@@ -187,6 +187,9 @@ public final class CatalogRepository {
     private static final Field<String>  EX_COL_MVER   = DSL.field("EXCLUDED.model_version", String.class);
     private static final Field<String>  EX_COL_DNAME  = DSL.field("EXCLUDED.display_name", String.class);
     private static final Field<Integer> EX_COL_LEGCY  = DSL.field("EXCLUDED.legacy_grandfathered", Integer.class);
+    private static final Field<String>  EX_COL_SUPBY  = DSL.field("EXCLUDED.superseded_by",  String.class);
+    private static final Field<String>  EX_COL_SUPAT  = DSL.field("EXCLUDED.superseded_at",  String.class);
+    private static final Field<String>  EX_COL_CRTAT  = DSL.field("EXCLUDED.created_at",     String.class);
 
     private static final Field<String>  EX_META_VAL   = DSL.field("EXCLUDED.value",       String.class);
     private static final Field<String>  EX_CHK_CHASH  = DSL.field("EXCLUDED.chash",       String.class);
@@ -883,26 +886,25 @@ public final class CatalogRepository {
     /** Upsert a collection. */
     public void upsertCollection(String tenant, Map<String, Object> coll) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(T_COLLS,
-                    F_COL_TENANT, F_COL_NAME, F_COL_CTYPE, F_COL_OWNER,
-                    F_COL_EMBD, F_COL_MVER, F_COL_DNAME, F_COL_LEGCY,
-                    F_COL_SUPBY, F_COL_SUPAT, F_COL_CRTAT)
-               .values(tenant,
-                       s(coll,"name"), nne(s(coll,"content_type")),
-                       nne(s(coll,"owner_id")), nne(s(coll,"embedding_model")),
-                       nne(s(coll,"model_version")), nne(s(coll,"display_name")),
-                       ni(i(coll,"legacy_grandfathered"), 0),
-                       nne(s(coll,"superseded_by")), nne(s(coll,"superseded_at")),
-                       nne(s(coll,"created_at")))
-               .onConflict(F_COL_TENANT, F_COL_NAME)
-               .doUpdate()
-               .set(F_COL_CTYPE, EX_COL_CTYPE)
-               .set(F_COL_OWNER, EX_COL_OWNER)
-               .set(F_COL_EMBD,  EX_COL_EMBD)
-               .set(F_COL_MVER,  EX_COL_MVER)
-               .set(F_COL_DNAME, EX_COL_DNAME)
-               .set(F_COL_LEGCY, EX_COL_LEGCY)
-               .execute();
+            // Raw SQL for superseded_at / created_at: these are timestamptz NULL columns after
+            // catalog-002-1-temporal-typing (RDR-156 P0.2).  jOOQ Field<String> would bind as
+            // varchar which PostgreSQL rejects; ?::timestamptz accepts ISO-8601 strings or NULL.
+            ctx.execute(
+                "INSERT INTO nexus.catalog_collections"
+                + " (tenant_id, name, content_type, owner_id, embedding_model, model_version,"
+                + "  display_name, legacy_grandfathered, superseded_by, superseded_at, created_at)"
+                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz)"
+                + " ON CONFLICT (tenant_id, name) DO UPDATE SET"
+                + "  content_type=EXCLUDED.content_type, owner_id=EXCLUDED.owner_id,"
+                + "  embedding_model=EXCLUDED.embedding_model, model_version=EXCLUDED.model_version,"
+                + "  display_name=EXCLUDED.display_name, legacy_grandfathered=EXCLUDED.legacy_grandfathered",
+                tenant,
+                s(coll, "name"), nne(s(coll, "content_type")),
+                nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
+                nne(s(coll, "model_version")), nne(s(coll, "display_name")),
+                ni(i(coll, "legacy_grandfathered"), 0),
+                nne(s(coll, "superseded_by")), nz(s(coll, "superseded_at")),
+                nz(s(coll, "created_at")));
             return null;
         });
     }
@@ -936,14 +938,17 @@ public final class CatalogRepository {
         );
     }
 
-    /** Supersede a collection. */
+    /**
+     * Supersede a collection.
+     * nz() for superseded_at: '' is invalid in the timestamptz column after catalog-002-1-temporal-typing.
+     */
     public int supersedeCollection(String tenant, String name, String supersededBy, String supersededAt) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(T_COLLS)
-               .set(F_COL_SUPBY, supersededBy)
-               .set(F_COL_SUPAT, supersededAt)
-               .where(F_COL_NAME.eq(name))
-               .execute()
+            // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing; use ?::timestamptz cast.
+            ctx.execute(
+                "UPDATE nexus.catalog_collections SET superseded_by=?, superseded_at=?::timestamptz"
+                + " WHERE tenant_id=? AND name=?",
+                supersededBy, nz(supersededAt), tenant, name)
         );
     }
 
@@ -1473,23 +1478,44 @@ public final class CatalogRepository {
         });
     }
 
-    /** Fidelity-preserving collection import. ON CONFLICT DO NOTHING. */
+    /**
+     * Fidelity-preserving collection import.
+     *
+     * <p>ON CONFLICT (tenant_id, name): performs DO UPDATE only when the existing row is a
+     * backfill/auto-registered STUB (embedding_model = '' AND content_type = '' AND owner_id = '').
+     * Stub rows are created by fk-002-0-backfill-stubs or by PgVectorRepository.upsertChunks
+     * auto-registration.  They must be upgradable by the RDR-153 catalog ETL, but a re-run
+     * must never clobber genuinely-newer live rows.
+     *
+     * <p>nz() for timestamptz columns: '' is invalid in timestamptz; NULL means "not set".
+     * catalog-002-1-temporal-typing (RDR-156 P0.2) converted these columns to timestamptz NULL.
+     */
     public void importCollection(String tenant, Map<String, Object> coll) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(T_COLLS,
-                    F_COL_TENANT, F_COL_NAME, F_COL_CTYPE, F_COL_OWNER,
-                    F_COL_EMBD, F_COL_MVER, F_COL_DNAME, F_COL_LEGCY,
-                    F_COL_SUPBY, F_COL_SUPAT, F_COL_CRTAT)
-               .values(tenant,
-                       s(coll,"name"), nne(s(coll,"content_type")),
-                       nne(s(coll,"owner_id")), nne(s(coll,"embedding_model")),
-                       nne(s(coll,"model_version")), nne(s(coll,"display_name")),
-                       ni(i(coll,"legacy_grandfathered"), 0),
-                       nne(s(coll,"superseded_by")), nne(s(coll,"superseded_at")),
-                       nne(s(coll,"created_at")))
-               .onConflict(F_COL_TENANT, F_COL_NAME)
-               .doNothing()
-               .execute();
+            // Raw SQL for superseded_at / created_at: timestamptz NULL after catalog-002-1-temporal-typing.
+            // DO UPDATE WHERE stub: only upgrades rows where all three discriminator columns are empty
+            // (i.e. auto-registered stubs from RDR-156 P0.2 ensure-registration steps).
+            ctx.execute(
+                "INSERT INTO nexus.catalog_collections"
+                + " (tenant_id, name, content_type, owner_id, embedding_model, model_version,"
+                + "  display_name, legacy_grandfathered, superseded_by, superseded_at, created_at)"
+                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz)"
+                + " ON CONFLICT (tenant_id, name) DO UPDATE SET"
+                + "  content_type=EXCLUDED.content_type, owner_id=EXCLUDED.owner_id,"
+                + "  embedding_model=EXCLUDED.embedding_model, model_version=EXCLUDED.model_version,"
+                + "  display_name=EXCLUDED.display_name, legacy_grandfathered=EXCLUDED.legacy_grandfathered,"
+                + "  superseded_by=EXCLUDED.superseded_by,"
+                + "  superseded_at=EXCLUDED.superseded_at,"
+                + "  created_at=EXCLUDED.created_at"
+                + " WHERE catalog_collections.embedding_model='' AND catalog_collections.content_type=''"
+                + "  AND catalog_collections.owner_id=''",
+                tenant,
+                s(coll, "name"), nne(s(coll, "content_type")),
+                nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
+                nne(s(coll, "model_version")), nne(s(coll, "display_name")),
+                ni(i(coll, "legacy_grandfathered"), 0),
+                nne(s(coll, "superseded_by")), nz(s(coll, "superseded_at")),
+                nz(s(coll, "created_at")));
             return null;
         });
     }
@@ -1624,6 +1650,15 @@ public final class CatalogRepository {
 
     /** Non-null empty: returns "" if null. */
     private static String nne(String v) { return v != null ? v : ""; }
+
+    /**
+     * Null-or-empty normalizer: returns null for null or blank/empty strings, else returns v.
+     * Use for timestamptz columns (catalog_collections.created_at / superseded_at) where the
+     * SQLite heritage used '' as the empty sentinel.  Binding '' into a timestamptz column
+     * fails at the JDBC driver layer; NULL is the correct representation of "not set".
+     * catalog-002-1-temporal-typing (RDR-156 P0.2) converts these columns to timestamptz NULL.
+     */
+    private static String nz(String v) { return (v != null && !v.isEmpty()) ? v : null; }
 
     /** Non-null integer: returns def if null. */
     private static int ni(Integer v, int def) { return v != null ? v : def; }

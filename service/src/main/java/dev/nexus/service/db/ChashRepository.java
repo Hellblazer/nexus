@@ -63,6 +63,27 @@ public final class ChashRepository {
         this.tenantScope = tenantScope;
     }
 
+    /**
+     * RDR-156 P0.2: ensure catalog_collections has a stub row for the given collection
+     * before any chash_index write that carries physical_collection.
+     * Idempotent — ON CONFLICT DO NOTHING.
+     *
+     * <p>physical_collection is NOT NULL in chash_index, so a blank/null value is a caller
+     * error — fail loud rather than silently skipping the registration step and letting the
+     * subsequent INSERT fail with a cryptic FK violation.
+     *
+     * @throws IllegalArgumentException if collection is null or blank
+     */
+    private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
+        if (collection == null || collection.isBlank()) {
+            throw new IllegalArgumentException("physical_collection must not be blank");
+        }
+        ctx.execute(
+            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) " +
+            "ON CONFLICT (tenant_id, name) DO NOTHING",
+            tenant, collection);
+    }
+
     // ── upsert ─────────────────────────────────────────────────────────────────
 
     /**
@@ -80,6 +101,8 @@ public final class ChashRepository {
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         tenantScope.withTenant(tenant, ctx -> {
+            // RDR-156 P0.2: ensure catalog_collections has a stub row before the chash write.
+            ensureCollectionRegistered(ctx, tenant, collection);
             ctx.insertInto(CHASH_INDEX,
                             F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT)
                .values(tenant, chash, collection, now)
@@ -109,6 +132,8 @@ public final class ChashRepository {
         if (valid.isEmpty()) return;
 
         tenantScope.withTenant(tenant, ctx -> {
+            // RDR-156 P0.2: ensure catalog_collections has a stub row before the chash writes.
+            ensureCollectionRegistered(ctx, tenant, collection);
             var insert = ctx.insertInto(CHASH_INDEX,
                                         F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT);
             var step = insert.values(tenant, valid.get(0), collection, now);
@@ -197,6 +222,8 @@ public final class ChashRepository {
      */
     public int renameCollection(String tenant, String oldCollection, String newCollection) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-156 P0.2: ensure the new collection is registered before renaming.
+            ensureCollectionRegistered(ctx, tenant, newCollection);
             // Drop rows in new that would collide with the rename
             ctx.deleteFrom(CHASH_INDEX)
                .where(F_COLLECTION.eq(newCollection)
@@ -325,6 +352,8 @@ public final class ChashRepository {
 
         final OffsetDateTime ts = createdAt;
         tenantScope.withTenant(tenant, ctx -> {
+            // RDR-156 P0.2: ensure catalog_collections has a stub row before the chash write.
+            ensureCollectionRegistered(ctx, tenant, collection);
             ctx.insertInto(CHASH_INDEX,
                             F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT)
                .values(tenant, chash, collection, ts)

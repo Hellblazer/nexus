@@ -144,6 +144,9 @@ class PgVectorRepositoryContractTest {
             }
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.catalog_documents, nexus.catalog_document_chunks TO " + SVC_ROLE);
+            // RDR-156 P0.2: upsertChunks now auto-stubs catalog_collections before chunk writes.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -211,7 +214,7 @@ class PgVectorRepositoryContractTest {
     void upsert_voyageCode_landsInChunks1024Only() throws Exception {
         String col = COL_CODE_1024;
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("disp-1024-c1", "disp-1024-c2"),
+            List.of("disp1024c10000000000000000000000", "disp1024c20000000000000000000000"),
             List.of("dispatch text one", "dispatch text two"),
             List.of(Map.of("kind", "d"), Map.of("kind", "d")));
 
@@ -224,7 +227,7 @@ class PgVectorRepositoryContractTest {
     void upsert_voyage3_landsInChunks1024Only() throws Exception {
         String col = "knowledge__v3disp__voyage-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("disp-v3-c1"),
+            List.of("dispv3c1000000000000000000000000"),
             List.of("voyage-3 dispatch text"),
             List.of(Map.of("kind", "d")));
 
@@ -248,18 +251,18 @@ class PgVectorRepositoryContractTest {
         String col = "knowledge__nulsan__voyage-context-3__v1";
         String dirty = "before\u0000middle\u0000\u0000after";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("nul-c1", "nul-c2"),
+            List.of("nulc1000000000000000000000000000", "nulc2000000000000000000000000000"),
             List.of(dirty, "clean text"),
             List.of(Map.of("note", "meta\u0000nul"), Map.of("kind", "clean")));
 
         assertThat(superuserCount(1024, col)).as("both rows landed despite NULs").isEqualTo(2L);
-        assertThat(superuserChunkText(1024, col, "nul-c1"))
+        assertThat(superuserChunkText(1024, col, "nulc1000000000000000000000000000"))
             .as("NULs stripped, surrounding text preserved verbatim")
             .isEqualTo("beforemiddleafter");
-        assertThat(superuserChunkText(1024, col, "nul-c2"))
+        assertThat(superuserChunkText(1024, col, "nulc2000000000000000000000000000"))
             .as("clean text untouched")
             .isEqualTo("clean text");
-        assertThat(superuserChunkMetadataJson(1024, col, "nul-c1"))
+        assertThat(superuserChunkMetadataJson(1024, col, "nulc1000000000000000000000000000"))
             .as("metadata string values NUL-stripped too (jsonb rejects NUL like text)")
             .contains("\"note\"")
             .contains("\"metanul\"")
@@ -270,7 +273,7 @@ class PgVectorRepositoryContractTest {
     void upsert_bge768_landsInChunks768Only() throws Exception {
         String col = COL_BGE_768;
         repo768.upsertChunks(TENANT_A, col,
-            List.of("disp-768-c1"),
+            List.of("disp768c100000000000000000000000"),
             List.of("bge dispatch text"),
             List.of(Map.of("kind", "d")));
 
@@ -283,7 +286,7 @@ class PgVectorRepositoryContractTest {
     void upsert_minilm384_landsInChunks384Only() throws Exception {
         String col = COL_MINI_384;
         repo384.upsertChunks(TENANT_A, col,
-            List.of("disp-384-c1"),
+            List.of("disp384c100000000000000000000000"),
             List.of("minilm dispatch text"),
             List.of(Map.of("kind", "d")));
 
@@ -296,7 +299,7 @@ class PgVectorRepositoryContractTest {
     void upsert_unknownModelSegment_failsLoud_writesNothing() throws Exception {
         assertThatThrownBy(() ->
             repo1024.upsertChunks(TENANT_A, COL_UNKNOWN,
-                List.of("unk-c1"), List.of("unknown model text"), List.of(Map.of())))
+                List.of("unkc1000000000000000000000000000"), List.of("unknown model text"), List.of(Map.of())))
             .as("unknown model segment must fail loud at dispatch")
             .isInstanceOf(IllegalArgumentException.class);
 
@@ -314,7 +317,7 @@ class PgVectorRepositoryContractTest {
         String col = "knowledge__mismatch__minilm-l6-v2-384__v1";
         assertThatThrownBy(() ->
             repo1024.upsertChunks(TENANT_A, col,
-                List.of("mis-c1"), List.of("mismatched vector"), List.of(Map.of())))
+                List.of("misc1000000000000000000000000000"), List.of("mismatched vector"), List.of(Map.of())))
             .as("dim mismatch between embedded vector and dispatched table must throw")
             .isInstanceOf(Exception.class)
             // Not the skeleton's UOE: keeps this test RED until P2.2 actually implements
@@ -337,10 +340,10 @@ class PgVectorRepositoryContractTest {
         String col = "code__exactvec__voyage-code-3__v1";
         embedder1024.register("exact vector text", 0.6f, 0.8f);
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("exact-c1"), List.of("exact vector text"), List.of(Map.of()));
+            List.of("exactc10000000000000000000000000"), List.of("exact vector text"), List.of(Map.of()));
 
         double distToExpected = superuserCosineDistance(
-            1024, col, "exact-c1", FakeEmbedder.unitVector(1024, 0.6f, 0.8f));
+            1024, col, "exactc10000000000000000000000000", FakeEmbedder.unitVector(1024, 0.6f, 0.8f));
         assertThat(distToExpected)
             .as("stored embedding must be exactly the embedder's output (cosine distance 0)")
             .isCloseTo(0.0, within(1e-6));
@@ -350,14 +353,14 @@ class PgVectorRepositoryContractTest {
     void upsert_duplicateIdsInBatch_firstWins() throws Exception {
         String col = "code__dedup__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("dup-c1", "dup-c1"),
+            List.of("dupc1000000000000000000000000000", "dupc1000000000000000000000000000"),
             List.of("first occurrence", "second occurrence"),
-            List.of(Map.of("ord", "first"), Map.of("ord", "second")));
+            List.of(Map.of("ord", "first000000000000000000000000000"), Map.of("ord", "second00000000000000000000000000")));
 
         assertThat(superuserCount(1024, col))
             .as("duplicate IDs in one batch must collapse to exactly 1 row")
             .isEqualTo(1L);
-        assertThat(superuserChunkText(1024, col, "dup-c1"))
+        assertThat(superuserChunkText(1024, col, "dupc1000000000000000000000000000"))
             .as("first-wins: the surviving row carries the FIRST text (T3Database._write_batch semantics)")
             .isEqualTo("first occurrence");
     }
@@ -368,23 +371,23 @@ class PgVectorRepositoryContractTest {
         embedder1024.register("version one", 1.0f, 0.0f);
         embedder1024.register("version two", 0.0f, 1.0f);   // orthogonal to version one
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("re-c1"), List.of("version one"), List.of(Map.of("rev", "1")));
+            List.of("rec10000000000000000000000000000"), List.of("version one"), List.of(Map.of("rev", "1")));
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("re-c1"), List.of("version two"), List.of(Map.of("rev", "2")));
+            List.of("rec10000000000000000000000000000"), List.of("version two"), List.of(Map.of("rev", "2")));
 
         assertThat(superuserCount(1024, col))
             .as("re-upsert of the same chash must not create a second row")
             .isEqualTo(1L);
-        assertThat(superuserChunkText(1024, col, "re-c1"))
+        assertThat(superuserChunkText(1024, col, "rec10000000000000000000000000000"))
             .as("re-upsert must update chunk_text in place (Chroma upsert semantics)")
             .isEqualTo("version two");
-        assertThat(superuserCosineDistance(1024, col, "re-c1",
+        assertThat(superuserCosineDistance(1024, col, "rec10000000000000000000000000000",
                 FakeEmbedder.unitVector(1024, 0.0f, 1.0f)))
             .as("re-upsert must re-embed: the stored vector matches the NEW text's "
                 + "embedding, not the original")
             .isCloseTo(0.0, within(1e-6));
 
-        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of("re-c1"), 10, 0);
+        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of("rec10000000000000000000000000000"), 10, 0);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
         assertThat(metas).hasSize(1);
@@ -404,7 +407,7 @@ class PgVectorRepositoryContractTest {
     void upsert_rowsAttributedToCallingTenantOnly() throws Exception {
         String col = "code__attribution__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("attr-c1"), List.of("tenant a text"), List.of(Map.of()));
+            List.of("attrc100000000000000000000000000"), List.of("tenant a text"), List.of(Map.of()));
 
         assertThat(repo1024.count(TENANT_A, col))
             .as("writing tenant must see exactly its 1 row")
@@ -426,7 +429,7 @@ class PgVectorRepositoryContractTest {
         embedder1024.register("middle text",  0.8f, 0.6f);     // distance 0.2
         embedder1024.register("farthest text", 0.0f, 1.0f);    // distance 1.0
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("s-near", "s-mid", "s-far"),
+            List.of("snear000000000000000000000000000", "smid0000000000000000000000000000", "sfar0000000000000000000000000000"),
             List.of("nearest text", "middle text", "farthest text"),
             List.of(Map.of("kind", "a"), Map.of("kind", "b"), Map.of("kind", "a")));
     }
@@ -442,7 +445,7 @@ class PgVectorRepositoryContractTest {
         assertThat(rows).as("exactly the 3 seeded rows").hasSize(3);
         assertThat(rows).extracting(r -> r.get("id"))
             .as("distance-ascending order is exact")
-            .containsExactly("s-near", "s-mid", "s-far");
+            .containsExactly("snear000000000000000000000000000", "smid0000000000000000000000000000", "sfar0000000000000000000000000000");
         assertThat(((Number) rows.get(0).get("distance")).doubleValue()).isCloseTo(0.0, within(1e-5));
         assertThat(((Number) rows.get(1).get("distance")).doubleValue()).isCloseTo(0.2, within(1e-5));
         assertThat(((Number) rows.get(2).get("distance")).doubleValue()).isCloseTo(1.0, within(1e-5));
@@ -466,7 +469,7 @@ class PgVectorRepositoryContractTest {
 
         assertThat(rows).extracting(r -> r.get("id"))
             .as("where {kind=a} must return exactly the two matching rows, distance-ordered")
-            .containsExactly("s-near", "s-far");
+            .containsExactly("snear000000000000000000000000000", "sfar0000000000000000000000000000");
     }
 
     @Test
@@ -477,7 +480,7 @@ class PgVectorRepositoryContractTest {
         embedder1024.register("and t2", 0.8f, 0.6f);
         embedder1024.register("and t3", 0.0f, 1.0f);
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("and-c1", "and-c2", "and-c3"),
+            List.of("andc1000000000000000000000000000", "andc2000000000000000000000000000", "andc3000000000000000000000000000"),
             List.of("and t1", "and t2", "and t3"),
             List.of(Map.of("kind", "a", "score", "high"),
                     Map.of("kind", "a", "score", "low"),
@@ -489,7 +492,7 @@ class PgVectorRepositoryContractTest {
 
         assertThat(rows).extracting(r -> r.get("id"))
             .as("multi-key where must AND all predicates: exactly the one row matching both")
-            .containsExactly("and-c1");
+            .containsExactly("andc1000000000000000000000000000");
     }
 
     @Test
@@ -512,17 +515,17 @@ class PgVectorRepositoryContractTest {
         embedder1024.register("y mid",  0.8f, 0.6f);       // 0.2
         embedder1024.register("x far",  0.0f, 1.0f);       // 1.0
         repo1024.upsertChunks(TENANT_A, colX,
-            List.of("mc-xnear", "mc-xfar"), List.of("x near", "x far"),
+            List.of("mcxnear0000000000000000000000000", "mcxfar00000000000000000000000000"), List.of("x near", "x far"),
             List.of(Map.of(), Map.of()));
         repo1024.upsertChunks(TENANT_A, colY,
-            List.of("mc-ymid"), List.of("y mid"), List.of(Map.of()));
+            List.of("mcymid00000000000000000000000000"), List.of("y mid"), List.of(Map.of()));
 
         List<Map<String, Object>> rows = repo1024.search(
             TENANT_A, "search query", List.of(colX, colY), 10, null);
 
         assertThat(rows).extracting(r -> r.get("id"))
             .as("multi-collection union must interleave by distance, not group by collection")
-            .containsExactly("mc-xnear", "mc-ymid", "mc-xfar");
+            .containsExactly("mcxnear0000000000000000000000000", "mcymid00000000000000000000000000", "mcxfar00000000000000000000000000");
         assertThat(rows).extracting(r -> r.get("collection"))
             .as("each row labels its source collection")
             .containsExactly(colX, colY, colX);
@@ -538,7 +541,7 @@ class PgVectorRepositoryContractTest {
 
         assertThat(rows).extracting(r -> r.get("id"))
             .as("nResults=2 returns exactly the 2 nearest")
-            .containsExactly("s-near", "s-mid");
+            .containsExactly("snear000000000000000000000000000", "smid0000000000000000000000000000");
     }
 
     @Test
@@ -572,12 +575,12 @@ class PgVectorRepositoryContractTest {
     void get_byIds_returnsAlignedEnvelope_missingIdsOmitted() {
         String col = "code__getbyids__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("g-c1", "g-c2"),
+            List.of("gc100000000000000000000000000000", "gc200000000000000000000000000000"),
             List.of("get text one", "get text two"),
             List.of(Map.of("m", "1"), Map.of("m", "2")));
 
         Map<String, Object> got = repo1024.get(
-            TENANT_A, col, List.of("g-c1", "g-c2", "g-missing"), 10, 0);
+            TENANT_A, col, List.of("gc100000000000000000000000000000", "gc200000000000000000000000000000", "gmissing000000000000000000000000"), 10, 0);
 
         @SuppressWarnings("unchecked")
         List<String> ids = (List<String>) got.get("ids");
@@ -587,10 +590,10 @@ class PgVectorRepositoryContractTest {
         List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
 
         assertThat(ids).as("missing id omitted, both present ids returned")
-            .containsExactlyInAnyOrder("g-c1", "g-c2");
+            .containsExactlyInAnyOrder("gc100000000000000000000000000000", "gc200000000000000000000000000000");
         assertThat(docs).hasSize(2);
         assertThat(metas).hasSize(2);
-        int i1 = ids.indexOf("g-c1");
+        int i1 = ids.indexOf("gc100000000000000000000000000000");
         assertThat(docs.get(i1)).isEqualTo("get text one");
         assertThat(metas.get(i1).get("m")).isEqualTo("1");
     }
@@ -598,34 +601,34 @@ class PgVectorRepositoryContractTest {
     @Test
     void get_limitOffset_skipsInChashOrder() {
         String col = "code__getoffset__voyage-code-3__v1";
-        // Insertion order is the REVERSE of chash order ("go-z9" > "go-a2"), so this
+        // Insertion order is the REVERSE of chash order ("goz90000000000000000000000000000" > "goa20000000000000000000000000000"), so this
         // assertion can distinguish chash-order pagination from insertion-order or
-        // id-list-order pagination: those would return "go-a2" at offset 1.
+        // id-list-order pagination: those would return "goa20000000000000000000000000000" at offset 1.
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("go-z9", "go-a2"),
+            List.of("goz90000000000000000000000000000", "goa20000000000000000000000000000"),
             List.of("offset text z", "offset text a"),
             List.of(Map.of(), Map.of()));
 
         Map<String, Object> got = repo1024.get(
-            TENANT_A, col, List.of("go-z9", "go-a2"), 1, 1);
+            TENANT_A, col, List.of("goz90000000000000000000000000000", "goa20000000000000000000000000000"), 1, 1);
         @SuppressWarnings("unchecked")
         List<String> ids = (List<String>) got.get("ids");
 
         assertThat(ids)
             .as("limit=1 offset=1 must skip the first chash ('go-a2') and return 'go-z9'")
-            .containsExactly("go-z9");
+            .containsExactly("goz90000000000000000000000000000");
     }
 
     @Test
     void get_crossTenant_returnsEmptyEnvelope() throws Exception {
         String col = "code__getrls__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("gr-c1"), List.of("tenant a only"), List.of(Map.of()));
+            List.of("grc10000000000000000000000000000"), List.of("tenant a only"), List.of(Map.of()));
         assertThat(superuserCount(1024, col))
             .as("control: tenant-a's row must physically exist before the RLS assertion")
             .isEqualTo(1L);
 
-        Map<String, Object> got = repo1024.get(TENANT_B, col, List.of("gr-c1"), 10, 0);
+        Map<String, Object> got = repo1024.get(TENANT_B, col, List.of("grc10000000000000000000000000000"), 10, 0);
         @SuppressWarnings("unchecked")
         List<String> ids = (List<String>) got.get("ids");
         assertThat(ids).as("tenant-b must get 0 of tenant-a's chunks").isEmpty();
@@ -634,7 +637,7 @@ class PgVectorRepositoryContractTest {
     @Test
     void list_paginatesWithLimitOffset_disjointAndComplete() {
         String col = "code__listpage__voyage-code-3__v1";
-        List<String> allIds = List.of("l-c1", "l-c2", "l-c3", "l-c4", "l-c5");
+        List<String> allIds = List.of("lc100000000000000000000000000000", "lc200000000000000000000000000000", "lc300000000000000000000000000000", "lc400000000000000000000000000000", "lc500000000000000000000000000000");
         repo1024.upsertChunks(TENANT_A, col, allIds,
             List.of("t1", "t2", "t3", "t4", "t5"),
             List.of(Map.of(), Map.of(), Map.of(), Map.of(), Map.of()));
@@ -648,9 +651,9 @@ class PgVectorRepositoryContractTest {
         // lexicographically ordered, so each page's exact contents are pinned — an
         // unstable sort would make repeated list() calls return different rows.
         assertThat(page1).as("first page: exactly the 3 lowest chashes, in order")
-            .containsExactly("l-c1", "l-c2", "l-c3");
+            .containsExactly("lc100000000000000000000000000000", "lc200000000000000000000000000000", "lc300000000000000000000000000000");
         assertThat(page2).as("second page: exactly the remaining 2 chashes, in order")
-            .containsExactly("l-c4", "l-c5");
+            .containsExactly("lc400000000000000000000000000000", "lc500000000000000000000000000000");
         Set<String> union = new LinkedHashSet<>();
         union.addAll(page1);
         union.addAll(page2);
@@ -663,7 +666,7 @@ class PgVectorRepositoryContractTest {
     void list_crossTenant_returnsEmptyEnvelope() throws Exception {
         String col = "code__listrls__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("lr-c1"), List.of("tenant a list row"), List.of(Map.of()));
+            List.of("lrc10000000000000000000000000000"), List.of("tenant a list row"), List.of(Map.of()));
         assertThat(superuserCount(1024, col))
             .as("control: tenant-a's row must physically exist before the RLS assertion")
             .isEqualTo(1L);
@@ -677,7 +680,7 @@ class PgVectorRepositoryContractTest {
     void count_exactPerCollection_andZeroForOtherTenant() {
         String col = "code__countexact__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("cnt-c1", "cnt-c2", "cnt-c3"),
+            List.of("cntc1000000000000000000000000000", "cntc2000000000000000000000000000", "cntc3000000000000000000000000000"),
             List.of("a", "b", "c"),
             List.of(Map.of(), Map.of(), Map.of()));
 
@@ -696,11 +699,11 @@ class PgVectorRepositoryContractTest {
     void delete_byIds_returnsAffectedCount() {
         String col = "code__deleteown__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("d-c1", "d-c2", "d-c3"),
+            List.of("dc100000000000000000000000000000", "dc200000000000000000000000000000", "dc300000000000000000000000000000"),
             List.of("a", "b", "c"),
             List.of(Map.of(), Map.of(), Map.of()));
 
-        int deleted = repo1024.delete(TENANT_A, col, List.of("d-c1", "d-c2", "d-missing"));
+        int deleted = repo1024.delete(TENANT_A, col, List.of("dc100000000000000000000000000000", "dc200000000000000000000000000000", "dmissing000000000000000000000000"));
         assertThat(deleted).as("exactly the 2 existing ids deleted").isEqualTo(2);
         assertThat(repo1024.count(TENANT_A, col)).isEqualTo(1);
     }
@@ -709,7 +712,7 @@ class PgVectorRepositoryContractTest {
     void delete_emptyIds_isNoop() {
         String col = "code__deleteempty__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("de-c1"), List.of("survivor"), List.of(Map.of()));
+            List.of("dec10000000000000000000000000000"), List.of("survivor000000000000000000000000"), List.of(Map.of()));
 
         int deleted = repo1024.delete(TENANT_A, col, List.of());
         assertThat(deleted).as("empty ids list must delete exactly 0 rows").isEqualTo(0);
@@ -720,9 +723,9 @@ class PgVectorRepositoryContractTest {
     void delete_crossTenant_affectsZero_rowSurvives() {
         String col = "code__deleterls__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("dr-c1"), List.of("survivor"), List.of(Map.of()));
+            List.of("drc10000000000000000000000000000"), List.of("survivor000000000000000000000000"), List.of(Map.of()));
 
-        int deleted = repo1024.delete(TENANT_B, col, List.of("dr-c1"));
+        int deleted = repo1024.delete(TENANT_B, col, List.of("drc10000000000000000000000000000"));
         assertThat(deleted)
             .as("cross-tenant delete through the repository must affect exactly 0 rows")
             .isEqualTo(0);
@@ -740,12 +743,12 @@ class PgVectorRepositoryContractTest {
         String col = "code__updatemeta__voyage-code-3__v1";
         embedder1024.register("frecency text", 0.6f, 0.8f);
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("um-c1"), List.of("frecency text"), List.of(Map.of("frecency_score", "0.1")));
+            List.of("umc10000000000000000000000000000"), List.of("frecency text"), List.of(Map.of("frecency_score", "0.1")));
 
         repo1024.updateMetadata(TENANT_A, col,
-            List.of("um-c1"), List.of(Map.of("frecency_score", "0.9")));
+            List.of("umc10000000000000000000000000000"), List.of(Map.of("frecency_score", "0.9")));
 
-        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of("um-c1"), 10, 0);
+        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of("umc10000000000000000000000000000"), 10, 0);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
         @SuppressWarnings("unchecked")
@@ -758,7 +761,7 @@ class PgVectorRepositoryContractTest {
             .isEqualTo("frecency text");
 
         double distToOriginal = superuserCosineDistance(
-            1024, col, "um-c1", FakeEmbedder.unitVector(1024, 0.6f, 0.8f));
+            1024, col, "umc10000000000000000000000000000", FakeEmbedder.unitVector(1024, 0.6f, 0.8f));
         assertThat(distToOriginal)
             .as("embedding must be untouched by a metadata-only update (no re-embed)")
             .isCloseTo(0.0, within(1e-6));
@@ -769,7 +772,7 @@ class PgVectorRepositoryContractTest {
         String col = "code__updatemeta-align__voyage-code-3__v1";
         assertThatThrownBy(() ->
             repo1024.updateMetadata(TENANT_A, col,
-                List.of("ma-c1", "ma-c2"), List.of(Map.of("v", "only-one"))))
+                List.of("mac10000000000000000000000000000", "mac20000000000000000000000000000"), List.of(Map.of("v", "onlyone0000000000000000000000000"))))
             .as("ids and metadatas of different sizes must fail loud, not zip-truncate")
             .isInstanceOf(IllegalArgumentException.class);
     }
@@ -778,21 +781,21 @@ class PgVectorRepositoryContractTest {
     void updateMetadata_crossTenant_noEffect() {
         String col = "code__updatemeta-rls__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("umr-c1"), List.of("owned text"), List.of(Map.of("v", "original")));
+            List.of("umrc1000000000000000000000000000"), List.of("owned text"), List.of(Map.of("v", "original000000000000000000000000")));
 
         // tenant-b attempts to overwrite tenant-a's metadata: RLS makes the row
         // invisible, so the update affects nothing (frecency path, nexus-enehl —
         // cross-tenant frecency corruption would be silent and persistent).
         repo1024.updateMetadata(TENANT_B, col,
-            List.of("umr-c1"), List.of(Map.of("v", "corrupted")));
+            List.of("umrc1000000000000000000000000000"), List.of(Map.of("v", "corrupted")));
 
-        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of("umr-c1"), 10, 0);
+        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of("umrc1000000000000000000000000000"), 10, 0);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
         assertThat(metas).hasSize(1);
         assertThat(metas.get(0).get("v"))
             .as("cross-tenant updateMetadata must not modify the owning tenant's metadata")
-            .isEqualTo("original");
+            .isEqualTo("original000000000000000000000000");
     }
 
     // ---------------------------------------------------------------------------
@@ -805,15 +808,15 @@ class PgVectorRepositoryContractTest {
         String col = "code__manifest__voyage-code-3__v1";
         String tumbler = "1.9.1";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("mf-c1", "mf-c2", "mf-c3"),
+            List.of("mfc10000000000000000000000000000", "mfc20000000000000000000000000000", "mfc30000000000000000000000000000"),
             List.of("manifest chunk one", "manifest chunk two", "manifest chunk three"),
             List.of(Map.of(), Map.of(), Map.of()));
         seedCatalogDocument(TENANT_A, tumbler, "Manifest Doc");
         // Insert manifest rows deliberately out of position order: the JOIN must
         // return position order, not insertion order.
-        seedManifestRow(TENANT_A, tumbler, 2, "mf-c3", col);
-        seedManifestRow(TENANT_A, tumbler, 0, "mf-c1", col);
-        seedManifestRow(TENANT_A, tumbler, 1, "mf-c2", col);
+        seedManifestRow(TENANT_A, tumbler, 2, "mfc30000000000000000000000000000", col);
+        seedManifestRow(TENANT_A, tumbler, 0, "mfc10000000000000000000000000000", col);
+        seedManifestRow(TENANT_A, tumbler, 1, "mfc20000000000000000000000000000", col);
 
         List<Map<String, Object>> rows = repo1024.fetchDocumentChunks(TENANT_A, tumbler);
 
@@ -822,7 +825,7 @@ class PgVectorRepositoryContractTest {
             .as("rows ordered by manifest position")
             .containsExactly(0, 1, 2);
         assertThat(rows).extracting(r -> r.get("chash"))
-            .containsExactly("mf-c1", "mf-c2", "mf-c3");
+            .containsExactly("mfc10000000000000000000000000000", "mfc20000000000000000000000000000", "mfc30000000000000000000000000000");
         assertThat(rows).extracting(r -> r.get("chunk_text"))
             .as("chunk text resolved in-database from the dispatched chunks table")
             .containsExactly("manifest chunk one", "manifest chunk two", "manifest chunk three");
@@ -835,12 +838,12 @@ class PgVectorRepositoryContractTest {
         String col = "code__manifestshared__voyage-code-3__v1";
         String tumbler = "1.9.2";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("mfs-c1"), List.of("repeated chunk text"), List.of(Map.of()));
+            List.of("mfsc1000000000000000000000000000"), List.of("repeated chunk text"), List.of(Map.of()));
         seedCatalogDocument(TENANT_A, tumbler, "Shared Chash Doc");
         // Two positions point at the SAME chash: identical text collapses to one chunk
         // row by design; the manifest preserves position (CLAUDE.md §Catalog/T3 split).
-        seedManifestRow(TENANT_A, tumbler, 0, "mfs-c1", col);
-        seedManifestRow(TENANT_A, tumbler, 1, "mfs-c1", col);
+        seedManifestRow(TENANT_A, tumbler, 0, "mfsc1000000000000000000000000000", col);
+        seedManifestRow(TENANT_A, tumbler, 1, "mfsc1000000000000000000000000000", col);
 
         List<Map<String, Object>> rows = repo1024.fetchDocumentChunks(TENANT_A, tumbler);
 
@@ -871,10 +874,10 @@ class PgVectorRepositoryContractTest {
         String col = "code__manifestbroken__voyage-code-3__v1";
         String tumbler = "1.9.3";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("mfb-c1"), List.of("resolvable chunk"), List.of(Map.of()));
+            List.of("mfbc1000000000000000000000000000"), List.of("resolvable chunk"), List.of(Map.of()));
         seedCatalogDocument(TENANT_A, tumbler, "Broken Manifest Doc");
-        seedManifestRow(TENANT_A, tumbler, 0, "mfb-c1", col);
-        seedManifestRow(TENANT_A, tumbler, 1, "mfb-missing", col);  // dangling chash
+        seedManifestRow(TENANT_A, tumbler, 0, "mfbc1000000000000000000000000000", col);
+        seedManifestRow(TENANT_A, tumbler, 1, "mfbmissing0000000000000000000000", col);  // dangling chash
 
         assertThatThrownBy(() -> repo1024.fetchDocumentChunks(TENANT_A, tumbler))
             .as("a manifest row whose (collection, chash) has no chunk must fail loud — "
@@ -887,9 +890,9 @@ class PgVectorRepositoryContractTest {
         String col = "code__manifestrls__voyage-code-3__v1";
         String tumbler = "1.9.4";
         repo1024.upsertChunks(TENANT_A, col,
-            List.of("mfr-c1"), List.of("tenant a manifest chunk"), List.of(Map.of()));
+            List.of("mfrc1000000000000000000000000000"), List.of("tenant a manifest chunk"), List.of(Map.of()));
         seedCatalogDocument(TENANT_A, tumbler, "RLS Manifest Doc");
-        seedManifestRow(TENANT_A, tumbler, 0, "mfr-c1", col);
+        seedManifestRow(TENANT_A, tumbler, 0, "mfrc1000000000000000000000000000", col);
 
         // tenant-b cannot see tenant-a's catalog document: same failure as an unknown
         // tumbler (RLS must not leak existence).
