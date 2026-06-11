@@ -27,6 +27,7 @@ The SQLite source is never modified (copy-not-move).
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import click
@@ -978,30 +979,68 @@ def migrate_vectors_cmd(
         click.echo(f"Done. {sum(deleted.values())} chunk(s) removed; source untouched.")
         return
 
+    # nexus-pebfx.3: live, FLUSHED per-collection progress. The 2026-06-10
+    # production run left a redirected log empty while 35k+ rows landed —
+    # stdout is block-buffered off a tty, so flush after every line.
+    def _echo_progress(r) -> None:
+        line = (
+            f"{r.status:<13} {r.collection}: source={r.source_count} "
+            f"written={r.written_count} ({r.duration_s:.1f}s)"
+        )
+        if r.reason:
+            line += f" — {r.reason}"
+        is_err = r.status in ("failed", "skipped")
+        click.echo(line, err=is_err)
+        (sys.stderr if is_err else sys.stdout).flush()
+
     try:
         if cloud:
-            report = migrate_cloud(vector_client, collections=collections, dry_run=dry_run)
+            report = migrate_cloud(
+                vector_client, collections=collections, dry_run=dry_run,
+                on_result=_echo_progress,
+            )
         else:
             report = migrate_local(
-                local_path, vector_client, collections=collections, dry_run=dry_run
+                local_path, vector_client, collections=collections,
+                dry_run=dry_run, on_result=_echo_progress,
             )
     except Exception as exc:
         raise click.ClickException(f"ETL failed: {exc}")
 
-    for r in report.results:
-        line = f"{r.status:<9} {r.collection}: source={r.source_count} written={r.written_count}"
-        if r.reason:
-            line += f" — {r.reason}"
-        click.echo(line, err=(r.status in ("failed", "skipped")))
-    click.echo(
-        f"Done ({report.leg} leg). collections={len(report.results)}, "
-        f"source={report.total_source}, written={report.total_written}."
-    )
+    _echo_summary_table(report)
     if not report.ok:
         raise click.ClickException(
             "migration is NOT clean — fix the failed/skipped collections above "
             "and re-run (idempotent)."
         )
+
+
+def _echo_summary_table(report) -> None:
+    """Final per-collection summary so the operator never scrolls structlog
+    (nexus-pebfx.3 item 4). Sorted failures-first so the actionable rows
+    are adjacent to the verdict line."""
+    rank = {"failed": 0, "skipped": 1, "skipped-empty": 2, "dry-run": 3, "migrated": 4}
+    rows = sorted(report.results, key=lambda r: (rank.get(r.status, 9), r.collection))
+    name_w = max([len(r.collection) for r in rows] + [10])
+    click.echo("")
+    click.echo(f"{'STATUS':<13} {'COLLECTION':<{name_w}} {'SOURCE':>8} {'WRITTEN':>8} {'TIME':>8}")
+    click.echo("-" * (13 + 1 + name_w + 27))
+    for r in rows:
+        line = (
+            f"{r.status:<13} {r.collection:<{name_w}} {r.source_count:>8} "
+            f"{r.written_count:>8} {r.duration_s:>7.1f}s"
+        )
+        # Actionable rows carry their reason — the table must be sufficient
+        # on its own (no structlog scrolling).
+        if r.reason and r.status in ("failed", "skipped"):
+            line += f"  — {r.reason}"
+        click.echo(line)
+    click.echo("-" * (13 + 1 + name_w + 27))
+    click.echo(
+        f"{'TOTAL':<13} {report.leg + ' leg':<{name_w}} {report.total_source:>8} "
+        f"{report.total_written:>8}   ok={report.ok}"
+    )
+    sys.stdout.flush()
 
 
 def _resolve_catalog_db_path(explicit: Path | None) -> Path:

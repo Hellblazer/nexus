@@ -53,7 +53,7 @@ import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import structlog
 
@@ -67,7 +67,12 @@ from nexus.migration.chroma_read import (
 
 _log = structlog.get_logger(__name__)
 
-MigrationStatus = Literal["migrated", "failed", "skipped", "dry-run"]
+# "skipped-empty" (nexus-pebfx.3): non-conformant AND source has 0 chunks —
+# nothing can be lost by definition, so it does not redden the run. A
+# non-conformant collection WITH data stays "skipped" and red: the
+# partial-migration-never-green contract is preserved exactly where it
+# protects data (locked test: test_nonconformant_collection_skipped_loud).
+MigrationStatus = Literal["migrated", "failed", "skipped", "skipped-empty", "dry-run"]
 
 #: Model-segment → pgvector table dimension. MIRRORS the Java authority
 #: ``PgVectorRepository.MODEL_DIMS`` (service/src/main/java/dev/nexus/
@@ -95,6 +100,8 @@ class CollectionResult:
     written_count: int
     status: MigrationStatus
     reason: str = ""
+    #: Wall-clock seconds for this collection (nexus-pebfx.3 summary table).
+    duration_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -112,7 +119,10 @@ class MigrationReport:
 
     @property
     def ok(self) -> bool:
-        return all(r.status in ("migrated", "dry-run") for r in self.results)
+        return all(
+            r.status in ("migrated", "dry-run", "skipped-empty")
+            for r in self.results
+        )
 
     @property
     def total_source(self) -> int:
@@ -166,8 +176,25 @@ def _migrate_one(
 ) -> CollectionResult:
     dim, reason = _dim_for_collection(name)
     if dim is None:
+        # nexus-pebfx.3 disposition rule: probe the source count. Empty +
+        # non-conformant cannot lose data — report "skipped-empty" (clean).
+        # Unreadable counts as data (conservative: stays red).
+        try:
+            nc_count = int(read_client.get_collection(name).count())
+        except Exception:
+            nc_count = -1
+        if nc_count == 0:
+            _log.info(
+                "vector_etl_skip_empty_nonconformant",
+                collection=name,
+                reason=reason,
+            )
+            return CollectionResult(
+                name, 0, 0, "skipped-empty",
+                reason + " (source has 0 chunks — nothing to lose)",
+            )
         _log.warning("vector_etl_skip_nonconformant", collection=name, reason=reason)
-        return CollectionResult(name, 0, 0, "skipped", reason)
+        return CollectionResult(name, max(nc_count, 0), 0, "skipped", reason)
 
     try:
         source_col = read_client.get_collection(name)
@@ -234,6 +261,7 @@ def migrate_collections(
     collections: list[str] | None = None,
     dry_run: bool = False,
     page_size: int | None = None,
+    on_result: "Callable[[CollectionResult], None] | None" = None,
 ) -> MigrationReport:
     """Copy every chunk of *collections* (default: ALL source collections)
     from the Chroma *read_client* into pgvector via *vector_client*.
@@ -243,19 +271,37 @@ def migrate_collections(
     reported in the :class:`MigrationReport`, never raised — a single bad
     collection must not abort the run (and must not be silently dropped).
 
+    *on_result* (nexus-pebfx.3) is invoked once per collection AS IT
+    COMPLETES — the CLI uses it for live, flushed progress lines (the
+    2026-06-10 production run showed an EMPTY redirected log while 35k+
+    rows landed; the only live meter was psql). Callback exceptions
+    propagate — a broken progress sink should fail loud, not corrupt the
+    operator's picture silently.
+
     The post-write count verification assumes a QUIESCENT write window:
     concurrent serving writes into the same collection during the ETL would
     inflate the target count and read as a (conservative) failure. Run the
     migration with indexing paused. ``dry_run`` counts via ``col.count()``
     as a pre-flight estimate, not a binding commitment on a later live run.
     """
+    import dataclasses
+    import time
+
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
     names = collections if collections is not None else list_collection_names(read_client)
-    results = tuple(
-        _migrate_one(read_client, vector_client, name, dry_run=dry_run, page=page)
-        for name in names
-    )
-    report = MigrationReport(leg=leg, results=results)
+    results: list[CollectionResult] = []
+    for name in names:
+        t0 = time.monotonic()
+        result = _migrate_one(
+            read_client, vector_client, name, dry_run=dry_run, page=page,
+        )
+        result = dataclasses.replace(
+            result, duration_s=round(time.monotonic() - t0, 3),
+        )
+        results.append(result)
+        if on_result is not None:
+            on_result(result)
+    report = MigrationReport(leg=leg, results=tuple(results))
     _log.info(
         "vector_etl_leg_complete",
         leg=leg,
@@ -274,6 +320,7 @@ def migrate_local(
     collections: list[str] | None = None,
     dry_run: bool = False,
     page_size: int | None = None,
+    on_result: "Callable[[CollectionResult], None] | None" = None,
 ) -> MigrationReport:
     """LOCAL leg: open the on-disk store the retired daemon served and
     migrate it. The ETL must be the only opener (WAL single-process
@@ -286,6 +333,7 @@ def migrate_local(
         collections=collections,
         dry_run=dry_run,
         page_size=page_size,
+        on_result=on_result,
     )
 
 
@@ -298,6 +346,7 @@ def migrate_cloud(
     collections: list[str] | None = None,
     dry_run: bool = False,
     page_size: int | None = None,
+    on_result: "Callable[[CollectionResult], None] | None" = None,
 ) -> MigrationReport:
     """CLOUD leg: read via the ChromaCloud REST/auth API (no direct
     psql/pg_restore path exists) and write through the same pgvector
@@ -312,6 +361,7 @@ def migrate_cloud(
         collections=collections,
         dry_run=dry_run,
         page_size=page_size,
+        on_result=on_result,
     )
 
 

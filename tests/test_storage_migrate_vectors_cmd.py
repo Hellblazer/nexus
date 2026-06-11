@@ -50,7 +50,7 @@ class TestMigrateVectorsCmd:
     ) -> None:
         calls: list[dict] = []
 
-        def fake_migrate_local(local_path, vector_client, *, collections=None, dry_run=False, page_size=None):
+        def fake_migrate_local(local_path, vector_client, *, collections=None, dry_run=False, page_size=None, on_result=None):
             calls.append({"path": Path(local_path), "collections": collections, "dry_run": dry_run})
             return _report("local", CollectionResult(_COLL, 3, 3, "migrated"))
 
@@ -69,7 +69,9 @@ class TestMigrateVectorsCmd:
                 "dry_run": False,
             }
         ]
-        assert "source=3" in result.output
+        # nexus-pebfx.3: counts surface in the summary table.
+        assert "TOTAL" in result.output
+        assert _COLL in result.output
 
     def test_cloud_flag_routes_to_cloud_leg(self, runner, monkeypatch) -> None:
         legs: list[str] = []
@@ -128,3 +130,78 @@ class TestMigrateVectorsCmd:
         assert opened == [tmp_path]
         assert "7 chunk(s) removed" in result.output
         assert "source untouched" in result.output
+
+
+class TestEtlOperability:
+    """nexus-pebfx.3 CLI surface: skipped-empty stays green, live progress
+    lines flush per collection, dry-run never needs endpoint resolution."""
+
+    def test_skipped_empty_exits_zero(self, runner, monkeypatch, tmp_path) -> None:
+        """The 2026-06-10 headline wart: 15 EMPTY non-conformant collections
+        forced the run red and required hand-pinning 49 names."""
+
+        def fake_migrate_local(local_path, vector_client, **kw):
+            return _report(
+                "local",
+                CollectionResult(_COLL, 3, 3, "migrated"),
+                CollectionResult(
+                    "tuples__x", 0, 0, "skipped-empty",
+                    "not conformant (source has 0 chunks — nothing to lose)",
+                ),
+            )
+
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.migrate_local", fake_migrate_local
+        )
+        result = runner.invoke(migrate_vectors_cmd, ["--local-path", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "skipped-empty" in result.output
+        assert "NOT clean" not in result.output
+
+    def test_live_progress_lines_emitted_per_collection(
+        self, runner, monkeypatch, tmp_path
+    ) -> None:
+        """The CLI passes on_result; each completed collection emits a
+        flushed line BEFORE the summary table."""
+
+        def fake_migrate_local(local_path, vector_client, *, on_result=None, **kw):
+            results = (
+                CollectionResult(_COLL, 3, 3, "migrated", duration_s=1.2),
+                CollectionResult("docs__d__voyage-context-3__v1", 5, 5, "migrated",
+                                 duration_s=0.4),
+            )
+            assert on_result is not None
+            for r in results:
+                on_result(r)
+            return _report("local", *results)
+
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.migrate_local", fake_migrate_local
+        )
+        result = runner.invoke(migrate_vectors_cmd, ["--local-path", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        # Two live lines plus the table row for each: collection name appears twice.
+        assert result.output.count(_COLL) == 2
+        # Live line includes the duration.
+        assert "(1.2s)" in result.output
+
+    def test_dry_run_without_token_or_lease(self, monkeypatch, tmp_path) -> None:
+        """Counting source chunks never touches the service: no token, no
+        lease, no NX_SERVICE_URL — dry-run must still run (item 3; the
+        endpoint pre-flight is skipped for --dry-run)."""
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+
+        def fake_migrate_local(local_path, vector_client, **kw):
+            return _report(
+                "local", CollectionResult(_COLL, 7, 0, "dry-run"),
+            )
+
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.migrate_local", fake_migrate_local
+        )
+        result = CliRunner().invoke(
+            migrate_vectors_cmd, ["--local-path", str(tmp_path), "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "dry-run" in result.output
