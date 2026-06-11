@@ -274,3 +274,181 @@ def test_flush_logging_skips_handler_that_raises():
         root.removeHandler(good)
 
     assert other_flushed, "a raising handler blocked flushing the others"
+
+
+# ---------------------------------------------------------------------------
+# nexus-ovbr7: daemon-observability additions — new modes + open_child_log
+# ---------------------------------------------------------------------------
+
+
+def test_storage_service_mode_creates_file_handler(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    configure_logging("storage_service")
+    root = logging.getLogger()
+    file_handlers = [
+        h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)
+    ]
+    assert len(file_handlers) >= 1
+    assert file_handlers[-1].baseFilename.endswith("storage_service.log")
+    for h in file_handlers:
+        root.removeHandler(h)
+        h.close()
+
+
+def test_t3_daemon_mode_creates_file_handler(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    configure_logging("t3_daemon")
+    root = logging.getLogger()
+    file_handlers = [
+        h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)
+    ]
+    assert len(file_handlers) >= 1
+    assert file_handlers[-1].baseFilename.endswith("t3_daemon.log")
+    for h in file_handlers:
+        root.removeHandler(h)
+        h.close()
+
+
+class TestOpenChildLog:
+    """open_child_log: an append-mode binary handle for redirecting a
+    daemon child's stdout/stderr to ``<config>/logs/<name>.log`` — the
+    anti-DEVNULL primitive (nexus-ovbr7)."""
+
+    def test_creates_logs_dir_and_appends(self, tmp_path):
+        from nexus.logging_setup import open_child_log
+
+        with open_child_log("jar_test", config_dir=tmp_path) as fh:
+            fh.write(b"first\n")
+        with open_child_log("jar_test", config_dir=tmp_path) as fh:
+            fh.write(b"second\n")
+        path = tmp_path / "logs" / "jar_test.log"
+        assert path.read_bytes() == b"first\nsecond\n", (
+            "handle must append, not truncate — prior crash output is evidence"
+        )
+
+    def test_binary_append_mode(self, tmp_path):
+        from nexus.logging_setup import open_child_log
+
+        with open_child_log("jar_test", config_dir=tmp_path) as fh:
+            assert "a" in fh.mode and "b" in fh.mode
+
+    def test_rotates_at_spawn_when_over_max_bytes(self, tmp_path):
+        from nexus.logging_setup import open_child_log
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "jar_test.log").write_bytes(b"x" * 100)
+        (logs / "jar_test.log.1").write_bytes(b"old-backup-1")
+
+        with open_child_log("jar_test", config_dir=tmp_path, max_bytes=50) as fh:
+            fh.write(b"fresh\n")
+
+        assert (logs / "jar_test.log").read_bytes() == b"fresh\n"
+        assert (logs / "jar_test.log.1").read_bytes() == b"x" * 100
+        assert (logs / "jar_test.log.2").read_bytes() == b"old-backup-1"
+
+    def test_rotation_drops_oldest_beyond_backup_count(self, tmp_path):
+        from nexus.logging_setup import open_child_log
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "jar_test.log").write_bytes(b"x" * 100)
+        (logs / "jar_test.log.1").write_bytes(b"backup-1")
+        (logs / "jar_test.log.2").write_bytes(b"backup-2")
+
+        with open_child_log(
+            "jar_test", config_dir=tmp_path, max_bytes=50, backup_count=2,
+        ) as fh:
+            fh.write(b"fresh\n")
+
+        assert (logs / "jar_test.log.1").read_bytes() == b"x" * 100
+        assert (logs / "jar_test.log.2").read_bytes() == b"backup-1"
+        assert not (logs / "jar_test.log.3").exists(), "oldest must be dropped"
+
+    def test_no_rotation_under_max_bytes(self, tmp_path):
+        from nexus.logging_setup import open_child_log
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "jar_test.log").write_bytes(b"small")
+
+        with open_child_log("jar_test", config_dir=tmp_path) as fh:
+            fh.write(b"+more")
+        assert (logs / "jar_test.log").read_bytes() == b"small+more"
+        assert not (logs / "jar_test.log.1").exists()
+
+    def test_dotted_name_builds_crash_channel_path(self, tmp_path):
+        """The detached-spawn crash channel uses a dotted name
+        (``storage_service.crash``) — distinct from the structlog file so
+        the daemon's RotatingFileHandler never co-owns it."""
+        from nexus.logging_setup import open_child_log
+
+        with open_child_log("storage_service.crash", config_dir=tmp_path) as fh:
+            fh.write(b"traceback\n")
+        assert (tmp_path / "logs" / "storage_service.crash.log").exists()
+
+
+class TestDaemonModeStderrPolicy:
+    """nexus-ovbr7: daemon modes drop the stderr StreamHandler when stderr
+    is not a tty, so the rotating file is the single copy of every event
+    and the spawner's crash-channel file does not accumulate a duplicate
+    of the whole stream. A tty stderr (--foreground in a terminal) keeps
+    the handler for interactive debugging."""
+
+    def _stderr_stream_handlers(self) -> list[logging.Handler]:
+        import sys
+
+        return [
+            h for h in logging.getLogger().handlers
+            if isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.handlers.RotatingFileHandler)
+            and getattr(h, "stream", None) is sys.stderr
+        ]
+
+    def _cleanup_file_handlers(self) -> None:
+        root = logging.getLogger()
+        for h in [
+            x for x in root.handlers
+            if isinstance(x, logging.handlers.RotatingFileHandler)
+        ]:
+            root.removeHandler(h)
+            h.close()
+
+    def test_daemon_mode_non_tty_drops_stderr_handler(self, tmp_path, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+        configure_logging("storage_service")
+        try:
+            assert self._stderr_stream_handlers() == [], (
+                "non-tty daemon stderr must not duplicate the event stream"
+            )
+        finally:
+            self._cleanup_file_handlers()
+
+    def test_daemon_mode_tty_keeps_stderr_handler(self, tmp_path, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+        configure_logging("t2_daemon")
+        try:
+            assert self._stderr_stream_handlers(), (
+                "--foreground terminal debugging needs the stderr handler"
+            )
+        finally:
+            self._cleanup_file_handlers()
+
+    def test_non_daemon_mode_keeps_stderr_handler(self, tmp_path, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+        configure_logging("mcp")
+        try:
+            assert self._stderr_stream_handlers(), (
+                "non-daemon modes keep legacy stderr behaviour"
+            )
+        finally:
+            self._cleanup_file_handlers()

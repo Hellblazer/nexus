@@ -6,7 +6,7 @@ import logging.handlers
 import os
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import IO, Literal
 
 import structlog
 
@@ -17,6 +17,18 @@ def _config_dir() -> Path:
     if override:
         return Path(override)
     return Path.home() / ".config" / "nexus"
+
+
+#: Long-lived daemon entry points (nexus-ovbr7). For these, stderr is a crash
+#: channel, not a logging surface: when stderr is NOT a tty (detached spawn,
+#: launchd/systemd), configure_logging drops the stderr StreamHandler so the
+#: rotating file is the single copy of every event. The spawner points the
+#: daemon's fd 1/2 at ``<mode>.crash.log``; with the stderr handler removed,
+#: that file receives ONLY pre-configure failures and interpreter-fatal
+#: tracebacks — without the removal it would accumulate an unbounded duplicate
+#: of the event stream. A tty stderr (--foreground in a terminal) keeps the
+#: handler for interactive debugging.
+_DAEMON_MODES: frozenset[str] = frozenset({"t2_daemon", "t3_daemon", "storage_service"})
 
 
 def _resolve_level(mode: str, verbose: bool) -> int:
@@ -43,7 +55,10 @@ def _resolve_level(mode: str, verbose: bool) -> int:
 
 
 def configure_logging(
-    mode: Literal["cli", "console", "mcp", "hook", "watchdog", "t2_daemon"],
+    mode: Literal[
+        "cli", "console", "mcp", "hook", "watchdog",
+        "t2_daemon", "t3_daemon", "storage_service",
+    ],
     verbose: bool = False,
     config_dir: Path | None = None,
 ) -> None:
@@ -59,10 +74,11 @@ def configure_logging(
     Modes:
       * ``cli``: stderr only, WARNING default. Kept legacy-compatible so
         the human-facing CLI does not gain noise from this change.
-      * ``console`` / ``mcp`` / ``hook`` / ``watchdog`` / ``t2_daemon``:
-        stderr + RotatingFileHandler at ``<config_dir>/logs/<mode>.log``,
-        INFO default. Lifecycle events, tool dispatches, and structured
-        warnings now land in the log file.
+      * ``console`` / ``mcp`` / ``hook`` / ``watchdog`` / ``t2_daemon`` /
+        ``t3_daemon`` / ``storage_service``: stderr + RotatingFileHandler
+        at ``<config_dir>/logs/<mode>.log``, INFO default. Lifecycle
+        events, tool dispatches, and structured warnings now land in the
+        log file.
 
     *config_dir* overrides the log directory root (default:
     ``NEXUS_CONFIG_DIR`` env or ``~/.config/nexus``). The T2 daemon
@@ -146,6 +162,64 @@ def configure_logging(
     handler.setLevel(level)
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     root.addHandler(handler)
+
+    # Daemon modes with a non-tty stderr: the file above is the single copy
+    # (see _DAEMON_MODES). Without this, a spawner that captures the daemon's
+    # stderr to a file would record every event twice.
+    if mode in _DAEMON_MODES and not sys.stderr.isatty():
+        for h in list(root.handlers):
+            if (
+                isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.handlers.RotatingFileHandler)
+                and getattr(h, "stream", None) is sys.stderr
+            ):
+                root.removeHandler(h)
+
+
+def open_child_log(
+    name: str,
+    config_dir: Path | None = None,
+    *,
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 2,
+) -> IO[bytes]:
+    """Open ``<config_dir>/logs/<name>.log`` for a daemon child's output.
+
+    The anti-DEVNULL primitive (nexus-ovbr7): daemon supervisors pass the
+    returned handle as a child's ``stdout``/``stderr`` instead of
+    ``subprocess.DEVNULL``, so JVM banners, chroma tracebacks, and any
+    other output a crash leaves behind survive the process. Four
+    storage-service supervisor deaths (2026-06) were undiagnosable
+    because every byte of evidence went to DEVNULL.
+
+    Opened in binary append (``O_APPEND``) so a respawned child never
+    truncates the previous incarnation's final output — that tail IS the
+    crash evidence.
+
+    The file is size-rotated AT OPEN TIME (``.log`` -> ``.log.1`` -> ...
+    up to *backup_count*) when it exceeds *max_bytes*. Open-time
+    rotation, not continuous: the handle is handed to a child process
+    whose writes bypass Python entirely, so in-flight rotation is
+    impossible without a pipe pump — and a pipe pump couples the child's
+    liveness to the supervisor's (a child blocks on a full pipe once the
+    pump dies), which is exactly wrong when the known failure mode is
+    the supervisor dying.
+    """
+    logs_dir = (config_dir or _config_dir()) / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / f"{name}.log"
+
+    if log_path.exists() and log_path.stat().st_size > max_bytes:
+        oldest = log_path.with_name(f"{name}.log.{backup_count}")
+        oldest.unlink(missing_ok=True)
+        for i in range(backup_count - 1, 0, -1):
+            src = log_path.with_name(f"{name}.log.{i}")
+            if src.exists():
+                src.rename(log_path.with_name(f"{name}.log.{i + 1}"))
+        if backup_count > 0:
+            log_path.rename(log_path.with_name(f"{name}.log.1"))
+
+    return open(log_path, "ab")
 
 
 def flush_logging() -> None:

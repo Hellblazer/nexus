@@ -1636,10 +1636,25 @@ auto-discover.
 `status` is the single is-the-stack-healthy surface: the lease (host, port,
 JAR pid, generation), supervisor pid, addr-file path, live `/health` probe,
 the PG cluster (port, data dir, up/down, installed pgvector version,
-pg_credentials path), and the running service's `/version` handshake
-(`app_version`, `embedding_mode` voyage|onnx-local with the dispatchable
-models, `schema_latest_id`, `schema_changeset_count`). It warns when the
-running JAR differs from the installed one.
+pg_credentials path), the log-file paths (below), and the running service's
+`/version` handshake (`app_version`, `embedding_mode` voyage|onnx-local with
+the dispatchable models, `schema_latest_id`, `schema_changeset_count`). It
+warns when the running JAR differs from the installed one.
+
+**Observability.** Every component of the stack writes a persistent log
+(none of them is ever DEVNULL'd); when the stack dies, the evidence lives
+in (all under `~/.config/nexus/` unless noted):
+
+| File | Contents |
+|------|----------|
+| `logs/storage_service.log` | Supervisor lifecycle (rotating): start/exit breadcrumbs, jar exit codes, restart attempts, PG recoveries, crash backstop. |
+| `logs/storage_service_jar.log` | The Java service's stdout/stderr (logback console output, JVM banners, fatal errors). Size-rotated at respawn. |
+| `logs/storage_service.crash.log` | Pre-startup failures of the detached supervisor (import errors, bad argv) and interpreter-fatal tracebacks. Quiet in healthy operation. |
+| `<pg_data>/pg.log` | The nx-managed Postgres cluster log (`pg_ctl`). |
+
+A supervisor death without a `storage_service_supervisor_exit` breadcrumb
+in `storage_service.log` means it was killed, not that it chose to exit —
+check the jar log tail and `pg.log` next.
 
 `stop` stops the supervisor + JAR but **leaves Postgres running by
 design** (it is independently managed and may serve other clients) — the

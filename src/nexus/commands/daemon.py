@@ -354,12 +354,20 @@ def t3_start_cmd(
             *_resolve_nx_bin(), "daemon", "t3", "start", "--foreground",
             "--config-dir", str(config_dir), "--local-path", str(local_path),
         ]
-        subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # nexus-ovbr7: crash-channel capture (see the storage-service spawn
+        # for the rationale).
+        from nexus.logging_setup import open_child_log
+
+        spawn_log = open_child_log("t3_daemon.crash", config_dir)
+        try:
+            subprocess.Popen(
+                argv,
+                stdout=spawn_log,
+                stderr=spawn_log,
+                start_new_session=True,
+            )
+        finally:
+            spawn_log.close()
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             existing = find_t3_daemon(config_dir)
@@ -1284,13 +1292,21 @@ def _t2_ensure_running_inner(
                 argv.extend(["--config-dir", config_dir_str])
             if not quiet:
                 click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
-            proc = subprocess.Popen(
-                argv,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            # nexus-ovbr7: crash-channel capture (see the storage-service
+            # spawn for the rationale).
+            from nexus.logging_setup import open_child_log
+
+            spawn_log = open_child_log("t2_daemon.crash", config_dir)
+            try:
+                proc = subprocess.Popen(
+                    argv,
+                    stdout=spawn_log,
+                    stderr=spawn_log,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            finally:
+                spawn_log.close()
 
         # nexus-u3mfr: migration-aware wait. A cold-start daemon runs its
         # one-time startup migration (multi-second, holds the write lock)
@@ -1557,12 +1573,23 @@ def service_start_cmd(
         ]
         if jar_path is not None:
             argv += ["--jar", str(jar_path)]
-        subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # nexus-ovbr7: route the child's streams to a crash-channel file so a
+        # failure BEFORE run_storage_supervisor's configure_logging runs
+        # (import error, bad argv) and interpreter-fatal tracebacks are
+        # captured. Post-configure, the daemon drops its stderr handler
+        # (non-tty), so this file stays quiet in healthy operation.
+        from nexus.logging_setup import open_child_log
+
+        spawn_log = open_child_log("storage_service.crash", config_dir)
+        try:
+            subprocess.Popen(
+                argv,
+                stdout=spawn_log,
+                stderr=spawn_log,
+                start_new_session=True,
+            )
+        finally:
+            spawn_log.close()
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
             existing = registry.discover(scope)
@@ -1572,7 +1599,8 @@ def service_start_cmd(
         if existing is None:
             click.echo(
                 "Error: Storage service supervisor did not become ready within 60s. "
-                "Check logs or run with --foreground to see the error.",
+                f"Check {config_dir / 'logs' / 'storage_service.log'} "
+                "or run with --foreground to see the error.",
                 err=True,
             )
             sys.exit(2)
@@ -1926,6 +1954,15 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     data["pg_credentials"] = str(creds_path) if creds_path.exists() else "(absent)"
     pg_info = _probe_pg(creds_path)
     data.update(pg_info)
+
+    # nexus-ovbr7: surface where the evidence lives. Every component of the
+    # stack writes a log file; an operator triaging a death should not have
+    # to know the layout by heart.
+    data["supervisor_log"] = str(config_dir / "logs" / "storage_service.log")
+    data["jar_log"] = str(config_dir / "logs" / "storage_service_jar.log")
+    data["crash_log"] = str(config_dir / "logs" / "storage_service.crash.log")
+    if pg_info.get("pg_data"):
+        data["pg_log"] = str(Path(pg_info["pg_data"]) / "pg.log")
 
     # nexus-pebfx.4 version handshake: report the RUNNING service's app +
     # schema versions, and warn when they drift from the JAR installed at
