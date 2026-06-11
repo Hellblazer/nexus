@@ -488,17 +488,17 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge"));
 
         var rows = List.of(
-            Map.<String, Object>of("position", 0, "chash", "aaaa0000", "chunk_index", 0,
+            Map.<String, Object>of("position", 0, "chash", "aaaa0000000000000000000000000000", "chunk_index", 0,
                 "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 100),
-            Map.<String, Object>of("position", 1, "chash", "bbbb1111", "chunk_index", 1,
+            Map.<String, Object>of("position", 1, "chash", "bbbb1111000000000000000000000000", "chunk_index", 1,
                 "line_start", 11, "line_end", 20, "char_start", 100, "char_end", 200)
         );
         repo.writeManifest(TENANT_A, "mfst.1", rows);
 
         var got = repo.getManifest(TENANT_A, "mfst.1");
         assertThat(got).hasSize(2);
-        assertThat(got.get(0).get("chash")).isEqualTo("aaaa0000");
-        assertThat(got.get(1).get("chash")).isEqualTo("bbbb1111");
+        assertThat(got.get(0).get("chash")).isEqualTo("aaaa0000000000000000000000000000");
+        assertThat(got.get(1).get("chash")).isEqualTo("bbbb1111000000000000000000000000");
     }
 
     @Test @Order(51)
@@ -507,17 +507,17 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge"));
         // Write initial
         repo.writeManifest(TENANT_A, "mfst.2", List.of(
-            Map.<String, Object>of("position", 0, "chash", "old0000", "chunk_index", 0)
+            Map.<String, Object>of("position", 0, "chash", "old00000000000000000000000000000", "chunk_index", 0)
         ));
         // Replace with new set
         repo.writeManifest(TENANT_A, "mfst.2", List.of(
-            Map.<String, Object>of("position", 0, "chash", "new0000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "new1111", "chunk_index", 1)
+            Map.<String, Object>of("position", 0, "chash", "new00000000000000000000000000000", "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", "new11110000000000000000000000000", "chunk_index", 1)
         ));
         var got = repo.getManifest(TENANT_A, "mfst.2");
         assertThat(got).hasSize(2);
         assertThat(got.stream().map(r -> (String) r.get("chash")).toList())
-            .containsExactlyInAnyOrder("new0000", "new1111");
+            .containsExactlyInAnyOrder("new00000000000000000000000000000", "new11110000000000000000000000000");
     }
 
     @Test @Order(52)
@@ -525,7 +525,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.3", "title", "Purge Doc",
             "content_type", "paper", "corpus", "knowledge"));
         repo.writeManifest(TENANT_A, "mfst.3", List.of(
-            Map.<String, Object>of("position", 0, "chash", "purge0000", "chunk_index", 0)
+            Map.<String, Object>of("position", 0, "chash", "purge000000000000000000000000000", "chunk_index", 0)
         ));
         assertThat(repo.getManifest(TENANT_A, "mfst.3")).hasSize(1);
         int deleted = repo.purgeManifest(TENANT_A, "mfst.3");
@@ -539,11 +539,11 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__chash_test"));
         repo.writeManifest(TENANT_A, "mfst.4", List.of(
-            Map.<String, Object>of("position", 0, "chash", "cfccc000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "cfccc111", "chunk_index", 1)
+            Map.<String, Object>of("position", 0, "chash", "cfccc000000000000000000000000000", "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", "cfccc111000000000000000000000000", "chunk_index", 1)
         ));
         Set<String> chashes = repo.chashesForCollection(TENANT_A, "knowledge__chash_test");
-        assertThat(chashes).containsExactlyInAnyOrder("cfccc000", "cfccc111");
+        assertThat(chashes).containsExactlyInAnyOrder("cfccc000000000000000000000000000", "cfccc111000000000000000000000000");
     }
 
     @Test @Order(54)
@@ -551,9 +551,9 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
         repo.writeManifest(TENANT_A, "mfst.5", List.of(
-            Map.<String, Object>of("position", 0, "chash", "rsync000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "rsync111", "chunk_index", 1),
-            Map.<String, Object>of("position", 2, "chash", "rsync222", "chunk_index", 2)
+            Map.<String, Object>of("position", 0, "chash", "rsync000000000000000000000000000", "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", "rsync111000000000000000000000000", "chunk_index", 1),
+            Map.<String, Object>of("position", 2, "chash", "rsync222000000000000000000000000", "chunk_index", 2)
         ));
         repo.resyncChunkCount(TENANT_A, "mfst.5");
         var doc = repo.getDocument(TENANT_A, "mfst.5");

@@ -267,7 +267,32 @@ public final class PgVectorRepository {
         }
 
         String table = chunksTable(dim);
+
+        // Standing rule (RDR-156 P0.2, bead nexus-70r3c.2):
+        // Collection registration precedes chunk writes — enforced server-side here
+        // (auto-stub in the write transaction) and by the chunks_<dim>/chash_index/
+        // topic_assignments -> catalog_collections FKs (NOT VALID until RDR-153 data
+        // lands; VALIDATE is nexus-70r3c.3).  Stub rows (all metadata='') are upgraded
+        // by the catalog ETL's importCollection DO UPDATE...WHERE-stub logic.
+        // Never add a chunk write path that bypasses this ensure-registered step.
+        String[] collSegs = collection.split("__");
+        boolean conformant = collSegs.length == 4;
+        String regContentType  = conformant ? collSegs[0] : "";
+        String regOwner        = conformant ? collSegs[1] : "";
+        String regModel        = conformant ? collSegs[2] : "";
+        String regModelVersion = conformant ? collSegs[3] : "";
+
         tenantScope.withTenant(tenant, ctx -> {
+            // Ensure-registered: INSERT stub row for this collection before any chunk write.
+            // ON CONFLICT DO NOTHING: a fully-populated row from the catalog ETL is never
+            // overwritten; a stub inserted by a prior upsertChunks call is also preserved.
+            ctx.execute(
+                "INSERT INTO nexus.catalog_collections"
+                + " (tenant_id, name, content_type, owner_id, embedding_model, model_version)"
+                + " VALUES (?, ?, ?, ?, ?, ?)"
+                + " ON CONFLICT (tenant_id, name) DO NOTHING",
+                tenant, collection, regContentType, regOwner, regModel, regModelVersion);
+
             for (int i = 0; i < dedupIds.size(); i++) {
                 ctx.execute(
                     "INSERT INTO " + table

@@ -95,6 +95,8 @@ class ChashRepositoryTest {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute("GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_index TO " + SVC_ROLE);
+            // RDR-156 P0.2: ChashRepository.upsert now auto-stubs catalog_collections.
+            su.createStatement().execute("GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute("ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
 

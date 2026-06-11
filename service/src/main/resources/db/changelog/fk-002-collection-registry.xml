@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 bead nexus-70r3c.2 — collection-registry foreign keys.
+
+    Adds NOT VALID FKs from the three chunk tables, chash_index, and topic_assignments
+    back to catalog_collections(tenant_id, name).  "NOT VALID" means the constraint is
+    enforced for ALL NEW writes immediately but does NOT validate existing rows — safe to
+    add against a live table with millions of rows.  The backfill changeset (fk-002-0)
+    inserts stubs for any collection names that already exist in the data tables so that
+    a subsequent VALIDATE CONSTRAINT (bead nexus-70r3c.3) can succeed.
+
+    Deploy-order landmine: in production the vector ETL runs before the catalog ETL,
+    so chunk rows accumulate in nexus.chunks_<dim> and nexus.chash_index BEFORE the
+    catalog registry is populated.  Without fk-002-0-backfill-stubs the NOT VALID FKs
+    would reject all new serving writes at deploy time (NOT VALID still enforces new
+    inserts; it only skips retroactive validation of pre-existing rows).
+
+    Constraint names are a fixed contract (CollectionRegistryFkTest):
+      chunks_384_collection_fk
+      chunks_768_collection_fk
+      chunks_1024_collection_fk
+      chash_index_collection_fk
+      topic_assignments_collection_fk
+
+    DO NOT add VALIDATE CONSTRAINT here.  That is bead nexus-70r3c.3, world-blocked
+    on the RDR-153 data migration (a combined changeset would fail on any pre-RDR-153
+    deployment that has old-format rows).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset fk-002-0: backfill stubs into catalog_collections ──────── -->
+    <!--
+        Production deploy-order landmine: chunks data exists before the catalog ETL runs.
+        Without this backfill the NOT VALID FKs (changesets fk-002-1 through fk-002-5)
+        would reject all new serving writes at deploy time.  NOT VALID still enforces new
+        inserts; it only skips retroactive validation of rows that existed BEFORE the ALTER
+        TABLE.  Rows inserted AFTER the ALTER TABLE are fully checked.  So if any new chunk
+        write arrives after fk-002-1 lands but before the catalog ETL registers the
+        collection, the insert would fail the FK.  This backfill prevents that window.
+        Each stub row has empty metadata fields ('') and is upgradable by importCollection's
+        DO UPDATE WHERE-stub logic once the catalog ETL runs.
+    -->
+    <changeSet id="fk-002-0-backfill-stubs" author="nexus-70r3c.2">
+        <comment>
+            Backfill catalog_collections stub rows for every collection name that already
+            exists in chunks_384, chunks_768, chunks_1024, chash_index, and topic_assignments.
+            Production deploy-order landmine: chunk data accumulates before the catalog ETL
+            runs. Without this backfill the NOT VALID FKs added by fk-002-1 through fk-002-5
+            would reject all new serving writes at deploy time (NOT VALID still enforces new
+            inserts; it only skips retroactive validation of pre-existing rows).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- Backfill stubs from chunks_384
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.chunks_384
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+-- Backfill stubs from chunks_768
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.chunks_768
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+-- Backfill stubs from chunks_1024
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.chunks_1024
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+-- Backfill stubs from chash_index
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, physical_collection
+FROM nexus.chash_index
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+-- Backfill stubs from topic_assignments (non-null, non-empty source_collection only)
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, source_collection
+FROM nexus.topic_assignments
+WHERE source_collection IS NOT NULL
+  AND source_collection != ''
+ON CONFLICT (tenant_id, name) DO NOTHING;
+        </sql>
+        <rollback>
+            <!-- No rollback: stub rows are inert; the FKs being added next would be dropped
+                 by their own rollbacks.  Removing stubs here could break existing references. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-1: chunks_384 → catalog_collections FK ──────────── -->
+    <changeSet id="fk-002-1" author="nexus-70r3c.2">
+        <comment>
+            chunks_384_collection_fk: FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID.
+            NOT VALID: enforces new inserts immediately; skips retroactive validation of
+            pre-existing rows (validation rides with bead nexus-70r3c.3 after RDR-153 data lands).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_384
+    ADD CONSTRAINT chunks_384_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.chunks_384 DROP CONSTRAINT IF EXISTS chunks_384_collection_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-2: chunks_768 → catalog_collections FK ──────────── -->
+    <changeSet id="fk-002-2" author="nexus-70r3c.2">
+        <comment>
+            chunks_768_collection_fk: FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID.
+            NOT VALID: enforces new inserts immediately; skips retroactive validation of
+            pre-existing rows (validation rides with bead nexus-70r3c.3 after RDR-153 data lands).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_768
+    ADD CONSTRAINT chunks_768_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.chunks_768 DROP CONSTRAINT IF EXISTS chunks_768_collection_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-3: chunks_1024 → catalog_collections FK ─────────── -->
+    <changeSet id="fk-002-3" author="nexus-70r3c.2">
+        <comment>
+            chunks_1024_collection_fk: FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID.
+            NOT VALID: enforces new inserts immediately; skips retroactive validation of
+            pre-existing rows (validation rides with bead nexus-70r3c.3 after RDR-153 data lands).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_1024
+    ADD CONSTRAINT chunks_1024_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.chunks_1024 DROP CONSTRAINT IF EXISTS chunks_1024_collection_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-4: chash_index → catalog_collections FK ─────────── -->
+    <changeSet id="fk-002-4" author="nexus-70r3c.2">
+        <comment>
+            chash_index_collection_fk: FOREIGN KEY (tenant_id, physical_collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID.
+            NOT VALID: enforces new inserts immediately; skips retroactive validation of
+            pre-existing rows.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chash_index
+    ADD CONSTRAINT chash_index_collection_fk
+    FOREIGN KEY (tenant_id, physical_collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_collection_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-5: topic_assignments → catalog_collections FK ───── -->
+    <changeSet id="fk-002-5" author="nexus-70r3c.2">
+        <comment>
+            topic_assignments_collection_fk: FOREIGN KEY (tenant_id, source_collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name)
+            ON UPDATE CASCADE ON DELETE RESTRICT NOT VALID.
+            ON UPDATE CASCADE: propagates collection renames to source_collection automatically.
+            source_collection IS NULLABLE: NULL satisfies the FK (MATCH SIMPLE default).
+            NOT VALID: enforces new inserts immediately; skips retroactive validation of
+            pre-existing rows.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments
+    ADD CONSTRAINT topic_assignments_collection_fk
+    FOREIGN KEY (tenant_id, source_collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON UPDATE CASCADE
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_collection_fk;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
