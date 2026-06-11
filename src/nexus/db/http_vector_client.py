@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import threading
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -435,7 +436,7 @@ class HttpVectorClient:
 
     def upsert_chunks_with_embeddings(
         self,
-        collection: str,
+        collection_name: str,
         ids: list[str],
         documents: list[str],
         embeddings: list[list[float]],
@@ -447,26 +448,106 @@ class HttpVectorClient:
         discarded (Seam B: embed moves to JVM). This method signature matches
         ``T3Database.upsert_chunks_with_embeddings`` so it works transparently
         as a drop-in.
+
+        Param name ``collection_name`` (not ``collection``) matches
+        ``T3Database.upsert_chunks_with_embeddings`` so callers using the kwarg
+        form (code_indexer.py:470, prose_indexer.py:233, exporter.py:431,448)
+        don't get a TypeError (nexus-7zuzz).
         """
         self.upsert_chunks(
-            collection, ids, documents, metadatas=metadatas
+            collection_name, ids, documents, metadatas=metadatas
         )
 
     def put(
         self,
         collection: str,
-        doc_id: str,
         content: str,
-        metadata: dict | None = None,
-        *,
-        embedding: list[float] | None = None,
+        title: str = "",
+        tags: str = "",
+        category: str = "",
+        session_id: str = "",
+        source_agent: str = "",
+        store_type: str = "knowledge",
+        ttl_days: int = 0,
+        catalog_doc_id: str = "",
     ) -> str:
-        """Single-chunk put (MCP store_put path)."""
+        """Upsert *content* into *collection*. Returns the document ID.
+
+        Drop-in parity with ``T3Database.put`` (nexus-7zuzz): same parameter
+        list, same doc_id derivation (sha256(content)[:32]), and metadata built
+        via the SAME :func:`nexus.metadata_schema.make_chunk_metadata` factory
+        that T3Database.put uses — parity by construction, not by duplication.
+
+        ``store_type`` is accepted for API symmetry but intentionally not
+        forwarded: T3Database also ignores it (RDR-101 Phase 5c dropped
+        store_type from ALLOWED_TOP_LEVEL; content_type derives from the
+        collection prefix, identical logic is applied here).
+
+        ``catalog_doc_id`` is an HTTP-path superset: T3Database.put() accepts
+        the param but normalize() strips it from the Chroma write (not in
+        ALLOWED_TOP_LEVEL); on the T3 path catalog association is via the hook
+        chain, not chunk metadata. HttpVectorClient stamps it into the service
+        request body so the Java layer can persist the tumbler cross-reference
+        if the service endpoint accepts it. This is a documented divergence, not
+        a parity gap — see EXCLUSIONS comment in the parity test.
+
+        Single-chunk: one HTTP call per put() call. T3Database.put uses
+        ``fail_on_oversized=True``; the server is responsible for rejecting
+        oversized content on the HTTP path.
+        """
+        from nexus.corpus import (  # noqa: PLC0415
+            embedding_model_for_collection_name,
+            index_model_for_collection,
+        )
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        doc_id = content_hash[:32]
+        now_iso = datetime.now(UTC).isoformat()
+
+        # Derive content_type from collection prefix — mirrors T3Database.put
+        # at t3.py:860-870 exactly.
+        prefix_to_ct = {
+            "code__": "code",
+            "docs__": "prose",
+            "rdr__": "markdown",
+            "knowledge__": "prose",
+        }
+        content_type = "prose"
+        for prefix, ct in prefix_to_ct.items():
+            if collection.startswith(prefix):
+                content_type = ct
+                break
+
+        metadata = make_chunk_metadata(
+            content_type=content_type,
+            chunk_text_hash=content_hash,
+            content_hash=content_hash,
+            chunk_start_char=0,
+            chunk_end_char=len(content),
+            indexed_at=now_iso,
+            embedding_model=(
+                embedding_model_for_collection_name(collection)
+                or index_model_for_collection(collection)
+            ),
+            title=title,
+            tags=tags,
+            category=category,
+            ttl_days=ttl_days,
+            source_agent=source_agent,
+            session_id=session_id,
+        )
+
+        # catalog_doc_id: HTTP-path superset (see docstring). Stamp when present;
+        # omit when empty to keep the body clean for the legacy/no-catalog path.
+        if catalog_doc_id:
+            metadata["catalog_doc_id"] = catalog_doc_id
+
         body: dict[str, Any] = {
             "collection": collection,
             "doc_id": doc_id,
             "content": content,
-            "metadata": metadata or {},
+            "metadata": metadata,
         }
         result = _post("/v1/vectors/store-put", body, tenant=self._tenant)
         return result.get("id", doc_id)
@@ -476,15 +557,19 @@ class HttpVectorClient:
     def search(
         self,
         query: str,
-        collections: list[str],
+        collection_names: list[str],
         n_results: int = 10,
-        *,
         where: dict | None = None,
+        *,
         cluster_by: str = "",
         threshold: float | None = None,
         structured: bool = False,
     ) -> list[dict] | dict:
         """Semantic search via the Java service.
+
+        Param name ``collection_names`` (not ``collections``) matches
+        ``T3Database.search`` (nexus-7zuzz). The HTTP body key stays
+        ``"collections"`` — that is what the Java VectorHandler reads.
 
         The service embeds the query server-side and returns ranked results.
         Returns the same list-of-dicts shape as ``T3Database.search()``
@@ -493,7 +578,7 @@ class HttpVectorClient:
         """
         body: dict[str, Any] = {
             "query": query,
-            "collections": collections,
+            "collections": collection_names,
             "n_results": n_results,
         }
         if where:
@@ -679,8 +764,12 @@ class HttpVectorClient:
         """
         return _ServiceCollectionStub(name=name, tenant=self._tenant)
 
-    def get_embeddings(self, collection: str, ids: list[str]):
+    def get_embeddings(self, collection_name: str, ids: list[str]):
         """Fetch stored embeddings for *ids* via the service (nexus-pebfx.7).
+
+        Param name ``collection_name`` matches ``T3Database.get_embeddings``
+        (nexus-7zuzz). The HTTP body key stays ``"collection"`` — that is what
+        the Java VectorHandler reads.
 
         Mirrors ``T3Database.get_embeddings``: returns an ``(N, D)`` float32
         ndarray with rows in request order; ids the service does not find
@@ -692,7 +781,7 @@ class HttpVectorClient:
 
         result = _post(
             "/v1/vectors/get-embeddings",
-            {"collection": collection, "ids": ids},
+            {"collection": collection_name, "ids": ids},
             tenant=self._tenant,
         )
         return np.array(result.get("embeddings", []), dtype=np.float32)
@@ -702,7 +791,14 @@ class HttpVectorClient:
     def delete_collection(self, name: str) -> None:
         raise NotImplementedError("delete_collection not implemented in HttpVectorClient")
 
-    def delete_by_source(self, collection: str, source_path: str) -> int:
+    def delete_by_source(self, collection_name: str, source_path: str) -> int:
+        """Delete all chunks for a given source path.
+
+        Param name ``collection_name`` matches ``T3Database.delete_by_source``
+        (nexus-7zuzz). Currently raises NotImplementedError — the server-side
+        endpoint for source-path deletion is tracked as a follow-on bead.
+        The param name is correct for drop-in parity even while the body is a stub.
+        """
         raise NotImplementedError("delete_by_source not implemented in HttpVectorClient")
 
     # ── Utility ──────────────────────────────────────────────────────────────
