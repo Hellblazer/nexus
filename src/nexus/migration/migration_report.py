@@ -147,6 +147,11 @@ class IssueCollector:
         self._issues: dict[tuple[str, str], dict[tuple[str, str, str], MigrationIssue]] = {}
         # (store, table) -> {"read": int, "written": int}
         self._counts: dict[tuple[str, str], dict[str, int]] = {}
+        #: Construction time = ETL start. build_report uses this as the
+        #: report's started_at so no caller has to remember to capture it
+        #: (a forgotten started_at would silently equal completed_at and
+        #: erase the run duration from the audit artifact).
+        self.started_at: str = datetime.now(UTC).isoformat()
 
     # ── Recording ────────────────────────────────────────────────────────────
 
@@ -161,7 +166,15 @@ class IssueCollector:
         action: str,
         sample_id: str,
     ) -> None:
-        """Record one offending row into its (class, constraint, action) bucket."""
+        """Record one offending row into its (class, constraint, action) bucket.
+
+        ``reason`` is taken from the FIRST call for each bucket; subsequent
+        reasons are not recorded (rows sharing a bucket share a diagnosis —
+        51,286 orphans carry one reason, not 51,286).
+
+        Not thread-safe: all ``record()``/``count_*()`` calls must come from
+        a single thread (the ETLs run sequentially by design).
+        """
         bucket = self._issues.setdefault((store, table), {})
         key = (issue_class, constraint, action)
         issue = bucket.get(key)
@@ -176,6 +189,33 @@ class IssueCollector:
             )
             bucket[key] = issue
         issue.add_sample(sample_id)
+
+    def record_event(
+        self,
+        store: str,
+        table: str,
+        *,
+        issue_class: str,
+        constraint: str,
+        reason: str,
+        action: str,
+    ) -> None:
+        """Record a ONE-TIME event with no natural row sample (e.g. a
+        ``schema_corrected`` decision). ``count`` increments per call;
+        ``sample_ids`` stays empty — synthesizing a fake row id for a
+        non-row event would be semantically wrong (critic P1.4 finding)."""
+        bucket = self._issues.setdefault((store, table), {})
+        key = (issue_class, constraint, action)
+        issue = bucket.get(key)
+        if issue is None:
+            issue = MigrationIssue(
+                issue_class=issue_class,
+                constraint=constraint,
+                reason=reason,
+                action=action,
+            )
+            bucket[key] = issue
+        issue.count += 1
 
     def count_read(self, store: str, table: str, n: int) -> None:
         self._table(store, table)["read"] += n
@@ -222,7 +262,12 @@ def build_report(
     """
     now = datetime.now(UTC).isoformat()
     stores_out: list[dict[str, Any]] = []
-    by_action: dict[str, int] = {a: 0 for a in sorted(ISSUE_ACTIONS)}
+    # Severity-descending key order, matching the RDR schema example
+    # (JSON objects are unordered by spec; this is for human readers).
+    by_action: dict[str, int] = {
+        a: 0
+        for a in sorted(ISSUE_ACTIONS, key=lambda a: ACTION_SEVERITY[a], reverse=True)
+    }
     totals = {"read": 0, "written": 0, "skipped": 0, "flagged": 0, "failed": 0}
     max_severity = 0
 
@@ -255,7 +300,7 @@ def build_report(
     report = {
         "schema_version": "1",
         "migration_id": migration_id or str(uuid.uuid4()),
-        "started_at": started_at or now,
+        "started_at": started_at or collector.started_at,
         "completed_at": now,
         "source": dict(source),
         "target": dict(target),

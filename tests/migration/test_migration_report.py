@@ -284,3 +284,144 @@ class TestBuildReport:
         decoded = json.loads(encoded)
         assert decoded == report
         assert json.dumps(decoded, sort_keys=True) == encoded
+
+
+class TestReviewPassRegressions:
+    """P1.3/P1.4 review findings (2026-06-11)."""
+
+    def test_phase4_gate_clears_with_nonzero_skipped_and_handled(self) -> None:
+        """Critic S1: the REAL passing-gate shape — the production audit
+        expects ~51k skipped + 273 flagged + 234 handled + 1 schema
+        correction and ZERO failed. The gate must clear on exactly that."""
+        c = IssueCollector()
+        c.count_read("taxonomy", "topic_assignments", 180806)
+        c.count_written("taxonomy", "topic_assignments", 129520)
+        for i in range(3):
+            c.record(
+                "taxonomy", "topic_assignments",
+                issue_class="orphan_parent",
+                constraint="topic_assignments.topic_id -> topics.id",
+                reason="deleted topic",
+                action="skipped",
+                sample_id=f"d{i}:t9",
+            )
+        c.record(
+            "catalog", "links",
+            issue_class="soft_dangler",
+            constraint="links.from_tumbler -> documents.tumbler",
+            reason="endpoint missing",
+            action="flagged",
+            sample_id="L1",
+        )
+        c.record(
+            "telemetry", "hook_failures",
+            issue_class="format_anomaly",
+            constraint="hook_failures.occurred_at",
+            reason="space-form timestamp normalized",
+            action="handled",
+            sample_id="hf-1",
+        )
+        c.record_event(
+            "taxonomy", "topics",
+            issue_class="identity_mismatch",
+            constraint="topics.doc_id",
+            reason="doc_id is a chash — schema corrected",
+            action="schema_corrected",
+        )
+        report = build_report(c, source={}, target={})
+        summary = report["summary"]
+        assert summary["total_failed"] == 0      # the gate clears
+        assert summary["total_skipped"] == 3
+        assert summary["total_flagged"] == 1
+        assert summary["by_action"]["handled"] == 1
+        assert summary["by_action"]["schema_corrected"] == 1
+        assert summary["max_severity"] == 3      # skipped, nothing failed
+
+    def test_started_at_defaults_to_collector_construction(self) -> None:
+        """Critic S2: a forgotten started_at must not silently equal
+        completed_at — the collector captures it at construction (= ETL
+        start), so the audit artifact keeps the run duration."""
+        c = IssueCollector()
+        c.count_read("memory", "memory", 1)
+        report = build_report(c, source={}, target={})
+        assert report["started_at"] == c.started_at
+        assert report["completed_at"] >= report["started_at"]
+        # Explicit override still wins.
+        explicit = build_report(
+            c, source={}, target={}, started_at="2026-06-10T00:00:00+00:00",
+        )
+        assert explicit["started_at"] == "2026-06-10T00:00:00+00:00"
+
+    def test_multiple_issues_same_table(self) -> None:
+        """CRE M2: two distinct (class, constraint, action) buckets in ONE
+        (store, table) — the most likely production shape."""
+        c = IssueCollector()
+        c.count_read("taxonomy", "topic_links", 17638)
+        c.count_written("taxonomy", "topic_links", 6535)
+        c.record(
+            "taxonomy", "topic_links",
+            issue_class="orphan_parent",
+            constraint="topic_links.topic_id -> topics.id",
+            reason="deleted from-topic",
+            action="skipped",
+            sample_id="tl-1",
+        )
+        c.record(
+            "taxonomy", "topic_links",
+            issue_class="orphan_parent",
+            constraint="topic_links.to_topic_id -> topics.id",
+            reason="deleted to-topic",
+            action="skipped",
+            sample_id="tl-2",
+        )
+        c.record(
+            "taxonomy", "topic_links",
+            issue_class="unexpected",
+            constraint="topic_links",
+            reason="unparseable row",
+            action="failed",
+            sample_id="tl-3",
+        )
+        report = build_report(c, source={}, target={})
+        (store,) = report["stores"]
+        (table,) = store["tables"]
+        assert len(table["issues"]) == 3
+        assert table["skipped"] == 2   # summed across the two skip buckets
+        assert table["failed"] == 1
+        assert report["summary"]["by_action"]["skipped"] == 2
+        assert report["summary"]["total_failed"] == 1
+
+    def test_table_key_set_locked(self) -> None:
+        """CRE L2: the table dict carries EXACTLY the RDR schema columns —
+        handled/schema_corrected are by_action-only by design."""
+        c = IssueCollector()
+        c.count_read("memory", "memory", 1)
+        report = build_report(c, source={}, target={})
+        (table,) = report["stores"][0]["tables"]
+        assert set(table.keys()) == {
+            "table", "read", "written", "skipped", "flagged", "failed", "issues",
+        }
+
+    def test_by_action_severity_descending_order(self) -> None:
+        """CRE L1: key order matches the RDR example (human readability;
+        JSON object order is non-semantic)."""
+        c = IssueCollector()
+        c.count_read("memory", "memory", 1)
+        report = build_report(c, source={}, target={})
+        assert list(report["summary"]["by_action"]) == [
+            "failed", "skipped", "flagged", "handled", "schema_corrected",
+        ]
+
+    def test_record_event_has_no_samples(self) -> None:
+        c = IssueCollector()
+        c.record_event(
+            "taxonomy", "topics",
+            issue_class="identity_mismatch",
+            constraint="topics.doc_id",
+            reason="schema corrected once",
+            action="schema_corrected",
+        )
+        (issue,) = c.issues_for("taxonomy", "topics")
+        assert issue.count == 1
+        assert issue.sample_ids == []
+        assert issue.sample_truncated is False
