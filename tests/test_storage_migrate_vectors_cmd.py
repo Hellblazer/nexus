@@ -69,9 +69,12 @@ class TestMigrateVectorsCmd:
                 "dry_run": False,
             }
         ]
-        # nexus-pebfx.3: counts surface in the summary table.
+        # nexus-pebfx.3: counts surface in the summary table — pin the
+        # NUMERIC rendering (right-aligned 8-wide columns), not just the
+        # table structure: a zeroed source_count must fail this test.
         assert "TOTAL" in result.output
         assert _COLL in result.output
+        assert f"{3:>8} {3:>8}" in result.output
 
     def test_cloud_flag_routes_to_cloud_leg(self, runner, monkeypatch) -> None:
         legs: list[str] = []

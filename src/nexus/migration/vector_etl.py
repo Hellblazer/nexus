@@ -51,6 +51,8 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+import dataclasses
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -284,9 +286,6 @@ def migrate_collections(
     migration with indexing paused. ``dry_run`` counts via ``col.count()``
     as a pre-flight estimate, not a binding commitment on a later live run.
     """
-    import dataclasses
-    import time
-
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
     names = collections if collections is not None else list_collection_names(read_client)
     results: list[CollectionResult] = []

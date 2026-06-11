@@ -1030,9 +1030,11 @@ def _echo_summary_table(report) -> None:
             f"{r.status:<13} {r.collection:<{name_w}} {r.source_count:>8} "
             f"{r.written_count:>8} {r.duration_s:>7.1f}s"
         )
-        # Actionable rows carry their reason — the table must be sufficient
-        # on its own (no structlog scrolling).
-        if r.reason and r.status in ("failed", "skipped"):
+        # Rows with a reason carry it — the table is the permanent
+        # scrollback record and must be sufficient on its own (no structlog
+        # scrolling). skipped-empty included: the operator reviewing a
+        # redirected log needs the disposition rationale in the table.
+        if r.reason and r.status in ("failed", "skipped", "skipped-empty"):
             line += f"  — {r.reason}"
         click.echo(line)
     click.echo("-" * (13 + 1 + name_w + 27))

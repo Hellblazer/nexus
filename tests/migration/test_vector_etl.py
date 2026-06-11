@@ -1373,10 +1373,17 @@ class TestLiveProgressCallback:
         )
         assert seen == [a, b]
 
-    def test_durations_populated(self, source_client) -> None:
+    def test_durations_populated(self, source_client, monkeypatch) -> None:
+        # Deterministic clock (exact-assertion discipline): the default
+        # duration_s=0.0 would satisfy a >=0 inequality even if the timing
+        # loop never ran.
+        import nexus.migration.vector_etl as etl_mod
+
         a = _coll("etlop-dur")
         _seed_source(source_client, a, 1)
+        ticks = iter([10.0, 11.5])
+        monkeypatch.setattr(etl_mod.time, "monotonic", lambda: next(ticks))
         report = migrate_collections(
             source_client, FakeVectorClient(), leg="local", collections=[a],
         )
-        assert report.results[0].duration_s >= 0.0
+        assert report.results[0].duration_s == 1.5
