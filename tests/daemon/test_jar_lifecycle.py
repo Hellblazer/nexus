@@ -358,6 +358,11 @@ class TestStatusVersionHandshake:
             "nexus.daemon.service_registry.ServiceRegistry.discover",
             return_value=record,
         ), patch(
+            # pebfx.5 latency guard: an unreachable /health skips the
+            # /version fetch entirely — pin health ok so the mocked
+            # version payload actually surfaces.
+            "nexus.commands.daemon._probe_health", return_value="ok",
+        ), patch(
             "nexus.daemon.jar_lifecycle.fetch_service_version",
             return_value=svc_version,
         ):

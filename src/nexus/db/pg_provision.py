@@ -82,6 +82,12 @@ CREDENTIALS_FILENAME: str = "pg_credentials"
 # ── Binary discovery ───────────────────────────────────────────────────────────
 
 
+class PgVectorNotInstalledError(RuntimeError):
+    """The pgvector extension is not installed for the discovered PostgreSQL
+    (nexus-pebfx.5 pre-flight). Raised BEFORE any cluster work so the user
+    gets the remedy instead of a mid-provision Liquibase failure."""
+
+
 class PgBinaryNotFoundError(RuntimeError):
     """Raised when no Postgres binaries are found on the system."""
 
@@ -192,6 +198,49 @@ def discover_pg_binaries() -> PgBinaries:
 
 
 # ── Port helpers ───────────────────────────────────────────────────────────────
+
+
+def check_pgvector_available(bins: PgBinaries) -> None:
+    """Fail loud when pgvector is not installed for THIS PostgreSQL.
+
+    Checks for ``<sharedir>/extension/vector.control`` via ``pg_config``.
+    Indeterminate (pg_config missing/failing) does NOT block — provisioning
+    will fail loud at CREATE EXTENSION anyway; this gate exists to move the
+    common failure earlier, not to add a new way to be wrong.
+    """
+    pg_config = bins.bin_dir / "pg_config"
+    if not pg_config.is_file():
+        _log.warning("pgvector_preflight_no_pg_config", bin_dir=str(bins.bin_dir))
+        return
+    try:
+        result = subprocess.run(
+            [str(pg_config), "--sharedir"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log.warning("pgvector_preflight_indeterminate", error=str(exc))
+        return
+    sharedir = result.stdout.strip()
+    if result.returncode != 0 or not sharedir:
+        _log.warning(
+            "pgvector_preflight_indeterminate",
+            returncode=result.returncode,
+        )
+        return
+    control = Path(sharedir) / "extension" / "vector.control"
+    if control.is_file():
+        return
+    raise PgVectorNotInstalledError(
+        f"The pgvector extension is not installed for the PostgreSQL at "
+        f"{bins.bin_dir} (no {control}).\n"
+        "The Homebrew 'pgvector' formula targets the default postgresql "
+        "major — for a versioned install (e.g. postgresql@16) build from "
+        "source against THIS pg_config:\n"
+        f"  git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git\n"
+        f"  cd pgvector && PG_CONFIG={pg_config} make && "
+        f"PG_CONFIG={pg_config} make install\n"
+        "then re-run: nx init --service"
+    )
 
 
 def _find_free_port() -> int:
@@ -638,6 +687,14 @@ def provision(
 
     # ── Discover binaries ──────────────────────────────────────────────────────
     bins = discover_pg_binaries()
+
+    # ── pgvector pre-flight (nexus-pebfx.5) ────────────────────────────────────
+    # CREATE EXTENSION vector otherwise fails much later (manually 2026-06-08;
+    # rediscovered via a mid-provision Liquibase failure 2026-06-10): the
+    # Homebrew pgvector formula targets the DEFAULT postgresql major, so with
+    # postgresql@16 the control file lands in a different sharedir. Fail here,
+    # before any cluster work, with the exact remedy.
+    check_pgvector_available(bins)
 
     # ── Determine port ─────────────────────────────────────────────────────────
     # Reuse the port from an existing credentials file when possible so
