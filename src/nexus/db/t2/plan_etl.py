@@ -238,9 +238,10 @@ def migrate_plan_rows(
 
     for row_dict in (dict(r) for r in rows):
         read_count += 1
-        transformed = _transform_row(row_dict)
-
+        # Transform INSIDE the try (RDR-153 P2 review): never-silent.
+        transformed: dict[str, Any] = {}
         try:
+            transformed = _transform_row(row_dict)
             store.import_plan(**transformed)
             written_count += 1
         except Exception as exc:

@@ -90,6 +90,18 @@ def migrate_chash_rows(
                 created_at = row["created_at"] or "1970-01-01T00:00:00Z"
                 if not chash or not collection:
                     _log.warning("chash_etl_skip_blank", chash=chash, collection=collection)
+                    # RDR-153 catch-all: a blank natural key cannot import —
+                    # record it (failed, gate-visible), never silently skip.
+                    if collector is not None:
+                        collector.record(
+                            "chash", "chash_index",
+                            issue_class="unexpected",
+                            constraint="chash_index(chash)",
+                            reason="blank chash or physical_collection — row "
+                                   "cannot carry its natural key",
+                            action="failed",
+                            sample_id=chash or collection or "blank-row",
+                        )
                     continue
                 payload.append({
                     "chash":      chash,

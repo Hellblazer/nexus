@@ -210,16 +210,24 @@ def _migrate_all(
 ) -> dict[str, Any]:
     results: dict[str, Any] = {}
 
-    results["relevance_log"]    = _migrate_relevance_log(conn, store, batch_log_every)
-    results["search_telemetry"] = _migrate_search_telemetry(conn, store, batch_log_every)
-    results["tier_writes"]      = _migrate_tier_writes(conn, store, batch_log_every)
+    results["relevance_log"]    = _migrate_relevance_log(
+        conn, store, batch_log_every, collector=collector,
+    )
+    results["search_telemetry"] = _migrate_search_telemetry(
+        conn, store, batch_log_every, collector=collector,
+    )
+    results["tier_writes"]      = _migrate_tier_writes(
+        conn, store, batch_log_every, collector=collector,
+    )
     results["nx_answer_runs"]   = _migrate_nx_answer_runs(
         conn, store, batch_log_every, collector=collector,
     )
     results["hook_failures"]    = _migrate_hook_failures(
         conn, store, batch_log_every, collector=collector,
     )
-    results["frecency"]         = _migrate_frecency(conn, store, batch_log_every)
+    results["frecency"]         = _migrate_frecency(
+        conn, store, batch_log_every, collector=collector,
+    )
 
     if collector is not None:
         for table, counts in results.items():
@@ -239,6 +247,7 @@ def _migrate_all(
 
 def _migrate_relevance_log(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "relevance_log", _RELEVANCE_LOG_COLS)
     read_n = written_n = 0
@@ -263,6 +272,15 @@ def _migrate_relevance_log(
                 query_prefix=str(row.get("query", ""))[:40],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "relevance_log",
+                    issue_class="unexpected",
+                    constraint="relevance_log",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"relevance_log#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.relevance_log.progress",
                       read=read_n, written=written_n, total=total)
@@ -272,6 +290,7 @@ def _migrate_relevance_log(
 
 def _migrate_search_telemetry(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "search_telemetry", _SEARCH_TELEMETRY_COLS)
     read_n = written_n = 0
@@ -297,6 +316,15 @@ def _migrate_search_telemetry(
                 ts=str(row.get("ts", ""))[:30],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "search_telemetry",
+                    issue_class="unexpected",
+                    constraint="search_telemetry",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"search_telemetry#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.search_telemetry.progress",
                       read=read_n, written=written_n, total=total)
@@ -306,6 +334,7 @@ def _migrate_search_telemetry(
 
 def _migrate_tier_writes(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "tier_writes", _TIER_WRITES_COLS)
     read_n = written_n = 0
@@ -334,6 +363,15 @@ def _migrate_tier_writes(
                 ts=str(row.get("ts", ""))[:30],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "tier_writes",
+                    issue_class="unexpected",
+                    constraint="tier_writes",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"tier_writes#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.tier_writes.progress",
                       read=read_n, written=written_n, total=total)
@@ -396,6 +434,15 @@ def _migrate_nx_answer_runs(
                 question_prefix=str(row.get("question", ""))[:40],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "nx_answer_runs",
+                    issue_class="unexpected",
+                    constraint="nx_answer_runs",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"nx_answer_runs#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.nx_answer_runs.progress",
                       read=read_n, written=written_n, total=total)
@@ -415,6 +462,11 @@ def _normalize_timestamp(raw: str) -> tuple[str, bool]:
     from datetime import datetime as _dt
 
     canonical = _dt.fromisoformat(raw).isoformat()
+    # NOTE: any non-canonical-but-parseable form counts as normalized —
+    # e.g. a 'Z' suffix becomes '+00:00', a bare date gains T00:00:00.
+    # Production data had only the space form (234/234 hook_failures);
+    # benign variants inflating 'handled' is acceptable and honest (the
+    # stored value DID change).
     return canonical, canonical != raw
 
 
@@ -475,6 +527,15 @@ def _migrate_hook_failures(
                 hook_name=str(row.get("hook_name", "")),
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "hook_failures",
+                    issue_class="unexpected",
+                    constraint="hook_failures",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=str(row.get("id", read_n)),
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.hook_failures.progress",
                       read=read_n, written=written_n, total=total)
@@ -484,6 +545,7 @@ def _migrate_hook_failures(
 
 def _migrate_frecency(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "frecency", _FRECENCY_COLS)
     read_n = written_n = 0
@@ -508,6 +570,15 @@ def _migrate_frecency(
                 chunk_id=str(row.get("chunk_id", ""))[:32],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "frecency",
+                    issue_class="unexpected",
+                    constraint="frecency",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"frecency#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.frecency.progress",
                       read=read_n, written=written_n, total=total)

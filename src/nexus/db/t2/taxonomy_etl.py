@@ -348,6 +348,9 @@ def migrate_taxonomy_rows(
     # The strict Postgres FKs would reject these anyway (that is the
     # diagnostic); pre-checking lets us SKIP-AND-RECORD with exact counts
     # and composite-key samples instead of burning a round-trip per orphan.
+    # int() is safe: the SQLite schema enforces NOT NULL INTEGER on
+    # topics.id / topic_assignments.topic_id / topic_links.(from|to)_topic_id,
+    # and the source is opened read-only (no concurrent mutation).
     valid_topic_ids = {int(r["id"]) for r in topic_rows if r.get("id") is not None}
 
     orphan_assignments = [

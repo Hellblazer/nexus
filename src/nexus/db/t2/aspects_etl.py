@@ -327,11 +327,13 @@ def migrate_highlights(
     http_highlights,  # HttpDocumentHighlightsStore instance
     *,
     batch_size: int = 200,
+    collector: Any = None,
 ) -> dict[str, int]:
     """Migrate document_highlights from SQLite to Postgres via the HTTP service."""
     conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     imported = skipped = errors = 0
+    read = 0
     try:
         offset = 0
         while True:
@@ -344,6 +346,7 @@ def migrate_highlights(
                 break
             for row in rows:
                 row_dict = dict(row)
+                read += 1
                 try:
                     body = _transform_highlight(row_dict)
                     n = http_highlights.import_highlight(body)
@@ -358,6 +361,15 @@ def migrate_highlights(
                         doc_id=row_dict.get("doc_id"),
                         error=str(exc),
                     )
+                    if collector is not None:
+                        collector.record(
+                            "aspects", "document_highlights",
+                            issue_class="unexpected",
+                            constraint="document_highlights",
+                            reason=f"row rejected during import: {exc}",
+                            action="failed",
+                            sample_id=str(row_dict.get("doc_id") or f"row#{read}"),
+                        )
             offset += batch_size
     finally:
         conn.close()
@@ -368,6 +380,9 @@ def migrate_highlights(
         skipped=skipped,
         errors=errors,
     )
+    if collector is not None:
+        collector.count_read("aspects", "document_highlights", read)
+        collector.count_written("aspects", "document_highlights", imported)
     return {"imported": imported, "skipped": skipped, "errors": errors}
 
 
@@ -449,6 +464,15 @@ def migrate_queue(
                         source_path=row_dict.get("source_path"),
                         error=str(exc),
                     )
+                    if collector is not None:
+                        collector.record(
+                            "aspects", "aspect_extraction_queue",
+                            issue_class="unexpected",
+                            constraint="aspect_extraction_queue",
+                            reason=f"row rejected during import: {exc}",
+                            action="failed",
+                            sample_id=q_doc_id or f"row#{read}",
+                        )
             offset += batch_size
     finally:
         conn.close()
@@ -470,6 +494,7 @@ def migrate_promotion_log(
     http_aspects,  # HttpDocumentAspectsStore instance (uses /v1/aspects/promotion/import)
     *,
     batch_size: int = 200,
+    collector: Any = None,
 ) -> dict[str, int]:
     """Migrate aspect_promotion_log from SQLite to Postgres via the HTTP service."""
     import json
@@ -519,6 +544,15 @@ def migrate_promotion_log(
                         field_name=row_dict.get("field_name"),
                         error=str(exc),
                     )
+                    if collector is not None:
+                        collector.record(
+                            "aspects", "aspect_promotion_log",
+                            issue_class="unexpected",
+                            constraint="aspect_promotion_log",
+                            reason=f"row rejected during import: {exc}",
+                            action="failed",
+                            sample_id=f"row#{imported + skipped + errors}",
+                        )
             offset += batch_size
     finally:
         conn.close()
@@ -539,6 +573,8 @@ def migrate_all(
     http_queue,
     *,
     batch_size: int = 200,
+    collector: Any = None,
+    catalog_db_path: Path | None = None,
 ) -> dict[str, dict[str, int]]:
     """Run all four table migrations in order.
 
@@ -547,8 +583,20 @@ def migrate_all(
     each containing {imported, skipped, errors}.
     """
     return {
-        "aspects": migrate_aspects(sqlite_path, http_aspects, batch_size=batch_size),
-        "highlights": migrate_highlights(sqlite_path, http_highlights, batch_size=batch_size),
-        "queue": migrate_queue(sqlite_path, http_queue, batch_size=batch_size),
-        "promotion_log": migrate_promotion_log(sqlite_path, http_aspects, batch_size=batch_size),
+        "aspects": migrate_aspects(
+            sqlite_path, http_aspects, batch_size=batch_size,
+            collector=collector, catalog_db_path=catalog_db_path,
+        ),
+        "highlights": migrate_highlights(
+            sqlite_path, http_highlights, batch_size=batch_size,
+            collector=collector,
+        ),
+        "queue": migrate_queue(
+            sqlite_path, http_queue, batch_size=batch_size,
+            collector=collector, catalog_db_path=catalog_db_path,
+        ),
+        "promotion_log": migrate_promotion_log(
+            sqlite_path, http_aspects, batch_size=batch_size,
+            collector=collector,
+        ),
     }

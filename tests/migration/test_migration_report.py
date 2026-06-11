@@ -425,3 +425,35 @@ class TestReviewPassRegressions:
         assert issue.count == 1
         assert issue.sample_ids == []
         assert issue.sample_truncated is False
+
+
+class TestEtlRegistry:
+    """RDR-153 P2 critique S5: the Phase-3 seam — ladder order + the
+    uniform runner contract live in ONE reviewable place."""
+
+    def test_ladder_order_exact(self) -> None:
+        from nexus.migration.etl_registry import LADDER_ORDER
+
+        assert LADDER_ORDER == (
+            "memory", "plans", "telemetry", "taxonomy",
+            "aspects", "chash", "catalog",
+        )
+
+    def test_unknown_store_rejected(self) -> None:
+        from nexus.migration.etl_registry import StoreEtl
+
+        with pytest.raises(ValueError, match="unknown store"):
+            StoreEtl(store="vectors", run=lambda sources, collector: {})
+
+    def test_ordered_sorts_and_rejects_duplicates(self) -> None:
+        from nexus.migration.etl_registry import StoreEtl, ordered
+
+        runner = lambda sources, collector: {}  # noqa: E731
+        etls = [
+            StoreEtl("catalog", runner),
+            StoreEtl("memory", runner),
+            StoreEtl("taxonomy", runner),
+        ]
+        assert [e.store for e in ordered(etls)] == ["memory", "taxonomy", "catalog"]
+        with pytest.raises(ValueError, match="duplicate"):
+            ordered([StoreEtl("memory", runner), StoreEtl("memory", runner)])

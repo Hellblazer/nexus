@@ -190,9 +190,11 @@ def migrate_memory_rows(
 
     for row_dict in (dict(r) for r in rows):
         read_count += 1
-        transformed = _transform_row(row_dict)
-
+        # Transform INSIDE the try (RDR-153 P2 review): a corrupt row must
+        # become a recorded failed issue, never abort the loop unrecorded.
+        transformed: dict[str, Any] = {}
         try:
+            transformed = _transform_row(row_dict)
             store.import_entry(
                 project=transformed["project"],
                 title=transformed["title"],
@@ -209,8 +211,8 @@ def migrate_memory_rows(
         except Exception as exc:
             _log.error(
                 "memory_etl.row_failed",
-                project=transformed["project"],
-                title=transformed["title"],
+                project=transformed.get("project", row_dict.get("project", "?")),
+                title=transformed.get("title", row_dict.get("title", "?")),
                 error=str(exc),
             )
             # Continue processing remaining rows so a single failure
@@ -224,7 +226,10 @@ def migrate_memory_rows(
                     reason=f"row rejected during import: {exc}; sample ids "
                            "are <project>:<title>",
                     action="failed",
-                    sample_id=f"{transformed['project']}:{transformed['title']}",
+                    sample_id=(
+                        f"{transformed.get('project', row_dict.get('project', '?'))}"
+                        f":{transformed.get('title', row_dict.get('title', '?'))}"
+                    ),
                 )
 
         if read_count % batch_log_every == 0:

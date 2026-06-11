@@ -708,7 +708,7 @@ class TestCleanStoreCountsAndCatchAll:
         ]
         assert issue.count == 1
 
-    def test_chash_counts_and_batch_error_exact(self, tmp_path: Path) -> None:
+    def test_chash_batch_error_records_failed_per_row(self, tmp_path: Path) -> None:
         from nexus.db.t2.chash_etl import migrate_chash_rows
 
         db = tmp_path / "chash.db"
@@ -738,3 +738,124 @@ class TestCleanStoreCountsAndCatchAll:
         migrate_chash_rows(db, _OkChash(), collector=collector)
         counts = collector.table_counts("chash", "chash_index")
         assert counts["read"] == 2
+        # _OkChash's __getattr__ returns a bare function for ._client, so
+        # the batch post raises — this test OWNS the error path (CRE P2
+        # finding): nothing written, and total_failed counts BOTH rows.
+        assert counts["written"] == 0
+        (issue,) = [
+            i for i in collector.issues_for("chash", "chash_index")
+            if i.action == "failed"
+        ]
+        assert issue.count == 2
+
+
+class TestNeverSilentSweep:
+    """RDR-153 P2 critic Criticals: EVERY ETL surface records import
+    rejections — a silent path lets the Phase-4 gate pass falsely."""
+
+    def test_telemetry_relevance_log_failure_recorded(self, tmp_path: Path) -> None:
+        from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
+
+        db = _make_db(tmp_path, _TELEMETRY_SCHEMA + """
+CREATE TABLE relevance_log (
+    id INTEGER PRIMARY KEY, query TEXT, doc_id TEXT, rank INTEGER,
+    clicked INTEGER DEFAULT 0, timestamp TEXT
+);""")
+        _insert(db, "INSERT INTO relevance_log (query, doc_id, rank) VALUES (?,?,?)", [
+            ("q", "d1", 1), ("q", "d2", 2),
+        ])
+        store = _CaptureStore()
+        store.fail_on["import_relevance_row"] = 1
+        collector = IssueCollector()
+
+        migrate_telemetry_rows(db, store, collector=collector)
+
+        failed = [
+            i for i in collector.issues_for("telemetry", "relevance_log")
+            if i.action == "failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0].count == 1
+
+    def test_catalog_import_failure_recorded(self, tmp_path: Path) -> None:
+        from nexus.db.t2.catalog_etl import migrate_catalog
+
+        db = TestCatalogPolicy()._seeded_db(tmp_path)
+
+        class _FailingSecondDoc(_CaptureCatalogClient):
+            def _post(self, path, payload):
+                super()._post(path, payload)
+                if path == "/import/document" and len(self.posts[path]) == 2:
+                    raise RuntimeError("injected")
+                return {"imported": 1}
+
+        collector = IssueCollector()
+        migrate_catalog(db, _FailingSecondDoc(), collector=collector)
+
+        (issue,) = [
+            i for i in collector.issues_for("catalog", "documents")
+            if i.action == "failed"
+        ]
+        assert issue.count == 1
+        assert collector.table_counts("catalog", "documents")["written"] == 1
+
+    def test_queue_import_rejection_recorded(self, tmp_path: Path) -> None:
+        from nexus.db.t2.aspects_etl import migrate_queue
+
+        aspects_db, catalog_db = TestAspectsPolicy()._seeded(tmp_path)
+
+        class _RejectingQueue(_CaptureAspectsStore):
+            def import_queue_row(self, body):
+                raise RuntimeError("rejected")
+
+        collector = IssueCollector()
+        migrate_queue(
+            aspects_db, _RejectingQueue(), collector=collector,
+            catalog_db_path=catalog_db,
+        )
+        failed = [
+            i for i in collector.issues_for("aspects", "aspect_extraction_queue")
+            if i.action == "failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0].count == 1  # the valid row; the orphan was skipped
+
+    def test_memory_transform_failure_recorded_not_aborting(
+        self, tmp_path: Path,
+    ) -> None:
+        """CRE Low-2: a corrupt row whose TRANSFORM raises must record a
+        failed issue and the loop must continue (never-silent, no abort)."""
+        from nexus.db.t2.memory_etl import migrate_memory_rows
+
+        db = _make_db(tmp_path, _MEMORY_SCHEMA)
+        conn = sqlite3.connect(db)
+        # NULL content slips past SQLite (no NOT NULL via executescript path?
+        # enforce corruption explicitly: drop NOT NULL by inserting via a
+        # direct pragma-free path is impossible — instead simulate transform
+        # failure with a row whose content is NULL through a relaxed table).
+        conn.executescript(
+            "CREATE TABLE m2 AS SELECT * FROM memory; DROP TABLE memory;"
+            "CREATE TABLE memory (id INTEGER PRIMARY KEY, project TEXT, "
+            "title TEXT, content TEXT, tags TEXT, timestamp TEXT, "
+            "ttl_days INTEGER, access_count INTEGER, last_accessed TEXT, "
+            "session_id TEXT, source_agent TEXT);"
+        )
+        conn.executemany(
+            "INSERT INTO memory (project, title, content) VALUES (?,?,?)",
+            [("p", "good", "c"), (None, None, None), ("p", "good2", "c")],
+        )
+        conn.commit()
+        conn.close()
+        store = _CaptureStore()
+        collector = IssueCollector()
+
+        migrate_memory_rows(db, store, collector=collector)
+
+        counts = collector.table_counts("memory", "memory")
+        assert counts["read"] == 3
+        # The corrupt row either transforms-and-imports or records failed —
+        # never silently vanishes:
+        assert counts["written"] + sum(
+            i.count for i in collector.issues_for("memory", "memory")
+            if i.action == "failed"
+        ) == 3
