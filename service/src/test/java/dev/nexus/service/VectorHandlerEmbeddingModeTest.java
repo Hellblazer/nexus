@@ -212,14 +212,14 @@ class VectorHandlerEmbeddingModeTest {
         // pgvector rows, request order, missing ids omitted (Chroma parity).
         var up = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",
-            "ids",        List.of("emb-b", "emb-a"),
+            "ids",        List.of("emb-b000000000000000000000000000", "emb-a000000000000000000000000000"),
             "documents",  List.of("second text", "first text"),
             "metadatas",  List.of(Map.of(), Map.of())));
         assertThat(up.statusCode()).isEqualTo(200);
 
         var resp = post("/v1/vectors/get-embeddings", Map.of(
             "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",
-            "ids",        List.of("emb-a", "emb-b", "emb-missing")));
+            "ids",        List.of("emb-a000000000000000000000000000", "emb-b000000000000000000000000000", "emb-missing000000000000000000000")));
         assertThat(resp.statusCode()).isEqualTo(200);
         @SuppressWarnings("unchecked")
         Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
@@ -227,7 +227,7 @@ class VectorHandlerEmbeddingModeTest {
         List<String> ids = (List<String>) body.get("ids");
         @SuppressWarnings("unchecked")
         List<List<Number>> embeddings = (List<List<Number>>) body.get("embeddings");
-        assertThat(ids).containsExactly("emb-a", "emb-b");   // request order, missing omitted
+        assertThat(ids).containsExactly("emb-a000000000000000000000000000", "emb-b000000000000000000000000000");   // request order, missing omitted
         assertThat(embeddings).hasSize(2);
         assertThat(embeddings.get(0)).hasSize(384);
         assertThat(embeddings.get(1)).hasSize(384);
@@ -239,7 +239,7 @@ class VectorHandlerEmbeddingModeTest {
     void minilmCollectionInOnnxMode_stillServes200() throws Exception {
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__pebfx2__minilm-l6-v2-384__v1",
-            "ids",        List.of("pebfx2-ok1"),
+            "ids",        List.of("pebfx2-ok10000000000000000000000"),
             "documents",  List.of("a servable chunk"),
             "metadatas",  List.of(Map.of())));
         assertThat(resp.statusCode())
