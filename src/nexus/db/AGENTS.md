@@ -75,9 +75,10 @@ Collection registration is enforced server-side at two layers:
    `CatalogRepository.importCollection` via `DO UPDATE ... WHERE embedding_model='' AND
    content_type='' AND owner_id=''`.  A re-run never clobbers a genuinely-newer live row.
 
-**Rule**: Never add a chunk write path that bypasses `PgVectorRepository.upsertChunks`.
-All chunk writers (Python Chroma clients in local mode, the vector ETL, future writers) must
-pass through this method so registration-before-write is structural.
+**Rule (Java service surface)**: Never add a chunk write path in the Java service that bypasses
+`PgVectorRepository.upsertChunks`.  This rule governs service-mode writes only; local-mode
+Python clients write directly to Chroma (bypassing PostgreSQL) and are outside this rule's
+scope until RDR-155 P4b removes the Chroma path.
 
 ## Hot rules
 

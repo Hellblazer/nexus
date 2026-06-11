@@ -601,6 +601,71 @@ class CatalogRepositoryTest {
     }
 
     @Test @Order(63)
+    void importCollection_overwritesStubRow() {
+        // A stub row (all three discriminator columns empty) must be fully upgraded
+        // by importCollection. Stubs are created by PgVectorRepository.upsertChunks
+        // auto-registration and by fk-002-0-backfill-stubs (RDR-156 P0.2).
+        String name = "code__nexus__voyage-code-3__v2";
+        // Seed a stub via upsertCollection with no metadata — this simulates the
+        // auto-registration path (content_type/owner_id/embedding_model all default to '').
+        // Use a direct SQL stub to guarantee the three discriminators are all empty:
+        repo.importCollection(TENANT_A, Map.of(
+            "name", name,
+            "content_type", "",
+            "owner_id", "",
+            "embedding_model", "",
+            "model_version", ""
+        ));
+        var before = repo.getCollection(TENANT_A, name);
+        assertThat(before).isNotNull();
+        assertThat(before.get("content_type")).as("stub has empty content_type").isEqualTo("");
+
+        // Now call importCollection with full metadata — the DO UPDATE WHERE-stub must fire.
+        repo.importCollection(TENANT_A, Map.of(
+            "name", name,
+            "content_type", "code",
+            "owner_id", "nexus-1-1",
+            "embedding_model", "voyage-code-3",
+            "model_version", "v2"
+        ));
+        var after = repo.getCollection(TENANT_A, name);
+        assertThat(after.get("content_type")).as("importCollection must upgrade stub content_type").isEqualTo("code");
+        assertThat(after.get("owner_id")).as("importCollection must upgrade stub owner_id").isEqualTo("nexus-1-1");
+        assertThat(after.get("embedding_model")).as("importCollection must upgrade stub embedding_model").isEqualTo("voyage-code-3");
+        assertThat(after.get("model_version")).as("importCollection must upgrade stub model_version").isEqualTo("v2");
+    }
+
+    @Test @Order(64)
+    void importCollection_doesNotOverwriteLiveRow() {
+        // A live row (at least one discriminator non-empty) must NOT be overwritten
+        // by importCollection. The DO UPDATE WHERE-stub predicate must not fire.
+        String name = "code__nexus__voyage-code-3__v3";
+        // Register a live row with fully populated metadata via upsertCollection.
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name,
+            "content_type", "code",
+            "owner_id", "live-owner",
+            "embedding_model", "voyage-code-3",
+            "model_version", "v3"
+        ));
+        var before = repo.getCollection(TENANT_A, name);
+        assertThat(before.get("owner_id")).as("live row owner_id before import").isEqualTo("live-owner");
+
+        // Call importCollection with DIFFERENT metadata — must NOT overwrite the live row.
+        repo.importCollection(TENANT_A, Map.of(
+            "name", name,
+            "content_type", "docs",
+            "owner_id", "different-owner",
+            "embedding_model", "voyage-context-3",
+            "model_version", "v3"
+        ));
+        var after = repo.getCollection(TENANT_A, name);
+        assertThat(after.get("content_type")).as("importCollection must not overwrite live content_type").isEqualTo("code");
+        assertThat(after.get("owner_id")).as("importCollection must not overwrite live owner_id").isEqualTo("live-owner");
+        assertThat(after.get("embedding_model")).as("importCollection must not overwrite live embedding_model").isEqualTo("voyage-code-3");
+    }
+
+    @Test @Order(65)
     void collection_rename_cascadesToDocuments() {
         repo.upsertCollection(TENANT_A, Map.of(
             "name", "knowledge__old__v1",

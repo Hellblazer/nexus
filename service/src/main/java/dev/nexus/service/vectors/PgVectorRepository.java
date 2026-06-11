@@ -276,6 +276,11 @@ public final class PgVectorRepository {
         // by the catalog ETL's importCollection DO UPDATE...WHERE-stub logic.
         // Never add a chunk write path that bypasses this ensure-registered step.
         String[] collSegs = collection.split("__");
+        // Non-conformant path (collSegs.length != 4) is unreachable in practice:
+        // dimForCollection() above fails loud for any non-four-segment name, so by
+        // the time we reach this point, segments.length == 4 is guaranteed.
+        // The branch is retained as defense-in-depth to produce a name-only stub
+        // rather than crash if the invariant is ever violated by a future caller.
         boolean conformant = collSegs.length == 4;
         String regContentType  = conformant ? collSegs[0] : "";
         String regOwner        = conformant ? collSegs[1] : "";

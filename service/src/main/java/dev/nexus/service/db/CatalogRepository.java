@@ -1505,10 +1505,10 @@ public final class CatalogRepository {
                 + "  embedding_model=EXCLUDED.embedding_model, model_version=EXCLUDED.model_version,"
                 + "  display_name=EXCLUDED.display_name, legacy_grandfathered=EXCLUDED.legacy_grandfathered,"
                 + "  superseded_by=EXCLUDED.superseded_by,"
-                + "  superseded_at=EXCLUDED.superseded_at::timestamptz,"
-                + "  created_at=EXCLUDED.created_at::timestamptz"
-                + " WHERE nexus.catalog_collections.embedding_model='' AND nexus.catalog_collections.content_type=''"
-                + "  AND nexus.catalog_collections.owner_id=''",
+                + "  superseded_at=EXCLUDED.superseded_at,"
+                + "  created_at=EXCLUDED.created_at"
+                + " WHERE catalog_collections.embedding_model='' AND catalog_collections.content_type=''"
+                + "  AND catalog_collections.owner_id=''",
                 tenant,
                 s(coll, "name"), nne(s(coll, "content_type")),
                 nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),

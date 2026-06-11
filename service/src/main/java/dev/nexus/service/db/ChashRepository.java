@@ -67,9 +67,17 @@ public final class ChashRepository {
      * RDR-156 P0.2: ensure catalog_collections has a stub row for the given collection
      * before any chash_index write that carries physical_collection.
      * Idempotent — ON CONFLICT DO NOTHING.
+     *
+     * <p>physical_collection is NOT NULL in chash_index, so a blank/null value is a caller
+     * error — fail loud rather than silently skipping the registration step and letting the
+     * subsequent INSERT fail with a cryptic FK violation.
+     *
+     * @throws IllegalArgumentException if collection is null or blank
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
-        if (collection == null || collection.isBlank()) return;
+        if (collection == null || collection.isBlank()) {
+            throw new IllegalArgumentException("physical_collection must not be blank");
+        }
         ctx.execute(
             "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) " +
             "ON CONFLICT (tenant_id, name) DO NOTHING",

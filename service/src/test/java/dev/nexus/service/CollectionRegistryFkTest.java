@@ -990,6 +990,77 @@ class CollectionRegistryFkTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 12 — CatalogRepository.renameCollection FK violation
+    //
+    // Position: nothing in the service renames pgvector chunk rows today.
+    // Pre-FK, a catalog rename produced SILENT data incoherence: chunks
+    // remained stranded under the old collection name while the catalog
+    // row moved to the new name.  The FK (chunks_384_collection_fk etc.)
+    // converts that silent incoherence into a loud FK violation, which is
+    // an improvement.  The coherent multi-step rename flow (rename chunks
+    // first, then rename the catalog row) is follow-on bead work — see
+    // 'pgvector-coherent collection rename follow-on'.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(120)
+    void renameCollection_withChunkRows_violatesChunks384Fk() throws Exception {
+        // Register a collection, insert a chunk row, then attempt to rename the catalog row.
+        // The rename updates catalog_collections.name; the existing chunks_384 row still
+        // references the OLD name.  The FK enforces ON DELETE RESTRICT / ON UPDATE RESTRICT
+        // (no CASCADE on the chunks FK), so updating catalog_collections.name from under a
+        // referenced chunks row must fail with chunks_384_collection_fk.
+        //
+        // This demonstrates the FK converts pre-existing silent data incoherence into a loud
+        // failure.  The coherent rename flow (move chunk rows first, then rename catalog row)
+        // is tracked as follow-on work: 'pgvector-coherent collection rename follow-on'.
+        String tenant  = "grp12-rename-tenant";
+        String oldName = "code__nexus__minilm-l6-v2-384__v1";
+        String newName = "code__nexus__minilm-l6-v2-384__v2";
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // Register the collection
+            insertCollection(su, tenant, oldName);
+            // Insert a chunk row referencing the collection
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "VALUES ('" + tenant + "', '" + oldName + "', " +
+                "'" + validChash("grp12chunk1") + "', 'rename-test chunk', " +
+                vectorLiteral(384) + "::vector)");
+        }
+
+        // TenantScope / CatalogRepository via svc role.
+        // jOOQ wraps PSQLException in IntegrityConstraintViolationException — unwrap the cause.
+        var cfg = new com.zaxxer.hikari.HikariConfig();
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(SVC_ROLE);
+        cfg.setPassword(SVC_PASS);
+        cfg.setMaximumPoolSize(2);
+        cfg.setAutoCommit(true);
+        try (var ds = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+            TenantScope scope = new TenantScope(ds);
+            var repo = new dev.nexus.service.db.CatalogRepository(scope);
+
+            // renameCollection updates catalog_collections.name — the FK must block this
+            // because chunks_384 still references the old name.
+            Exception thrown = assertThrows(Exception.class, () ->
+                repo.renameCollection(tenant, oldName, newName));
+            // jOOQ wraps the PSQL FK violation in IntegrityConstraintViolationException;
+            // walk the cause chain to find the PSQLException carrying the constraint name.
+            Throwable cause = thrown;
+            while (cause != null && !(cause instanceof PSQLException)) {
+                cause = cause.getCause();
+            }
+            assertThat(cause)
+                .as("FK violation must be present in exception chain")
+                .isInstanceOf(PSQLException.class);
+            assertThat(cause.getMessage())
+                .as("renameCollection with stranded chunk rows must violate chunks_384_collection_fk")
+                .containsIgnoringCase(FK_CHUNKS_384);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // HELPERS
     // ══════════════════════════════════════════════════════════════════════════
 
