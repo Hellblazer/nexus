@@ -1631,10 +1631,20 @@ The storage-service supervisor (RDR-152 P5.1): managed Java service JAR +
 nx-managed Postgres. `start` ensures PG is running, runs the schema-skew
 gate, spawns the JAR (resolving `NX_VOYAGE_API_KEY` through the credential
 chain), waits for `/health`, and publishes the endpoint lease that clients
-auto-discover. `status` shows the lease plus the running service's
-`/version` handshake (`app_version`, `schema_latest_id`,
-`schema_changeset_count`) and warns when the running JAR differs from the
-installed one.
+auto-discover.
+
+`status` is the single is-the-stack-healthy surface: the lease (host, port,
+JAR pid, generation), supervisor pid, addr-file path, live `/health` probe,
+the PG cluster (port, data dir, up/down, installed pgvector version,
+pg_credentials path), and the running service's `/version` handshake
+(`app_version`, `embedding_mode` voyage|onnx-local with the dispatchable
+models, `schema_latest_id`, `schema_changeset_count`). It warns when the
+running JAR differs from the installed one.
+
+`stop` stops the supervisor + JAR but **leaves Postgres running by
+design** (it is independently managed and may serve other clients) — the
+command says so; pass `--with-pg` to stop the cluster too (`pg_ctl -m
+fast`).
 
 | Flag | Description |
 |------|-------------|
@@ -1642,6 +1652,7 @@ installed one.
 | `--foreground` | Block until SIGTERM (for launchd/systemd supervision). |
 | `--config-dir` | Config directory override. |
 | `--json` | (`status`) Raw JSON output. |
+| `--with-pg` | (`stop`) Also stop the nx-managed Postgres cluster. |
 
 ### nx daemon service install-jar
 

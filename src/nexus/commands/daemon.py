@@ -1677,16 +1677,161 @@ def service_install_jar_cmd(
     default=None,
     help="Config directory override.",
 )
-def service_stop_cmd(config_dir_str: str | None) -> None:
-    """Stop the running storage-service supervisor (SIGTERM -> SIGKILL)."""
-    from nexus.daemon.storage_service_daemon import stop_storage_service
+@click.option(
+    "--with-pg",
+    "with_pg",
+    is_flag=True,
+    default=False,
+    help="Also stop the nx-managed Postgres cluster (left running by default).",
+)
+def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
+    """Stop the running storage-service supervisor (SIGTERM -> SIGKILL).
+
+    Postgres is INTENTIONALLY left running (it is independently managed and
+    may serve other clients) — nexus-pebfx.5 makes that visible instead of
+    surprising: the command says so and offers --with-pg.
+    """
+    from nexus.daemon.storage_service_daemon import (
+        _port_accepting,
+        _read_pg_credentials,
+        stop_storage_service,
+    )
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     pid = stop_storage_service(config_dir=config_dir)
     if pid is None:
         click.echo("No storage service lease found — already stopped.")
+    else:
+        click.echo(f"Storage service stopped (pid={pid}).")
+
+    creds_path = config_dir / "pg_credentials"
+    if not creds_path.exists():
         return
-    click.echo(f"Storage service stopped (pid={pid}).")
+    try:
+        creds = _read_pg_credentials(creds_path)
+    except OSError:
+        return
+    port_str = creds.get("PG_PORT", "")
+    if not port_str.isdigit() or not _port_accepting("127.0.0.1", int(port_str)):
+        return
+
+    if not with_pg:
+        click.echo(
+            f"Postgres left running on 127.0.0.1:{port_str} (by design — it is "
+            "independently managed; use 'nx daemon service stop --with-pg' to "
+            "stop it too)."
+        )
+        return
+
+    pg_data = creds.get("PG_DATA", "")
+    if not pg_data:
+        click.echo(
+            "--with-pg: PG_DATA missing from pg_credentials — cannot stop "
+            "Postgres. Stop it manually with pg_ctl.",
+            err=True,
+        )
+        sys.exit(2)
+    import subprocess
+
+    from nexus.db.pg_provision import discover_pg_binaries
+
+    try:
+        bins = discover_pg_binaries()
+        subprocess.run(
+            [str(bins.pg_ctl), "-D", pg_data, "-m", "fast", "stop"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+    except Exception as exc:
+        click.echo(f"--with-pg: failed to stop Postgres: {exc}", err=True)
+        sys.exit(2)
+    click.echo(f"Postgres stopped (port {port_str}).")
+
+
+def _probe_health(host: str, port: int, timeout: float = 3.0) -> str:
+    """GET /health → "ok" | "db-down" | "unreachable" (nexus-pebfx.5)."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/health", timeout=timeout,
+        ) as resp:
+            return "ok" if resp.status == 200 else f"http-{resp.status}"
+    except Exception as exc:
+        import urllib.error
+
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 503:
+            return "db-down"
+        return "unreachable"
+
+
+def _probe_pg(creds_path: Path) -> dict:
+    """PG cluster facts for the status surface (nexus-pebfx.5).
+
+    Best-effort: every field degrades to a readable placeholder rather than
+    failing the status command — status must work BEST when the stack is
+    broken.
+    """
+    out: dict = {}
+    if not creds_path.exists():
+        out["pg"] = "not provisioned (run: nx init --service)"
+        return out
+    from nexus.daemon.storage_service_daemon import (
+        _port_accepting,
+        _read_pg_credentials,
+    )
+
+    try:
+        creds = _read_pg_credentials(creds_path)
+    except OSError:
+        out["pg"] = f"credentials unreadable: {creds_path}"
+        return out
+    port_str = creds.get("PG_PORT", "")
+    out["pg_port"] = port_str or "(missing from pg_credentials)"
+    out["pg_data"] = creds.get("PG_DATA", "(missing from pg_credentials)")
+    pg_up = bool(port_str.isdigit()) and _port_accepting("127.0.0.1", int(port_str))
+    out["pg"] = "up" if pg_up else "DOWN"
+    if pg_up:
+        out["pgvector"] = _pgvector_version(creds) or "(query failed)"
+    return out
+
+
+def _pgvector_version(creds: dict) -> str | None:
+    """Installed pgvector extension version via psql (admin creds)."""
+    import subprocess
+
+    from nexus.daemon.jar_lifecycle import _db_name_from_creds, _psql_bin
+
+    psql = _psql_bin()
+    if psql is None:
+        return None
+    user = creds.get("NX_DB_ADMIN_USER", "") or creds.get("NX_DB_USER", "")
+    password = (
+        creds.get("NX_DB_ADMIN_PASS", "")
+        if creds.get("NX_DB_ADMIN_USER", "")
+        else creds.get("NX_DB_PASS", "")
+    )
+    if not user:
+        return None
+    import os as _os
+
+    env = dict(_os.environ)
+    env["PGPASSWORD"] = password
+    try:
+        result = subprocess.run(
+            [
+                psql, "-h", "127.0.0.1", "-p", str(creds.get("PG_PORT", "")),
+                "-U", user, "-d", _db_name_from_creds(creds),
+                "-t", "-A", "-X",
+                "-c", "SELECT extversion FROM pg_extension WHERE extname='vector'",
+            ],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    version = result.stdout.strip()
+    return version or "NOT INSTALLED"
 
 
 def _nx_major_gap_note(installed_by: str) -> str | None:
@@ -1755,6 +1900,23 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         "status": record.status,
     }
 
+    # nexus-pebfx.5: one surface answering "is the stack healthy and how is
+    # it configured" — supervisor, JAR (/health + /version), PG cluster,
+    # embedding mode, pgvector version, and the paths an operator would
+    # otherwise assemble from ps aux + psql + curl + the addr file by hand.
+    data["supervisor_pid"] = record.payload.get("supervisor_pid")
+    data["addr_file"] = str(
+        config_dir / f"storage_service_addr.{__import__('os').getuid()}"
+    )
+    host = ep.get("host", "127.0.0.1")
+    port = int(ep.get("port") or 0)
+    data["health"] = _probe_health(host, port)
+
+    creds_path = config_dir / "pg_credentials"
+    data["pg_credentials"] = str(creds_path) if creds_path.exists() else "(absent)"
+    pg_info = _probe_pg(creds_path)
+    data.update(pg_info)
+
     # nexus-pebfx.4 version handshake: report the RUNNING service's app +
     # schema versions, and warn when they drift from the JAR installed at
     # the well-known location (a stale service that needs a restart).
@@ -1762,12 +1924,13 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         fetch_service_version,
         read_installed_provenance,
     )
-    svc_version = fetch_service_version(
-        ep.get("host", "127.0.0.1"), int(ep.get("port") or 0),
-    )
+    svc_version = fetch_service_version(host, port)
     stale_warning: str | None = None
     if svc_version is not None:
         data["service_app_version"] = svc_version.get("app_version")
+        data["embedding_mode"] = svc_version.get("embedding_mode", "unknown")
+        if svc_version.get("embedding_models"):
+            data["embedding_models"] = ",".join(svc_version["embedding_models"])
         data["schema_latest_id"] = svc_version.get("schema_latest_id")
         data["schema_changeset_count"] = svc_version.get("schema_changeset_count")
         installed = read_installed_provenance(config_dir)
