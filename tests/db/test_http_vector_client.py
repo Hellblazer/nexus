@@ -723,3 +723,84 @@ class TestGetEmbeddings:
         )
         result = client.get_embeddings("col", ["x"])
         assert result.shape[0] == 0
+
+
+class TestEmbeddingFetchServiceModeRegression:
+    """nexus-pebfx.7 critic: lock the NAMED symptom — a service-mode search's
+    embedding fetch must NOT emit embedding_fetch_failed (it did, once per
+    collection per search, while get_embeddings raised NotImplementedError)."""
+
+    @staticmethod
+    def _results(col: str, n: int):
+        from nexus.types import SearchResult
+
+        return [
+            SearchResult(
+                id=f"{col}-{i}", content=f"text {i}", distance=0.1,
+                collection=col, metadata={},
+            )
+            for i in range(n)
+        ]
+
+    def test_fetch_succeeds_without_embedding_fetch_failed(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from nexus.search_engine import _fetch_embeddings_for_results
+
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            _make_mock_post({
+                "ids": ["colA-0", "colA-1"],
+                "embeddings": [[0.1, 0.2], [0.3, 0.4]],
+            }),
+        )
+        results = self._results("colA", 2)
+        with capture_logs() as logs:
+            embeddings, failed = _fetch_embeddings_for_results(results, client)
+        assert not any(e["event"] == "embedding_fetch_failed" for e in logs)
+        assert failed == set()
+        assert embeddings.shape == (2, 2)
+
+    def test_shape_mismatch_marks_collection_failed(self, monkeypatch):
+        # Service omits a missing id -> N < len(ids) -> the collection's
+        # indices land in failed_indices (never positional misattribution).
+        from nexus.search_engine import _fetch_embeddings_for_results
+
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            _make_mock_post({"ids": ["colA-0"], "embeddings": [[0.1, 0.2]]}),
+        )
+        results = self._results("colA", 2)
+        _, failed = _fetch_embeddings_for_results(results, client)
+        assert failed == {0, 1}
+
+    def test_mixed_dim_collections_fail_minority_not_crash(self, monkeypatch):
+        """Live-verify catch (2026-06-11): a 384-dim collection in the same
+        result set as 1024-dim collections crashed the whole search with a
+        broadcast ValueError once the fetch started succeeding. The
+        odd-dim collection must be marked failed instead."""
+        from nexus.search_engine import _fetch_embeddings_for_results
+        from nexus.types import SearchResult
+
+        client = HttpVectorClient()
+        payloads = {
+            "colBig": {"ids": ["colBig-0"], "embeddings": [[0.1] * 1024]},
+            "colSmall": {"ids": ["colSmall-0"], "embeddings": [[0.2] * 384]},
+        }
+
+        def fake_post(path, body, *, tenant="default", timeout=120):
+            return payloads[body["collection"]]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        results = [
+            SearchResult(id="colBig-0", content="t", distance=0.1,
+                         collection="colBig", metadata={}),
+            SearchResult(id="colSmall-0", content="t", distance=0.1,
+                         collection="colSmall", metadata={}),
+        ]
+        embeddings, failed = _fetch_embeddings_for_results(results, client)
+        assert embeddings is not None
+        assert embeddings.shape == (2, 1024)
+        assert failed == {1}

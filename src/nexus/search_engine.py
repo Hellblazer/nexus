@@ -760,9 +760,26 @@ def _fetch_embeddings_for_results(
     if emb_dim is None:
         return None, failed_indices
 
+    # nexus-pebfx.7 live-verify catch: cross-corpus results can mix embedding
+    # dims (e.g. 1024-dim voyage collections + a 384-dim minilm collection).
+    # One matrix can only hold one dim — and cross-dim cosine/Euclidean is
+    # meaningless anyway — so collections whose dim differs from the first
+    # successful fetch are marked failed (their results lose the
+    # contradiction/clustering features, same semantics as a fetch failure).
+    # Latent before this bead: the fetch always failed in service mode, so
+    # the mixed-dim assembly was unreachable.
     embeddings = np.zeros((len(results), emb_dim), dtype=np.float32)
     for col, col_emb in col_fetched.items():
         indices = col_groups[col]
+        if col_emb.shape[1] != emb_dim:
+            _log.warning(
+                "embedding_dim_mismatch_across_collections",
+                collection=col,
+                dim=col_emb.shape[1],
+                matrix_dim=emb_dim,
+            )
+            failed_indices.update(indices)
+            continue
         for local_idx, global_idx in enumerate(indices):
             embeddings[global_idx] = col_emb[local_idx]
 

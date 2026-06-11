@@ -764,9 +764,19 @@ class T3Database:
     def get_embeddings(self, collection_name: str, ids: list[str]) -> "np.ndarray":
         """Fetch embeddings for specific document IDs.
 
-        Returns an ``(N, D)`` float32 ndarray, one row per ID (in order).
-        Used by the clustering pipeline to avoid including embeddings in
-        every search response.
+        Returns an ``(N, D)`` float32 ndarray with rows in REQUEST order;
+        ids the store does not have are dropped (``N < len(ids)`` is the
+        caller's per-collection failure signal). Used by the clustering +
+        contradiction pipeline to avoid including embeddings in every
+        search response.
+
+        nexus-pebfx.7 critic finding: Chroma's ``col.get(ids=...)`` returns
+        rows in its INTERNAL insertion order (``ORDER BY embeddings_t.id``),
+        not request order — the previous positional ``np.array(...)`` could
+        misattribute embeddings to the wrong results whenever insertion
+        order differed from request order (false contradiction flags, wrong
+        cluster geometry). Reorder explicitly, exactly like the service
+        path's ``PgVectorRepository.getEmbeddings``.
         """
         import numpy as np
 
@@ -774,7 +784,10 @@ class T3Database:
             self._client_for(collection_name).get_collection, collection_name,
         )
         result = _chroma_with_retry(col.get, ids=ids, include=["embeddings"])
-        return np.array(result["embeddings"], dtype=np.float32)
+        by_id = dict(zip(result["ids"], result["embeddings"]))
+        return np.array(
+            [by_id[i] for i in ids if i in by_id], dtype=np.float32,
+        )
 
     # ── Write ─────────────────────────────────────────────────────────────────
 

@@ -623,6 +623,14 @@ public final class PgVectorRepository {
 
     /** Parse a pgvector text literal {@code "[0.1,0.2,...]"} into floats. */
     private static List<Float> parseVectorLiteral(String literal) {
+        if (literal == null || literal.length() < 2) {
+            // Schema says NOT NULL; a null/short literal means a malformed
+            // row. Return an empty row — the Python caller's ndarray
+            // construction rejects the ragged shape and fails the
+            // collection's fetch (degrade, never misattribute).
+            log.warn("event=embedding_literal_malformed literal={}", literal);
+            return List.of();
+        }
         String body = literal.substring(1, literal.length() - 1);
         if (body.isBlank()) {
             return List.of();
