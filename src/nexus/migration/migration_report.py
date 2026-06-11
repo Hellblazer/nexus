@@ -38,6 +38,7 @@ __all__ = [
     "MigrationIssue",
     "IssueCollector",
     "build_report",
+    "load_report",
 ]
 
 #: What is WRONG with the row (diagnosis).
@@ -322,3 +323,19 @@ def build_report(
         max_severity=max_severity,
     )
     return report
+
+
+def load_report(path: "Path | str") -> dict[str, Any]:
+    """Load a migration-report artifact (the ``migration-report show``
+    reader — Phase-4's gate input).
+
+    Raises ``FileNotFoundError`` / ``json.JSONDecodeError`` loud — a gate
+    that cannot read its input must never default to a pass.
+    """
+    import json
+    from pathlib import Path as _Path
+
+    data = json.loads(_Path(path).read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: migration report must be a JSON object")
+    return data

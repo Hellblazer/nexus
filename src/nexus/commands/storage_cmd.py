@@ -42,6 +42,95 @@ def storage_group() -> None:
     """Storage migration and ETL commands (RDR-152)."""
 
 
+@storage_group.group(name="migration-report")
+def migration_report_group() -> None:
+    """Inspect RDR-153 migration-report artifacts."""
+
+
+@migration_report_group.command(name="show")
+@click.argument(
+    "report_file",
+    type=click.Path(path_type=Path),
+)
+def migration_report_show_cmd(report_file: Path) -> None:
+    """Summarize a migration report: gate verdict, by-action rollup
+    (severity-descending), and per-issue triage lines (RDR-153 Phase 4).
+
+    The Phase-4 SQLite-deletion gate reads this artifact; the predicate is
+    ``summary.total_failed == 0``. Exits non-zero when the gate fails so
+    the verdict is scriptable.
+    """
+    import json as _json
+
+    from nexus.migration.migration_report import ACTION_SEVERITY, load_report
+
+    try:
+        report = load_report(report_file)
+    except FileNotFoundError:
+        raise click.ClickException(f"report not found: {report_file}")
+    except (ValueError, _json.JSONDecodeError) as exc:
+        raise click.ClickException(f"unreadable report {report_file}: {exc}")
+
+    schema = str(report.get("schema_version", "?"))
+    if schema != "1":
+        click.echo(
+            f"note: schema_version {schema} is newer than this viewer "
+            "understands — best-effort display",
+            err=True,
+        )
+
+    summary = report.get("summary", {})
+    click.echo(f"migration: {report.get('migration_id', '?')}")
+    click.echo(
+        f"  {report.get('started_at', '?')} -> {report.get('completed_at', '?')}"
+    )
+    source = report.get("source", {})
+    if source:
+        click.echo(f"  source: {source}")
+    click.echo(f"verification: {report.get('verification', '(not recorded)')}")
+    click.echo(f"max_severity={summary.get('max_severity', '?')}")
+    by_action = summary.get("by_action", {})
+    ordered_actions = sorted(
+        by_action,
+        key=lambda a: ACTION_SEVERITY.get(a, -1),
+        reverse=True,
+    )
+    click.echo(
+        "  " + " ".join(f"{a}={by_action[a]}" for a in ordered_actions)
+    )
+    click.echo(
+        f"  total_read={summary.get('total_read', '?')} "
+        f"total_written={summary.get('total_written', '?')} "
+        f"total_failed={summary.get('total_failed', '?')}"
+    )
+
+    # Per-issue triage lines, severity-descending (the actionable ones first).
+    issues: list[tuple[int, str]] = []
+    for store in report.get("stores", []):
+        for table in store.get("tables", []):
+            for issue in table.get("issues", []):
+                sample = (issue.get("sample_ids") or ["-"])[0]
+                issues.append((
+                    int(issue.get("severity", 0)),
+                    f"  [{issue.get('severity', '?')}] "
+                    f"{store.get('store', '?')}.{table.get('table', '?')} "
+                    f"{issue.get('class', '?')}/{issue.get('action', '?')} "
+                    f"count={issue.get('count', '?')} sample={sample} — "
+                    f"{issue.get('reason', '')}",
+                ))
+    if issues:
+        click.echo("issues (severity-descending):")
+        for _, line in sorted(issues, key=lambda t: t[0], reverse=True):
+            click.echo(line)
+
+    total_failed = int(summary.get("total_failed", 0))
+    if total_failed == 0:
+        click.echo("GATE: PASS (total_failed=0)")
+    else:
+        click.echo(f"GATE: FAIL (total_failed={total_failed})", err=True)
+        raise SystemExit(1)
+
+
 @storage_group.group(name="migrate")
 def migrate_group() -> None:
     """Migrate a T2 store from SQLite to the Postgres service tier."""

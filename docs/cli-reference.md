@@ -1847,6 +1847,22 @@ artifact is written even when the flag is omitted, including on a
 mid-run crash — partial data beats no data). Note: `aspects` has no
 standalone command; it runs only via `migrate all`.
 
+### nx storage migration-report show
+
+```
+nx storage migration-report show <path>
+```
+
+Summarize an RDR-153 migration-report artifact: migration id and window,
+the recorded verification verdict (`(not recorded)` for artifacts that
+predate it), `max_severity` first, the by-action rollup
+(severity-descending), per-issue triage lines (severity-descending, with
+class/action/count/sample), and the gate verdict — **GATE: PASS** when
+`summary.total_failed == 0`, otherwise **GATE: FAIL** with a non-zero
+exit (scriptable; this is the RDR-152 Phase-4 SQLite-deletion gate
+predicate). The reader lives in `nexus.migration` and survives the
+`src/nexus/db/t2` deletion.
+
 Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-not-move (the source is never modified) and idempotent (server-side upsert; re-runs produce no duplicates). All require `NX_SERVICE_TOKEN`.
 
 ### nx storage migrate
