@@ -863,16 +863,25 @@ def reset_http_vector_client_for_tests() -> None:
 
 
 def is_vector_service_mode() -> bool:
-    """Return True when NX_STORAGE_BACKEND_VECTORS=service.
+    """Return True unless NX_STORAGE_BACKEND_VECTORS explicitly opts out.
 
-    RDR-155 P4a.2 note: since the serving cutover, ``make_t3()`` returns the
-    service-backed client unconditionally — this env flag survives only as
-    the explicit indexer-side opt-in (skip Python-side embedding). For
-    "can this HANDLE do chroma-client things?" decisions use
-    :func:`is_service_backed` on the handle instead: env state and handle
-    type diverge in tests that inject a chroma-backed ``T3Database``.
+    nexus-tawx0: since the RDR-155 P4a.2 serving cutover, ``make_t3()``
+    returns the service-backed client UNCONDITIONALLY — service mode is
+    the default reality, so this defaults True. The opt-in era left the
+    no-Python-embed stubs (doc/prose/code indexers) inert in default
+    environments: every indexing run client-embedded via Voyage, the
+    client discarded the vectors, and the server embedded again — double
+    spend per chunk, empirically proven by voyageai tracebacks in
+    production hook runs (2026-06-11).
+
+    The env var survives as an explicit OPT-OUT (any value other than
+    ``service``/empty, conventionally ``chroma``) for test setups that
+    inject a chroma-backed ``T3Database``. For "can this HANDLE do
+    chroma-client things?" decisions use :func:`is_service_backed` on the
+    handle instead: env state and handle type diverge in those tests.
     """
-    return os.environ.get(_VECTORS_BACKEND_ENV, "").strip().lower() == "service"
+    value = os.environ.get(_VECTORS_BACKEND_ENV, "").strip().lower()
+    return value in ("", "service")
 
 
 def is_service_backed(db: object) -> bool:

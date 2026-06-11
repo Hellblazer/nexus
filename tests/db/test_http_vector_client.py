@@ -20,9 +20,11 @@ from nexus.db.http_vector_client import (
 # ── is_vector_service_mode ────────────────────────────────────────────────────
 
 class TestIsVectorServiceMode:
-    def test_unset_returns_false(self, monkeypatch):
+    def test_unset_returns_true(self, monkeypatch):
+        # nexus-tawx0: service mode is the post-P4a default (make_t3 returns
+        # the service client unconditionally); unset == service.
         monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
-        assert is_vector_service_mode() is False
+        assert is_vector_service_mode() is True
 
     def test_sqlite_returns_false(self, monkeypatch):
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "sqlite")
@@ -880,3 +882,36 @@ class TestUpsertSkipExisting:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         client.upsert_chunks("col", ["a", "b"], ["ta", "tb"], skip_existing=True)
         assert calls[0][1]["ids"] == ["a", "b"]
+
+
+class TestServiceModeDefault:
+    """nexus-tawx0: post-RDR-155 P4a.2, make_t3() returns HttpVectorClient
+    unconditionally — service mode IS the default reality. The env var
+    survives only as an explicit OPT-OUT for chroma-injected test setups.
+    Before this fix the no-Python-embed stubs (doc/prose/code indexers)
+    were inert in default environments and every indexing run paid Voyage
+    twice (client embed discarded, server re-embed)."""
+
+    def test_unset_defaults_to_service_mode(self, monkeypatch):
+        from nexus.db.http_vector_client import is_vector_service_mode
+
+        monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+        assert is_vector_service_mode() is True
+
+    def test_explicit_service_is_service_mode(self, monkeypatch):
+        from nexus.db.http_vector_client import is_vector_service_mode
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+        assert is_vector_service_mode() is True
+
+    def test_empty_string_treated_as_unset(self, monkeypatch):
+        from nexus.db.http_vector_client import is_vector_service_mode
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "")
+        assert is_vector_service_mode() is True
+
+    def test_chroma_opts_out(self, monkeypatch):
+        from nexus.db.http_vector_client import is_vector_service_mode
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+        assert is_vector_service_mode() is False

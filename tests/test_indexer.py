@@ -1694,3 +1694,12 @@ def test_run_index_creates_both_for_mixed_repo(tmp_path):
         "mixed repo must create docs__ collection; "
         "lazy-creation gate is over-eager"
     )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_vector_backend(monkeypatch):
+    """nexus-tawx0: service mode is the post-P4a DEFAULT (no-Python-embed
+    stubs fire unless opted out). This module tests the legacy
+    chroma/local embed pipeline, which is exactly the chroma-injected
+    configuration the opt-out exists for."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")

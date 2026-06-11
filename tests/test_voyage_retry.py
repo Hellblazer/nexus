@@ -363,3 +363,12 @@ def test_client_constructed_with_config_timeout() -> None:
          patch("nexus.retry.time.sleep"):
         _embed_with_fallback(["chunk"], "voyage-code-3", "test-key", timeout=60.0)
         mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=0)
+
+
+@pytest.fixture(autouse=True)
+def _legacy_vector_backend(monkeypatch):
+    """nexus-tawx0: service mode is the post-P4a DEFAULT (no-Python-embed
+    stubs fire unless opted out). This module tests the legacy
+    chroma/local embed pipeline, which is exactly the chroma-injected
+    configuration the opt-out exists for."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
