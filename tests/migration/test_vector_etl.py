@@ -1311,7 +1311,10 @@ class TestSkippedEmptyDisposition:
     def test_empty_nonconformant_is_skipped_empty_and_green(
         self, source_client,
     ) -> None:
-        empty_legacy = "tuples__something"
+        # taxonomy__centroids: the OTHER real empty non-conformant from the
+        # production run (tuples__* now route to "excluded" before the
+        # disposition probe runs).
+        empty_legacy = "taxonomy__centroids"
         good = _coll("etlop-good")
         source_client.create_collection(empty_legacy)  # 0 chunks
         _seed_source(source_client, good, 2)
@@ -1387,3 +1390,44 @@ class TestLiveProgressCallback:
             source_client, FakeVectorClient(), leg="local", collections=[a],
         )
         assert report.results[0].duration_s == 1.5
+
+
+class TestEphemeralExclusion:
+    """pebfx.3 follow-up (Hal, 2026-06-11): tuples__* are session-ephemeral
+    and die with Chroma at P4b — four of them accumulated hook-event data
+    post-migration and would have failed the straggler sweep. Excluded from
+    DEFAULT enumeration (reported, never silent); explicit --collections
+    naming overrides."""
+
+    def test_data_bearing_tuples_excluded_from_default_run(
+        self, source_client,
+    ) -> None:
+        good = _coll("etlex-good")
+        _seed_source(source_client, good, 2)
+        _seed_source(source_client, "tuples__hook_events_notification", 64)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        by_name = {r.collection: r for r in report.results}
+        tup = by_name["tuples__hook_events_notification"]
+        assert tup.status == "excluded"
+        assert tup.source_count == 64          # reported, not hidden
+        assert tup.written_count == 0
+        assert "ephemeral" in tup.reason
+        assert report.ok is True               # the sweep can go green
+        # Nothing was written for the excluded collection.
+        assert all(c != "tuples__hook_events_notification"
+                   for c, _ in fake.upsert_calls)
+
+    def test_explicit_naming_overrides_exclusion(self, source_client) -> None:
+        # Explicit intent wins: a named tuples collection follows the normal
+        # disposition (non-conformant with data -> skipped + red).
+        _seed_source(source_client, "tuples__hook_events_notification", 3)
+        fake = FakeVectorClient()
+        report = migrate_collections(
+            source_client, fake, leg="local",
+            collections=["tuples__hook_events_notification"],
+        )
+        assert report.results[0].status == "skipped"
+        assert report.ok is False

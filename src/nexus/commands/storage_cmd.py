@@ -1019,7 +1019,10 @@ def _echo_summary_table(report) -> None:
     """Final per-collection summary so the operator never scrolls structlog
     (nexus-pebfx.3 item 4). Sorted failures-first so the actionable rows
     are adjacent to the verdict line."""
-    rank = {"failed": 0, "skipped": 1, "skipped-empty": 2, "dry-run": 3, "migrated": 4}
+    rank = {
+        "failed": 0, "skipped": 1, "skipped-empty": 2, "excluded": 3,
+        "dry-run": 4, "migrated": 5,
+    }
     rows = sorted(report.results, key=lambda r: (rank.get(r.status, 9), r.collection))
     name_w = max([len(r.collection) for r in rows] + [10])
     click.echo("")
@@ -1034,7 +1037,7 @@ def _echo_summary_table(report) -> None:
         # scrollback record and must be sufficient on its own (no structlog
         # scrolling). skipped-empty included: the operator reviewing a
         # redirected log needs the disposition rationale in the table.
-        if r.reason and r.status in ("failed", "skipped", "skipped-empty"):
+        if r.reason and r.status in ("failed", "skipped", "skipped-empty", "excluded"):
             line += f"  — {r.reason}"
         click.echo(line)
     click.echo("-" * (13 + 1 + name_w + 27))

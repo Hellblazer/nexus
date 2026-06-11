@@ -74,7 +74,18 @@ _log = structlog.get_logger(__name__)
 # non-conformant collection WITH data stays "skipped" and red: the
 # partial-migration-never-green contract is preserved exactly where it
 # protects data (locked test: test_nonconformant_collection_skipped_loud).
-MigrationStatus = Literal["migrated", "failed", "skipped", "skipped-empty", "dry-run"]
+# "excluded" (pebfx.3 follow-up, Hal 2026-06-11): tuples__* collections are
+# session-ephemeral hook/tuplespace state that dies with Chroma at P4b and
+# is never migrated. They are excluded from DEFAULT enumeration (reported,
+# never silent) so accumulating tuples data cannot fail the straggler
+# sweep; naming one explicitly via --collections still migrates/refuses it.
+MigrationStatus = Literal[
+    "migrated", "failed", "skipped", "skipped-empty", "excluded", "dry-run",
+]
+
+#: Collection-name prefixes excluded from DEFAULT enumeration (explicit
+#: --collections naming overrides). Session-ephemeral, die-with-Chroma data.
+EPHEMERAL_EXCLUDE_PREFIXES: tuple[str, ...] = ("tuples__",)
 
 #: Model-segment → pgvector table dimension. MIRRORS the Java authority
 #: ``PgVectorRepository.MODEL_DIMS`` (service/src/main/java/dev/nexus/
@@ -122,7 +133,7 @@ class MigrationReport:
     @property
     def ok(self) -> bool:
         return all(
-            r.status in ("migrated", "dry-run", "skipped-empty")
+            r.status in ("migrated", "dry-run", "skipped-empty", "excluded")
             for r in self.results
         )
 
@@ -287,9 +298,24 @@ def migrate_collections(
     as a pre-flight estimate, not a binding commitment on a later live run.
     """
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
-    names = collections if collections is not None else list_collection_names(read_client)
+    explicit = collections is not None
+    names = collections if explicit else list_collection_names(read_client)
     results: list[CollectionResult] = []
     for name in names:
+        if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
+            try:
+                eph_count = int(read_client.get_collection(name).count())
+            except Exception:  # noqa: BLE001 — count is informational here
+                eph_count = 0
+            result = CollectionResult(
+                name, eph_count, 0, "excluded",
+                "session-ephemeral (dies with Chroma at P4b) — excluded from "
+                "default enumeration; pass --collections to act on it",
+            )
+            results.append(result)
+            if on_result is not None:
+                on_result(result)
+            continue
         t0 = time.monotonic()
         result = _migrate_one(
             read_client, vector_client, name, dry_run=dry_run, page=page,

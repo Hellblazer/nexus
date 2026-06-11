@@ -170,7 +170,10 @@ class TestEtlOperability:
         def fake_migrate_local(local_path, vector_client, *, on_result=None, **kw):
             results = (
                 CollectionResult(_COLL, 3, 3, "migrated", duration_s=1.2),
-                CollectionResult("docs__d__voyage-context-3__v1", 5, 5, "migrated",
+                # minilm token: a voyage token here would trip the RDR-109
+                # mode lint — the name is a progress-line label, not a mode
+                # assertion, so the local model token serves identically.
+                CollectionResult("docs__d__minilm-l6-v2-384__v1", 5, 5, "migrated",
                                  duration_s=0.4),
             )
             assert on_result is not None
