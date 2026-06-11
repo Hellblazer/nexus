@@ -214,7 +214,7 @@ class PgVectorServingContractTest {
     void upsertChunks_servesFromPgvector() throws Exception {
         Map<String, Object> resp = postOk("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
             "collection", COL,
-            "ids",        List.of("p4a-c1", "p4a-c2", "p4a-c3"),
+            "ids",        List.of("p4a-c100000000000000000000000000", "p4a-c200000000000000000000000000", "p4a-c300000000000000000000000000"),
             "documents",  List.of(
                 "the tenant isolation policy guards every row",
                 "tenant isolation policy enforcement in postgres",
@@ -253,7 +253,7 @@ class PgVectorServingContractTest {
         List<Map<String, Object>> rows = MAPPER.readValue(resp.body(), List.class);
         assertThat(rows.stream().map(r -> r.get("id")).toList())
             .as("cosine-ranked flat rows: distances 0.0, 0.2, 0.4 exactly")
-            .containsExactly("p4a-c1", "p4a-c2", "p4a-c3");
+            .containsExactly("p4a-c100000000000000000000000000", "p4a-c200000000000000000000000000", "p4a-c300000000000000000000000000");
         assertThat(rows.get(0).get("lang"))
             .as("metadata flattens into rows, same envelope as the Chroma path")
             .isEqualTo("java");
@@ -264,12 +264,12 @@ class PgVectorServingContractTest {
     void storePut_singleChunk() throws Exception {
         Map<String, Object> resp = postOk("/v1/vectors/store-put", TOKEN_A, Map.of(
             "collection", COL,
-            "doc_id",     "p4a-put1",
+            "doc_id",     "p4a-put1000000000000000000000000",
             "content",    "single put chunk about tenant isolation policy",
             "metadata",   Map.of("kind", "put")));
         assertThat(resp.get("id"))
             .as("store-put envelope {\"id\": ...} preserved")
-            .isEqualTo("p4a-put1");
+            .isEqualTo("p4a-put1000000000000000000000000");
     }
 
     @Test
@@ -277,11 +277,11 @@ class PgVectorServingContractTest {
     void storeGet_byIds_chromaEnvelope() throws Exception {
         Map<String, Object> resp = postOk("/v1/vectors/store-get", TOKEN_A, Map.of(
             "collection", COL,
-            "ids",        List.of("p4a-c1", "p4a-put1")));
+            "ids",        List.of("p4a-c100000000000000000000000000", "p4a-put1000000000000000000000000")));
 
         assertThat((List<Object>) resp.get("ids"))
             .as("store-get envelope: ids aligned ascending by chash")
-            .containsExactly("p4a-c1", "p4a-put1");
+            .containsExactly("p4a-c100000000000000000000000000", "p4a-put1000000000000000000000000");
         assertThat((List<Object>) resp.get("documents"))
             .containsExactly(
                 "the tenant isolation policy guards every row",
@@ -302,7 +302,7 @@ class PgVectorServingContractTest {
         assertThat((List<Object>) resp.get("ids"))
             .as("plain-equality where filter (the incremental-sync staleness "
                 + "check's shape) returns exactly the matching chunk")
-            .containsExactly("p4a-c2");
+            .containsExactly("p4a-c200000000000000000000000000");
     }
 
     @Test
@@ -313,7 +313,7 @@ class PgVectorServingContractTest {
 
         assertThat((List<Object>) resp.get("ids"))
             .as("store-list paginates in chash order")
-            .containsExactly("p4a-c1", "p4a-c2");
+            .containsExactly("p4a-c100000000000000000000000000", "p4a-c200000000000000000000000000");
         assertThat((List<?>) resp.get("metadatas"))
             .as("metadatas aligned with the page of ids")
             .hasSize(2);
@@ -324,7 +324,7 @@ class PgVectorServingContractTest {
     void updateMetadata_metadataOnly_textAndVectorUntouched() throws Exception {
         Map<String, Object> resp = postOk("/v1/vectors/update-metadata", TOKEN_A, Map.of(
             "collection", COL,
-            "ids",        List.of("p4a-c1"),
+            "ids",        List.of("p4a-c100000000000000000000000000"),
             "metadatas",  List.of(Map.of("lang", "java", "frecency_score", 0.75))));
         assertThat(((Number) resp.get("updated")).intValue()).isEqualTo(1);
 
@@ -334,7 +334,7 @@ class PgVectorServingContractTest {
                  "SELECT chunk_text, metadata->>'frecency_score' FROM nexus.chunks_1024"
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, COL);
-            ps.setString(2, "p4a-c1");
+            ps.setString(2, "p4a-c100000000000000000000000000");
             try (var rs = ps.executeQuery()) {
                 assertThat(rs.next()).isTrue();
                 assertThat(rs.getString(1))
@@ -390,14 +390,14 @@ class PgVectorServingContractTest {
     void storeDelete_tenantIsolated_thenOwnerDeletes() throws Exception {
         // Foreign tenant deletes exactly 0 of tenant-a's rows.
         Map<String, Object> foreign = postOk("/v1/vectors/store-delete", TOKEN_B, Map.of(
-            "collection", COL, "ids", List.of("p4a-c1", "p4a-c2")));
+            "collection", COL, "ids", List.of("p4a-c100000000000000000000000000", "p4a-c200000000000000000000000000")));
         assertThat(((Number) foreign.get("deleted")).intValue())
             .as("cross-tenant delete affects exactly 0 rows under RLS")
             .isEqualTo(0);
 
         // Owner deletes for real.
         Map<String, Object> owner = postOk("/v1/vectors/store-delete", TOKEN_A, Map.of(
-            "collection", COL, "ids", List.of("p4a-c3", "p4a-put1")));
+            "collection", COL, "ids", List.of("p4a-c300000000000000000000000000", "p4a-put1000000000000000000000000")));
         assertThat(((Number) owner.get("deleted")).intValue()).isEqualTo(2);
 
         try (Connection su = pg.createConnection("");
@@ -422,7 +422,7 @@ class PgVectorServingContractTest {
         // tenant-B's partition and tenant-A's rows must be untouched.
         Map<String, Object> resp = postOk("/v1/vectors/upsert-chunks", TOKEN_B, Map.of(
             "collection", COL,
-            "ids",        List.of("p4a-b1"),
+            "ids",        List.of("p4a-b100000000000000000000000000"),
             "documents",  List.of("the tenant isolation policy guards every row"),
             "metadatas",  List.of(Map.of("owner", "b"))));
         assertThat(((Number) resp.get("upserted")).intValue()).isEqualTo(1);

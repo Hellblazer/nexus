@@ -116,7 +116,7 @@ class PgVectorHybridSearchContractTest {
     private static final String T_C5 = "unrelated cooking recipe for pasta carbonara";
     private static final String T_C6 = "the tenant isolation policy appendix";
 
-    private static final List<String> FUSED_EXPECTED = List.of("hyb-c1", "hyb-c3", "hyb-c2", "hyb-c6");
+    private static final List<String> FUSED_EXPECTED = List.of("hyb-c100000000000000000000000000", "hyb-c300000000000000000000000000", "hyb-c200000000000000000000000000", "hyb-c600000000000000000000000000");
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
@@ -168,6 +168,11 @@ class PgVectorHybridSearchContractTest {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_" + dim + " TO " + SVC_ROLE);
             }
+            // ensureCollectionRegistered() in PgVectorRepository.upsertChunks() needs
+            // INSERT (for the ON CONFLICT DO NOTHING upsert) and SELECT (implicit in
+            // ON CONFLICT clause resolution) on catalog_collections.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -213,7 +218,7 @@ class PgVectorHybridSearchContractTest {
         embedder1024.register(T_C5,  0.0f, 1.0f);
         embedder1024.register(T_C6, -1.0f, 0.0f);
         repo1024.upsertChunks(TENANT_A, COL_HY,
-            List.of("hyb-c1", "hyb-c2", "hyb-c3", "hyb-c4", "hyb-c5", "hyb-c6"),
+            List.of("hyb-c100000000000000000000000000", "hyb-c200000000000000000000000000", "hyb-c300000000000000000000000000", "hyb-c400000000000000000000000000", "hyb-c500000000000000000000000000", "hyb-c600000000000000000000000000"),
             List.of(T_C1, T_C2, T_C3, T_C4, T_C5, T_C6),
             List.of(Map.of("kind", "hy"), Map.of("kind", "hy"), Map.of("kind", "hy"),
                     Map.of("kind", "hy"), Map.of("kind", "hy"), Map.of("kind", "hy")));
@@ -223,12 +228,12 @@ class PgVectorHybridSearchContractTest {
         embedder1024.register("tenant isolation policy beta document",  0.8f, 0.6f);
         embedder1024.register("tenant isolation policy gamma document", 0.6f, 0.8f);
         repo1024.upsertChunks(TENANT_A, COL_MA,
-            List.of("ma-c1", "ma-c2"),
+            List.of("ma-c1000000000000000000000000000", "ma-c2000000000000000000000000000"),
             List.of("tenant isolation policy alpha document",
                     "tenant isolation policy gamma document"),
             List.of(Map.of(), Map.of()));
         repo1024.upsertChunks(TENANT_A, COL_MB,
-            List.of("mb-c1"),
+            List.of("mb-c1000000000000000000000000000"),
             List.of("tenant isolation policy beta document"),
             List.of(Map.of()));
 
@@ -237,7 +242,7 @@ class PgVectorHybridSearchContractTest {
         embedder768.register("tenant isolation policy for java services",   1.0f, 0.0f);
         embedder768.register("tenant isolation policy for python services", 0.6f, 0.8f);
         repo768.upsertChunks(TENANT_A, COL_WH,
-            List.of("wh-c1", "wh-c2"),
+            List.of("wh-c1000000000000000000000000000", "wh-c2000000000000000000000000000"),
             List.of("tenant isolation policy for java services",
                     "tenant isolation policy for python services"),
             List.of(Map.of("lang", "java"), Map.of("lang", "py")));
@@ -249,7 +254,7 @@ class PgVectorHybridSearchContractTest {
         embedder384.register("tenant isolation policy variant",       0.8f, 0.6f);
         embedder384.register("cooking carbonara again",               0.995f, 0.0998749f);
         repo384.upsertChunks(TENANT_A, COL_384H,
-            List.of("m384-c1", "m384-c2", "m384-c3"),
+            List.of("m384-c10000000000000000000000000", "m384-c20000000000000000000000000", "m384-c30000000000000000000000000"),
             List.of("tenant isolation policy small model",
                     "tenant isolation policy variant",
                     "cooking carbonara again"),
@@ -284,13 +289,13 @@ class PgVectorHybridSearchContractTest {
             repo1024.search(TENANT_A, Q, List.of(COL_HY), 10, null);
         assertThat(ids(vectorOnly))
             .as("precondition: vector-only search surfaces the text-unrelated row")
-            .contains("hyb-c4");
+            .contains("hyb-c400000000000000000000000000");
 
         List<Map<String, Object>> fused =
             repo1024.hybridSearch(TENANT_A, Q, List.of(COL_HY), 10, null);
         assertThat(ids(fused))
             .as("a vector-close row with no text signal must NEVER appear in hybrid results")
-            .doesNotContain("hyb-c4", "hyb-c5");
+            .doesNotContain("hyb-c400000000000000000000000000", "hyb-c500000000000000000000000000");
     }
 
     // ---------------------------------------------------------------------------
@@ -364,7 +369,7 @@ class PgVectorHybridSearchContractTest {
         assertThat(ids(rows))
             .as("multi-collection hybrid is ONE ranked list interleaved by distance "
                 + "(ma-c1 0.0, mb-c1 0.2, ma-c2 0.4), not per-collection blocks")
-            .containsExactly("ma-c1", "mb-c1", "ma-c2");
+            .containsExactly("ma-c1000000000000000000000000000", "mb-c1000000000000000000000000000", "ma-c2000000000000000000000000000");
     }
 
     @Test
@@ -375,7 +380,7 @@ class PgVectorHybridSearchContractTest {
         assertThat(ids(rows))
             .as("metadata where-predicate ANDs with the text gate: wh-c1 matches the "
                 + "text gate but not lang=py and must be filtered out")
-            .containsExactly("wh-c2");
+            .containsExactly("wh-c2000000000000000000000000000");
     }
 
     @Test
@@ -385,7 +390,7 @@ class PgVectorHybridSearchContractTest {
 
         assertThat(ids(rows))
             .as("nResults truncates the ranked fused list — top-2 exactly")
-            .containsExactly("hyb-c1", "hyb-c3");
+            .containsExactly("hyb-c100000000000000000000000000", "hyb-c300000000000000000000000000");
     }
 
     @Test
@@ -407,7 +412,7 @@ class PgVectorHybridSearchContractTest {
         assertThat(ids(rows))
             .as("hybrid dispatches per-dim exactly like search(): same gate + rank "
                 + "behaviour on chunks_384, text-unrelated row excluded")
-            .containsExactly("m384-c1", "m384-c2");
+            .containsExactly("m384-c10000000000000000000000000", "m384-c20000000000000000000000000");
     }
 
     @Test
@@ -417,7 +422,7 @@ class PgVectorHybridSearchContractTest {
 
         assertThat(rows).hasSize(1);
         Map<String, Object> top = rows.get(0);
-        assertThat(top.get("id")).isEqualTo("hyb-c1");
+        assertThat(top.get("id")).isEqualTo("hyb-c100000000000000000000000000");
         assertThat(top.get("content")).isEqualTo(T_C1);
         assertThat(top.get("collection")).isEqualTo(COL_HY);
         assertThat(((Number) top.get("distance")).doubleValue())

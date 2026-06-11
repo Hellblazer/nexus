@@ -123,7 +123,7 @@ class VectorHybridHttpTest {
         embedder.register("quantum entanglement spectroscopy experiment", 0.995f, 0.0998749f);
         pgRepo = new PgVectorRepository(tenantScope, embedder, embedder);
         pgRepo.upsertChunks(TENANT_A, COL,
-            List.of("hh-c1", "hh-c2", "hh-c3"),
+            List.of("hh-c1000000000000000000000000000", "hh-c2000000000000000000000000000", "hh-c3000000000000000000000000000"),
             List.of("the tenant isolation policy guards every row",
                     "tenant isolation policy enforcement in postgres",
                     "quantum entanglement spectroscopy experiment"),
@@ -169,7 +169,7 @@ class VectorHybridHttpTest {
         assertThat(rows.stream().map(r -> r.get("id")).toList())
             .as("text-gated rows ranked by distance; the no-text-signal row hh-c3 "
                 + "(vector-closer than hh-c2) is excluded")
-            .containsExactly("hh-c1", "hh-c2");
+            .containsExactly("hh-c1000000000000000000000000000", "hh-c2000000000000000000000000000");
         assertThat(rows.get(0).get("kind"))
             .as("metadata flattens into HTTP rows exactly like /search")
             .isEqualTo("hh");
