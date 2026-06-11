@@ -408,18 +408,33 @@ class StorageServiceSupervisor:
                 )
 
         java_bin = self._find_java()
-        proc = subprocess.Popen(
-            [java_bin, "-jar", str(self._jar_path)],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # nexus-ovbr7: the jar's logback config is console-only, so DEVNULL
+        # here discarded every Java log line AND the JVM-level output logback
+        # can't capture (OOM banners, hs_err preambles). Route both streams
+        # to one file so interleaved output keeps its order; O_APPEND means a
+        # respawn never truncates the previous jar's final (crash) output.
+        from nexus.logging_setup import open_child_log_or_devnull
+
+        jar_log = open_child_log_or_devnull("storage_service_jar", self._config_dir)
+        try:
+            proc = subprocess.Popen(
+                [java_bin, "-jar", str(self._jar_path)],
+                env=env,
+                stdout=jar_log,
+                stderr=jar_log,
+                start_new_session=True,
+            )
+        finally:
+            # The child holds its own duplicated fd; the parent's handle is
+            # no longer needed (and must not leak across respawns).
+            if not isinstance(jar_log, int):
+                jar_log.close()
         _log.info(
             "storage_service_spawned",
             pid=proc.pid,
             port=port,
             jar=str(self._jar_path),
+            jar_log=getattr(jar_log, "name", "DEVNULL"),
         )
         return proc, port
 
@@ -767,7 +782,16 @@ class StorageServiceSupervisor:
         """
         if self._proc is None or self._supervisor is None:
             return False, False
-        if self._proc.poll() is not None:
+        if (rc := self._proc.poll()) is not None:
+            # nexus-ovbr7: the returncode is the single cheapest diagnostic a
+            # dead jar leaves behind (137=SIGKILL/oom, 143=SIGTERM, 1=java
+            # error) — record it, plus where the jar's own output went.
+            _log.warning(
+                "storage_service_jar_exit_detected",
+                pid=self._proc.pid,
+                returncode=rc,
+                jar_log=str(self._config_dir / "logs" / "storage_service_jar.log"),
+            )
             return False, False  # jar exited; signal the run loop to respawn
 
         jar_alive = _pid_is_alive(self._proc.pid)
@@ -938,6 +962,15 @@ def run_storage_supervisor(
         from nexus.config import nexus_config_dir
         config_dir = nexus_config_dir()
 
+    # nexus-ovbr7: route structlog to <config_dir>/logs/storage_service.log
+    # (mirrors run_t2_daemon / nexus-n8sbw). The detached spawn DEVNULLs
+    # stderr, so without this file sink every lifecycle event below —
+    # including the restart-exhausted and crash paths — was invisible and
+    # four supervisor deaths went undiagnosed.
+    from nexus.logging_setup import configure_logging, flush_logging
+
+    configure_logging("storage_service", config_dir=config_dir)
+
     # Register signal handlers BEFORE start() so a SIGTERM during startup
     # leads to a clean stop() rather than orphaning the jar.
     stop_requested = threading.Event()
@@ -959,6 +992,14 @@ def run_storage_supervisor(
     if jar_path is None:
         jar_path = _find_service_jar()
 
+    _log.info(
+        "storage_service_supervisor_started",
+        pid=os.getpid(),
+        jar_path=str(jar_path),
+        pg_port=pg_port,
+        config_dir=str(config_dir),
+    )
+
     sup = StorageServiceSupervisor(
         config_dir=config_dir,
         jar_path=jar_path,
@@ -967,6 +1008,24 @@ def run_storage_supervisor(
         creds=creds,
         supervised=True,
     )
+    try:
+        return _supervise_until_stopped(sup, stop_requested, flush_logging)
+    except Exception:
+        # Last-resort backstop (t2_daemon precedent): an exception escaping
+        # the supervisor loop must hit the log file, not a DEVNULL'd stderr —
+        # an unlogged supervisor death is the exact defect this fixes.
+        _log.exception("storage_service_supervisor_crashed")
+        flush_logging()
+        raise
+
+
+def _supervise_until_stopped(
+    sup: StorageServiceSupervisor,
+    stop_requested: threading.Event,
+    flush_logging: Callable[[], None],
+) -> int:
+    """The supervise loop body of ``run_storage_supervisor`` (split out so
+    the crash backstop wraps start() and the loop uniformly)."""
     sup.start()
 
     exit_code = 0
@@ -1013,6 +1072,15 @@ def run_storage_supervisor(
 
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
 
+    # Exit breadcrumb BEFORE stop(): a death without this line means the
+    # supervisor was killed, not that it chose to exit. Flush immediately —
+    # stop() can stall, and the breadcrumb is the diagnostic (nexus-61539).
+    _log.info(
+        "storage_service_supervisor_exit",
+        exit_code=exit_code,
+        stop_requested=stop_requested.is_set(),
+    )
+    flush_logging()
     sup.stop()
     return exit_code
 
