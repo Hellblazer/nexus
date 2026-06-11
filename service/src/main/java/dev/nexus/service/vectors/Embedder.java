@@ -31,6 +31,19 @@ public interface Embedder extends AutoCloseable {
         return embed(List.of(text)).get(0);
     }
 
+    /**
+     * RDR-103 embedding-model token this embedder produces (the collection-name
+     * model segment, e.g. {@code "voyage-code-3"}, {@code "minilm-l6-v2-384"}).
+     *
+     * <p>Default {@code "unknown"} keeps test fakes compiling (the locked
+     * {@code PgVectorRepositoryContractTest.FakeEmbedder} is additive-only);
+     * every production embedder overrides (bead nexus-pebfx.2 model-identity
+     * validation).
+     */
+    default String modelToken() {
+        return "unknown";
+    }
+
     @Override
     default void close() {}
 }

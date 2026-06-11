@@ -1625,6 +1625,43 @@ Local-mode T3 wraps the upstream `chroma run` server lifecycle
 under launchd / systemd supervision; templates ship as
 `com.nexus.t3.plist` / `nexus-t3.service`.
 
+### nx daemon service start / stop / status
+
+The storage-service supervisor (RDR-152 P5.1): managed Java service JAR +
+nx-managed Postgres. `start` ensures PG is running, runs the schema-skew
+gate, spawns the JAR (resolving `NX_VOYAGE_API_KEY` through the credential
+chain), waits for `/health`, and publishes the endpoint lease that clients
+auto-discover. `status` shows the lease plus the running service's
+`/version` handshake (`app_version`, `schema_latest_id`,
+`schema_changeset_count`) and warns when the running JAR differs from the
+installed one.
+
+| Flag | Description |
+|------|-------------|
+| `--jar PATH` | Explicit JAR (otherwise: `NEXUS_SERVICE_JAR` env > well-known location > repo `service/target/`). |
+| `--foreground` | Block until SIGTERM (for launchd/systemd supervision). |
+| `--config-dir` | Config directory override. |
+| `--json` | (`status`) Raw JSON output. |
+
+### nx daemon service install-jar
+
+```
+nx daemon service install-jar <path-to-jar>
+nx daemon service install-jar --from-repo
+```
+
+Install a nexus-service fat JAR to the well-known location
+(`~/.config/nexus/service/nexus-service.jar`) with a provenance sidecar
+(version, sha256, build date, bundled Liquibase changesets). Supervisor
+discovery prefers this location, so pip/uv-installed users never need
+`--jar` or a repo checkout. `--from-repo` installs the freshest build from
+the current checkout's `service/target/` (dev convenience).
+
+The recorded changesets feed the **schema-skew gate**: at start, the
+supervisor refuses to spawn a JAR that is older than the database schema
+(Liquibase silently ignores applied changesets it does not know, so the
+old JAR would boot cleanly and fail undiagnosably at runtime).
+
 ---
 
 ## nx upgrade

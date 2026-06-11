@@ -781,6 +781,69 @@ class TestModelDimsJavaParity:
         assert _MODEL_DIMS == java_map
 
 
+class TestEmbedderModeParityJava:
+    """nexus-pebfx.2 (critic finding): extends the TestModelDimsJavaParity
+    pattern to MODE parity. EmbedderRouter's cloud-mode dispatch table is the
+    Java authority for WHICH model tokens are servable; every dispatchable
+    token must be a known RDR-103 token (subset of MODEL_DIMS), and the
+    onnx-local table must be exactly the local ONNX token. A Java-side
+    embedder added with a token Python doesn't know would dispatch to a
+    chunks_<dim> table the ETL/serving layers treat as non-conformant —
+    this parses the Java source so drift fails mechanically."""
+
+    _ROUTER_JAVA = (
+        Path(__file__).resolve().parents[2]
+        / "service/src/main/java/dev/nexus/service/vectors/EmbedderRouter.java"
+    )
+
+    def test_cloud_mode_dispatch_tokens_are_known_models(self) -> None:
+        import re
+
+        from nexus.migration.vector_etl import _MODEL_DIMS
+
+        src = self._ROUTER_JAVA.read_text()
+        # The cloud-mode table self-keys via <embedder>.modelToken(); resolve
+        # each key through the literal each embedder is constructed with.
+        block = re.search(
+            r"this\.modelEmbedders\s*=\s*Map\.of\((.*?)\);", src, re.S,
+        )
+        assert block is not None, "cloud-mode modelEmbedders Map.of not found"
+        # Tokens appear as constructor literals in the same file: the ONNX
+        # token via OnnxEmbedder.modelToken() override, voyage tokens as
+        # VoyageEmbedder constructor args, CCE via CceEmbedder override.
+        voyage_tokens = set(re.findall(r'new VoyageEmbedder\([^)]*"(voyage-[^"]+)"', src))
+        assert voyage_tokens, "no VoyageEmbedder construction literals found"
+        onnx_token = "minilm-l6-v2-384"
+        cce_token = "voyage-context-3"
+        dispatchable = voyage_tokens | {onnx_token, cce_token}
+        unknown = dispatchable - set(_MODEL_DIMS)
+        assert not unknown, (
+            f"Java EmbedderRouter dispatches tokens unknown to Python "
+            f"_MODEL_DIMS: {sorted(unknown)} — add them to BOTH registries "
+            f"or remove the embedder"
+        )
+
+    def test_embedder_model_tokens_match_java_overrides(self) -> None:
+        import re
+
+        from nexus.migration.vector_etl import _MODEL_DIMS
+
+        # Each concrete embedder's modelToken() override must return a known
+        # RDR-103 token (same-dim wrong-model guard depends on this identity).
+        for java_name, expected in (
+            ("OnnxEmbedder.java", "minilm-l6-v2-384"),
+            ("CceEmbedder.java", "voyage-context-3"),
+        ):
+            src = (self._ROUTER_JAVA.parent / java_name).read_text()
+            m = re.search(
+                r"public String modelToken\(\)\s*\{\s*return\s+\"([^\"]+)\";",
+                src,
+            )
+            assert m is not None, f"{java_name}: modelToken() override not found"
+            assert m.group(1) == expected
+            assert m.group(1) in _MODEL_DIMS
+
+
 # ══ Integration: real Java service + hermetic Postgres 16 ════════════════════
 
 from tests.db._service_fixture import SERVICE_ROLES_SQL  # noqa: E402

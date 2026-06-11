@@ -81,6 +81,11 @@ public final class VoyageEmbedder implements Embedder {
     }
 
     @Override
+    public String modelToken() {
+        return model;
+    }
+
+    @Override
     public List<float[]> embed(List<String> texts) {
         if (texts == null || texts.isEmpty()) return List.of();
         String json = buildJson(texts);

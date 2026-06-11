@@ -11,6 +11,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.EmbeddingModelUnavailableException;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -122,6 +123,12 @@ public final class VectorHandler implements HttpHandler {
             }
         } catch (SkipHandlerException e) {
             // Response already sent (405 / 503 / 401 guard) — nothing further.
+        } catch (EmbeddingModelUnavailableException e) {
+            // nexus-pebfx.2: well-formed request, unservable in this embedding
+            // mode (e.g. voyage-* collection while the service has no Voyage
+            // credentials) → 422, distinguishable from a malformed request (400).
+            log.warn("event=vector_model_unavailable op={} error={}", op, e.getMessage());
+            HttpUtil.send(exchange, 422, json(Map.of("error", e.getMessage())));
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));

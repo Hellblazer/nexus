@@ -17,6 +17,7 @@ import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.CatalogHandler;
 import dev.nexus.service.http.ChashHandler;
 import dev.nexus.service.http.HealthHandler;
+import dev.nexus.service.http.VersionHandler;
 import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.ScratchHandler;
@@ -187,6 +188,9 @@ public final class NexusService {
 
         // /health — unauthenticated
         server.createContext("/health", new HealthHandler(dataSource));
+
+        // /version — unauthenticated app+schema handshake (nexus-pebfx.4)
+        server.createContext("/version", new VersionHandler(dataSource));
 
         // /v1/* — auth filter applied
         var authFilter = List.of(new AuthFilter(tokenCache, tokenStore));

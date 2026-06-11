@@ -93,6 +93,18 @@ class ServiceIntegrationTest {
     // ─── Test 2: auth 401 matrix ──────────────────────────────────────────────
 
     @Test
+    void version_reportsAppVersion_andExplicitSchemaError_withoutJournal() throws Exception {
+        // nexus-pebfx.4: this harness bootstraps schema manually (no Liquibase),
+        // so /version must report app_version AND an explicit schema_error —
+        // never silently omit the schema fields.
+        var resp = get("/version", null);
+        org.assertj.core.api.Assertions.assertThat(resp.statusCode()).isEqualTo(200);
+        org.assertj.core.api.Assertions.assertThat(resp.body())
+            .contains("\"app_version\"")
+            .contains("\"schema_error\"");
+    }
+
+    @Test
     void auth_matrix() throws Exception {
         // No Authorization header → 401
         var noToken = get("/v1/_whoami", null);
