@@ -1298,7 +1298,12 @@ class TestSimultaneousJarPgDeath:
     """nexus-14k0m (P5 gate code-review HIGH): heartbeat (False, False)
     previously hit only the ``not jar_running`` branch, whose _respawn()
     never restarts PG — the new jar's /health can never pass, the restart
-    budget burns down, and the supervisor exits without ONE pg_ctl attempt."""
+    budget burns down, and the supervisor exits without ONE pg_ctl attempt.
+
+    The (False, False) beat models BOTH real routes into jar_running=False
+    (process exit, which hardcodes pg_ok=False; stuck-JVM threshold, which
+    carries a live PG probe) — at the run-loop seam they are
+    indistinguishable, so one scripted beat covers both (CRE M2)."""
 
     def _run(self, sup_factory):
         import threading
@@ -1331,6 +1336,7 @@ class TestSimultaneousJarPgDeath:
             )
         )
         assert code == 4, "PG-unrecoverable is the exit-4 contract"
+        assert "ensure_pg" in sup.calls, "exit 4 must come FROM the PG attempt"
         assert "respawn" not in sup.calls, (
             "respawning the jar with PG down is futile budget burn"
         )

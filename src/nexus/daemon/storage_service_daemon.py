@@ -723,6 +723,14 @@ class StorageServiceSupervisor:
         Reuses ``pg_provision._start_cluster`` so PG lifecycle logic stays
         in the provisioner, not here. Raises ``StorageServiceStartError``
         if PG cannot be started.
+
+        Known limitation (nexus-14k0m critic): "accepting" means TCP
+        accept, not query readiness. A PG in crash recovery (WAL replay)
+        accepts connections while rejecting queries, so a success here
+        does not guarantee the jar's subsequent /health ready-wait (60s)
+        will pass — a long replay can still burn one respawn attempt. A
+        ``pg_isready``-grade probe is the follow-on if that residual is
+        ever observed in practice.
         """
         if _port_accepting(_SERVICE_HOST, self._pg_port):
             _log.debug("storage_service_pg_already_running", port=self._pg_port)
@@ -1047,6 +1055,13 @@ def _supervise_until_stopped(
                 # burned down with zero pg_ctl attempts. Restart PG FIRST;
                 # if PG is unrecoverable, respawning the jar is futile —
                 # exit 4 (the PG-unrecoverable contract) with budget intact.
+                # Covers BOTH routes into jar_running=False (process exit
+                # hardcodes pg_ok=False; stuck-JVM carries a live probe) —
+                # _ensure_pg_running() re-probes, so a hardcoded False with
+                # PG actually up is a cheap no-op, never a false exit 4.
+                # Loop invariant: heartbeat_once() returned (False, False)
+                # with _proc/_supervisor still set (stop() only runs after
+                # the loop) — do not call sup.stop() mid-loop.
                 _log.warning(
                     "storage_service_jar_and_pg_died",
                     msg="jar and PG both down; restarting PG before jar respawn",
@@ -1056,7 +1071,7 @@ def _supervise_until_stopped(
                     _log.info("storage_service_pg_restarted_before_respawn")
                 except StorageServiceStartError as exc:
                     _log.error(
-                        "storage_service_pg_restart_failed",
+                        "storage_service_jar_and_pg_restart_failed",
                         error=str(exc),
                         msg="Could not restart PG; supervisor exiting",
                     )
