@@ -69,6 +69,18 @@ def _make_fake_jar(
             "META-INF/maven/dev.nexus/nexus-service/pom.properties",
             f"artifactId=nexus-service\ngroupId=dev.nexus\nversion={version}\n",
         )
+        # The maven-shade fat JAR merges every DEPENDENCY's pom.properties
+        # too (21 in the real JAR). A generic matcher is last-write-wins and
+        # records a dep's version — the 2026-06-10 critic Critical. Keep the
+        # fixture faithful so the regression stays visible.
+        zf.writestr(
+            "META-INF/maven/org.apache.commons/commons-compress/pom.properties",
+            "artifactId=commons-compress\ngroupId=org.apache.commons\nversion=1.24.0\n",
+        )
+        zf.writestr(
+            "META-INF/maven/org.postgresql/postgresql/pom.properties",
+            "artifactId=postgresql\ngroupId=org.postgresql\nversion=42.7.2\n",
+        )
         for name, content in changelogs.items():
             zf.writestr(f"db/changelog/{name}", content)
     return path
@@ -236,7 +248,7 @@ class TestSchemaSkewGate:
     def test_psql_output_parsing(self) -> None:
         fake = type("R", (), {
             "returncode": 0,
-            "stdout": "vectors-001|hal\ncatalog-001|liam\n\n",
+            "stdout": "vectors-001\thal\ncatalog-001\tliam\n\n",
             "stderr": "",
         })()
         with patch("nexus.daemon.jar_lifecycle.subprocess.run", return_value=fake), \
@@ -381,3 +393,134 @@ class TestStatusVersionHandshake:
         result, _ = self._invoke_status(tmp_path, None)
         assert result.exit_code == 0, result.output
         assert "service_app_version" not in result.output
+
+
+class TestProvenanceReviewRegressions:
+    """2026-06-10 stacked-review regressions on extract_jar_provenance and
+    the gate's credential choice."""
+
+    def test_version_pinned_to_service_artifact_not_dependency(
+        self, tmp_path: Path,
+    ) -> None:
+        """Critic CRITICAL: the fat JAR merges ~21 dependency pom.properties;
+        a generic matcher records a random dep's version (commons-compress
+        1.24.0 beat 1.0-SNAPSHOT live). Only dev.nexus may win — regardless
+        of zip member order."""
+        jar = tmp_path / "svc.jar"
+        with zipfile.ZipFile(jar, "w") as zf:
+            # Dependency FIRST and LAST so any order-dependent scan fails.
+            zf.writestr(
+                "META-INF/maven/org.apache.commons/commons-compress/pom.properties",
+                "version=1.24.0\n",
+            )
+            zf.writestr(
+                "META-INF/maven/dev.nexus/nexus-service/pom.properties",
+                "version=7.7.7\n",
+            )
+            zf.writestr(
+                "META-INF/maven/org.postgresql/postgresql/pom.properties",
+                "version=42.7.2\n",
+            )
+            zf.writestr("db/changelog/a.xml", _CHANGELOG_A)
+        assert extract_jar_provenance(jar)["version"] == "7.7.7"
+
+    def test_changeset_inside_xml_comment_ignored(self, tmp_path: Path) -> None:
+        """CRE M1: a literal <changeSet> inside an XML comment must not
+        inject a phantom changeset into the bundled set."""
+        commented = """<?xml version="1.0"?>
+<databaseChangeLog>
+    <!-- Replaces <changeSet id="ghost-001" author="hal"> from before -->
+    <changeSet id="real-001" author="hal">
+        <sql>SELECT 1</sql>
+    </changeSet>
+</databaseChangeLog>
+"""
+        jar = _make_fake_jar(tmp_path / "svc.jar", changelogs={"c.xml": commented})
+        ids = {(c["id"], c["author"])
+               for c in extract_jar_provenance(jar)["changesets"]}
+        assert ids == {("real-001", "hal")}
+
+    def test_gate_prefers_admin_credentials(self) -> None:
+        """Critic Significant 1 / CRE M2: the journal tables are owned by the
+        migration role; with svc creds the gate is blind for exactly the
+        first upgrade start (grants-002 not yet applied). Admin creds make
+        it effective from run one."""
+        creds = {
+            "PG_PORT": "5499",
+            "NX_DB_USER": "svc", "NX_DB_PASS": "svc-pw",
+            "NX_DB_ADMIN_USER": "nexus_admin", "NX_DB_ADMIN_PASS": "admin-pw",
+            "NX_DB_URL": "jdbc:postgresql://127.0.0.1:5499/nexus",
+        }
+        captured = {}
+
+        def fake_run(cmd, env=None, **kw):
+            captured["cmd"] = cmd
+            captured["pgpassword"] = env.get("PGPASSWORD")
+            return type("R", (), {
+                "returncode": 0, "stdout": "", "stderr": "",
+            })()
+
+        with patch("nexus.daemon.jar_lifecycle.subprocess.run", side_effect=fake_run), \
+             patch("nexus.daemon.jar_lifecycle._psql_bin", return_value="/fake/psql"):
+            applied_changesets_via_psql(creds)
+        assert "nexus_admin" in captured["cmd"]
+        assert captured["pgpassword"] == "admin-pw"
+
+    def test_gate_falls_back_to_svc_credentials(self) -> None:
+        creds = {
+            "PG_PORT": "5499",
+            "NX_DB_USER": "svc", "NX_DB_PASS": "svc-pw",
+            "NX_DB_URL": "jdbc:postgresql://127.0.0.1:5499/nexus",
+        }
+        captured = {}
+
+        def fake_run(cmd, env=None, **kw):
+            captured["cmd"] = cmd
+            captured["pgpassword"] = env.get("PGPASSWORD")
+            return type("R", (), {
+                "returncode": 0, "stdout": "", "stderr": "",
+            })()
+
+        with patch("nexus.daemon.jar_lifecycle.subprocess.run", side_effect=fake_run), \
+             patch("nexus.daemon.jar_lifecycle._psql_bin", return_value="/fake/psql"):
+            applied_changesets_via_psql(creds)
+        assert "svc" in captured["cmd"]
+        assert captured["pgpassword"] == "svc-pw"
+
+    def test_permission_denied_is_indeterminate_none(self) -> None:
+        """CRE M2 explicit pin: permission denied (not 'does not exist') is
+        INDETERMINATE — fail-open with a warning, never an empty applied set
+        (an empty set would falsely declare the JAR compatible)."""
+        fake = type("R", (), {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "ERROR:  permission denied for table databasechangelog",
+        })()
+        creds = {
+            "PG_PORT": "5499", "NX_DB_USER": "svc", "NX_DB_PASS": "pw",
+            "NX_DB_URL": "jdbc:postgresql://127.0.0.1:5499/nexus",
+        }
+        with patch("nexus.daemon.jar_lifecycle.subprocess.run", return_value=fake), \
+             patch("nexus.daemon.jar_lifecycle._psql_bin", return_value="/fake/psql"):
+            assert applied_changesets_via_psql(creds) is None
+
+
+class TestStatusNxMajorGapNote:
+    def test_older_major_notes(self, monkeypatch) -> None:
+        from nexus.commands.daemon import _nx_major_gap_note
+
+        with patch("importlib.metadata.version", return_value="5.10.6"):
+            note = _nx_major_gap_note("conexus 4.34.1")
+        assert note is not None and "4.34.1" in note
+
+    def test_same_major_silent(self) -> None:
+        from nexus.commands.daemon import _nx_major_gap_note
+
+        with patch("importlib.metadata.version", return_value="5.10.6"):
+            assert _nx_major_gap_note("conexus 5.2.0") is None
+
+    def test_unparseable_silent(self) -> None:
+        from nexus.commands.daemon import _nx_major_gap_note
+
+        assert _nx_major_gap_note("") is None
+        assert _nx_major_gap_note("hand-rolled") is None

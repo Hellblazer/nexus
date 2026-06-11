@@ -77,7 +77,7 @@ public final class VersionHandler implements HttpHandler {
             return;
         }
         String latestId = null;
-        long count = -1;
+        long count = 0;
         String schemaError = null;
         try (Connection conn = dataSource.getConnection();
              var stmt = conn.createStatement()) {

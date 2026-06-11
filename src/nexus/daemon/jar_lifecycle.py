@@ -57,8 +57,12 @@ _CHANGESET_TAG_RE = re.compile(r"<changeSet\b([^>]*)>", re.S)
 _ATTR_ID_RE = re.compile(r'\bid="([^"]+)"')
 _ATTR_AUTHOR_RE = re.compile(r'\bauthor="([^"]+)"')
 
+# Pinned to the dev.nexus group: the maven-shade fat JAR carries a
+# pom.properties for EVERY dependency (21 of them); a generic match is
+# last-write-wins and records a random dep's version (critic Critical,
+# 2026-06-10: commons-compress 1.24.0 won over 1.0-SNAPSHOT).
 _POM_PROPERTIES_RE = re.compile(
-    r"^META-INF/maven/[^/]+/[^/]+/pom\.properties$",
+    r"^META-INF/maven/dev\.nexus/[^/]+/pom\.properties$",
 )
 _CHANGELOG_MEMBER_RE = re.compile(r"^db/changelog/[^/]+\.xml$")
 
@@ -104,6 +108,9 @@ def extract_jar_provenance(jar_path: Path) -> dict:
                         break
             elif _CHANGELOG_MEMBER_RE.match(name):
                 xml = zf.read(name).decode("utf-8", "replace")
+                # A literal <changeSet ...> inside an XML comment would inject
+                # a phantom changeset into the bundled set (CRE M1).
+                xml = re.sub(r"<!--.*?-->", "", xml, flags=re.S)
                 for tag in _CHANGESET_TAG_RE.finditer(xml):
                     attrs = tag.group(1)
                     cs_id = _ATTR_ID_RE.search(attrs)
@@ -222,21 +229,11 @@ def _psql_bin() -> str | None:
     """psql from the same discovery the supervisor uses for pg_ctl."""
     try:
         from nexus.db.pg_provision import discover_pg_binaries
-        bins = discover_pg_binaries()
-        psql = getattr(bins, "psql", None)
-        if psql:
-            return str(psql)
-        # Fall back to a sibling of any discovered binary.
-        for attr in ("pg_ctl", "initdb"):
-            b = getattr(bins, attr, None)
-            if b:
-                candidate = Path(b).parent / "psql"
-                if candidate.is_file():
-                    return str(candidate)
+        # discover_pg_binaries validates all four binaries incl. psql.
+        return str(discover_pg_binaries().psql)
     except Exception:
-        pass
-    import shutil
-    return shutil.which("psql")
+        import shutil
+        return shutil.which("psql")
 
 
 def _db_name_from_creds(creds: dict) -> str:
@@ -260,19 +257,29 @@ def applied_changesets_via_psql(creds: dict) -> set[tuple[str, str]] | None:
         _log.warning("schema_skew_psql_not_found")
         return None
     port = creds.get("PG_PORT", "")
-    user = creds.get("NX_DB_USER", "")
+    # Prefer ADMIN creds: the journal tables are owned by the migration role,
+    # and the nexus_svc read grant (grants-002) only exists on databases that
+    # have already run a pebfx.4-era JAR — with svc creds the gate would be
+    # blind for exactly the first upgrade start (critic Significant 1 /
+    # CRE M2). Falls back to svc creds when admin creds are absent.
+    user = creds.get("NX_DB_ADMIN_USER", "") or creds.get("NX_DB_USER", "")
+    password = (
+        creds.get("NX_DB_ADMIN_PASS", "")
+        if creds.get("NX_DB_ADMIN_USER", "")
+        else creds.get("NX_DB_PASS", "")
+    )
     if not port or not user:
         _log.warning("schema_skew_creds_incomplete")
         return None
 
     env = dict(os.environ)
-    env["PGPASSWORD"] = creds.get("NX_DB_PASS", "")
+    env["PGPASSWORD"] = password
     try:
         result = subprocess.run(
             [
                 psql, "-h", "127.0.0.1", "-p", str(port), "-U", user,
                 "-d", _db_name_from_creds(creds),
-                "-t", "-A", "-F", "|", "-X", "-v", "ON_ERROR_STOP=1",
+                "-t", "-A", "-F", "\t", "-X", "-v", "ON_ERROR_STOP=1",
                 "-c", "SELECT id, author FROM databasechangelog",
             ],
             env=env,
@@ -299,7 +306,7 @@ def applied_changesets_via_psql(creds: dict) -> set[tuple[str, str]] | None:
         line = line.strip()
         if not line:
             continue
-        parts = line.split("|")
+        parts = line.split("\t")
         if len(parts) >= 2:
             applied.add((parts[0], parts[1]))
     return applied

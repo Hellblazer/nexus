@@ -1689,6 +1689,32 @@ def service_stop_cmd(config_dir_str: str | None) -> None:
     click.echo(f"Storage service stopped (pid={pid}).")
 
 
+def _nx_major_gap_note(installed_by: str) -> str | None:
+    """Note when the well-known JAR was installed by an older nx MAJOR.
+
+    ``installed_by`` is the sidecar's ``"conexus X.Y.Z"`` stamp. Returns
+    ``None`` when versions are unparseable or majors match.
+    """
+    import re as _re
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    m = _re.match(r"conexus (\d+)\.", installed_by or "")
+    if not m:
+        return None
+    installed_major = int(m.group(1))
+    try:
+        current_major = int(_pkg_version("conexus").split(".")[0])
+    except (PackageNotFoundError, ValueError):
+        return None
+    if installed_major < current_major:
+        return (
+            f"installed JAR was installed by {installed_by} but this nx is "
+            f"major version {current_major} — reinstall it from a current "
+            "build: nx daemon service install-jar <path>"
+        )
+    return None
+
+
 @service_group.command("status")
 @click.option(
     "--config-dir",
@@ -1757,6 +1783,15 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
                 "pick it up: nx daemon service stop && nx daemon service start"
             )
             data["stale"] = True
+        # Bead pebfx.4(b): warn when the installed JAR predates the current
+        # nx by a major version — the proactive "this JAR was installed by a
+        # much older nx" signal (JAR and nx version schemes are otherwise
+        # incomparable; the schema-skew gate catches actual drift at start).
+        if installed is not None and not stale_warning:
+            note = _nx_major_gap_note(installed.get("installed_by", ""))
+            if note:
+                stale_warning = note
+                data["installed_by_outdated"] = True
 
     if as_json:
         click.echo(_json.dumps(data, indent=2))
