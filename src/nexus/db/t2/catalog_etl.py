@@ -390,6 +390,7 @@ def migrate_catalog(
     client: Any,
     *,
     batch_log_every: int = 50,
+    collector: Any = None,
 ) -> dict[str, dict[str, int]]:
     """Copy all rows from a SQLite catalog into Postgres via *client*.
 
@@ -434,6 +435,27 @@ def migrate_catalog(
         conn.close()
 
     results: dict[str, dict[str, int]] = {}
+
+    # RDR-153 soft-dangler policy: links carry NO enforced endpoint FK —
+    # rows referencing missing documents IMPORT (the graph edge is event
+    # data) and each dangling edge is recorded as a flagged advisory.
+    if collector is not None:
+        live_tumblers = {r.get("tumbler") for r in docs_rows}
+        for r in links_rows:
+            if (
+                r.get("from_tumbler") not in live_tumblers
+                or r.get("to_tumbler") not in live_tumblers
+            ):
+                collector.record(
+                    "catalog", "links",
+                    issue_class="soft_dangler",
+                    constraint="links.(from|to)_tumbler -> documents.tumbler "
+                               "(not enforced)",
+                    reason="link endpoint references a missing document; row "
+                           "imports; sample ids are <from_tumbler>:<to_tumbler>",
+                    action="flagged",
+                    sample_id=f"{r.get('from_tumbler')}:{r.get('to_tumbler')}",
+                )
 
     _log.info(
         "catalog_etl.start",
@@ -553,6 +575,11 @@ def migrate_catalog(
         total_written=total_written,
         by_table={k: v for k, v in results.items()},
     )
+    if collector is not None:
+        for table, counts in results.items():
+            collector.count_read("catalog", table, counts.get("read", 0))
+            collector.count_written("catalog", table, counts.get("written", 0))
+
     return results
 
 
