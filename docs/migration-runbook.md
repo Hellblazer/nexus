@@ -1,0 +1,288 @@
+# Migration-Window Operations Runbook (SQLite/Chroma to Postgres)
+
+Operational narrative for the operator running the next T2 + T3 migration
+onto the PG16 + pgvector + nexus-service stack (RDR-152/153/155). The flag
+reference lives in [`docs/cli-reference.md` § nx storage](cli-reference.md#nx-storage);
+this document is the order of operations, the failure playbook, and how to
+read the artifacts. Precedent: the 2026-06-10 production run (115,716
+chunks, ~10:46 to 15:05 PT, zero lost, est. $4-6 Voyage; permanent record:
+T2 `nexus_rdr/155-production-migration-complete`).
+
+## 1. Before you start: the quiescent window
+
+The vector ETL's post-write verification compares an exact source count
+against an exact target count per collection
+(`src/nexus/migration/vector_etl.py`, `migrate_collections`): "concurrent
+serving writes into the same collection during the ETL would inflate the
+target count and read as a (conservative) failure." A mismatch is a
+`failed` migration, never a green one. Rollback runs the same comparison
+arithmetic, so the whole window (migrate, validate, and any rollback) must
+be quiescent.
+
+Stop everything that writes: other Claude Code sessions (every session
+hosts an `nx-mcp` process with an in-process aspect worker writing T2, and
+MCP `store_put` writes T3), any `nx index` runs ("Run the migration with
+indexing paused", per the docstring), and anything else driving the
+service's vector upsert path. On the T2 side, copy-not-move means rows
+written to the SQLite source after the ETL's read pass simply are not
+migrated: stop the writers so the snapshot is complete.
+
+Then verify the stack is healthy:
+
+```
+nx daemon service start        # if not already running
+nx daemon service status
+```
+
+`status` is the single is-the-stack-healthy surface
+([cli-reference § nx daemon service](cli-reference.md#nx-daemon-service-start--stop--status)).
+Check, in order:
+
+- The lease (host, port, JAR pid, generation) and a passing live `/health`
+  probe (`{"status":"ok","db":"up"}`).
+- The PG cluster block: up, pgvector version installed, `pg_credentials`
+  path resolvable.
+- The `/version` handshake: `app_version`, `schema_latest_id`,
+  `schema_changeset_count`, and critically `embedding_mode`: it must say
+  `voyage`. In `onnx-local` mode the service refuses every `voyage-*`
+  collection with HTTP 422 (nexus-pebfx.2 fail-loud dispatch), so a
+  migration started in the wrong mode fails loudly per batch instead of
+  silently embedding the wrong model. If the key did not resolve the
+  supervisor logs a WARN naming the consequence; fix with
+  `nx config set voyage_api_key` (chain: explicit env > `VOYAGE_API_KEY` >
+  `config.yml` credentials).
+- No stale-JAR warning (running JAR differs from the installed sidecar).
+  Install the intended JAR first via `nx daemon service install-jar`; the
+  schema-skew gate refuses a JAR older than the database schema at spawn
+  (nexus-pebfx.4).
+
+The T2 ladder commands read the service endpoint from the environment
+(`NX_SERVICE_PORT` + `NX_SERVICE_TOKEN` are required; the per-store
+commands error with "NX_SERVICE_TOKEN is required for storage migrate
+memory" when unset, see `src/nexus/db/t2/http_memory_store.py`
+`_resolve_config`). The vectors command needs neither: it resolves
+`{url, token}` from the supervisor's ServiceRegistry lease, env as
+override (nexus-pebfx.1; addr file `~/.config/nexus/storage_service_addr.<uid>`).
+
+## 2. The two migrations
+
+Two independent ETL families land in disjoint Postgres tables. Run the T2
+ladder first: the cutover validation in section 5 joins manifest rows
+(written by the catalog ETL) against chunk rows (written by the vector
+ETL), and the 2026-06-10 production run proved that running it with empty
+catalog tables produces a vacuous pass.
+
+### T2 ladder
+
+```
+nx storage migrate all [--report PATH]
+```
+
+Runs all seven store ETLs in the RDR-152 ladder order
+(`LADDER_ORDER` in `src/nexus/migration/etl_registry.py`):
+`memory, plans, telemetry, taxonomy, aspects, chash, catalog`. Memory is
+first (smallest, fastest validation); catalog is LAST because it is
+graph-heavy: every other store's FK targets must exist before its links
+land. A store-level crash is recorded as a `failed` issue and the run
+continues, so the report covers every store it attempted.
+
+One shared `IssueCollector` spans the run and emits ONE
+`migration-report.json` (default
+`~/.config/nexus/migration-reports/migration-<id>.json`; a run always
+produces an artifact, even on a mid-run crash). The gate predicate is
+`summary.total_failed == 0`. Post-run count verification (pg_count >=
+report written, via psql against the local nx-managed cluster) is recorded
+in the artifact as `"verification"`: `verified`, `mismatch`, or a loud
+`VERIFICATION INDETERMINATE` warning when psql/credentials cannot resolve
+(never a silent skip).
+
+Note: `aspects` has no standalone command; it runs only via `migrate all`.
+
+### T3 vectors
+
+```
+nx storage migrate vectors --dry-run            # local leg, count only (no service needed)
+nx storage migrate vectors                      # local leg (~/.config/nexus/chroma)
+nx storage migrate vectors --cloud --dry-run    # cloud leg, count only
+nx storage migrate vectors --cloud              # ChromaCloud leg
+```
+
+Run BOTH legs, separately: "an ETL with only one leg is a silent
+half-migration" (`vector_etl.py` module docstring). Chunk text, chash, and
+metadata transfer byte-verbatim; the service re-embeds server-side
+(vector-identity decision (a), bead nexus-unp61); collection names are
+preserved verbatim so `topic_assignments.source_collection` references
+stay valid. Per-collection progress lines are flushed live; a
+failures-first summary table closes the run. `--collections A,B` pins a
+subset; `--dry-run` only counts source chunks and never touches the
+service.
+
+## 3. Mid-run failure: Voyage 429 / outage
+
+A batch-level failure (rate limit, timeout, service outage) shows up as a
+per-collection `failed` line and the run continues to the next collection:
+
+```
+failed        docs__1-16__voyage-context-3__v1: source=812 written=600 (94.2s) — upsert failed after 600 chunks: ...
+```
+
+(structlog event `vector_etl_upsert_failed`). The summary table sorts
+failures first, and the command exits non-zero:
+
+```
+Error: migration is NOT clean — fix the failed/skipped collections above and re-run (idempotent).
+```
+
+Re-running is safe, twice over: the server upserts on
+`(tenant, collection, chash)` so already-landed chunks are converged, not
+duplicated, and copy-not-move means the Chroma source was never modified,
+so the re-read sees exactly the same data. The exact re-run is the same
+command, optionally pinned:
+
+```
+nx storage migrate vectors --cloud --collections docs__1-16__voyage-context-3__v1
+```
+
+Production precedent: 46 of 49 cloud collections were clean on the first
+full run; 3 failed deterministically (two on a 120s client timeout against
+slow CCE batches, fixed by a 600s per-op upsert timeout; one on 62
+NUL-bearing chunks, fixed by service-side sanitization, PR #1152) and were
+re-run to a clean 49/49, EXIT=0. NUL delta: the service strips 0x00 bytes
+before embed+bind (event `upsert_nul_sanitized`), so for exactly those
+rows `sha256(stored_text)[:32] != chash`; the chash is carried source
+identity, never recomputed, so manifest joins, rollback, dedup, and
+re-migration are unaffected (affected-chash list: T2
+`nexus_rdr/155-nul-sanitization-delta`).
+
+The T2 ladder is equally idempotent ("ON CONFLICT DO NOTHING" per the
+`migration-report show` failure hint): repair the cause, re-run
+`nx storage migrate all`, and a fresh report supersedes the red one.
+
+## 4. Reading the outcome
+
+T2 report issues carry two enums, never mixed
+(`src/nexus/migration/migration_report.py`): `class` (what is wrong:
+`orphan_parent`, `identity_mismatch`, `format_anomaly`, `soft_dangler`,
+`unexpected`) and `action` (what the ETL did). Severity is a function of
+action:
+
+| action | severity | meaning |
+|---|---|---|
+| `failed` | 4 | gate-blocking, data not migrated and the run is red |
+| `skipped` | 3 | data not migrated |
+| `flagged` | 2 | imported with advisory |
+| `handled` | 1 | normalized on the way through |
+| `schema_corrected` | 0 | schema fixed; data correct |
+
+`summary.by_action` is the gate-facing rollup; `summary.total_failed == 0`
+is the gate predicate (also the RDR-152 Phase-4 SQLite-deletion gate). The
+triage surface is:
+
+```
+nx storage migration-report show <path>
+```
+
+It prints the migration window, the recorded verification verdict,
+`max_severity`, the by-action rollup, per-issue lines severity-descending
+(class/action/count/sample/reason), and `GATE: PASS` or `GATE: FAIL` with
+a non-zero exit (scriptable).
+
+Vector legs use per-collection statuses instead (no JSON artifact; the
+summary table plus exit code is the record):
+
+| status | red? | meaning |
+|---|---|---|
+| `migrated` | no | copied and count-verified exactly |
+| `dry-run` | no | counted only |
+| `skipped-empty` | no | non-conformant name AND 0 source chunks: nothing can be lost (nexus-pebfx.3) |
+| `excluded` | no | `tuples__*` prefix: session-ephemeral, dies with Chroma at P4b; excluded from default enumeration, reported never silent; naming it via `--collections` still acts on it |
+| `skipped` | yes | non-conformant name WITH data: partial-migration-never-green |
+| `failed` | yes | unreadable source, upsert failure, or post-write count mismatch |
+
+A red exit from either command means the run is not clean and must be
+re-run after triage; it never means data was destroyed (both ETLs are
+copy-not-move).
+
+## 5. Cutover validation
+
+After BOTH the catalog ETL and both vector legs are clean, run the
+manifest checks. These are direct SQL by design (P2.1 constraint, recorded
+on nexus-unp61): never `PgVectorRepository.fetchDocumentChunks`, which
+fails loud on partially-migrated documents. The SQL is generated by
+`manifest_backfill_sql()` / `manifest_orphan_sql(dim)` in
+`src/nexus/migration/vector_etl.py` and executed by the operator via psql
+as a superuser or admin role (the orphan query is deliberately
+cross-tenant: the whole-database answer is the point). Connection details
+come from `~/.config/nexus/pg_credentials`; the port is also shown by
+`nx daemon service status`.
+
+Sequence (backfill first: orphan rows with `collection IS NULL` are
+pre-backfill state, not orphans):
+
+```
+uv run python -c "from nexus.migration.vector_etl import manifest_backfill_sql; print(manifest_backfill_sql())" \
+  | psql -h 127.0.0.1 -p <PG_PORT> -U <admin> -d nexus
+
+for dim in 384 768 1024; do
+  uv run python -c "from nexus.migration.vector_etl import manifest_orphan_sql; print(manifest_orphan_sql($dim))" \
+    | psql -h 127.0.0.1 -p <PG_PORT> -U <admin> -d nexus
+done
+```
+
+Expected: the backfill touches only `collection IS NULL` rows (idempotent
+re-run), and each orphan query returns ZERO rows. An orphan row is a
+manifest entry that does not resolve to a migrated chunk. Caveat repeated
+on purpose: zero rows against empty catalog tables is a vacuous pass; run
+this only after the T2 ladder's catalog leg.
+
+Optional check (`verify_taxonomy_consistency`, same module): every
+`topic_assignments.source_collection` must resolve to a migrated
+collection. Production returned 28 unresolved values, all verified as
+pre-existing T2 drift (absent from the Chroma source too, the RDR-108
+string-copy-orphan class), not migration loss.
+
+## 6. Rollback
+
+```
+nx storage migrate vectors --rollback [--cloud] [--collections A,B]
+```
+
+`rollback_collections` deletes from pgvector exactly the chashes present
+in the source Chroma collections, nothing else. The source IS the rollback
+manifest: copy-not-move keeps it immutable, so the id set at rollback time
+equals the id set at migration time, and the source itself is never
+modified. Two fail-loud guards refuse to lie:
+
+1. Zero-resolution guard: if the target holds chunks and the source has
+   chashes but not a single lookup resolved, the lookup layer may have
+   swallowed transport errors; it raises rather than reporting a clean
+   "deleted 0".
+2. Post-delete count guard: the target count must move by exactly the
+   number deleted; if deletes were swallowed by the transport layer, it
+   raises.
+
+Both error messages say it explicitly: verify the service and re-run,
+rollback is idempotent. The standing fact (T2
+`nexus/release-boundary-since-p4a`): the Chroma sources (local and
+ChromaCloud) are untouched and remain a free rollback target until RDR-155
+P4b deletes the Chroma read path, which ships only in the second release
+of the deprecation window.
+
+## 7. If the stack dies mid-run
+
+The stack never dies silently; the evidence lives in the persistent logs
+documented in
+[cli-reference § nx daemon service, "Observability"](cli-reference.md#nx-daemon-service-start--stop--status)
+(under `~/.config/nexus/` unless noted): `logs/storage_service.log`
+(supervisor lifecycle: start/exit breadcrumbs, jar exit codes, restart
+attempts, PG recoveries), `logs/storage_service_jar.log` (the Java
+service's stdout/stderr), `logs/storage_service.crash.log` (pre-startup
+failures of the detached supervisor), and `<pg_data>/pg.log` (the
+nx-managed Postgres cluster).
+
+The absence convention: a supervisor death WITHOUT a
+`storage_service_supervisor_exit` breadcrumb in `storage_service.log`
+means it was killed, not that it chose to exit; check the jar log tail and
+`pg.log` next. Once `nx daemon service status` is green again, re-run the
+interrupted command: both ETL families are idempotent, and a collection
+interrupted mid-upsert re-converges on `(tenant, collection, chash)`.

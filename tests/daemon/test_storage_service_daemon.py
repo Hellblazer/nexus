@@ -1241,3 +1241,120 @@ class TestSchemaSkewGateWiring:
             payload = sup.start()
         gate.assert_called_once()
         assert payload["port"] == 19500
+
+
+# ---------------------------------------------------------------------------
+# nexus-14k0m: simultaneous JAR+PG death must attempt PG recovery
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedSupervisor:
+    """run-loop double for ``_supervise_until_stopped``: heartbeat_once pops
+    scripted (jar_running, pg_ok) tuples; every lifecycle call is recorded in
+    ``calls`` so ordering assertions are exact."""
+
+    def __init__(
+        self,
+        beats: list[tuple[bool, bool]],
+        stop_requested,
+        *,
+        ensure_pg_raises: Exception | None = None,
+        respawn_raises: Exception | None = None,
+    ) -> None:
+        self._beats = list(beats)
+        self._stop = stop_requested
+        self._ensure_pg_raises = ensure_pg_raises
+        self._respawn_raises = respawn_raises
+        self.calls: list[str] = []
+
+    def start(self) -> None:
+        self.calls.append("start")
+
+    def heartbeat_once(self) -> tuple[bool, bool]:
+        if not self._beats:
+            # Script exhausted: end the loop instead of inventing beats.
+            self._stop.set()
+            return True, True
+        beat = self._beats.pop(0)
+        if not self._beats:
+            self._stop.set()  # last scripted beat — loop exits after handling
+        return beat
+
+    def _ensure_pg_running(self) -> None:
+        self.calls.append("ensure_pg")
+        if self._ensure_pg_raises is not None:
+            raise self._ensure_pg_raises
+
+    def _respawn(self) -> None:
+        self.calls.append("respawn")
+        if self._respawn_raises is not None:
+            raise self._respawn_raises
+
+    def stop(self) -> None:
+        self.calls.append("stop")
+
+
+class TestSimultaneousJarPgDeath:
+    """nexus-14k0m (P5 gate code-review HIGH): heartbeat (False, False)
+    previously hit only the ``not jar_running`` branch, whose _respawn()
+    never restarts PG — the new jar's /health can never pass, the restart
+    budget burns down, and the supervisor exits without ONE pg_ctl attempt.
+
+    The (False, False) beat models BOTH real routes into jar_running=False
+    (process exit, which hardcodes pg_ok=False; stuck-JVM threshold, which
+    carries a live PG probe) — at the run-loop seam they are
+    indistinguishable, so one scripted beat covers both (CRE M2)."""
+
+    def _run(self, sup_factory):
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        stop = threading.Event()
+        sup = sup_factory(stop)
+        with patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0):
+            code = ssd._supervise_until_stopped(sup, stop, lambda: None)
+        return sup, code
+
+    def test_pg_restarted_before_jar_respawn(self) -> None:
+        sup, code = self._run(
+            lambda stop: _ScriptedSupervisor([(False, False)], stop)
+        )
+        assert code == 0
+        assert "ensure_pg" in sup.calls, (
+            "simultaneous death must attempt PG recovery, not only respawn"
+        )
+        assert sup.calls.index("ensure_pg") < sup.calls.index("respawn"), (
+            "PG must be up BEFORE the jar respawn or /health can never pass"
+        )
+
+    def test_pg_restart_failure_exits_4_without_burning_respawn(self) -> None:
+        sup, code = self._run(
+            lambda stop: _ScriptedSupervisor(
+                [(False, False)], stop,
+                ensure_pg_raises=StorageServiceStartError("pg_ctl failed"),
+            )
+        )
+        assert code == 4, "PG-unrecoverable is the exit-4 contract"
+        assert "ensure_pg" in sup.calls, "exit 4 must come FROM the PG attempt"
+        assert "respawn" not in sup.calls, (
+            "respawning the jar with PG down is futile budget burn"
+        )
+
+    def test_jar_only_death_does_not_touch_pg(self) -> None:
+        sup, code = self._run(
+            lambda stop: _ScriptedSupervisor([(False, True)], stop)
+        )
+        assert code == 0
+        assert "respawn" in sup.calls
+        assert "ensure_pg" not in sup.calls, (
+            "jar-only death keeps the existing no-PG-churn behaviour"
+        )
+
+    def test_pg_only_death_unchanged(self) -> None:
+        sup, code = self._run(
+            lambda stop: _ScriptedSupervisor([(True, False)], stop)
+        )
+        assert code == 0
+        assert sup.calls.count("ensure_pg") == 1
+        assert "respawn" not in sup.calls

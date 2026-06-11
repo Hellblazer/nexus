@@ -723,6 +723,14 @@ class StorageServiceSupervisor:
         Reuses ``pg_provision._start_cluster`` so PG lifecycle logic stays
         in the provisioner, not here. Raises ``StorageServiceStartError``
         if PG cannot be started.
+
+        Known limitation (nexus-14k0m critic): "accepting" means TCP
+        accept, not query readiness. A PG in crash recovery (WAL replay)
+        accepts connections while rejecting queries, so a success here
+        does not guarantee the jar's subsequent /health ready-wait (60s)
+        will pass — a long replay can still burn one respawn attempt. A
+        ``pg_isready``-grade probe is the follow-on if that residual is
+        ever observed in practice.
         """
         if _port_accepting(_SERVICE_HOST, self._pg_port):
             _log.debug("storage_service_pg_already_running", port=self._pg_port)
@@ -950,6 +958,11 @@ def run_storage_supervisor(
     PG-only failure: when heartbeat_once() returns (True, False), the run loop
     calls _ensure_pg_running() directly — a PG restart without a jar respawn.
 
+    Simultaneous JAR+PG death (False, False): PG is restarted FIRST, then the
+    jar respawns (nexus-14k0m) — a respawn against a dead PG can never pass
+    /health and would burn the restart budget with no PG attempt. If PG is
+    unrecoverable the supervisor exits 4 without consuming respawn budget.
+
     Jar failure or stuck JVM: when heartbeat_once() returns (False, _),
     auto-restart up to _MAX_RESTART_ATTEMPTS times in the current window.
     The (False, _) signal is raised both when the jar process exits AND when
@@ -1034,10 +1047,36 @@ def _supervise_until_stopped(
 
         if not jar_running:
             # Jar exited (or stuck-JVM threshold hit) — attempt auto-restart.
-            # NOTE: _respawn() does NOT call _ensure_pg_running(); if PG is also
-            # down the new jar's /health will keep failing until PG is restarted
-            # (next loop's `elif not pg_ok` branch) or the restart budget is
-            # exhausted and the supervisor exits.
+            if not pg_ok:
+                # nexus-14k0m: simultaneous JAR+PG death. _respawn() never
+                # starts PG, and the `elif not pg_ok` branch below only fires
+                # while the jar is ALIVE — so without this, the respawned
+                # jar's /health could never pass and the restart budget
+                # burned down with zero pg_ctl attempts. Restart PG FIRST;
+                # if PG is unrecoverable, respawning the jar is futile —
+                # exit 4 (the PG-unrecoverable contract) with budget intact.
+                # Covers BOTH routes into jar_running=False (process exit
+                # hardcodes pg_ok=False; stuck-JVM carries a live probe) —
+                # _ensure_pg_running() re-probes, so a hardcoded False with
+                # PG actually up is a cheap no-op, never a false exit 4.
+                # Loop invariant: heartbeat_once() returned (False, False)
+                # with _proc/_supervisor still set (stop() only runs after
+                # the loop) — do not call sup.stop() mid-loop.
+                _log.warning(
+                    "storage_service_jar_and_pg_died",
+                    msg="jar and PG both down; restarting PG before jar respawn",
+                )
+                try:
+                    sup._ensure_pg_running()
+                    _log.info("storage_service_pg_restarted_before_respawn")
+                except StorageServiceStartError as exc:
+                    _log.error(
+                        "storage_service_jar_and_pg_restart_failed",
+                        error=str(exc),
+                        msg="Could not restart PG; supervisor exiting",
+                    )
+                    exit_code = 4
+                    break
             _log.warning("storage_service_jar_exited", msg="jar child gone; attempting restart")
             try:
                 sup._respawn()
