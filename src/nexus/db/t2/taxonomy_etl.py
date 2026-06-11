@@ -348,6 +348,13 @@ def migrate_taxonomy_rows(
     # The strict Postgres FKs would reject these anyway (that is the
     # diagnostic); pre-checking lets us SKIP-AND-RECORD with exact counts
     # and composite-key samples instead of burning a round-trip per orphan.
+    #
+    # Classification note (P2 critique observation): the valid set is the
+    # SOURCE topics, not the migrated ones. If a topic later FAILS to
+    # import, its assignments pass this pre-check, hit the server FK, and
+    # are recorded as unexpected/FAILED by the catch-all — correctly so:
+    # for those rows the problem is the parent's import failure (visible as
+    # its own failed issue), not orphan parentage in the source data.
     # int() is safe: the SQLite schema enforces NOT NULL INTEGER on
     # topics.id / topic_assignments.topic_id / topic_links.(from|to)_topic_id,
     # and the source is opened read-only (no concurrent mutation).
