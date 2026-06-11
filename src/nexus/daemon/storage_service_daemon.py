@@ -375,6 +375,25 @@ class StorageServiceSupervisor:
         # Use the stable token so clients don't get 401 after a restart.
         env["NX_SERVICE_TOKEN"] = self._service_token
 
+        # nexus-pebfx.2: the JAR only reads NX_VOYAGE_API_KEY; without it the
+        # service embeds ONNX-384 and refuses every voyage-* collection. Resolve
+        # through the nexus credential chain (VOYAGE_API_KEY env > config.yml
+        # credentials) so `nx daemon service start` works without manual env
+        # plumbing. An explicit NX_VOYAGE_API_KEY in the caller's env wins.
+        if not env.get("NX_VOYAGE_API_KEY"):
+            from nexus.config import get_credential
+            voyage_key = get_credential("voyage_api_key")
+            if voyage_key:
+                env["NX_VOYAGE_API_KEY"] = voyage_key
+                _log.info("storage_service_voyage_key_resolved", source="credential_chain")
+            else:
+                _log.warning(
+                    "storage_service_no_voyage_key",
+                    embedding_mode="onnx-local",
+                    consequence="voyage-* collections will be refused (HTTP 422)",
+                    hint="set VOYAGE_API_KEY or `nx config set voyage_api_key <key>`",
+                )
+
         java_bin = self._find_java()
         proc = subprocess.Popen(
             [java_bin, "-jar", str(self._jar_path)],

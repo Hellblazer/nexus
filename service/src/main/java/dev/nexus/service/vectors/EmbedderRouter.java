@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * RDR-152 bead nexus-gmiaf.21 — Routes embedding requests to the correct embedder
@@ -46,6 +47,16 @@ public final class EmbedderRouter implements Embedder {
     private final String         inputType;             // "document" or "query"
 
     /**
+     * RDR-103 model-segment → embedder dispatch table (bead nexus-pebfx.2).
+     * Built per mode at construction; the collection name's model segment is
+     * the authority for conformant names — prefix routing is the fallback for
+     * non-conformant names only. A conformant collection whose model token is
+     * absent here is REFUSED ({@link EmbeddingModelUnavailableException}),
+     * never silently embedded with a different model.
+     */
+    private final Map<String, Embedder> modelEmbedders;
+
+    /**
      * Local-mode constructor: all collections embedded via ONNX.
      *
      * @param onnxEmbedder the ONNX embedder instance
@@ -56,10 +67,12 @@ public final class EmbedderRouter implements Embedder {
         this.voyageCodeEmbedder  = null;
         this.cceEmbedder         = null;
         this.inputType           = inputType;
+        this.modelEmbedders      = Map.of(onnxEmbedder.modelToken(), onnxEmbedder);
     }
 
     /**
-     * Cloud-mode constructor: routes by collection prefix.
+     * Cloud-mode constructor: routes by collection model segment (prefix for
+     * non-conformant names).
      *
      * @param onnxEmbedder  ONNX fallback (used when collection prefix is unrecognised)
      * @param voyageApiKey  Voyage AI API key
@@ -70,6 +83,24 @@ public final class EmbedderRouter implements Embedder {
         this.voyageCodeEmbedder = new VoyageEmbedder(voyageApiKey, "voyage-code-3", inputType);
         this.cceEmbedder        = new CceEmbedder(voyageApiKey, inputType);
         this.inputType          = inputType;
+        // voyage-3 gets its own standard-embed instance: prefix routing sent it
+        // to CCE (voyage-context-3) — the same-dim wrong-model contamination
+        // hole this dispatch table closes.
+        this.modelEmbedders     = Map.of(
+                onnxEmbedder.modelToken(),       onnxEmbedder,
+                voyageCodeEmbedder.modelToken(), voyageCodeEmbedder,
+                cceEmbedder.modelToken(),        cceEmbedder,
+                "voyage-3", new VoyageEmbedder(voyageApiKey, "voyage-3", inputType));
+    }
+
+    /** Embedding mode for banners and refusal messages. */
+    public String modeName() {
+        return voyageCodeEmbedder == null ? "onnx-local" : "voyage";
+    }
+
+    /** Model tokens this router can embed for (sorted, for stable banner output). */
+    public List<String> availableModels() {
+        return modelEmbedders.keySet().stream().sorted().toList();
     }
 
     /**
@@ -80,7 +111,7 @@ public final class EmbedderRouter implements Embedder {
      * @return embedding vectors aligned with input
      */
     public List<float[]> embedForCollection(String collection, List<String> texts) {
-        Embedder embedder = resolveEmbedder(collection);
+        Embedder embedder = resolveEmbedderStrict(collection);
         log.debug("event=embed_router collection={} embedder={} count={}",
                 collection, embedder.getClass().getSimpleName(), texts.size());
         return embedder.embed(texts);
@@ -113,7 +144,7 @@ public final class EmbedderRouter implements Embedder {
      * the original JSON double values without float32 truncation.
      */
     public List<double[]> embedDoubleForCollection(String collection, List<String> texts) {
-        Embedder embedder = resolveEmbedder(collection);
+        Embedder embedder = resolveEmbedderStrict(collection);
         log.debug("event=embed_double_router collection={} embedder={} count={}",
                 collection, embedder.getClass().getSimpleName(), texts.size());
 
@@ -135,11 +166,62 @@ public final class EmbedderRouter implements Embedder {
     }
 
     /**
-     * Resolve the appropriate embedder for a collection name.
+     * Strict, model-segment-authoritative resolution (bead nexus-pebfx.2).
+     *
+     * <p>For a four-segment conformant name, the RDR-103 model segment decides
+     * the embedder — never the prefix. Model identity is validated by
+     * construction: the dispatched embedder's {@link Embedder#modelToken()}
+     * keys the table, so a same-dimension wrong-model embed cannot happen.
+     * A conformant name whose model token has no embedder in this mode is
+     * REFUSED loudly instead of silently embedded with the wrong model
+     * (no-silent-fallbacks-for-correctness):
+     * <ul>
+     *   <li>onnx-local mode + {@code voyage-*} segment → refuse (no credentials)
+     *   <li>any mode + unknown segment (e.g. {@code bge-base-en-v15-768} with
+     *       no wired embedder) → refuse
+     *   <li>cloud mode + {@code minilm-l6-v2-384} segment → ONNX (the segment
+     *       is the authority; prefix routing wrongly sent these to CCE)
+     * </ul>
+     *
+     * <p>Non-conformant names keep legacy {@link #resolveEmbedder prefix
+     * routing} (test fixtures and the parity-gate /embed endpoint).
+     *
+     * @throws EmbeddingModelUnavailableException when a conformant collection's
+     *         model segment cannot be served in the current mode (→ HTTP 422)
+     */
+    public Embedder resolveEmbedderStrict(String collection) {
+        if (collection != null) {
+            String[] segments = collection.split("__");
+            if (segments.length == 4) {
+                Embedder embedder = modelEmbedders.get(segments[2]);
+                if (embedder == null) {
+                    throw new EmbeddingModelUnavailableException(
+                        "service (embedding mode " + modeName() + ") has no embedder for "
+                        + "model '" + segments[2] + "' — refusing to embed collection '"
+                        + collection + "' with a different model. Available models: "
+                        + availableModels()
+                        + ("onnx-local".equals(modeName())
+                           ? ". Voyage collections need NX_VOYAGE_API_KEY in the service "
+                             + "environment (supervisor plumbs it from the nexus credential "
+                             + "chain when set)."
+                           : "."));
+                }
+                return embedder;
+            }
+        }
+        return resolveEmbedder(collection);
+    }
+
+    /**
+     * Resolve the appropriate embedder for a collection name by PREFIX.
      *
      * <p>Returns the CCE embedder for CCE prefix collections (in cloud mode),
      * the standard Voyage embedder for {@code code__} (in cloud mode), or the
      * ONNX embedder for everything else / local mode.
+     *
+     * <p>Legacy fallback for non-conformant names only — production embed
+     * paths go through {@link #resolveEmbedderStrict} (model segment is the
+     * authority for conformant names).
      */
     public Embedder resolveEmbedder(String collection) {
         if (voyageCodeEmbedder == null) {

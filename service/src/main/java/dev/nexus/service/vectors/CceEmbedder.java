@@ -89,6 +89,11 @@ public final class CceEmbedder implements Embedder {
         this.mapper = new ObjectMapper();
     }
 
+    @Override
+    public String modelToken() {
+        return "voyage-context-3";
+    }
+
     /**
      * Embed a batch of texts via CCE, one text per API call.
      *

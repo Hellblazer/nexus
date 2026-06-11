@@ -111,14 +111,23 @@ public final class Main {
         String voyageKey = System.getenv("NX_VOYAGE_API_KEY");
         EmbedderRouter docEmbedRouter;
         EmbedderRouter qryEmbedRouter;
+        // nexus-pebfx.2: LOUD one-line embedding-mode banner. The 2026-06-10
+        // migration ran for hours against silent ONNX-384 fallback because the
+        // mode was invisible; onnx-local now logs at WARN and names the refusal
+        // behaviour so a missing key is unmissable in the service log.
         if (voyageKey != null && !voyageKey.isBlank()) {
             docEmbedRouter = new EmbedderRouter(onnx, voyageKey, "document");
             qryEmbedRouter = new EmbedderRouter(onnx, voyageKey, "query");
-            log.info("event=vector_backend_pgvector embedders=voyage+onnx_fallback");
+            log.info("event=embedding_mode_banner mode={} models={} backend=pgvector",
+                    docEmbedRouter.modeName(), docEmbedRouter.availableModels());
         } else {
             docEmbedRouter = new EmbedderRouter(onnx, "document");
             qryEmbedRouter = new EmbedderRouter(onnx, "query");
-            log.info("event=vector_backend_pgvector embedders=onnx_only");
+            log.warn("event=embedding_mode_banner mode={} models={} backend=pgvector "
+                    + "voyage_collections=REFUSED_422 hint=\"set NX_VOYAGE_API_KEY (or let "
+                    + "the supervisor plumb it from VOYAGE_API_KEY / config.yml credentials) "
+                    + "to serve voyage-* collections\"",
+                    docEmbedRouter.modeName(), docEmbedRouter.availableModels());
         }
         var pgVectorRepo = new PgVectorRepository(new TenantScope(ds), docEmbedRouter,
                                                   qryEmbedRouter);

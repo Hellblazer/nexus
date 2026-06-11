@@ -1145,3 +1145,61 @@ def test_module_does_not_define_lease_record() -> None:
     assert "class LeaseRecord" not in src, (
         "LeaseRecord must be defined only in service_registry.py"
     )
+
+
+# ---------------------------------------------------------------------------
+# nexus-pebfx.2: supervisor plumbs NX_VOYAGE_API_KEY into the JAR env
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnServiceVoyageKeyPlumbing:
+    """The 2026-06-10 migration ran against silent ONNX-384 fallback because
+    the JAR only reads ``NX_VOYAGE_API_KEY`` and nothing put it there. The
+    supervisor must resolve the key through the nexus credential chain
+    (``VOYAGE_API_KEY`` env > ``config.yml`` credentials) and pass it down."""
+
+    def _spawn_env(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> dict[str, str]:
+        """Run _spawn_service with Popen mocked; return the env it received."""
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict[str, str] = {}
+
+        def _fake_popen(cmd, env=None, **kwargs):
+            captured.update(env or {})
+            return MagicMock(pid=43210)
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon.subprocess.Popen", _fake_popen,
+        )
+        with patch.object(sup, "_find_java", return_value="/usr/bin/java"):
+            sup._spawn_service()
+        return captured
+
+    def test_explicit_nx_voyage_api_key_passes_through(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_VOYAGE_API_KEY", "explicit-key")
+        monkeypatch.setenv("VOYAGE_API_KEY", "chain-key-should-lose")
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        assert env["NX_VOYAGE_API_KEY"] == "explicit-key"
+
+    def test_key_resolved_from_credential_chain(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+        with patch(
+            "nexus.config.get_credential", return_value="chain-key",
+        ) as get_cred:
+            env = self._spawn_env(config_dir, clock, monkeypatch)
+        get_cred.assert_called_once_with("voyage_api_key")
+        assert env["NX_VOYAGE_API_KEY"] == "chain-key"
+
+    def test_no_key_anywhere_leaves_env_unset(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        with patch("nexus.config.get_credential", return_value=""):
+            env = self._spawn_env(config_dir, clock, monkeypatch)
+        assert "NX_VOYAGE_API_KEY" not in env

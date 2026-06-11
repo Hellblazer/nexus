@@ -62,6 +62,11 @@ public final class OnnxEmbedder implements Embedder {
         this(DEFAULT_MODEL_PATH, DEFAULT_TOKENIZER_PATH);
     }
 
+    @Override
+    public String modelToken() {
+        return "minilm-l6-v2-384";
+    }
+
     /**
      * Construct with explicit paths (for testing with non-default cache locations).
      *
