@@ -806,6 +806,274 @@ class SoftDeleteTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 9 — Manifest-less chunk safety (CRITICAL-1: CRE finding, 2026-06-11)
+    //
+    // MCP store_put / nx store put writes chunks WITHOUT writing manifest rows
+    // (catalog_store_hook registers catalog_documents but does NOT insert
+    // catalog_document_chunks). These "manifest-less" chunks MUST NOT be swept
+    // as orphans by purge_trash AND must appear in live_chunks.
+    //
+    // Manifest-less-is-live contract (until RDR-145):
+    //   purge_trash may sweep a chunk ONLY IF EXISTS(manifest row) AND NOT EXISTS
+    //   (live manifest row). A chunk with NO manifest rows must survive.
+    //   live_chunks: visible if NOT EXISTS(manifest) OR EXISTS(live manifest).
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(90)
+    void purgeTrash_manifestlessChunk_survives() throws Exception {
+        // Arrange: insert a chunk_384 row with NO catalog_document_chunks manifest row.
+        // This simulates an MCP store_put / nx store put note — no associated catalog doc.
+        final String manifestlessChash = validChash("manifestless9090");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertCollection(su, TENANT_A, COLLECTION_A);
+            insertChunk384(su, TENANT_A, COLLECTION_A, manifestlessChash, "manifest-less note chunk");
+        }
+
+        // Verify the chunk exists and has NO manifest rows (precondition)
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM nexus.chunks_384 " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND chash = '" + manifestlessChash + "'");
+            rs.next();
+            assertThat(rs.getInt(1))
+                .as("precondition: manifest-less chunk must exist before purge")
+                .isEqualTo(1);
+
+            ResultSet mf = su.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND chash = '" + manifestlessChash + "'");
+            mf.next();
+            assertThat(mf.getInt(1))
+                .as("precondition: no manifest rows for this chash")
+                .isEqualTo(0);
+        }
+
+        // Act: purge_trash with 0-second interval (would sweep anything eligible)
+        try (Connection svc = svcDs.getConnection()) {
+            svc.createStatement().execute(
+                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            svc.createStatement().execute(
+                "SELECT " + FN_PURGE + "('0 seconds'::interval)");
+        }
+
+        // Assert: the manifest-less chunk MUST still exist (exact == 1)
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM nexus.chunks_384 " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND chash = '" + manifestlessChash + "'");
+            rs.next();
+            assertThat(rs.getInt(1))
+                .as("manifest-less chunk must survive purge_trash " +
+                    "(no manifest rows → not eligible for orphan sweep)")
+                .isEqualTo(1);
+        }
+    }
+
+    @Test @Order(91)
+    void liveChunks_includesManifestlessChunk() throws Exception {
+        // Arrange: insert a fresh manifest-less chunk (no catalog_document_chunks row).
+        final String manifestlessChash = validChash("manifestless9191");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertCollection(su, TENANT_A, COLLECTION_A);
+            insertChunk384(su, TENANT_A, COLLECTION_A, manifestlessChash, "manifest-less live_chunks note");
+        }
+
+        // Assert: the chunk appears in live_chunks (NOT EXISTS(manifest) → visible)
+        // The svc role reads via GUC-scoped RLS; live_chunks is SECURITY INVOKER.
+        try (Connection svc = svcDs.getConnection()) {
+            svc.createStatement().execute(
+                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            ResultSet rs = svc.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS + " " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND chash = '" + manifestlessChash + "'");
+            rs.next();
+            assertThat(rs.getInt(1))
+                .as("manifest-less chunk must appear in live_chunks " +
+                    "(NOT EXISTS(manifest row) → always live)")
+                .isEqualTo(1);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 10 — Double-trash idempotency (SIG finding, 2026-06-11)
+    //
+    // document_trash must have AND deleted_at IS NULL so a second call does NOT
+    // reset the deleted_at timestamp. Without the guard the purge age clock
+    // would restart on every re-trash call.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(92)
+    void doubleTrash_doesNotResetDeletedAt() throws Exception {
+        final String tumbler = "sd-owner-a.92";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertCatalogDocument(su, TENANT_A, tumbler);
+        }
+
+        // First trash — sets deleted_at
+        try (Connection svc = svcDs.getConnection()) {
+            svc.createStatement().execute(
+                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            svc.createStatement().execute(
+                "SELECT " + FN_TRASH + "('" + tumbler + "')");
+        }
+
+        // Capture the timestamp after the FIRST trash call
+        java.sql.Timestamp firstDeletedAt;
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT deleted_at FROM nexus.catalog_documents " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumbler + "'");
+            assertThat(rs.next()).as("document must exist after first trash").isTrue();
+            firstDeletedAt = rs.getTimestamp("deleted_at");
+            assertThat(firstDeletedAt)
+                .as("deleted_at must be non-null after first trash")
+                .isNotNull();
+        }
+
+        // Second trash — must NOT change deleted_at (AND deleted_at IS NULL guard)
+        try (Connection svc = svcDs.getConnection()) {
+            svc.createStatement().execute(
+                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            svc.createStatement().execute(
+                "SELECT " + FN_TRASH + "('" + tumbler + "')");
+        }
+
+        // Assert: deleted_at timestamp unchanged after second call (exact same value)
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT deleted_at FROM nexus.catalog_documents " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumbler + "'");
+            assertThat(rs.next()).as("document must still exist after second trash").isTrue();
+            java.sql.Timestamp secondDeletedAt = rs.getTimestamp("deleted_at");
+            assertThat(secondDeletedAt)
+                .as("deleted_at must not be reset by a second document_trash call " +
+                    "(AND deleted_at IS NULL guard must prevent clock reset)")
+                .isEqualTo(firstDeletedAt);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 11 — registerDocument / updateDocument tombstone contracts (HIGH)
+    //
+    // registerDocument must treat a tombstoned source_uri as expired — the
+    // idempotency check filters deleted_at IS NULL so a re-registration
+    // allocates a NEW tumbler rather than returning the old tombstoned one.
+    //
+    // updateDocument must refuse to update a tombstoned doc (returns 0).
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(93)
+    void registerDocument_tombstonedSourceUri_allocatesNewTumbler() throws Exception {
+        // Build a CatalogRepository backed by the superuser DataSource so the owner
+        // upsert inside registerDocument succeeds. The tombstone logic under test lives
+        // in the WHERE clause of the idempotency SELECT (deleted_at IS NULL filter) —
+        // this is application-layer logic, not an RLS contract; superuser is appropriate.
+        try (var suDs = PgContainerHelper.superuserDataSource(pg)) {
+            var repo = new dev.nexus.service.db.CatalogRepository(
+                new dev.nexus.service.db.TenantScope(suDs));
+
+            final String ownerPrefix  = "sd-owner-reg93";
+            final String srcUri       = "file:///tmp/rdr156-p1-reg93-test.md";
+
+            // Step 1: register a document — gets tumbler sd-owner-reg93.1
+            String firstTumbler = repo.registerDocument(TENANT_A, ownerPrefix, java.util.Map.of(
+                "title",      "Reg93 Doc",
+                "source_uri", srcUri,
+                "content_type", "rdr",
+                "corpus",     "rdr"
+            ));
+            assertThat(firstTumbler)
+                .as("first registration must succeed and return a tumbler")
+                .isNotNull()
+                .startsWith(ownerPrefix + ".");
+
+            // Step 2: verify idempotency — same source_uri returns same tumbler (LIVE doc)
+            String idempotentTumbler = repo.registerDocument(TENANT_A, ownerPrefix, java.util.Map.of(
+                "title",      "Reg93 Doc (repeat)",
+                "source_uri", srcUri,
+                "content_type", "rdr",
+                "corpus",     "rdr"
+            ));
+            assertThat(idempotentTumbler)
+                .as("re-registration of a live source_uri must return the SAME existing tumbler")
+                .isEqualTo(firstTumbler);
+
+            // Step 3: tombstone the document via Java deleteDocument (uses DSL.currentOffsetDateTime())
+            int tombstoned = repo.deleteDocument(TENANT_A, firstTumbler);
+            assertThat(tombstoned)
+                .as("deleteDocument must affect exactly 1 row")
+                .isEqualTo(1);
+
+            // Step 4: re-register same source_uri — tombstone is NOT live, must allocate NEW tumbler
+            String newTumbler = repo.registerDocument(TENANT_A, ownerPrefix, java.util.Map.of(
+                "title",      "Reg93 Doc (re-registered after tombstone)",
+                "source_uri", srcUri,
+                "content_type", "rdr",
+                "corpus",     "rdr"
+            ));
+            assertThat(newTumbler)
+                .as("re-registration after tombstone must allocate a NEW tumbler, " +
+                    "not return the tombstoned one (idempotency check filters deleted_at IS NULL)")
+                .isNotEqualTo(firstTumbler);
+            assertThat(newTumbler)
+                .as("new tumbler must still be under the same owner prefix")
+                .startsWith(ownerPrefix + ".");
+        }
+    }
+
+    @Test @Order(94)
+    void updateDocument_tombstonedDoc_returnsZero() throws Exception {
+        try (var suDs = PgContainerHelper.superuserDataSource(pg)) {
+            var repo = new dev.nexus.service.db.CatalogRepository(
+                new dev.nexus.service.db.TenantScope(suDs));
+
+            final String ownerPrefix = "sd-owner-upd94";
+            final String srcUri      = "file:///tmp/rdr156-p1-upd94-test.md";
+
+            // Register a document
+            String tumbler = repo.registerDocument(TENANT_A, ownerPrefix, java.util.Map.of(
+                "title",      "Upd94 Doc",
+                "source_uri", srcUri,
+                "content_type", "rdr",
+                "corpus",     "rdr"
+            ));
+
+            // Verify updateDocument works on a live doc (returns 1)
+            int liveUpdate = repo.updateDocument(TENANT_A, tumbler, java.util.Map.of("title", "Upd94 Updated"));
+            assertThat(liveUpdate)
+                .as("updateDocument on a live doc must return 1")
+                .isEqualTo(1);
+
+            // Tombstone the document
+            int tombstoned = repo.deleteDocument(TENANT_A, tumbler);
+            assertThat(tombstoned).as("deleteDocument must return 1").isEqualTo(1);
+
+            // Act: updateDocument on tombstoned doc
+            int deadUpdate = repo.updateDocument(TENANT_A, tumbler, java.util.Map.of("title", "Should Not Apply"));
+            assertThat(deadUpdate)
+                .as("updateDocument on a tombstoned doc must return 0 (AND deleted_at IS NULL guard)")
+                .isEqualTo(0);
+
+            // Verify the title was NOT changed (tombstone is intact; title is pre-tombstone value)
+            try (Connection su = pg.createConnection("")) {
+                ResultSet rs = su.createStatement().executeQuery(
+                    "SELECT title, deleted_at FROM nexus.catalog_documents " +
+                    "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumbler + "'");
+                assertThat(rs.next()).as("tombstoned doc row must still exist").isTrue();
+                assertThat(rs.getString("title"))
+                    .as("title must remain at pre-tombstone value; update on dead doc must not apply")
+                    .isEqualTo("Upd94 Updated");
+                assertThat(rs.getTimestamp("deleted_at"))
+                    .as("deleted_at must remain non-null (doc is still tombstoned)")
+                    .isNotNull();
+            }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // HELPERS
     // ══════════════════════════════════════════════════════════════════════════
 

@@ -364,10 +364,15 @@ public final class CatalogRepository {
 
             // Idempotency check BEFORE claiming a sequence number — avoids permanent seq gaps
             // on re-registration of existing documents.
+            // Idempotency check: only match LIVE (non-tombstoned) docs.
+            // A tombstoned source_uri re-registration allocates a NEW tumbler;
+            // the trash entry is left untouched (users can restore or purge it separately).
             String srcUri = s(fields, "source_uri", "");
             if (!srcUri.isEmpty()) {
                 var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
-                                  .where(F_DOC_TENANT.eq(tenant).and(F_DOC_URI.eq(srcUri)))
+                                  .where(F_DOC_TENANT.eq(tenant)
+                                         .and(F_DOC_URI.eq(srcUri))
+                                         .and(F_DOC_DELETED_AT.isNull()))
                                   .fetchOne();
                 if (existing != null) return existing.value1();
             }
@@ -376,7 +381,8 @@ public final class CatalogRepository {
                 var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
                                   .where(F_DOC_TENANT.eq(tenant)
                                          .and(F_DOC_FPATH.eq(filePath))
-                                         .and(F_DOC_TUMBLER.startsWith(ownerPrefix + ".")))
+                                         .and(F_DOC_TUMBLER.startsWith(ownerPrefix + "."))
+                                         .and(F_DOC_DELETED_AT.isNull()))
                                   .fetchOne();
                 if (existing != null) return existing.value1();
             }
@@ -442,7 +448,12 @@ public final class CatalogRepository {
         });
     }
 
-    /** Update mutable document fields. Only non-null fields in the map are updated. */
+    /**
+     * Update mutable document fields. Only non-null fields in the map are updated.
+     * Refuses to update tombstoned documents (returns 0).
+     * Silently strips {@code deleted_at} from the input map — callers must use
+     * {@code document_trash} / {@code document_restore} to manage the tombstone column.
+     */
     public int updateDocument(String tenant, String tumbler, Map<String, Object> fields) {
         if (fields.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
@@ -450,25 +461,33 @@ public final class CatalogRepository {
             UpdateSetMoreStep<?> more = null;
             for (var e : fields.entrySet()) {
                 if (e.getValue() == null) continue;
+                // Strip deleted_at — must not be settable via updateDocument
+                if ("deleted_at".equals(e.getKey())) continue;
                 @SuppressWarnings("unchecked")
                 Field<Object> f = (Field<Object>) DSL.field(DSL.name("catalog_documents", e.getKey()));
                 more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
             }
             if (more == null) return 0;
-            return more.where(F_DOC_TENANT.eq(tenant).and(F_DOC_TUMBLER.eq(tumbler))).execute();
+            // AND deleted_at IS NULL: refuse to update tombstoned documents
+            return more.where(F_DOC_TENANT.eq(tenant)
+                              .and(F_DOC_TUMBLER.eq(tumbler))
+                              .and(F_DOC_DELETED_AT.isNull()))
+                       .execute();
         });
     }
 
     /**
      * Tombstone a document by tumbler (RDR-156 P1.2 soft delete).
-     * Sets deleted_at = NOW() instead of physically deleting, so fk-001 CASCADE
-     * chains (manifest, aspects, highlights, queue) do NOT fire.
-     * Returns 1 if tombstoned, 0 if not found.
+     * Sets deleted_at = NOW() (PG server clock, same clock as purge_trash) instead of
+     * physically deleting, so fk-001 CASCADE chains (manifest, aspects, highlights, queue)
+     * do NOT fire. AND deleted_at IS NULL: idempotent — double-tombstone does not reset
+     * the purge age clock.
+     * Returns 1 if tombstoned, 0 if not found or already tombstoned.
      */
     public int deleteDocument(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(T_DOCS)
-               .set(F_DOC_DELETED_AT, java.time.OffsetDateTime.now())
+               .set(F_DOC_DELETED_AT, DSL.currentOffsetDateTime())
                .where(F_DOC_TUMBLER.eq(tumbler).and(F_DOC_DELETED_AT.isNull()))
                .execute()
         );

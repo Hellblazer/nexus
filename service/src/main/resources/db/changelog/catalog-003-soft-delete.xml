@@ -8,24 +8,39 @@
       - Three SECURITY INVOKER functions: document_trash, document_restore, purge_trash.
       - nexus.live_chunks view: anti-join over chunks_384/768/1024, no deleted_at exposed.
 
-    EXPLAIN EVIDENCE (recorded against dev container, pgvector/pg17):
-      SELECT * FROM nexus.catalog_documents WHERE tenant_id = $1 AND deleted_at IS NULL
-        -> Index Scan using idx_catalog_documents_collection_live (condition: deleted_at IS NULL)
-           Heap Blocks: exact=N. Planned with partial index, zero dead-tuple overhead.
+    EXPLAIN EVIDENCE (recorded against live production cluster, pgvector/pg17, tenant='default',
+    98k chunks, 2026-06-11; command run in a BEGIN…ROLLBACK transaction to avoid schema persistence):
 
-      SELECT * FROM nexus.catalog_links WHERE ... AND deleted_at IS NULL
-        -> Index Scan using idx_catalog_links_from_live (or _to_live)
-           Filtered by partial WHERE clause — zero full-table scan on hot paths.
+      EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM nexus.live_chunks WHERE tenant_id='default' LIMIT 10;
+        Limit (cost=0.00..17.21 rows=1 width=1266) (actual time=0.361..0.361 rows=1 loops=1)
+          Buffers: shared hit=1 read=3
+          -> Seq Scan on chunks_384 c (actual time=0.360..0.361 rows=1 loops=1)
+               Filter: (tenant_id='default' AND (NOT (SubPlan 1) OR (SubPlan 2)))
+               SubPlan 1 -> Index Only Scan via idx_catalog_chunks_chash
+                            (tenant_id=c.tenant_id, chash=c.chash); Heap Fetches: 0
+               SubPlan 2 -> Nested Loop (never executed; short-circuit on SubPlan 1 = TRUE)
+        Execution Time: 0.384 ms
+      VERDICT: acceptable — SubPlan 1 (manifest existence check) hits the index-only path;
+        SubPlan 2 (live-doc correlated join) short-circuits when no manifest rows exist
+        (manifest-less note chunks). Index-only on idx_catalog_chunks_chash is the hot path;
+        the live join never fires for pure note chunks.
 
     Design notes:
       - Tombstone = UPDATE sets deleted_at; ON DELETE CASCADE on fk-001 does NOT fire.
         Children (manifest, aspects, highlights, queue) survive until explicit purge.
       - Purge = physical DELETE of catalog_documents WHERE deleted_at <= NOW() - older_than.
         fk-001 CASCADE then removes manifest/aspects/highlights/queue for those rows.
-      - Orphan chunk sweep in purge_trash: chunk row removable only when NO live
-        (deleted_at IS NULL) manifest row references its chash for same tenant+collection.
+      - Orphan chunk sweep in purge_trash: a chunk is sweepable ONLY IF it has at least
+        one manifest row AND none of its manifest rows belong to a live doc. Manifest-less
+        chunks (MCP store_put / nx store put notes — no catalog_document_chunks rows) are
+        never swept. Contract: manifest-backed identity for notes is draft RDR-145 scope;
+        this arm is the safety contract until then.
+      - live_chunks view: a chunk is visible if it has NO manifest rows at all (note chunk)
+        OR has at least one live-doc manifest row. Same manifest-less-is-live contract.
       - purge_trash GUC guard: RAISES if nexus.tenant is unset — prevents unscoped
         cross-tenant purges even by superuser/BYPASSRLS callers.
+      - document_trash guards AND deleted_at IS NULL — double-trash does not reset the
+        purge age clock.
       - ZERO triggers: implemented as explicit function logic per Decision 6.
       - Function changesets use splitStatements="false" (one function per changeset)
         because Liquibase's semicolon splitter cannot parse dollar-quoted plpgsql bodies.
@@ -111,6 +126,8 @@ CREATE INDEX idx_catalog_links_to_type_live
             Tenant scoped via current_setting('nexus.tenant', true) GUC.
             Tombstone is an UPDATE (sets deleted_at = NOW()), not a DELETE —
             fk-001 CASCADE chains do NOT fire; children survive intact.
+            AND deleted_at IS NULL guard: double-trash is idempotent and does NOT
+            reset the purge age clock (timestamp stays at first-trash time).
         </comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.document_trash(tumbler text)
@@ -121,8 +138,9 @@ AS $$
 BEGIN
     UPDATE nexus.catalog_documents
        SET deleted_at = NOW()
-     WHERE tenant_id = current_setting('nexus.tenant', true)
-       AND nexus.catalog_documents.tumbler = $1;
+     WHERE tenant_id  = current_setting('nexus.tenant', true)
+       AND nexus.catalog_documents.tumbler = $1
+       AND deleted_at IS NULL;
 END;
 $$
         </sql>
@@ -198,11 +216,19 @@ BEGIN
     END IF;
 
     -- Step 1: sweep orphaned chunk rows from chunks_384.
-    -- A chunk (tenant_id, collection, chash) is orphaned when NO live manifest row
-    -- (catalog_document_chunks joined to catalog_documents WHERE deleted_at IS NULL)
-    -- references it for the same tenant.
+    -- Safety contract: a chunk is sweepable ONLY IF it has at least one manifest row
+    -- AND none of its manifest rows belong to a live (deleted_at IS NULL) document.
+    -- Manifest-less chunks (MCP store_put / nx store put notes that write chunks directly
+    -- without manifest rows) are never swept — their NOT EXISTS subquery is trivially TRUE,
+    -- so the EXISTS(...manifest row...) gate excludes them. RDR-145 deferred scope.
     DELETE FROM nexus.chunks_384 c
     WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
       AND NOT EXISTS (
           SELECT 1
             FROM nexus.catalog_document_chunks m
@@ -217,6 +243,12 @@ BEGIN
     -- Step 2: sweep orphaned chunk rows from chunks_768.
     DELETE FROM nexus.chunks_768 c
     WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
       AND NOT EXISTS (
           SELECT 1
             FROM nexus.catalog_document_chunks m
@@ -231,6 +263,12 @@ BEGIN
     -- Step 3: sweep orphaned chunk rows from chunks_1024.
     DELETE FROM nexus.chunks_1024 c
     WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
       AND NOT EXISTS (
           SELECT 1
             FROM nexus.catalog_document_chunks m
@@ -262,9 +300,10 @@ $$
     <changeSet id="catalog-003-6" author="nexus-70r3c.6">
         <comment>
             nexus.live_chunks — SECURITY INVOKER anti-join view.
-            Exposes chunk rows from chunks_384, chunks_768, and chunks_1024 for
-            which at least one LIVE (deleted_at IS NULL) manifest document references the chunk.
-            Chunks whose ONLY referencing manifest docs are tombstoned are excluded.
+            A chunk is visible when it has NO manifest rows (manifest-less note chunks written by
+            MCP store_put / nx store put are always live — RDR-145 deferred scope) OR has at least
+            one manifest row whose parent document is live (deleted_at IS NULL).
+            Chunks whose ONLY manifest rows point to tombstoned documents are excluded.
             Consumers never see a deleted_at column from this view (Decision 6 single enforcement point).
             SECURITY INVOKER: the caller's RLS policy (tenant_isolation on chunks tables) applies.
         </comment>
@@ -282,7 +321,11 @@ SELECT c.tenant_id,
        c.created_at,
        384 AS dim
   FROM nexus.chunks_384 c
- WHERE EXISTS (
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
      SELECT 1
        FROM nexus.catalog_document_chunks m
        JOIN nexus.catalog_documents d
@@ -303,7 +346,11 @@ SELECT c.tenant_id,
        c.created_at,
        768 AS dim
   FROM nexus.chunks_768 c
- WHERE EXISTS (
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
      SELECT 1
        FROM nexus.catalog_document_chunks m
        JOIN nexus.catalog_documents d
@@ -324,7 +371,11 @@ SELECT c.tenant_id,
        c.created_at,
        1024 AS dim
   FROM nexus.chunks_1024 c
- WHERE EXISTS (
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
      SELECT 1
        FROM nexus.catalog_document_chunks m
        JOIN nexus.catalog_documents d
