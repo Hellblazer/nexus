@@ -153,4 +153,75 @@ of this RDR's install primitives.
 
 ## Research Findings
 
-(To be populated via /conexus:rdr-research before gate.)
+All verified 2026-06-11. Author preference registered: native-image is the desired
+end state for Decision 1; the findings below say it is feasible with the risk
+concentrated in two JNI libraries, and they reshape the draft in three ways.
+
+### RF-157-1 (VERIFIED, local): the 134 MB JAR is an artifact-hygiene problem first
+
+`unzip -l` of the production fat JAR: the bulk is **multi-platform native payloads
+and debug symbols** — a 304 MB (uncompressed) Windows `onnxruntime.pdb`, onnxruntime
+natives for six platforms (osx-x64/aarch64, linux-x64/aarch64, win-x64), DJL
+tokenizers natives for four, plus `.dSYM` DWARF bundles; 54 native libs total.
+**Per-platform assembly (exclude foreign-platform natives + debug artifacts) shrinks
+the artifact to roughly 30-40 MB before native-image enters the picture.** Decision 1
+therefore decomposes into two independent wins: per-platform packaging (cheap, ships
+with channel (a)) and runtime-prereq removal (native-image).
+
+### RF-157-2 (VERIFIED, local): the GraalVM toolchain is already in place
+
+Dev machine JDK IS Oracle GraalVM 25.0.1 with `native-image` on PATH; CI builds on
+GraalVM (GRAALVM_HOME in the Java job). No toolchain acquisition cost for the spike.
+
+### RF-157-3 (VERIFIED, web — per-library native-image status, sources in T2)
+
+The SQL/migrations/pool/JSON/logging layer is **green** via the actively-maintained
+`oracle/graalvm-reachability-metadata` repo (verified by listing the repo directly,
+entries current May-June 2026): jOOQ (tested to 3.21.5), liquibase-core (tested to
+5.0.3, standalone — not via Quarkus), pgjdbc (to 42.7.11), HikariCP (to 7.0.2),
+jackson-databind/jsr310 (to 2.21.4+), logback (to 1.5.29). sqlite-jdbc ships its own
+in-jar metadata since 3.40.1.0 (we use 3.47.1.0 — out of the box). Virtual threads
+(the service's thread model) are fully supported on native-image since GraalVM for
+JDK 21. Two caveats that are work, not blockers: jOOQ metadata covers jOOQ internals,
+NOT our precompiled generated Record classes (tracing-agent pass over the integration
+suite generates that config); same for our Jackson DTOs.
+
+### RF-157-4 (VERIFIED, web): the risk is exactly two ML JNI libraries
+
+- **onnxruntime Java**: proven standalone recipe exists (JNI config + resource
+  patterns for the bundled natives + `--initialize-at-run-time=ai.onnxruntime.*`,
+  microsoft/onnxruntime#5172), BUT oracle/graal#8431 — the native-image **builder
+  itself bundles ai.onnxruntime** for ML-guided PGO, conflicting with the app's copy —
+  was still open as of 2026-03 with mixed fixed/not-fixed reports on GraalVM 24.
+  Community Edition historically sidesteps the enterprise-jar variant of the
+  conflict; the spike must verify on the exact distribution chosen.
+- **DJL HuggingFace tokenizers**: **zero prior art found** under native-image
+  (not in the metadata repo; djl-demo/graalvm covers other engines; issue search
+  empty). Mechanically the same JNI/resource/runtime-init pattern as onnxruntime,
+  but that is inference, not evidence. This is the single most likely item to kill
+  or delay the native path.
+
+### RF-157-5 (VERIFIED, web): distribution + licensing constraints
+
+GitHub Releases: < 2 GiB per asset, 1000 assets/release, no total-size or bandwidth
+limit, `browser_download_url` downloads not API-rate-limited — a 30-40 MB jar or a
+~100 MB native binary per platform is trivially fine (Decision 1(a) channel is
+unconstrained). Licensing: Oracle GraalVM 25 is GFTC — native-image output is
+"deemed an unmodified Program," redistribution permitted only "not for a fee," and
+Oracle-revocable; **GraalVM Community Edition (GPLv2+CE) output carries no
+redistribution conditions** — CI should build release binaries on CE. Platform
+matrix note: GraalVM 25 dropped macOS x64 (Apple Silicon only); Mandrel has no
+macOS builds at all.
+
+### Implications for the draft Decisions (to lock at gate)
+
+1. **Decision 1 becomes a sequence, not a choice**: release N ships per-platform
+   JARs via GitHub Releases + `install-jar --from-release` (RF-157-1 makes these
+   small; JDK 17+ stays a preflighted prereq); native-image binaries follow as the
+   prereq-removal upgrade once the spike clears the two JNI items.
+2. **The P0 spike narrows to**: build the service with native-image on **GraalVM CE
+   for JDK 25**, tracing-agent config from the integration suite, and empirically
+   answer (a) does tokenizers' JNI load from image resources, (b) does graal#8431
+   bite on CE 25. Everything else is metadata-repo-covered.
+3. Platform matrix for native binaries: linux-x64/aarch64 + macos-aarch64
+   (GraalVM 25 has no macos-x64; per-platform JARs cover that tail).
