@@ -808,3 +808,75 @@ class TestEmbeddingFetchServiceModeRegression:
         assert embeddings is not None
         assert embeddings.shape == (2, 1024)
         assert failed == {1}
+
+
+class TestUpsertSkipExisting:
+    """nexus-7zuzz remediation follow-on: opt-in chash pre-filter so a
+    forced re-index pays embedding cost only for genuinely missing chunks.
+    Opt-in because skipping existing ids also skips the ON CONFLICT
+    DO UPDATE metadata refresh (line numbers can drift for identical
+    chunk text); default behavior is unchanged."""
+
+    def _client_with_fake_post(self, monkeypatch, existing: list[str]):
+        client = HttpVectorClient()
+        calls = []
+
+        def fake_post(path, body, *, tenant="default", timeout=120):
+            calls.append((path, body))
+            if path == "/v1/vectors/store-get":
+                present = [i for i in body["ids"] if i in existing]
+                return {"ids": present}
+            return {"upserted": len(body.get("ids", []))}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        return client, calls
+
+    def test_skip_existing_filters_present_ids(self, monkeypatch):
+        client, calls = self._client_with_fake_post(monkeypatch, existing=["a", "c"])
+        client.upsert_chunks(
+            "col", ["a", "b", "c"], ["ta", "tb", "tc"],
+            metadatas=[{"k": 1}, {"k": 2}, {"k": 3}],
+            skip_existing=True,
+        )
+        upserts = [(p, b) for p, b in calls if p == "/v1/vectors/upsert-chunks"]
+        assert len(upserts) == 1
+        body = upserts[0][1]
+        assert body["ids"] == ["b"]
+        assert body["documents"] == ["tb"]
+        assert body["metadatas"] == [{"k": 2}]
+
+    def test_skip_existing_all_present_skips_upsert_entirely(self, monkeypatch):
+        client, calls = self._client_with_fake_post(monkeypatch, existing=["a", "b"])
+        client.upsert_chunks("col", ["a", "b"], ["ta", "tb"], skip_existing=True)
+        assert [p for p, _ in calls if p == "/v1/vectors/upsert-chunks"] == []
+
+    def test_default_behavior_unchanged_no_existence_probe(self, monkeypatch):
+        client, calls = self._client_with_fake_post(monkeypatch, existing=["a"])
+        client.upsert_chunks("col", ["a", "b"], ["ta", "tb"])
+        assert [p for p, _ in calls] == ["/v1/vectors/upsert-chunks"]
+        assert calls[0][1]["ids"] == ["a", "b"]
+
+    def test_env_flag_activates_skip(self, monkeypatch):
+        monkeypatch.setenv("NX_UPSERT_SKIP_EXISTING", "1")
+        client, calls = self._client_with_fake_post(monkeypatch, existing=["a"])
+        client.upsert_chunks("col", ["a", "b"], ["ta", "tb"])
+        upserts = [b for p, b in calls if p == "/v1/vectors/upsert-chunks"]
+        assert upserts[0]["ids"] == ["b"]
+
+    def test_probe_failure_degrades_to_full_upsert(self, monkeypatch):
+        """existing_ids resolves to empty set on service error (its
+        documented contract) — skip_existing must then upsert EVERYTHING,
+        never silently drop chunks."""
+        client = HttpVectorClient()
+        calls = []
+
+        def fake_post(path, body, *, tenant="default", timeout=120):
+            if path == "/v1/vectors/store-get":
+                from nexus.db.http_vector_client import VectorServiceError
+                raise VectorServiceError("probe down")
+            calls.append((path, body))
+            return {"upserted": len(body.get("ids", []))}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client.upsert_chunks("col", ["a", "b"], ["ta", "tb"], skip_existing=True)
+        assert calls[0][1]["ids"] == ["a", "b"]

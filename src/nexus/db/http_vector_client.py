@@ -412,15 +412,45 @@ class HttpVectorClient:
         metadatas: list[dict] | None = None,
         *,
         embeddings: list[list[float]] | None = None,
+        skip_existing: bool | None = None,
     ) -> None:
         """Embed + quota-check + write via the Java service.
 
         CHUNKING STAYS PYTHON — this method is called with pre-chunked text.
         Embeddings are computed server-side; any ``embeddings`` argument is
         ignored (Seam B contract).
+
+        ``skip_existing`` (or env ``NX_UPSERT_SKIP_EXISTING=1``): pre-filter
+        ids through :meth:`existing_ids` and embed/upsert only the chunks
+        the collection does not already hold. Chunk ids are content hashes,
+        so re-indexing unchanged files re-sends byte-identical chunks whose
+        server-side embedding cost is pure waste — the pre-filter makes a
+        forced re-convergence run pay only for genuinely missing chunks
+        (nexus-7zuzz orphan remediation). OPT-IN, not default: skipping an
+        existing id also skips the ON CONFLICT DO UPDATE metadata refresh
+        (line numbers can drift for identical chunk text after edits
+        elsewhere in the file). ``existing_ids`` resolves to the EMPTY set
+        on probe failure, so a degraded probe upserts everything — chunks
+        are never silently dropped.
         """
         if not ids:
             return
+        if skip_existing is None:
+            skip_existing = os.environ.get("NX_UPSERT_SKIP_EXISTING", "") == "1"
+        if skip_existing:
+            present = self.existing_ids(collection, ids)
+            if present:
+                keep = [i for i, _id in enumerate(ids) if _id not in present]
+                if not keep:
+                    _log.debug(
+                        "http_vector_upsert_all_present",
+                        collection=collection, count=len(ids),
+                    )
+                    return
+                metas = metadatas or [{}] * len(ids)
+                ids = [ids[i] for i in keep]
+                documents = [documents[i] for i in keep]
+                metadatas = [metas[i] for i in keep]
         body: dict[str, Any] = {
             "collection": collection,
             "ids": ids,
