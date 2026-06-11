@@ -81,4 +81,22 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA t1    GRANT USAGE, SELECT                  ON
         </rollback>
     </changeSet>
 
+    <changeSet id="grants-002-changelog-read" author="hal" runAlways="true">
+        <comment>
+            nexus-pebfx.4: the /version endpoint reports the applied Liquibase
+            journal (schema_latest_id, schema_changeset_count) for the
+            nx-client/JAR version handshake. The journal tables are created by
+            Liquibase under the migration (admin) role; the service role needs
+            read access. runAlways for the same self-healing reason as
+            grants-001.
+        </comment>
+        <sql splitStatements="false">
+GRANT SELECT ON public.databasechangelog     TO nexus_svc;
+GRANT SELECT ON public.databasechangeloglock TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated. -->
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>

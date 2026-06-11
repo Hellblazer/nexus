@@ -172,9 +172,19 @@ def _find_service_jar() -> Path:
             "cd service && mvn package -DskipTests -q"
         )
 
-    # Canonical Maven target directory relative to this module's location.
-    # Resolve from: src/nexus/daemon/storage_service_daemon.py ->
-    # repo_root/service/target/nexus-service-*.jar
+    # Well-known installed location (bead nexus-pebfx.4): populated by
+    # `nx daemon service install-jar` — the only path that exists for
+    # pip/uv-installed users, who have no repo checkout. Preferred over
+    # repo-relative per the bead's discovery order.
+    from nexus.config import nexus_config_dir
+    from nexus.daemon.jar_lifecycle import well_known_jar_path
+    well_known = well_known_jar_path(nexus_config_dir())
+    if well_known.is_file():
+        return well_known
+
+    # Canonical Maven target directory relative to this module's location
+    # (dev convenience). Resolve from: src/nexus/daemon/storage_service_daemon.py
+    # -> repo_root/service/target/nexus-service-*.jar
     repo_root = Path(__file__).parent.parent.parent.parent
     pattern = str(repo_root / "service" / "target" / "nexus-service-*.jar")
     matches = [p for p in sorted(glob.glob(pattern)) if not p.endswith("-sources.jar")]
@@ -182,9 +192,12 @@ def _find_service_jar() -> Path:
         return Path(matches[-1])
 
     raise StorageServiceStartError(
-        "No nexus-service JAR found. Build it first:\n"
+        "No nexus-service JAR found. Install one to the well-known location:\n"
+        "  nx daemon service install-jar <path-to-jar>\n"
+        f"  (installs to {well_known})\n"
+        "or build from a repo checkout:\n"
         "  cd service && mvn package -DskipTests -q\n"
-        f"Expected pattern: {pattern}"
+        f"  (expected pattern: {pattern})"
     )
 
 
@@ -655,6 +668,13 @@ class StorageServiceSupervisor:
 
         # Step 1: ensure Postgres is accepting connections on the provisioned port.
         self._ensure_pg_running()
+
+        # Step 1.5 (nexus-pebfx.4): refuse a JAR older than the applied schema.
+        # Liquibase silently ignores applied changesets it does not know, so an
+        # old JAR would boot cleanly and fail undiagnosably at runtime. Gate
+        # AFTER PG is up (it reads databasechangelog) and BEFORE the spawn.
+        from nexus.daemon.jar_lifecycle import check_schema_skew
+        check_schema_skew(self._jar_path, self._creds)
 
         # Step 2: spawn the Java JAR.
         proc, port = self._spawn_service()

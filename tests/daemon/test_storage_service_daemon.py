@@ -1205,3 +1205,39 @@ class TestSpawnServiceVoyageKeyPlumbing:
         with patch("nexus.config.get_credential", return_value=""):
             env = self._spawn_env(config_dir, clock, monkeypatch)
         assert "NX_VOYAGE_API_KEY" not in env
+
+
+class TestSchemaSkewGateWiring:
+    """nexus-pebfx.4: _start_locked runs the schema-skew gate after PG is up
+    and BEFORE spawning the JAR — a skewed JAR must never reach Popen."""
+
+    def test_skew_refusal_blocks_spawn(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        sup = _make_supervisor(config_dir, clock)
+        spawned: list[bool] = []
+        with patch.object(sup, "_ensure_pg_running"), \
+             patch(
+                 "nexus.daemon.jar_lifecycle.check_schema_skew",
+                 side_effect=StorageServiceStartError("JAR is OLDER"),
+             ), \
+             patch.object(
+                 sup, "_spawn_service",
+                 side_effect=lambda: spawned.append(True) or (MagicMock(), 1),
+             ):
+            with pytest.raises(StorageServiceStartError, match="OLDER"):
+                sup.start()
+        assert spawned == [], "skewed JAR must not be spawned"
+
+    def test_clean_gate_proceeds_to_spawn(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        sup = _make_supervisor(config_dir, clock)
+        proc = _FakeProc(pid=51000)
+        with patch.object(sup, "_ensure_pg_running"), \
+             patch("nexus.daemon.jar_lifecycle.check_schema_skew") as gate, \
+             patch.object(sup, "_spawn_service", return_value=(proc, 19500)), \
+             patch.object(sup, "_wait_for_service_ready"):
+            payload = sup.start()
+        gate.assert_called_once()
+        assert payload["port"] == 19500

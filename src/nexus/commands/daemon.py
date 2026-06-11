@@ -1593,6 +1593,83 @@ def service_start_cmd(
         )
 
 
+@service_group.command("install-jar")
+@click.argument("jar_path", required=False, default=None)
+@click.option(
+    "--from-repo",
+    "from_repo",
+    is_flag=True,
+    default=False,
+    help="Install the freshest nexus-service-*.jar from this repo checkout's "
+         "service/target/ (dev convenience).",
+)
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+def service_install_jar_cmd(
+    jar_path: str | None, from_repo: bool, config_dir_str: str | None,
+) -> None:
+    """Install a nexus-service JAR to the well-known location (nexus-pebfx.4).
+
+    Copies the JAR to <config-dir>/service/nexus-service.jar and records
+    provenance (version, sha256, build date, bundled Liquibase changesets)
+    in a sidecar. Supervisor discovery prefers this location, so installed
+    (pip/uv) users never need --jar or a repo checkout.
+    """
+    import glob as _glob
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    from nexus.daemon.jar_lifecycle import install_jar
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+    try:
+        _nx_version = _pkg_version("conexus")
+    except PackageNotFoundError:
+        _nx_version = "unknown"
+
+    if bool(jar_path) == from_repo:
+        raise click.UsageError("pass exactly one of JAR_PATH or --from-repo")
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+
+    if from_repo:
+        repo_root = Path(__file__).parent.parent.parent.parent
+        pattern = str(repo_root / "service" / "target" / "nexus-service-*.jar")
+        matches = [
+            m for m in sorted(_glob.glob(pattern))
+            if not m.endswith("-sources.jar")
+        ]
+        if not matches:
+            click.echo(
+                f"Error: no JAR matches {pattern}. Build it first: "
+                "cd service && mvn package -DskipTests -q",
+                err=True,
+            )
+            sys.exit(2)
+        source = Path(matches[-1])
+    else:
+        source = Path(jar_path)  # type: ignore[arg-type]
+
+    try:
+        dest, prov = install_jar(
+            source, config_dir, installed_by=f"conexus {_nx_version}",
+        )
+    except StorageServiceStartError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    click.echo(f"Installed {source}")
+    click.echo(f"  -> {dest}")
+    click.echo(f"  version:    {prov['version']}")
+    click.echo(f"  sha256:     {prov['sha256'][:16]}…")
+    click.echo(f"  changesets: {len(prov['changesets'])} (Liquibase)")
+    click.echo("Restart the service to pick it up: nx daemon service stop && "
+               "nx daemon service start")
+
+
 @service_group.command("stop")
 @click.option(
     "--config-dir",
@@ -1651,6 +1728,36 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         "heartbeat_epoch": record.heartbeat_epoch,
         "status": record.status,
     }
+
+    # nexus-pebfx.4 version handshake: report the RUNNING service's app +
+    # schema versions, and warn when they drift from the JAR installed at
+    # the well-known location (a stale service that needs a restart).
+    from nexus.daemon.jar_lifecycle import (
+        fetch_service_version,
+        read_installed_provenance,
+    )
+    svc_version = fetch_service_version(
+        ep.get("host", "127.0.0.1"), int(ep.get("port") or 0),
+    )
+    stale_warning: str | None = None
+    if svc_version is not None:
+        data["service_app_version"] = svc_version.get("app_version")
+        data["schema_latest_id"] = svc_version.get("schema_latest_id")
+        data["schema_changeset_count"] = svc_version.get("schema_changeset_count")
+        installed = read_installed_provenance(config_dir)
+        if (
+            installed is not None
+            and installed.get("version")
+            and svc_version.get("app_version")
+            and installed["version"] != svc_version["app_version"]
+        ):
+            stale_warning = (
+                f"running service is app_version={svc_version['app_version']} "
+                f"but the installed JAR is {installed['version']} — restart to "
+                "pick it up: nx daemon service stop && nx daemon service start"
+            )
+            data["stale"] = True
+
     if as_json:
         click.echo(_json.dumps(data, indent=2))
         return
@@ -1658,3 +1765,5 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     click.echo("-" * 40)
     for key, value in data.items():
         click.echo(f"  {key}: {value}")
+    if stale_warning:
+        click.echo(f"warning: {stale_warning}", err=True)

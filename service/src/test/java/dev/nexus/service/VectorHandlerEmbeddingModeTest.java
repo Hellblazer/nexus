@@ -177,6 +177,28 @@ class VectorHandlerEmbeddingModeTest {
     }
 
     @Test
+    void versionEndpoint_reportsAppAndSchemaVersions() throws Exception {
+        // nexus-pebfx.4 handshake surface. Liquibase ran in @BeforeAll, so the
+        // applied journal is populated and grants-002 lets nexus_svc read it.
+        // app_version is "unknown" under surefire (pom.properties is a fat-JAR
+        // resource, absent from the classes dir) — assert field presence and
+        // pin the schema fields strictly.
+        var req = java.net.http.HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/version"))
+            .GET()
+            .build();
+        var resp = http.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+        assertThat(resp.statusCode()).isEqualTo(200);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
+        assertThat((String) body.get("app_version")).isNotBlank();
+        assertThat(body.get("schema_error")).isNull();
+        assertThat((String) body.get("schema_latest_id")).isNotBlank();
+        assertThat(((Number) body.get("schema_changeset_count")).longValue())
+            .isGreaterThan(0);
+    }
+
+    @Test
     void minilmCollectionInOnnxMode_stillServes200() throws Exception {
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__pebfx2__minilm-l6-v2-384__v1",
