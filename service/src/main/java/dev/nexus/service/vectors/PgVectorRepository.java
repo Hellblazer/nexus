@@ -574,6 +574,76 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Stored embeddings for {@code ids} (bead nexus-pebfx.7).
+     *
+     * <p>The Python search engine fetches result vectors post-search for the
+     * contradiction check and Ward-clustering grouping
+     * ({@code search_engine._fetch_embeddings_for_results}); without this the
+     * client raised {@code NotImplementedError} and both features silently
+     * degraded on every service-mode search.
+     *
+     * @return envelope {@code {ids: List<String>, embeddings: List<List<Float>>}}
+     *         in REQUEST order; ids not present (or invisible under RLS) are
+     *         OMITTED — Chroma {@code get(include=["embeddings"])} parity; the
+     *         Python caller treats {@code N < len(ids)} as a per-collection
+     *         fetch failure.
+     */
+    public Map<String, Object> getEmbeddings(String tenant, String collection,
+                                             List<String> ids) {
+        int dim = dimForCollection(collection);
+        if (ids == null || ids.isEmpty()) {
+            return Map.of("ids", List.of(), "embeddings", List.of());
+        }
+        List<Object> binds = new ArrayList<>();
+        binds.add(collection);
+        binds.addAll(ids);
+        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
+            ctx.fetch("SELECT chash, embedding::text AS embedding_text FROM "
+                      + chunksTable(dim)
+                      + " WHERE collection = ? AND chash IN ("
+                      + placeholders(ids.size()) + ")",
+                      binds.toArray()));
+
+        Map<String, List<Float>> byChash = new HashMap<>();
+        for (Record rec : result) {
+            byChash.put(rec.get("chash", String.class),
+                        parseVectorLiteral(rec.get("embedding_text", String.class)));
+        }
+        List<String> outIds = new ArrayList<>();
+        List<List<Float>> outEmbeddings = new ArrayList<>();
+        for (String id : ids) {
+            List<Float> vec = byChash.get(id);
+            if (vec != null) {
+                outIds.add(id);
+                outEmbeddings.add(vec);
+            }
+        }
+        return Map.of("ids", outIds, "embeddings", outEmbeddings);
+    }
+
+    /** Parse a pgvector text literal {@code "[0.1,0.2,...]"} into floats. */
+    private static List<Float> parseVectorLiteral(String literal) {
+        if (literal == null || literal.length() < 2) {
+            // Schema says NOT NULL; a null/short literal means a malformed
+            // row. Return an empty row — the Python caller's ndarray
+            // construction rejects the ragged shape and fails the
+            // collection's fetch (degrade, never misattribute).
+            log.warn("event=embedding_literal_malformed literal={}", literal);
+            return List.of();
+        }
+        String body = literal.substring(1, literal.length() - 1);
+        if (body.isBlank()) {
+            return List.of();
+        }
+        String[] parts = body.split(",");
+        List<Float> out = new ArrayList<>(parts.length);
+        for (String part : parts) {
+            out.add(Float.parseFloat(part.trim()));
+        }
+        return out;
+    }
+
+    /**
      * Single-chunk put (MCP {@code store_put} path) — embed + upsert one chunk.
      *
      * <p>RDR-155 P4a.2 (bead nexus-1k8s1): mirrors the Chroma

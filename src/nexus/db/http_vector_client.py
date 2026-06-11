@@ -679,6 +679,24 @@ class HttpVectorClient:
         """
         return _ServiceCollectionStub(name=name, tenant=self._tenant)
 
+    def get_embeddings(self, collection: str, ids: list[str]):
+        """Fetch stored embeddings for *ids* via the service (nexus-pebfx.7).
+
+        Mirrors ``T3Database.get_embeddings``: returns an ``(N, D)`` float32
+        ndarray with rows in request order; ids the service does not find
+        are DROPPED (``N < len(ids)``), which the search-engine caller
+        already treats as a per-collection shape-mismatch failure —
+        identical to the Chroma path's semantics.
+        """
+        import numpy as np
+
+        result = _post(
+            "/v1/vectors/get-embeddings",
+            {"collection": collection, "ids": ids},
+            tenant=self._tenant,
+        )
+        return np.array(result.get("embeddings", []), dtype=np.float32)
+
     # ── Stubs for T3Database surface not used by Seam B ─────────────────────
 
     def delete_collection(self, name: str) -> None:
@@ -686,9 +704,6 @@ class HttpVectorClient:
 
     def delete_by_source(self, collection: str, source_path: str) -> int:
         raise NotImplementedError("delete_by_source not implemented in HttpVectorClient")
-
-    def get_embeddings(self, collection: str, ids: list[str]):  # type: ignore[return]
-        raise NotImplementedError("get_embeddings not implemented in HttpVectorClient")
 
     # ── Utility ──────────────────────────────────────────────────────────────
 

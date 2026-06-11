@@ -206,6 +206,36 @@ class VectorHandlerEmbeddingModeTest {
     }
 
     @Test
+    void getEmbeddings_returnsStoredVectors_inRequestOrder() throws Exception {
+        // nexus-pebfx.7: the search engine fetches result vectors post-search
+        // (contradiction check + Ward clustering); the endpoint returns stored
+        // pgvector rows, request order, missing ids omitted (Chroma parity).
+        var up = post("/v1/vectors/upsert-chunks", Map.of(
+            "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",
+            "ids",        List.of("emb-b", "emb-a"),
+            "documents",  List.of("second text", "first text"),
+            "metadatas",  List.of(Map.of(), Map.of())));
+        assertThat(up.statusCode()).isEqualTo(200);
+
+        var resp = post("/v1/vectors/get-embeddings", Map.of(
+            "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",
+            "ids",        List.of("emb-a", "emb-b", "emb-missing")));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
+        @SuppressWarnings("unchecked")
+        List<String> ids = (List<String>) body.get("ids");
+        @SuppressWarnings("unchecked")
+        List<List<Number>> embeddings = (List<List<Number>>) body.get("embeddings");
+        assertThat(ids).containsExactly("emb-a", "emb-b");   // request order, missing omitted
+        assertThat(embeddings).hasSize(2);
+        assertThat(embeddings.get(0)).hasSize(384);
+        assertThat(embeddings.get(1)).hasSize(384);
+        // The two texts differ, so the stored vectors must differ.
+        assertThat(embeddings.get(0)).isNotEqualTo(embeddings.get(1));
+    }
+
+    @Test
     void minilmCollectionInOnnxMode_stillServes200() throws Exception {
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__pebfx2__minilm-l6-v2-384__v1",

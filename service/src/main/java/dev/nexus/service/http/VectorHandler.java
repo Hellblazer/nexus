@@ -113,6 +113,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/store-put"     -> handleStorePut(exchange, method);
                 case "/get"           -> handleGet(exchange, method);
                 case "/store-get"     -> handleStoreGet(exchange, method);
+                case "/get-embeddings" -> handleGetEmbeddings(exchange, method);
                 case "/store-list"    -> handleStoreList(exchange, method);
                 case "/store-delete"  -> handleStoreDelete(exchange, method);
                 case "/update-metadata" -> handleUpdateMetadata(exchange, method);
@@ -354,6 +355,26 @@ public final class VectorHandler implements HttpHandler {
         var result = (ids == null)
                 ? repo.getWhere(tenant, collection, null, limit, offset)
                 : repo.get(tenant, collection, ids, limit, offset);
+        HttpUtil.send(ex, 200, json(result));
+    }
+
+    /**
+     * POST /v1/vectors/get-embeddings (bead nexus-pebfx.7)
+     *
+     * <p>Request: {"collection": "...", "ids": ["...", ...]}
+     * <p>Response 200: {"ids":[...], "embeddings":[[...], ...]} in request
+     * order; missing ids omitted (Chroma parity — the Python caller detects
+     * the count mismatch).
+     */
+    private void handleGetEmbeddings(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        List<String> ids  = optStringList(body, "ids");
+        var result = repo.getEmbeddings(tenant, collection,
+                                        ids == null ? List.of() : ids);
         HttpUtil.send(ex, 200, json(result));
     }
 
