@@ -328,6 +328,31 @@ class ChashRepositoryTest {
         assertThat(repo.countForCollection(importTenant, importColl)).isEqualTo(1);
     }
 
+    // ── Test 18: ensureCollectionRegistered rejects blank collection ─────────────
+
+    @Test
+    @Order(18)
+    void upsert_blankCollection_throwsIllegalArgument() {
+        // ChashRepository.ensureCollectionRegistered throws IllegalArgumentException
+        // for blank physical_collection rather than silently skipping registration
+        // (which would let the subsequent FK-constrained INSERT fail with a cryptic
+        // FK violation instead of a clear caller-error message).
+        // upsert() is the most direct public entry point that reaches ensureCollectionRegistered;
+        // upsert() itself also guards blank collection, so the IAE surfaces from there.
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () ->
+            repo.upsert(TENANT_A, "some_valid_chash", ""));
+        assertThat(ex.getMessage())
+            .as("blank physical_collection must produce a clear IllegalArgumentException")
+            .contains("must not be");
+
+        // Also verify for whitespace-only value
+        IllegalArgumentException exWs = assertThrows(IllegalArgumentException.class, () ->
+            repo.upsert(TENANT_A, "some_valid_chash", "  "));
+        assertThat(exWs.getMessage())
+            .as("whitespace-only physical_collection must also be rejected")
+            .contains("must not be");
+    }
+
     // ── Test 12: RLS isolation — tenant A rows invisible to tenant B ──────────
 
     @Test

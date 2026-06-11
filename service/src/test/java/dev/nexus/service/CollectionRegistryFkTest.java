@@ -412,6 +412,26 @@ class CollectionRegistryFkTest {
         }
     }
 
+    @Test @Order(41)
+    void topicAssignments_unregisteredNonNullSourceCollection_rejected() throws Exception {
+        // RED until P0.2 adds topic_assignments_collection_fk.
+        // Non-null source_collection that has no matching catalog_collections row must be rejected.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertCatalogDocument(su, TENANT_A, "unreg-src-doc");
+            insertTopic(su, TENANT_A, 8003L, "unreg-src-topic", "unreg-src-col");
+            PSQLException ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.topic_assignments " +
+                    "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
+                    "('" + TENANT_A + "', 'unreg-src-doc', 8003, 'hdbscan', 'unreg-src-col', NOW())")
+            );
+            assertThat(ex.getMessage())
+                .as("topic_assignments_collection_fk must reject non-null source_collection not in catalog_collections")
+                .containsIgnoringCase(FK_TOPIC_ASSIGN);
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // GROUP 5 — chash_index FK: unregistered physical_collection rejected
     //
@@ -477,7 +497,7 @@ class CollectionRegistryFkTest {
             );
             assertThat(ex.getMessage())
                 .as("ON DELETE RESTRICT must prevent deleting a collection with live chunks_384 rows")
-                .containsIgnoringCase("foreign key");
+                .containsIgnoringCase(FK_CHUNKS_384);
         }
     }
 
@@ -576,40 +596,82 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(73)
-    void chunks768_chashLenCheck_rejectsBadLengths() throws Exception {
+    void chunks768_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_768_chash_len_check.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "chk-col-768-bad");
-            PSQLException ex31 = assertThrows(PSQLException.class, () ->
+            insertCollection(su, TENANT_A, "chk-col-768-31");
+            PSQLException ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-col-768-bad', " +
+                    "VALUES ('" + TENANT_A + "', 'chk-col-768-31', " +
                     "'" + chashOfLen(31) + "', 'text', " +
                     vectorLiteral(768) + "::vector)")
             );
-            assertThat(ex31.getMessage()).containsIgnoringCase(CHK_768_CHASH);
+            assertThat(ex.getMessage())
+                .as("chunks_768_chash_len_check must reject chash of length 31")
+                .containsIgnoringCase(CHK_768_CHASH);
         }
     }
 
     @Test @Order(74)
-    void chunks1024_chashLenCheck_rejectsBadLengths() throws Exception {
-        // RED until P0.2 adds chunks_1024_chash_len_check.
+    void chunks768_chashLenCheck_rejects33() throws Exception {
+        // RED until P0.2 adds chunks_768_chash_len_check.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "chk-col-1024-bad");
-            PSQLException ex31 = assertThrows(PSQLException.class, () ->
+            insertCollection(su, TENANT_A, "chk-col-768-33");
+            PSQLException ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
-                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-col-1024-bad', " +
-                    "'" + chashOfLen(31) + "', 'text', " +
-                    vectorLiteral(1024) + "::vector)")
+                    "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) " +
+                    "VALUES ('" + TENANT_A + "', 'chk-col-768-33', " +
+                    "'" + chashOfLen(33) + "', 'text', " +
+                    vectorLiteral(768) + "::vector)")
             );
-            assertThat(ex31.getMessage()).containsIgnoringCase(CHK_1024_CHASH);
+            assertThat(ex.getMessage())
+                .as("chunks_768_chash_len_check must reject chash of length 33")
+                .containsIgnoringCase(CHK_768_CHASH);
         }
     }
 
     @Test @Order(75)
+    void chunks1024_chashLenCheck_rejects31() throws Exception {
+        // RED until P0.2 adds chunks_1024_chash_len_check.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertCollection(su, TENANT_A, "chk-col-1024-31");
+            PSQLException ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
+                    "VALUES ('" + TENANT_A + "', 'chk-col-1024-31', " +
+                    "'" + chashOfLen(31) + "', 'text', " +
+                    vectorLiteral(1024) + "::vector)")
+            );
+            assertThat(ex.getMessage())
+                .as("chunks_1024_chash_len_check must reject chash of length 31")
+                .containsIgnoringCase(CHK_1024_CHASH);
+        }
+    }
+
+    @Test @Order(76)
+    void chunks1024_chashLenCheck_rejects33() throws Exception {
+        // RED until P0.2 adds chunks_1024_chash_len_check.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertCollection(su, TENANT_A, "chk-col-1024-33");
+            PSQLException ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
+                    "VALUES ('" + TENANT_A + "', 'chk-col-1024-33', " +
+                    "'" + chashOfLen(33) + "', 'text', " +
+                    vectorLiteral(1024) + "::vector)")
+            );
+            assertThat(ex.getMessage())
+                .as("chunks_1024_chash_len_check must reject chash of length 33")
+                .containsIgnoringCase(CHK_1024_CHASH);
+        }
+    }
+
+    @Test @Order(85)
     void catalogDocumentChunks_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds catalog_document_chunks_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -626,7 +688,7 @@ class CollectionRegistryFkTest {
         }
     }
 
-    @Test @Order(76)
+    @Test @Order(86)
     void catalogDocumentChunks_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds catalog_document_chunks_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -643,7 +705,7 @@ class CollectionRegistryFkTest {
         }
     }
 
-    @Test @Order(77)
+    @Test @Order(87)
     void catalogDocumentChunks_chashLenCheck_accepts32() throws Exception {
         // CONTROL — must be GREEN before and after P0.2 lands.
         try (Connection su = pg.createConnection("")) {
@@ -660,7 +722,7 @@ class CollectionRegistryFkTest {
         }
     }
 
-    @Test @Order(78)
+    @Test @Order(88)
     void catalogDocumentChunks_positionCheck_rejectsNegative() throws Exception {
         // RED until P0.2 adds catalog_document_chunks_position_check.
         try (Connection su = pg.createConnection("")) {
@@ -677,7 +739,7 @@ class CollectionRegistryFkTest {
         }
     }
 
-    @Test @Order(79)
+    @Test @Order(89)
     void catalogDocumentChunks_positionCheck_acceptsZero() throws Exception {
         // CONTROL — must be GREEN before and after P0.2 lands.
         try (Connection su = pg.createConnection("")) {
