@@ -242,7 +242,7 @@ class TestPutBehavior:
         expected_doc_id = hashlib.sha256(content.encode()).hexdigest()[:32]
 
         returned = client.put(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
             content=content,
             title="test-title",
             tags="rdr-test",
@@ -264,7 +264,7 @@ class TestPutBehavior:
         expected_doc_id = hashlib.sha256(content.encode()).hexdigest()[:32]
 
         client.put(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
             content=content,
         )
         assert calls, "no HTTP call was made"
@@ -293,7 +293,7 @@ class TestPutBehavior:
         monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
 
         result = client.put(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
             content="MCP store_put content body",
             title="mcp-test-title",
             tags="tag1,tag2",
@@ -319,7 +319,7 @@ class TestPutBehavior:
         the produced metadata against a reference dict from the same factory,
         so future factory changes are automatically caught — no manual enumeration.
         """
-        collection = "knowledge__nexus__voyage-context-3__v1"
+        collection = "knowledge__nexus__minilm-l6-v2-384__v1"
         content = "Metadata factory parity test content"
         title = "parity-title"
         tags = "test,parity"
@@ -413,7 +413,7 @@ class TestPutBehavior:
         monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
 
         client.put(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
             content="catalog doc id test content",
             catalog_doc_id="1.5.17",
         )
@@ -429,7 +429,7 @@ class TestPutBehavior:
         monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
 
         client.put(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
             content="no catalog path",
             catalog_doc_id="",
         )
@@ -445,7 +445,7 @@ class TestPutBehavior:
         monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
 
         client.put(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
             content="content here",
         )
         path = calls[0]["path"]
@@ -466,7 +466,7 @@ class TestPutBehavior:
 
         content = "A" * 10000  # under SAFE_CHUNK_BYTES (12288 bytes)
         client.put(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
             content=content,
         )
         store_put_calls = [c for c in calls if "/store-put" in c["path"]]
@@ -483,7 +483,7 @@ class TestPutBehavior:
         )
         # Full T3Database.put() call signature — must not raise TypeError
         client.put(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
             content="full signature test",
             title="full-sig",
             tags="a,b",
@@ -507,7 +507,7 @@ class TestPutBehavior:
         monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
 
         client.put(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
             content="store type test",
             store_type="rdr",
         )
@@ -546,14 +546,14 @@ class TestUpsertChunksWithEmbeddingsKwarg:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
 
         client.upsert_chunks_with_embeddings(
-            collection_name="code__nexus__voyage-code-3__v1",
+            collection_name="code__nexus__minilm-l6-v2-384__v1",
             ids=["abc123"],
             documents=["def foo(): pass"],
             embeddings=[[0.1, 0.2, 0.3]],
             metadatas=[{"source_path": "/src/foo.py"}],
         )
         assert len(calls) == 1, "expected one HTTP call"
-        assert calls[0].get("collection") == "code__nexus__voyage-code-3__v1", (
+        assert calls[0].get("collection") == "code__nexus__minilm-l6-v2-384__v1", (
             f"collection name not forwarded: {calls[0]}"
         )
 
@@ -569,12 +569,12 @@ class TestUpsertChunksWithEmbeddingsKwarg:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
 
         client.upsert_chunks_with_embeddings(
-            "code__nexus__voyage-code-3__v1",
+            "code__nexus__minilm-l6-v2-384__v1",
             ["id1"],
             ["text1"],
             [[0.1]],
         )
-        assert calls[0]["collection"] == "code__nexus__voyage-code-3__v1"
+        assert calls[0]["collection"] == "code__nexus__minilm-l6-v2-384__v1"
 
 
 # ── Behavior: search collection_names kwarg ───────────────────────────────────
@@ -596,7 +596,7 @@ class TestSearchCollectionNamesParam:
 
         client.search(
             query="test query",
-            collection_names=["knowledge__nexus__voyage-context-3__v1"],
+            collection_names=["knowledge__nexus__minilm-l6-v2-384__v1"],
         )
         assert calls
 
@@ -656,7 +656,7 @@ class TestGetEmbeddingsParam:
             lambda *a, **kw: {"embeddings": [[0.1, 0.2]]},
         )
         result = client.get_embeddings(
-            collection_name="knowledge__nexus__voyage-context-3__v1",
+            collection_name="knowledge__nexus__minilm-l6-v2-384__v1",
             ids=["abc"],
         )
         assert result.shape == (1, 2)
@@ -673,13 +673,13 @@ class TestGetEmbeddingsParam:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
 
         client.get_embeddings(
-            collection_name="knowledge__nexus__voyage-context-3__v1",
+            collection_name="knowledge__nexus__minilm-l6-v2-384__v1",
             ids=["abc"],
         )
         assert "collection" in calls[0], (
             "HTTP body key must be 'collection' (Java endpoint field)"
         )
-        assert calls[0]["collection"] == "knowledge__nexus__voyage-context-3__v1"
+        assert calls[0]["collection"] == "knowledge__nexus__minilm-l6-v2-384__v1"
 
 
 # ── Behavior: delete_by_source collection_name param ─────────────────────────
@@ -706,6 +706,6 @@ class TestDeleteBySourceParam:
         # Must raise NotImplementedError (stub), not TypeError (wrong param name)
         with pytest.raises(NotImplementedError):
             client.delete_by_source(
-                collection_name="code__nexus__voyage-code-3__v1",
+                collection_name="code__nexus__minilm-l6-v2-384__v1",
                 source_path="/src/foo.py",
             )
