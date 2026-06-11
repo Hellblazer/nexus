@@ -573,7 +573,7 @@ class ForeignKeyConstraintTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks " +
                 "(tenant_id, doc_id, position, chash) VALUES " +
-                "('" + TENANT_A + "', 'chunk-doc-1', 0, 'abc123')");
+                "('" + TENANT_A + "', 'chunk-doc-1', 0, 'abc123abc123abc123abc123abc12300')");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
                 "WHERE tenant_id='" + TENANT_A + "' AND doc_id='chunk-doc-1'");
@@ -590,7 +590,7 @@ class ForeignKeyConstraintTest {
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_document_chunks " +
                     "(tenant_id, doc_id, position, chash) VALUES " +
-                    "('" + TENANT_A + "', 'nonexistent-chunk-doc', 0, 'deadbeef')")
+                    "('" + TENANT_A + "', 'nonexistent-chunk-doc', 0, 'deadbeefdeadbeefdeadbeefdeadbeef')")
             );
             assertThat(ex.getMessage())
                 .as("FK must reject chunk row with no matching catalog_documents entry")
@@ -606,8 +606,8 @@ class ForeignKeyConstraintTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks " +
                 "(tenant_id, doc_id, position, chash) VALUES " +
-                "('" + TENANT_A + "', 'chunk-cascade-doc', 0, 'hash0'), " +
-                "('" + TENANT_A + "', 'chunk-cascade-doc', 1, 'hash1')");
+                "('" + TENANT_A + "', 'chunk-cascade-doc', 0, 'hash0000000000000000000000000000'), " +
+                "('" + TENANT_A + "', 'chunk-cascade-doc', 1, 'hash1111111111111111111111111111')");
 
             ResultSet before = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
@@ -641,7 +641,7 @@ class ForeignKeyConstraintTest {
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_document_chunks " +
                     "(tenant_id, doc_id, position, chash) VALUES " +
-                    "('" + TENANT_B + "', '" + TUMBLER_A + "', 0, 'crosshash')")
+                    "('" + TENANT_B + "', '" + TUMBLER_A + "', 0, 'crosshashcrosshashcrosshash00000')")
             );
             assertThat(ex.getMessage())
                 .as("Composite FK must reject cross-tenant chunk manifest reference")

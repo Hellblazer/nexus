@@ -86,6 +86,19 @@ public final class TaxonomyRepository {
         return dt == null ? null : dt.format(UTC_SECOND);
     }
 
+    /**
+     * RDR-156 P0.2: ensure catalog_collections has a stub row for the given collection
+     * before any topic_assignment write that carries source_collection.
+     * Idempotent — ON CONFLICT DO NOTHING.
+     */
+    private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
+        if (collection == null || collection.isBlank()) return;
+        ctx.execute(
+            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) " +
+            "ON CONFLICT (tenant_id, name) DO NOTHING",
+            tenant, collection);
+    }
+
     private static Map<String, Object> buildTopicMap(org.jooq.Record r) {
         var m = new LinkedHashMap<String, Object>();
         m.put("id",            r.get("id",             Long.class));
@@ -314,6 +327,8 @@ public final class TaxonomyRepository {
                              String sourceCollection, String assignedAt) {
         tenantScope.withTenant(tenant, ctx -> {
             if ("projection".equals(assignedBy)) {
+                // RDR-156 P0.2: ensure collection is registered before the assignment write
+                ensureCollectionRegistered(ctx, tenant, sourceCollection);
                 String tsStr = fmtTs(assignedAt != null ? parseTs(assignedAt)
                                                         : OffsetDateTime.now(ZoneOffset.UTC));
                 ctx.execute("""
@@ -648,6 +663,8 @@ public final class TaxonomyRepository {
         String tsStr = (assignedAt != null && !assignedAt.isBlank())
             ? fmtTs(parseTsStrict(assignedAt)) : null;
         tenantScope.withTenant(tenant, ctx -> {
+            // RDR-156 P0.2: ensure collection is registered before the assignment write
+            ensureCollectionRegistered(ctx, tenant, sourceCollection);
             ctx.execute("""
                 INSERT INTO nexus.topic_assignments
                     (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
