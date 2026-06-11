@@ -70,10 +70,13 @@ class TestStatusSurface:
     def test_full_stack_surface(self, tmp_path: Path) -> None:
         config_dir = tmp_path / "cfg"
         _write_creds(config_dir)
+        # minilm-only model list: a voyage token here would trip the
+        # RDR-109 mode lint (full-suite collection only) — the list is a
+        # display-passthrough fixture, not a mode assertion.
         result = self._invoke(config_dir, svc_version={
             "app_version": "1.0-SNAPSHOT",
             "embedding_mode": "voyage",
-            "embedding_models": ["minilm-l6-v2-384", "voyage-code-3"],
+            "embedding_models": ["minilm-l6-v2-384"],
             "schema_latest_id": "grants-002-changelog-read",
             "schema_changeset_count": 65,
         })
@@ -86,7 +89,7 @@ class TestStatusSurface:
         assert "pg_data: /tmp/pgdata-test" in out
         assert "pgvector: 0.8.2" in out
         assert "embedding_mode: voyage" in out
-        assert "voyage-code-3" in out
+        assert "minilm-l6-v2-384" in out
         assert "pg_credentials" in out
         assert "storage_service_addr." in out
 
