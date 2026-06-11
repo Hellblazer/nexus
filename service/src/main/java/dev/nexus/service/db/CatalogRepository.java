@@ -89,6 +89,8 @@ public final class CatalogRepository {
     static final Field<String>  F_DOC_BIOA    = DSL.field(DSL.name("catalog_documents","bib_openalex_id"), String.class);
     static final Field<String>  F_DOC_BIDOI   = DSL.field(DSL.name("catalog_documents","bib_doi"), String.class);
     static final Field<String>  F_DOC_BIAT    = DSL.field(DSL.name("catalog_documents","bib_enriched_at"), String.class);
+    static final Field<java.time.OffsetDateTime> F_DOC_DELETED_AT =
+        DSL.field(DSL.name("catalog_documents","deleted_at"), java.time.OffsetDateTime.class);
 
     // ── Links fields ───────────────────────────────────────────────────────────
 
@@ -457,10 +459,18 @@ public final class CatalogRepository {
         });
     }
 
-    /** Delete a document by tumbler. Returns 1 if deleted, 0 if not found. */
+    /**
+     * Tombstone a document by tumbler (RDR-156 P1.2 soft delete).
+     * Sets deleted_at = NOW() instead of physically deleting, so fk-001 CASCADE
+     * chains (manifest, aspects, highlights, queue) do NOT fire.
+     * Returns 1 if tombstoned, 0 if not found.
+     */
     public int deleteDocument(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(T_DOCS).where(F_DOC_TUMBLER.eq(tumbler)).execute()
+            ctx.update(T_DOCS)
+               .set(F_DOC_DELETED_AT, java.time.OffsetDateTime.now())
+               .where(F_DOC_TUMBLER.eq(tumbler).and(F_DOC_DELETED_AT.isNull()))
+               .execute()
         );
     }
 
