@@ -1,0 +1,383 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""RDR-153 Phase 2 (bead nexus-cr3oo, TDD-red): per-store ETL policy
+integration — the data-quality policy table applied inside the RDR-152
+T2 ETLs, recording into the Phase-1 ``IssueCollector``.
+
+Policy (RDR §Decision 2): orphan_parent → skip-and-record (skipped);
+identity_mismatch → schema_corrected; format_anomaly parseable →
+normalize (handled), unparseable → failed; soft_dangler →
+import-but-flag (flagged); unexpected → fail-and-record (failed, NEVER
+a silent drop).
+
+Real tmp SQLite sources (integration over mocks — the source side is the
+thing under test); the Postgres side is a duck-typed capture store, as
+in the existing per-ETL suites (the service's INSERT…ON CONFLICT
+idempotency is its own locked contract there).
+"""
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows
+from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
+from nexus.migration.migration_report import IssueCollector, build_report
+
+# ── Source fixtures ──────────────────────────────────────────────────────────
+
+_TAXONOMY_SCHEMA = """
+CREATE TABLE topics (
+    id            INTEGER PRIMARY KEY,
+    label         TEXT NOT NULL,
+    parent_id     INTEGER,
+    collection    TEXT NOT NULL,
+    centroid_hash TEXT,
+    doc_count     INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    terms         TEXT
+);
+CREATE TABLE topic_assignments (
+    doc_id            TEXT NOT NULL,
+    topic_id          INTEGER NOT NULL,
+    assigned_by       TEXT NOT NULL DEFAULT 'hdbscan',
+    similarity        REAL,
+    assigned_at       TEXT,
+    source_collection TEXT,
+    PRIMARY KEY (doc_id, topic_id)
+);
+CREATE TABLE topic_links (
+    from_topic_id INTEGER NOT NULL,
+    to_topic_id   INTEGER NOT NULL,
+    link_type     TEXT NOT NULL DEFAULT 'related',
+    weight        REAL,
+    created_at    TEXT
+);
+CREATE TABLE taxonomy_meta (
+    collection              TEXT PRIMARY KEY,
+    last_discover_doc_count INTEGER NOT NULL DEFAULT 0,
+    last_discover_at        TEXT
+);
+"""
+
+_TELEMETRY_SCHEMA = """
+CREATE TABLE hook_failures (
+    id            INTEGER PRIMARY KEY,
+    doc_id        TEXT,
+    collection    TEXT,
+    hook_name     TEXT NOT NULL,
+    error         TEXT,
+    occurred_at   TEXT NOT NULL,
+    batch_doc_ids TEXT,
+    is_batch      INTEGER DEFAULT 0,
+    chain         TEXT
+);
+CREATE TABLE nx_answer_runs (
+    id                 INTEGER PRIMARY KEY,
+    question           TEXT NOT NULL,
+    plan_id            INTEGER,
+    matched_confidence REAL,
+    step_count         INTEGER DEFAULT 0,
+    final_text         TEXT,
+    cost_usd           REAL,
+    duration_ms        INTEGER DEFAULT 0,
+    created_at         TEXT NOT NULL
+);
+CREATE TABLE plans (
+    id         INTEGER PRIMARY KEY,
+    query      TEXT,
+    created_at TEXT
+);
+"""
+
+
+def _make_db(tmp_path: Path, schema: str, name: str = "src.db") -> Path:
+    db = tmp_path / name
+    conn = sqlite3.connect(db)
+    conn.executescript(schema)
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _insert(db: Path, sql: str, rows: list[tuple]) -> None:
+    conn = sqlite3.connect(db)
+    conn.executemany(sql, rows)
+    conn.commit()
+    conn.close()
+
+
+class _CaptureStore:
+    """Duck-typed Postgres store: records every import call; raises for
+    keys registered via ``fail_on`` (models a service-side rejection)."""
+
+    def __init__(self) -> None:
+        self.calls: dict[str, list[dict]] = {}
+        self.fail_on: dict[str, int] = {}  # method -> 1-based call index
+
+    def __getattr__(self, name: str):
+        if not name.startswith("import_"):
+            raise AttributeError(name)
+
+        def _record(*args, **kwargs):
+            seq = self.calls.setdefault(name, [])
+            seq.append(kwargs or (args[0] if args else {}))
+            if self.fail_on.get(name) == len(seq):
+                raise RuntimeError(f"injected failure on {name} #{len(seq)}")
+
+        return _record
+
+
+# ── Taxonomy policy ──────────────────────────────────────────────────────────
+
+
+class TestTaxonomyPolicy:
+    def _seeded_db(self, tmp_path: Path) -> Path:
+        db = _make_db(tmp_path, _TAXONOMY_SCHEMA)
+        _insert(db, "INSERT INTO topics (id, label, collection, created_at) VALUES (?,?,?,?)", [
+            (1, "alpha", "knowledge__x", "2026-01-01T00:00:00"),
+            (2, "beta", "knowledge__x", "2026-01-01T00:00:00"),
+        ])
+        _insert(db, "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?,?)", [
+            ("chash-a", 1),        # valid
+            ("chash-b", 2),        # valid
+            ("chash-c", 99),       # orphan: topic 99 deleted
+            ("chash-d", 99),       # orphan
+        ])
+        _insert(db, "INSERT INTO topic_links (from_topic_id, to_topic_id) VALUES (?,?)", [
+            (1, 2),                # valid
+            (1, 99),               # orphan to-side
+            (99, 2),               # orphan from-side
+        ])
+        return db
+
+    def test_orphan_assignments_skipped_and_recorded(self, tmp_path: Path) -> None:
+        db = self._seeded_db(tmp_path)
+        store = _CaptureStore()
+        collector = IssueCollector()
+
+        migrate_taxonomy_rows(db, store, collector=collector)
+
+        # Valid rows imported; orphans NEVER reach the store.
+        imported = {c["doc_id"] for c in store.calls["import_assignment"]}
+        assert imported == {"chash-a", "chash-b"}
+        (issue,) = [
+            i for i in collector.issues_for("taxonomy", "topic_assignments")
+            if i.issue_class == "orphan_parent"
+        ]
+        assert issue.action == "skipped"
+        assert issue.count == 2
+        # Composite-key sample convention: <doc_id>:<topic_id>.
+        assert set(issue.sample_ids) == {"chash-c:99", "chash-d:99"}
+
+    def test_orphan_links_skipped_both_sides(self, tmp_path: Path) -> None:
+        db = self._seeded_db(tmp_path)
+        store = _CaptureStore()
+        collector = IssueCollector()
+
+        migrate_taxonomy_rows(db, store, collector=collector)
+
+        links = store.calls["import_topic_link"]
+        assert len(links) == 1
+        assert (links[0]["from_topic_id"], links[0]["to_topic_id"]) == (1, 2)
+        (issue,) = [
+            i for i in collector.issues_for("taxonomy", "topic_links")
+            if i.issue_class == "orphan_parent"
+        ]
+        assert issue.action == "skipped"
+        assert issue.count == 2
+        assert set(issue.sample_ids) == {"1:99", "99:2"}
+
+    def test_doc_id_is_chash_schema_correction_recorded_once(
+        self, tmp_path: Path,
+    ) -> None:
+        db = self._seeded_db(tmp_path)
+        collector = IssueCollector()
+        migrate_taxonomy_rows(db, _CaptureStore(), collector=collector)
+        issues = [
+            i for i in collector.issues_for("taxonomy", "topic_assignments")
+            if i.issue_class == "identity_mismatch"
+        ]
+        assert len(issues) == 1
+        assert issues[0].action == "schema_corrected"
+        assert issues[0].count == 1          # ONCE per run, not per row
+        assert issues[0].sample_ids == []    # one-time event, no row sample
+
+    def test_counts_recorded_per_table(self, tmp_path: Path) -> None:
+        db = self._seeded_db(tmp_path)
+        collector = IssueCollector()
+        migrate_taxonomy_rows(db, _CaptureStore(), collector=collector)
+        assert collector.table_counts("taxonomy", "topic_assignments") == {
+            "read": 4, "written": 2,
+        }
+        assert collector.table_counts("taxonomy", "topic_links") == {
+            "read": 3, "written": 1,
+        }
+        assert collector.table_counts("taxonomy", "topics") == {
+            "read": 2, "written": 2,
+        }
+
+    def test_store_rejection_is_failed_issue_never_silent(
+        self, tmp_path: Path,
+    ) -> None:
+        """Catch-all: a service-side rejection on one row records a failed
+        issue and the run continues (no abort, no silent drop)."""
+        db = self._seeded_db(tmp_path)
+        store = _CaptureStore()
+        store.fail_on["import_topic"] = 2   # second topic write blows up
+        collector = IssueCollector()
+
+        migrate_taxonomy_rows(db, store, collector=collector)
+
+        (issue,) = [
+            i for i in collector.issues_for("taxonomy", "topics")
+            if i.action == "failed"
+        ]
+        assert issue.issue_class == "unexpected"
+        assert issue.count == 1
+        assert collector.table_counts("taxonomy", "topics")["written"] == 1
+        # The run continued: assignments still migrated.
+        assert len(store.calls["import_assignment"]) == 2
+
+    def test_rerun_is_idempotent_at_etl_level(self, tmp_path: Path) -> None:
+        """Re-run after parent repair must not raise (server-side
+        INSERT…ON CONFLICT DO NOTHING absorbs already-migrated rows; the
+        ETL must not fail on identical inputs either)."""
+        db = self._seeded_db(tmp_path)
+        store = _CaptureStore()
+        migrate_taxonomy_rows(db, store, collector=IssueCollector())
+        collector2 = IssueCollector()
+        migrate_taxonomy_rows(db, store, collector=collector2)
+        # Second run reads identically; orphans recorded identically.
+        assert collector2.table_counts("taxonomy", "topic_assignments") == {
+            "read": 4, "written": 2,
+        }
+
+    def test_collector_optional_back_compat(self, tmp_path: Path) -> None:
+        # The RDR-152 callers pass no collector; the ETL must work unchanged.
+        db = self._seeded_db(tmp_path)
+        result = migrate_taxonomy_rows(db, _CaptureStore())
+        assert result["topics"]["written"] == 2
+
+
+# ── Telemetry policy ─────────────────────────────────────────────────────────
+
+
+class TestTelemetryPolicy:
+    def _seeded_db(self, tmp_path: Path) -> Path:
+        db = _make_db(tmp_path, _TELEMETRY_SCHEMA)
+        _insert(db, "INSERT INTO plans (id, query) VALUES (?,?)", [(7, "q")])
+        _insert(
+            db,
+            "INSERT INTO hook_failures (hook_name, error, occurred_at) VALUES (?,?,?)",
+            [
+                ("auto_link", "boom", "2026-04-23 10:47:54"),   # space form
+                ("auto_link", "boom", "2026-04-24T09:00:00"),   # already ISO
+                ("auto_link", "boom", "not-a-timestamp"),       # unparseable
+            ],
+        )
+        _insert(
+            db,
+            "INSERT INTO nx_answer_runs (question, plan_id, created_at) VALUES (?,?,?)",
+            [
+                ("q-ok", 7, "2026-05-01T00:00:00"),     # plan exists
+                ("q-dangler", 99, "2026-05-01T00:00:00"),  # plan deleted
+                ("q-none", None, "2026-05-01T00:00:00"),   # NULL is fine
+            ],
+        )
+        return db
+
+    def test_space_form_timestamp_normalized_and_handled(
+        self, tmp_path: Path,
+    ) -> None:
+        db = self._seeded_db(tmp_path)
+        store = _CaptureStore()
+        collector = IssueCollector()
+
+        migrate_telemetry_rows(db, store, collector=collector)
+
+        by_ts = {c["occurred_at"] for c in store.calls["import_hook_failure"]}
+        assert "2026-04-23T10:47:54" in by_ts     # normalized
+        assert "2026-04-24T09:00:00" in by_ts     # untouched
+        assert "2026-04-23 10:47:54" not in by_ts # space form never written
+        (issue,) = [
+            i for i in collector.issues_for("telemetry", "hook_failures")
+            if i.action == "handled"
+        ]
+        assert issue.issue_class == "format_anomaly"
+        assert issue.count == 1   # only the space-form row was normalized
+
+    def test_unparseable_timestamp_failed_never_silent(
+        self, tmp_path: Path,
+    ) -> None:
+        db = self._seeded_db(tmp_path)
+        store = _CaptureStore()
+        collector = IssueCollector()
+
+        migrate_telemetry_rows(db, store, collector=collector)
+
+        (issue,) = [
+            i for i in collector.issues_for("telemetry", "hook_failures")
+            if i.action == "failed"
+        ]
+        assert issue.issue_class == "format_anomaly"
+        assert issue.count == 1
+        # The unparseable row was NOT written.
+        assert len(store.calls["import_hook_failure"]) == 2
+        assert collector.table_counts("telemetry", "hook_failures") == {
+            "read": 3, "written": 2,
+        }
+
+    def test_plan_danglers_imported_and_flagged(self, tmp_path: Path) -> None:
+        """Soft dangler policy: the row IMPORTS (no FK enforced) and an
+        advisory records the dangling reference."""
+        db = self._seeded_db(tmp_path)
+        store = _CaptureStore()
+        collector = IssueCollector()
+
+        migrate_telemetry_rows(db, store, collector=collector)
+
+        # All three runs imported — danglers are not dropped.
+        assert len(store.calls["import_nx_answer_run"]) == 3
+        (issue,) = [
+            i for i in collector.issues_for("telemetry", "nx_answer_runs")
+            if i.action == "flagged"
+        ]
+        assert issue.issue_class == "soft_dangler"
+        assert issue.count == 1               # only plan_id=99; NULL is not a dangler
+        assert collector.table_counts("telemetry", "nx_answer_runs") == {
+            "read": 3, "written": 3,
+        }
+
+    def test_collector_optional_back_compat(self, tmp_path: Path) -> None:
+        db = self._seeded_db(tmp_path)
+        result = migrate_telemetry_rows(db, _CaptureStore())
+        assert result["nx_answer_runs"]["written"] == 3
+
+
+# ── Report round-trip over a real two-store run ──────────────────────────────
+
+
+class TestEndToEndReport:
+    def test_gate_predicate_over_real_etl_run(self, tmp_path: Path) -> None:
+        """The production-shaped pass: orphans skipped, timestamps handled,
+        danglers flagged, one unparseable row failed — the report reflects
+        every action and total_failed counts exactly the failed rows."""
+        tax_db = TestTaxonomyPolicy()._seeded_db(tmp_path)
+        tel_db = TestTelemetryPolicy()._seeded_db(
+            (tmp_path / "tel").resolve() if (tmp_path / "tel").mkdir() is None else tmp_path / "tel",
+        )
+        collector = IssueCollector()
+        migrate_taxonomy_rows(tax_db, _CaptureStore(), collector=collector)
+        migrate_telemetry_rows(tel_db, _CaptureStore(), collector=collector)
+
+        report = build_report(collector, source={"sqlite": str(tax_db)}, target={})
+        summary = report["summary"]
+        assert summary["by_action"]["skipped"] == 4      # 2 assignments + 2 links
+        assert summary["by_action"]["handled"] == 1
+        assert summary["by_action"]["flagged"] == 1
+        assert summary["by_action"]["schema_corrected"] == 1
+        assert summary["total_failed"] == 1              # the unparseable ts
+        assert summary["max_severity"] == 4
