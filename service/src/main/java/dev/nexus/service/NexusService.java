@@ -189,8 +189,9 @@ public final class NexusService {
         // /health — unauthenticated
         server.createContext("/health", new HealthHandler(dataSource));
 
-        // /version — unauthenticated app+schema handshake (nexus-pebfx.4)
-        server.createContext("/version", new VersionHandler(dataSource));
+        // /version — unauthenticated app+schema+embedding-mode handshake
+        // (nexus-pebfx.4 + nexus-pebfx.5)
+        server.createContext("/version", new VersionHandler(dataSource, docEmbedderRouter));
 
         // /v1/* — auth filter applied
         var authFilter = List.of(new AuthFilter(tokenCache, tokenStore));

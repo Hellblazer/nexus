@@ -4,6 +4,7 @@ package dev.nexus.service.http;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import dev.nexus.service.vectors.EmbedderRouter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,9 +47,22 @@ public final class VersionHandler implements HttpHandler {
 
     private final DataSource dataSource;
     private final String appVersion;
+    private final EmbedderRouter embedderRouter;   // nullable — mode "unknown"
 
     public VersionHandler(DataSource dataSource) {
+        this(dataSource, null);
+    }
+
+    /**
+     * @param embedderRouter the doc-side router; supplies the
+     *        nexus-pebfx.5 embedding-mode handshake fields
+     *        ({@code embedding_mode}, {@code embedding_models}) so
+     *        {@code nx daemon service status} can show voyage|onnx-local
+     *        without parsing DEVNULLed JAR logs. Null → "unknown".
+     */
+    public VersionHandler(DataSource dataSource, EmbedderRouter embedderRouter) {
         this.dataSource = dataSource;
+        this.embedderRouter = embedderRouter;
         this.appVersion = resolveAppVersion();
     }
 
@@ -99,8 +113,21 @@ public final class VersionHandler implements HttpHandler {
             schemaError = e.getMessage();
         }
 
-        StringBuilder body = new StringBuilder(128);
+        StringBuilder body = new StringBuilder(192);
         body.append("{\"app_version\":").append(HttpUtil.jsonString(appVersion));
+        if (embedderRouter != null) {
+            body.append(",\"embedding_mode\":")
+                .append(HttpUtil.jsonString(embedderRouter.modeName()))
+                .append(",\"embedding_models\":[");
+            var models = embedderRouter.availableModels();
+            for (int i = 0; i < models.size(); i++) {
+                if (i > 0) body.append(',');
+                body.append(HttpUtil.jsonString(models.get(i)));
+            }
+            body.append(']');
+        } else {
+            body.append(",\"embedding_mode\":\"unknown\"");
+        }
         if (schemaError == null) {
             body.append(",\"schema_latest_id\":")
                 .append(latestId == null ? "null" : HttpUtil.jsonString(latestId))

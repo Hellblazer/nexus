@@ -112,7 +112,9 @@ class VectorHandlerEmbeddingModeTest {
         var qryRouter = new EmbedderRouter(onnx, "query");
         var pgRepo = new PgVectorRepository(new TenantScope(svcDs), docRouter, qryRouter);
 
-        service = new NexusService(0, TOKEN, svcDs, null, null, pgRepo);
+        // Pass the doc router so /version reports the embedding mode
+        // (nexus-pebfx.5) — same wiring shape as Main.java.
+        service = new NexusService(0, TOKEN, svcDs, null, docRouter, pgRepo);
         service.start();
         http = HttpClient.newHttpClient();
     }
@@ -192,6 +194,11 @@ class VectorHandlerEmbeddingModeTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
         assertThat((String) body.get("app_version")).isNotBlank();
+        // nexus-pebfx.5: the embedding-mode handshake — this harness is wired
+        // key-less, so the mode must read onnx-local with exactly the ONNX model.
+        assertThat(body.get("embedding_mode")).isEqualTo("onnx-local");
+        assertThat((List<String>) body.get("embedding_models"))
+            .containsExactly("minilm-l6-v2-384");
         assertThat(body.get("schema_error")).isNull();
         assertThat((String) body.get("schema_latest_id")).isNotBlank();
         assertThat(((Number) body.get("schema_changeset_count")).longValue())
