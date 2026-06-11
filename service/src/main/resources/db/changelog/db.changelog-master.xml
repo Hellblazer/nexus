@@ -69,6 +69,12 @@
          and CHECK constraints for chash length = 32 and position >= 0. -->
     <include file="db/changelog/catalog-002-hygiene.xml"/>
 
+    <!-- Soft-delete schema (bead nexus-70r3c.6, RDR-156 P1.2):
+         deleted_at timestamptz NULL on catalog_documents + catalog_links; partial
+         indexes WHERE deleted_at IS NULL; document_trash/document_restore/purge_trash
+         functions; live_chunks anti-join view. ZERO triggers. -->
+    <include file="db/changelog/catalog-003-soft-delete.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

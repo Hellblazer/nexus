@@ -1,0 +1,424 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 bead nexus-70r3c.6 — P1.2 soft-delete schema.
+
+    Decision 6 implementation:
+      - deleted_at timestamptz NULL on catalog_documents and catalog_links.
+      - Partial indexes WHERE deleted_at IS NULL preserve hot-path performance.
+      - Three SECURITY INVOKER functions: document_trash, document_restore, purge_trash.
+      - nexus.live_chunks view: anti-join over chunks_384/768/1024, no deleted_at exposed.
+
+    EXPLAIN EVIDENCE (recorded against live production cluster, pgvector/pg17, tenant='default',
+    98k chunks, 2026-06-11; command run in a BEGIN…ROLLBACK transaction to avoid schema persistence):
+
+      EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM nexus.live_chunks WHERE tenant_id='default' LIMIT 10;
+        Limit (cost=0.00..17.21 rows=1 width=1266) (actual time=0.361..0.361 rows=1 loops=1)
+          Buffers: shared hit=1 read=3
+          -> Seq Scan on chunks_384 c (actual time=0.360..0.361 rows=1 loops=1)
+               Filter: (tenant_id='default' AND (NOT (SubPlan 1) OR (SubPlan 2)))
+               SubPlan 1 -> Index Only Scan via idx_catalog_chunks_chash
+                            (tenant_id=c.tenant_id, chash=c.chash); Heap Fetches: 0
+               SubPlan 2 -> Nested Loop (never executed; short-circuit on SubPlan 1 = TRUE)
+        Execution Time: 0.384 ms
+      VERDICT: acceptable — SubPlan 1 (manifest existence check) hits the index-only path;
+        SubPlan 2 (live-doc correlated join) short-circuits when no manifest rows exist
+        (manifest-less note chunks). Index-only on idx_catalog_chunks_chash is the hot path;
+        the live join never fires for pure note chunks.
+
+    Design notes:
+      - Tombstone = UPDATE sets deleted_at; ON DELETE CASCADE on fk-001 does NOT fire.
+        Children (manifest, aspects, highlights, queue) survive until explicit purge.
+      - Purge = physical DELETE of catalog_documents WHERE deleted_at <= NOW() - older_than.
+        fk-001 CASCADE then removes manifest/aspects/highlights/queue for those rows.
+      - Orphan chunk sweep in purge_trash: a chunk is sweepable ONLY IF it has at least
+        one manifest row AND none of its manifest rows belong to a live doc. Manifest-less
+        chunks (MCP store_put / nx store put notes — no catalog_document_chunks rows) are
+        never swept. Contract: manifest-backed identity for notes is draft RDR-145 scope;
+        this arm is the safety contract until then.
+      - live_chunks view: a chunk is visible if it has NO manifest rows at all (note chunk)
+        OR has at least one live-doc manifest row. Same manifest-less-is-live contract.
+      - purge_trash GUC guard: RAISES if nexus.tenant is unset — prevents unscoped
+        cross-tenant purges even by superuser/BYPASSRLS callers.
+      - document_trash guards AND deleted_at IS NULL — double-trash does not reset the
+        purge age clock.
+      - ZERO triggers: implemented as explicit function logic per Decision 6.
+      - Function changesets use splitStatements="false" (one function per changeset)
+        because Liquibase's semicolon splitter cannot parse dollar-quoted plpgsql bodies.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: deleted_at columns on catalog_documents and catalog_links ── -->
+    <changeSet id="catalog-003-1" author="nexus-70r3c.6">
+        <comment>
+            Add deleted_at timestamptz NULL to catalog_documents and catalog_links.
+            NULL = live; non-NULL = tombstoned. Tombstone is an UPDATE — fk-001 CASCADE
+            chains (manifest, aspects, highlights, queue) do NOT fire on tombstone.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN deleted_at TIMESTAMPTZ NULL;
+
+ALTER TABLE nexus.catalog_links
+    ADD COLUMN deleted_at TIMESTAMPTZ NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.catalog_links    DROP COLUMN IF EXISTS deleted_at;
+                ALTER TABLE nexus.catalog_documents DROP COLUMN IF EXISTS deleted_at;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: partial indexes WHERE deleted_at IS NULL ─────────────────── -->
+    <changeSet id="catalog-003-2" author="nexus-70r3c.6">
+        <comment>
+            Partial indexes covering only live (non-tombstoned) rows.
+            Keeps hot-path queries (catalog browse, link traversal) as fast as pre-soft-delete.
+            The existing full indexes remain for admin/audit queries that need tombstoned rows.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_catalog_documents_collection_live
+    ON nexus.catalog_documents (tenant_id, physical_collection)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_catalog_documents_source_uri_live
+    ON nexus.catalog_documents (tenant_id, source_uri)
+    WHERE deleted_at IS NULL AND source_uri != '';
+
+CREATE INDEX idx_catalog_links_from_live
+    ON nexus.catalog_links (tenant_id, from_tumbler)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_catalog_links_to_live
+    ON nexus.catalog_links (tenant_id, to_tumbler)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_catalog_links_from_type_live
+    ON nexus.catalog_links (tenant_id, from_tumbler, link_type)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_catalog_links_to_type_live
+    ON nexus.catalog_links (tenant_id, to_tumbler, link_type)
+    WHERE deleted_at IS NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                DROP INDEX IF EXISTS nexus.idx_catalog_links_to_type_live;
+                DROP INDEX IF EXISTS nexus.idx_catalog_links_from_type_live;
+                DROP INDEX IF EXISTS nexus.idx_catalog_links_to_live;
+                DROP INDEX IF EXISTS nexus.idx_catalog_links_from_live;
+                DROP INDEX IF EXISTS nexus.idx_catalog_documents_source_uri_live;
+                DROP INDEX IF EXISTS nexus.idx_catalog_documents_collection_live;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: document_trash function ──────────────────────────────────── -->
+    <!-- splitStatements="false": single plpgsql function body, dollar-quoted -->
+    <changeSet id="catalog-003-3" author="nexus-70r3c.6">
+        <comment>
+            nexus.document_trash(tumbler text) RETURNS void.
+            SECURITY INVOKER — runs under the caller's FORCE RLS context.
+            Tenant scoped via current_setting('nexus.tenant', true) GUC.
+            Tombstone is an UPDATE (sets deleted_at = NOW()), not a DELETE —
+            fk-001 CASCADE chains do NOT fire; children survive intact.
+            AND deleted_at IS NULL guard: double-trash is idempotent and does NOT
+            reset the purge age clock (timestamp stays at first-trash time).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.document_trash(tumbler text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    UPDATE nexus.catalog_documents
+       SET deleted_at = NOW()
+     WHERE tenant_id  = current_setting('nexus.tenant', true)
+       AND nexus.catalog_documents.tumbler = $1
+       AND deleted_at IS NULL;
+END;
+$$
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.document_trash(text)</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: document_restore function ────────────────────────────────── -->
+    <changeSet id="catalog-003-4" author="nexus-70r3c.6">
+        <comment>
+            nexus.document_restore(tumbler text) RETURNS void.
+            SECURITY INVOKER — runs under the caller's FORCE RLS context.
+            Clears deleted_at (sets to NULL), making the document live again.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.document_restore(tumbler text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    UPDATE nexus.catalog_documents
+       SET deleted_at = NULL
+     WHERE tenant_id = current_setting('nexus.tenant', true)
+       AND nexus.catalog_documents.tumbler = $1;
+END;
+$$
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.document_restore(text)</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: purge_trash function ─────────────────────────────────────── -->
+    <changeSet id="catalog-003-5" author="nexus-70r3c.6">
+        <comment>
+            nexus.purge_trash(older_than interval) RETURNS bigint.
+            SECURITY INVOKER — runs under caller's FORCE RLS context.
+
+            GUC guard (Decision 6): raises with message containing "tenant" when
+            current_setting('nexus.tenant', true) is NULL or empty. Prevents unscoped
+            cross-tenant purges even for BYPASSRLS/superuser callers.
+
+            Steps:
+              1. Check GUC — raise if unset.
+              2. Sweep orphaned chunk rows from chunks_384/768/1024 where the only
+                 referencing manifest rows belong to tombstoned documents being purged.
+                 A chunk is safe to sweep only if NO live (deleted_at IS NULL) manifest
+                 row for the same tenant references it (shared-chash safety).
+              3. Physically DELETE catalog_documents WHERE deleted_at &lt;= NOW() - older_than.
+                 fk-001 ON DELETE CASCADE removes manifest/aspects/highlights/queue rows.
+              4. Return count of documents purged.
+
+            Order: sweep orphan chunks BEFORE deleting catalog_documents rows, because
+            the orphan-detection anti-join references catalog_document_chunks (which
+            cascade-deletes with the document). Doing the sweep first avoids the need
+            to reconstruct which chashes had no surviving live reference after cascade.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.purge_trash(older_than interval)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_tenant TEXT;
+    v_count  BIGINT;
+BEGIN
+    -- GUC guard: must have a non-empty tenant scope
+    v_tenant := current_setting('nexus.tenant', true);
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION
+            'purge_trash: nexus.tenant GUC must be set to a non-empty tenant scope. '
+            'Cross-tenant purge is not permitted. Set the nexus.tenant configuration '
+            'parameter before calling purge_trash.';
+    END IF;
+
+    -- Step 1: sweep orphaned chunk rows from chunks_384.
+    -- Safety contract: a chunk is sweepable ONLY IF it has at least one manifest row
+    -- AND none of its manifest rows belong to a live (deleted_at IS NULL) document.
+    -- Manifest-less chunks (MCP store_put / nx store put notes that write chunks directly
+    -- without manifest rows) are never swept — their NOT EXISTS subquery is trivially TRUE,
+    -- so the EXISTS(...manifest row...) gate excludes them. RDR-145 deferred scope.
+    DELETE FROM nexus.chunks_384 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND d.deleted_at IS NULL
+      );
+
+    -- Step 2: sweep orphaned chunk rows from chunks_768.
+    DELETE FROM nexus.chunks_768 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND d.deleted_at IS NULL
+      );
+
+    -- Step 3: sweep orphaned chunk rows from chunks_1024.
+    DELETE FROM nexus.chunks_1024 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND d.deleted_at IS NULL
+      );
+
+    -- Step 4: physically delete tombstoned documents older than the threshold.
+    -- fk-001 ON DELETE CASCADE removes catalog_document_chunks, document_aspects,
+    -- document_highlights, and aspect_extraction_queue rows for each deleted doc.
+    DELETE FROM nexus.catalog_documents
+     WHERE tenant_id  = v_tenant
+       AND deleted_at IS NOT NULL
+       AND deleted_at &lt;= NOW() - older_than;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.purge_trash(interval)</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 6: live_chunks view ─────────────────────────────────────────── -->
+    <changeSet id="catalog-003-6" author="nexus-70r3c.6">
+        <comment>
+            nexus.live_chunks — SECURITY INVOKER anti-join view.
+            A chunk is visible when it has NO manifest rows (manifest-less note chunks written by
+            MCP store_put / nx store put are always live — RDR-145 deferred scope) OR has at least
+            one manifest row whose parent document is live (deleted_at IS NULL).
+            Chunks whose ONLY manifest rows point to tombstoned documents are excluded.
+            Consumers never see a deleted_at column from this view (Decision 6 single enforcement point).
+            SECURITY INVOKER: the caller's RLS policy (tenant_isolation on chunks tables) applies.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.live_chunks
+    WITH (security_invoker = true)
+AS
+SELECT c.tenant_id,
+       c.collection,
+       c.chash,
+       c.chunk_text,
+       c.embedding,
+       c.chunk_tsv,
+       c.metadata,
+       c.created_at,
+       384 AS dim
+  FROM nexus.chunks_384 c
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
+     SELECT 1
+       FROM nexus.catalog_document_chunks m
+       JOIN nexus.catalog_documents d
+         ON d.tenant_id = m.tenant_id
+        AND d.tumbler   = m.doc_id
+      WHERE m.tenant_id  = c.tenant_id
+        AND m.chash       = c.chash
+        AND d.deleted_at IS NULL
+ )
+UNION ALL
+SELECT c.tenant_id,
+       c.collection,
+       c.chash,
+       c.chunk_text,
+       c.embedding,
+       c.chunk_tsv,
+       c.metadata,
+       c.created_at,
+       768 AS dim
+  FROM nexus.chunks_768 c
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
+     SELECT 1
+       FROM nexus.catalog_document_chunks m
+       JOIN nexus.catalog_documents d
+         ON d.tenant_id = m.tenant_id
+        AND d.tumbler   = m.doc_id
+      WHERE m.tenant_id  = c.tenant_id
+        AND m.chash       = c.chash
+        AND d.deleted_at IS NULL
+ )
+UNION ALL
+SELECT c.tenant_id,
+       c.collection,
+       c.chash,
+       c.chunk_text,
+       c.embedding,
+       c.chunk_tsv,
+       c.metadata,
+       c.created_at,
+       1024 AS dim
+  FROM nexus.chunks_1024 c
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
+     SELECT 1
+       FROM nexus.catalog_document_chunks m
+       JOIN nexus.catalog_documents d
+         ON d.tenant_id = m.tenant_id
+        AND d.tumbler   = m.doc_id
+      WHERE m.tenant_id  = c.tenant_id
+        AND m.chash       = c.chash
+        AND d.deleted_at IS NULL
+ )
+        </sql>
+        <rollback>DROP VIEW IF EXISTS nexus.live_chunks</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 7: GRANT EXECUTE on functions and SELECT on live_chunks view ── -->
+    <changeSet id="catalog-003-7" author="nexus-70r3c.6">
+        <comment>
+            Grant nexus_svc EXECUTE on the three soft-delete functions.
+            The grants-nexus-svc.xml runAlways changeset covers ALL TABLES (including views)
+            via "GRANT SELECT ON ALL TABLES" but does not cover FUNCTIONS. Explicit here.
+
+            live_chunks SELECT is granted to PUBLIC because:
+              (a) It is a SECURITY INVOKER view — the caller's RLS on chunks_384/768/1024
+                  provides tenant isolation; explicit view-level grants do not add security.
+              (b) Any role that can call the soft-delete functions (nexus_svc and its peers)
+                  needs to read live_chunks; PUBLIC avoids per-role enumeration.
+              (c) grants-nexus-svc.xml's "GRANT SELECT ON ALL TABLES" does not cover views
+                  created in later changesets (ALTER DEFAULT PRIVILEGES handles new objects,
+                  but only for roles with the ALTER DEFAULT PRIVILEGES privilege).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT EXECUTE ON FUNCTION nexus.document_trash(text)    TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.document_restore(text)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval)   TO nexus_svc;
+GRANT SELECT ON nexus.live_chunks                        TO PUBLIC;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                REVOKE SELECT ON nexus.live_chunks                       FROM PUBLIC;
+                REVOKE EXECUTE ON FUNCTION nexus.purge_trash(interval)  FROM nexus_svc;
+                REVOKE EXECUTE ON FUNCTION nexus.document_restore(text) FROM nexus_svc;
+                REVOKE EXECUTE ON FUNCTION nexus.document_trash(text)   FROM nexus_svc;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
