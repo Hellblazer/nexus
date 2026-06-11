@@ -68,7 +68,7 @@ def migration_report_show_cmd(report_file: Path) -> None:
         report = load_report(report_file)
     except FileNotFoundError:
         raise click.ClickException(f"report not found: {report_file}")
-    except (ValueError, _json.JSONDecodeError) as exc:
+    except ValueError as exc:  # JSONDecodeError subclasses ValueError
         raise click.ClickException(f"unreadable report {report_file}: {exc}")
 
     schema = str(report.get("schema_version", "?"))
@@ -79,7 +79,24 @@ def migration_report_show_cmd(report_file: Path) -> None:
             err=True,
         )
 
-    summary = report.get("summary", {})
+    # NEVER default-to-pass (P4 review CRITICAL): this command is the
+    # RDR-152 Phase-4 deletion gate's reading tool — a structurally
+    # damaged artifact (missing summary, missing total_failed) must FAIL
+    # the gate loudly, not evaluate the predicate against defaults.
+    summary = report.get("summary")
+    if not isinstance(summary, dict) or "total_failed" not in summary:
+        raise click.ClickException(
+            f"report has no summary.total_failed — cannot evaluate the gate "
+            f"predicate (schema_version="
+            f"{report.get('schema_version', '?')}): {report_file}"
+        )
+    try:
+        gate_total_failed = int(summary["total_failed"])
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(
+            f"report summary.total_failed is not an integer "
+            f"({summary['total_failed']!r}): {report_file} — {exc}"
+        )
     click.echo(f"migration: {report.get('migration_id', '?')}")
     click.echo(
         f"  {report.get('started_at', '?')} -> {report.get('completed_at', '?')}"
@@ -123,12 +140,16 @@ def migration_report_show_cmd(report_file: Path) -> None:
         for _, line in sorted(issues, key=lambda t: t[0], reverse=True):
             click.echo(line)
 
-    total_failed = int(summary.get("total_failed", 0))
-    if total_failed == 0:
+    if gate_total_failed == 0:
         click.echo("GATE: PASS (total_failed=0)")
     else:
-        click.echo(f"GATE: FAIL (total_failed={total_failed})", err=True)
-        raise SystemExit(1)
+        click.echo(f"GATE: FAIL (total_failed={gate_total_failed})", err=True)
+        click.echo(
+            "  failed rows are triaged above; after repairing parents, "
+            "re-running the ETL is idempotent (ON CONFLICT DO NOTHING).",
+            err=True,
+        )
+        sys.exit(1)
 
 
 @storage_group.group(name="migrate")

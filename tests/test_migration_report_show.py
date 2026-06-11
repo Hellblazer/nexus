@@ -146,15 +146,54 @@ class TestShowSummary:
         result = runner.invoke(main, [
             "storage", "migration-report", "show", str(tmp_path / "absent.json"),
         ])
-        assert result.exit_code != 0
+        # exit 1 + the command's OWN message (a usage error would be exit 2
+        # without it — the original assertions passed before the command
+        # existed; P4 review tightened them).
+        assert result.exit_code == 1
+        assert "report not found" in result.output
         assert "Traceback" not in result.output
 
     def test_malformed_json_clean_error(self, runner, tmp_path: Path) -> None:
         path = tmp_path / "bad.json"
         path.write_text("{not json")
         result = runner.invoke(main, ["storage", "migration-report", "show", str(path)])
-        assert result.exit_code != 0
+        assert result.exit_code == 1
+        assert "unreadable report" in result.output
         assert "Traceback" not in result.output
+
+    def test_missing_summary_never_defaults_to_pass(
+        self, runner, tmp_path: Path,
+    ) -> None:
+        """P4 review CRITICAL: a structurally damaged artifact (no summary)
+        must FAIL the gate loudly — never evaluate the predicate against
+        defaults. This is the deletion gate's last line of defense."""
+        path = tmp_path / "stub.json"
+        path.write_text(
+            json.dumps({"schema_version": "1", "migration_id": "x", "stores": []})
+        )
+        result = runner.invoke(main, ["storage", "migration-report", "show", str(path)])
+        assert result.exit_code == 1
+        assert "cannot evaluate the gate predicate" in result.output
+        assert "GATE: PASS" not in result.output
+        assert "Traceback" not in result.output
+
+    def test_malformed_total_failed_clean_error(
+        self, runner, tmp_path: Path,
+    ) -> None:
+        report = _sample_report()
+        report["summary"]["total_failed"] = "oops"
+        path = _write(tmp_path, report)
+        result = runner.invoke(main, ["storage", "migration-report", "show", str(path)])
+        assert result.exit_code == 1
+        assert "not an integer" in result.output
+        assert "GATE: PASS" not in result.output
+        assert "Traceback" not in result.output
+
+    def test_gate_fail_carries_rerun_hint(self, runner, tmp_path: Path) -> None:
+        path = _write(tmp_path, _sample_report(failed=1))
+        result = runner.invoke(main, ["storage", "migration-report", "show", str(path)])
+        assert result.exit_code == 1
+        assert "idempotent" in result.output
 
     def test_unknown_schema_version_warns_but_displays(
         self, runner, tmp_path: Path,
