@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 bead nexus-70r3c.9 — P2.2 manifest functions.
+
+    Decision 3 implementation:
+      - nexus.manifest_orphans(dim int): manifest rows whose chash has NO chunk row in
+        chunks_<dim> for that tenant+collection. Tombstone-aware: excludes orphan rows
+        whose parent doc has deleted_at IS NOT NULL. Call AFTER manifest_backfill()
+        (rows with collection IS NULL are pre-backfill state, not orphans).
+      - nexus.manifest_backfill(): idempotent collection-stamping backfill — stamps
+        catalog_document_chunks.collection from the owning doc's physical_collection
+        WHERE collection IS NULL. Tombstone-aware: skips tombstoned docs. Returns bigint
+        (count of rows stamped).
+      - nexus.document_text(doc_id text): ordered manifest⋈chunk_text reconstruction.
+        Tombstone-aware: tombstoned doc returns empty set (never stale text).
+        Gap contract: manifest rows with no corresponding chunk row are silently skipped
+        (use manifest_orphans for integrity checks, not document_text).
+        Tenant-scoped via nexus.tenant GUC (SECURITY INVOKER under FORCE RLS).
+
+    All three: SECURITY INVOKER, grants to nexus_svc consistent with catalog-003 pattern.
+
+    Call protocol note: run manifest_backfill() BEFORE manifest_orphans(dim).
+    Rows with collection IS NULL are pre-backfill state, not orphans; they will show
+    up as false orphans if orphan check runs first (the LEFT JOIN cannot match on NULL).
+
+    Model → dimension routing (mirrors vector_etl._MODEL_DIMS):
+      384:  minilm-l6-v2-384
+      768:  bge-base-en-v15-768
+      1024: voyage-code-3, voyage-context-3, voyage-3
+
+    Retired generated-SQL artifacts (see deprecation comments in vector_etl.py):
+      manifest_orphan_sql(dim)  → superseded by nexus.manifest_orphans(dim)
+      manifest_backfill_sql()   → superseded by nexus.manifest_backfill()
+
+    splitStatements="false" on every function changeset (dollar-quoted plpgsql bodies
+    cannot be parsed by Liquibase's semicolon splitter).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: nexus.manifest_orphans(dim int) ─────────────────────── -->
+    <changeSet id="catalog-004-1" author="nexus-70r3c.9">
+        <comment>
+            nexus.manifest_orphans(dim int) RETURNS TABLE(tenant_id text, doc_id text,
+              position int, chash text, collection text).
+            SECURITY INVOKER — runs under the caller's context (admin/superuser cross-tenant).
+
+            Returns manifest rows (catalog_document_chunks) whose chash has NO corresponding
+            chunk row in chunks_&lt;dim&gt; for that (tenant_id, collection, chash) combination.
+
+            TOMBSTONE-AWARE: orphan rows whose parent doc has deleted_at IS NOT NULL are
+            EXCLUDED. Rationale: orphan sweep is a forward-migration health check; tombstoned
+            documents are being retired, not migrated — they should not appear in orphan output.
+
+            NULL-collection caveat: rows with collection IS NULL are NOT counted as orphans
+            (they are pre-backfill state). Call manifest_backfill() FIRST to stamp collection
+            before running orphan checks. The WHERE c.collection IS NOT NULL guard enforces this.
+
+            Dim routing (mirrors vector_etl._MODEL_DIMS):
+              384:  minilm-l6-v2-384
+              768:  bge-base-en-v15-768
+              1024: voyage-code-3, voyage-context-3, voyage-3
+
+            Error: raises if dim is not one of 384, 768, 1024.
+
+            Replaces: manifest_orphan_sql(dim) in src/nexus/migration/vector_etl.py
+            (superseded by this stored function, catalog-004, RDR-156 P2;
+             kept in vector_etl.py only because P4b bead nexus-g37fr deletes that module wholesale).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.manifest_orphans(dim int)
+RETURNS TABLE(
+    tenant_id  text,
+    doc_id     text,
+    "position" int,
+    chash      text,
+    collection text
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    -- Validate dim argument
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'manifest_orphans: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        RETURN QUERY
+            SELECT c.tenant_id, c.doc_id, c.position, c.chash, c.collection
+              FROM nexus.catalog_document_chunks c
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = c.tenant_id
+               AND d.tumbler   = c.doc_id
+               AND d.deleted_at IS NULL
+              LEFT JOIN nexus.chunks_384 k
+                ON k.tenant_id  = c.tenant_id
+               AND k.collection = c.collection
+               AND k.chash      = c.chash
+             WHERE c.collection IS NOT NULL
+               AND split_part(c.collection, '__', 3) IN ('minilm-l6-v2-384')
+               AND k.chash IS NULL;
+
+    ELSIF dim = 768 THEN
+        RETURN QUERY
+            SELECT c.tenant_id, c.doc_id, c.position, c.chash, c.collection
+              FROM nexus.catalog_document_chunks c
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = c.tenant_id
+               AND d.tumbler   = c.doc_id
+               AND d.deleted_at IS NULL
+              LEFT JOIN nexus.chunks_768 k
+                ON k.tenant_id  = c.tenant_id
+               AND k.collection = c.collection
+               AND k.chash      = c.chash
+             WHERE c.collection IS NOT NULL
+               AND split_part(c.collection, '__', 3) IN ('bge-base-en-v15-768')
+               AND k.chash IS NULL;
+
+    ELSIF dim = 1024 THEN
+        RETURN QUERY
+            SELECT c.tenant_id, c.doc_id, c.position, c.chash, c.collection
+              FROM nexus.catalog_document_chunks c
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = c.tenant_id
+               AND d.tumbler   = c.doc_id
+               AND d.deleted_at IS NULL
+              LEFT JOIN nexus.chunks_1024 k
+                ON k.tenant_id  = c.tenant_id
+               AND k.collection = c.collection
+               AND k.chash      = c.chash
+             WHERE c.collection IS NOT NULL
+               AND split_part(c.collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3')
+               AND k.chash IS NULL;
+    END IF;
+END;
+$$
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.manifest_orphans(int)</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: nexus.manifest_backfill() ────────────────────────────── -->
+    <changeSet id="catalog-004-2" author="nexus-70r3c.9">
+        <comment>
+            nexus.manifest_backfill() RETURNS bigint.
+            SECURITY INVOKER — runs under the caller's context (admin/superuser).
+
+            Stamps catalog_document_chunks.collection from the owning document's
+            physical_collection WHERE collection IS NULL and physical_collection IS NOT NULL
+            AND physical_collection != ''.
+
+            IDEMPOTENT: only touches rows where collection IS NULL — a second call returns 0.
+
+            TOMBSTONE-AWARE: skips manifest rows whose parent doc has deleted_at IS NOT NULL.
+            Rationale: tombstoned documents are being retired, not migrated.
+
+            Returns bigint: count of rows stamped (0 on idempotent re-run).
+
+            Replaces: manifest_backfill_sql() in src/nexus/migration/vector_etl.py
+            (superseded by this stored function, catalog-004, RDR-156 P2;
+             kept in vector_etl.py only because P4b bead nexus-g37fr deletes that module wholesale).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.manifest_backfill()
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_count bigint;
+BEGIN
+    UPDATE nexus.catalog_document_chunks c
+       SET collection = d.physical_collection
+      FROM nexus.catalog_documents d
+     WHERE d.tenant_id          = c.tenant_id
+       AND d.tumbler             = c.doc_id
+       AND d.deleted_at         IS NULL
+       AND c.collection         IS NULL
+       AND d.physical_collection IS NOT NULL
+       AND d.physical_collection != '';
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.manifest_backfill()</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: nexus.document_text(doc_id text) ─────────────────────── -->
+    <changeSet id="catalog-004-3" author="nexus-70r3c.9">
+        <comment>
+            nexus.document_text(doc_id text)
+              RETURNS TABLE(position int, chunk_text text).
+            SECURITY INVOKER — runs under the caller's FORCE RLS context.
+            Tenant-scoped via current_setting('nexus.tenant', true) GUC.
+
+            Returns ordered manifest⋈chunk_text reconstruction for the specified document
+            (the fetchDocumentChunks read-shape, queryable server-side without the Java service).
+            Rows are ordered by manifest position.
+
+            TOMBSTONE-AWARE: a tombstoned doc (deleted_at IS NOT NULL) returns an EMPTY SET.
+            Never stale text from a retired document.
+
+            GAP CONTRACT: manifest rows with no corresponding chunk row in any chunks_&lt;dim&gt;
+            table are SILENTLY SKIPPED (INNER JOIN semantics). The function returns the
+            positions it can resolve. Use manifest_orphans(dim) for integrity checks —
+            document_text is a reader, not a validator.
+
+            The JOIN across all three dim tables uses UNION ALL so each chunk row is found
+            regardless of dimension. A chash that appears in multiple dim tables (e.g. after
+            re-indexing) will appear once per dim, but in practice each chash is in exactly
+            one dim table.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.document_text(doc_id text)
+RETURNS TABLE(
+    "position"  int,
+    chunk_text  text
+)
+LANGUAGE sql
+SECURITY INVOKER
+AS $$
+    SELECT m.position::int, k.chunk_text::text
+      FROM nexus.catalog_document_chunks m
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id
+       AND d.tumbler   = m.doc_id
+       AND d.deleted_at IS NULL
+      JOIN (
+          SELECT tenant_id, collection, chash, chunk_text FROM nexus.chunks_384
+          UNION ALL
+          SELECT tenant_id, collection, chash, chunk_text FROM nexus.chunks_768
+          UNION ALL
+          SELECT tenant_id, collection, chash, chunk_text FROM nexus.chunks_1024
+      ) k
+        ON k.tenant_id  = m.tenant_id
+       AND k.collection = m.collection
+       AND k.chash      = m.chash
+     WHERE m.tenant_id = current_setting('nexus.tenant', true)
+       AND m.doc_id    = $1
+     ORDER BY m.position
+$$
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.document_text(text)</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: GRANT EXECUTE on all three functions to nexus_svc ──────── -->
+    <changeSet id="catalog-004-4" author="nexus-70r3c.9">
+        <comment>
+            Grant nexus_svc EXECUTE on the three manifest functions.
+            Consistent with catalog-003-7 pattern for soft-delete functions.
+
+            manifest_orphans and manifest_backfill are admin/superuser functions
+            (no GUC scoping, cross-tenant by design) — granting to nexus_svc allows
+            the service layer and doctor/status surfaces to call them without requiring
+            a superuser connection.
+
+            document_text is tenant-scoped via nexus.tenant GUC (SECURITY INVOKER
+            under FORCE RLS) — nexus_svc is the primary caller.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT EXECUTE ON FUNCTION nexus.manifest_orphans(int)   TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.manifest_backfill()     TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.document_text(text)     TO nexus_svc;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                REVOKE EXECUTE ON FUNCTION nexus.document_text(text)     FROM nexus_svc;
+                REVOKE EXECUTE ON FUNCTION nexus.manifest_backfill()     FROM nexus_svc;
+                REVOKE EXECUTE ON FUNCTION nexus.manifest_orphans(int)   FROM nexus_svc;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

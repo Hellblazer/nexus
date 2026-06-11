@@ -75,6 +75,12 @@
          functions; live_chunks anti-join view. ZERO triggers. -->
     <include file="db/changelog/catalog-003-soft-delete.xml"/>
 
+    <!-- Manifest functions (bead nexus-70r3c.9, RDR-156 P2.2):
+         nexus.manifest_orphans(dim int), nexus.manifest_backfill(), nexus.document_text(doc_id text).
+         All SECURITY INVOKER, tombstone-aware (deleted_at IS NULL). Promotes the RDR-155
+         generated-SQL-string artifacts to first-class DB objects. -->
+    <include file="db/changelog/catalog-004-manifest-functions.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

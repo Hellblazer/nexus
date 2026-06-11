@@ -103,7 +103,12 @@ class ManifestFunctionsTest {
     private static final String FN_DOC_TEXT  = "nexus.document_text";
 
     // ── Test collections (must be registered in catalog_collections per fk-002) ─
-    private static final String COLLECTION_384  = "knowledge__mf-owner-a__minilm__v1";
+    // Collection names follow the conformant shape: <type>__<owner>__<model>__<version>
+    // The model segment (split_part(name, '__', 3)) must match the _MODEL_DIMS tokens
+    // used by manifest_orphans to route to the correct chunks_<dim> table.
+    // 384: model token = 'minilm-l6-v2-384' (maps chunks_384)
+    // 1024: model token = 'voyage-context-3' (maps chunks_1024)
+    private static final String COLLECTION_384  = "knowledge__mf-owner-a__minilm-l6-v2-384__v1";
     private static final String COLLECTION_1024 = "knowledge__mf-owner-a__voyage-context-3__v1";
 
     PostgreSQLContainer<?> pg;

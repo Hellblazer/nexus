@@ -522,7 +522,18 @@ def manifest_backfill_sql() -> str:
     """SQL stamping ``catalog_document_chunks.collection`` from the owning
     document's ``physical_collection`` (vectors-001-6: the column ships
     nullable, "backfilled by Phase 5 ETL"). Touches ONLY rows whose
-    collection IS NULL — idempotent re-run."""
+    collection IS NULL — idempotent re-run.
+
+    .. deprecated::
+        Superseded by ``nexus.manifest_backfill()`` stored function
+        (catalog-004, RDR-156 P2; bead nexus-70r3c.9). Call the stored
+        function via psql instead::
+
+            SELECT nexus.manifest_backfill();
+
+        This function is kept only because bead nexus-g37fr (RDR-155 P4b)
+        will delete this entire module wholesale. Do not add new callers.
+    """
     return """\
 UPDATE nexus.catalog_document_chunks c
    SET collection = d.physical_collection
@@ -550,6 +561,18 @@ def manifest_orphan_sql(dim: int) -> str:
     Returns orphans across ALL tenants (no outer tenant filter) — intended
     for superuser/admin cutover validation, where the whole-database answer
     is the point.
+
+    .. deprecated::
+        Superseded by ``nexus.manifest_orphans(dim int)`` stored function
+        (catalog-004, RDR-156 P2; bead nexus-70r3c.9). Call the stored
+        function via psql instead::
+
+            SELECT * FROM nexus.manifest_orphans(1024);
+
+        Run ``nexus.manifest_backfill()`` first (rows with collection IS NULL
+        are pre-backfill state, not orphans). This function is kept only
+        because bead nexus-g37fr (RDR-155 P4b) will delete this entire
+        module wholesale. Do not add new callers.
     """
     if dim not in _KNOWN_DIMS:
         raise ValueError(
