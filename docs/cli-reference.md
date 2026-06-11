@@ -1823,6 +1823,46 @@ List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revo
 
 ## nx storage
 
+### nx storage migrate all
+
+```
+nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH]
+```
+
+Run ALL seven T2 store migrations in the RDR-152 ladder order (memory →
+plans → telemetry → taxonomy → aspects → chash → catalog last) with one
+shared issue collector, and emit ONE RDR-153 migration report (default:
+`~/.config/nexus/migration-reports/migration-<id>.json` — a run always
+produces an artifact). Exits non-zero when `summary.total_failed > 0`
+("migration is NOT clean") or when post-run count verification finds
+Postgres counts below the report's written totals. When psql/credentials
+cannot be resolved the verification is reported as **VERIFICATION
+INDETERMINATE** — a loud warning, never a silent skip (the RDR-152
+prod-copy.sh harness bug). The verdict is recorded in the report
+artifact (`"verification"`). Verification queries the LOCAL nx-managed
+Postgres (from `pg_credentials`) — when migrating against a remote
+service it reports on the local cluster only. Every per-store command
+also accepts `--report PATH` for a single-store report (a default-path
+artifact is written even when the flag is omitted, including on a
+mid-run crash — partial data beats no data). Note: `aspects` has no
+standalone command; it runs only via `migrate all`.
+
+### nx storage migration-report show
+
+```
+nx storage migration-report show <path>
+```
+
+Summarize an RDR-153 migration-report artifact: migration id and window,
+the recorded verification verdict (`(not recorded)` for artifacts that
+predate it), `max_severity` first, the by-action rollup
+(severity-descending), per-issue triage lines (severity-descending, with
+class/action/count/sample), and the gate verdict — **GATE: PASS** when
+`summary.total_failed == 0`, otherwise **GATE: FAIL** with a non-zero
+exit (scriptable; this is the RDR-152 Phase-4 SQLite-deletion gate
+predicate). The reader lives in `nexus.migration` and survives the
+`src/nexus/db/t2` deletion.
+
 Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-not-move (the source is never modified) and idempotent (server-side upsert; re-runs produce no duplicates). All require `NX_SERVICE_TOKEN`.
 
 ### nx storage migrate

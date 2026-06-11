@@ -196,19 +196,44 @@ def _transform_promotion_row(row: dict[str, Any]) -> dict[str, Any]:
 # ── Migration functions ────────────────────────────────────────────────────────
 
 
+def _load_live_tumblers(catalog_db_path: Path) -> set[str]:
+    """Document tumblers from the SQLite catalog (the valid-doc_id source
+    for the RDR-153 orphan pre-check). Read-only open."""
+    conn = sqlite3.connect(f"file:{catalog_db_path}?mode=ro", uri=True)
+    try:
+        return {
+            str(r[0])
+            for r in conn.execute("SELECT tumbler FROM documents").fetchall()
+        }
+    finally:
+        conn.close()
+
+
 def migrate_aspects(
     sqlite_path: Path,
     http_aspects,  # HttpDocumentAspectsStore instance
     *,
     batch_size: int = 200,
+    collector: Any = None,
+    catalog_db_path: Path | None = None,
 ) -> dict[str, int]:
     """Migrate document_aspects from SQLite to Postgres via the HTTP service.
 
+    RDR-153 orphan policy: when *catalog_db_path* is provided, rows whose
+    ``doc_id`` references no live catalog document (the audit's 675/675
+    stale pre-rebuild tumblers) are SKIP-AND-RECORDED into *collector*
+    instead of imported. Without it, behavior is unchanged (RDR-152
+    callers).
+
     Returns a summary dict: {imported, skipped, errors}.
     """
+    live_tumblers: set[str] | None = (
+        _load_live_tumblers(catalog_db_path) if catalog_db_path else None
+    )
     conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     imported = skipped = errors = 0
+    read = 0
     try:
         # Detect column presence (document_aspects schema evolves)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
@@ -235,6 +260,28 @@ def migrate_aspects(
                 break
             for row in rows:
                 row_dict = dict(row)
+                read += 1
+                doc_id = str(row_dict.get("doc_id") or "")
+                if (
+                    live_tumblers is not None
+                    and doc_id
+                    and doc_id not in live_tumblers
+                ):
+                    skipped += 1
+                    if collector is not None:
+                        collector.record(
+                            "aspects", "document_aspects",
+                            issue_class="orphan_parent",
+                            constraint="document_aspects.doc_id -> "
+                                       "documents.tumbler",
+                            reason="doc_id references a deleted/rebuilt "
+                                   "catalog document (stale pre-rebuild "
+                                   "tumbler); re-extract follow-on is "
+                                   "nexus-f1m8s",
+                            action="skipped",
+                            sample_id=doc_id,
+                        )
+                    continue
                 try:
                     body = _transform_aspect(row_dict)
                     n = http_aspects.import_aspect(body)
@@ -250,6 +297,15 @@ def migrate_aspects(
                         source_path=row_dict.get("source_path"),
                         error=str(exc),
                     )
+                    if collector is not None:
+                        collector.record(
+                            "aspects", "document_aspects",
+                            issue_class="unexpected",
+                            constraint="document_aspects",
+                            reason=f"row rejected during import: {exc}",
+                            action="failed",
+                            sample_id=doc_id or f"row#{read}",
+                        )
             offset += batch_size
     finally:
         conn.close()
@@ -260,6 +316,9 @@ def migrate_aspects(
         skipped=skipped,
         errors=errors,
     )
+    if collector is not None:
+        collector.count_read("aspects", "document_aspects", read)
+        collector.count_written("aspects", "document_aspects", imported)
     return {"imported": imported, "skipped": skipped, "errors": errors}
 
 
@@ -268,11 +327,13 @@ def migrate_highlights(
     http_highlights,  # HttpDocumentHighlightsStore instance
     *,
     batch_size: int = 200,
+    collector: Any = None,
 ) -> dict[str, int]:
     """Migrate document_highlights from SQLite to Postgres via the HTTP service."""
     conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     imported = skipped = errors = 0
+    read = 0
     try:
         offset = 0
         while True:
@@ -285,6 +346,7 @@ def migrate_highlights(
                 break
             for row in rows:
                 row_dict = dict(row)
+                read += 1
                 try:
                     body = _transform_highlight(row_dict)
                     n = http_highlights.import_highlight(body)
@@ -299,6 +361,15 @@ def migrate_highlights(
                         doc_id=row_dict.get("doc_id"),
                         error=str(exc),
                     )
+                    if collector is not None:
+                        collector.record(
+                            "aspects", "document_highlights",
+                            issue_class="unexpected",
+                            constraint="document_highlights",
+                            reason=f"row rejected during import: {exc}",
+                            action="failed",
+                            sample_id=str(row_dict.get("doc_id") or f"row#{read}"),
+                        )
             offset += batch_size
     finally:
         conn.close()
@@ -309,6 +380,9 @@ def migrate_highlights(
         skipped=skipped,
         errors=errors,
     )
+    if collector is not None:
+        collector.count_read("aspects", "document_highlights", read)
+        collector.count_written("aspects", "document_highlights", imported)
     return {"imported": imported, "skipped": skipped, "errors": errors}
 
 
@@ -317,11 +391,22 @@ def migrate_queue(
     http_queue,  # HttpAspectQueue instance
     *,
     batch_size: int = 200,
+    collector: Any = None,
+    catalog_db_path: Path | None = None,
 ) -> dict[str, int]:
-    """Migrate aspect_extraction_queue from SQLite to Postgres via the HTTP service."""
+    """Migrate aspect_extraction_queue from SQLite to Postgres via the HTTP service.
+
+    RDR-153 orphan policy (the audit's 3/7 shape): with *catalog_db_path*,
+    rows whose ``doc_id`` references no live catalog document are
+    SKIP-AND-RECORDED; the valid rows migrate.
+    """
+    live_tumblers: set[str] | None = (
+        _load_live_tumblers(catalog_db_path) if catalog_db_path else None
+    )
     conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     imported = skipped = errors = 0
+    read = 0
     try:
         # Detect column presence (queue schema evolves)
         cols = {r[1] for r in conn.execute(
@@ -344,6 +429,26 @@ def migrate_queue(
                 break
             for row in rows:
                 row_dict = dict(row)
+                read += 1
+                q_doc_id = str(row_dict.get("doc_id") or "")
+                if (
+                    live_tumblers is not None
+                    and q_doc_id
+                    and q_doc_id not in live_tumblers
+                ):
+                    skipped += 1
+                    if collector is not None:
+                        collector.record(
+                            "aspects", "aspect_extraction_queue",
+                            issue_class="orphan_parent",
+                            constraint="aspect_extraction_queue.doc_id -> "
+                                       "documents.tumbler",
+                            reason="queued doc_id references a deleted/"
+                                   "rebuilt catalog document",
+                            action="skipped",
+                            sample_id=q_doc_id,
+                        )
+                    continue
                 try:
                     body = _transform_queue_row(row_dict)
                     n = http_queue.import_queue_row(body)
@@ -359,6 +464,15 @@ def migrate_queue(
                         source_path=row_dict.get("source_path"),
                         error=str(exc),
                     )
+                    if collector is not None:
+                        collector.record(
+                            "aspects", "aspect_extraction_queue",
+                            issue_class="unexpected",
+                            constraint="aspect_extraction_queue",
+                            reason=f"row rejected during import: {exc}",
+                            action="failed",
+                            sample_id=q_doc_id or f"row#{read}",
+                        )
             offset += batch_size
     finally:
         conn.close()
@@ -369,6 +483,9 @@ def migrate_queue(
         skipped=skipped,
         errors=errors,
     )
+    if collector is not None:
+        collector.count_read("aspects", "aspect_extraction_queue", read)
+        collector.count_written("aspects", "aspect_extraction_queue", imported)
     return {"imported": imported, "skipped": skipped, "errors": errors}
 
 
@@ -377,6 +494,7 @@ def migrate_promotion_log(
     http_aspects,  # HttpDocumentAspectsStore instance (uses /v1/aspects/promotion/import)
     *,
     batch_size: int = 200,
+    collector: Any = None,
 ) -> dict[str, int]:
     """Migrate aspect_promotion_log from SQLite to Postgres via the HTTP service."""
     import json
@@ -426,6 +544,15 @@ def migrate_promotion_log(
                         field_name=row_dict.get("field_name"),
                         error=str(exc),
                     )
+                    if collector is not None:
+                        collector.record(
+                            "aspects", "aspect_promotion_log",
+                            issue_class="unexpected",
+                            constraint="aspect_promotion_log",
+                            reason=f"row rejected during import: {exc}",
+                            action="failed",
+                            sample_id=f"row#{imported + skipped + errors}",
+                        )
             offset += batch_size
     finally:
         conn.close()
@@ -446,6 +573,8 @@ def migrate_all(
     http_queue,
     *,
     batch_size: int = 200,
+    collector: Any = None,
+    catalog_db_path: Path | None = None,
 ) -> dict[str, dict[str, int]]:
     """Run all four table migrations in order.
 
@@ -454,8 +583,20 @@ def migrate_all(
     each containing {imported, skipped, errors}.
     """
     return {
-        "aspects": migrate_aspects(sqlite_path, http_aspects, batch_size=batch_size),
-        "highlights": migrate_highlights(sqlite_path, http_highlights, batch_size=batch_size),
-        "queue": migrate_queue(sqlite_path, http_queue, batch_size=batch_size),
-        "promotion_log": migrate_promotion_log(sqlite_path, http_aspects, batch_size=batch_size),
+        "aspects": migrate_aspects(
+            sqlite_path, http_aspects, batch_size=batch_size,
+            collector=collector, catalog_db_path=catalog_db_path,
+        ),
+        "highlights": migrate_highlights(
+            sqlite_path, http_highlights, batch_size=batch_size,
+            collector=collector,
+        ),
+        "queue": migrate_queue(
+            sqlite_path, http_queue, batch_size=batch_size,
+            collector=collector, catalog_db_path=catalog_db_path,
+        ),
+        "promotion_log": migrate_promotion_log(
+            sqlite_path, http_aspects, batch_size=batch_size,
+            collector=collector,
+        ),
     }

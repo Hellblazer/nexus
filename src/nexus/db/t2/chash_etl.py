@@ -50,6 +50,7 @@ def migrate_chash_rows(
     http_chash: Any,
     *,
     tenant: str = "default",
+    collector: Any = None,
 ) -> dict[str, int]:
     """Copy all ``chash_index`` rows from ``sqlite_path`` to the service via ``http_chash``.
 
@@ -89,6 +90,18 @@ def migrate_chash_rows(
                 created_at = row["created_at"] or "1970-01-01T00:00:00Z"
                 if not chash or not collection:
                     _log.warning("chash_etl_skip_blank", chash=chash, collection=collection)
+                    # RDR-153 catch-all: a blank natural key cannot import —
+                    # record it (failed, gate-visible), never silently skip.
+                    if collector is not None:
+                        collector.record(
+                            "chash", "chash_index",
+                            issue_class="unexpected",
+                            constraint="chash_index(chash)",
+                            reason="blank chash or physical_collection — row "
+                                   "cannot carry its natural key",
+                            action="failed",
+                            sample_id=chash or collection or "blank-row",
+                        )
                     continue
                 payload.append({
                     "chash":      chash,
@@ -129,4 +142,18 @@ def migrate_chash_rows(
         conn.close()
 
     _log.info("chash_etl_done", total=total, imported=imported, errors=errors)
+    if collector is not None:
+        collector.count_read("chash", "chash_index", total)
+        collector.count_written("chash", "chash_index", imported)
+        # One event per errored row: total_failed is the Phase-4 gate
+        # predicate and must count every failure exactly.
+        for _ in range(errors):
+            collector.record_event(
+                "chash", "chash_index",
+                issue_class="unexpected",
+                constraint="chash_index(chash)",
+                reason="batch import error — see chash_etl logs (batched "
+                       "writes; per-row samples unavailable)",
+                action="failed",
+            )
     return {"total": total, "imported": imported, "errors": errors}

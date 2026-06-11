@@ -254,6 +254,7 @@ def migrate_taxonomy_rows(
     store: Any,
     *,
     batch_log_every: int = 100,
+    collector: Any = None,
 ) -> dict[str, Any]:
     """Copy all rows from the four SQLite taxonomy tables into Postgres via *store*.
 
@@ -343,6 +344,82 @@ def migrate_taxonomy_rows(
 
     results: dict[str, Any] = {}
 
+    # ── RDR-153 §Decision 2 policy: orphan pre-check ─────────────────────────
+    # The strict Postgres FKs would reject these anyway (that is the
+    # diagnostic); pre-checking lets us SKIP-AND-RECORD with exact counts
+    # and composite-key samples instead of burning a round-trip per orphan.
+    #
+    # Classification note (P2 critique observation): the valid set is the
+    # SOURCE topics, not the migrated ones. If a topic later FAILS to
+    # import, its assignments pass this pre-check, hit the server FK, and
+    # are recorded as unexpected/FAILED by the catch-all — correctly so:
+    # for those rows the problem is the parent's import failure (visible as
+    # its own failed issue), not orphan parentage in the source data.
+    # int() is safe: the SQLite schema enforces NOT NULL INTEGER on
+    # topics.id / topic_assignments.topic_id / topic_links.(from|to)_topic_id,
+    # and the source is opened read-only (no concurrent mutation).
+    valid_topic_ids = {int(r["id"]) for r in topic_rows if r.get("id") is not None}
+
+    orphan_assignments = [
+        r for r in assign_rows if int(r["topic_id"]) not in valid_topic_ids
+    ]
+    assign_rows = [
+        r for r in assign_rows if int(r["topic_id"]) in valid_topic_ids
+    ]
+    orphan_links = [
+        r for r in link_rows
+        if int(r["from_topic_id"]) not in valid_topic_ids
+        or int(r["to_topic_id"]) not in valid_topic_ids
+    ]
+    link_rows = [
+        r for r in link_rows
+        if int(r["from_topic_id"]) in valid_topic_ids
+        and int(r["to_topic_id"]) in valid_topic_ids
+    ]
+
+    if collector is not None:
+        for r in orphan_assignments:
+            collector.record(
+                "taxonomy", "topic_assignments",
+                issue_class="orphan_parent",
+                constraint="topic_assignments.topic_id -> topics.id",
+                reason="topic_id references a deleted topic; sample ids are "
+                       "<doc_id>:<topic_id>",
+                action="skipped",
+                sample_id=f"{r.get('doc_id')}:{r.get('topic_id')}",
+            )
+        for r in orphan_links:
+            collector.record(
+                "taxonomy", "topic_links",
+                issue_class="orphan_parent",
+                constraint="topic_links.(from|to)_topic_id -> topics.id",
+                reason="from/to topic_id references a deleted topic; sample "
+                       "ids are <from_topic_id>:<to_topic_id>",
+                action="skipped",
+                sample_id=f"{r.get('from_topic_id')}:{r.get('to_topic_id')}",
+            )
+        # The audit's identity_mismatch finding: topic_assignments.doc_id is
+        # a CHASH, not a catalog tumbler — the schema fix was to NOT register
+        # the wrong FK (nexus-sa14p). Recorded once per run (a decision, not
+        # a per-row anomaly), counted in read totals below.
+        if assign_rows or orphan_assignments:
+            collector.record_event(
+                "taxonomy", "topic_assignments",
+                issue_class="identity_mismatch",
+                constraint="topic_assignments.doc_id",
+                reason="doc_id is a chash (opaque identity), not a catalog "
+                       "tumbler — FK deliberately not registered "
+                       "(schema corrected, nexus-sa14p)",
+                action="schema_corrected",
+            )
+    elif orphan_assignments or orphan_links:
+        _log.warning(
+            "taxonomy_etl.orphans_skipped_unrecorded",
+            assignments=len(orphan_assignments),
+            links=len(orphan_links),
+            hint="pass collector= to record these in the migration report",
+        )
+
     # 1. Topics — must go first; assignments/links reference topic.id
     results["topics"] = _migrate_table(
         rows=topic_rows,
@@ -350,15 +427,19 @@ def migrate_taxonomy_rows(
         import_fn=store.import_topic,
         table="topics",
         batch_log_every=batch_log_every,
+        collector=collector,
     )
 
-    # 2. Assignments
+    # 2. Assignments (orphans already skipped-and-recorded above; read
+    #    counts include them so read == source cardinality).
     results["assignments"] = _migrate_table(
         rows=assign_rows,
         transform_fn=_transform_assignment,
         import_fn=store.import_assignment,
         table="topic_assignments",
         batch_log_every=batch_log_every,
+        collector=collector,
+        pre_skipped=len(orphan_assignments),
     )
 
     # 3. Links
@@ -368,6 +449,8 @@ def migrate_taxonomy_rows(
         import_fn=store.import_topic_link,
         table="topic_links",
         batch_log_every=batch_log_every,
+        collector=collector,
+        pre_skipped=len(orphan_links),
     )
 
     # 4. Meta
@@ -377,6 +460,7 @@ def migrate_taxonomy_rows(
         import_fn=store.import_taxonomy_meta,
         table="taxonomy_meta",
         batch_log_every=batch_log_every,
+        collector=collector,
     )
 
     _log.info(
@@ -401,6 +485,8 @@ def _migrate_table(
     import_fn: Any,
     table: str,
     batch_log_every: int,
+    collector: Any = None,
+    pre_skipped: int = 0,
 ) -> dict[str, int]:
     """Generic per-table migration loop. Returns ``{"read": N, "written": M, "skipped": K}``.
 
@@ -442,7 +528,16 @@ def _migrate_table(
                 error=str(exc),
             )
             # Continue processing remaining rows — a single failure does not
-            # abort the migration.
+            # abort the migration. RDR-153 catch-all: never a silent drop.
+            if collector is not None:
+                collector.record(
+                    "taxonomy", table,
+                    issue_class="unexpected",
+                    constraint=table,
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"{table}#{read_count}",
+                )
 
         if read_count % batch_log_every == 0:
             _log.info(
@@ -465,5 +560,10 @@ def _migrate_table(
             skipped_doc_ids_sample=skipped_ids,
             skipped_ids_truncated=skipped_count > len(skipped_ids),
         )
+
+    if collector is not None:
+        # read includes pre-skipped orphans so read == source cardinality.
+        collector.count_read("taxonomy", table, read_count + pre_skipped)
+        collector.count_written("taxonomy", table, written_count)
 
     return {"read": read_count, "written": written_count, "skipped": skipped_count}

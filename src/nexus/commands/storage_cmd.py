@@ -26,6 +26,7 @@ The SQLite source is never modified (copy-not-move).
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -39,6 +40,116 @@ _log = structlog.get_logger(__name__)
 @click.group(name="storage")
 def storage_group() -> None:
     """Storage migration and ETL commands (RDR-152)."""
+
+
+@storage_group.group(name="migration-report")
+def migration_report_group() -> None:
+    """Inspect RDR-153 migration-report artifacts."""
+
+
+@migration_report_group.command(name="show")
+@click.argument(
+    "report_file",
+    type=click.Path(path_type=Path),
+)
+def migration_report_show_cmd(report_file: Path) -> None:
+    """Summarize a migration report: gate verdict, by-action rollup
+    (severity-descending), and per-issue triage lines (RDR-153 Phase 4).
+
+    The Phase-4 SQLite-deletion gate reads this artifact; the predicate is
+    ``summary.total_failed == 0``. Exits non-zero when the gate fails so
+    the verdict is scriptable.
+    """
+    import json as _json
+
+    from nexus.migration.migration_report import ACTION_SEVERITY, load_report
+
+    try:
+        report = load_report(report_file)
+    except FileNotFoundError:
+        raise click.ClickException(f"report not found: {report_file}")
+    except ValueError as exc:  # JSONDecodeError subclasses ValueError
+        raise click.ClickException(f"unreadable report {report_file}: {exc}")
+
+    schema = str(report.get("schema_version", "?"))
+    if schema != "1":
+        click.echo(
+            f"note: schema_version {schema} is newer than this viewer "
+            "understands — best-effort display",
+            err=True,
+        )
+
+    # NEVER default-to-pass (P4 review CRITICAL): this command is the
+    # RDR-152 Phase-4 deletion gate's reading tool — a structurally
+    # damaged artifact (missing summary, missing total_failed) must FAIL
+    # the gate loudly, not evaluate the predicate against defaults.
+    summary = report.get("summary")
+    if not isinstance(summary, dict) or "total_failed" not in summary:
+        raise click.ClickException(
+            f"report has no summary.total_failed — cannot evaluate the gate "
+            f"predicate (schema_version="
+            f"{report.get('schema_version', '?')}): {report_file}"
+        )
+    try:
+        gate_total_failed = int(summary["total_failed"])
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(
+            f"report summary.total_failed is not an integer "
+            f"({summary['total_failed']!r}): {report_file} — {exc}"
+        )
+    click.echo(f"migration: {report.get('migration_id', '?')}")
+    click.echo(
+        f"  {report.get('started_at', '?')} -> {report.get('completed_at', '?')}"
+    )
+    source = report.get("source", {})
+    if source:
+        click.echo(f"  source: {source}")
+    click.echo(f"verification: {report.get('verification', '(not recorded)')}")
+    click.echo(f"max_severity={summary.get('max_severity', '?')}")
+    by_action = summary.get("by_action", {})
+    ordered_actions = sorted(
+        by_action,
+        key=lambda a: ACTION_SEVERITY.get(a, -1),
+        reverse=True,
+    )
+    click.echo(
+        "  " + " ".join(f"{a}={by_action[a]}" for a in ordered_actions)
+    )
+    click.echo(
+        f"  total_read={summary.get('total_read', '?')} "
+        f"total_written={summary.get('total_written', '?')} "
+        f"total_failed={summary.get('total_failed', '?')}"
+    )
+
+    # Per-issue triage lines, severity-descending (the actionable ones first).
+    issues: list[tuple[int, str]] = []
+    for store in report.get("stores", []):
+        for table in store.get("tables", []):
+            for issue in table.get("issues", []):
+                sample = (issue.get("sample_ids") or ["-"])[0]
+                issues.append((
+                    int(issue.get("severity", 0)),
+                    f"  [{issue.get('severity', '?')}] "
+                    f"{store.get('store', '?')}.{table.get('table', '?')} "
+                    f"{issue.get('class', '?')}/{issue.get('action', '?')} "
+                    f"count={issue.get('count', '?')} sample={sample} — "
+                    f"{issue.get('reason', '')}",
+                ))
+    if issues:
+        click.echo("issues (severity-descending):")
+        for _, line in sorted(issues, key=lambda t: t[0], reverse=True):
+            click.echo(line)
+
+    if gate_total_failed == 0:
+        click.echo("GATE: PASS (total_failed=0)")
+    else:
+        click.echo(f"GATE: FAIL (total_failed={gate_total_failed})", err=True)
+        click.echo(
+            "  failed rows are triaged above; after repairing parents, "
+            "re-running the ETL is idempotent (ON CONFLICT DO NOTHING).",
+            err=True,
+        )
+        sys.exit(1)
 
 
 @storage_group.group(name="migrate")
@@ -72,10 +183,20 @@ def migrate_group() -> None:
     default=False,
     help="Count rows in the source without writing. No service connection is made.",
 )
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write a single-store RDR-153 migration report to PATH "
+         "(default when omitted: <config>/migration-reports/"
+         "migration-<id>.json).",
+)
 def migrate_memory_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
+    report_path: Path | None,
 ) -> None:
     """Migrate the SQLite memory store to Postgres via the nexus-service.
 
@@ -137,13 +258,22 @@ def migrate_memory_cmd(
     # Run the ETL
     from nexus.db.t2.memory_etl import migrate_memory_rows
 
+    from nexus.migration.migration_report import IssueCollector
+
+    collector = IssueCollector()
     click.echo(f"Migrating memory store from {resolved_db} ...")
     try:
-        result = migrate_memory_rows(resolved_db, store)
+        result = migrate_memory_rows(resolved_db, store, collector=collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2): the report is
+        # written even on a mid-run crash, so the operator always has a
+        # triage artifact covering everything the run recorded.
+        _emit_store_report(collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
+
+    _emit_store_report(collector, resolved_db, report_path)
 
     read_n = result["read"]
     written_m = result["written"]
@@ -190,10 +320,18 @@ def migrate_memory_cmd(
     default=False,
     help="Count rows in the source without writing. No service connection is made.",
 )
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write a single-store RDR-153 migration report to PATH.",
+)
 def migrate_plans_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
+    report_path: Path | None,
 ) -> None:
     """Migrate the SQLite plans store to Postgres via the nexus-service.
 
@@ -256,13 +394,20 @@ def migrate_plans_cmd(
 
     from nexus.db.t2.plan_etl import migrate_plan_rows
 
+    from nexus.migration.migration_report import IssueCollector
+
+    _collector = IssueCollector()
     click.echo(f"Migrating plans store from {resolved_db} ...")
     try:
-        result = migrate_plan_rows(resolved_db, store)
+        result = migrate_plan_rows(resolved_db, store, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
+
+    _emit_store_report(_collector, resolved_db, report_path)
 
     read_n = result["read"]
     written_m = result["written"]
@@ -309,10 +454,18 @@ def migrate_plans_cmd(
     default=False,
     help="Count rows in all six source tables without writing. No service connection is made.",
 )
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write a single-store RDR-153 migration report to PATH.",
+)
 def migrate_telemetry_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
+    report_path: Path | None,
 ) -> None:
     """Migrate the SQLite telemetry stores to Postgres via the nexus-service.
 
@@ -383,13 +536,20 @@ def migrate_telemetry_cmd(
 
     from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
 
+    from nexus.migration.migration_report import IssueCollector
+
+    _collector = IssueCollector()
     click.echo(f"Migrating telemetry stores from {resolved_db} ...")
     try:
-        results = migrate_telemetry_rows(resolved_db, store)
+        results = migrate_telemetry_rows(resolved_db, store, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
+
+    _emit_store_report(_collector, resolved_db, report_path)
 
     total_read    = sum(v["read"]    for v in results.values())
     total_written = sum(v["written"] for v in results.values())
@@ -440,10 +600,18 @@ def migrate_telemetry_cmd(
     default=False,
     help="Count rows in all four source tables without writing. No service connection is made.",
 )
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write a single-store RDR-153 migration report to PATH.",
+)
 def migrate_taxonomy_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
+    report_path: Path | None,
 ) -> None:
     """Migrate the SQLite taxonomy tables to Postgres via the nexus-service.
 
@@ -525,13 +693,20 @@ def migrate_taxonomy_cmd(
 
     from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows
 
+    from nexus.migration.migration_report import IssueCollector
+
+    _collector = IssueCollector()
     click.echo(f"Migrating taxonomy stores from {resolved_db} ...")
     try:
-        results = migrate_taxonomy_rows(resolved_db, store)
+        results = migrate_taxonomy_rows(resolved_db, store, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
+
+    _emit_store_report(_collector, resolved_db, report_path)
 
     total_read    = sum(v["read"]    for v in results.values())
     total_written = sum(v["written"] for v in results.values())
@@ -597,10 +772,18 @@ def migrate_taxonomy_cmd(
     default=False,
     help="Count rows in the source without writing. No service connection is made.",
 )
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write a single-store RDR-153 migration report to PATH.",
+)
 def migrate_chash_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
+    report_path: Path | None,
 ) -> None:
     """Migrate the SQLite chash_index store to Postgres via the nexus-service.
 
@@ -670,13 +853,19 @@ def migrate_chash_cmd(
         store = HttpChashIndex()
 
     from nexus.db.t2.chash_etl import migrate_chash_rows
+    from nexus.migration.migration_report import IssueCollector
 
+    _collector = IssueCollector()
     try:
-        results = migrate_chash_rows(resolved_db, store)
+        results = migrate_chash_rows(resolved_db, store, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
+
+    _emit_store_report(_collector, resolved_db, report_path)
 
     total    = results["total"]
     imported = results["imported"]
@@ -722,10 +911,18 @@ def migrate_chash_cmd(
     default=False,
     help="Count rows in all catalog tables without writing. No service connection is made.",
 )
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write a single-store RDR-153 migration report to PATH.",
+)
 def migrate_catalog_cmd(
     catalog_db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
+    report_path: Path | None,
 ) -> None:
     """Migrate the SQLite catalog to Postgres via the nexus-service.
 
@@ -795,13 +992,20 @@ def migrate_catalog_cmd(
 
     from nexus.db.t2.catalog_etl import migrate_catalog
 
+    from nexus.migration.migration_report import IssueCollector
+
+    _collector = IssueCollector()
     click.echo(f"Migrating catalog from {resolved_catalog} ...")
     try:
-        results = migrate_catalog(resolved_catalog, client)
+        results = migrate_catalog(resolved_catalog, client, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_catalog, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         client.close()
+
+    _emit_store_report(_collector, resolved_catalog, report_path)
 
     from nexus.db.t2.catalog_etl import IMPORT_TABLE_KEYS
 
@@ -1046,6 +1250,407 @@ def _echo_summary_table(report) -> None:
         f"{report.total_written:>8}   ok={report.ok}"
     )
     sys.stdout.flush()
+# ── RDR-153 Phase 3: migrate-all orchestration ───────────────────────────────
+
+
+def _default_report_path(migration_id: str) -> Path:
+    """``<config>/migration-reports/migration-<id>.json`` — a run ALWAYS
+    produces an artifact, even when the operator forgets ``--report``."""
+    from nexus.config import nexus_config_dir
+
+    return nexus_config_dir() / "migration-reports" / f"migration-{migration_id}.json"
+
+
+def _write_report(report: dict, path: Path) -> None:
+    import json as _json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps(report, indent=2, sort_keys=True))
+
+
+#: (store, table) → Postgres relation counted during verification. Only
+#: tables with a 1:1 name mapping are verified; the check is
+#: pg_count >= report_written (the target may carry rows from previous
+#: idempotent runs — equality only holds on a fresh target).
+_VERIFY_TABLES: dict[tuple[str, str], str] = {
+    ("memory", "memory"): "nexus.memory",
+    ("plans", "plans"): "nexus.plans",
+    ("taxonomy", "topics"): "nexus.topics",
+    ("taxonomy", "topic_assignments"): "nexus.topic_assignments",
+    ("taxonomy", "topic_links"): "nexus.topic_links",
+    ("telemetry", "hook_failures"): "nexus.hook_failures",
+    ("telemetry", "nx_answer_runs"): "nexus.nx_answer_runs",
+    ("chash", "chash_index"): "nexus.chash_index",
+    ("catalog", "documents"): "nexus.documents",
+    ("catalog", "links"): "nexus.links",
+}
+
+
+def _emit_store_report(
+    collector, sqlite_path: Path, report_path: Path | None,
+) -> None:
+    """Write the single-store RDR-153 report (per-store ``--report``).
+
+    A report is ALWAYS written (default path when the flag is omitted) —
+    the run must leave a triage artifact.
+    """
+    import uuid as _uuid
+
+    from nexus.migration.migration_report import build_report
+
+    migration_id = str(_uuid.uuid4())
+    report = build_report(
+        collector,
+        source={"sqlite": str(sqlite_path)},
+        target={"service_url": os.environ.get("NX_SERVICE_URL", "(lease)")},
+        migration_id=migration_id,
+    )
+    out_path = report_path or _default_report_path(migration_id)
+    _write_report(report, out_path)
+    click.echo(f"report: {out_path}")
+
+
+def _psql_for_verify() -> str | None:
+    """psql via the same discovery the provisioner uses; PATH fallback.
+
+    Self-contained (no dependency on the supervisor-side helpers) so the
+    orchestrator works on any branch state.
+    """
+    try:
+        from nexus.db.pg_provision import discover_pg_binaries
+
+        return str(discover_pg_binaries().psql)
+    except Exception:
+        import shutil
+
+        return shutil.which("psql")
+
+
+def _verify_db_name(creds: dict) -> str:
+    import re as _re
+
+    url = creds.get("NX_DB_ADMIN_URL", "") or creds.get("NX_DB_URL", "")
+    m = _re.search(r"postgresql://[^/]+/([^?]+)", url)
+    return m.group(1) if m else "nexus"
+
+
+def _verify_pg_counts(report: dict, creds: dict) -> str:
+    """Count-verify the migration against Postgres.
+
+    Returns ``"verified"`` | ``"mismatch"`` | ``"indeterminate"``.
+
+    nexus-r0esi: an unresolvable psql / unreadable target is
+    ``indeterminate`` and the CLI surfaces it LOUDLY — never the hollow
+    'SKIP … all passed' the prod-copy.sh harness produced.
+    """
+    import subprocess
+
+    psql = _psql_for_verify()
+    port = creds.get("PG_PORT", "")
+    user = creds.get("NX_DB_ADMIN_USER", "") or creds.get("NX_DB_USER", "")
+    password = (
+        creds.get("NX_DB_ADMIN_PASS", "")
+        if creds.get("NX_DB_ADMIN_USER", "")
+        else creds.get("NX_DB_PASS", "")
+    )
+    if psql is None or not port or not user:
+        return "indeterminate"
+
+    written_by_table: dict[str, int] = {}
+    for store in report.get("stores", []):
+        for table in store.get("tables", []):
+            key = (store["store"], table["table"])
+            relation = _VERIFY_TABLES.get(key)
+            if relation is not None:
+                written_by_table[relation] = (
+                    written_by_table.get(relation, 0) + int(table["written"])
+                )
+    if not written_by_table:
+        return "indeterminate"  # nothing mappable to verify is NOT a pass
+    # NOTE: written=0 for a mapped table passes trivially (pg_count >= 0) —
+    # correct for idempotent re-runs and empty sources; the gate predicate
+    # is the report's total_failed, never this advisory check.
+
+    env = dict(os.environ)
+    env["PGPASSWORD"] = password
+    for relation, written in written_by_table.items():
+        try:
+            result = subprocess.run(
+                [
+                    str(psql), "-h", "127.0.0.1", "-p", str(port), "-U", user,
+                    "-d", _verify_db_name(creds), "-t", "-A", "-X",
+                    "-c", f"SELECT count(*) FROM {relation}",
+                ],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "indeterminate"
+        if result.returncode != 0:
+            return "indeterminate"
+        try:
+            pg_count = int(result.stdout.strip())
+        except ValueError:
+            return "indeterminate"
+        if pg_count < written:
+            _log.error(
+                "migrate_all_verify_mismatch",
+                relation=relation,
+                pg_count=pg_count,
+                report_written=written,
+            )
+            return "mismatch"
+    return "verified"
+
+
+def _build_store_etls(sources):
+    """The seven RDR-152 ETL adapters, registered against the RDR-153
+    ladder (``nexus.migration.etl_registry``). Each runner constructs its
+    HTTP store lazily so a single-store failure surfaces inside the
+    orchestrated run, not at registry build time."""
+    from nexus.migration.etl_registry import StoreEtl
+
+    def _memory(sources, collector):
+        from nexus.db.t2.http_memory_store import HttpMemoryStore
+        from nexus.db.t2.memory_etl import migrate_memory_rows
+
+        store = HttpMemoryStore()
+        try:
+            return migrate_memory_rows(
+                sources.sqlite_path, store, collector=collector,
+            )
+        finally:
+            store.close()
+
+    def _plans(sources, collector):
+        from nexus.db.t2.http_plan_library import HttpPlanLibrary
+        from nexus.db.t2.plan_etl import migrate_plan_rows
+
+        store = HttpPlanLibrary()
+        try:
+            return migrate_plan_rows(
+                sources.sqlite_path, store, collector=collector,
+            )
+        finally:
+            store.close()
+
+    def _telemetry(sources, collector):
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+        from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
+
+        store = HttpTelemetryStore()
+        try:
+            return migrate_telemetry_rows(
+                sources.sqlite_path, store, collector=collector,
+            )
+        finally:
+            store.close()
+
+    def _taxonomy(sources, collector):
+        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+        from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows
+
+        store = HttpTaxonomyStore()
+        try:
+            return migrate_taxonomy_rows(
+                sources.sqlite_path, store, collector=collector,
+            )
+        finally:
+            store.close()
+
+    def _aspects(sources, collector):
+        from nexus.db.t2.aspects_etl import migrate_all as migrate_aspects_all
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        from nexus.db.t2.http_document_aspects_store import (
+            HttpDocumentAspectsStore,
+        )
+        from nexus.db.t2.http_document_highlights_store import (
+            HttpDocumentHighlightsStore,
+        )
+
+        aspects = HttpDocumentAspectsStore()
+        highlights = HttpDocumentHighlightsStore()
+        queue = HttpAspectQueue()
+        try:
+            return migrate_aspects_all(
+                sources.sqlite_path, aspects, highlights, queue,
+                collector=collector,
+                catalog_db_path=sources.catalog_db_path,
+            )
+        finally:
+            for st in (aspects, highlights, queue):
+                with contextlib.suppress(Exception):
+                    st.close()
+
+    def _chash(sources, collector):
+        from nexus.db.t2.chash_etl import migrate_chash_rows
+        from nexus.db.t2.http_chash_index import HttpChashIndex
+
+        store = HttpChashIndex()
+        try:
+            return migrate_chash_rows(
+                sources.sqlite_path, store, collector=collector,
+            )
+        finally:
+            store.close()
+
+    def _catalog(sources, collector):
+        from nexus.catalog.factory import make_catalog_client_for_migration
+        from nexus.db.t2.catalog_etl import migrate_catalog
+
+        token = os.environ.get("NX_SERVICE_TOKEN", "")
+        client = make_catalog_client_for_migration(base_url=None, token=token)
+        try:
+            return migrate_catalog(
+                sources.catalog_db_path, client, collector=collector,
+            )
+        finally:
+            client.close()
+
+    return [
+        StoreEtl("memory", _memory),
+        StoreEtl("plans", _plans),
+        StoreEtl("telemetry", _telemetry),
+        StoreEtl("taxonomy", _taxonomy),
+        StoreEtl("aspects", _aspects),
+        StoreEtl("chash", _chash),
+        StoreEtl("catalog", _catalog),
+    ]
+
+
+@migrate_group.command(name="all")
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Report artifact path (default: <config>/migration-reports/"
+         "migration-<id>.json — a run always produces an artifact).",
+)
+@click.option(
+    "--db", "db_path", default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="SQLite T2 source (default: NX_DB_PATH or the canonical path).",
+)
+@click.option(
+    "--catalog-db", "catalog_db_path", default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="SQLite catalog source (default: NX_CATALOG_DB_PATH or the "
+         "canonical path).",
+)
+def migrate_all_cmd(
+    report_path: Path | None,
+    db_path: Path | None,
+    catalog_db_path: Path | None,
+) -> None:
+    """Run ALL seven store migrations in the RDR-152 ladder order and emit
+    ONE migration report (RDR-153 Phase 3).
+
+    Order: memory → plans → telemetry → taxonomy → aspects → chash →
+    catalog LAST (graph-heavy). One shared IssueCollector spans the run;
+    the report is the triage/recovery artifact and the Phase-4 gate input
+    (``summary.total_failed == 0``). Post-run count verification is LOUD
+    when it cannot run (nexus-r0esi: never SKIP-then-'all passed').
+    """
+    import uuid as _uuid
+
+    from nexus.migration.etl_registry import EtlSources, ordered
+    from nexus.migration.migration_report import IssueCollector, build_report
+
+    sources = EtlSources(
+        sqlite_path=_resolve_db_path(db_path),
+        catalog_db_path=_resolve_catalog_db_path(catalog_db_path),
+    )
+    collector = IssueCollector()
+    migration_id = str(_uuid.uuid4())
+
+    for etl in ordered(_build_store_etls(sources)):
+        click.echo(f"migrating {etl.store} …")
+        sys.stdout.flush()
+        try:
+            etl.run(sources, collector)
+        except Exception as exc:
+            # A store-level crash is recorded, the run continues — the
+            # report must cover every store it attempted (never silent).
+            collector.record_event(
+                etl.store, etl.store,
+                issue_class="unexpected",
+                constraint=etl.store,
+                reason=f"store-level ETL crash: {exc}",
+                action="failed",
+            )
+            click.echo(f"  {etl.store}: CRASHED — {exc}", err=True)
+
+    report = build_report(
+        collector,
+        source={
+            "sqlite": str(sources.sqlite_path),
+            "catalog_db": str(sources.catalog_db_path),
+        },
+        target={"service_url": os.environ.get("NX_SERVICE_URL", "(lease)")},
+        migration_id=migration_id,
+    )
+    # Verification runs BEFORE the single artifact write so its verdict is
+    # recorded IN the report (P3 critique S1: the artifact must be
+    # self-contained for the Phase-4 triage surface — an operator reading
+    # the JSON tomorrow must see whether counts were checked).
+    verification = _run_verification(report)
+    report["verification"] = verification
+
+    out_path = report_path or _default_report_path(migration_id)
+    _write_report(report, out_path)
+
+    summary = report["summary"]
+    click.echo(f"report: {out_path}")
+    click.echo(
+        f"total_read={summary['total_read']} "
+        f"total_written={summary['total_written']} "
+        f"total_failed={summary['total_failed']} "
+        f"max_severity={summary['max_severity']}"
+    )
+    if summary["total_failed"] > 0:
+        raise click.ClickException(
+            f"migration is NOT clean — total_failed={summary['total_failed']}; "
+            f"triage with: nx storage migration-report show {out_path}"
+        )
+    if verification == "mismatch":
+        raise click.ClickException(
+            "VERIFICATION MISMATCH — Postgres counts are below the report's "
+            "written totals; the report and logs identify the tables."
+        )
+
+
+def _run_verification(report: dict) -> str:
+    """Resolve creds + run :func:`_verify_pg_counts`; print the verdict
+    loudly (nexus-r0esi: indeterminate is a WARNING, never a pass)."""
+    from nexus.config import nexus_config_dir
+    from nexus.daemon.storage_service_daemon import _read_pg_credentials
+
+    creds_path = nexus_config_dir() / "pg_credentials"
+    creds: dict = {}
+    if creds_path.exists():
+        try:
+            creds = _read_pg_credentials(creds_path)
+        except OSError:
+            creds = {}
+    verification = _verify_pg_counts(report, creds)
+    if verification == "verified":
+        checked = len(_VERIFY_TABLES)
+        click.echo(
+            f"verification: verified (pg counts >= report written across the "
+            f"{checked} mappable relations; unmapped tables are not checked)"
+        )
+    elif verification == "mismatch":
+        click.echo("verification: VERIFICATION MISMATCH", err=True)
+    else:
+        click.echo(
+            "verification: VERIFICATION INDETERMINATE — psql/credentials "
+            "unresolved; counts were NOT checked (this is a warning, not a "
+            "pass — fix the environment and re-run, the ETL is idempotent)",
+            err=True,
+        )
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return verification
 
 
 def _resolve_catalog_db_path(explicit: Path | None) -> Path:

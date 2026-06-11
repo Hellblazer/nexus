@@ -219,6 +219,15 @@ fi
 
 OS_USER="${USER:-$(id -un)}"
 
+# nexus-r0esi: an unresolved psql must FAIL the verification step, never
+# SKIP every count check and report 'all passed'. SKIPs are counted and
+# any skip makes the run red.
+SKIPPED=0
+if [[ -z "${PSQL_BIN}" ]]; then
+    echo "[prod-copy] ERROR: psql could not be resolved — count verification CANNOT run." >&2
+    FAIL=1
+fi
+
 # verify_pg_count_exact: FAIL if sandbox != prod_count (strict equality).
 # Use for stores that must copy completely.
 # The memory store accepts prod_count OR prod_count+1 (one probe write on ETL
@@ -229,7 +238,7 @@ verify_pg_count_exact() {
     local prod_count="$3"
     local allow_plus_one="${4:-0}"
     if [[ -z "${PSQL_BIN}" ]]; then
-        echo "[prod-copy] SKIP ${label} (psql not found)"
+        SKIPPED=$((SKIPPED+1)); echo "[prod-copy] SKIP ${label} (psql not found)"
         return
     fi
     # Query as OS superuser (trust auth) to bypass FORCE RLS on nexus tables.
@@ -265,7 +274,7 @@ verify_pg_count_at_least() {
     local table="$2"
     local prod_count="$3"
     if [[ -z "${PSQL_BIN}" ]]; then
-        echo "[prod-copy] SKIP ${label} (psql not found)"
+        SKIPPED=$((SKIPPED+1)); echo "[prod-copy] SKIP ${label} (psql not found)"
         return
     fi
     SBX_COUNT="$("${PSQL_BIN}" -h 127.0.0.1 -p "${PG_PORT}" \
@@ -293,7 +302,7 @@ verify_pg_count_known_gap() {
     local known_sbx_count="$4"  # expected sandbox count given the bug
     local bead="$5"             # tracking bead for the gap
     if [[ -z "${PSQL_BIN}" ]]; then
-        echo "[prod-copy] SKIP ${label} (psql not found)"
+        SKIPPED=$((SKIPPED+1)); echo "[prod-copy] SKIP ${label} (psql not found)"
         return
     fi
     SBX_COUNT="$("${PSQL_BIN}" -h 127.0.0.1 -p "${PG_PORT}" \
@@ -428,6 +437,10 @@ if [[ -n "${CHROMA_SQLITE}" ]]; then
     _assert_mtime_unchanged "${CHROMA_SQLITE}" "${MTIME_BEFORE_CHROMA_SQLITE}" "prod chroma.sqlite3" 0
 fi
 
+if [[ "${SKIPPED}" -ne 0 ]]; then
+    echo "[prod-copy] VERIFICATION INCOMPLETE — ${SKIPPED} count check(s) were skipped (psql unresolved)." >&2
+    FAIL=1
+fi
 if [[ "${FAIL}" -ne 0 ]]; then
     echo "[prod-copy] VERIFICATION FAILED — see errors above" >&2
     exit 1

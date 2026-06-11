@@ -390,6 +390,7 @@ def migrate_catalog(
     client: Any,
     *,
     batch_log_every: int = 50,
+    collector: Any = None,
 ) -> dict[str, dict[str, int]]:
     """Copy all rows from a SQLite catalog into Postgres via *client*.
 
@@ -435,6 +436,27 @@ def migrate_catalog(
 
     results: dict[str, dict[str, int]] = {}
 
+    # RDR-153 soft-dangler policy: links carry NO enforced endpoint FK —
+    # rows referencing missing documents IMPORT (the graph edge is event
+    # data) and each dangling edge is recorded as a flagged advisory.
+    if collector is not None:
+        live_tumblers = {r.get("tumbler") for r in docs_rows}
+        for r in links_rows:
+            if (
+                r.get("from_tumbler") not in live_tumblers
+                or r.get("to_tumbler") not in live_tumblers
+            ):
+                collector.record(
+                    "catalog", "links",
+                    issue_class="soft_dangler",
+                    constraint="links.(from|to)_tumbler -> documents.tumbler "
+                               "(not enforced)",
+                    reason="link endpoint references a missing document; row "
+                           "imports; sample ids are <from_tumbler>:<to_tumbler>",
+                    action="flagged",
+                    sample_id=f"{r.get('from_tumbler')}:{r.get('to_tumbler')}",
+                )
+
     _log.info(
         "catalog_etl.start",
         source=str(catalog_db_path),
@@ -453,6 +475,7 @@ def migrate_catalog(
         transform=_transform_owner,
         import_fn=lambda payload: client._post("/import/owner", payload),
         batch_log_every=batch_log_every,
+        collector=collector,
     )
 
     # ── 2. documents (depends on owners) ───────────────────────────────────────
@@ -462,6 +485,7 @@ def migrate_catalog(
         transform=_transform_document,
         import_fn=lambda payload: client._post("/import/document", payload),
         batch_log_every=batch_log_every,
+        collector=collector,
     )
 
     # ── 3. collections (independent of docs, but after owners) ─────────────────
@@ -471,6 +495,7 @@ def migrate_catalog(
         transform=_transform_collection,
         import_fn=lambda payload: client._post("/import/collection", payload),
         batch_log_every=batch_log_every,
+        collector=collector,
     )
 
     # ── 4. document_chunks (depends on documents) ──────────────────────────────
@@ -495,6 +520,18 @@ def migrate_catalog(
                 count=len(doc_chunks),
                 error=str(exc),
             )
+            if collector is not None:
+                # One failed record per chunk in the rejected group —
+                # total_failed is the gate predicate and counts rows.
+                for _ in doc_chunks:
+                    collector.record_event(
+                        "catalog", "document_chunks",
+                        issue_class="unexpected",
+                        constraint="document_chunks(doc_id,position)",
+                        reason=f"chunk group rejected during import "
+                               f"(doc {doc_id}): {exc}",
+                        action="failed",
+                    )
         if chunk_read % (batch_log_every * 5) == 0 and chunk_read > 0:
             _log.info(
                 "catalog_etl.chunks_progress",
@@ -512,6 +549,7 @@ def migrate_catalog(
         transform=_transform_link,
         import_fn=lambda payload: client._post("/import/link", payload),
         batch_log_every=batch_log_every,
+        collector=collector,
     )
 
     # ── 6. _meta — SKIPPED intentionally ──────────────────────────────────────
@@ -553,6 +591,11 @@ def migrate_catalog(
         total_written=total_written,
         by_table={k: v for k, v in results.items()},
     )
+    if collector is not None:
+        for table, counts in results.items():
+            collector.count_read("catalog", table, counts.get("read", 0))
+            collector.count_written("catalog", table, counts.get("written", 0))
+
     return results
 
 
@@ -563,6 +606,7 @@ def _import_table(
     transform: Any,
     import_fn: Any,
     batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     """Import one table's rows via ``import_fn(payload)``."""
     read_count = 0
@@ -573,18 +617,20 @@ def _import_table(
 
     for row in rows:
         read_count += 1
-        payload = transform(row)
         try:
+            # Transform INSIDE the try (RDR-153 P2 critic): a corrupt row
+            # must become a recorded failed issue, never abort the table.
+            payload = transform(row)
             import_fn(payload)
             written_count += 1
         except Exception as exc:
             # Log the key for the failing row; continue so one bad row
             # doesn't abort the whole table.
             key_hint = (
-                payload.get("tumbler_prefix")
-                or payload.get("tumbler")
-                or payload.get("name")
-                or payload.get("from_tumbler")
+                row.get("tumbler_prefix")
+                or row.get("tumbler")
+                or row.get("name")
+                or row.get("from_tumbler")
                 or f"row-{read_count}"
             )
             _log.error(
@@ -593,6 +639,15 @@ def _import_table(
                 key=key_hint,
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "catalog", table,
+                    issue_class="unexpected",
+                    constraint=table,
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=str(key_hint),
+                )
 
         if read_count % batch_log_every == 0:
             _log.info(

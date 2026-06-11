@@ -174,6 +174,7 @@ def migrate_telemetry_rows(
     store: Any,
     *,
     batch_log_every: int = 100,
+    collector: Any = None,
 ) -> dict[str, Any]:
     """Copy all telemetry rows from SQLite into Postgres via *store*.
 
@@ -193,7 +194,9 @@ def migrate_telemetry_rows(
     """
     conn = _open_ro(source_db_path)
     try:
-        return _migrate_all(conn, store, batch_log_every=batch_log_every)
+        return _migrate_all(
+            conn, store, batch_log_every=batch_log_every, collector=collector,
+        )
     finally:
         conn.close()
 
@@ -203,15 +206,33 @@ def _migrate_all(
     store: Any,
     *,
     batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {}
 
-    results["relevance_log"]    = _migrate_relevance_log(conn, store, batch_log_every)
-    results["search_telemetry"] = _migrate_search_telemetry(conn, store, batch_log_every)
-    results["tier_writes"]      = _migrate_tier_writes(conn, store, batch_log_every)
-    results["nx_answer_runs"]   = _migrate_nx_answer_runs(conn, store, batch_log_every)
-    results["hook_failures"]    = _migrate_hook_failures(conn, store, batch_log_every)
-    results["frecency"]         = _migrate_frecency(conn, store, batch_log_every)
+    results["relevance_log"]    = _migrate_relevance_log(
+        conn, store, batch_log_every, collector=collector,
+    )
+    results["search_telemetry"] = _migrate_search_telemetry(
+        conn, store, batch_log_every, collector=collector,
+    )
+    results["tier_writes"]      = _migrate_tier_writes(
+        conn, store, batch_log_every, collector=collector,
+    )
+    results["nx_answer_runs"]   = _migrate_nx_answer_runs(
+        conn, store, batch_log_every, collector=collector,
+    )
+    results["hook_failures"]    = _migrate_hook_failures(
+        conn, store, batch_log_every, collector=collector,
+    )
+    results["frecency"]         = _migrate_frecency(
+        conn, store, batch_log_every, collector=collector,
+    )
+
+    if collector is not None:
+        for table, counts in results.items():
+            collector.count_read("telemetry", table, counts["read"])
+            collector.count_written("telemetry", table, counts["written"])
 
     total_read    = sum(v["read"]    for v in results.values())
     total_written = sum(v["written"] for v in results.values())
@@ -226,6 +247,7 @@ def _migrate_all(
 
 def _migrate_relevance_log(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "relevance_log", _RELEVANCE_LOG_COLS)
     read_n = written_n = 0
@@ -250,6 +272,15 @@ def _migrate_relevance_log(
                 query_prefix=str(row.get("query", ""))[:40],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "relevance_log",
+                    issue_class="unexpected",
+                    constraint="relevance_log",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"relevance_log#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.relevance_log.progress",
                       read=read_n, written=written_n, total=total)
@@ -259,6 +290,7 @@ def _migrate_relevance_log(
 
 def _migrate_search_telemetry(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "search_telemetry", _SEARCH_TELEMETRY_COLS)
     read_n = written_n = 0
@@ -284,6 +316,15 @@ def _migrate_search_telemetry(
                 ts=str(row.get("ts", ""))[:30],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "search_telemetry",
+                    issue_class="unexpected",
+                    constraint="search_telemetry",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"search_telemetry#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.search_telemetry.progress",
                       read=read_n, written=written_n, total=total)
@@ -293,6 +334,7 @@ def _migrate_search_telemetry(
 
 def _migrate_tier_writes(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "tier_writes", _TIER_WRITES_COLS)
     read_n = written_n = 0
@@ -321,6 +363,15 @@ def _migrate_tier_writes(
                 ts=str(row.get("ts", ""))[:30],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "tier_writes",
+                    issue_class="unexpected",
+                    constraint="tier_writes",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"tier_writes#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.tier_writes.progress",
                       read=read_n, written=written_n, total=total)
@@ -330,14 +381,41 @@ def _migrate_tier_writes(
 
 def _migrate_nx_answer_runs(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "nx_answer_runs", _NX_ANSWER_RUNS_COLS)
     read_n = written_n = 0
     total = len(rows)
     _log.info("telemetry_etl.nx_answer_runs.start", total=total)
 
+    # RDR-153 soft-dangler policy: plan_id has NO enforced FK — rows with a
+    # deleted plan IMPORT (preserving event history) and an advisory records
+    # the dangling reference. Valid plan ids come from the same source db.
+    valid_plan_ids: set[int] = set()
+    try:
+        valid_plan_ids = {
+            int(r[0]) for r in conn.execute("SELECT id FROM plans").fetchall()
+        }
+    except sqlite3.OperationalError:
+        pass  # no plans table in source — every plan_id is then a dangler
+
     for row in rows:
         read_n += 1
+        plan_id = _nullable_int(row.get("plan_id"))
+        if (
+            collector is not None
+            and plan_id is not None
+            and plan_id not in valid_plan_ids
+        ):
+            collector.record(
+                "telemetry", "nx_answer_runs",
+                issue_class="soft_dangler",
+                constraint="nx_answer_runs.plan_id -> plans.id (not enforced)",
+                reason="plan deleted; row imports with dangling reference; "
+                       "sample ids are <run_id>:<plan_id>",
+                action="flagged",
+                sample_id=f"{row.get('id')}:{plan_id}",
+            )
         try:
             store.import_nx_answer_run(
                 question=row.get("question", ""),
@@ -356,6 +434,15 @@ def _migrate_nx_answer_runs(
                 question_prefix=str(row.get("question", ""))[:40],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "nx_answer_runs",
+                    issue_class="unexpected",
+                    constraint="nx_answer_runs",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"nx_answer_runs#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.nx_answer_runs.progress",
                       read=read_n, written=written_n, total=total)
@@ -363,8 +450,39 @@ def _migrate_nx_answer_runs(
     return {"read": read_n, "written": written_n}
 
 
+def _normalize_timestamp(raw: str) -> tuple[str, bool]:
+    """RDR-153 format-anomaly policy: parse lenient, emit canonical
+    OFFSET-QUALIFIED ISO-8601.
+
+    Returns ``(canonical, was_normalized)``. The production anomaly is the
+    space-form NAIVE ``2026-04-23 10:47:54`` (234/234 hook_failures rows).
+    The Java import path (``TelemetryRepository.parseTsStrict``) uses
+    ``OffsetDateTime.parse`` which REQUIRES an offset — this is the actual
+    root cause of nexus-9sjn3 (hook_failures imported 0/234): the rows fail
+    twice over, space separator AND missing offset. Naive timestamps are
+    treated as UTC (SQLite ``CURRENT_TIMESTAMP``/``datetime('now')`` is
+    UTC), so canonical form is ``...T...+00:00``.
+
+    Raises ``ValueError`` for unparseable input — the caller records a
+    ``failed`` issue (fail only if unparseable, never silently drop).
+
+    NOTE: any non-canonical-but-parseable form counts as normalized —
+    a 'Z' suffix becomes '+00:00', a naive T-form gains '+00:00'. Benign
+    variants inflating 'handled' is acceptable and honest (the stored
+    value DID change).
+    """
+    from datetime import UTC as _UTC, datetime as _dt
+
+    parsed = _dt.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_UTC)
+    canonical = parsed.isoformat()
+    return canonical, canonical != raw
+
+
 def _migrate_hook_failures(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "hook_failures", _HOOK_FAILURES_COLS)
     read_n = written_n = 0
@@ -373,13 +491,41 @@ def _migrate_hook_failures(
 
     for row in rows:
         read_n += 1
+        raw_ts = row.get("occurred_at", "")
+        try:
+            occurred_at, normalized = _normalize_timestamp(raw_ts)
+        except ValueError:
+            _log.error(
+                "telemetry_etl.hook_failures.unparseable_timestamp",
+                occurred_at=raw_ts[:40],
+            )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "hook_failures",
+                    issue_class="format_anomaly",
+                    constraint="hook_failures.occurred_at",
+                    reason=f"unparseable timestamp (not ISO-8601-coercible): "
+                           f"{raw_ts[:40]!r}",
+                    action="failed",
+                    sample_id=str(row.get("id", read_n)),
+                )
+            continue
+        if normalized and collector is not None:
+            collector.record(
+                "telemetry", "hook_failures",
+                issue_class="format_anomaly",
+                constraint="hook_failures.occurred_at",
+                reason="space-form timestamp normalized to ISO-8601 T form",
+                action="handled",
+                sample_id=str(row.get("id", read_n)),
+            )
         try:
             store.import_hook_failure(
                 doc_id=_str_or_empty(row.get("doc_id")),
                 collection=_str_or_empty(row.get("collection")),
                 hook_name=row.get("hook_name", ""),
                 error=_str_or_empty(row.get("error")),
-                occurred_at=row.get("occurred_at", ""),
+                occurred_at=occurred_at,
                 batch_doc_ids=_nullable_str(row.get("batch_doc_ids")),
                 is_batch=bool(row.get("is_batch", False)),
                 chain=_nullable_str(row.get("chain")),
@@ -391,6 +537,15 @@ def _migrate_hook_failures(
                 hook_name=str(row.get("hook_name", "")),
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "hook_failures",
+                    issue_class="unexpected",
+                    constraint="hook_failures",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=str(row.get("id", read_n)),
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.hook_failures.progress",
                       read=read_n, written=written_n, total=total)
@@ -400,6 +555,7 @@ def _migrate_hook_failures(
 
 def _migrate_frecency(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
 ) -> dict[str, int]:
     _, rows = _fetch(conn, "frecency", _FRECENCY_COLS)
     read_n = written_n = 0
@@ -424,6 +580,15 @@ def _migrate_frecency(
                 chunk_id=str(row.get("chunk_id", ""))[:32],
                 error=str(exc),
             )
+            if collector is not None:
+                collector.record(
+                    "telemetry", "frecency",
+                    issue_class="unexpected",
+                    constraint="frecency",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=f"frecency#{read_n}",
+                )
         if read_n % batch_log_every == 0:
             _log.info("telemetry_etl.frecency.progress",
                       read=read_n, written=written_n, total=total)

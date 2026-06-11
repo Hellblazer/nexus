@@ -63,10 +63,26 @@ def _cmd_pg_bin(args: argparse.Namespace) -> None:
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
     )
 
-    from nexus.db.pg_provision import discover_pg_binaries
+    from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
 
-    bins = discover_pg_binaries()
-    val = getattr(bins, args.binary, None)
+    try:
+        bins = discover_pg_binaries()
+        val = getattr(bins, args.binary, None)
+    except PgBinaryNotFoundError:
+        # nexus-r0esi: discovery failure must not silently yield an empty
+        # path (the prod-copy.sh count verification then SKIPped every
+        # check and reported 'all passed'). Fall back to PATH; fail LOUD
+        # with a non-zero exit when nothing resolves.
+        import shutil
+
+        val = shutil.which(args.binary) if args.binary != "bin_dir" else None
+        if val is None:
+            print(
+                f"pg-bin: {args.binary} not found via discovery or PATH "
+                "(install postgresql@16 or set NEXUS_PG_BIN)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     if val is None:
         print(f"Unknown binary: {args.binary}", file=sys.stderr)
         sys.exit(1)
