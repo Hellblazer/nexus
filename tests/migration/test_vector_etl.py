@@ -1295,3 +1295,139 @@ class TestNulByteBoundary:
         doc, meta = fake.store[name][cid]
         assert doc == dirty
         assert meta == {"tag": "etl\x00meta"}
+
+
+# ── nexus-pebfx.3: ETL operability (additive — locked assertions untouched) ──
+
+
+class TestSkippedEmptyDisposition:
+    """Disposition rule from the 2026-06-10 production run: 14x tuples__* +
+    taxonomy__centroids (all non-conformant, all source=0) forced the run
+    red and required hand-pinning --collections with 49 names. Empty +
+    non-conformant cannot lose data — 'skipped-empty' does not redden the
+    run. Non-conformant WITH data stays 'skipped' + red (the locked
+    test_nonconformant_collection_skipped_loud pins that side)."""
+
+    def test_empty_nonconformant_is_skipped_empty_and_green(
+        self, source_client,
+    ) -> None:
+        # taxonomy__centroids: the OTHER real empty non-conformant from the
+        # production run (tuples__* now route to "excluded" before the
+        # disposition probe runs).
+        empty_legacy = "taxonomy__centroids"
+        good = _coll("etlop-good")
+        source_client.create_collection(empty_legacy)  # 0 chunks
+        _seed_source(source_client, good, 2)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        by_name = {r.collection: r for r in report.results}
+        assert by_name[empty_legacy].status == "skipped-empty"
+        assert by_name[empty_legacy].source_count == 0
+        assert by_name[empty_legacy].written_count == 0
+        assert "0 chunks" in by_name[empty_legacy].reason
+        assert by_name[good].status == "migrated"
+        assert report.ok is True
+
+    def test_nonconformant_with_data_still_red(self, source_client) -> None:
+        # The protective side of the rule, re-pinned at the disposition
+        # boundary: data present -> red, exactly as before.
+        legacy = "knowledge__legacy-with-data"
+        _seed_source(source_client, legacy, 1)
+        fake = FakeVectorClient()
+        report = migrate_collections(source_client, fake, leg="local")
+        assert report.results[0].status == "skipped"
+        assert report.results[0].source_count == 1
+        assert report.ok is False
+
+    def test_unreadable_nonconformant_stays_red(self) -> None:
+        # Conservative: if the count probe fails we cannot prove emptiness.
+        class _ExplodingClient:
+            def list_collections(self):
+                return []
+
+            def get_collection(self, name):
+                raise RuntimeError("boom")
+
+        from nexus.migration.vector_etl import _migrate_one
+
+        result = _migrate_one(
+            _ExplodingClient(), FakeVectorClient(), "tuples__broken",
+            dry_run=False, page=300,
+        )
+        assert result.status == "skipped"
+        assert result.source_count == 0
+
+
+class TestLiveProgressCallback:
+    def test_on_result_fires_per_collection_in_order(self, source_client) -> None:
+        a = _coll("etlop-a")
+        b = _coll("etlop-b")
+        _seed_source(source_client, a, 1)
+        _seed_source(source_client, b, 1)
+        fake = FakeVectorClient()
+        seen: list[str] = []
+
+        migrate_collections(
+            source_client, fake, leg="local",
+            collections=[a, b],
+            on_result=lambda r: seen.append(r.collection),
+        )
+        assert seen == [a, b]
+
+    def test_durations_populated(self, source_client, monkeypatch) -> None:
+        # Deterministic clock (exact-assertion discipline): the default
+        # duration_s=0.0 would satisfy a >=0 inequality even if the timing
+        # loop never ran.
+        import nexus.migration.vector_etl as etl_mod
+
+        a = _coll("etlop-dur")
+        _seed_source(source_client, a, 1)
+        ticks = iter([10.0, 11.5])
+        monkeypatch.setattr(etl_mod.time, "monotonic", lambda: next(ticks))
+        report = migrate_collections(
+            source_client, FakeVectorClient(), leg="local", collections=[a],
+        )
+        assert report.results[0].duration_s == 1.5
+
+
+class TestEphemeralExclusion:
+    """pebfx.3 follow-up (Hal, 2026-06-11): tuples__* are session-ephemeral
+    and die with Chroma at P4b — four of them accumulated hook-event data
+    post-migration and would have failed the straggler sweep. Excluded from
+    DEFAULT enumeration (reported, never silent); explicit --collections
+    naming overrides."""
+
+    def test_data_bearing_tuples_excluded_from_default_run(
+        self, source_client,
+    ) -> None:
+        good = _coll("etlex-good")
+        _seed_source(source_client, good, 2)
+        _seed_source(source_client, "tuples__hook_events_notification", 64)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        by_name = {r.collection: r for r in report.results}
+        tup = by_name["tuples__hook_events_notification"]
+        assert tup.status == "excluded"
+        assert tup.source_count == 64          # reported, not hidden
+        assert tup.written_count == 0
+        assert "ephemeral" in tup.reason
+        assert report.ok is True               # the sweep can go green
+        # Nothing was written for the excluded collection.
+        assert all(c != "tuples__hook_events_notification"
+                   for c, _ in fake.upsert_calls)
+
+    def test_explicit_naming_overrides_exclusion(self, source_client) -> None:
+        # Explicit intent wins: a named tuples collection follows the normal
+        # disposition (non-conformant with data -> skipped + red).
+        _seed_source(source_client, "tuples__hook_events_notification", 3)
+        fake = FakeVectorClient()
+        report = migrate_collections(
+            source_client, fake, leg="local",
+            collections=["tuples__hook_events_notification"],
+        )
+        assert report.results[0].status == "skipped"
+        assert report.ok is False
