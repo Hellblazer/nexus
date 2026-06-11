@@ -381,3 +381,220 @@ class TestEndToEndReport:
         assert summary["by_action"]["schema_corrected"] == 1
         assert summary["total_failed"] == 1              # the unparseable ts
         assert summary["max_severity"] == 4
+
+
+# ── Catalog policy (P2.3) ────────────────────────────────────────────────────
+
+_CATALOG_SCHEMA = """
+CREATE TABLE owners (
+    tumbler_prefix TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    owner_type     TEXT NOT NULL,
+    repo_hash      TEXT,
+    description    TEXT,
+    repo_root      TEXT DEFAULT '',
+    head_hash      TEXT
+);
+CREATE TABLE documents (
+    tumbler              TEXT PRIMARY KEY,
+    title                TEXT NOT NULL,
+    author               TEXT,
+    year                 INTEGER,
+    content_type         TEXT,
+    file_path            TEXT,
+    corpus               TEXT,
+    physical_collection  TEXT,
+    chunk_count          INTEGER,
+    head_hash            TEXT,
+    indexed_at           TEXT,
+    metadata             TEXT,
+    source_mtime         REAL DEFAULT 0.0,
+    alias_of             TEXT DEFAULT '',
+    source_uri           TEXT DEFAULT ''
+);
+CREATE TABLE links (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_tumbler TEXT NOT NULL,
+    to_tumbler   TEXT NOT NULL,
+    link_type    TEXT NOT NULL,
+    from_span    TEXT DEFAULT '',
+    to_span      TEXT DEFAULT '',
+    created_by   TEXT DEFAULT 'user',
+    created_at   TEXT DEFAULT '',
+    metadata     TEXT
+);
+CREATE TABLE collections (
+    name         TEXT PRIMARY KEY,
+    content_type TEXT DEFAULT ''
+);
+CREATE TABLE document_chunks (
+    doc_id   TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    chash    TEXT NOT NULL
+);
+CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT);
+"""
+
+
+class _CaptureCatalogClient:
+    """Duck-typed HttpCatalogClient: records _post calls per path."""
+
+    def __init__(self) -> None:
+        self.posts: dict[str, list[dict]] = {}
+
+    def _post(self, path: str, payload: dict) -> dict:
+        self.posts.setdefault(path, []).append(payload)
+        return {"imported": 1}
+
+
+class TestCatalogPolicy:
+    def _seeded_db(self, tmp_path: Path) -> Path:
+        db = _make_db(tmp_path, _CATALOG_SCHEMA, name="catalog.db")
+        _insert(db, "INSERT INTO owners (tumbler_prefix, name, owner_type) VALUES (?,?,?)", [
+            ("1.1", "nexus", "repo"),
+        ])
+        _insert(db, "INSERT INTO documents (tumbler, title) VALUES (?,?)", [
+            ("1.1.1", "doc-a"),
+            ("1.1.2", "doc-b"),
+        ])
+        _insert(db, "INSERT INTO links (from_tumbler, to_tumbler, link_type) VALUES (?,?,?)", [
+            ("1.1.1", "1.1.2", "cites"),     # valid
+            ("1.1.1", "9.9.9", "cites"),     # dangling endpoint (deleted doc)
+            ("9.9.8", "1.1.2", "relates"),   # dangling from-side
+        ])
+        return db
+
+    def test_dangling_links_imported_and_flagged(self, tmp_path: Path) -> None:
+        """Soft-dangler policy: catalog links have no enforced endpoint FK —
+        they IMPORT (273/1,719 in the audit) and the advisory records each."""
+        from nexus.db.t2.catalog_etl import migrate_catalog
+
+        db = self._seeded_db(tmp_path)
+        client = _CaptureCatalogClient()
+        collector = IssueCollector()
+
+        migrate_catalog(db, client, collector=collector)
+
+        # ALL three links imported — flag, never drop.
+        assert len(client.posts["/import/link"]) == 3
+        (issue,) = [
+            i for i in collector.issues_for("catalog", "links")
+            if i.action == "flagged"
+        ]
+        assert issue.issue_class == "soft_dangler"
+        assert issue.count == 2
+        assert set(issue.sample_ids) == {"1.1.1:9.9.9", "9.9.8:1.1.2"}
+        assert collector.table_counts("catalog", "links") == {
+            "read": 3, "written": 3,
+        }
+
+    def test_collector_optional_back_compat(self, tmp_path: Path) -> None:
+        from nexus.db.t2.catalog_etl import migrate_catalog
+
+        db = self._seeded_db(tmp_path)
+        result = migrate_catalog(db, _CaptureCatalogClient())
+        assert result["links"]["written"] == 3
+
+
+# ── Aspects policy (P2.3) ────────────────────────────────────────────────────
+
+_ASPECTS_SCHEMA = """
+CREATE TABLE document_aspects (
+    collection            TEXT,
+    source_path           TEXT,
+    doc_id                TEXT,
+    problem_formulation   TEXT,
+    proposed_method       TEXT,
+    experimental_datasets TEXT,
+    experimental_baselines TEXT,
+    experimental_results  TEXT,
+    extras                TEXT,
+    confidence            REAL,
+    extracted_at          TEXT,
+    model_version         TEXT,
+    extractor_name        TEXT
+);
+CREATE TABLE aspect_extraction_queue (
+    id          INTEGER PRIMARY KEY,
+    doc_id      TEXT,
+    collection  TEXT,
+    source_path TEXT,
+    status      TEXT,
+    enqueued_at TEXT
+);
+"""
+
+
+class _CaptureAspectsStore:
+    def __init__(self) -> None:
+        self.imported: list[dict] = []
+        self.queued: list[dict] = []
+
+    def import_aspect(self, body: dict) -> int:
+        self.imported.append(body)
+        return 1
+
+    def import_queue_row(self, body: dict) -> int:
+        self.queued.append(body)
+        return 1
+
+
+class TestAspectsPolicy:
+    def _seeded(self, tmp_path: Path) -> tuple[Path, Path]:
+        aspects_db = _make_db(tmp_path, _ASPECTS_SCHEMA, name="memory.db")
+        catalog_db = _make_db(tmp_path, _CATALOG_SCHEMA, name="catalog.db")
+        _insert(catalog_db, "INSERT INTO documents (tumbler, title) VALUES (?,?)", [
+            ("1.1.1", "live-doc"),
+        ])
+        _insert(
+            aspects_db,
+            "INSERT INTO document_aspects "
+            "(collection, source_path, doc_id, extracted_at, model_version, extractor_name) "
+            "VALUES (?,?,?,?,?,?)",
+            [
+                ("knowledge__x", "/a", "1.1.1", "2026-01-01", "v2", "claude"),  # valid doc
+                ("knowledge__x", "/b", "9.9.9", "2026-01-01", "v2", "claude"),  # stale doc_id
+            ],
+        )
+        _insert(
+            aspects_db,
+            "INSERT INTO aspect_extraction_queue (doc_id, collection, status) VALUES (?,?,?)",
+            [
+                ("1.1.1", "knowledge__x", "pending"),  # valid
+                ("9.9.9", "knowledge__x", "pending"),  # orphan
+            ],
+        )
+        return aspects_db, catalog_db
+
+    def test_orphan_doc_id_skipped_and_recorded(self, tmp_path: Path) -> None:
+        from nexus.db.t2.aspects_etl import migrate_aspects
+
+        aspects_db, catalog_db = self._seeded(tmp_path)
+        store = _CaptureAspectsStore()
+        collector = IssueCollector()
+
+        migrate_aspects(
+            aspects_db, store, collector=collector, catalog_db_path=catalog_db,
+        )
+
+        assert len(store.imported) == 1                  # only the live doc
+        assert store.imported[0]["doc_id"] == "1.1.1"
+        (issue,) = [
+            i for i in collector.issues_for("aspects", "document_aspects")
+            if i.action == "skipped"
+        ]
+        assert issue.issue_class == "orphan_parent"
+        assert issue.count == 1
+        assert collector.table_counts("aspects", "document_aspects") == {
+            "read": 2, "written": 1,
+        }
+
+    def test_without_catalog_db_no_orphan_check_back_compat(
+        self, tmp_path: Path,
+    ) -> None:
+        from nexus.db.t2.aspects_etl import migrate_aspects
+
+        aspects_db, _ = self._seeded(tmp_path)
+        store = _CaptureAspectsStore()
+        result = migrate_aspects(aspects_db, store)
+        assert result["imported"] == 2  # current behavior preserved
