@@ -26,6 +26,7 @@ The SQLite source is never modified (copy-not-move).
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -154,6 +155,10 @@ def migrate_memory_cmd(
     try:
         result = migrate_memory_rows(resolved_db, store, collector=collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2): the report is
+        # written even on a mid-run crash, so the operator always has a
+        # triage artifact covering everything the run recorded.
+        _emit_store_report(collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
@@ -286,6 +291,8 @@ def migrate_plans_cmd(
     try:
         result = migrate_plan_rows(resolved_db, store, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
@@ -426,6 +433,8 @@ def migrate_telemetry_cmd(
     try:
         results = migrate_telemetry_rows(resolved_db, store, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
@@ -581,6 +590,8 @@ def migrate_taxonomy_cmd(
     try:
         results = migrate_taxonomy_rows(resolved_db, store, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
@@ -738,6 +749,8 @@ def migrate_chash_cmd(
     try:
         results = migrate_chash_rows(resolved_db, store, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
@@ -876,6 +889,8 @@ def migrate_catalog_cmd(
     try:
         results = migrate_catalog(resolved_catalog, client, collector=_collector)
     except Exception as exc:
+        # Partial data beats no data (P3 critique S2).
+        _emit_store_report(_collector, resolved_catalog, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         client.close()
@@ -1242,6 +1257,9 @@ def _verify_pg_counts(report: dict, creds: dict) -> str:
                 )
     if not written_by_table:
         return "indeterminate"  # nothing mappable to verify is NOT a pass
+    # NOTE: written=0 for a mapped table passes trivially (pg_count >= 0) —
+    # correct for idempotent re-runs and empty sources; the gate predicate
+    # is the report's total_failed, never this advisory check.
 
     env = dict(os.environ)
     env["PGPASSWORD"] = password
@@ -1461,6 +1479,13 @@ def migrate_all_cmd(
         target={"service_url": os.environ.get("NX_SERVICE_URL", "(lease)")},
         migration_id=migration_id,
     )
+    # Verification runs BEFORE the single artifact write so its verdict is
+    # recorded IN the report (P3 critique S1: the artifact must be
+    # self-contained for the Phase-4 triage surface — an operator reading
+    # the JSON tomorrow must see whether counts were checked).
+    verification = _run_verification(report)
+    report["verification"] = verification
+
     out_path = report_path or _default_report_path(migration_id)
     _write_report(report, out_path)
 
@@ -1472,8 +1497,6 @@ def migrate_all_cmd(
         f"total_failed={summary['total_failed']} "
         f"max_severity={summary['max_severity']}"
     )
-
-    verification = _run_verification(report)
     if summary["total_failed"] > 0:
         raise click.ClickException(
             f"migration is NOT clean — total_failed={summary['total_failed']}; "
@@ -1501,7 +1524,11 @@ def _run_verification(report: dict) -> str:
             creds = {}
     verification = _verify_pg_counts(report, creds)
     if verification == "verified":
-        click.echo("verification: verified (pg counts >= report written)")
+        checked = len(_VERIFY_TABLES)
+        click.echo(
+            f"verification: verified (pg counts >= report written across the "
+            f"{checked} mappable relations; unmapped tables are not checked)"
+        )
     elif verification == "mismatch":
         click.echo("verification: VERIFICATION MISMATCH", err=True)
     else:

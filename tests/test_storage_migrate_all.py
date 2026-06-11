@@ -234,3 +234,98 @@ class TestPerStoreReport:
         report = json.loads(report_path.read_text())
         assert [s["store"] for s in report["stores"]] == ["memory"]
         assert report["summary"]["total_written"] == 4
+
+
+class TestP3ReviewRegressions:
+    """P3.3/P3.4 review findings (2026-06-11)."""
+
+    def test_verification_verdict_recorded_in_artifact(
+        self, runner, tmp_path: Path,
+    ) -> None:
+        """Critic S1: the artifact must be self-contained — the Phase-4
+        triage surface reads the JSON, not the run's stdout."""
+        order: list[str] = []
+        report_path = tmp_path / "r.json"
+        result, _ = _invoke_all(
+            runner, tmp_path, order, "--report", str(report_path),
+            verify="indeterminate",
+        )
+        assert result.exit_code == 0, result.output
+        report = json.loads(report_path.read_text())
+        assert report["verification"] == "indeterminate"
+
+    def test_per_store_default_path_always_produces_artifact(
+        self, runner, tmp_path: Path,
+    ) -> None:
+        """Critic S3 / CRE L1: the per-store default-path guarantee."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        db = config_dir / "t2.db"
+        db.touch()
+
+        def fake_migrate(source_db_path, store, *, collector=None, **kw):
+            if collector is not None:
+                collector.count_read("memory", "memory", 1)
+                collector.count_written("memory", "memory", 1)
+            return {"read": 1, "written": 1}
+
+        class _FakeStore:
+            def __init__(self, *a, **k): ...
+            def close(self): ...
+
+        with patch(
+            "nexus.db.t2.memory_etl.migrate_memory_rows",
+            side_effect=fake_migrate,
+        ), patch(
+            "nexus.db.t2.http_memory_store.HttpMemoryStore", _FakeStore,
+        ), patch.dict(
+            "os.environ",
+            {"NEXUS_CONFIG_DIR": str(config_dir),
+             "NX_SERVICE_TOKEN": "t", "NX_SERVICE_URL": "http://127.0.0.1:1"},
+        ):
+            result = runner.invoke(main, [
+                "storage", "migrate", "memory", "--db", str(db),
+            ])
+        assert result.exit_code == 0, result.output
+        reports = list((config_dir / "migration-reports").glob("migration-*.json"))
+        assert len(reports) == 1
+
+    def test_per_store_crash_still_writes_artifact(
+        self, runner, tmp_path: Path,
+    ) -> None:
+        """Critic S2 / CRE M2: partial data beats no data — a mid-run crash
+        must still leave the triage artifact."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        db = config_dir / "t2.db"
+        db.touch()
+        report_path = tmp_path / "crash-report.json"
+
+        def exploding_migrate(source_db_path, store, *, collector=None, **kw):
+            if collector is not None:
+                collector.count_read("memory", "memory", 2)
+                collector.count_written("memory", "memory", 1)
+            raise RuntimeError("mid-run network partition")
+
+        class _FakeStore:
+            def __init__(self, *a, **k): ...
+            def close(self): ...
+
+        with patch(
+            "nexus.db.t2.memory_etl.migrate_memory_rows",
+            side_effect=exploding_migrate,
+        ), patch(
+            "nexus.db.t2.http_memory_store.HttpMemoryStore", _FakeStore,
+        ), patch.dict(
+            "os.environ",
+            {"NEXUS_CONFIG_DIR": str(config_dir),
+             "NX_SERVICE_TOKEN": "t", "NX_SERVICE_URL": "http://127.0.0.1:1"},
+        ):
+            result = runner.invoke(main, [
+                "storage", "migrate", "memory", "--db", str(db),
+                "--report", str(report_path),
+            ])
+        assert result.exit_code != 0
+        assert "ETL failed" in result.output
+        report = json.loads(report_path.read_text())
+        assert report["summary"]["total_read"] == 2  # partial data preserved

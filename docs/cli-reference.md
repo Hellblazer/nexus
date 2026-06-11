@@ -1838,8 +1838,14 @@ produces an artifact). Exits non-zero when `summary.total_failed > 0`
 Postgres counts below the report's written totals. When psql/credentials
 cannot be resolved the verification is reported as **VERIFICATION
 INDETERMINATE** — a loud warning, never a silent skip (the RDR-152
-prod-copy.sh harness bug). Every per-store command also accepts
-`--report PATH` for a single-store report.
+prod-copy.sh harness bug). The verdict is recorded in the report
+artifact (`"verification"`). Verification queries the LOCAL nx-managed
+Postgres (from `pg_credentials`) — when migrating against a remote
+service it reports on the local cluster only. Every per-store command
+also accepts `--report PATH` for a single-store report (a default-path
+artifact is written even when the flag is omitted, including on a
+mid-run crash — partial data beats no data). Note: `aspects` has no
+standalone command; it runs only via `migrate all`.
 
 Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-not-move (the source is never modified) and idempotent (server-side upsert; re-runs produce no duplicates). All require `NX_SERVICE_TOKEN`.
 
