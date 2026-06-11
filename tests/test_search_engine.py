@@ -790,3 +790,121 @@ class TestAttachDocIdsFromCatalog:
             "Phase-3 chunk did NOT receive link boost. The attach helper "
             "did not inject doc_id, OR apply_link_boost regressed."
         )
+
+
+# ── Per-collection error isolation (nexus-pebfx.8) ──────────────────────────
+
+
+class _FailingT3:
+    """T3 stand-in where selected collections raise VectorServiceError.
+
+    Models the service-mode failure where a collection's embedding space
+    doesn't match the query embedding (HTTP 400 from /v1/vectors/search).
+    """
+
+    def __init__(
+        self,
+        results_by_col: dict[str, list[dict]],
+        failing: set[str],
+        voyage: bool = True,
+    ):
+        self._results = results_by_col
+        self._failing = set(failing)
+        self._voyage_client = "fake-voyage" if voyage else None
+
+    def search(self, query, collection_names, n_results=10, where=None):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        col = collection_names[0]
+        if col in self._failing:
+            raise VectorServiceError(
+                "POST /v1/vectors/search → HTTP 400: query embedder produced "
+                "a 1024-dim vector but the collections dispatch to chunks_384",
+            )
+        return self._results.get(col, [])
+
+
+class TestPerCollectionErrorIsolation:
+    """One unservable collection must not sink the whole cross-corpus search.
+
+    nexus-pebfx.8: the default knowledge,code,docs search died with HTTP 400
+    because the 384-dim seam-b-test collection was in the prefix expansion
+    alongside 1024-dim collections — the loop re-raised on the first
+    unservable collection and the user got zero results plus a traceback.
+    """
+
+    def test_one_failing_collection_does_not_sink_the_search(self):
+        t3 = _FailingT3(
+            {"code__nexus": [{"id": "a", "content": "hit", "distance": 0.30}]},
+            failing={"knowledge__seam-b-test__minilm-l6-v2-384__v1"},
+        )
+        results = search_cross_corpus(
+            "q",
+            ["code__nexus", "knowledge__seam-b-test__minilm-l6-v2-384__v1"],
+            10,
+            t3,
+        )
+        assert {r.id for r in results} == {"a"}
+
+    def test_failure_recorded_in_diagnostics(self):
+        from nexus.search_engine import SearchDiagnostics
+
+        t3 = _FailingT3(
+            {"code__nexus": [{"id": "a", "content": "hit", "distance": 0.30}]},
+            failing={"knowledge__seam"},
+        )
+        diags: list[SearchDiagnostics] = []
+        search_cross_corpus(
+            "q", ["code__nexus", "knowledge__seam"], 10, t3,
+            diagnostics_out=diags,
+        )
+        assert list(diags[0].failed_collections) == ["knowledge__seam"]
+        assert "HTTP 400" in diags[0].failed_collections["knowledge__seam"]
+
+    def test_failed_collection_absent_from_per_collection_diag(self):
+        from nexus.search_engine import SearchDiagnostics
+
+        t3 = _FailingT3(
+            {"code__nexus": [{"id": "a", "content": "hit", "distance": 0.30}]},
+            failing={"knowledge__seam"},
+        )
+        diags: list[SearchDiagnostics] = []
+        search_cross_corpus(
+            "q", ["code__nexus", "knowledge__seam"], 10, t3,
+            diagnostics_out=diags,
+        )
+        assert "knowledge__seam" not in diags[0].per_collection
+        assert list(diags[0].per_collection) == ["code__nexus"]
+
+    def test_all_collections_failing_reraises(self):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        t3 = _FailingT3({}, failing={"code__a", "knowledge__b"})
+        with pytest.raises(VectorServiceError, match="all 2 collections failed"):
+            search_cross_corpus("q", ["code__a", "knowledge__b"], 10, t3)
+
+    def test_duplicate_collections_all_failing_still_reraises(self):
+        """The all-fail guard must not be defeated by a duplicated input
+        name (failed_collections is keyed by name; pre-dedup the input)."""
+        from nexus.db.http_vector_client import VectorServiceError
+
+        t3 = _FailingT3({}, failing={"code__a"})
+        with pytest.raises(VectorServiceError, match="all 1 collections failed"):
+            search_cross_corpus("q", ["code__a", "code__a"], 10, t3)
+
+    def test_failure_log_event_name_locked(self):
+        """Lock the ``collection_search_failed`` structlog event name —
+        downstream log consumers grep for it."""
+        from structlog.testing import capture_logs
+
+        t3 = _FailingT3(
+            {"code__nexus": [{"id": "a", "content": "hit", "distance": 0.30}]},
+            failing={"knowledge__seam"},
+        )
+        with capture_logs() as logs:
+            search_cross_corpus("q", ["code__nexus", "knowledge__seam"], 10, t3)
+        assert any(
+            entry["event"] == "collection_search_failed"
+            and entry["collection"] == "knowledge__seam"
+            for entry in logs
+        )
