@@ -2,7 +2,8 @@
 title: "Soft-Delete via Tombstone Columns on Catalog Projection"
 id: RDR-106
 type: Architecture
-status: draft
+status: superseded
+superseded-by: RDR-156
 priority: high
 author: Hal Hildebrand
 reviewed-by: self

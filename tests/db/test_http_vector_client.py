@@ -216,18 +216,22 @@ class TestSearch:
 
 class TestPut:
     def test_post_to_store_put(self, monkeypatch):
+        """put() now matches T3Database.put() contract: doc_id derived from content."""
+        import hashlib
         client = HttpVectorClient()
         calls = []
         def fake_post(path, body, **kw):
             calls.append((path, body))
-            return {"id": "abc123"}
+            return {"id": body.get("doc_id", "fallback")}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        returned_id = client.put("col", "abc123", "content here")
+        content = "content here"
+        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()[:32]
+        returned_id = client.put("col", content, title="my-title")
         path, body = calls[0]
         assert path == "/v1/vectors/store-put"
-        assert body["doc_id"] == "abc123"
-        assert body["content"] == "content here"
-        assert returned_id == "abc123"
+        assert body["doc_id"] == expected_doc_id
+        assert body["content"] == content
+        assert returned_id == expected_doc_id
 
 
 class TestGetById:

@@ -488,17 +488,17 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge"));
 
         var rows = List.of(
-            Map.<String, Object>of("position", 0, "chash", "aaaa0000", "chunk_index", 0,
+            Map.<String, Object>of("position", 0, "chash", "aaaa0000000000000000000000000000", "chunk_index", 0,
                 "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 100),
-            Map.<String, Object>of("position", 1, "chash", "bbbb1111", "chunk_index", 1,
+            Map.<String, Object>of("position", 1, "chash", "bbbb1111000000000000000000000000", "chunk_index", 1,
                 "line_start", 11, "line_end", 20, "char_start", 100, "char_end", 200)
         );
         repo.writeManifest(TENANT_A, "mfst.1", rows);
 
         var got = repo.getManifest(TENANT_A, "mfst.1");
         assertThat(got).hasSize(2);
-        assertThat(got.get(0).get("chash")).isEqualTo("aaaa0000");
-        assertThat(got.get(1).get("chash")).isEqualTo("bbbb1111");
+        assertThat(got.get(0).get("chash")).isEqualTo("aaaa0000000000000000000000000000");
+        assertThat(got.get(1).get("chash")).isEqualTo("bbbb1111000000000000000000000000");
     }
 
     @Test @Order(51)
@@ -507,17 +507,17 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge"));
         // Write initial
         repo.writeManifest(TENANT_A, "mfst.2", List.of(
-            Map.<String, Object>of("position", 0, "chash", "old0000", "chunk_index", 0)
+            Map.<String, Object>of("position", 0, "chash", "old00000000000000000000000000000", "chunk_index", 0)
         ));
         // Replace with new set
         repo.writeManifest(TENANT_A, "mfst.2", List.of(
-            Map.<String, Object>of("position", 0, "chash", "new0000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "new1111", "chunk_index", 1)
+            Map.<String, Object>of("position", 0, "chash", "new00000000000000000000000000000", "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", "new11110000000000000000000000000", "chunk_index", 1)
         ));
         var got = repo.getManifest(TENANT_A, "mfst.2");
         assertThat(got).hasSize(2);
         assertThat(got.stream().map(r -> (String) r.get("chash")).toList())
-            .containsExactlyInAnyOrder("new0000", "new1111");
+            .containsExactlyInAnyOrder("new00000000000000000000000000000", "new11110000000000000000000000000");
     }
 
     @Test @Order(52)
@@ -525,7 +525,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.3", "title", "Purge Doc",
             "content_type", "paper", "corpus", "knowledge"));
         repo.writeManifest(TENANT_A, "mfst.3", List.of(
-            Map.<String, Object>of("position", 0, "chash", "purge0000", "chunk_index", 0)
+            Map.<String, Object>of("position", 0, "chash", "purge000000000000000000000000000", "chunk_index", 0)
         ));
         assertThat(repo.getManifest(TENANT_A, "mfst.3")).hasSize(1);
         int deleted = repo.purgeManifest(TENANT_A, "mfst.3");
@@ -539,11 +539,11 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__chash_test"));
         repo.writeManifest(TENANT_A, "mfst.4", List.of(
-            Map.<String, Object>of("position", 0, "chash", "cfccc000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "cfccc111", "chunk_index", 1)
+            Map.<String, Object>of("position", 0, "chash", "cfccc000000000000000000000000000", "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", "cfccc111000000000000000000000000", "chunk_index", 1)
         ));
         Set<String> chashes = repo.chashesForCollection(TENANT_A, "knowledge__chash_test");
-        assertThat(chashes).containsExactlyInAnyOrder("cfccc000", "cfccc111");
+        assertThat(chashes).containsExactlyInAnyOrder("cfccc000000000000000000000000000", "cfccc111000000000000000000000000");
     }
 
     @Test @Order(54)
@@ -551,9 +551,9 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
         repo.writeManifest(TENANT_A, "mfst.5", List.of(
-            Map.<String, Object>of("position", 0, "chash", "rsync000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "rsync111", "chunk_index", 1),
-            Map.<String, Object>of("position", 2, "chash", "rsync222", "chunk_index", 2)
+            Map.<String, Object>of("position", 0, "chash", "rsync000000000000000000000000000", "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", "rsync111000000000000000000000000", "chunk_index", 1),
+            Map.<String, Object>of("position", 2, "chash", "rsync222000000000000000000000000", "chunk_index", 2)
         ));
         repo.resyncChunkCount(TENANT_A, "mfst.5");
         var doc = repo.getDocument(TENANT_A, "mfst.5");
@@ -601,6 +601,71 @@ class CatalogRepositoryTest {
     }
 
     @Test @Order(63)
+    void importCollection_overwritesStubRow() {
+        // A stub row (all three discriminator columns empty) must be fully upgraded
+        // by importCollection. Stubs are created by PgVectorRepository.upsertChunks
+        // auto-registration and by fk-002-0-backfill-stubs (RDR-156 P0.2).
+        String name = "code__nexus__voyage-code-3__v2";
+        // Seed a stub via upsertCollection with no metadata — this simulates the
+        // auto-registration path (content_type/owner_id/embedding_model all default to '').
+        // Use a direct SQL stub to guarantee the three discriminators are all empty:
+        repo.importCollection(TENANT_A, Map.of(
+            "name", name,
+            "content_type", "",
+            "owner_id", "",
+            "embedding_model", "",
+            "model_version", ""
+        ));
+        var before = repo.getCollection(TENANT_A, name);
+        assertThat(before).isNotNull();
+        assertThat(before.get("content_type")).as("stub has empty content_type").isEqualTo("");
+
+        // Now call importCollection with full metadata — the DO UPDATE WHERE-stub must fire.
+        repo.importCollection(TENANT_A, Map.of(
+            "name", name,
+            "content_type", "code",
+            "owner_id", "nexus-1-1",
+            "embedding_model", "voyage-code-3",
+            "model_version", "v2"
+        ));
+        var after = repo.getCollection(TENANT_A, name);
+        assertThat(after.get("content_type")).as("importCollection must upgrade stub content_type").isEqualTo("code");
+        assertThat(after.get("owner_id")).as("importCollection must upgrade stub owner_id").isEqualTo("nexus-1-1");
+        assertThat(after.get("embedding_model")).as("importCollection must upgrade stub embedding_model").isEqualTo("voyage-code-3");
+        assertThat(after.get("model_version")).as("importCollection must upgrade stub model_version").isEqualTo("v2");
+    }
+
+    @Test @Order(64)
+    void importCollection_doesNotOverwriteLiveRow() {
+        // A live row (at least one discriminator non-empty) must NOT be overwritten
+        // by importCollection. The DO UPDATE WHERE-stub predicate must not fire.
+        String name = "code__nexus__voyage-code-3__v3";
+        // Register a live row with fully populated metadata via upsertCollection.
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name,
+            "content_type", "code",
+            "owner_id", "live-owner",
+            "embedding_model", "voyage-code-3",
+            "model_version", "v3"
+        ));
+        var before = repo.getCollection(TENANT_A, name);
+        assertThat(before.get("owner_id")).as("live row owner_id before import").isEqualTo("live-owner");
+
+        // Call importCollection with DIFFERENT metadata — must NOT overwrite the live row.
+        repo.importCollection(TENANT_A, Map.of(
+            "name", name,
+            "content_type", "docs",
+            "owner_id", "different-owner",
+            "embedding_model", "voyage-context-3",
+            "model_version", "v3"
+        ));
+        var after = repo.getCollection(TENANT_A, name);
+        assertThat(after.get("content_type")).as("importCollection must not overwrite live content_type").isEqualTo("code");
+        assertThat(after.get("owner_id")).as("importCollection must not overwrite live owner_id").isEqualTo("live-owner");
+        assertThat(after.get("embedding_model")).as("importCollection must not overwrite live embedding_model").isEqualTo("voyage-code-3");
+    }
+
+    @Test @Order(65)
     void collection_rename_cascadesToDocuments() {
         repo.upsertCollection(TENANT_A, Map.of(
             "name", "knowledge__old__v1",

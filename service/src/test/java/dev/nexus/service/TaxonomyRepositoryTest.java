@@ -113,6 +113,10 @@ class TaxonomyRepositoryTest {
             // prod nexus_svc grant set.)
             su.createStatement().execute(
                 "GRANT SELECT ON " + schema + ".catalog_documents TO " + SVC_ROLE);
+            // RDR-156 P0.2: assignTopic/importAssignment now auto-stub catalog_collections;
+            // the svc role needs INSERT (and SELECT for the ON CONFLICT check).
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT ON " + schema + ".catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute("GRANT USAGE ON SCHEMA " + schema + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO " + schema + ", public");
@@ -128,6 +132,14 @@ class TaxonomyRepositoryTest {
                     "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
                     "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
                     "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+            }
+            // RDR-156 P0.2: topic_assignments.source_collection now enforces a FK to
+            // catalog_collections(tenant_id, name).  Seed stub rows for all test collections.
+            for (String col : List.of(COL_A, COL_B)) {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                    "VALUES ('" + TENANT_A + "', '" + col + "') " +
+                    "ON CONFLICT (tenant_id, name) DO NOTHING");
             }
         }
 
