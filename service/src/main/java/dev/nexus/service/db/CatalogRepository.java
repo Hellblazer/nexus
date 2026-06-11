@@ -436,7 +436,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(documentFields())
                        .from(T_DOCS)
-                       .where(F_DOC_TUMBLER.eq(tumbler))
+                       .where(F_DOC_TUMBLER.eq(tumbler).and(F_DOC_DELETED_AT.isNull()))
                        .fetchOne();
             return r != null ? docRowFromRecord(r.intoMap()) : null;
         });
