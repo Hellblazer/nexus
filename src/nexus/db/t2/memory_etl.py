@@ -135,6 +135,7 @@ def migrate_memory_rows(
     store: Any,
     *,
     batch_log_every: int = 100,
+    collector: Any = None,
 ) -> dict[str, int]:
     """Copy all rows from a SQLite memory table into Postgres via *store*.
 
@@ -213,7 +214,18 @@ def migrate_memory_rows(
                 error=str(exc),
             )
             # Continue processing remaining rows so a single failure
-            # doesn't abort the whole migration.
+            # doesn't abort the whole migration. RDR-153 catch-all: the
+            # failure is recorded, never silently dropped.
+            if collector is not None:
+                collector.record(
+                    "memory", "memory",
+                    issue_class="unexpected",
+                    constraint="memory(project,title)",
+                    reason=f"row rejected during import: {exc}; sample ids "
+                           "are <project>:<title>",
+                    action="failed",
+                    sample_id=f"{transformed['project']}:{transformed['title']}",
+                )
 
         if read_count % batch_log_every == 0:
             _log.info(
@@ -229,4 +241,8 @@ def migrate_memory_rows(
         written=written_count,
         total=total,
     )
+    if collector is not None:
+        collector.count_read("memory", "memory", read_count)
+        collector.count_written("memory", "memory", written_count)
+
     return {"read": read_count, "written": written_count}

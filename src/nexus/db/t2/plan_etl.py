@@ -174,6 +174,7 @@ def migrate_plan_rows(
     store: Any,
     *,
     batch_log_every: int = 100,
+    collector: Any = None,
 ) -> dict[str, int]:
     """Copy all rows from a SQLite plans table into Postgres via *store*.
 
@@ -254,7 +255,16 @@ def migrate_plan_rows(
                 error=str(exc),
             )
             # Continue processing remaining rows so a single failure
-            # doesn't abort the whole migration.
+            # doesn't abort the whole migration. RDR-153 catch-all.
+            if collector is not None:
+                collector.record(
+                    "plans", "plans",
+                    issue_class="unexpected",
+                    constraint="plans",
+                    reason=f"row rejected during import: {exc}",
+                    action="failed",
+                    sample_id=str(transformed.get("query", ""))[:60],
+                )
 
         if read_count % batch_log_every == 0:
             _log.info(
@@ -270,4 +280,8 @@ def migrate_plan_rows(
         written=written_count,
         total=total,
     )
+    if collector is not None:
+        collector.count_read("plans", "plans", read_count)
+        collector.count_written("plans", "plans", written_count)
+
     return {"read": read_count, "written": written_count}

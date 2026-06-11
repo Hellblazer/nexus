@@ -515,12 +515,16 @@ CREATE TABLE document_aspects (
     extractor_name        TEXT
 );
 CREATE TABLE aspect_extraction_queue (
-    id          INTEGER PRIMARY KEY,
-    doc_id      TEXT,
-    collection  TEXT,
-    source_path TEXT,
-    status      TEXT,
-    enqueued_at TEXT
+    id              INTEGER PRIMARY KEY,
+    doc_id          TEXT,
+    collection      TEXT,
+    source_path     TEXT,
+    content_hash    TEXT,
+    status          TEXT,
+    retry_count     INTEGER DEFAULT 0,
+    enqueued_at     TEXT,
+    last_attempt_at TEXT,
+    last_error      TEXT
 );
 """
 
@@ -558,10 +562,11 @@ class TestAspectsPolicy:
         )
         _insert(
             aspects_db,
-            "INSERT INTO aspect_extraction_queue (doc_id, collection, status) VALUES (?,?,?)",
+            "INSERT INTO aspect_extraction_queue "
+            "(doc_id, collection, source_path, status, enqueued_at) VALUES (?,?,?,?,?)",
             [
-                ("1.1.1", "knowledge__x", "pending"),  # valid
-                ("9.9.9", "knowledge__x", "pending"),  # orphan
+                ("1.1.1", "knowledge__x", "/a", "pending", "2026-01-01"),  # valid
+                ("9.9.9", "knowledge__x", "/b", "pending", "2026-01-01"),  # orphan
             ],
         )
         return aspects_db, catalog_db
@@ -598,3 +603,138 @@ class TestAspectsPolicy:
         store = _CaptureAspectsStore()
         result = migrate_aspects(aspects_db, store)
         assert result["imported"] == 2  # current behavior preserved
+
+    def test_queue_orphans_skipped_valid_migrate(self, tmp_path: Path) -> None:
+        """The audit's 3/7 queue-orphan shape: orphans skip-and-record, the
+        valid rows migrate."""
+        from nexus.db.t2.aspects_etl import migrate_queue
+
+        aspects_db, catalog_db = self._seeded(tmp_path)
+        store = _CaptureAspectsStore()
+        collector = IssueCollector()
+
+        migrate_queue(
+            aspects_db, store, collector=collector, catalog_db_path=catalog_db,
+        )
+
+        assert len(store.queued) == 1
+        assert store.queued[0]["doc_id"] == "1.1.1"
+        (issue,) = [
+            i for i in collector.issues_for("aspects", "aspect_extraction_queue")
+            if i.action == "skipped"
+        ]
+        assert issue.issue_class == "orphan_parent"
+        assert issue.count == 1
+        assert collector.table_counts("aspects", "aspect_extraction_queue") == {
+            "read": 2, "written": 1,
+        }
+
+
+# ── Clean stores: counts + catch-all only (P2.3) ─────────────────────────────
+
+_MEMORY_SCHEMA = """
+CREATE TABLE memory (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    project       TEXT NOT NULL,
+    title         TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    tags          TEXT,
+    timestamp     TEXT,
+    ttl_days      INTEGER DEFAULT 0,
+    access_count  INTEGER DEFAULT 0,
+    last_accessed TEXT,
+    session_id    TEXT,
+    source_agent  TEXT,
+    UNIQUE (project, title)
+);
+"""
+
+
+class TestCleanStoreCountsAndCatchAll:
+    def test_memory_counts_and_failed_catch_all(self, tmp_path: Path) -> None:
+        from nexus.db.t2.memory_etl import migrate_memory_rows
+
+        db = _make_db(tmp_path, _MEMORY_SCHEMA)
+        _insert(
+            db,
+            "INSERT INTO memory (project, title, content) VALUES (?,?,?)",
+            [("p", "t1", "c1"), ("p", "t2", "c2"), ("p", "t3", "c3")],
+        )
+        store = _CaptureStore()
+        store.fail_on["import_entry"] = 2
+        collector = IssueCollector()
+
+        migrate_memory_rows(db, store, collector=collector)
+
+        assert collector.table_counts("memory", "memory") == {
+            "read": 3, "written": 2,
+        }
+        (issue,) = [
+            i for i in collector.issues_for("memory", "memory")
+            if i.action == "failed"
+        ]
+        assert issue.issue_class == "unexpected"
+        assert issue.count == 1
+
+    def test_plans_counts_and_failed_catch_all(self, tmp_path: Path) -> None:
+        from nexus.db.t2.plan_etl import migrate_plan_rows
+
+        db = tmp_path / "plans.db"
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            "CREATE TABLE plans (id INTEGER PRIMARY KEY, project TEXT, "
+            "query TEXT NOT NULL, plan_json TEXT NOT NULL DEFAULT '{}', "
+            "outcome TEXT DEFAULT 'success', tags TEXT DEFAULT '', "
+            "created_at TEXT DEFAULT '');"
+        )
+        conn.executemany(
+            "INSERT INTO plans (project, query) VALUES (?,?)",
+            [("p", "q1"), ("p", "q2")],
+        )
+        conn.commit()
+        conn.close()
+        store = _CaptureStore()
+        store.fail_on["import_plan"] = 1
+        collector = IssueCollector()
+
+        migrate_plan_rows(db, store, collector=collector)
+
+        assert collector.table_counts("plans", "plans") == {
+            "read": 2, "written": 1,
+        }
+        (issue,) = [
+            i for i in collector.issues_for("plans", "plans")
+            if i.action == "failed"
+        ]
+        assert issue.count == 1
+
+    def test_chash_counts_and_batch_error_exact(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_etl import migrate_chash_rows
+
+        db = tmp_path / "chash.db"
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            "CREATE TABLE chash_index (chash TEXT PRIMARY KEY, "
+            "physical_collection TEXT, created_at TEXT);"
+        )
+        conn.executemany(
+            "INSERT INTO chash_index VALUES (?,?,?)",
+            [("c1", "k", ""), ("c2", "k", "")],
+        )
+        conn.commit()
+        conn.close()
+
+        class _OkChash:
+            def import_batch(self, *a, **k):
+                return len(a[0]) if a else 0
+
+            def __getattr__(self, name):
+                def _f(*a, **k):
+                    payload = a[0] if a else k.get("rows", [])
+                    return {"imported": len(payload)} if isinstance(payload, list) else 1
+                return _f
+
+        collector = IssueCollector()
+        migrate_chash_rows(db, _OkChash(), collector=collector)
+        counts = collector.table_counts("chash", "chash_index")
+        assert counts["read"] == 2
