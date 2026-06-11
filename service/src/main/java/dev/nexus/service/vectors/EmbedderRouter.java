@@ -85,12 +85,15 @@ public final class EmbedderRouter implements Embedder {
         this.inputType          = inputType;
         // voyage-3 gets its own standard-embed instance: prefix routing sent it
         // to CCE (voyage-context-3) — the same-dim wrong-model contamination
-        // hole this dispatch table closes.
+        // hole this dispatch table closes. Every entry is self-keyed by the
+        // embedder's own modelToken() so a key can never drift from the
+        // identity actually dispatched.
+        VoyageEmbedder voyage3 = new VoyageEmbedder(voyageApiKey, "voyage-3", inputType);
         this.modelEmbedders     = Map.of(
                 onnxEmbedder.modelToken(),       onnxEmbedder,
                 voyageCodeEmbedder.modelToken(), voyageCodeEmbedder,
                 cceEmbedder.modelToken(),        cceEmbedder,
-                "voyage-3", new VoyageEmbedder(voyageApiKey, "voyage-3", inputType));
+                voyage3.modelToken(),            voyage3);
     }
 
     /** Embedding mode for banners and refusal messages. */

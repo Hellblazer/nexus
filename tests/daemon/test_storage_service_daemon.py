@@ -1181,7 +1181,9 @@ class TestSpawnServiceVoyageKeyPlumbing:
     ) -> None:
         monkeypatch.setenv("NX_VOYAGE_API_KEY", "explicit-key")
         monkeypatch.setenv("VOYAGE_API_KEY", "chain-key-should-lose")
-        env = self._spawn_env(config_dir, clock, monkeypatch)
+        with patch("nexus.config.get_credential") as get_cred:
+            env = self._spawn_env(config_dir, clock, monkeypatch)
+        get_cred.assert_not_called()
         assert env["NX_VOYAGE_API_KEY"] == "explicit-key"
 
     def test_key_resolved_from_credential_chain(
