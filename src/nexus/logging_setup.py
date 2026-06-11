@@ -203,7 +203,12 @@ def open_child_log(
     impossible without a pipe pump — and a pipe pump couples the child's
     liveness to the supervisor's (a child blocks on a full pipe once the
     pump dies), which is exactly wrong when the known failure mode is
-    the supervisor dying.
+    the supervisor dying. A *backup_count* of 0 disables rotation
+    (the file grows unbounded — callers should not pass it).
+
+    Raises ``OSError`` on filesystem failure; spawn sites that must not
+    let a logging failure block the daemon use
+    :func:`open_child_log_or_devnull`.
     """
     logs_dir = (config_dir or _config_dir()) / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -220,6 +225,36 @@ def open_child_log(
             log_path.rename(log_path.with_name(f"{name}.log.1"))
 
     return open(log_path, "ab")
+
+
+def open_child_log_or_devnull(
+    name: str,
+    config_dir: Path | None = None,
+    **kwargs: int,
+) -> IO[bytes] | int:
+    """:func:`open_child_log`, degrading to ``subprocess.DEVNULL`` on
+    ``OSError`` (permissions, disk full, read-only mount).
+
+    Availability beats observability at a spawn site: the DEVNULL path
+    this replaces could never fail, so a logging failure must not become
+    the reason a daemon doesn't start (CRE finding HIGH-1, nexus-ovbr7).
+    The degradation is logged loud — it is itself an observability loss.
+
+    Callers must only ``close()`` the result when it is not the DEVNULL
+    sentinel (an ``int``).
+    """
+    import subprocess
+
+    try:
+        return open_child_log(name, config_dir, **kwargs)
+    except OSError as exc:
+        structlog.get_logger(__name__).warning(
+            "child_log_open_failed_using_devnull",
+            name=name,
+            error=str(exc),
+            consequence="this child's output will not be captured",
+        )
+        return subprocess.DEVNULL
 
 
 def flush_logging() -> None:

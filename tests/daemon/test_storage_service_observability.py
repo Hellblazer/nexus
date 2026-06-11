@@ -324,6 +324,35 @@ class TestSupervisorLifecycleLog:
         assert "storage_service_supervisor_started" in text
         assert "storage_service_supervisor_exit" in text
 
+    def test_sigkill_diagnosable_by_started_without_exit(
+        self, config_dir: Path, fake_storage_sup, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """critic SIG-2: a SIGKILL is unblockable — no breadcrumb can be
+        written. The diagnostic convention is ABSENCE: ``supervisor_started``
+        present, ``supervisor_exit`` missing => the supervisor was killed,
+        it did not choose to exit. Pin the convention: the started
+        breadcrumb must be on disk (flushed) BEFORE the run loop begins,
+        so it survives any later hard kill.
+
+        Simulated by raising SystemExit from the heartbeat (the loop dies
+        without ever reaching the exit-breadcrumb path), since a real
+        SIGKILL would take pytest down with the process.
+        """
+        _write_creds(config_dir)
+        fake_storage_sup.start_raises = None
+
+        def _killed(self):  # noqa: ANN001
+            raise KeyboardInterrupt("simulated hard kill mid-loop")
+
+        monkeypatch.setattr(_FakeStorageSupervisor, "heartbeat_once", _killed)
+        with pytest.raises(KeyboardInterrupt):
+            ssd.run_storage_supervisor(
+                config_dir=config_dir, jar_path=Path("/fake/nexus-service.jar"),
+            )
+        text = (config_dir / "logs" / "storage_service.log").read_text()
+        assert "storage_service_supervisor_started" in text
+        assert "storage_service_supervisor_exit" not in text
+
     def test_run_storage_supervisor_crash_backstop_logs_exception(
         self, config_dir: Path, fake_storage_sup, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

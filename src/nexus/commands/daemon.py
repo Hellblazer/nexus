@@ -356,9 +356,9 @@ def t3_start_cmd(
         ]
         # nexus-ovbr7: crash-channel capture (see the storage-service spawn
         # for the rationale).
-        from nexus.logging_setup import open_child_log
+        from nexus.logging_setup import open_child_log_or_devnull
 
-        spawn_log = open_child_log("t3_daemon.crash", config_dir)
+        spawn_log = open_child_log_or_devnull("t3_daemon.crash", config_dir)
         try:
             subprocess.Popen(
                 argv,
@@ -367,7 +367,8 @@ def t3_start_cmd(
                 start_new_session=True,
             )
         finally:
-            spawn_log.close()
+            if not isinstance(spawn_log, int):
+                spawn_log.close()
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             existing = find_t3_daemon(config_dir)
@@ -1294,9 +1295,9 @@ def _t2_ensure_running_inner(
                 click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
             # nexus-ovbr7: crash-channel capture (see the storage-service
             # spawn for the rationale).
-            from nexus.logging_setup import open_child_log
+            from nexus.logging_setup import open_child_log_or_devnull
 
-            spawn_log = open_child_log("t2_daemon.crash", config_dir)
+            spawn_log = open_child_log_or_devnull("t2_daemon.crash", config_dir)
             try:
                 proc = subprocess.Popen(
                     argv,
@@ -1306,7 +1307,8 @@ def _t2_ensure_running_inner(
                     start_new_session=True,
                 )
             finally:
-                spawn_log.close()
+                if not isinstance(spawn_log, int):
+                    spawn_log.close()
 
         # nexus-u3mfr: migration-aware wait. A cold-start daemon runs its
         # one-time startup migration (multi-second, holds the write lock)
@@ -1578,9 +1580,9 @@ def service_start_cmd(
         # (import error, bad argv) and interpreter-fatal tracebacks are
         # captured. Post-configure, the daemon drops its stderr handler
         # (non-tty), so this file stays quiet in healthy operation.
-        from nexus.logging_setup import open_child_log
+        from nexus.logging_setup import open_child_log_or_devnull
 
-        spawn_log = open_child_log("storage_service.crash", config_dir)
+        spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
         try:
             subprocess.Popen(
                 argv,
@@ -1589,7 +1591,8 @@ def service_start_cmd(
                 start_new_session=True,
             )
         finally:
-            spawn_log.close()
+            if not isinstance(spawn_log, int):
+                spawn_log.close()
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
             existing = registry.discover(scope)

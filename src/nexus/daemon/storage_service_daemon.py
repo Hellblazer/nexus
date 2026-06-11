@@ -413,9 +413,9 @@ class StorageServiceSupervisor:
         # can't capture (OOM banners, hs_err preambles). Route both streams
         # to one file so interleaved output keeps its order; O_APPEND means a
         # respawn never truncates the previous jar's final (crash) output.
-        from nexus.logging_setup import open_child_log
+        from nexus.logging_setup import open_child_log_or_devnull
 
-        jar_log = open_child_log("storage_service_jar", self._config_dir)
+        jar_log = open_child_log_or_devnull("storage_service_jar", self._config_dir)
         try:
             proc = subprocess.Popen(
                 [java_bin, "-jar", str(self._jar_path)],
@@ -427,13 +427,14 @@ class StorageServiceSupervisor:
         finally:
             # The child holds its own duplicated fd; the parent's handle is
             # no longer needed (and must not leak across respawns).
-            jar_log.close()
+            if not isinstance(jar_log, int):
+                jar_log.close()
         _log.info(
             "storage_service_spawned",
             pid=proc.pid,
             port=port,
             jar=str(self._jar_path),
-            jar_log=jar_log.name,
+            jar_log=getattr(jar_log, "name", "DEVNULL"),
         )
         return proc, port
 

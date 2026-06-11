@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import logging
 import logging.handlers
+from pathlib import Path
 
 import pytest
 import structlog
@@ -388,6 +389,35 @@ class TestOpenChildLog:
         assert (tmp_path / "logs" / "storage_service.crash.log").exists()
 
 
+class TestOpenChildLogOrDevnull:
+    """CRE HIGH-1 (nexus-ovbr7): a logging failure must never be the
+    reason a daemon fails to spawn — the DEVNULL path it replaces could
+    never fail."""
+
+    def test_degrades_to_devnull_on_oserror(self, tmp_path, monkeypatch):
+        import subprocess
+
+        from nexus import logging_setup as ls
+
+        def _boom(*a, **k):
+            raise OSError("read-only filesystem")
+
+        monkeypatch.setattr(ls, "open_child_log", _boom)
+        result = ls.open_child_log_or_devnull("jar_test", config_dir=tmp_path)
+        assert result is subprocess.DEVNULL
+
+    def test_passes_through_handle_on_success(self, tmp_path):
+        from nexus.logging_setup import open_child_log_or_devnull
+
+        fh = open_child_log_or_devnull("jar_test", config_dir=tmp_path)
+        try:
+            assert not isinstance(fh, int)
+            assert Path(fh.name) == tmp_path / "logs" / "jar_test.log"
+        finally:
+            if not isinstance(fh, int):
+                fh.close()
+
+
 class TestDaemonModeStderrPolicy:
     """nexus-ovbr7: daemon modes drop the stderr StreamHandler when stderr
     is not a tty, so the rotating file is the single copy of every event
@@ -450,5 +480,41 @@ class TestDaemonModeStderrPolicy:
             assert self._stderr_stream_handlers(), (
                 "non-daemon modes keep legacy stderr behaviour"
             )
+        finally:
+            self._cleanup_file_handlers()
+
+    def test_t2_daemon_mode_non_tty_drops_stderr_handler(self, tmp_path, monkeypatch):
+        """critic SIG-1: t2_daemon is a PRE-EXISTING mode retroactively
+        added to _DAEMON_MODES; pin its membership so a refactor cannot
+        silently drop it (the T2 daemon runs all SQLite writes)."""
+        import sys
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+        configure_logging("t2_daemon")
+        try:
+            assert self._stderr_stream_handlers() == []
+        finally:
+            self._cleanup_file_handlers()
+
+    def test_daemon_mode_repeated_configure_single_file_handler(
+        self, tmp_path, monkeypatch,
+    ):
+        """critic SIG-2 (part b): re-invoking configure_logging for a
+        daemon mode must not stack file handlers — a double-wire would
+        write every event twice, the exact corruption the single-copy
+        invariant exists to prevent."""
+        import sys
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+        configure_logging("storage_service")
+        configure_logging("storage_service")
+        try:
+            file_handlers = [
+                h for h in logging.getLogger().handlers
+                if isinstance(h, logging.handlers.RotatingFileHandler)
+            ]
+            assert len(file_handlers) == 1
         finally:
             self._cleanup_file_handlers()

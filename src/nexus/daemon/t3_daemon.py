@@ -311,9 +311,9 @@ class T3Supervisor:
         # only record of WHY it died; DEVNULL discarded them (same silent-
         # death class as the storage-service jar). O_APPEND: a respawn never
         # truncates the previous incarnation's final output.
-        from nexus.logging_setup import open_child_log
+        from nexus.logging_setup import open_child_log_or_devnull
 
-        chroma_log = open_child_log("t3_chroma", self._config_dir)
+        chroma_log = open_child_log_or_devnull("t3_chroma", self._config_dir)
         try:
             proc = subprocess.Popen(
                 [chroma, "run", "--host", _T3_HOST, "--port", str(port),
@@ -323,7 +323,8 @@ class T3Supervisor:
                 start_new_session=True,
             )
         finally:
-            chroma_log.close()
+            if not isinstance(chroma_log, int):
+                chroma_log.close()
         try:
             _wait_for_ready(_T3_HOST, port, proc, _READY_TIMEOUT)
         except T3StartError:
