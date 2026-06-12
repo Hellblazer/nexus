@@ -129,6 +129,61 @@ Draft sequencing decisions (to lock at gate):
 
 ## Research Findings
 
-_None yet — RDR is draft. Verify the seven-domain parity status, the exact
-`CatalogTaxonomy` static surface the HTTP store delegates to, and the deprecation-window
-constraint against the RDR-155 P4b precedent before gate._
+### RF-158-1 (VERIFIED, local): the deletion is NOT parity-blocked — every domain already has a strict service drop-in
+
+The signature-parity tripwire `tests/db/test_http_t2_store_parity.py` (`_STORE_PAIRS`)
+covers **nine** store pairs, each with an `Http*` drop-in for its SQLite oracle:
+memory, plans, telemetry, chash_index, document_aspects, document_highlights,
+aspect_queue, taxonomy, and **scratch** (`T1Database` → `HttpScratchStore`). As of
+RDR-152 nexus-1di3r (this session), `_EXCLUSIONS = {}` and `_PARAM_DRIFT_OK = {}` — the
+tripwire is **fully strict with zero exemptions** across all nine pairs. Every one also
+has a cross-language integration suite (`tests/db/test_http_*_integration.py`: aspects,
+catalog, chash, memory, plan_library, scratch, taxonomy, telemetry).
+
+**Implication:** P3 (remove the `=sqlite` opt-out) is *parity-unblocked today*. The
+remaining gates are NOT "build service parity" (done) but the install/migration story
+(nexus-luxe6) and the deprecation window. This narrows the RDR considerably: P1–P2 are
+pure refactors with no external gate; only P3–P4 wait on luxe6/the window.
+
+### RF-158-2 (VERIFIED, local): the runtime-delegated `CatalogTaxonomy` surface is small and already backend-neutral — D1 is cheap
+
+`HttpTaxonomyStore` (service mode) imports from `catalog_taxonomy` exactly:
+
+- **Three compute statics** — `compute_discovered_topics` (:1943), `compute_split`
+  (:1593), `compute_rebuild_plan` (:3032). All three are `@staticmethod`, pure
+  numpy/sklearn/HDBSCAN, **no `self.conn`/`self._lock`**. Delegated verbatim at runtime.
+- **One class constant** — `_PROJECTION_THRESHOLD = 0.85` (:2126), read by
+  `compute_cross_links`/`project_against`.
+- **Four pure data types** — `AssignResult`, `HubRow`, `AuditReport`, `AuditHub` (all
+  `NamedTuple`) + the `DEFAULT_HUB_STOPWORDS` constant.
+
+`compute_assignments` / `compute_cross_links` / `assign_single` are **reimplemented** in
+the HTTP store (local numpy over the centroid-port), NOT delegated — they only touch
+`_PROJECTION_THRESHOLD`. So D1 (extract a backend-neutral `taxonomy_compute` module)
+moves a *small, already-pure* surface; the SQLite-coupled cursor methods (~the rest of
+the 3205-line class) are cleanly separable and deletable.
+
+**Caveat (breadth):** ten `src/` modules reference `CatalogTaxonomy`
+(`mcp_infra`, `context`, `taxonomy_backfill`, `db/t2/__init__` [the store factory],
+`db/migrations`, `db/t3`, `doc/resolvers_corpus`, `http_centroid_store`,
+`http_taxonomy_store`, plus the class itself). P4 must inverse-grep each: separate the
+"needs the SQLite store" callers (factory, migrations) from the "needs only statics/
+types" callers (backfill, the HTTP stores), and re-point the latter at the extracted
+module before deletion.
+
+### RF-158-3 (VERIFIED, local): the deprecation-window constraint matches the RDR-155 P4b precedent exactly
+
+The SQLite→PG migration READER cannot be deleted in the same release that ships the
+migration tool — a user on release N must still have SQLite to migrate *from*. This is
+the identical two-release constraint RDR-155 P4b hit for Chroma (the Chroma read leg
+survives the migration release, deleted only in N+1). `nexus-luxe6` already encodes a
+**single** two-release deprecation window covering both Chroma *and* SQLite source
+deletion (release N = both paths + bundled migration tool; release N+1 = P4b Chroma
+deletion + this RDR's P4 SQLite deletion). So RDR-158 P4 and RDR-155 P4b should ship in
+the **same** N+1 release, not as independent windows.
+
+**T1 nuance:** `HttpScratchStore` already exists (T1 has a service drop-in in the
+tripwire), so T1 *can* run on PG. But the hard default keeps T1 **local = Chroma**
+(`storage_mode.py:178`). Routing local-T1 to a dep-free non-Chroma store is the
+RDR-155 P4b prerequisite recorded on nexus-g37fr / nexus-19svb — orthogonal to this
+RDR's T2 scope, but it shares the "last Chroma/SQLite tenant" shape.
