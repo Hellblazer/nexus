@@ -23,10 +23,12 @@ What is exercised (bead nexus-gmiaf.16 gate requirements):
   f) delete_stale removes specific PK; absent PK returns 0
   g) is_empty and count_for_collection
   h) Cross-tenant RLS negative: default tenant rows invisible to other-tenant
-  i) RLS WITH CHECK: cross-tenant INSERT rejected (fail-closed)
+  i) RLS isolation: a genuine other-tenant write is invisible to default
   j) ETL fidelity: migrate_chash_rows preserves created_at verbatim
   k) ETL idempotent re-run: second pass produces no duplicates
-  l) Unset GUC / missing tenant returns empty (fail-closed)
+  l) Phase E: tenant comes from the bearer, not the X-Nexus-Tenant header
+     (the unset-GUC fail-closed property lives at the repo layer —
+      ChashRepositoryTest / ChunksRlsBehavioralTest)
 
 NX_STORAGE_BACKEND is NOT touched — default SQLite path is unchanged.
 """
@@ -44,7 +46,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -233,7 +235,9 @@ def other_chash_store(service):
     """HttpChashIndex for the cross-tenant RLS probe (tenant='other-tenant')."""
     from nexus.db.t2.http_chash_index import HttpChashIndex
     base_url, token, _ = service
-    s = HttpChashIndex(base_url=base_url, _token=token, tenant="other-tenant")
+    # Phase E: real other-tenant-bound bearer (mirrors `nx tenant create`).
+    other_token = create_tenant_token(base_url, token, "other-tenant")
+    s = HttpChashIndex(base_url=base_url, _token=other_token, tenant="other-tenant")
     yield s
     s.close()
 
@@ -350,18 +354,18 @@ class TestChashMVV:
             f"rows; got {other_rows!r}"
         )
 
-    def test_i_rls_with_check_rejected(self, service):
-        """i) RLS WITH CHECK: INSERT with a mismatched tenant_id must be rejected."""
+    def test_i_other_tenant_write_invisible_to_default(self, service):
+        """i) RLS isolation: a genuine other-tenant write is invisible to default."""
         import httpx
 
         base_url, token, _ = service
-        # We craft a raw request with X-Nexus-Tenant='evil' but the PG GUC is set
-        # to 'evil' by the service — the row would be written as evil-tenant. We
-        # verify that is_empty() for the default tenant is still True after the
-        # evil tenant writes something, confirming RLS isolation.
+        # Phase E (nexus-gmiaf.32.5): tenant_id is taken from the AUTHENTICATED
+        # bearer, not the X-Nexus-Tenant header. A genuine evil-tenant write
+        # therefore needs an evil-tenant-bound bearer (mirrors `nx tenant create`);
+        # the header alone resolves back to the bearer's tenant.
+        evil_token = create_tenant_token(base_url, token, "evil-tenant")
         evil_headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Nexus-Tenant": "evil-tenant",
+            "Authorization": f"Bearer {evil_token}",
             "Content-Type": "application/json",
         }
         resp = httpx.post(
@@ -440,23 +444,46 @@ class TestChashMVV:
         # Only 2 distinct rows after double ETL (no duplication)
         assert chash_store.count_for_collection("col_idem") == 2
 
-    def test_l_unset_guc_fails_closed(self, service):
-        """l) Missing X-Nexus-Tenant header should yield error or empty response."""
+    def test_l_tenant_from_bearer_not_header(self, service):
+        """l) Phase E: the X-Nexus-Tenant header is advisory-only — the bearer is
+        authoritative. A request with NO header is valid (not 400), and a SPOOFED
+        header cannot redirect the request to another tenant's view.
+
+        Pre-Phase-E this asserted fail-closed-on-missing-header; the header was
+        load-bearing then. Phase E (nexus-gmiaf.32.5) made the bearer
+        authoritative; the unset-GUC fail-closed property moved to the SQL layer
+        (ChashRepositoryTest / ChunksRlsBehavioralTest). Here we pin the HTTP
+        contract: header omitted → 200, and a spoofed header yields the IDENTICAL
+        bearer-scoped result (so it cannot leak/cross into another tenant).
+        """
         import httpx
 
         base_url, token, _ = service
-        # Send a request with the auth header but NO X-Nexus-Tenant (or empty).
-        resp = httpx.get(
+
+        # No tenant header → valid, scoped to the bearer (default).
+        bare = httpx.get(
+            f"{base_url}/v1/chash/is_empty",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert bare.status_code == 200, (
+            f"missing X-Nexus-Tenant is valid under Phase E (bearer is "
+            f"authoritative); expected 200, got {bare.status_code}: {bare.text[:200]}"
+        )
+
+        # Spoofed tenant header must be IGNORED — identical result to no header.
+        # If the header were load-bearing this would switch to 'evil-spoof''s
+        # (empty) view and diverge; identical bodies prove bearer-scoping.
+        spoofed = httpx.get(
             f"{base_url}/v1/chash/is_empty",
             headers={
                 "Authorization": f"Bearer {token}",
-                # Deliberately omit X-Nexus-Tenant
+                "X-Nexus-Tenant": "evil-spoof",
             },
         )
-        # Service must reject with 400 (missing tenant header) — fail-closed,
-        # never returns data from another tenant's rows.
-        assert resp.status_code in (400, 401), (
-            f"Missing X-Nexus-Tenant must be rejected (400/401); got {resp.status_code}"
+        assert spoofed.status_code == 200
+        assert spoofed.json() == bare.json(), (
+            "a spoofed X-Nexus-Tenant header must NOT change the tenant view — "
+            f"bearer is authoritative; got bare={bare.json()} spoofed={spoofed.json()}"
         )
 
     def test_m_registered_chashes_for_collection(self, chash_store):

@@ -34,7 +34,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token
 
 import pytest
 
@@ -471,7 +471,11 @@ def cat_b(service):
     """HttpCatalogClient for the cross-tenant RLS probe (tenant='tenant-b')."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     base_url, token, _ = service
-    c = HttpCatalogClient(base_url=base_url, tenant="tenant-b", _token=token)
+    # Phase E: real tenant-b-bound bearer (mirrors `nx tenant create`); the root
+    # token resolves every claim to `default`, so the header alone cannot make a
+    # second tenant.
+    tenant_b_token = create_tenant_token(base_url, token, "tenant-b")
+    c = HttpCatalogClient(base_url=base_url, tenant="tenant-b", _token=tenant_b_token)
     yield c
     c.close()
 
@@ -710,9 +714,9 @@ class TestManifest:
             source_uri="file:///manifest/test.md",
         )
         chunks = [
-            {"position": 0, "chash": "chunk_hash_00", "line_start": 1, "line_end": 10},
-            {"position": 1, "chash": "chunk_hash_01", "line_start": 11, "line_end": 20},
-            {"position": 2, "chash": "chunk_hash_02", "line_start": 21, "line_end": 30},
+            {"position": 0, "chash": "chunk_hash_000000000000000000000", "line_start": 1, "line_end": 10},
+            {"position": 1, "chash": "chunk_hash_010000000000000000000", "line_start": 11, "line_end": 20},
+            {"position": 2, "chash": "chunk_hash_020000000000000000000", "line_start": 21, "line_end": 30},
         ]
         cat.write_manifest(str(t), chunks)
         return t, chunks
@@ -722,24 +726,24 @@ class TestManifest:
         rows = cat.get_manifest(str(t))
         assert len(rows) == 3
         chashes = [r["chash"] for r in rows]
-        assert "chunk_hash_00" in chashes
-        assert "chunk_hash_01" in chashes
-        assert "chunk_hash_02" in chashes
+        assert "chunk_hash_000000000000000000000" in chashes
+        assert "chunk_hash_010000000000000000000" in chashes
+        assert "chunk_hash_020000000000000000000" in chashes
 
     def test_get_chunk_chashes(self, cat, doc_with_manifest) -> None:
         t, expected = doc_with_manifest
         chashes = cat.get_chunk_chashes(str(t))
-        assert "chunk_hash_00" in chashes
+        assert "chunk_hash_000000000000000000000" in chashes
         assert len(chashes) == 3
 
     def test_append_manifest_chunks(self, cat, doc_with_manifest) -> None:
         t, _ = doc_with_manifest
         cat.append_manifest_chunks(str(t), [
-            {"position": 3, "chash": "chunk_hash_03"},
+            {"position": 3, "chash": "chunk_hash_030000000000000000000"},
         ])
         rows = cat.get_manifest(str(t))
         chashes = [r["chash"] for r in rows]
-        assert "chunk_hash_03" in chashes
+        assert "chunk_hash_030000000000000000000" in chashes
 
     def test_docs_for_chashes_reverse_lookup(self, cat, doc_with_manifest) -> None:
         """docs_for_chashes returns a flat list of distinct document tumblers.
@@ -748,7 +752,7 @@ class TestManifest:
         chash IN (?), so the result is a list of tumblers (not a per-chash map).
         """
         t, _ = doc_with_manifest
-        result = cat.docs_for_chashes(["chunk_hash_00", "chunk_hash_01"])
+        result = cat.docs_for_chashes(["chunk_hash_000000000000000000000", "chunk_hash_010000000000000000000"])
         assert isinstance(result, list)
         assert str(t) in result
 
@@ -759,7 +763,7 @@ class TestManifest:
             content_type="paper",
             source_uri="file:///manifest/purge.md",
         )
-        cat.write_manifest(str(t), [{"position": 0, "chash": "purge_hash_00"}])
+        cat.write_manifest(str(t), [{"position": 0, "chash": "purge_hash_000000000000000000000"}])
         before = cat.get_manifest(str(t))
         assert len(before) == 1
         cat.purge_manifest_for_doc(str(t))
@@ -774,16 +778,16 @@ class TestManifest:
             content_type="paper",
             source_uri="file:///manifest/atomic.md",
         )
-        cat.write_manifest(str(t), [{"position": 0, "chash": "old_hash"}])
+        cat.write_manifest(str(t), [{"position": 0, "chash": "old_hash000000000000000000000000"}])
         cat.atomic_manifest_replace(str(t), [
-            {"position": 0, "chash": "new_hash_00"},
-            {"position": 1, "chash": "new_hash_01"},
+            {"position": 0, "chash": "new_hash_00000000000000000000000"},
+            {"position": 1, "chash": "new_hash_01000000000000000000000"},
         ])
         rows = cat.get_manifest(str(t))
         chashes = [r["chash"] for r in rows]
-        assert "new_hash_00" in chashes
-        assert "new_hash_01" in chashes
-        assert "old_hash" not in chashes
+        assert "new_hash_00000000000000000000000" in chashes
+        assert "new_hash_01000000000000000000000" in chashes
+        assert "old_hash000000000000000000000000" not in chashes
 
 
 class TestFTSSearch:
@@ -1399,9 +1403,9 @@ class TestResyncChunkCount:
 
         # Write a 3-chunk manifest
         cat.write_manifest(str(tumbler), [
-            {"position": 0, "chash": "resync_chk_aaa000", "chunk_index": 0},
-            {"position": 1, "chash": "resync_chk_bbb111", "chunk_index": 1},
-            {"position": 2, "chash": "resync_chk_ccc222", "chunk_index": 2},
+            {"position": 0, "chash": "resync_chk_aaa000000000000000000", "chunk_index": 0},
+            {"position": 1, "chash": "resync_chk_bbb111000000000000000", "chunk_index": 1},
+            {"position": 2, "chash": "resync_chk_ccc222000000000000000", "chunk_index": 2},
         ])
 
         # Resync: must recompute from catalog_document_chunks and update documents.chunk_count

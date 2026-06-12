@@ -46,7 +46,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -235,7 +235,9 @@ def other_plan_store(service):
     """HttpPlanLibrary for the cross-tenant RLS probe (tenant='other-tenant')."""
     from nexus.db.t2.http_plan_library import HttpPlanLibrary
     base_url, token, _ = service
-    s = HttpPlanLibrary(base_url=base_url, tenant="other-tenant", _token=token)
+    # Phase E: real other-tenant-bound bearer (mirrors `nx tenant create`).
+    other_token = create_tenant_token(base_url, token, "other-tenant")
+    s = HttpPlanLibrary(base_url=base_url, tenant="other-tenant", _token=other_token)
     yield s
     s.close()
 
@@ -319,23 +321,25 @@ class TestPlansMVV:
             f"tenant 'default' plan id={pid}; got {row!r}"
         )
 
-    def test_f_rls_with_check_rejected(self, service):
-        """f) RLS WITH CHECK: cross-tenant INSERT rejected."""
+    def test_f_cross_tenant_write_invisible_to_default(self, service):
+        """f) RLS isolation: a gamma-plans write is invisible to the default tenant.
+
+        (Was test_f_rls_with_check_rejected — renamed: Phase E resolves tenant
+        from the bearer, so this exercises cross-tenant READ isolation with a real
+        gamma-plans bearer, not a WITH CHECK INSERT rejection.)
+        """
         import httpx
         from nexus.db.t2.http_plan_library import HttpPlanLibrary
         base_url, token, _ = service
 
-        # Construct a store stamped as "gamma-plans"
-        cross_store = HttpPlanLibrary(base_url=base_url, tenant="gamma-plans", _token=token)
+        # Construct a store bound to a real "gamma-plans" tenant. Phase E
+        # (nexus-gmiaf.32.5): tenant_id comes from the AUTHENTICATED bearer, not
+        # the X-Nexus-Tenant header — so a genuine second tenant needs its own
+        # minted bearer (mirrors `nx tenant create`), not the root token + a header.
+        gamma_token = create_tenant_token(base_url, token, "gamma-plans")
+        cross_store = HttpPlanLibrary(base_url=base_url, tenant="gamma-plans", _token=gamma_token)
         try:
-            # Attempt cross-tenant write: X-Nexus-Tenant="gamma-plans" but
-            # the Java service stamps tenant_id from the header, so the only
-            # cross-tenant scenario is calling /import with a different tenant_id
-            # which is not exposed via the public API.
-            # This test validates the RLS is wired by checking that the WITH CHECK
-            # assertion in PlansSchemaLiquibaseTest passed (structural test).
-            # For the integration test, we verify that tenant isolation works
-            # by checking that gamma-plans store cannot see default's plans.
+            # Write under gamma-plans, then assert the default tenant cannot see it.
             pid = cross_store.save_plan(
                 query="Cross-tenant write attempt",
                 plan_json="{}",

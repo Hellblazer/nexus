@@ -42,7 +42,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -258,8 +258,11 @@ def other_store(service):
     """HttpMemoryStore for the cross-tenant RLS probe (tenant='other-tenant')."""
     from nexus.db.t2.http_memory_store import HttpMemoryStore
     base_url, token, _ = service
-    os.environ["NX_SERVICE_TOKEN"] = token
-    s = HttpMemoryStore(base_url=base_url, tenant="other-tenant")
+    # Phase E: a real other-tenant-bound bearer (the root token is bound to
+    # `default` and the X-Nexus-Tenant header is ignored, so it cannot stand in
+    # for a second tenant). Mirrors `nx tenant create`.
+    other_token = create_tenant_token(base_url, token, "other-tenant")
+    s = HttpMemoryStore(base_url=base_url, tenant="other-tenant", _token=other_token)
     yield s
     s.close()
 

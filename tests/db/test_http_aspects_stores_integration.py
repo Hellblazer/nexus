@@ -47,7 +47,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -283,7 +283,9 @@ def other_aspects_store(service):
     """HttpDocumentAspectsStore for cross-tenant RLS probe (tenant='other-tenant')."""
     from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
     base_url, token, _ = service
-    s = HttpDocumentAspectsStore(base_url=base_url, tenant="other-tenant", _token=token)
+    # Phase E: real other-tenant-bound bearer (mirrors `nx tenant create`).
+    other_token = create_tenant_token(base_url, token, "other-tenant")
+    s = HttpDocumentAspectsStore(base_url=base_url, tenant="other-tenant", _token=other_token)
     yield s
     s.close()
 
