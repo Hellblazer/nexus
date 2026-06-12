@@ -1478,7 +1478,16 @@ public final class CatalogRepository {
         });
     }
 
-    /** Fidelity-preserving link import. ON CONFLICT DO NOTHING. */
+    /**
+     * Fidelity-preserving link import. ON CONFLICT DO NOTHING.
+     *
+     * <p>Stale-snapshot class: link metadata (spans, created_by, created_at) does
+     * not converge on re-import — a changed metadata value in the source is silently
+     * dropped.  Identity fields (from_tumbler, to_tumbler, link_type) are immutable
+     * once the link exists, so this is accepted for the initial migration.  Same
+     * convergence gap as pre-nexus-9wz72 importChunk; revisit at final cutover if
+     * stale link metadata surfaces in production.
+     */
     public void importLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
         tenantScope.withTenant(tenant, ctx -> {

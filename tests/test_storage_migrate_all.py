@@ -75,12 +75,15 @@ def _invoke_all(runner, tmp_path: Path, order_sink: list[str], *args,
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "memory.db").touch()
     (config_dir / ".catalog.db").touch()
+    # _verify_pg_counts now returns (status, convergence_notes); wrap the
+    # test-fixture string into the tuple the caller unpacks.
+    verify_tuple = (verify, [])
     with patch(
         "nexus.commands.storage_cmd._build_store_etls",
         return_value=_fake_etls(order_sink, fail_store=fail_store),
     ), patch(
         "nexus.commands.storage_cmd._verify_pg_counts",
-        return_value=verify,
+        return_value=verify_tuple,
     ), patch.dict(
         "os.environ", {"NEXUS_CONFIG_DIR": str(config_dir)},
     ):
@@ -189,13 +192,14 @@ class TestVerificationLoudness:
         with patch(
             "nexus.commands.storage_cmd._psql_for_verify", return_value=None,
         ):
-            outcome = _verify_pg_counts(
+            status, notes = _verify_pg_counts(
                 {"summary": {"total_written": 5}, "stores": []},
                 {"PG_PORT": "5499", "NX_DB_ADMIN_USER": "a",
                  "NX_DB_ADMIN_PASS": "p",
                  "NX_DB_URL": "jdbc:postgresql://127.0.0.1:5499/nexus"},
             )
-        assert outcome == "indeterminate"
+        assert status == "indeterminate"
+        assert notes == []
 
 
 # ── Per-store --report ───────────────────────────────────────────────────────
@@ -445,9 +449,10 @@ class TestVerifyPgCountsBugFixes:
             patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
             patch("subprocess.run", side_effect=_fake_run),
         ):
-            outcome = _verify_pg_counts(report, creds)
+            status, notes = _verify_pg_counts(report, creds)
 
-        assert outcome == "verified"
+        assert status == "verified"
+        assert notes == []  # no convergence delta for normal relations
         assert len(captured_cmds) == 1
         # The -c argument must contain the SET GUC prefix
         cmd = captured_cmds[0]
@@ -491,9 +496,57 @@ class TestVerifyPgCountsBugFixes:
             patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
             patch("subprocess.run", side_effect=_fake_run),
         ):
-            outcome = _verify_pg_counts(report, creds)
+            status, notes = _verify_pg_counts(report, creds)
 
-        # 80 landed < 98 written: dedup-aware semantics -> NOT a mismatch
-        assert outcome == "verified", (
-            "Plans dedup collapse (pg_count < written) must not be flagged as mismatch"
+        # 80 landed < 98 written: convergence semantics -> NOT a mismatch
+        assert status == "verified", (
+            "Plans convergence collapse (pg_count < written) must not be flagged as mismatch"
         )
+        # The delta must be surfaced in the notes for the operator artifact
+        assert len(notes) == 1, "Convergence delta must be recorded in notes"
+        assert "nexus.plans" in notes[0]
+        assert "80" in notes[0] and "98" in notes[0]
+        assert "18" in notes[0]  # delta = 98 - 80 = 18
+        assert "UNIQUE" in notes[0]
+
+    def test_verify_pg_counts_dedup_written_zero_is_trivial_pass(
+        self, tmp_path: Path,
+    ) -> None:
+        """written=0 for a plans relation must be a trivial pass even when
+        pg_count > 0 (idempotent re-run: the source had no new rows to write,
+        but PG already has rows from a prior run).  The old guard pg_count > written
+        incorrectly flagged this as a mismatch (CRE Medium, 2026-06-12)."""
+        from nexus.commands.storage_cmd import _verify_pg_counts
+
+        def _fake_run(cmd, **kw):
+            class _R:
+                returncode = 0
+                stdout = "50"  # PG has 50 rows from a prior run
+            return _R()
+
+        report = {
+            "stores": [
+                {
+                    "store": "plans",
+                    "tables": [{"table": "plans", "written": 0}],  # nothing new
+                }
+            ]
+        }
+        creds = {
+            "PG_PORT": "5499",
+            "NX_DB_ADMIN_USER": "nexus_admin",
+            "NX_DB_ADMIN_PASS": "secret",
+            "NX_DB_URL": "postgresql://127.0.0.1:5499/nexus",
+        }
+        with (
+            patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            status, notes = _verify_pg_counts(report, creds)
+
+        # written=0 -> trivial pass even if pg_count > 0
+        assert status == "verified", (
+            "written=0 on a dedup-relation must be a trivial pass "
+            "(idempotent re-run, no new source rows)"
+        )
+        assert notes == [], "No convergence notes when written=0 (no delta)"

@@ -78,13 +78,16 @@ catalog tables produces a vacuous pass.
 nx storage migrate all [--report PATH]
 ```
 
-Runs all seven store ETLs in the RDR-152 ladder order
+Runs all eight store ETLs in the RDR-152 ladder order
 (`LADDER_ORDER` in `src/nexus/migration/etl_registry.py`):
-`memory, plans, telemetry, taxonomy, aspects, chash, catalog`. Memory is
-first (smallest, fastest validation); catalog is LAST because it is
-graph-heavy: every other store's FK targets must exist before its links
-land. A store-level crash is recorded as a `failed` issue and the run
-continues, so the report covers every store it attempted.
+`memory, plans, telemetry, taxonomy, aspects, chash, catalog,
+aspects_queue`. Memory is first (smallest, fastest validation); catalog
+is second-to-last because it is graph-heavy: every other store's FK
+targets must exist before its links land. `aspects_queue` runs AFTER
+catalog: `fk_aspect_queue_catalog_doc` requires `catalog_documents`
+populated first (first-run FK safety, nexus-iy5se). A store-level crash
+is recorded as a `failed` issue and the run continues, so the report
+covers every store it attempted.
 
 One shared `IssueCollector` spans the run and emits ONE
 `migration-report.json` (default
