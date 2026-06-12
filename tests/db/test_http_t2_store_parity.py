@@ -64,16 +64,17 @@ _EXCLUSIONS: dict[str, dict[str, str]] = {
     },
 }
 
-# Stores excused from the strict shared-prefix parameter check. taxonomy's HTTP
-# store is a known-incomplete port (nexus-1di3r): beyond the 17 missing
-# compute/rebuild methods, several READ methods (get_topics, get_topic_tree,
-# get_topics_for_collection, upsert_topic_links, chunk_grounded_in) carry
-# DRIFTED signatures vs the SQLite oracle, so nx taxonomy read commands are not
-# yet parity-safe in service mode. Locking the param check here would freeze the
-# drift in; nexus-1di3r owns bringing the store to full parity.
-_PARAM_DRIFT_EXCUSED: dict[str, str] = {
-    "taxonomy": "nexus-1di3r — HttpTaxonomyStore read-method signatures drift "
-                "from CatalogTaxonomy; full parity is the follow-on's scope.",
+# Per-(store, method) param-drift exemptions: the method exists on both stores
+# and is genuinely USED in service mode, but with a different (working)
+# signature than the SQLite oracle. Every entry needs a written reason.
+_PARAM_DRIFT_OK: dict[tuple[str, str], str] = {
+    ("taxonomy", "get_topics"): (
+        "HttpTaxonomyStore.get_topics(collection) is a working service-backend "
+        "read with a different shape than CatalogTaxonomy.get_topics(parent_id); "
+        "reconciling the two APIs is nexus-1di3r. The oracle-only-arg callers "
+        "(get_topic_tree/get_topics_for_collection/upsert_topic_links) already "
+        "fail loud, so this divergence cannot cause a crash or wrong results."
+    ),
 }
 
 # Methods present on every store base but not part of the storage contract.
@@ -125,15 +126,21 @@ def test_shared_method_param_prefix_matches(label, sqlite_path, http_path):
     """For methods on BOTH, the HTTP signature's shared parameter prefix must
     match the SQLite oracle (HTTP may add trailing params, never reorder/rename
     the prefix) — the drift that broke git-hook indexing in nexus-7zuzz."""
-    if label in _PARAM_DRIFT_EXCUSED:
-        pytest.skip(_PARAM_DRIFT_EXCUSED[label])
-
     sqlite_cls = _load(sqlite_path)
     http_cls = _load(http_path)
 
-    shared = (_public_methods(sqlite_cls) & _public_methods(http_cls))
+    # Only methods absent from the HTTP store (the _EXCLUSIONS set) are excused
+    # from the param check — they literally cannot be param-compared. Methods
+    # present on BOTH stores MUST match: signature drift on a shared method is
+    # the exact nexus-7zuzz crash class (a drifted taxonomy read method
+    # TypeErrors nx doc extensions / nx taxonomy in service mode). An earlier
+    # per-STORE skip here over-broadly silenced that drift (critic catch).
+    excused = set(_EXCLUSIONS.get(label, {}))
+    shared = (_public_methods(sqlite_cls) & _public_methods(http_cls)) - excused
     mismatches = []
     for m in sorted(shared):
+        if (label, m) in _PARAM_DRIFT_OK:
+            continue
         s_params = [
             p for p in inspect.signature(getattr(sqlite_cls, m)).parameters
             if p != "self"

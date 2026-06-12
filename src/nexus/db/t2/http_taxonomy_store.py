@@ -70,6 +70,25 @@ DEFAULT_TENANT: str = "default"
 from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
 
+def _not_on_service(method: str) -> "Any":
+    """Fail loud: this taxonomy method has no parity-correct service-backend
+    implementation yet (RDR-152 nexus-fjwxh / nexus-1di3r).
+
+    The HttpTaxonomyStore is an incomplete port of CatalogTaxonomy: the
+    BERTopic/HDBSCAN compute pipeline and several raw-cursor read methods
+    (topic-tree assembly, exclude-id merge-target listing, link upserts) are
+    not yet exposed by the Java service. Rather than crash with a TypeError on
+    a drifted signature (or, worse, return silently-wrong results), the method
+    raises a clear, actionable error. Run taxonomy in local mode meanwhile.
+    """
+    raise NotImplementedError(
+        f"taxonomy.{method} is not available on the service storage backend yet "
+        f"(tracked in nexus-1di3r). Run taxonomy commands in local mode: set "
+        f"NX_STORAGE_BACKEND_TAXONOMY=sqlite (the migrated data is still in the "
+        f"local SQLite store)."
+    )
+
+
 # ── HttpTaxonomyStore ──────────────────────────────────────────────────────────
 
 
@@ -153,7 +172,12 @@ class HttpTaxonomyStore:
         include_children: bool = False,
     ) -> list[dict[str, Any]]:
         """Return all topics (mirrors CatalogTaxonomy.get_all_topics)."""
-        return self.get_topics(collection)
+        # Hit /topics directly rather than via get_topics() — the latter's
+        # signature differs from the oracle (collection vs parent_id) and is
+        # excluded from the parity tripwire; this keeps get_all_topics, the
+        # method the working read commands actually use, decoupled from it.
+        params = {"collection": collection} if collection else {}
+        return self._get("/topics", params)
 
     def get_topic_by_id(self, topic_id: int) -> dict[str, Any] | None:
         """Return a single topic by id, or None."""
@@ -186,14 +210,11 @@ class HttpTaxonomyStore:
         self,
         collection: str,
         *,
-        limit: int = 100,
-        status: str | None = None,
+        exclude_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return topics for a collection."""
-        topics = self.get_topics(collection)
-        if status:
-            topics = [t for t in topics if t.get("review_status") == status]
-        return topics[:limit]
+        """Merge-target listing (CatalogTaxonomy signature). Service backend not
+        yet implemented — the exclude_id raw-cursor query has no Java endpoint."""
+        return _not_on_service("get_topics_for_collection")
 
     def get_unreviewed_topics(
         self,
@@ -331,16 +352,14 @@ class HttpTaxonomyStore:
 
     def get_topic_tree(
         self,
-        parent_id: int | None = None,
+        collection: str = "",
         *,
-        depth: int = -1,
+        max_depth: int = 2,
     ) -> list[dict[str, Any]]:
-        """Return topic tree structure (roots if parent_id is None)."""
-        if parent_id is None:
-            roots = self._get("/topics/root")
-        else:
-            roots = self._get("/topics/children", {"parent_id": parent_id})
-        return roots
+        """Collection-scoped, depth-bounded topic tree (CatalogTaxonomy
+        signature). Service backend not yet implemented — the recursive
+        collection+depth assembly has no Java endpoint."""
+        return _not_on_service("get_topic_tree")
 
     # ── Links ──────────────────────────────────────────────────────────────────
 
@@ -354,19 +373,12 @@ class HttpTaxonomyStore:
 
     def upsert_topic_links(
         self,
-        pairs: list[tuple[int, int, int]],
-        *,
-        link_types: str = "[]",
+        links: list[dict[str, Any]],
     ) -> int:
-        """Upsert topic link pairs. Returns count of pairs processed."""
-        for from_id, to_id, link_count in pairs:
-            self._post("/links/upsert", {
-                "from_topic_id": from_id,
-                "to_topic_id": to_id,
-                "link_count": link_count,
-                "link_types": link_types,
-            })
-        return len(pairs)
+        """Upsert topic links (CatalogTaxonomy signature: list of link dicts).
+        Service backend not yet implemented — the dict-shaped link upsert with
+        per-link type arrays has no parity-correct Java endpoint mapping yet."""
+        return _not_on_service("upsert_topic_links")
 
     # ── ICF / analytics ────────────────────────────────────────────────────────
 
@@ -462,8 +474,15 @@ class HttpTaxonomyStore:
         self,
         doc_id: str,
         source_collection: str,
+        *,
+        threshold: float = 0.0,
     ) -> float | None:
-        """Return max projection similarity for a doc into source_collection."""
+        """Return max projection similarity for a doc into source_collection.
+
+        ``threshold`` mirrors CatalogTaxonomy's signature; like the oracle it is
+        accepted-for-future-use (the caller applies the threshold to the
+        returned raw max — see nexus.doc.citations.extensions_report).
+        """
         try:
             r = self._get("/chunk_grounded", {
                 "doc_id": doc_id,
