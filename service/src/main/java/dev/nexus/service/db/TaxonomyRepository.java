@@ -34,7 +34,10 @@ import java.util.Optional;
  *   <li>topics.label: existing (operator may have renamed; do not clobber live label)</li>
  *   <li>topics.centroid_hash / terms: EXCLUDED (allow ETL to refresh)</li>
  *   <li>topic_assignments.similarity: GREATEST to preserve best projection quality</li>
- *   <li>topic_links.link_count: GREATEST(EXCLUDED, existing)</li>
+ *   <li>topic_links.link_count: GREATEST(EXCLUDED, existing) — for the ETL
+ *       {@code importTopicLink} path ONLY. The live-compute {@code upsertTopicLink}
+ *       path uses EXCLUDED (overwrite) to mirror the oracle's authoritative
+ *       full-recompute — see that method's javadoc (RDR-152 nexus-1di3r.4).</li>
  *   <li>taxonomy_meta counters: GREATEST(EXCLUDED, existing)</li>
  * </ul>
  *
@@ -514,14 +517,28 @@ public final class TaxonomyRepository {
         });
     }
 
-    /** Upsert a topic link pair (link_count uses GREATEST). */
+    /**
+     * Upsert a topic link pair from a live recompute (mirrors the oracle
+     * {@code upsert_topic_links} INSERT OR REPLACE, catalog_taxonomy.py:1405).
+     *
+     * <p>Conflict policy is EXCLUDED (overwrite), NOT GREATEST. The caller
+     * ({@code compute_topic_links}) recomputes the COMPLETE, authoritative link
+     * count for the pair on every run, so the freshly computed value IS the
+     * truth — a GREATEST would floor the stored count at a historical maximum
+     * and never reflect a decrement (catalog pruning / topic split). This is the
+     * live-compute counterpart to the ETL {@link #importTopicLink} path, which
+     * correctly uses GREATEST to avoid clobbering a live PG value that may be
+     * ahead of an older SQLite snapshot. Sister recompute methods
+     * ({@code generateCooccurrenceLinks}, {@code refreshProjectionLinks}) use
+     * EXCLUDED for the same reason (RDR-152 nexus-1di3r.4).
+     */
     public void upsertTopicLink(String tenant, long fromId, long toId, int linkCount, String linkTypes) {
         tenantScope.withTenant(tenant, ctx -> {
             ctx.execute("""
                 INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_count, link_types)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (tenant_id, from_topic_id, to_topic_id) DO UPDATE SET
-                    link_count = GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count),
+                    link_count = EXCLUDED.link_count,
                     link_types = EXCLUDED.link_types
                 """, tenant, fromId, toId, linkCount, linkTypes);
             return null;

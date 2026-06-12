@@ -397,8 +397,11 @@ class TaxonomyRepositoryTest {
         long t1 = repo.insertTopic(TENANT_A, "link-topic-1", null, COL_A, 0, null, null);
         long t2 = repo.insertTopic(TENANT_A, "link-topic-2", null, COL_A, 0, null, null);
 
-        repo.upsertTopicLink(TENANT_A, t1, t2, 3, "co-occurrence");
-        repo.upsertTopicLink(TENANT_A, t1, t2, 5, "co-occurrence"); // GREATEST wins
+        // upsertTopicLink is the LIVE-COMPUTE path: EXCLUDED (overwrite), NOT
+        // GREATEST. A decremented recompute must lower the stored count (RDR-152
+        // nexus-1di3r.4). Contrast importTopicLink (ETL) below, which keeps GREATEST.
+        repo.upsertTopicLink(TENANT_A, t1, t2, 5, "co-occurrence");
+        repo.upsertTopicLink(TENANT_A, t1, t2, 3, "co-occurrence"); // EXCLUDED overwrites -> 3
 
         List<Map<String, Object>> pairs = repo.getTopicLinkPairs(TENANT_A, List.of(t1, t2));
         assertThat(pairs).isNotEmpty();
@@ -407,7 +410,7 @@ class TaxonomyRepositoryTest {
                       && ((Number) m.get("to_topic_id")).longValue() == t2)
             .findFirst();
         assertThat(link).isPresent();
-        assertThat(((Number) link.get().get("link_count")).intValue()).isEqualTo(5);
+        assertThat(((Number) link.get().get("link_count")).intValue()).isEqualTo(3);
     }
 
     // ── ICF ────────────────────────────────────────────────────────────────────

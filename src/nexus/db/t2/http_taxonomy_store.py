@@ -160,10 +160,25 @@ class HttpTaxonomyStore:
 
     # ── Topics ─────────────────────────────────────────────────────────────────
 
-    def get_topics(self, collection: str | None = None) -> list[dict[str, Any]]:
-        """Return all topics, optionally filtered by collection."""
-        params = {"collection": collection} if collection else {}
-        return self._get("/topics", params)
+    def get_topics(
+        self,
+        *,
+        parent_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return topics filtered by parent (mirrors CatalogTaxonomy.get_topics).
+
+        - ``parent_id=None`` (default): root topics (parent_id IS NULL), ordered
+          by doc_count DESC.
+        - ``parent_id=<int>``: children of that topic.
+
+        RDR-152 nexus-1di3r.5: reconciled to the oracle's parent_id-keyed
+        signature (was ``collection``) so the param-prefix tripwire goes strict.
+        Collection-scoped reads use :meth:`get_all_topics` /
+        :meth:`get_topics_for_collection`, which already hit ``/topics`` directly.
+        """
+        if parent_id is None:
+            return self._get("/topics/root")
+        return self._get("/topics/children", {"parent_id": parent_id})
 
     def get_all_topics(
         self,
@@ -212,9 +227,17 @@ class HttpTaxonomyStore:
         *,
         exclude_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Merge-target listing (CatalogTaxonomy signature). Service backend not
-        yet implemented — the exclude_id raw-cursor query has no Java endpoint."""
-        return _not_on_service("get_topics_for_collection")
+        """Return all topics (root + children) for a collection, ordered by
+        doc_count DESC (mirrors CatalogTaxonomy.get_topics_for_collection).
+
+        Backed by GET /topics?collection= (getAllTopics) with ``exclude_id``
+        applied client-side — a single-row predicate on an already-fetched list,
+        so no dedicated Java route is needed (RDR-152 nexus-1di3r.4).
+        """
+        rows = self._get("/topics", {"collection": collection})
+        if exclude_id is not None:
+            rows = [r for r in rows if r.get("id") != exclude_id]
+        return rows
 
     def get_unreviewed_topics(
         self,
@@ -356,10 +379,38 @@ class HttpTaxonomyStore:
         *,
         max_depth: int = 2,
     ) -> list[dict[str, Any]]:
-        """Collection-scoped, depth-bounded topic tree (CatalogTaxonomy
-        signature). Service backend not yet implemented — the recursive
-        collection+depth assembly has no Java endpoint."""
-        return _not_on_service("get_topic_tree")
+        """Collection-scoped, depth-bounded topic tree (mirrors
+        CatalogTaxonomy.get_topic_tree).
+
+        Each node: ``{id, label, collection, doc_count, children:[...]}``. Roots
+        are the parent_id-IS-NULL topics (filtered to ``collection`` when given,
+        matching the oracle's root-only collection filter); children are fetched
+        per node down to ``max_depth``. Client-side recursion over the existing
+        GET /topics/root + GET /topics/children routes (RDR-152 nexus-1di3r.3):
+        round-trips are bounded by node count within ``max_depth`` — acceptable
+        for this infrequent operator read — and avoids a new server-side tree
+        route. Like the oracle, the returned tree is a multi-snapshot view (each
+        fetch is an independent read), not a single-transaction snapshot.
+        """
+        roots = self._get("/topics/root")
+        if collection:
+            roots = [r for r in roots if r.get("collection") == collection]
+
+        def _build(row: dict[str, Any], depth: int) -> dict[str, Any]:
+            node: dict[str, Any] = {
+                "id": row["id"],
+                "label": row["label"],
+                "collection": row["collection"],
+                "doc_count": row["doc_count"],
+            }
+            if depth < max_depth:
+                children = self._get("/topics/children", {"parent_id": row["id"]})
+                node["children"] = [_build(c, depth + 1) for c in children]
+            else:
+                node["children"] = []
+            return node
+
+        return [_build(r, 0) for r in roots]
 
     # ── Links ──────────────────────────────────────────────────────────────────
 
@@ -375,10 +426,27 @@ class HttpTaxonomyStore:
         self,
         links: list[dict[str, Any]],
     ) -> int:
-        """Upsert topic links (CatalogTaxonomy signature: list of link dicts).
-        Service backend not yet implemented — the dict-shaped link upsert with
-        per-link type arrays has no parity-correct Java endpoint mapping yet."""
-        return _not_on_service("upsert_topic_links")
+        """Upsert inter-topic link pairs (mirrors CatalogTaxonomy.upsert_topic_links).
+
+        Each dict carries from_topic_id, to_topic_id, link_count, link_types.
+        ``link_types`` is JSON-serialized (list -> string) before sending, exactly
+        matching the oracle's ``json.dumps(link["link_types"])``; the Java
+        upsertTopicLink stores it verbatim as a string. The per-link POST loop is
+        parity-correct: INSERT OR REPLACE is per-PK idempotent with no cross-set
+        atomicity need, so projection links written by ``_discover_cross_links``
+        survive (only matching PK pairs are overwritten). Returns the number of
+        links upserted (RDR-152 nexus-1di3r.4).
+        """
+        if not links:
+            return 0
+        for link in links:
+            self._post("/links/upsert", {
+                "from_topic_id": link["from_topic_id"],
+                "to_topic_id": link["to_topic_id"],
+                "link_count": link["link_count"],
+                "link_types": json.dumps(link["link_types"]),
+            })
+        return len(links)
 
     # ── ICF / analytics ────────────────────────────────────────────────────────
 

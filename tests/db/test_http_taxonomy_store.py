@@ -100,6 +100,9 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                     t for t in _TOPICS.values()
                     if collection is None or t["collection"] == collection
                 ]
+                # Real service sorts ORDER BY doc_count DESC — mirror it so the
+                # ordering contract is enforced, not insertion-order coincidence.
+                topics = sorted(topics, key=lambda t: -t["doc_count"])
                 self._json(200, topics)
 
             elif path == "/v1/taxonomy/topics/by_id":
@@ -125,11 +128,13 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
 
             elif path == "/v1/taxonomy/topics/root":
                 roots = [t for t in _TOPICS.values() if t.get("parent_id") is None]
+                roots = sorted(roots, key=lambda t: -t["doc_count"])  # doc_count DESC
                 self._json(200, roots)
 
             elif path == "/v1/taxonomy/topics/children":
                 pid = int(params.get("parent_id", -1))
                 children = [t for t in _TOPICS.values() if t.get("parent_id") == pid]
+                children = sorted(children, key=lambda t: -t["doc_count"])  # doc_count DESC
                 self._json(200, children)
 
             elif path == "/v1/taxonomy/topics/unreviewed":
@@ -322,7 +327,9 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                 link_types = body.get("link_types", "[]")
                 for lk in _LINKS:
                     if lk["from_topic_id"] == from_id and lk["to_topic_id"] == to_id:
-                        lk["link_count"] = max(lk["link_count"], link_count)
+                        # EXCLUDED (overwrite) — mirrors the live-compute Java
+                        # upsertTopicLink (RDR-152 nexus-1di3r.4), NOT GREATEST.
+                        lk["link_count"] = link_count
                         lk["link_types"] = link_types
                         self._json(200, {"ok": True})
                         return
@@ -467,7 +474,10 @@ class TestTopicCRUD:
         assert topics[0]["label"] == "machine-learning"
         assert topics[0]["doc_count"] == 10
 
-    def test_get_topics_filters_by_collection(self, client: HttpTaxonomyStore) -> None:
+    def test_get_all_topics_filters_by_collection(self, client: HttpTaxonomyStore) -> None:
+        # get_topics no longer takes a collection (RDR-152 nexus-1di3r.5 reconciled
+        # it to the oracle's parent_id-keyed signature); collection-scoped reads go
+        # through get_all_topics / get_topics_for_collection.
         client.import_topic(
             src_id=1, label="ml", parent_id=None,
             collection="coll-A", centroid_hash=None, doc_count=5,
@@ -478,9 +488,57 @@ class TestTopicCRUD:
             collection="coll-B", centroid_hash=None, doc_count=3,
             created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
         )
-        assert len(client.get_topics("coll-A")) == 1
-        assert client.get_topics("coll-A")[0]["label"] == "ml"
-        assert len(client.get_topics("coll-B")) == 1
+        assert len(client.get_all_topics(collection="coll-A")) == 1
+        assert client.get_all_topics(collection="coll-A")[0]["label"] == "ml"
+        assert len(client.get_all_topics(collection="coll-B")) == 1
+
+    def test_get_topics_roots_vs_children(self, client: HttpTaxonomyStore) -> None:
+        # parent_id=None -> roots; parent_id=X -> children of X (oracle parity).
+        client.import_topic(
+            src_id=1, label="root-big", parent_id=None,
+            collection="c", centroid_hash=None, doc_count=9,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        client.import_topic(
+            src_id=3, label="root-small", parent_id=None,
+            collection="c", centroid_hash=None, doc_count=2,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        client.import_topic(
+            src_id=2, label="child", parent_id=1,
+            collection="c", centroid_hash=None, doc_count=4,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        # roots, ordered doc_count DESC (root-big=9 before root-small=2).
+        roots = client.get_topics()
+        assert [t["label"] for t in roots] == ["root-big", "root-small"]
+        children = client.get_topics(parent_id=1)
+        assert [t["label"] for t in children] == ["child"]
+        assert client.get_topics(parent_id=999) == []
+
+    def test_get_topics_for_collection_with_exclude_id(self, client: HttpTaxonomyStore) -> None:
+        for sid, label, dc in ((1, "a", 9), (2, "b", 5), (3, "c", 1)):
+            client.import_topic(
+                src_id=sid, label=label, parent_id=None,
+                collection="coll", centroid_hash=None, doc_count=dc,
+                created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+            )
+        # Other-collection topic must not leak in.
+        client.import_topic(
+            src_id=4, label="other", parent_id=None,
+            collection="elsewhere", centroid_hash=None, doc_count=7,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        full = client.get_topics_for_collection("coll")
+        assert [t["label"] for t in full] == ["a", "b", "c"]  # doc_count DESC
+        # 9 _TOPIC_COLUMNS keys round-trip.
+        assert set(full[0]) == {
+            "id", "label", "parent_id", "collection", "centroid_hash",
+            "doc_count", "created_at", "review_status", "terms",
+        }
+        excluded = client.get_topics_for_collection("coll", exclude_id=2)
+        assert [t["label"] for t in excluded] == ["a", "c"]
+        assert all(t["id"] != 2 for t in excluded)
 
     def test_get_topic_by_id(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
@@ -685,31 +743,116 @@ class TestAssignments:
 
 
 class TestTopicTree:
-    # RDR-152 nexus-fjwxh: get_topic_tree was aligned to the CatalogTaxonomy
-    # oracle signature (collection, max_depth) and made FAIL LOUD in service
-    # mode — the old (parent_id, depth) flat roots/children shape cannot produce
-    # the oracle's recursive collection-scoped tree the CLI needs, and the CLI
-    # only ever calls the oracle shape. Full service-backend parity = nexus-1di3r.
-    def test_get_topic_tree_fails_loud(self, client: HttpTaxonomyStore) -> None:
-        import pytest
+    # RDR-152 nexus-1di3r.3: get_topic_tree is now service-backed via client-side
+    # recursion over /topics/root + /topics/children, mirroring the oracle's
+    # nested {id,label,collection,doc_count,children} shape, depth-bounded.
+    def _seed_tree(self, client: HttpTaxonomyStore) -> None:
+        rows = [
+            (1, "root", None, "c", 10),
+            (2, "child", 1, "c", 4),
+            (3, "grandchild", 2, "c", 2),
+            (9, "other-root", None, "other", 8),
+        ]
+        for sid, label, parent, coll, dc in rows:
+            client.import_topic(
+                src_id=sid, label=label, parent_id=parent,
+                collection=coll, centroid_hash=None, doc_count=dc,
+                created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+            )
 
-        with pytest.raises(NotImplementedError, match="nexus-1di3r"):
-            client.get_topic_tree("c", max_depth=2)
+    def test_get_topic_tree_nested_shape_and_collection_filter(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        self._seed_tree(client)
+        tree = client.get_topic_tree("c", max_depth=2)
+        # Collection filter scopes the roots: only "root" (other-root excluded).
+        assert len(tree) == 1
+        root = tree[0]
+        assert set(root) == {"id", "label", "collection", "doc_count", "children"}
+        assert root["label"] == "root"
+        assert root["collection"] == "c"
+        assert root["doc_count"] == 10
+        # depth 1: child present, with its grandchild at depth 2.
+        assert [c["label"] for c in root["children"]] == ["child"]
+        child = root["children"][0]
+        assert [g["label"] for g in child["children"]] == ["grandchild"]
+        # depth 2 is the max — grandchildren are leaves (children == []).
+        assert child["children"][0]["children"] == []
+
+    def test_get_topic_tree_max_depth_bounds_recursion(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        self._seed_tree(client)
+        tree = client.get_topic_tree("c", max_depth=1)
+        root = tree[0]
+        # depth 1 children fetched, but they do NOT recurse to grandchildren.
+        assert [c["label"] for c in root["children"]] == ["child"]
+        assert root["children"][0]["children"] == []
+
+    def test_get_topic_tree_no_collection_returns_all_roots(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        self._seed_tree(client)
+        tree = client.get_topic_tree(max_depth=2)
+        # All roots, ordered doc_count DESC: root=10 before other-root=8.
+        assert [n["label"] for n in tree] == ["root", "other-root"]
 
 
 class TestLinks:
-    # RDR-152 nexus-fjwxh: upsert_topic_links was aligned to the oracle
-    # signature (links: list[dict]) and made FAIL LOUD in service mode. The old
-    # (pairs: list[tuple]) shape could not consume the dict payload the CLI
-    # builds (taxonomy_cmd persist_data), so it was unreachable-or-wrong via the
-    # real caller. link_types serialization parity = nexus-1di3r.
-    def test_upsert_topic_links_fails_loud(self, client: HttpTaxonomyStore) -> None:
-        import pytest
+    # RDR-152 nexus-1di3r.4: upsert_topic_links is service-backed (dict payload,
+    # link_types json.dumps parity). NOTE: the service /links/upsert applies
+    # GREATEST(link_count) on conflict whereas the oracle INSERT OR REPLACE
+    # overwrites — a surfaced cross-backend divergence flagged on bead
+    # nexus-1di3r.6 for the Phase 4 gate. These tests pin the ACTUAL service
+    # behavior; the link_types serialization is the bead's named parity subtlety.
+    def test_upsert_topic_links_returns_count_and_serializes_link_types(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        links = [
+            {"from_topic_id": 1, "to_topic_id": 2, "link_count": 5,
+             "link_types": ["cooccurrence", "projection"]},
+            {"from_topic_id": 3, "to_topic_id": 4, "link_count": 2,
+             "link_types": ["cooccurrence"]},
+        ]
+        assert client.upsert_topic_links(links) == 2
+        # link_types persisted as a JSON STRING (list -> json.dumps), matching oracle.
+        stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
+        assert stored[(1, 2)]["link_types"] == json.dumps(["cooccurrence", "projection"])
+        assert stored[(3, 4)]["link_types"] == json.dumps(["cooccurrence"])
 
-        links = [{"from_topic_id": 1, "to_topic_id": 2, "link_count": 5,
-                  "link_types": ["cooccurrence"]}]
-        with pytest.raises(NotImplementedError, match="nexus-1di3r"):
-            client.upsert_topic_links(links)
+    def test_upsert_topic_links_empty_is_noop(self, client: HttpTaxonomyStore) -> None:
+        assert client.upsert_topic_links([]) == 0
+        assert _LINKS == []
+
+    def test_upsert_topic_links_overwrites_on_same_pk(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        # Live-compute overwrite (EXCLUDED), NOT GREATEST: a decremented recompute
+        # must lower the stored count. Pins the nexus-1di3r.4 Java flip; a revert
+        # to GREATEST would make this fail (RDR-152, bead nexus-1di3r.6).
+        client.upsert_topic_links(
+            [{"from_topic_id": 1, "to_topic_id": 2, "link_count": 10,
+              "link_types": ["cooccurrence"]}])
+        client.upsert_topic_links(
+            [{"from_topic_id": 1, "to_topic_id": 2, "link_count": 3,
+              "link_types": ["cooccurrence"]}])
+        stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
+        assert stored[(1, 2)]["link_count"] == 3  # overwritten, not GREATEST=10
+        assert client.get_topic_link_pairs([1, 2]) == [(1, 2, 3)]
+
+    def test_upsert_topic_links_does_not_clobber_other_pk(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        # Pre-seed a projection link on a DIFFERENT PK; the upsert must leave it.
+        client.upsert_topic_links(
+            [{"from_topic_id": 7, "to_topic_id": 8, "link_count": 99,
+              "link_types": ["projection"]}])
+        client.upsert_topic_links(
+            [{"from_topic_id": 1, "to_topic_id": 2, "link_count": 3,
+              "link_types": ["cooccurrence"]}])
+        stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
+        assert stored[(7, 8)]["link_count"] == 99  # untouched
+        assert stored[(7, 8)]["link_types"] == json.dumps(["projection"])
 
 
 class TestMetaAndRebalance:
