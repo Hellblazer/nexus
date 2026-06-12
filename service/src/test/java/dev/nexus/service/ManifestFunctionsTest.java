@@ -52,11 +52,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *   <li>GROUP 4 (manifest_backfill basic): RED — function absent</li>
  *   <li>GROUP 5 (manifest_backfill idempotent): RED — function absent</li>
  *   <li>GROUP 6 (manifest_backfill tombstone-aware): RED — function absent</li>
+ *   <li>GROUP 6b (manifest_backfill restore-cycle idempotency): RED — function absent</li>
  *   <li>GROUP 7 (document_text ordering): RED — function absent</li>
  *   <li>GROUP 8 (document_text tombstone-aware): RED — function absent</li>
  *   <li>GROUP 9 (document_text manifest gap contract): RED — function absent</li>
  *   <li>GROUP 10 (SECURITY INVOKER / grants): RED — function absent</li>
  *   <li>GROUP 11 (RLS isolation — svc role sees only its tenant): RED — function absent</li>
+ *   <li>GROUP 11b (document_text missing GUC returns empty set): RED — function absent</li>
  *   <li>All CONTROL paths (fixture inserts, schema presence checks): GREEN always</li>
  * </ul>
  *
@@ -432,10 +434,16 @@ class ManifestFunctionsTest {
     @Test @Order(50)
     void manifestBackfill_idempotent_secondCallReturnsZero() throws Exception {
         // RED until catalog-004 adds nexus.manifest_backfill() with idempotency.
+        //
+        // Fresh fixture: this test runs after @Order(40) which already called backfill —
+        // so at entry there are ZERO NULL-collection rows. We seed exactly ONE fresh row,
+        // making the first-call count exactly == 1 (not >=1), preventing vacuous inequality
+        // from masking a missed stamp.
         String docId = "mf-idem-doc-1";
         String chash = validChash("mf-idem-chsh0001");
 
-        // Fixture: doc with physical_collection; manifest row with collection = NULL
+        // Fixture: doc with physical_collection; manifest row with collection = NULL.
+        // @Order(40) stamped all prior rows, so this is the only NULL row at call time.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
@@ -446,14 +454,15 @@ class ManifestFunctionsTest {
                 "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
         }
 
-        // First call — stamps collection
+        // First call — stamps the one fresh NULL row; count must be exactly 1
         try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
             rs.next();
             long firstCount = rs.getLong(1);
             assertThat(firstCount)
-                .as("manifest_backfill() first call must stamp >= 1 row (the fixture NULL row)")
-                .isGreaterThanOrEqualTo(1L);
+                .as("manifest_backfill() first call must stamp exactly 1 row " +
+                    "(the fresh NULL row seeded above; prior tests leave no NULL rows at @Order(50))")
+                .isEqualTo(1L);
         }
 
         // Second call — must return 0 (idempotent: nothing left to stamp)
@@ -514,6 +523,90 @@ class ManifestFunctionsTest {
                 .as("manifest_backfill() must NOT stamp collection for tombstoned docs " +
                     "(tombstone-aware: joins deleted_at IS NULL on parent doc)")
                 .isNull();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 6b — manifest_backfill: restore-cycle idempotency
+    //
+    // EXPECTED RED: nexus.manifest_backfill function absent until catalog-004.
+    //
+    // Scenario: backfill a doc, tombstone it, restore it (clear deleted_at via
+    // nexus.document_restore), run manifest_backfill() again — the already-stamped
+    // collection value must be UNCHANGED and the call returns 0 for it.
+    // Validates that restore does not create a second wave of NULL-collection rows.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(61)
+    void manifestBackfill_restoreCycle_alreadyStampedRowUnchanged() throws Exception {
+        // RED until catalog-004 adds nexus.manifest_backfill().
+        String docId = "mf-restore-doc-1";
+        String chash = validChash("mf-restore-chsh01");
+
+        // Step 1: live doc with manifest row (collection = NULL initially)
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_document_chunks " +
+                "  (tenant_id, doc_id, position, chash) " +
+                "VALUES ('" + TENANT_A + "', '" + docId + "', 0, '" + chash + "') " +
+                "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        }
+
+        // Step 2: backfill — stamps collection
+        try (Connection su = pg.createConnection("")) {
+            su.createStatement().execute("SELECT " + FN_BACKFILL + "()");
+        }
+
+        // Verify stamped
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT collection FROM nexus.catalog_document_chunks " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND doc_id = '" + docId + "' AND position = 0");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString("collection"))
+                .as("collection must be stamped after first backfill")
+                .isEqualTo(COLLECTION_384);
+        }
+
+        // Step 3: tombstone the doc (simulates a delete)
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "UPDATE nexus.catalog_documents SET deleted_at = NOW() " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+        }
+
+        // Step 4: restore the doc (clear deleted_at — simulates nexus.document_restore)
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "UPDATE nexus.catalog_documents SET deleted_at = NULL " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+        }
+
+        // Step 5: second backfill — must return 0 for the already-stamped row
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
+            rs.next();
+            long count = rs.getLong(1);
+            assertThat(count)
+                .as("manifest_backfill() after restore cycle must return 0 " +
+                    "(restore-safe: already-stamped rows keep their collection; second call is idempotent)")
+                .isEqualTo(0L);
+        }
+
+        // Step 6: collection value must be unchanged (still COLLECTION_384, not overwritten)
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT collection FROM nexus.catalog_document_chunks " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND doc_id = '" + docId + "' AND position = 0");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString("collection"))
+                .as("collection must remain COLLECTION_384 after restore cycle and second backfill " +
+                    "(restore-safe: row already stamped, collection IS NOT NULL, backfill skips it)")
+                .isEqualTo(COLLECTION_384);
         }
     }
 
@@ -792,6 +885,44 @@ class ManifestFunctionsTest {
             assertThat(rs.getLong(1))
                 .as("document_text called with GUC=A must return 0 rows for tenant B's doc " +
                     "(RLS isolation: SECURITY INVOKER under FORCE RLS filters by tenant)")
+                .isEqualTo(0L);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 11b — document_text: missing GUC returns empty set
+    //
+    // EXPECTED RED: nexus.document_text function absent until catalog-004.
+    //
+    // Reader contract: when nexus.tenant GUC is NOT set, current_setting returns
+    // NULL (via the missing_ok=true arg). The WHERE m.tenant_id = NULL predicate
+    // matches nothing, so the function returns 0 rows intentionally.
+    //
+    // This diverges from purge_trash's RAISE pattern deliberately:
+    // destructive operations raise on missing GUC; readers return nothing.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(111)
+    void documentText_missingGuc_returnsEmptySet() throws Exception {
+        // RED until catalog-004 adds nexus.document_text(text).
+        //
+        // Use a superuser connection with NO nexus.tenant GUC configured.
+        // The function's WHERE m.tenant_id = current_setting('nexus.tenant', true)
+        // evaluates to WHERE m.tenant_id = NULL — matches nothing.
+        String anyDocId = "mf-doctext-doc-1"; // exists from GROUP 7, has chunks
+
+        try (Connection su = pg.createConnection("")) {
+            // Confirm GUC is NOT set (reset to default)
+            su.createStatement().execute("RESET nexus.tenant");
+
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + anyDocId + "')");
+            rs.next();
+            long count = rs.getLong(1);
+            assertThat(count)
+                .as("document_text with no nexus.tenant GUC must return 0 rows " +
+                    "(reader contract: no GUC = no tenant = no rows; missing_ok=true returns NULL, " +
+                    "WHERE tenant_id = NULL matches nothing — diverges from purge_trash RAISE deliberately)")
                 .isEqualTo(0L);
         }
     }
