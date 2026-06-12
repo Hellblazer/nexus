@@ -40,6 +40,7 @@ import java.util.Map;
  *   POST /v1/vectors/update-metadata metadata-only update (frecency reindex)
  *   GET  /v1/vectors/collections     list the tenant's collections
  *   GET  /v1/vectors/count           count chunks in a collection
+ *   GET  /v1/vectors/stats           per-collection live stats (count/dim/last_write) — RDR-156 P3
  *   POST /v1/vectors/embed           embed-only (parity gate); 503 without a router
  * </pre>
  *
@@ -119,6 +120,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/update-metadata" -> handleUpdateMetadata(exchange, method);
                 case "/collections"   -> handleCollections(exchange, method);
                 case "/count"         -> handleCount(exchange, method);
+                case "/stats"         -> handleStats(exchange, method);   // RDR-156 P3
                 case "/embed"         -> handleEmbed(exchange, method);    // parity gate
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
@@ -469,6 +471,22 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         var cols = repo.listCollections(tenant);
         HttpUtil.send(ex, 200, json(cols));
+    }
+
+    /**
+     * GET /v1/vectors/stats
+     * Response 200: [{"name":"...","dim":384,"count":N,"last_write":"2026-..."}, ...]
+     *
+     * <p>Per-collection vector statistics from {@code nexus.collection_vector_stats}
+     * (RDR-156 P3, Decision 4) — tombstone-filtered live counts, one round-trip for
+     * all of the tenant's collections. Replaces doctor/status N+1 count() loops.
+     */
+    private void handleStats(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        var stats = repo.collectionStats(tenant);
+        HttpUtil.send(ex, 200, json(stats));
     }
 
     /**

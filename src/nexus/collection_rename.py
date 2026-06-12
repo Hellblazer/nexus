@@ -62,6 +62,12 @@ def rename_collection_data_plane(
     if on_warn is None:
         on_warn = lambda msg: click.echo(msg, err=True)  # noqa: E731
 
+    # Tombstone caveat (RDR-156 P3, Decision 6): on the service path
+    # collection_exists() reads the tombstone-filtered stats view, so a
+    # collection whose every chunk belongs to trashed documents reads as
+    # ABSENT here — "not found" may mean "trashed; restore it first".
+    # Distinguishing the two needs a raw existence probe (bead nexus-9n485;
+    # materializes only once trash verbs ship).
     if not t3_db.collection_exists(old):
         raise click.ClickException(f"collection not found: {old!r}")
     if t3_db.collection_exists(new):

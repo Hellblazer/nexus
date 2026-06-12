@@ -768,6 +768,45 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Per-collection vector statistics for {@code tenant} (RDR-156 P3, Decision 4,
+     * bead nexus-70r3c.12).
+     *
+     * <p>Reads {@code nexus.collection_vector_stats} — the SECURITY INVOKER aggregate
+     * over {@code live_chunks} — so counts are TOMBSTONE-FILTERED (a chunk whose only
+     * manifest rows point to trashed documents is not counted; manifest-less note
+     * chunks are). This deliberately diverges from {@link #count} under tombstones:
+     * doctor/status surfaces want live counts, migration parity checks keep raw.
+     *
+     * <p>RLS scopes the view to the tenant's rows (security_invoker propagates the
+     * caller's context through both view layers), so a foreign tenant's collections
+     * are invisible — same guarantee as {@link #listCollections}.
+     *
+     * @return one entry per (collection, dim):
+     *         {@code [{"name": ..., "dim": 384, "count": N, "last_write": "..."}]},
+     *         name ascending. {@code last_write} is ISO-8601 with offset, or absent
+     *         if null. Collections with zero live chunks do not appear.
+     */
+    public List<Map<String, Object>> collectionStats(String tenant) {
+        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
+            ctx.fetch("SELECT collection, dim, chunk_count, last_write"
+                      + " FROM nexus.collection_vector_stats"
+                      + " ORDER BY collection ASC, dim ASC"));
+        List<Map<String, Object>> out = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("name",  rec.get("collection", String.class));
+            row.put("dim",   rec.get("dim", Integer.class));
+            row.put("count", rec.get("chunk_count", Long.class));
+            var lastWrite = rec.get("last_write", java.time.OffsetDateTime.class);
+            if (lastWrite != null) {
+                row.put("last_write", lastWrite.toString());
+            }
+            out.add(row);
+        }
+        return out;
+    }
+
+    /**
      * List entries in a collection (metadata only), paginated by chash ordering.
      *
      * @return Chroma-style envelope {@code {ids: List<String>, metadatas: List<Map>}}

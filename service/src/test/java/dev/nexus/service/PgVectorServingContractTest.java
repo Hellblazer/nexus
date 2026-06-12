@@ -369,6 +369,41 @@ class PgVectorServingContractTest {
             .contains(COL);
     }
 
+    @Test
+    @Order(9)
+    void stats_perCollectionLiveStats_tenantScoped() throws Exception {
+        // RDR-156 P3 (nexus-70r3c.12): GET /v1/vectors/stats serves
+        // nexus.collection_vector_stats — one round-trip, all collections,
+        // tombstone-filtered live counts. State here: 4 chunks in COL
+        // (3 upserted + 1 store-put), all manifest-less → all live.
+        var resp = get("/v1/vectors/stats", TOKEN_A);
+        assertThat(resp.statusCode())
+            .as("stats must serve 200 from pgvector (got: %s)", resp.body())
+            .isEqualTo(200);
+        List<Map<String, Object>> stats = MAPPER.readValue(resp.body(), List.class);
+        var col = stats.stream()
+                       .filter(s -> COL.equals(s.get("name")))
+                       .findFirst()
+                       .orElseThrow(() -> new AssertionError(
+                           "stats must contain " + COL + " (got: " + stats + ")"));
+        assertThat(((Number) col.get("count")).longValue())
+            .as("live chunk_count must be exactly 4 (3 upserted + 1 put, no tombstones)")
+            .isEqualTo(4L);
+        assertThat(((Number) col.get("dim")).intValue())
+            .as("voyage-context-3 collection routes to chunks_1024")
+            .isEqualTo(1024);
+        assertThat((String) col.get("last_write"))
+            .as("last_write must be present for a written collection")
+            .isNotEmpty();
+
+        // Foreign bearer: RLS through the security_invoker view → 0 rows.
+        var foreign = get("/v1/vectors/stats", TOKEN_B);
+        assertThat(foreign.statusCode()).isEqualTo(200);
+        assertThat((List<?>) MAPPER.readValue(foreign.body(), List.class))
+            .as("a bearer bound to another tenant sees exactly 0 stats rows")
+            .isEmpty();
+    }
+
     // ---------------------------------------------------------------------------
     // Tenant contract — RLS replaces the never-built skp06 app-layer guard
     // ---------------------------------------------------------------------------
