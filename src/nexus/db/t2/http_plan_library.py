@@ -457,8 +457,10 @@ def _normalize(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if row.get("outcome") is None:
         row["outcome"] = "success"
 
-    # Nullable timestamp fields: ensure key is always present (service omits null keys
-    # due to Jackson NON_NULL serialization; callers rely on dict access not .get()).
+    # Nullable timestamp fields: defensive no-op now that the service includes
+    # null fields (RDR-152 nexus-fjwxh flipped the handlers to JsonInclude.ALWAYS
+    # for SQLite parity). Kept as belt-and-suspenders so callers can rely on dict
+    # access, not .get(), regardless of serialization config.
     for nullable_field in ("disabled_at", "last_used"):
         if nullable_field not in row:
             row[nullable_field] = None
