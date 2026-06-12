@@ -317,6 +317,11 @@ def _check_t3_local() -> list[HealthResult]:
     try:
         from nexus.db import make_t3
 
+        # Graceful-degrade contract (RDR-156 P3): list_collections() swallows
+        # transport errors and returns [] — a down service reads as "0
+        # collections" here, NOT as a failure. That is intentional: the fatal
+        # vector-service reachability probe (_check_vector_service) fires
+        # separately and is the failure surface; this check is informational.
         cols = make_t3().list_collections()
         col_count = len(cols)
         detail = f"{col_count} collections (pgvector service)"

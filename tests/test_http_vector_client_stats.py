@@ -92,6 +92,22 @@ class TestListCollectionsViaStats:
             {"name": "z__coll", "count": 5},
         ]
 
+    def test_explicit_null_count_treated_as_zero(self, monkeypatch):
+        # CRE H1: row.get("count", 0) only defaults on ABSENT keys; an
+        # explicit JSON null must not raise TypeError at int(None).
+        rows = [
+            {"name": "null__coll", "dim": 384, "count": None, "last_write": "x"},
+            {"name": "ok__coll", "dim": 384, "count": 2, "last_write": "y"},
+        ]
+        _patch_get(monkeypatch, lambda p: rows)
+
+        got = HttpVectorClient().list_collections()
+
+        assert got == [
+            {"name": "null__coll", "count": 0},
+            {"name": "ok__coll", "count": 2},
+        ]
+
     def test_multidim_collection_collapses_counts_summed(self, monkeypatch):
         rows = [
             {"name": "mixed__coll", "dim": 384, "count": 2, "last_write": "x"},

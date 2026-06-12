@@ -722,7 +722,8 @@ class HttpVectorClient:
         for row in stats:
             name = row.get("name", "")
             if name:
-                merged[name] = merged.get(name, 0) + int(row.get("count", 0))
+                # `or 0` guards an explicit null count, not just an absent key
+                merged[name] = merged.get(name, 0) + int(row.get("count") or 0)
         return [{"name": n, "count": c} for n, c in sorted(merged.items())]
 
     def _list_collections_via_count(self) -> list[dict]:
@@ -735,7 +736,7 @@ class HttpVectorClient:
         try:
             result = _get("/v1/vectors/collections", tenant=self._tenant)
         except VectorServiceError as e:
-            _log.warning("http_vector_list_collections_failed", error=str(e))
+            _log.warning("http_vector_fallback_collections_failed", error=str(e))
             return []
         names = [c.get("name", "") for c in result] if isinstance(result, list) else []
         out: list[dict] = []

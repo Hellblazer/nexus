@@ -84,7 +84,8 @@
     <!-- collection_vector_stats view (bead nexus-70r3c.12, RDR-156 P3.2):
          SECURITY INVOKER aggregate over live_chunks — per-collection chunk count, dim,
          last write. Tombstone-filtered by construction. Replaces remote count(*) calls
-         in doctor/status surfaces. Must come after catalog-003 (live_chunks). -->
+         in doctor/status surfaces. Hard dependency: catalog-003 (live_chunks);
+         placed after catalog-004 to keep the catalog-NNN sequence in file order. -->
     <include file="db/changelog/catalog-005-collection-vector-stats.xml"/>
 
     <!--
