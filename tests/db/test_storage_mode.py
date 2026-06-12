@@ -35,9 +35,11 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── default: all stores resolve to 'service' (RDR-152 nexus-fjwxh flip) ───────
 
 
-# RDR-152 nexus-fjwxh: T1 scratch keeps SQLITE as its hard default (its Postgres
-# backing is forward-declared/incomplete); the nine T2 stores default to SERVICE.
-# T1 still follows an explicit per-store/global env flag.
+# RDR-152 nexus-fjwxh: T1 scratch keeps its LOCAL backend as the hard default
+# (StorageBackend.SQLITE is the generic non-service marker — for T1 that local
+# backend is the Chroma-backed T1Database, NOT SQLite; T1's service backing is
+# forward-declared/incomplete). The nine T2 stores default to SERVICE. T1 still
+# follows an explicit per-store/global env flag.
 def _expected_hard_default(store: str) -> StorageBackend:
     return StorageBackend.SQLITE if store == "t1" else StorageBackend.SERVICE
 
