@@ -49,11 +49,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import numpy as np
 import structlog
 
 from nexus.db.t2.catalog_taxonomy import (
+    AssignResult,
     AuditHub,
     AuditReport,
+    CatalogTaxonomy,
     DEFAULT_HUB_STOPWORDS,
     HubRow,
 )
@@ -68,6 +71,22 @@ DEFAULT_TENANT: str = "default"
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
 from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+
+
+def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
+    """Row-wise cosine-similarity matrix (a_rows × b_rows), i.e. ``1 - cosine
+    distance``.
+
+    Mirrors the normalized-dot the oracle's compute_assignments /
+    compute_cross_links run over chroma results, so service-mode similarities
+    match the chroma path to float precision. Zero-norm rows are guarded to 1.0
+    (same as the oracle).
+    """
+    an = np.linalg.norm(a, axis=1, keepdims=True)
+    an[an == 0] = 1.0
+    bn = np.linalg.norm(b, axis=1, keepdims=True)
+    bn[bn == 0] = 1.0
+    return (a / an) @ (b / bn).T
 
 
 def _not_on_service(method: str) -> "Any":
@@ -112,6 +131,7 @@ class HttpTaxonomyStore:
         tenant: str = DEFAULT_TENANT,
         *,
         _token: str | None = None,
+        centroid_store: Any | None = None,
     ) -> None:
         if base_url is not None:
             if _token is None:
@@ -127,6 +147,7 @@ class HttpTaxonomyStore:
             _token = token
 
         self._tenant = tenant
+        self._token = _token
         self._headers = {
             "Authorization": f"Bearer {_token}",
             "X-Nexus-Tenant": tenant,
@@ -137,11 +158,28 @@ class HttpTaxonomyStore:
             headers=self._headers,
             timeout=30.0,
         )
+        # Centroid R/W routes through the pgvector centroid-port (nexus-t1hnc),
+        # NOT chroma. Constructed lazily from the SAME resolved service config so
+        # both stores share one base_url/token/tenant; injectable for tests.
+        self._centroid_store = centroid_store
         _log.info("http_taxonomy_store.init", base_url=self._base_url, tenant=tenant)
+
+    @property
+    def _centroid(self) -> Any:
+        """The service-backed centroid port (lazy; shares this store's config)."""
+        if self._centroid_store is None:
+            from nexus.db.t2.http_centroid_store import HttpCentroidStore
+
+            self._centroid_store = HttpCentroidStore(
+                base_url=self._base_url, tenant=self._tenant, _token=self._token,
+            )
+        return self._centroid_store
 
     def close(self) -> None:
         """Close the keep-alive connection pool (idempotent)."""
         self._client.close()
+        if self._centroid_store is not None:
+            self._centroid_store.close()
         _log.debug("http_taxonomy_store.closed")
 
     # ── Internal helpers ───────────────────────────────────────────────────────
@@ -447,6 +485,186 @@ class HttpTaxonomyStore:
                 "link_types": json.dumps(link["link_types"]),
             })
         return len(links)
+
+    # ── Compute (delegate-thin) + centroid ANN (RDR-152 nexus-1di3r.7) ──────────
+    #
+    # Per design Approach A: the heavy compute statics (cluster / c-TF-IDF /
+    # KMeans / rebuild-plan) are backend-agnostic and delegated VERBATIM to
+    # CatalogTaxonomy — zero reimplementation. Only the chroma-coupled centroid
+    # ANN reads are adapted to the pgvector centroid-port: assign_single (single
+    # doc) uses the port's server-side nearest; compute_assignments /
+    # compute_cross_links (batch) fetch the centroid set ONCE via get_by_collection
+    # / get_foreign and run the cosine nearest-search in numpy LOCALLY (S2
+    # decision: never loop ann_query N times, never add a Java batch endpoint).
+
+    @staticmethod
+    def compute_discovered_topics(
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: "np.ndarray",
+        texts: list[str],
+    ) -> list[dict[str, Any]]:
+        """Delegate verbatim to the backend-agnostic oracle static."""
+        return CatalogTaxonomy.compute_discovered_topics(
+            collection_name, doc_ids, embeddings, texts,
+        )
+
+    @staticmethod
+    def compute_rebuild_plan(
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: "np.ndarray",
+        texts: list[str],
+        *,
+        old_centroids: "np.ndarray",
+        old_labels: list[str],
+        old_review_statuses: list[str],
+        old_centroid_topic_ids: list[int],
+        manual_assignments: dict[str, int],
+    ) -> dict[str, Any]:
+        """Delegate verbatim to the backend-agnostic oracle static."""
+        return CatalogTaxonomy.compute_rebuild_plan(
+            collection_name, doc_ids, embeddings, texts,
+            old_centroids=old_centroids,
+            old_labels=old_labels,
+            old_review_statuses=old_review_statuses,
+            old_centroid_topic_ids=old_centroid_topic_ids,
+            manual_assignments=manual_assignments,
+        )
+
+    @staticmethod
+    def compute_split(
+        topic_id: int,
+        doc_ids: list[str],
+        texts: list[str],
+        fetched_ids: list[str],
+        embeddings: "np.ndarray",
+        collection_name: str,
+        k: int,
+    ) -> dict[str, Any]:
+        """Delegate verbatim to the backend-agnostic oracle static."""
+        return CatalogTaxonomy.compute_split(
+            topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
+        )
+
+    def assign_single(
+        self,
+        collection_name: str,
+        embedding: "np.ndarray",
+        chroma_client: Any = None,
+        *,
+        cross_collection: bool = False,
+    ) -> "AssignResult | None":
+        """Nearest topic_id + raw cosine similarity for one embedding, via the
+        centroid-port (mirrors CatalogTaxonomy.assign_single).
+
+        ``chroma_client`` is accepted for signature-prefix parity but unused —
+        centroid R/W routes through the pgvector port. The port's ``nearest``
+        already reproduces the oracle's None-on-empty / dim-mismatch short-circuit.
+        """
+        emb = embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
+        return self._centroid.nearest(
+            emb, collection_name, cross_collection=cross_collection,
+        )
+
+    def compute_assignments(
+        self,
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: list[list[float]],
+        chroma_client: Any = None,
+        *,
+        cross_collection: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Batch nearest-topic assignments via the centroid-port (mirrors
+        CatalogTaxonomy.compute_assignments).
+
+        S2 batch path: fetch the centroid set ONCE (get_foreign for the
+        cross-collection projection slice, else get_by_collection) and run the
+        cosine nearest-search in numpy locally. Preserves the oracle's
+        projection/centroid branch, raw-cosine similarity (``1 - distance``), and
+        empty-on-no-op short-circuits (no centroids / dim mismatch) exactly.
+        ``chroma_client`` is accepted for prefix parity but unused.
+        """
+        env = (
+            self._centroid.get_foreign(collection_name)
+            if cross_collection
+            else self._centroid.get_by_collection(collection_name)
+        )
+        c_embs = env.get("embeddings") or []
+        c_metas = env.get("metadatas") or []
+        if not c_embs or not embeddings:
+            return []
+
+        cent = np.array(c_embs, dtype=np.float32)
+        q = np.array(
+            [e if isinstance(e, list) else (e.tolist() if hasattr(e, "tolist") else list(e))
+             for e in embeddings],
+            dtype=np.float32,
+        )
+        if q.size == 0 or q.shape[1] != cent.shape[1]:
+            return []  # dimension mismatch — oracle short-circuit (SC-10)
+
+        sim = _cosine_matrix(q, cent)  # docs × centroids; 1 - cosine_distance
+        nearest_idx = sim.argmax(axis=1)
+
+        by = "projection" if cross_collection else "centroid"
+        out: list[dict[str, Any]] = []
+        for i, doc_id in enumerate(doc_ids):
+            j = int(nearest_idx[i])
+            topic_id = int(c_metas[j]["topic_id"])
+            if by == "projection":
+                out.append({
+                    "doc_id": doc_id,
+                    "topic_id": topic_id,
+                    "assigned_by": by,
+                    "similarity": float(sim[i, j]),
+                    "source_collection": collection_name,
+                })
+            else:
+                out.append({
+                    "doc_id": doc_id,
+                    "topic_id": topic_id,
+                    "assigned_by": by,
+                    "similarity": None,
+                    "source_collection": None,
+                })
+        return out
+
+    def compute_cross_links(
+        self,
+        collection_name: str,
+        new_centroids: list[list[float]],
+        new_metas: list[dict[str, Any]],
+        centroid_coll: Any = None,
+    ) -> list[tuple[int, int]]:
+        """Cross-collection centroid matching via the centroid-port (mirrors
+        CatalogTaxonomy.compute_cross_links).
+
+        Fetches the foreign centroid set ONCE via get_foreign and runs the SAME
+        cosine threshold match as the oracle. Returns ``(new_topic_id,
+        other_topic_id)`` pairs above ``_PROJECTION_THRESHOLD``. ``centroid_coll``
+        accepted for prefix parity but unused.
+        """
+        env = self._centroid.get_foreign(collection_name)
+        other_embs_raw = env.get("embeddings")
+        other_metas = env.get("metadatas", [])
+        if other_embs_raw is None or len(other_embs_raw) == 0:
+            return []
+
+        other_embs = np.array(other_embs_raw, dtype=np.float32)
+        new_embs = np.array(new_centroids, dtype=np.float32)
+        if new_embs.size == 0 or new_embs.shape[1] != other_embs.shape[1]:
+            return []
+
+        sim = _cosine_matrix(new_embs, other_embs)
+        pairs: list[tuple[int, int]] = []
+        for i, meta in enumerate(new_metas):
+            new_tid = int(meta["topic_id"])
+            for j in range(sim.shape[1]):
+                if float(sim[i, j]) >= CatalogTaxonomy._PROJECTION_THRESHOLD:
+                    pairs.append((new_tid, int(other_metas[j]["topic_id"])))
+        return pairs
 
     # ── ICF / analytics ────────────────────────────────────────────────────────
 

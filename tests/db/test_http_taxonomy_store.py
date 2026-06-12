@@ -24,8 +24,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import numpy as np
 import pytest
 
+from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 from nexus.db.t2.http_taxonomy_store import DEFAULT_TENANT, HttpTaxonomyStore
 
 TOKEN = "fake-taxonomy-token-abc"
@@ -985,3 +987,196 @@ class TestMiscMethods:
         tops = client.top_topics_for_collection("coll-A")
         assert len(tops) == 1
         assert tops[0]["label"] == "ml"
+
+
+# ── Compute / centroid-ANN parity (RDR-152 nexus-1di3r.7) ──────────────────────
+
+
+class _FakeCentroidStore:
+    """In-memory centroid port for compute/assign parity tests.
+
+    Holds records ``{collection, topic_id, embedding, label, doc_count}`` and
+    serves the get_by_collection / get_foreign envelope + the single-doc
+    ``nearest`` exactly as the real HttpCentroidStore would.
+    """
+
+    def __init__(self, records: list[dict]) -> None:
+        self._records = records
+        self.closed = False
+
+    def _envelope(self, rows: list[dict]) -> dict:
+        return {
+            "ids": [f"{r['collection']}:{r['topic_id']}" for r in rows],
+            "embeddings": [r["embedding"] for r in rows],
+            "metadatas": [
+                {"topic_id": int(r["topic_id"]), "label": r.get("label"),
+                 "collection": r["collection"], "doc_count": r.get("doc_count")}
+                for r in rows
+            ],
+        }
+
+    def get_by_collection(self, collection: str) -> dict:
+        return self._envelope([r for r in self._records if r["collection"] == collection])
+
+    def get_foreign(self, collection: str) -> dict:
+        return self._envelope([r for r in self._records if r["collection"] != collection])
+
+    def nearest(self, embedding, collection, *, cross_collection=False):
+        from nexus.db.t2.catalog_taxonomy import AssignResult
+        import numpy as _np
+        rows = ([r for r in self._records if r["collection"] != collection]
+                if cross_collection else
+                [r for r in self._records if r["collection"] == collection])
+        if not rows:
+            return None
+        q = _np.array(embedding, dtype=_np.float32)
+        cent = _np.array([r["embedding"] for r in rows], dtype=_np.float32)
+        if q.shape[0] != cent.shape[1]:
+            return None
+        qn = q / (_np.linalg.norm(q) or 1.0)
+        cn = cent / _np.where(_np.linalg.norm(cent, axis=1, keepdims=True) == 0, 1.0,
+                              _np.linalg.norm(cent, axis=1, keepdims=True))
+        sims = cn @ qn
+        j = int(sims.argmax())
+        return AssignResult(topic_id=int(rows[j]["topic_id"]), similarity=float(sims[j]))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _seed_oracle_chroma(records: list[dict]):
+    """Build an EphemeralClient with a taxonomy__centroids collection seeded from
+    the same records, for oracle-vs-http equality checks. Clears any prior
+    collection (EphemeralClient shares in-process backend state)."""
+    import chromadb
+
+    cl = chromadb.EphemeralClient()
+    try:
+        cl.delete_collection("taxonomy__centroids")
+    except Exception:
+        pass
+    coll = cl.create_collection(
+        "taxonomy__centroids", metadata={"hnsw:space": "cosine"}, embedding_function=None,
+    )
+    coll.add(
+        ids=[f"{r['collection']}:{r['topic_id']}" for r in records],
+        embeddings=[r["embedding"] for r in records],
+        metadatas=[{"topic_id": int(r["topic_id"]), "collection": r["collection"],
+                    "label": r.get("label", ""), "doc_count": r.get("doc_count", 0)}
+                   for r in records],
+    )
+    return cl
+
+
+class TestComputeAndAssign:
+    _CENTROIDS = [
+        {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0, 0.0], "label": "x", "doc_count": 3},
+        {"collection": "c", "topic_id": 2, "embedding": [0.0, 1.0, 0.0], "label": "y", "doc_count": 2},
+        {"collection": "other", "topic_id": 9, "embedding": [0.0, 0.0, 1.0], "label": "z", "doc_count": 1},
+    ]
+
+    def _store(self, client: HttpTaxonomyStore, records=None) -> HttpTaxonomyStore:
+        client._centroid_store = _FakeCentroidStore(records if records is not None else self._CENTROIDS)
+        return client
+
+    def test_compute_assignments_centroid_matches_oracle(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        doc_ids = ["d1", "d2"]
+        embeddings = [[0.9, 0.1, 0.0], [0.2, 0.95, 0.0]]
+        http_out = store.compute_assignments("c", doc_ids, embeddings)
+
+        cl = _seed_oracle_chroma(self._CENTROIDS)
+        oracle_out = CatalogTaxonomy.compute_assignments("c", doc_ids, embeddings, cl)
+
+        # Shape + topic_id + assigned_by parity; similarity to float precision.
+        assert [a["topic_id"] for a in http_out] == [a["topic_id"] for a in oracle_out] == [1, 2]
+        assert all(a["assigned_by"] == "centroid" for a in http_out)
+        assert all(a["similarity"] is None and a["source_collection"] is None for a in http_out)
+        assert [set(a) for a in http_out] == [
+            {"doc_id", "topic_id", "assigned_by", "similarity", "source_collection"}
+        ] * 2
+
+    def test_compute_assignments_projection_matches_oracle(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        doc_ids = ["d1"]
+        embeddings = [[0.05, 0.05, 0.99]]  # nearest the foreign 'other' centroid (topic 9)
+        http_out = store.compute_assignments("c", doc_ids, embeddings, cross_collection=True)
+
+        cl = _seed_oracle_chroma(self._CENTROIDS)
+        oracle_out = CatalogTaxonomy.compute_assignments(
+            "c", doc_ids, embeddings, cl, cross_collection=True,
+        )
+        assert http_out[0]["topic_id"] == oracle_out[0]["topic_id"] == 9
+        assert http_out[0]["assigned_by"] == "projection"
+        assert http_out[0]["source_collection"] == "c"
+        # raw cosine similarity (1 - distance), matches oracle to float precision
+        assert http_out[0]["similarity"] == pytest.approx(oracle_out[0]["similarity"], abs=1e-5)
+
+    def test_compute_assignments_empty_when_no_centroids(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client, records=[])
+        assert store.compute_assignments("c", ["d1"], [[1.0, 0.0, 0.0]]) == []
+
+    def test_compute_assignments_dim_mismatch_short_circuits(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        assert store.compute_assignments("c", ["d1"], [[1.0, 0.0]]) == []  # 2-dim vs 3-dim centroids
+
+    def test_assign_single_via_port(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        res = store.assign_single("c", np.array([0.9, 0.1, 0.0], dtype=np.float32))
+        assert res is not None
+        assert res.topic_id == 1
+        assert res.similarity == pytest.approx(1.0, abs=1e-2)
+        # cross-collection routes to foreign centroids
+        res_x = store.assign_single("c", np.array([0.0, 0.0, 1.0], dtype=np.float32),
+                                    cross_collection=True)
+        assert res_x.topic_id == 9
+
+    def test_assign_single_none_on_empty(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client, records=[])
+        assert store.assign_single("c", np.array([1.0, 0.0, 0.0], dtype=np.float32)) is None
+
+    def test_compute_cross_links_matches_oracle(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        # A new centroid for 'c' that points exactly at the foreign 'other' (topic 9).
+        new_centroids = [[0.0, 0.0, 1.0]]
+        new_metas = [{"topic_id": 1}]
+        pairs = store.compute_cross_links("c", new_centroids, new_metas)
+
+        cl = _seed_oracle_chroma(self._CENTROIDS)
+        # compute_cross_links takes the COLLECTION (not the client, unlike
+        # compute_assignments).
+        coll = cl.get_collection("taxonomy__centroids", embedding_function=None)
+        oracle_pairs = CatalogTaxonomy.compute_cross_links("c", new_centroids, new_metas, coll)
+        assert pairs == oracle_pairs == [(1, 9)]
+
+    def test_compute_discovered_topics_delegates(self, client, monkeypatch) -> None:
+        called = {}
+
+        def _fake(collection_name, doc_ids, embeddings, texts):
+            called["args"] = (collection_name, doc_ids, list(embeddings), texts)
+            return [{"label": "sentinel"}]
+
+        monkeypatch.setattr(CatalogTaxonomy, "compute_discovered_topics", staticmethod(_fake))
+        out = client.compute_discovered_topics("c", ["d1"], np.array([[1.0]]), ["t"])
+        assert out == [{"label": "sentinel"}]
+        assert called["args"][0] == "c" and called["args"][1] == ["d1"]
+
+    def test_compute_split_delegates(self, client, monkeypatch) -> None:
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_split",
+            staticmethod(lambda *a, **k: {"child_specs": ["S"], "topic_id": a[0]}),
+        )
+        out = client.compute_split(7, ["d"], ["t"], ["d"], np.array([[1.0]]), "c", 2)
+        assert out == {"child_specs": ["S"], "topic_id": 7}
+
+    def test_compute_rebuild_plan_delegates(self, client, monkeypatch) -> None:
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_rebuild_plan",
+            staticmethod(lambda *a, **k: {"specs": [], "manual_transfers": k.get("manual_assignments")}),
+        )
+        out = client.compute_rebuild_plan(
+            "c", ["d"], np.array([[1.0]]), ["t"],
+            old_centroids=np.empty((0, 0)), old_labels=[], old_review_statuses=[],
+            old_centroid_topic_ids=[], manual_assignments={"d": 0},
+        )
+        assert out == {"specs": [], "manual_transfers": {"d": 0}}
