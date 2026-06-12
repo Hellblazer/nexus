@@ -9,11 +9,16 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.TaxonomyRepository;
+import dev.nexus.service.vectors.TaxonomyCentroidRepository;
+import dev.nexus.service.vectors.TaxonomyCentroidRepository.AnnHit;
+import dev.nexus.service.vectors.TaxonomyCentroidRepository.CentroidRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -86,9 +91,11 @@ public final class TaxonomyHandler implements HttpHandler {
     private static final TypeReference<List<Object>>        LIST_TYPE  = new TypeReference<>() {};
 
     private final TaxonomyRepository repo;
+    private final TaxonomyCentroidRepository centroidRepo;
 
-    public TaxonomyHandler(TaxonomyRepository repo) {
+    public TaxonomyHandler(TaxonomyRepository repo, TaxonomyCentroidRepository centroidRepo) {
         this.repo = repo;
+        this.centroidRepo = centroidRepo;
     }
 
     @Override
@@ -155,6 +162,14 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/links/generate_cooccurrence"    -> handleGenerateCooccurrenceLinks(exchange, tenant, method);
                 case "/links/refresh_projection"       -> handleRefreshProjectionLinks(exchange, tenant, method);
                 case "/topics/persist_split"           -> handlePersistSplit(exchange, tenant, method);
+                // Centroids (pgvector — RDR-156 bead nexus-t1hnc; chroma-free taxonomy)
+                case "/centroids/upsert"               -> handleCentroidUpsert(exchange, tenant, method);
+                case "/centroids/query"                -> handleCentroidQuery(exchange, tenant, method);
+                case "/centroids/count"                -> handleCentroidCount(exchange, tenant, method);
+                case "/centroids/dimension"            -> handleCentroidDimension(exchange, tenant, method);
+                case "/centroids/by_collection"        -> handleCentroidByCollection(exchange, tenant, method);
+                case "/centroids/delete"               -> handleCentroidDelete(exchange, tenant, method);
+                case "/centroids/purge"                -> handleCentroidPurge(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -689,5 +704,150 @@ public final class TaxonomyHandler implements HttpHandler {
         if (childSpecs == null) childSpecs = List.of();
         var childIds = repo.persistSplit(tenant, topicId, collectionName, childSpecs);
         HttpUtil.send(ex, 200, json(Map.of("child_ids", childIds)));
+    }
+
+    // ── Centroid handlers (pgvector — RDR-156 bead nexus-t1hnc) ──────────────────
+    // The service-backed centroid store replaces the chroma_client in service-mode
+    // taxonomy compute. Responses use snake_case keys (the Python centroid-port
+    // contract); JsonInclude.ALWAYS keeps nullable label/doc_count present.
+
+    /**
+     * POST /v1/taxonomy/centroids/upsert
+     * Body: {records: [{collection, topic_id, embedding:[float...], label, doc_count}]}
+     * Returns: {ok:true, count:N}
+     */
+    @SuppressWarnings("unchecked")
+    private void handleCentroidUpsert(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        Object raw = body.get("records");
+        List<CentroidRecord> records = new ArrayList<>();
+        if (raw instanceof List<?> lst) {
+            for (Object o : lst) {
+                Map<String, Object> r = (Map<String, Object>) o;
+                records.add(new CentroidRecord(
+                    requireString(r, "collection"),
+                    requireLong(r, "topic_id"),
+                    requireFloatArray(r, "embedding"),
+                    optStringOrNull(r, "label"),
+                    optIntegerOrNull(r, "doc_count")));
+            }
+        }
+        centroidRepo.upsertCentroids(tenant, records);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true, "count", records.size())));
+    }
+
+    /**
+     * POST /v1/taxonomy/centroids/query
+     * Body: {embedding:[float...], collection, cross_collection:bool, n_results:int}
+     * Returns: [{topic_id, similarity}] (distance-ascending)
+     */
+    private void handleCentroidQuery(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        float[] embedding       = requireFloatArray(body, "embedding");
+        String  collection      = requireString(body, "collection");
+        boolean crossCollection = body.get("cross_collection") instanceof Boolean b && b;
+        int     nResults        = optIntDefault(body, "n_results", 1);
+        List<AnnHit> hits = centroidRepo.annQuery(tenant, embedding, collection, crossCollection, nResults);
+        List<Map<String, Object>> out = new ArrayList<>(hits.size());
+        for (AnnHit h : hits) {
+            out.add(map("topic_id", h.topicId(), "similarity", h.similarity()));
+        }
+        HttpUtil.send(ex, 200, json(out));
+    }
+
+    /** GET /v1/taxonomy/centroids/count?collection= (optional) — Returns {count:N}. */
+    private void handleCentroidCount(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        String collection = queryParam(ex, "collection");
+        HttpUtil.send(ex, 200, json(Map.of("count", centroidRepo.count(tenant, collection))));
+    }
+
+    /** GET /v1/taxonomy/centroids/dimension — Returns {dimension:N} (-1 when empty). */
+    private void handleCentroidDimension(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        HttpUtil.send(ex, 200, json(Map.of("dimension", centroidRepo.dimensionProbe(tenant))));
+    }
+
+    /**
+     * GET /v1/taxonomy/centroids/by_collection?collection= (required)
+     * Returns: [{topic_id, embedding:[float...], label, collection, doc_count}]
+     */
+    private void handleCentroidByCollection(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        String collection = requireQueryParam(ex, "collection");
+        List<CentroidRecord> rows = centroidRepo.getByCollection(tenant, collection);
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (CentroidRecord r : rows) {
+            out.add(map(
+                "topic_id",   r.topicId(),
+                "embedding",  r.embedding(),
+                "label",      r.label(),
+                "collection", r.collection(),
+                "doc_count",  r.docCount()));
+        }
+        HttpUtil.send(ex, 200, json(out));
+    }
+
+    /**
+     * POST /v1/taxonomy/centroids/delete
+     * Body: {collection, topic_ids:[long...]} — Returns {deleted:N}.
+     */
+    private void handleCentroidDelete(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        Object raw = body.get("topic_ids");
+        List<Long> topicIds = raw instanceof List<?> lst
+            ? lst.stream().map(v -> ((Number) v).longValue()).toList()
+            : List.of();
+        HttpUtil.send(ex, 200, json(Map.of("deleted",
+            centroidRepo.deleteByIds(tenant, collection, topicIds))));
+    }
+
+    /** POST /v1/taxonomy/centroids/purge — Body {collection} — Returns {deleted:N}. */
+    private void handleCentroidPurge(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        HttpUtil.send(ex, 200, json(Map.of("deleted",
+            centroidRepo.purgeByCollection(tenant, collection))));
+    }
+
+    // ── Centroid parsing helpers ─────────────────────────────────────────────────
+
+    /** Parse a JSON number array into a float[] (centroid embeddings). */
+    private float[] requireFloatArray(Map<String, Object> body, String key) {
+        Object raw = body.get(key);
+        if (!(raw instanceof List<?> lst) || lst.isEmpty()) {
+            throw new IllegalArgumentException("missing required float-array field: " + key);
+        }
+        float[] v = new float[lst.size()];
+        for (int i = 0; i < lst.size(); i++) {
+            Object e = lst.get(i);
+            if (!(e instanceof Number n)) {
+                throw new IllegalArgumentException("field '" + key + "' must be a number array");
+            }
+            v[i] = n.floatValue();
+        }
+        return v;
+    }
+
+    private Integer optIntegerOrNull(Map<String, Object> body, String key) {
+        Object val = body.get(key);
+        if (val == null) return null;
+        if (val instanceof Number n) return n.intValue();
+        try { return Integer.parseInt(val.toString()); }
+        catch (NumberFormatException e) { return null; }
+    }
+
+    /** Build a LinkedHashMap preserving null values (JsonInclude.ALWAYS keeps the keys). */
+    private static Map<String, Object> map(Object... kv) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        for (int i = 0; i < kv.length; i += 2) {
+            m.put((String) kv[i], kv[i + 1]);
+        }
+        return m;
     }
 }
