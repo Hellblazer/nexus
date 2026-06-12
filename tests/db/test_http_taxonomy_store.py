@@ -399,6 +399,9 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
 
             elif path == "/v1/taxonomy/import/topic":
                 tid = int(body["id"])
+                # Keep the autoincrement ahead of explicitly-imported ids so a
+                # later persist_* INSERT (via _next_id) never reuses one.
+                _ID_SEQ[0] = max(_ID_SEQ[0], tid)
                 _TOPICS[tid] = {
                     "id":            tid,
                     "label":         body["label"],
@@ -480,6 +483,30 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                             "similarity": None, "assigned_at": None, "source_collection": None,
                         })
                 self._json(200, {"topic_ids": tids})
+
+            elif path == "/v1/taxonomy/topics/persist_split":
+                parent = int(body["topic_id"])
+                collection = body["collection_name"]
+                _ASSIGNMENTS[:] = [a for a in _ASSIGNMENTS if a["topic_id"] != parent]
+                child_ids = []
+                for spec in body.get("child_specs", []):
+                    tid = _next_id()
+                    _TOPICS[tid] = {
+                        "id": tid, "label": spec["label"], "parent_id": parent,
+                        "collection": collection, "centroid_hash": None,
+                        "doc_count": int(spec.get("doc_count", 0)),
+                        "created_at": "2026-01-01T00:00:00Z", "review_status": "pending",
+                        "terms": spec.get("terms_json"),
+                    }
+                    child_ids.append(tid)
+                    for did in spec.get("doc_ids", []):
+                        _ASSIGNMENTS.append({
+                            "doc_id": did, "topic_id": tid, "assigned_by": "split",
+                            "similarity": None, "assigned_at": None, "source_collection": None,
+                        })
+                if parent in _TOPICS:
+                    _TOPICS[parent]["doc_count"] = 0
+                self._json(200, {"child_ids": child_ids})
 
             elif path == "/v1/taxonomy/purge_collection":
                 # Mirror the Java cascade: links touching doomed, assignments by
@@ -1110,8 +1137,28 @@ class _FakeCentroidStore:
     """
 
     def __init__(self, records: list[dict]) -> None:
-        self._records = records
+        self._records = list(records)
         self.closed = False
+        self.calls: list[tuple] = []  # ("upsert", n) | ("delete_ids", collection, ids)
+
+    def upsert(self, records: list[dict]) -> None:
+        self.calls.append(("upsert", len(records)))
+        for r in records:
+            self._records = [
+                x for x in self._records
+                if not (x["collection"] == r["collection"] and x["topic_id"] == r["topic_id"])
+            ]
+            self._records.append(r)
+
+    def delete_ids(self, collection: str, topic_ids: list[int]) -> int:
+        self.calls.append(("delete_ids", collection, list(topic_ids)))
+        ids = set(topic_ids)
+        before = len(self._records)
+        self._records = [
+            x for x in self._records
+            if not (x["collection"] == collection and x["topic_id"] in ids)
+        ]
+        return before - len(self._records)
 
     def _envelope(self, rows: list[dict]) -> dict:
         return {
@@ -1412,3 +1459,203 @@ class TestPersist:
         assert state["old_labels"] == []
         assert state["manual_assignments"] == {}
         assert state["old_centroids"].shape == (0, 0)
+
+
+# ── Orchestrator compose-glue (RDR-152 nexus-1di3r.9) ──────────────────────────
+
+
+class _FakeChromaColl:
+    """Minimal chroma collection: get() by ids (documents) or paginated (embeddings)."""
+
+    def __init__(self, *, documents=None, embeddings=None):
+        self._docs = documents or {}
+        self._embs = embeddings or {}
+        self._order = list((documents or embeddings or {}).keys())
+
+    def get(self, ids=None, include=None, limit=None, offset=None):
+        include = include or []
+        if ids is not None:
+            keys = [i for i in ids if i in self._docs or i in self._embs]
+        else:
+            start = offset or 0
+            keys = self._order[start:start + (limit or len(self._order))]
+        out = {"ids": keys}
+        if "documents" in include:
+            out["documents"] = [self._docs.get(k) for k in keys]
+        if "embeddings" in include:
+            out["embeddings"] = [self._embs.get(k) for k in keys]
+        return out
+
+
+class _FakeChromaClient:
+    def __init__(self, colls):
+        self._colls = colls
+
+    def get_collection(self, name, embedding_function=None):
+        return self._colls[name]
+
+
+class TestOrchestrators:
+    def _store(self, client, records):
+        client._centroid_store = _FakeCentroidStore(records)
+        return client
+
+    def test_discover_topics_compose(self, client, monkeypatch) -> None:
+        store = self._store(client, [])
+        specs = [{"label": "a", "terms": "[]", "doc_count": 2, "doc_ids": ["x1", "x2"],
+                  "centroid": [1.0, 0.0], "assigned_by": "hdbscan"}]
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_discovered_topics", staticmethod(lambda *a: specs))
+        n = store.discover_topics("c", ["x1", "x2"], np.array([[1.0, 0.0], [0.9, 0.1]]), ["t1", "t2"])
+        assert n == 1
+        assert {t["label"] for t in client.get_all_topics(collection="c")} == {"a"}
+        assert ("upsert", 1) in store._centroid_store.calls
+        assert len(store._centroid_store._records) == 1
+
+    def test_discover_topics_empty_specs_returns_zero(self, client, monkeypatch) -> None:
+        store = self._store(client, [])
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_discovered_topics", staticmethod(lambda *a: []))
+        assert store.discover_topics("c", [], np.array([]), []) == 0
+        assert store._centroid_store.calls == []
+
+    def test_assign_batch_compose(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0, 0.0], "label": "x", "doc_count": 1},
+        ])
+        n = store.assign_batch("c", ["d1"], [[0.9, 0.1, 0.0]])
+        assert n == 1
+        assert client.get_assignments_for_docs(["d1"]) == {"d1": 1}
+
+    def test_rebuild_taxonomy_compose(self, client, monkeypatch) -> None:
+        # Old topic id=1 in T2 + matching old centroid in the port.
+        client.import_topic(
+            src_id=1, label="old", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=1, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "old", "doc_count": 1},
+        ])
+        plan = {"specs": [{"label": "new", "doc_count": 1, "terms": "[]",
+                           "review_status": "pending", "assigned_by": "hdbscan",
+                           "doc_ids": ["d1"], "centroid": [0.0, 1.0]}],
+                "manual_transfers": {}}
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_rebuild_plan", staticmethod(lambda *a, **k: plan))
+        n = store.rebuild_taxonomy("c", ["d1"], np.array([[0.0, 1.0]]), ["t"])
+        assert n == 1
+        calls = store._centroid_store.calls
+        assert ("delete_ids", "c", [1]) in calls
+        assert ("upsert", 1) in calls
+        # T2 REPLACE: only "new" survives; the port now holds exactly the NEW
+        # centroid ([0,1]), the old one ([1,0]) deleted.
+        assert {t["label"] for t in client.get_all_topics(collection="c")} == {"new"}
+        port = store._centroid_store.get_by_collection("c")
+        assert len(port["embeddings"]) == 1
+        assert port["embeddings"][0] == [0.0, 1.0]
+        assert 1 not in {m["topic_id"] for m in port["metadatas"]}  # old id not reused
+
+    def test_rebuild_taxonomy_passes_old_state_kwargs(self, client, monkeypatch) -> None:
+        # Proves the GLUE: read_rebuild_old_state's dict reaches compute_rebuild_plan
+        # under the correct kwarg names (a compose-order test alone can't catch a
+        # wrong-kwarg bug). Spy captures kwargs instead of monkeypatching to a const.
+        client.import_topic(
+            src_id=1, label="old", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=1, created_at="2026-01-01T00:00:00Z", review_status="accepted", terms=None)
+        client.assign_topic("dm", 1, "manual")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "old", "doc_count": 1},
+        ])
+        captured: dict = {}
+
+        def _spy(collection_name, doc_ids, embeddings, texts, **kwargs):
+            captured.update(kwargs)
+            return {"specs": [], "manual_transfers": {}}
+
+        monkeypatch.setattr(CatalogTaxonomy, "compute_rebuild_plan", staticmethod(_spy))
+        store.rebuild_taxonomy("c", ["d1"], np.array([[0.0, 1.0]]), ["t"])
+
+        # kwargs must match read_rebuild_old_state's reshaped output exactly.
+        assert captured["old_labels"] == ["old"]
+        assert captured["old_review_statuses"] == ["accepted"]
+        assert captured["old_centroid_topic_ids"] == [1]
+        assert captured["manual_assignments"] == {"dm": 1}
+        assert np.array_equal(
+            captured["old_centroids"], np.array([[1.0, 0.0]], dtype=np.float32))
+
+    def test_split_topic_compose(self, client, monkeypatch) -> None:
+        client.import_topic(
+            src_id=5, label="parent", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=2, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        client.assign_topic("d1", 5, "hdbscan")
+        client.assign_topic("d2", 5, "hdbscan")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 5, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 2},
+        ])
+
+        class _EF:
+            def __init__(self, **k): pass
+            def __call__(self, texts): return [[1.0, 0.0]] * len(texts)
+
+        monkeypatch.setattr("nexus.db.local_ef.LocalEmbeddingFunction", _EF)
+        child_specs = [
+            {"label": "c0", "terms_json": "[]", "doc_count": 1, "doc_ids": ["d1"],
+             "centroid": [1.0, 0.0], "created_at": "2026-01-01T00:00:00Z"},
+            {"label": "c1", "terms_json": "[]", "doc_count": 1, "doc_ids": ["d2"],
+             "centroid": [0.0, 1.0], "created_at": "2026-01-01T00:00:00Z"},
+        ]
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_split",
+            staticmethod(lambda *a, **k: {"topic_id": 5, "collection_name": "c",
+                                          "child_specs": child_specs}))
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(documents={"d1": "t1", "d2": "t2"})})
+        n = store.split_topic(5, 2, fake_client)
+        assert n == 2
+        calls = store._centroid_store.calls
+        assert ("delete_ids", "c", [5]) in calls
+        assert ("upsert", 2) in calls
+        labels = {t["label"] for t in client.get_all_topics(collection="c")}
+        assert {"c0", "c1"} <= labels
+
+    def test_split_topic_too_few_docs(self, client) -> None:
+        client.import_topic(
+            src_id=6, label="p", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=1, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        client.assign_topic("only", 6, "hdbscan")
+        store = self._store(client, [])
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(documents={"only": "t"})})
+        assert store.split_topic(6, 5, fake_client) == 0  # 1 doc < k=5
+
+    def test_project_against_match_and_novel(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0], "label": "T7", "doc_count": 1},
+            {"collection": "tgt", "topic_id": 8, "embedding": [0.0, 1.0], "label": "T8", "doc_count": 1},
+        ])
+        src = _FakeChromaColl(embeddings={"s1": [1.0, 0.0], "s2": [0.0, 1.0], "s3": [0.7, 0.7]})
+        fake_client = _FakeChromaClient({"src": src})
+        out = store.project_against("src", ["tgt"], fake_client, threshold=0.85, top_k=3)
+
+        assert out["total_chunks"] == 3
+        assert out["total_centroids"] == 2
+        assert out["novel_chunks"] == ["s3"]  # 0.707 cosine to each < 0.85
+        assigns = {(d, t): round(s, 4) for d, t, s in out["chunk_assignments"]}
+        assert assigns[("s1", 7)] == 1.0 and assigns[("s2", 8)] == 1.0
+        matched = {m["topic_id"]: m for m in out["matched_topics"]}
+        assert set(matched) == {7, 8}
+        assert matched[7]["chunk_count"] == 1 and matched[7]["avg_similarity"] == pytest.approx(1.0)
+
+    def test_project_against_dim_mismatch_raises(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0, 0.0], "label": "T7", "doc_count": 1},
+        ])
+        src = _FakeChromaColl(embeddings={"s1": [1.0, 0.0]})  # 2d vs 3d centroid
+        fake_client = _FakeChromaClient({"src": src})
+        with pytest.raises(ValueError, match="Dimension mismatch"):
+            store.project_against("src", ["tgt"], fake_client)
+
+    def test_project_against_no_source_chunks(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0], "label": "T7", "doc_count": 1},
+        ])
+        fake_client = _FakeChromaClient({"src": _FakeChromaColl(embeddings={})})
+        out = store.project_against("src", ["tgt"], fake_client)
+        assert out["total_chunks"] == 0 and out["matched_topics"] == []
