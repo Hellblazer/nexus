@@ -236,7 +236,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         except Exception:
             err = {"error": body_bytes.decode(errors="replace")}
         raise VectorServiceError(
-            f"POST {path} → HTTP {e.code}: {err.get('error', err)}"
+            f"POST {path} → HTTP {e.code}: {err.get('error', err)}", code=e.code
         ) from e
 
 
@@ -253,12 +253,23 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         except Exception:
             err = {"error": body_bytes.decode(errors="replace")}
         raise VectorServiceError(
-            f"GET {path} → HTTP {e.code}: {err.get('error', err)}"
+            f"GET {path} → HTTP {e.code}: {err.get('error', err)}", code=e.code
         ) from e
 
 
 class VectorServiceError(RuntimeError):
-    """Raised when the vector service returns an error."""
+    """Raised when the vector service returns an error.
+
+    ``code`` carries the HTTP status when the failure was an HTTP error
+    response (404 from an older service JAR, 422 model-unavailable, ...);
+    ``None`` for transport-level failures. Callers use it for
+    deployment-skew fallbacks (RDR-156 P3: /stats absent on a pre-catalog-005
+    JAR → fall back to /collections + /count).
+    """
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # ── Collection-handle stub ────────────────────────────────────────────────────
@@ -661,20 +672,96 @@ class HttpVectorClient:
         except VectorServiceError:
             return False
 
+    def collection_stats(self) -> list[dict]:
+        """Per-collection live statistics via ``GET /v1/vectors/stats``.
+
+        RDR-156 P3 (nexus-70r3c.12): served from the
+        ``nexus.collection_vector_stats`` SECURITY INVOKER view — one
+        round-trip for all of the tenant's collections, TOMBSTONE-FILTERED
+        (chunks whose only manifest rows point to trashed documents are not
+        counted; manifest-less note chunks are).
+
+        Returns ``[{"name": ..., "dim": 384, "count": N,
+        "last_write": "2026-..."}, ...]``, name ascending. Collections with
+        zero live chunks do not appear. ``last_write`` may be absent.
+
+        Raises :class:`VectorServiceError` on failure — including ``code=404``
+        from a pre-catalog-005 service JAR (deployment skew); callers that
+        must work across the skew use :meth:`list_collections`, which falls
+        back automatically.
+        """
+        result = _get("/v1/vectors/stats", tenant=self._tenant)
+        return result if isinstance(result, list) else []
+
     def list_collections(self) -> list[dict]:
-        """List the tenant's vector collections via the service."""
+        """List the tenant's vector collections with live chunk counts.
+
+        T3Database parity: returns ``[{"name": ..., "count": N}, ...]`` —
+        ``nx collection list`` and friends index both keys (the missing
+        ``count`` was a live KeyError on every service-mode box, RDR-156 P3).
+
+        Primary path is ONE ``/v1/vectors/stats`` round-trip
+        (tombstone-filtered live counts, replacing T3Database's N-way
+        threadpooled ``col.count()`` fan-out). On a pre-catalog-005 service
+        JAR the route 404s; fall back to ``/collections`` + per-collection
+        ``/count`` so the surface keeps working across the deployment skew
+        (raw counts — tombstones do not exist on a pre-catalog-005 schema).
+
+        Multi-dim collections (same name in two ``chunks_<dim>`` tables —
+        cross-dim re-indexing residue) collapse to one entry, counts summed.
+        """
+        try:
+            stats = self.collection_stats()
+        except VectorServiceError as e:
+            if e.code != 404:
+                _log.warning("http_vector_list_collections_failed", error=str(e))
+                return []
+            _log.info("http_vector_stats_unavailable_fallback", error=str(e))
+            return self._list_collections_via_count()
+        merged: dict[str, int] = {}
+        for row in stats:
+            name = row.get("name", "")
+            if name:
+                merged[name] = merged.get(name, 0) + int(row.get("count", 0))
+        return [{"name": n, "count": c} for n, c in sorted(merged.items())]
+
+    def _list_collections_via_count(self) -> list[dict]:
+        """Deployment-skew fallback: ``/collections`` names + N ``/count`` calls.
+
+        Pre-catalog-005 JARs have no ``/stats`` route. Counts here are RAW
+        (the old endpoint's semantics); a failing per-collection count is
+        reported as -1 rather than dropping the collection from the listing.
+        """
         try:
             result = _get("/v1/vectors/collections", tenant=self._tenant)
-            return result if isinstance(result, list) else []
         except VectorServiceError as e:
             _log.warning("http_vector_list_collections_failed", error=str(e))
             return []
+        names = [c.get("name", "") for c in result] if isinstance(result, list) else []
+        out: list[dict] = []
+        for name in names:
+            if not name:
+                continue
+            try:
+                out.append({"name": name, "count": self.count(name)})
+            except VectorServiceError as e:
+                _log.warning(
+                    "http_vector_collection_count_failed",
+                    collection=name,
+                    error=str(e),
+                )
+                out.append({"name": name, "count": -1})
+        return out
 
     def collection_exists(self, name: str) -> bool:
-        """True if *name* holds at least one chunk (no create side-effect).
+        """True if *name* holds at least one LIVE chunk (no create side-effect).
 
         T3Database parity (RDR-155 P4a.2): on the pgvector path a collection
         is a column value, so existence == "has rows for this tenant".
+        Since RDR-156 P3 this reads the tombstone-filtered stats view via
+        :meth:`list_collections`: a collection whose every chunk belongs to
+        trashed documents reads as absent — the Decision 6 single-enforcement
+        -point semantics (consumers see live state only).
         """
         return any(c.get("name") == name for c in self.list_collections())
 

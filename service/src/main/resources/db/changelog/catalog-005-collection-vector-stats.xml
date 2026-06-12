@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 bead nexus-70r3c.12 — P3.2 collection_vector_stats view.
+
+    Decision 4 implementation:
+      - nexus.collection_vector_stats: per-collection chunk count, dim, and last write
+        timestamp, aggregated over nexus.live_chunks (catalog-003). Replaces the remote
+        per-collection count(*) calls in doctor/status surfaces and the migration
+        runbook's hand-psql counts.
+
+    Pinned contract (CollectionVectorStatsTest):
+      - Columns EXACTLY (tenant_id, collection, dim, chunk_count, last_write).
+        No deleted_at, no data-plane payload (Decision 6 single enforcement point).
+      - Grain: one row per (tenant_id, collection, dim). chunk_count bigint,
+        last_write = max(created_at) over LIVE chunks.
+      - TOMBSTONE-FILTERED by construction: built ON live_chunks, so a chunk whose
+        only manifest rows point to tombstoned documents is not counted, and
+        manifest-less note chunks (MCP store_put) ARE counted (live by contract).
+      - security_invoker = true (RDR-154 standing rule): the CALLER's RLS on the
+        underlying chunks tables provides tenant isolation. live_chunks is itself
+        security_invoker, so invoker context propagates through both layers.
+      - A collection with zero live chunks does not appear (chunk-driven GROUP BY,
+        matching the DISTINCT-based listCollections semantics).
+
+    Live-vs-raw divergence is deliberate: GET /v1/vectors/count's raw
+    SELECT count(*) sees tombstoned docs' chunks; this view does not. Doctor/status
+    surfaces want live counts; migration parity checks (vector_etl verify) keep the
+    raw count on purpose — exact source==target comparison must include everything.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: collection_vector_stats view ─────────────────────────── -->
+    <changeSet id="catalog-005-1" author="nexus-70r3c.12">
+        <comment>
+            nexus.collection_vector_stats — SECURITY INVOKER aggregate view over live_chunks.
+            (tenant_id, collection, dim, chunk_count, last_write); one row per
+            (tenant_id, collection, dim); tombstone-filtered by construction.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_vector_stats
+    WITH (security_invoker = true)
+AS
+SELECT lc.tenant_id,
+       lc.collection,
+       lc.dim,
+       count(*)           AS chunk_count,
+       max(lc.created_at) AS last_write
+  FROM nexus.live_chunks lc
+ GROUP BY lc.tenant_id, lc.collection, lc.dim
+        </sql>
+        <rollback>DROP VIEW IF EXISTS nexus.collection_vector_stats</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: GRANT SELECT to PUBLIC (live_chunks pattern) ──────────── -->
+    <changeSet id="catalog-005-2" author="nexus-70r3c.12">
+        <comment>
+            SELECT granted to PUBLIC for the same three reasons as live_chunks
+            (catalog-003-7): (a) security_invoker means caller RLS is the security
+            boundary, view-level grants add nothing; (b) every role that reads
+            live_chunks needs the stats; (c) grants-nexus-svc.xml's GRANT ON ALL TABLES
+            ran before this view existed.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT SELECT ON nexus.collection_vector_stats TO PUBLIC;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                REVOKE SELECT ON nexus.collection_vector_stats FROM PUBLIC;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

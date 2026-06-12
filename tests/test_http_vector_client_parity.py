@@ -69,6 +69,14 @@ EXCLUSIONS: dict[str, str] = {
         "provides a cheap collection record count via the Java service. No T3 parity "
         "pin possible — it is Http-only surface, not a shared-prefix method."
     ),
+    "collection_stats": (
+        "HttpVectorClient.collection_stats() is an Http-path-only extension "
+        "(RDR-156 P3, nexus-70r3c.12): one-round-trip per-collection live stats "
+        "from the nexus.collection_vector_stats view. T3Database has no equivalent "
+        "(its list_collections fans out N col.count() calls). list_collections() "
+        "itself IS pinned above; its return shape {name, count} is asserted in "
+        "tests/test_http_vector_client_stats.py."
+    ),
 }
 
 

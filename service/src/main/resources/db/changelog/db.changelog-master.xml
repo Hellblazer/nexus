@@ -81,6 +81,12 @@
          generated-SQL-string artifacts to first-class DB objects. -->
     <include file="db/changelog/catalog-004-manifest-functions.xml"/>
 
+    <!-- collection_vector_stats view (bead nexus-70r3c.12, RDR-156 P3.2):
+         SECURITY INVOKER aggregate over live_chunks — per-collection chunk count, dim,
+         last write. Tombstone-filtered by construction. Replaces remote count(*) calls
+         in doctor/status surfaces. Must come after catalog-003 (live_chunks). -->
+    <include file="db/changelog/catalog-005-collection-vector-stats.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

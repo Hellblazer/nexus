@@ -257,6 +257,25 @@ and `manifest_orphan_sql(dim)` in `src/nexus/migration/vector_etl.py` are
 deprecated and kept only because bead nexus-g37fr (RDR-155 P4b) will
 delete that module wholesale. Use the stored functions above.
 
+Per-collection chunk counts (eyeballing a migration or comparing against a
+source inventory) come from the `nexus.collection_vector_stats` view
+(catalog-005, RDR-156 P3, bead nexus-70r3c.12) — NOT hand-assembled
+`count(*)` over the three `chunks_<dim>` tables:
+
+```
+psql -h 127.0.0.1 -p <PG_PORT> -U <admin> -d nexus \
+  -c "SELECT * FROM nexus.collection_vector_stats ORDER BY tenant_id, collection;"
+```
+
+One row per `(tenant_id, collection, dim)` with `chunk_count` and
+`last_write` (max `created_at`). Caveat for migration parity: the view is
+TOMBSTONE-FILTERED (live chunks only). On a freshly migrated cluster with
+no trashed documents it equals the raw count; if documents have been
+trashed since, an exact source-vs-target comparison must use the ETL's own
+verification (raw counts) — the divergence is the view's purpose, not a
+bug. The same data is served to clients at `GET /v1/vectors/stats` and is
+what `nx collection list` prints.
+
 Optional check (`verify_taxonomy_consistency`, same module): every
 `topic_assignments.source_collection` must resolve to a migrated
 collection. Production returned 28 unresolved values, all verified as
