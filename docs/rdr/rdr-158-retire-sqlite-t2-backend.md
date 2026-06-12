@@ -126,13 +126,33 @@ Draft sequencing decisions (to lock at gate):
 
 - Does P1 (compute-core extraction) belong here or fold into a taxonomy-refactor bead
   independent of the retirement?
-- Is a thin in-memory reference T2 impl worth keeping purely as a test oracle after
-  the SQLite class is deleted, or is a frozen `Protocol` enough?
+- ~~Is a thin in-memory reference T2 impl worth keeping purely as a test oracle after
+  the SQLite class is deleted, or is a frozen `Protocol` enough?~~ **RESOLVED by P2
+  (nexus-jkzyq):** neither a hand-written `Protocol` nor an in-memory reference impl —
+  a **machine-generated frozen contract artifact**. The nine SQLite stores' public
+  surface (137 methods; taxonomy alone is 52) is too large to hand-transcribe into
+  Protocol stubs without silently loosening or wrongly tightening coverage, which
+  would defeat the tripwire. So P2 snapshots `{label: {method: [param_names]}}` from
+  the live oracles into `tests/db/t2_store_contract.py` (`T2_STORE_CONTRACT`), and the
+  durable tripwire asserts the `Http*` stores against THAT — no SQLite import. A
+  separate, P4-deletable faithfulness guard (`test_contract_matches_live_sqlite_oracle`)
+  cross-checks the frozen snapshot against the live SQLite classes for as long as they
+  exist (deleted with them in P4, surfaced by P4's SQLite-import inverse-grep). This
+  reproduces RF-158-1's nine-pair, zero-exemption strictness by construction and
+  preserves `_UNIVERSAL_IGNORE`.
 - ~~Telemetry/chash/aspect_queue: do all seven domains have verified service parity?~~
   **RESOLVED by RF-158-1**: the tripwire covers **nine** strict pairs (the seven domains
   plus `document_highlights` and the T1 `scratch` pair) with `_EXCLUSIONS = {}` and
   `_PARAM_DRIFT_OK = {}`. That IS the parity audit — no separate pre-P3 audit is needed;
   P3's only remaining gate is nexus-luxe6 + the deprecation window.
+- **(P3, forward-tracked on nexus-7bomn from P2 critique)** Service-mode-only `Http*`
+  methods with no SQLite-oracle counterpart (`HttpDocumentHighlightsStore.rename_collection`;
+  `HttpDocumentAspectsStore.operator_filter`/`operator_groupby`/`operator_confidence_aggregate`)
+  are production-called but absent from the frozen contract (and from the live oracle
+  before it), so the tripwire cannot catch their silent removal. P3 should add a
+  `T2_SUPPLEMENTAL_CONTRACT` listing these and union it into the coverage/param checks
+  BEFORE P4 deletes the faithfulness guard, after which no detection path remains. Out
+  of P2's D2 scope (reproduce the SQLite-oracle surface), deliberately deferred.
 - Coordination with conexus RDR-001 (`nx upgrade`): the user-facing migration is
   conexus-owned; this RDR consumes it as a gate, it does not define it.
 
