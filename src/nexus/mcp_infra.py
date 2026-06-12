@@ -215,6 +215,17 @@ def t2_ctx():
     (``t2_daemon._t2_decode``), so the method would receive a dict and
     break on attribute access. The hot every-poll path routes via
     ``t2_index_write``; only the work-bounded persist falls back here.
+
+    Remaining routable writers in mcp/core.py that still use _t2_ctx
+    (not yet converted; see nexus-j5geq commit notes for audit):
+    - memory.put (line ~1850): scratch_put tool
+    - memory.delete (line ~1943): scratch_delete tool
+    - memory.merge_memories (line ~2069): memory_consolidate tool
+    - memory.flag_stale_memories (line ~2080): memory_consolidate tool
+    - plans.increment_run_outcome (line ~3617): _nx_answer_record_outcome
+    - plans.increment_run_started (line ~4012): nx_answer
+    - _nx_answer_record_run uses db.telemetry.conn (raw sqlite3 conn,
+      NOT routable via RPC until a dedicated daemon op is added)
     """
     from nexus.db.t2 import T2Database
     return T2Database(default_db_path())  # epsilon-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)

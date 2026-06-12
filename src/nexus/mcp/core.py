@@ -33,6 +33,7 @@ from nexus.mcp_infra import (
     record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
     t2_ctx as _t2_ctx,
+    t2_index_write as _t2_index_write,
 )
 from nexus.ttl import parse_ttl
 
@@ -2302,16 +2303,21 @@ def plan_save(
     try:
         if not query or not plan_json:
             return "Error: query and plan_json are required"
-        with _t2_ctx() as db:
-            row_id = db.save_plan(
+        # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
+        # _WRITE_OPS; the daemon serialises the write through its single WAL
+        # writer, eliminating the "database is locked" races seen 2026-06-11).
+        _sc_tags = scope_tags or None
+        row_id = _t2_index_write(
+            lambda db: db.plans.save_plan(
                 query=query,
                 plan_json=plan_json,
                 outcome=outcome,
                 tags=tags,
                 project=project,
                 ttl=ttl,
-                scope_tags=scope_tags or None,
+                scope_tags=_sc_tags,
             )
+        )
         _record_tier_write(
             tool="plan_save", tier="plan",
             project=project, target_title=query[:80],
@@ -4308,16 +4314,20 @@ async def nx_answer(
                     "scope": "personal",
                     "strategy": grown_name,
                 })
-                with _t2_ctx() as _save_db:
-                    grown_id = _save_db.plans.save_plan(
+                # nexus-j5geq: route through daemon (eliminates second WAL writer).
+                _grow_scope_tags = scope or None
+                _grow_plan_json = best.plan_json
+                _grow_project = project_name
+                def _do_grow(db):
+                    gid = db.plans.save_plan(
                         query=question,
-                        plan_json=best.plan_json,
+                        plan_json=_grow_plan_json,
                         outcome="success",
                         tags="ad-hoc,grown",
-                        project=project_name,
+                        project=_grow_project,
                         ttl=ttl_days,
                         scope="personal",
-                        scope_tags=scope or None,
+                        scope_tags=_grow_scope_tags,
                         verb=grown_verb,
                         name=grown_name,
                         dimensions=grown_dimensions,
@@ -4327,11 +4337,13 @@ async def nx_answer(
                     try:
                         cache = get_t1_plan_cache()
                         if cache is not None:
-                            row = _save_db.plans.get_plan(grown_id)
+                            row = db.plans.get_plan(gid)
                             if row:
                                 cache.upsert(row)
                     except Exception:
                         _log.debug("plan_grow_cache_upsert_failed", exc_info=True)
+                    return gid
+                grown_id = _t2_index_write(_do_grow)
                 _log.info(
                     "plan_grow_saved",
                     plan_id=grown_id,

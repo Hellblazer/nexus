@@ -59,7 +59,8 @@ def _fake_etls(order_sink: list[str], *, fail_store: str | None = None):
     return [
         StoreEtl(s, _runner(s))
         for s in ("catalog", "memory", "chash", "plans",
-                  "taxonomy", "telemetry", "aspects")  # deliberately shuffled
+                  "taxonomy", "telemetry", "aspects",
+                  "aspects_queue")  # deliberately shuffled
     ]
 
 
@@ -74,12 +75,15 @@ def _invoke_all(runner, tmp_path: Path, order_sink: list[str], *args,
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "memory.db").touch()
     (config_dir / ".catalog.db").touch()
+    # _verify_pg_counts now returns (status, convergence_notes); wrap the
+    # test-fixture string into the tuple the caller unpacks.
+    verify_tuple = (verify, [])
     with patch(
         "nexus.commands.storage_cmd._build_store_etls",
         return_value=_fake_etls(order_sink, fail_store=fail_store),
     ), patch(
         "nexus.commands.storage_cmd._verify_pg_counts",
-        return_value=verify,
+        return_value=verify_tuple,
     ), patch.dict(
         "os.environ", {"NEXUS_CONFIG_DIR": str(config_dir)},
     ):
@@ -91,12 +95,15 @@ def _invoke_all(runner, tmp_path: Path, order_sink: list[str], *args,
 
 class TestMigrateAll:
     def test_runs_in_exact_ladder_order(self, runner, tmp_path: Path) -> None:
+        # nexus-iy5se: aspects_queue (queue import) runs AFTER catalog so
+        # queue rows with valid doc_ids do not fail FK constraints on a virgin
+        # target where catalog_documents is still empty.
         order: list[str] = []
         result, _ = _invoke_all(runner, tmp_path, order)
         assert result.exit_code == 0, result.output
         assert order == [
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog",
+            "aspects", "chash", "catalog", "aspects_queue",
         ]
 
     def test_single_merged_report_with_rollup(self, runner, tmp_path: Path) -> None:
@@ -111,10 +118,11 @@ class TestMigrateAll:
         stores = {s["store"] for s in report["stores"]}
         assert stores == {
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog",
+            "aspects", "chash", "catalog", "aspects_queue",
         }
-        assert report["summary"]["total_read"] == 70
-        assert report["summary"]["total_written"] == 70
+        # 8 stores x 10 rows each = 80
+        assert report["summary"]["total_read"] == 80
+        assert report["summary"]["total_written"] == 80
         assert report["summary"]["by_action"]["skipped"] == 1
         assert report["summary"]["total_failed"] == 0
         assert report["summary"]["max_severity"] == 3
@@ -184,13 +192,14 @@ class TestVerificationLoudness:
         with patch(
             "nexus.commands.storage_cmd._psql_for_verify", return_value=None,
         ):
-            outcome = _verify_pg_counts(
+            status, notes = _verify_pg_counts(
                 {"summary": {"total_written": 5}, "stores": []},
                 {"PG_PORT": "5499", "NX_DB_ADMIN_USER": "a",
                  "NX_DB_ADMIN_PASS": "p",
                  "NX_DB_URL": "jdbc:postgresql://127.0.0.1:5499/nexus"},
             )
-        assert outcome == "indeterminate"
+        assert status == "indeterminate"
+        assert notes == []
 
 
 # ── Per-store --report ───────────────────────────────────────────────────────
@@ -329,3 +338,215 @@ class TestP3ReviewRegressions:
         assert "ETL failed" in result.output
         report = json.loads(report_path.read_text())
         assert report["summary"]["total_read"] == 2  # partial data preserved
+
+
+# ── nexus-iy5se: aspects_queue ladder order ───────────────────────────────────
+
+
+class TestAspectsQueueLadderOrder:
+    """nexus-iy5se: aspects_queue must run after catalog in LADDER_ORDER."""
+
+    def test_aspects_queue_follows_catalog_in_ladder_order(self) -> None:
+        """LADDER_ORDER constant must list aspects_queue after catalog."""
+        from nexus.migration.etl_registry import LADDER_ORDER
+
+        assert "aspects_queue" in LADDER_ORDER
+        assert LADDER_ORDER.index("aspects_queue") > LADDER_ORDER.index("catalog"), (
+            "aspects_queue must appear after catalog in LADDER_ORDER so queue "
+            "rows with valid doc_ids import after catalog_documents is populated"
+        )
+
+    def test_aspects_queue_is_separate_from_aspects_in_ladder(self) -> None:
+        """aspects and aspects_queue are distinct slots; aspects runs before catalog."""
+        from nexus.migration.etl_registry import LADDER_ORDER
+
+        assert "aspects" in LADDER_ORDER
+        assert LADDER_ORDER.index("aspects") < LADDER_ORDER.index("catalog")
+        assert LADDER_ORDER.index("aspects") < LADDER_ORDER.index("aspects_queue")
+
+    def test_aspects_without_queue_migrate_all_excludes_queue(self) -> None:
+        """aspects_etl.migrate_without_queue does NOT call migrate_queue;
+        document_aspects, highlights, and promotion_log are migrated."""
+        from unittest.mock import MagicMock, call, patch
+
+        import nexus.db.t2.aspects_etl as ae
+
+        mock_aspects = MagicMock()
+        mock_highlights = MagicMock()
+        mock_queue = MagicMock()
+        sqlite = MagicMock()
+
+        with (
+            patch.object(ae, "migrate_aspects", return_value={"imported": 1, "skipped": 0, "errors": 0}) as m_aspects,
+            patch.object(ae, "migrate_highlights", return_value={"imported": 1, "skipped": 0, "errors": 0}) as m_highlights,
+            patch.object(ae, "migrate_queue", return_value={"imported": 0, "skipped": 0, "errors": 0}) as m_queue,
+            patch.object(ae, "migrate_promotion_log", return_value={"imported": 0, "skipped": 0, "errors": 0}) as m_promo,
+        ):
+            ae.migrate_without_queue(sqlite, mock_aspects, mock_highlights, collector=None)
+            assert m_aspects.called
+            assert m_highlights.called
+            assert m_promo.called
+            assert not m_queue.called, "migrate_queue must NOT be called from migrate_without_queue"
+
+    def test_aspects_etl_has_migrate_queue_function(self) -> None:
+        """migrate_queue is a public function importable from aspects_etl."""
+        from nexus.db.t2.aspects_etl import migrate_queue  # noqa: F401
+
+
+# ── nexus-d583z: _VERIFY_TABLES / _verify_pg_counts bug fixes ────────────────
+
+
+class TestVerifyPgCountsBugFixes:
+    """nexus-d583z: (a) relation names, (b) RLS-blind counts, (c) plans dedup."""
+
+    def test_verify_tables_uses_catalog_documents_not_nexus_documents(
+        self,
+    ) -> None:
+        """(a) The catalog/documents key must map to nexus.catalog_documents,
+        not nexus.documents (which does not exist in the schema)."""
+        from nexus.commands.storage_cmd import _VERIFY_TABLES
+
+        assert _VERIFY_TABLES[("catalog", "documents")] == "nexus.catalog_documents"
+
+    def test_verify_tables_uses_catalog_links_not_nexus_links(self) -> None:
+        """(a) The catalog/links key must map to nexus.catalog_links."""
+        from nexus.commands.storage_cmd import _VERIFY_TABLES
+
+        assert _VERIFY_TABLES[("catalog", "links")] == "nexus.catalog_links"
+
+    def test_verify_pg_counts_prefixes_count_with_set_tenant(
+        self, tmp_path: Path,
+    ) -> None:
+        """(b) Each psql -c must include SET nexus.tenant = 'default'; before
+        the SELECT count(*) so the admin user bypasses FORCE RLS."""
+        from nexus.commands.storage_cmd import _verify_pg_counts
+
+        captured_cmds: list[list[str]] = []
+
+        def _fake_run(cmd, **kw):
+            captured_cmds.append(cmd)
+
+            class _R:
+                returncode = 0
+                stdout = "5"
+            return _R()
+
+        report = {
+            "stores": [
+                {
+                    "store": "memory",
+                    "tables": [{"table": "memory", "written": 5}],
+                }
+            ]
+        }
+        creds = {
+            "PG_PORT": "5499",
+            "NX_DB_ADMIN_USER": "nexus_admin",
+            "NX_DB_ADMIN_PASS": "secret",
+            "NX_DB_URL": "postgresql://127.0.0.1:5499/nexus",
+        }
+        with (
+            patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            status, notes = _verify_pg_counts(report, creds)
+
+        assert status == "verified"
+        assert notes == []  # no convergence delta for normal relations
+        assert len(captured_cmds) == 1
+        # The -c argument must contain the SET GUC prefix
+        cmd = captured_cmds[0]
+        c_flag_idx = cmd.index("-c")
+        query_arg = cmd[c_flag_idx + 1]
+        assert "SET nexus.tenant" in query_arg, (
+            f"Expected SET nexus.tenant in psql -c arg, got: {query_arg!r}"
+        )
+        assert "SELECT count(*)" in query_arg
+
+    def test_verify_pg_counts_plans_uses_dedup_aware_check(
+        self, tmp_path: Path,
+    ) -> None:
+        """(c) Plans use server-side dedup (UNIQUE tenant/project/query).
+        pg_count may legitimately be less than written (collapsed duplicates).
+        The check: pg_count > 0 AND pg_count <= written (not pg_count >= written).
+        """
+        from nexus.commands.storage_cmd import _verify_pg_counts
+
+        def _fake_run(cmd, **kw):
+            class _R:
+                returncode = 0
+                stdout = "80"  # pg landed 80, but 98 were 'written' (HTTP acks)
+            return _R()
+
+        report = {
+            "stores": [
+                {
+                    "store": "plans",
+                    "tables": [{"table": "plans", "written": 98}],
+                }
+            ]
+        }
+        creds = {
+            "PG_PORT": "5499",
+            "NX_DB_ADMIN_USER": "nexus_admin",
+            "NX_DB_ADMIN_PASS": "secret",
+            "NX_DB_URL": "postgresql://127.0.0.1:5499/nexus",
+        }
+        with (
+            patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            status, notes = _verify_pg_counts(report, creds)
+
+        # 80 landed < 98 written: convergence semantics -> NOT a mismatch
+        assert status == "verified", (
+            "Plans convergence collapse (pg_count < written) must not be flagged as mismatch"
+        )
+        # The delta must be surfaced in the notes for the operator artifact
+        assert len(notes) == 1, "Convergence delta must be recorded in notes"
+        assert "nexus.plans" in notes[0]
+        assert "80" in notes[0] and "98" in notes[0]
+        assert "18" in notes[0]  # delta = 98 - 80 = 18
+        assert "UNIQUE" in notes[0]
+
+    def test_verify_pg_counts_dedup_written_zero_is_trivial_pass(
+        self, tmp_path: Path,
+    ) -> None:
+        """written=0 for a plans relation must be a trivial pass even when
+        pg_count > 0 (idempotent re-run: the source had no new rows to write,
+        but PG already has rows from a prior run).  The old guard pg_count > written
+        incorrectly flagged this as a mismatch (CRE Medium, 2026-06-12)."""
+        from nexus.commands.storage_cmd import _verify_pg_counts
+
+        def _fake_run(cmd, **kw):
+            class _R:
+                returncode = 0
+                stdout = "50"  # PG has 50 rows from a prior run
+            return _R()
+
+        report = {
+            "stores": [
+                {
+                    "store": "plans",
+                    "tables": [{"table": "plans", "written": 0}],  # nothing new
+                }
+            ]
+        }
+        creds = {
+            "PG_PORT": "5499",
+            "NX_DB_ADMIN_USER": "nexus_admin",
+            "NX_DB_ADMIN_PASS": "secret",
+            "NX_DB_URL": "postgresql://127.0.0.1:5499/nexus",
+        }
+        with (
+            patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            status, notes = _verify_pg_counts(report, creds)
+
+        # written=0 -> trivial pass even if pg_count > 0
+        assert status == "verified", (
+            "written=0 on a dedup-relation must be a trivial pass "
+            "(idempotent re-run, no new source rows)"
+        )
+        assert notes == [], "No convergence notes when written=0 (no delta)"

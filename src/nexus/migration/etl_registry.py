@@ -34,6 +34,14 @@ __all__ = ["LADDER_ORDER", "EtlSources", "StoreEtl", "MigrateRunner"]
 #: validation), catalog LAST (graph-heavy; every other store's FK targets
 #: must exist before its links land). The Phase-3 orchestrator MUST run
 #: stores in exactly this order.
+#:
+#: nexus-iy5se: aspects_queue (the aspect_extraction_queue table import) runs
+#: AFTER catalog.  On a virgin target catalog_documents is empty when the
+#: aspects slot runs; queue rows with VALID doc_ids would fail
+#: fk_aspect_queue_catalog_doc if imported then.  Splitting the queue import
+#: into a trailing slot guarantees catalog_documents is populated first.
+#: document_aspects, highlights, and promotion_log remain in the aspects slot
+#: (they carry no FK into catalog_documents).
 LADDER_ORDER: tuple[str, ...] = (
     "memory",
     "plans",
@@ -42,6 +50,7 @@ LADDER_ORDER: tuple[str, ...] = (
     "aspects",
     "chash",
     "catalog",
+    "aspects_queue",
 )
 
 

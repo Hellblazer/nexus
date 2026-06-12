@@ -1269,9 +1269,21 @@ def _write_report(report: dict, path: Path) -> None:
 
 
 #: (store, table) → Postgres relation counted during verification. Only
-#: tables with a 1:1 name mapping are verified; the check is
-#: pg_count >= report_written (the target may carry rows from previous
-#: idempotent runs — equality only holds on a fresh target).
+#: tables with a 1:1 name mapping are verified.
+#:
+#: Normal check: pg_count >= report_written (the target may carry rows from
+#: previous idempotent runs -- equality only holds on a fresh target).
+#:
+#: Plans convergence (nexus-d583z): plan_etl imports via POST /v1/plans/import →
+#: Java PlanRepository.importRow which is ON CONFLICT (tenant_id, project, query)
+#: DO UPDATE.  HTTP acks count *source rows processed*; multiple source rows that
+#: share the same (tenant, project, query) key converge onto ONE PG row (each ack
+#: overwrites the same row).  Landed rows < acks = source-duplicate convergence, by
+#: schema design.  Correct check for plans: pg_count > 0 AND pg_count <= written
+#: (some rows landed AND we did not land MORE than we sent, which would be truly
+#: impossible).  written=0 is a trivial pass for idempotent re-runs.
+#: Relations that need the convergence-aware check are listed in
+#: :data:`_VERIFY_TABLES_DEDUP`.
 _VERIFY_TABLES: dict[tuple[str, str], str] = {
     ("memory", "memory"): "nexus.memory",
     ("plans", "plans"): "nexus.plans",
@@ -1281,9 +1293,18 @@ _VERIFY_TABLES: dict[tuple[str, str], str] = {
     ("telemetry", "hook_failures"): "nexus.hook_failures",
     ("telemetry", "nx_answer_runs"): "nexus.nx_answer_runs",
     ("chash", "chash_index"): "nexus.chash_index",
-    ("catalog", "documents"): "nexus.documents",
-    ("catalog", "links"): "nexus.links",
+    # nexus-d583z (a): actual schema relations are catalog_documents/catalog_links,
+    # not documents/links (which do not exist and cause psql rc=1 -> indeterminate).
+    ("catalog", "documents"): "nexus.catalog_documents",
+    ("catalog", "links"): "nexus.catalog_links",
 }
+
+#: Relations with DO UPDATE convergence semantics: pg_count may be less than
+#: report_written when multiple source rows share the same natural key (they
+#: converge onto one PG row via DO UPDATE).  For these relations the check is
+#: pg_count > 0 AND pg_count <= written (not >=); written=0 is a trivial pass.
+#: nexus-d583z (c): plans converge on UNIQUE (tenant_id, project, query).
+_VERIFY_TABLES_DEDUP: frozenset[str] = frozenset({"nexus.plans"})
 
 
 def _emit_store_report(
@@ -1334,10 +1355,14 @@ def _verify_db_name(creds: dict) -> str:
     return m.group(1) if m else "nexus"
 
 
-def _verify_pg_counts(report: dict, creds: dict) -> str:
+def _verify_pg_counts(report: dict, creds: dict) -> tuple[str, list[str]]:
     """Count-verify the migration against Postgres.
 
-    Returns ``"verified"`` | ``"mismatch"`` | ``"indeterminate"``.
+    Returns ``(status, convergence_notes)`` where *status* is one of
+    ``"verified"`` | ``"mismatch"`` | ``"indeterminate"`` and
+    *convergence_notes* is a list of human-readable delta strings for
+    relations that experienced DO UPDATE key convergence (source rows >
+    landed rows).  The notes are empty on non-verified outcomes.
 
     nexus-r0esi: an unresolvable psql / unreadable target is
     ``indeterminate`` and the CLI surfaces it LOUDLY — never the hollow
@@ -1354,7 +1379,7 @@ def _verify_pg_counts(report: dict, creds: dict) -> str:
         else creds.get("NX_DB_PASS", "")
     )
     if psql is None or not port or not user:
-        return "indeterminate"
+        return "indeterminate", []
 
     written_by_table: dict[str, int] = {}
     for store in report.get("stores", []):
@@ -1366,40 +1391,103 @@ def _verify_pg_counts(report: dict, creds: dict) -> str:
                     written_by_table.get(relation, 0) + int(table["written"])
                 )
     if not written_by_table:
-        return "indeterminate"  # nothing mappable to verify is NOT a pass
+        return "indeterminate", []  # nothing mappable to verify is NOT a pass
     # NOTE: written=0 for a mapped table passes trivially (pg_count >= 0) —
     # correct for idempotent re-runs and empty sources; the gate predicate
     # is the report's total_failed, never this advisory check.
 
+    # nexus-d583z (b): counts run as NX_DB_ADMIN_USER which is subject to
+    # FORCE RLS with no tenant GUC active — every count returns 0.  Fix: prefix
+    # each COUNT query with ``SET nexus.tenant = 'default'`` in the SAME psql
+    # -c so both statements execute in one session.  The migration writes under
+    # the DEFAULT_TENANT ("default"), derived from HttpMemoryStore/HttpPlanLibrary
+    # DEFAULT_TENANT constants — hard-coded here to the same string constant.
+    _VERIFY_TENANT = "default"
+
     env = dict(os.environ)
     env["PGPASSWORD"] = password
+    convergence_notes: list[str] = []
     for relation, written in written_by_table.items():
+        # Build a single -c argument: SET GUC then COUNT, separated by semicolon.
+        # psql runs both in one session so the GUC applies to the SELECT.
+        count_query = (
+            f"SET nexus.tenant = '{_VERIFY_TENANT}'; "
+            f"SELECT count(*) FROM {relation}"
+        )
         try:
             result = subprocess.run(
                 [
                     str(psql), "-h", "127.0.0.1", "-p", str(port), "-U", user,
                     "-d", _verify_db_name(creds), "-t", "-A", "-X",
-                    "-c", f"SELECT count(*) FROM {relation}",
+                    "-c", count_query,
                 ],
                 env=env, capture_output=True, text=True, timeout=15,
             )
         except (OSError, subprocess.TimeoutExpired):
-            return "indeterminate"
+            return "indeterminate", []
         if result.returncode != 0:
-            return "indeterminate"
+            return "indeterminate", []
         try:
-            pg_count = int(result.stdout.strip())
-        except ValueError:
-            return "indeterminate"
-        if pg_count < written:
-            _log.error(
-                "migrate_all_verify_mismatch",
-                relation=relation,
-                pg_count=pg_count,
-                report_written=written,
-            )
-            return "mismatch"
-    return "verified"
+            # psql -t -A emits one line per statement; the count is the LAST line.
+            pg_count = int(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return "indeterminate", []
+
+        # nexus-d583z (c): relations with DO UPDATE convergence (e.g. plans:
+        # UNIQUE (tenant_id, project, query)) land fewer rows than acks when
+        # multiple source rows share the same key (each ack updates the same
+        # row, not a new row).  acks count source rows processed; delta =
+        # source-duplicate convergence, by schema design.  written=0 is a
+        # trivial pass (idempotent re-run with nothing new to write).
+        if relation in _VERIFY_TABLES_DEDUP:
+            if written > 0 and pg_count == 0:
+                _log.error(
+                    "migrate_all_verify_mismatch",
+                    relation=relation,
+                    pg_count=pg_count,
+                    report_written=written,
+                    note="convergence-aware: 0 rows landed from non-zero write count",
+                )
+                return "mismatch", []
+            if written > 0 and pg_count > written:
+                # truly impossible under DO UPDATE: landed MORE than sent
+                _log.error(
+                    "migrate_all_verify_mismatch",
+                    relation=relation,
+                    pg_count=pg_count,
+                    report_written=written,
+                    note="convergence-aware: pg_count exceeds written (impossible under DO UPDATE)",
+                )
+                return "mismatch", []
+            delta = written - pg_count
+            if delta > 0:
+                # written > 0 already checked above, so delta > 0 means some
+                # source rows converged onto existing PG rows via DO UPDATE.
+                _log.info(
+                    "migrate_all_verify_convergence_collapse",
+                    relation=relation,
+                    pg_count=pg_count,
+                    report_written=written,
+                    collapsed=delta,
+                    note="source-duplicate convergence via DO UPDATE unique key — by design",
+                )
+                # Record for the operator-facing artifact so the delta is
+                # visible in the report string, not just in structlog.
+                convergence_notes.append(
+                    f"{relation}: {pg_count} rows from {written} source rows; "
+                    f"{delta} converged onto existing keys by UNIQUE constraint "
+                    f"via DO UPDATE — by design"
+                )
+        else:
+            if pg_count < written:
+                _log.error(
+                    "migrate_all_verify_mismatch",
+                    relation=relation,
+                    pg_count=pg_count,
+                    report_written=written,
+                )
+                return "mismatch", []
+    return "verified", convergence_notes
 
 
 def _build_store_etls(sources):
@@ -1458,8 +1546,10 @@ def _build_store_etls(sources):
             store.close()
 
     def _aspects(sources, collector):
-        from nexus.db.t2.aspects_etl import migrate_all as migrate_aspects_all
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        # nexus-iy5se: run only document_aspects, highlights, and promotion_log
+        # here.  The queue import (aspect_extraction_queue) has a FK into
+        # catalog_documents and must run AFTER catalog -- see _aspects_queue.
+        from nexus.db.t2.aspects_etl import migrate_without_queue
         from nexus.db.t2.http_document_aspects_store import (
             HttpDocumentAspectsStore,
         )
@@ -1469,17 +1559,33 @@ def _build_store_etls(sources):
 
         aspects = HttpDocumentAspectsStore()
         highlights = HttpDocumentHighlightsStore()
-        queue = HttpAspectQueue()
         try:
-            return migrate_aspects_all(
-                sources.sqlite_path, aspects, highlights, queue,
+            return migrate_without_queue(
+                sources.sqlite_path, aspects, highlights,
                 collector=collector,
                 catalog_db_path=sources.catalog_db_path,
             )
         finally:
-            for st in (aspects, highlights, queue):
+            for st in (aspects, highlights):
                 with contextlib.suppress(Exception):
                     st.close()
+
+    def _aspects_queue(sources, collector):
+        # nexus-iy5se: queue import runs AFTER catalog so catalog_documents is
+        # populated and fk_aspect_queue_catalog_doc does not reject valid rows.
+        from nexus.db.t2.aspects_etl import migrate_queue
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+
+        queue = HttpAspectQueue()
+        try:
+            return migrate_queue(
+                sources.sqlite_path, queue,
+                collector=collector,
+                catalog_db_path=sources.catalog_db_path,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                queue.close()
 
     def _chash(sources, collector):
         from nexus.db.t2.chash_etl import migrate_chash_rows
@@ -1514,6 +1620,8 @@ def _build_store_etls(sources):
         StoreEtl("aspects", _aspects),
         StoreEtl("chash", _chash),
         StoreEtl("catalog", _catalog),
+        # nexus-iy5se: queue runs after catalog (FK safety on virgin targets)
+        StoreEtl("aspects_queue", _aspects_queue),
     ]
 
 
@@ -1593,8 +1701,10 @@ def migrate_all_cmd(
     # recorded IN the report (P3 critique S1: the artifact must be
     # self-contained for the Phase-4 triage surface — an operator reading
     # the JSON tomorrow must see whether counts were checked).
-    verification = _run_verification(report)
+    verification, convergence_notes = _run_verification(report)
     report["verification"] = verification
+    if convergence_notes:
+        report["verification_convergence_notes"] = convergence_notes
 
     out_path = report_path or _default_report_path(migration_id)
     _write_report(report, out_path)
@@ -1619,9 +1729,11 @@ def migrate_all_cmd(
         )
 
 
-def _run_verification(report: dict) -> str:
+def _run_verification(report: dict) -> tuple[str, list[str]]:
     """Resolve creds + run :func:`_verify_pg_counts`; print the verdict
-    loudly (nexus-r0esi: indeterminate is a WARNING, never a pass)."""
+    loudly (nexus-r0esi: indeterminate is a WARNING, never a pass).
+
+    Returns ``(status, convergence_notes)``."""
     from nexus.config import nexus_config_dir
     from nexus.daemon.storage_service_daemon import _read_pg_credentials
 
@@ -1632,13 +1744,21 @@ def _run_verification(report: dict) -> str:
             creds = _read_pg_credentials(creds_path)
         except OSError:
             creds = {}
-    verification = _verify_pg_counts(report, creds)
+    verification, convergence_notes = _verify_pg_counts(report, creds)
     if verification == "verified":
         checked = len(_VERIFY_TABLES)
-        click.echo(
-            f"verification: verified (pg counts >= report written across the "
-            f"{checked} mappable relations; unmapped tables are not checked)"
-        )
+        if convergence_notes:
+            # Emit delta prominently so the operator sees it without tailing logs.
+            notes_str = "; ".join(convergence_notes)
+            click.echo(
+                f"verification: verified ({checked} relations checked; "
+                f"convergence detected — {notes_str})"
+            )
+        else:
+            click.echo(
+                f"verification: verified (pg counts >= report written across the "
+                f"{checked} mappable relations; unmapped tables are not checked)"
+            )
     elif verification == "mismatch":
         click.echo("verification: VERIFICATION MISMATCH", err=True)
     else:
@@ -1650,7 +1770,7 @@ def _run_verification(report: dict) -> str:
         )
     sys.stdout.flush()
     sys.stderr.flush()
-    return verification
+    return verification, convergence_notes
 
 
 def _resolve_catalog_db_path(explicit: Path | None) -> Path:
