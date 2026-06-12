@@ -46,3 +46,82 @@ DO $$ BEGIN
   END IF;
 END $$;
 """
+
+
+# ── Phase-E token provisioning helpers (RDR-152 nexus-gmiaf.32.5) ──────────────
+#
+# Post-Phase-E the service binds every bearer to exactly ONE tenant and IGNORES
+# the X-Nexus-Tenant header (AuthFilter Decision 1). The bootstrap token
+# (NX_SERVICE_TOKEN) is bound to the `default` tenant only. Integration fixtures
+# that exercise cross-tenant RLS therefore need a SECOND, genuinely
+# other-tenant-bound bearer — minted over HTTP exactly as `nx tenant create`
+# does, not faked with the default bearer + a tenant header (which silently
+# resolves back to `default`).
+#
+# T1 scratch additionally requires a MINTED session token: the AuthFilter
+# require-minted gate 401s any X-Nexus-T1-Session header that does not resolve
+# to a live session_tokens row. Production mints via the MCP lifespan; tests
+# mint via /v1/sessions/start exactly the same way.
+
+import json as _json  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+
+def _post_json(base_url: str, path: str, bearer: str, body: dict) -> dict:
+    """POST *body* as JSON to *base_url+path* with a bearer; return parsed JSON.
+
+    Raises RuntimeError with the status + response text on any non-2xx, so a
+    provisioning failure surfaces loudly in the fixture rather than as a later
+    opaque 401 in the test body.
+    """
+    data = _json.dumps(body).encode()
+    req = urllib.request.Request(
+        base_url.rstrip("/") + path,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return _json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:  # pragma: no cover - fixture failure path
+        detail = exc.read().decode(errors="replace")[:300]
+        raise RuntimeError(
+            f"provisioning POST {path} -> HTTP {exc.code}: {detail}"
+        ) from exc
+
+
+def create_tenant_token(base_url: str, root_token: str, tenant: str) -> str:
+    """Create *tenant* and return a bearer bound to it (POST /v1/tenants/create).
+
+    Mirrors ``nx tenant create``: the bootstrap root token is the admin
+    credential (Phase C authorization note), and the raw token is returned ONCE.
+    Idempotent enough for tests — a second call mints another live token for the
+    same tenant, which is harmless (service_tokens permits multiple live rows).
+    """
+    resp = _post_json(base_url, "/v1/tenants/create", root_token, {"name": tenant})
+    token = resp.get("token")
+    if not token:
+        raise RuntimeError(f"/v1/tenants/create returned no token: {resp}")
+    return token
+
+
+def mint_session(base_url: str, bearer: str, session_id: str,
+                 ttl_seconds: int | None = None) -> str:
+    """Mint a session token for *session_id* (POST /v1/sessions/start).
+
+    The session is bound to *bearer*'s tenant (the body carries only the
+    session_id). Returns the raw session_token to send as X-Nexus-T1-Session.
+    """
+    body: dict = {"session_id": session_id}
+    if ttl_seconds is not None:
+        body["ttl_seconds"] = ttl_seconds
+    resp = _post_json(base_url, "/v1/sessions/start", bearer, body)
+    token = resp.get("session_token")
+    if not token:
+        raise RuntimeError(f"/v1/sessions/start returned no session_token: {resp}")
+    return token

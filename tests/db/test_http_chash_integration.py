@@ -44,7 +44,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -233,7 +233,9 @@ def other_chash_store(service):
     """HttpChashIndex for the cross-tenant RLS probe (tenant='other-tenant')."""
     from nexus.db.t2.http_chash_index import HttpChashIndex
     base_url, token, _ = service
-    s = HttpChashIndex(base_url=base_url, _token=token, tenant="other-tenant")
+    # Phase E: real other-tenant-bound bearer (mirrors `nx tenant create`).
+    other_token = create_tenant_token(base_url, token, "other-tenant")
+    s = HttpChashIndex(base_url=base_url, _token=other_token, tenant="other-tenant")
     yield s
     s.close()
 
@@ -351,17 +353,17 @@ class TestChashMVV:
         )
 
     def test_i_rls_with_check_rejected(self, service):
-        """i) RLS WITH CHECK: INSERT with a mismatched tenant_id must be rejected."""
+        """i) RLS isolation: a genuine other-tenant write is invisible to default."""
         import httpx
 
         base_url, token, _ = service
-        # We craft a raw request with X-Nexus-Tenant='evil' but the PG GUC is set
-        # to 'evil' by the service — the row would be written as evil-tenant. We
-        # verify that is_empty() for the default tenant is still True after the
-        # evil tenant writes something, confirming RLS isolation.
+        # Phase E (nexus-gmiaf.32.5): tenant_id is taken from the AUTHENTICATED
+        # bearer, not the X-Nexus-Tenant header. A genuine evil-tenant write
+        # therefore needs an evil-tenant-bound bearer (mirrors `nx tenant create`);
+        # the header alone resolves back to the bearer's tenant.
+        evil_token = create_tenant_token(base_url, token, "evil-tenant")
         evil_headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Nexus-Tenant": "evil-tenant",
+            "Authorization": f"Bearer {evil_token}",
             "Content-Type": "application/json",
         }
         resp = httpx.post(
@@ -440,23 +442,32 @@ class TestChashMVV:
         # Only 2 distinct rows after double ETL (no duplication)
         assert chash_store.count_for_collection("col_idem") == 2
 
-    def test_l_unset_guc_fails_closed(self, service):
-        """l) Missing X-Nexus-Tenant header should yield error or empty response."""
+    def test_l_tenant_from_bearer_not_header(self, service):
+        """l) Phase E: tenant is resolved from the bearer, NOT the X-Nexus-Tenant
+        header. A request with NO tenant header is therefore valid and scoped to
+        the bearer's tenant — it must NOT 400, and must NEVER leak another
+        tenant's rows.
+
+        Pre-Phase-E this asserted fail-closed-on-missing-header; the header was
+        load-bearing then. Phase E (nexus-gmiaf.32.5) made the bearer
+        authoritative and the header advisory-only, so the fail-closed property
+        moved to the SQL layer (unset nexus.tenant GUC → RLS returns zero rows),
+        exercised in the repository tests. Here we pin the HTTP contract: the
+        header is non-load-bearing and the request succeeds bearer-scoped.
+        """
         import httpx
 
         base_url, token, _ = service
-        # Send a request with the auth header but NO X-Nexus-Tenant (or empty).
         resp = httpx.get(
             f"{base_url}/v1/chash/is_empty",
             headers={
                 "Authorization": f"Bearer {token}",
-                # Deliberately omit X-Nexus-Tenant
+                # Deliberately omit X-Nexus-Tenant — the bearer carries the tenant.
             },
         )
-        # Service must reject with 400 (missing tenant header) — fail-closed,
-        # never returns data from another tenant's rows.
-        assert resp.status_code in (400, 401), (
-            f"Missing X-Nexus-Tenant must be rejected (400/401); got {resp.status_code}"
+        assert resp.status_code == 200, (
+            f"missing X-Nexus-Tenant is valid under Phase E (bearer is "
+            f"authoritative); expected 200, got {resp.status_code}: {resp.text[:200]}"
         )
 
     def test_m_registered_chashes_for_collection(self, chash_store):

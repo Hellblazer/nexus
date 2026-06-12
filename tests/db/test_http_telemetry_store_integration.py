@@ -45,7 +45,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -258,7 +258,10 @@ def tel_store_b(java_service):
     """A second HttpTelemetryStore with a DIFFERENT tenant (for RLS negative tests)."""
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
     base_url, token = java_service
-    store = HttpTelemetryStore(base_url=base_url, tenant="inttest-b", _token=token)
+    # Phase E: real tenant-bound bearer so this is a GENUINELY different tenant
+    # from the primary store (the root token resolves every claim to `default`).
+    other_token = create_tenant_token(base_url, token, "inttest-b")
+    store = HttpTelemetryStore(base_url=base_url, tenant="inttest-b", _token=other_token)
     yield store
     store.close()
 

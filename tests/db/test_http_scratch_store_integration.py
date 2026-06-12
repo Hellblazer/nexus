@@ -52,7 +52,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    create_tenant_token,
+    mint_session,
+)
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -235,15 +239,43 @@ def service(pg_instance):
                 pass
 
 
+# Cache of tenant -> bearer per service base_url, so each non-default tenant is
+# created exactly once (a fresh token per call would be harmless but noisy).
+_TENANT_TOKENS: dict[tuple[str, str], str] = {}
+
+
+def _bearer_for(base_url: str, root_token: str, tenant: str) -> str:
+    """Bearer bound to *tenant*. Root token for `default`; minted otherwise.
+
+    Phase E (nexus-gmiaf.32.5): the root bearer is bound to `default` and the
+    X-Nexus-Tenant header is ignored, so a genuine cross-tenant test needs a
+    real other-tenant-bound bearer — created over HTTP like `nx tenant create`.
+    """
+    if tenant == TENANT_DEFAULT:
+        return root_token
+    key = (base_url, tenant)
+    if key not in _TENANT_TOKENS:
+        _TENANT_TOKENS[key] = create_tenant_token(base_url, root_token, tenant)
+    return _TENANT_TOKENS[key]
+
+
 def _make_store(service, tenant: str, session_id: str):
-    """Construct an HttpScratchStore against the hermetic service."""
+    """Construct an HttpScratchStore against the hermetic service.
+
+    Provisions a tenant-bound bearer and a MINTED session token (Phase E
+    require-minted: an unminted X-Nexus-T1-Session header 401s). Mirrors what
+    `nx tenant create` + the MCP session lifespan do in production.
+    """
     from nexus.db.http_scratch_store import HttpScratchStore
-    base_url, token, _ = service
+    base_url, root_token, _ = service
+    bearer = _bearer_for(base_url, root_token, tenant)
+    session_token = mint_session(base_url, bearer, session_id)
     return HttpScratchStore(
         base_url=base_url,
         tenant=tenant,
         session_id=session_id,
-        _token=token,
+        _token=bearer,
+        _session_token=session_token,
     )
 
 

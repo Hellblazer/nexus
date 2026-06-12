@@ -119,6 +119,7 @@ class HttpScratchStore:
         *,
         session_id: str | None = None,
         _token: str | None = None,
+        _session_token: str | None = None,
     ) -> None:
         if base_url is not None:
             if _token is None:
@@ -145,7 +146,12 @@ class HttpScratchStore:
                 f"{_SESSION_ENV} (or {_SESSION_ID_ENV}) is required when "
                 "NX_STORAGE_BACKEND_T1=service. Set it to the session shared across siblings."
             )
-        self._session_token: str = env_token or self._session_id
+        # The minted session token (resolves to a live session_tokens row) is sent
+        # as the X-Nexus-T1-Session header; the AuthFilter require-minted gate 401s a
+        # header that does not resolve. Production mints via the MCP lifespan and
+        # exports NX_T1_SESSION; a direct caller (or a test) injects via _session_token.
+        # Falls back to the bare session id only in the pre-minting bootstrap posture.
+        self._session_token: str = _session_token or env_token or self._session_id
 
         self._headers = {
             "Authorization": f"Bearer {_token}",
