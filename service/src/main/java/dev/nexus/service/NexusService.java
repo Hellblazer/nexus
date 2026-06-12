@@ -179,6 +179,7 @@ public final class NexusService {
         var telemetryRepo = new TelemetryRepository(tenantScope);
         var scratchRepo   = new ScratchRepository(tenantScope);
         var taxonomyRepo  = new TaxonomyRepository(tenantScope);
+        var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope);
         var aspectRepo    = new AspectRepository(tenantScope);
         var chashRepo     = new ChashRepository(tenantScope);
         var catalogRepo   = new CatalogRepository(tenantScope);
@@ -216,7 +217,7 @@ public final class NexusService {
         t1Ctx.getFilters().addAll(authFilter);
 
         // /v1/taxonomy/* — taxonomy endpoints (bead nexus-gmiaf.14)
-        var taxonomyCtx = server.createContext("/v1/taxonomy", new TaxonomyHandler(taxonomyRepo));
+        var taxonomyCtx = server.createContext("/v1/taxonomy", new TaxonomyHandler(taxonomyRepo, taxonomyCentroidRepo));
         taxonomyCtx.getFilters().addAll(authFilter);
 
         // /v1/aspects/* — aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15)
