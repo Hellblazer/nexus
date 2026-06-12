@@ -546,12 +546,17 @@ class TestT2DatabaseAspectsSeam:
         finally:
             db.aspect_queue.close()
 
-    def test_sqlite_seam_when_env_unset(self, tmp_path, monkeypatch):
-        """When env vars are absent, T2Database uses the SQLite stores."""
+    def test_sqlite_seam_when_backend_sqlite(self, tmp_path, monkeypatch):
+        """With NX_STORAGE_BACKEND=sqlite, T2Database uses the SQLite aspect stores.
+
+        RDR-152 nexus-fjwxh: the default flipped to SERVICE, so the SQLite seam
+        is now pinned explicitly (was env-unset). The per-store vars are cleared
+        so the global opt-out governs all three.
+        """
         monkeypatch.delenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", raising=False)
         monkeypatch.delenv("NX_STORAGE_BACKEND_DOCUMENT_HIGHLIGHTS", raising=False)
         monkeypatch.delenv("NX_STORAGE_BACKEND_ASPECT_QUEUE", raising=False)
-        monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
 
         from nexus.db.t2 import T2Database
         from nexus.db.t2.document_aspects import DocumentAspects
