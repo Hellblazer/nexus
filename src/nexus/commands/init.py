@@ -323,6 +323,8 @@ def _provision_postgres_step() -> None:
         lines.append("  Role nexus_admin created (schema owner).")
     if result.svc_role_created:
         lines.append("  Role nexus_svc created (DML service role).")
+    if result.vector_extension_created:
+        lines.append("  Extension 'vector' (pgvector) created.")
     lines.append(f"  Credentials written to {result.credentials_path} (0600).")
     lines.append(
         f"  Cluster listening on 127.0.0.1:{result.port}.\n"

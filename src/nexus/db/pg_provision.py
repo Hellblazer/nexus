@@ -275,6 +275,8 @@ class ProvisionResult:
     admin_role_created: bool = False
     #: True when nexus_svc was created (first run).
     svc_role_created: bool = False
+    #: True when the pgvector ``vector`` extension was created (first run).
+    vector_extension_created: bool = False
     #: True when the cluster was already running and no work was needed.
     already_provisioned: bool = False
     #: Port the cluster is listening on.
@@ -426,6 +428,47 @@ def _create_db(bins: PgBinaries, port: int, os_user: str) -> bool:
         NEXUS_DB_NAME,
     ])
     _log.info("pg_db_created", dbname=NEXUS_DB_NAME)
+    return True
+
+
+def _extension_exists(bins: PgBinaries, port: int, superuser: str, extname: str) -> bool:
+    # ``extname`` must be a trusted literal — _psql shells out and does not
+    # support parameterized queries, so the value is interpolated directly.
+    # All callers pass the constant "vector".
+    res = _psql(
+        bins, port, NEXUS_DB_NAME, superuser,
+        f"SELECT 1 FROM pg_extension WHERE extname = '{extname}'"
+    )
+    return "1 row" in res.stdout
+
+
+def _create_vector_extension(bins: PgBinaries, port: int, os_user: str) -> bool:
+    """Create the pgvector ``vector`` extension in the nexus database.
+
+    CREATE EXTENSION requires superuser; provisioning owns the only superuser
+    context (``os_user`` is the cluster's initdb owner). nexus_admin is
+    NOSUPERUSER, so the Java service's Liquibase ``vectors-001`` changeset
+    cannot create the extension itself — it fails with 'permission denied to
+    create extension'. Creating it here, at provision time, closes that gap
+    (nexus-jdpn9 item 3, hit on the 2026-06-10 production migration run).
+
+    ``check_pgvector_available`` has already verified ``vector.control`` is
+    installed for these binaries, so CREATE EXTENSION will not fail for a
+    missing control file. Idempotent: ``IF NOT EXISTS`` is a no-op when the
+    extension is already present.
+
+    Returns True when the extension was freshly created, False on idempotent
+    skip.
+    """
+    if _extension_exists(bins, port, os_user, "vector"):
+        _log.info("pg_vector_extension_exists_skip")
+        return False
+
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "CREATE EXTENSION IF NOT EXISTS vector",
+    )
+    _log.info("pg_vector_extension_created", db=NEXUS_DB_NAME)
     return True
 
 
@@ -676,6 +719,32 @@ def provision(
                 # provisioned before NX_SERVICE_TOKEN existed in the file.
                 if not creds.get("NX_SERVICE_TOKEN"):
                     _persist_service_token(creds_path, secrets.token_hex(32))
+                # Backfill the pgvector extension for clusters provisioned
+                # before this step existed (nexus-jdpn9 item 3). This makes a
+                # re-run of `nx init --service` a reliable repair for the
+                # original failure mode: cluster already up, Liquibase blocked
+                # on a missing 'vector' extension. Discover binaries lazily so
+                # the common already-extension-present case stays cheap.
+                try:
+                    _bins = discover_pg_binaries()
+                    check_pgvector_available(_bins)
+                    result.vector_extension_created = _create_vector_extension(
+                        _bins, stored_port, os_user
+                    )
+                except PgBinaryNotFoundError:
+                    # No binaries to repair with; the running cluster is serving
+                    # via some other install. Leave the extension untouched.
+                    _log.warning("pg_vector_extension_backfill_no_binaries")
+                except PgVectorNotInstalledError:
+                    # Binaries found but pgvector is not installed for them
+                    # (e.g. postgresql@16 without the versioned pgvector
+                    # formula). Cannot repair; warn loud with the install hint
+                    # rather than crashing the idempotent re-run — this is the
+                    # exact installed-user repair path (nexus-jdpn9).
+                    _log.warning(
+                        "pg_vector_extension_backfill_no_pgvector",
+                        bin_dir=str(_bins.bin_dir),
+                    )
                 _log.info(
                     "pg_provision_no_op",
                     port=stored_port,
@@ -735,6 +804,11 @@ def provision(
     # ── Create database ────────────────────────────────────────────────────────
     result.db_created = _create_db(bins, port, os_user)
 
+    # ── Create pgvector extension ──────────────────────────────────────────────
+    # Must run as the cluster superuser (os_user); nexus_admin is NOSUPERUSER and
+    # the service's Liquibase migration cannot create it (nexus-jdpn9 item 3).
+    result.vector_extension_created = _create_vector_extension(bins, port, os_user)
+
     # ── Create roles ───────────────────────────────────────────────────────────
     result.admin_role_created, result.svc_role_created = _create_roles(
         bins, port, os_user, admin_pass, svc_pass
@@ -750,6 +824,7 @@ def provision(
         db_created=result.db_created,
         admin_role_created=result.admin_role_created,
         svc_role_created=result.svc_role_created,
+        vector_extension_created=result.vector_extension_created,
     )
     return result
 
