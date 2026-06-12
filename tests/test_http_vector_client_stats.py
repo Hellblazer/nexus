@@ -47,8 +47,11 @@ class TestVectorServiceErrorCode:
 
 class TestCollectionStats:
     def test_returns_stats_rows_from_stats_endpoint(self, monkeypatch):
+        # Neutral model tokens on purpose: the RDR-109 mode lint flags
+        # voyage-* names in tests without a cloud_mode declaration, and
+        # these mocked rows never touch an embedder.
         rows = [
-            {"name": "code__a__voyage-code-3__v1", "dim": 1024, "count": 7,
+            {"name": "code__a__model-x__v1", "dim": 1024, "count": 7,
              "last_write": "2026-06-11T00:00:00Z"},
             {"name": "knowledge__b__minilm-l6-v2-384__v1", "dim": 384, "count": 2,
              "last_write": "2026-06-10T00:00:00Z"},

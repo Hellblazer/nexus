@@ -291,14 +291,19 @@ class TestDeleteById:
 
 class TestListCollections:
     def test_returns_list(self, monkeypatch):
+        # RDR-156 P3 (nexus-70r3c.12): list_collections is served by
+        # GET /v1/vectors/stats and returns the {name, count} T3Database
+        # parity shape. Full stats/fallback behavior is covered in
+        # tests/test_http_vector_client_stats.py.
         client = HttpVectorClient()
-        fake = [{"name": "knowledge__nexus__model__v1"}]
+        fake = [{"name": "knowledge__nexus__model__v1", "dim": 384,
+                 "count": 7, "last_write": "2026-06-11T00:00:00Z"}]
         monkeypatch.setattr(
             "nexus.db.http_vector_client._get",
             lambda p, **kw: fake
         )
         result = client.list_collections()
-        assert result == fake
+        assert result == [{"name": "knowledge__nexus__model__v1", "count": 7}]
 
     def test_returns_empty_on_service_error(self, monkeypatch):
         client = HttpVectorClient()
