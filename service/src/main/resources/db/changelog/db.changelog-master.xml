@@ -88,6 +88,13 @@
          placed after catalog-004 to keep the catalog-NNN sequence in file order. -->
     <include file="db/changelog/catalog-005-collection-vector-stats.xml"/>
 
+    <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
+         taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB
+         collection into Postgres so service-mode taxonomy compute is chroma-free.
+         MUST come after vectors-001 (provides the `vector` extension) and taxonomy-001;
+         before grants-nexus-svc (schema-wide DML grants provision the new tables). -->
+    <include file="db/changelog/taxonomy-002-centroids.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
