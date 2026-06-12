@@ -170,6 +170,48 @@ class TestProvisionCreatesClusterAndRoles:
         assert row == "1", "nexus_svc role not found"
 
 
+# ── Test 1b: pgvector extension created at provision time (nexus-jdpn9 item 3) ─
+
+class TestVectorExtensionProvisioned:
+    """provision() creates the pgvector 'vector' extension in the nexus DB.
+
+    Regression for nexus-jdpn9 item 3: nexus_admin is NOSUPERUSER, so the Java
+    service's Liquibase vectors-001 changeset cannot create the extension. It
+    must be created at provision time (the only superuser context).
+    """
+
+    def test_vector_extension_exists_in_nexus_db(self, provisioned, bins):
+        result, _ = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        row = _query(bins, result.port, NEXUS_DB_NAME, os_user,
+                     "SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+        assert row == "1", "pgvector 'vector' extension not created in nexus DB"
+
+    def test_result_flags_extension_created_on_first_run(self, provisioned, bins):
+        result, _ = provisioned
+        assert result.vector_extension_created is True, (
+            "fresh provision must report vector_extension_created=True"
+        )
+
+    def test_nexus_admin_can_use_vector_type(self, provisioned, bins):
+        """The runtime role (nexus_admin, NOSUPERUSER) can use the vector type.
+
+        This is the actual capability the original failure blocked: the Java
+        service's Liquibase vectors-001 changeset creates a table with a
+        ``vector`` column AS nexus_admin. Proving the extension row exists is
+        not enough; prove the type is usable by the non-superuser role.
+        """
+        result, config_dir = provisioned
+        admin_pass = _read_credentials(
+            config_dir / CREDENTIALS_FILENAME
+        )["NX_DB_ADMIN_PASS"]
+        # CREATE TABLE with a vector column, then drop it — as nexus_admin.
+        _psql_as(
+            bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+            "CREATE TABLE _vector_probe (v vector(3)); DROP TABLE _vector_probe",
+        )
+
+
 # ── Test 2: role attributes are correct ───────────────────────────────────────
 
 class TestRoleAttributes:
@@ -315,10 +357,45 @@ class TestIdempotency:
         assert creds_after == creds_before, (
             "credentials must not change on idempotent re-run"
         )
+        # The extension already exists, so the backfill is a no-op.
+        assert result2.vector_extension_created is False, (
+            "clean idempotent re-run must report vector_extension_created=False"
+        )
 
     def test_is_provisioned_returns_true(self, provisioned):
         _, config_dir = provisioned
         assert is_provisioned(config_dir), "is_provisioned() must return True after provision()"
+
+    def test_idempotent_rerun_backfills_dropped_vector_extension(self, provisioned, bins):
+        """A re-run repairs a cluster whose 'vector' extension is missing.
+
+        This is the original nexus-jdpn9 failure mode: the cluster is already
+        up (fast idempotency path) but the extension was never created. Drop it,
+        re-run provision(), and assert it is recreated.
+
+        NOTE: mutates the module-scoped ``provisioned`` cluster. It restores the
+        extension before returning, so sibling tests that assume ``vector``
+        exists are safe regardless of collection order.
+        """
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        # Drop the extension to simulate a pre-fix cluster.
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user, "DROP EXTENSION vector")
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user,
+                      "SELECT 1 FROM pg_extension WHERE extname = 'vector'") == "", (
+            "extension drop precondition failed"
+        )
+
+        result2 = provision(config_dir)
+
+        assert result2.already_provisioned, "repair re-run must hit the fast path"
+        assert result2.vector_extension_created is True, (
+            "fast-path re-run must backfill the missing vector extension"
+        )
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user,
+                      "SELECT 1 FROM pg_extension WHERE extname = 'vector'") == "1", (
+            "vector extension not recreated by idempotent repair re-run"
+        )
 
 
 # ── Test 5: end-to-end provision → migrate DDL → svc DML under RLS ────────────
