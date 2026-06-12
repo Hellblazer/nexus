@@ -822,6 +822,7 @@ class TestGrownPlanDimensionalColumns:
              patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
              patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -897,6 +898,7 @@ class TestGrownPlanDimensionalColumns:
              patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
              patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -924,6 +926,7 @@ class TestGrownPlanDimensionalColumns:
              patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
              patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -952,6 +955,7 @@ class TestGrownPlanDimensionalColumns:
              patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
              patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
