@@ -164,7 +164,14 @@ def storage_backend_for(store: str) -> StorageBackend:
     if global_raw:
         return _parse_backend(global_raw, env_key=_GLOBAL_ENV)
 
-    # 3. Hard default (RDR-152 nexus-fjwxh: SERVICE; =sqlite is the opt-out)
+    # 3. Hard default (RDR-152 nexus-fjwxh: SERVICE; =sqlite is the opt-out).
+    #    Exception: T1 scratch keeps SQLITE as its hard default — its Postgres
+    #    backing is forward-declared/incomplete (HttpScratchStore needs a minted
+    #    session the CLI does not provision, so service T1 is MCP-context-only).
+    #    T1 still follows an explicit per-store or global env flag above, so the
+    #    eventual T1 cutover is just removing this branch.
+    if canonical == "t1":
+        return StorageBackend.SQLITE
     return StorageBackend.SERVICE
 
 

@@ -35,14 +35,22 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── default: all stores resolve to 'service' (RDR-152 nexus-fjwxh flip) ───────
 
 
+# RDR-152 nexus-fjwxh: T1 scratch keeps SQLITE as its hard default (its Postgres
+# backing is forward-declared/incomplete); the nine T2 stores default to SERVICE.
+# T1 still follows an explicit per-store/global env flag.
+def _expected_hard_default(store: str) -> StorageBackend:
+    return StorageBackend.SQLITE if store == "t1" else StorageBackend.SERVICE
+
+
 @pytest.mark.parametrize("store", VALID_STORE_NAMES)
 def test_default_is_service_for_every_store(
     store: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # RDR-152 nexus-fjwxh: the hard default flipped SQLITE → SERVICE (T3 parity).
-    # _clear_env delenvs the conftest sqlite-pin too, so this sees the true default.
+    # RDR-152 nexus-fjwxh: the hard default flipped SQLITE → SERVICE (T3 parity),
+    # except T1 (forward-declared service backing). _clear_env delenvs the conftest
+    # sqlite-pin too, so this sees the true default.
     _clear_env(monkeypatch)
-    assert storage_backend_for(store) == StorageBackend.SERVICE
+    assert storage_backend_for(store) == _expected_hard_default(store)
 
 
 def test_default_returns_service_literal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,7 +81,7 @@ def test_per_store_env_does_not_affect_other_stores(
     assert storage_backend_for("memory") == StorageBackend.SQLITE
     for store in VALID_STORE_NAMES:
         if store != "memory":
-            assert storage_backend_for(store) == StorageBackend.SERVICE, store
+            assert storage_backend_for(store) == _expected_hard_default(store), store
 
 
 def test_per_store_env_sqlite_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
