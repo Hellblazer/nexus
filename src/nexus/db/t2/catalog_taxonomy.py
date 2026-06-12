@@ -33,7 +33,7 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import structlog
@@ -43,10 +43,22 @@ from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
 if TYPE_CHECKING:
     from nexus.db.t2.memory_store import MemoryStore
 
-# RDR-070 (nexus-9k5): scikit-learn>=1.3 is a core dep. sklearn.cluster.HDBSCAN
-# HDBSCAN for topic discovery with c-TF-IDF labels via CountVectorizer.
-from sklearn.cluster import HDBSCAN as SklearnHDBSCAN
+# c-TF-IDF label generation for the chroma-coupled paths that remain in this
+# module (e.g. detect_hubs / split orchestration).
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
+
+# RDR-158 P1 (nexus-z3znb): the backend-neutral compute core lives in
+# taxonomy_compute. Re-import its NamedTuples + constants so existing
+# ``from ...catalog_taxonomy import AssignResult`` call sites are unchanged,
+# and bind its pure functions as static methods on CatalogTaxonomy below.
+from nexus.db.t2 import taxonomy_compute as _taxonomy_compute
+from nexus.db.t2.taxonomy_compute import (  # noqa: F401  (re-export)
+    AssignResult,
+    AuditHub,
+    AuditReport,
+    DEFAULT_HUB_STOPWORDS,
+    HubRow,
+)
 
 _log = structlog.get_logger()
 
@@ -108,87 +120,9 @@ _TOPIC_COLUMNS = (
     "terms",
 )
 
-# ── Assignment result shape (RDR-077 nexus-uti) ─────────────────────────────
-
-
-class AssignResult(NamedTuple):
-    """Return shape for :meth:`CatalogTaxonomy.assign_single`.
-
-    Carries the nearest ``topic_id`` and the raw cosine ``similarity``
-    (``1.0 - distance``). ICF weighting is applied at query time, not here.
-    """
-
-    topic_id: int
-    similarity: float
-
-
-class HubRow(NamedTuple):
-    """One hub row emitted by :meth:`CatalogTaxonomy.detect_hubs`.
-
-    RDR-077 Phase 5 (nexus-84v).
-    """
-
-    topic_id: int
-    label: str
-    collection: str
-    distinct_source_collections: int
-    total_chunks: int
-    icf: float
-    score: float
-    matched_stopwords: tuple[str, ...]
-    source_collections: tuple[str, ...]
-    last_assigned_at: str | None
-    # --warn-stale output (populated only when requested; None otherwise)
-    max_last_discover_at: str | None
-    never_discovered_count: int
-    is_stale: bool
-
-
-class AuditReport(NamedTuple):
-    """Summary of projection quality for a single source collection.
-
-    Returned by :meth:`CatalogTaxonomy.audit_collection`. RDR-077 Phase 6
-    (nexus-w4k).
-    """
-
-    collection: str
-    total_assignments: int  # projection rows with source_collection = this
-    p10: float | None
-    p50: float | None
-    p90: float | None
-    below_threshold_count: int
-    threshold: float
-    top_receiving_hubs: list["AuditHub"]
-    pattern_pollution: list["AuditHub"]
-
-
-class AuditHub(NamedTuple):
-    """One receiving-topic row inside an :class:`AuditReport`."""
-
-    topic_id: int
-    label: str
-    chunk_count: int
-    icf: float
-    matched_stopwords: tuple[str, ...]
-
-
-# RDR-077 Phase 5 PQ-3: default stopword tokens for generic-pattern detection.
-# A hub's label that *contains* any of these (case-insensitive substring) is
-# flagged. Ops can surface these in `--explain` so operators can accept or
-# suppress. Extending this list is a future RDR (PQ-3 open).
-DEFAULT_HUB_STOPWORDS: tuple[str, ...] = (
-    "assert",
-    "junit",
-    "builder",
-    "class",
-    "import",
-    "exception",
-    "getter",
-    "setter",
-    "variable",
-    "declaration",
-    "operator",
-)
+# AssignResult, HubRow, AuditReport, AuditHub, and DEFAULT_HUB_STOPWORDS now
+# live in taxonomy_compute (RDR-158 P1) and are re-imported at the top of this
+# module so existing import sites keep resolving them here.
 
 
 # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────────────────
@@ -1589,72 +1523,10 @@ class CatalogTaxonomy:
 
     # ── Split compute/persist split (RDR-151 Phase 3, nexus-uzay8) ─────────
 
-    @staticmethod
-    def compute_split(
-        topic_id: int,
-        doc_ids: list[str],
-        texts: list[str],
-        fetched_ids: list[str],
-        embeddings: np.ndarray,
-        collection_name: str,
-        k: int,
-    ) -> dict[str, Any]:
-        """Compute the KMeans split (pure CPU + numpy — no T2 writes).
-
-        Returns a serializable dict with child specs and centroid records
-        so the caller can route :meth:`persist_split` through the daemon
-        and then do the local chroma centroid update.
-
-        ``fetched_ids`` is the subset of ``doc_ids`` for which texts were
-        actually retrieved (may differ from ``doc_ids`` when the T3 get
-        returned partial results).
-
-        Returns a dict with keys:
-        - ``child_specs``: list of dicts ``{label, terms_json, doc_count,
-          doc_ids, centroid}`` (one per KMeans cluster that is non-empty)
-        - ``collection_name``: passed through for the caller
-        - ``topic_id``: passed through for the caller
-        """
-        from sklearn.cluster import KMeans
-
-        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        km = KMeans(n_clusters=k, n_init=10, random_state=42)
-        labels = km.fit_predict(embeddings)
-
-        vectorizer = CountVectorizer(stop_words="english")
-        tfidf_matrix = TfidfTransformer().fit_transform(
-            vectorizer.fit_transform(texts),
-        )
-        feature_names = vectorizer.get_feature_names_out()
-
-        child_specs: list[dict[str, Any]] = []
-        for cid in range(k):
-            mask = labels == cid
-            if not mask.any():
-                continue
-            cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
-            top_idx = cluster_tfidf.argsort()[-10:][::-1]
-            top_terms = [str(feature_names[i]) for i in top_idx]
-            label = " ".join(top_terms[:3])
-            terms_json = json.dumps(top_terms)
-            doc_count = int(mask.sum())
-            child_doc_ids = [fetched_ids[i] for i in range(len(fetched_ids)) if mask[i]]
-            child_centroid = embeddings[mask].mean(axis=0).tolist()
-            child_specs.append({
-                "label": label,
-                "terms_json": terms_json,
-                "doc_count": doc_count,
-                "doc_ids": child_doc_ids,
-                "centroid": child_centroid,
-                "created_at": now,
-            })
-
-        return {
-            "topic_id": topic_id,
-            "collection_name": collection_name,
-            "child_specs": child_specs,
-        }
+    # RDR-158 P1: pure compute core moved to taxonomy_compute; bound as a
+    # static method so ``CatalogTaxonomy.compute_split`` and the monkeypatch
+    # surface are unchanged.
+    compute_split = staticmethod(_taxonomy_compute.compute_split)
 
     def persist_split(
         self,
@@ -1739,72 +1611,8 @@ class CatalogTaxonomy:
 
     # ── Merge strategy (RDR-070, nexus-1im) ───────────────────────────
 
-    @staticmethod
-    def _merge_labels(
-        old_centroids: np.ndarray,
-        old_labels: list[str],
-        old_review_statuses: list[str],
-        new_centroids: np.ndarray,
-        *,
-        threshold: float = 0.8,
-    ) -> list[dict[str, Any]]:
-        """Match new centroids to old centroids, transfer operator labels.
-
-        Returns a list of dicts (one per new centroid) with:
-        - ``label``: transferred label or None (caller uses c-TF-IDF)
-        - ``review_status``: 'accepted' if matched, 'pending' if new
-
-        N:1 dedup: each old centroid claimed at most once. If two new
-        centroids match the same old centroid above threshold, the
-        higher-similarity claimant wins.
-        """
-        from sklearn.metrics.pairwise import cosine_similarity
-
-        n_new = new_centroids.shape[0]
-        result: list[dict[str, Any]] = [
-            {"label": None, "review_status": "pending", "old_centroid_idx": -1}
-            for _ in range(n_new)
-        ]
-
-        if old_centroids.shape[0] == 0:
-            return result
-
-        # Dimensionality mismatch guard (model upgrade scenario)
-        if old_centroids.shape[1] != new_centroids.shape[1]:
-            _log.warning(
-                "centroid_dimension_mismatch",
-                old_dim=old_centroids.shape[1],
-                new_dim=new_centroids.shape[1],
-            )
-            return result
-
-        # Cosine similarity matrix: (n_new, n_old)
-        sims = cosine_similarity(new_centroids, old_centroids)
-
-        # Greedy assignment: highest similarity first, each old used once
-        claimed_old: set[int] = set()
-        # Build (sim, new_idx, old_idx) sorted descending by sim
-        candidates = []
-        for new_idx in range(n_new):
-            for old_idx in range(old_centroids.shape[0]):
-                candidates.append((sims[new_idx, old_idx], new_idx, old_idx))
-        candidates.sort(key=lambda x: x[0], reverse=True)
-
-        claimed_new: set[int] = set()
-        for sim, new_idx, old_idx in candidates:
-            if sim < threshold:
-                break  # No more above threshold
-            if old_idx in claimed_old or new_idx in claimed_new:
-                continue
-            result[new_idx] = {
-                "label": old_labels[old_idx],
-                "review_status": old_review_statuses[old_idx],
-                "old_centroid_idx": old_idx,
-            }
-            claimed_old.add(old_idx)
-            claimed_new.add(new_idx)
-
-        return result
+    # RDR-158 P1: pure label-merge moved to taxonomy_compute.
+    _merge_labels = staticmethod(_taxonomy_compute._merge_labels)
 
     # ── HDBSCAN topic discovery (RDR-070, nexus-9k5) ────────────────────
 
@@ -1826,53 +1634,13 @@ class CatalogTaxonomy:
             metadata={"hnsw:space": "cosine"},
         )
 
-    # Threshold for switching from HDBSCAN to MiniBatchKMeans.
-    # HDBSCAN is O(n^2) on high-dimensional data; at 5K+ x 1024d it
-    # takes minutes. MiniBatchKMeans is O(n) and produces good clusters.
-    _LARGE_COLLECTION_THRESHOLD = 5000
+    # Threshold for switching from HDBSCAN to MiniBatchKMeans (RDR-158 P1:
+    # canonical value lives in taxonomy_compute; re-bound here for the
+    # ``CatalogTaxonomy._LARGE_COLLECTION_THRESHOLD`` access pattern).
+    _LARGE_COLLECTION_THRESHOLD = _taxonomy_compute.LARGE_COLLECTION_THRESHOLD
 
-    @staticmethod
-    def _cluster(
-        embeddings: np.ndarray,
-        n: int,
-        collection_name: str,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Cluster embeddings. Returns (labels, centroids).
-
-        Uses HDBSCAN for small collections (density-based, automatic k).
-        Switches to MiniBatchKMeans for large collections (O(n) speed).
-
-        Pure (no instance state) so the daemon-routable COMPUTE half
-        (:meth:`compute_discovered_topics`, RDR-151 Phase 3) can call it
-        without a ``CatalogTaxonomy`` instance.
-        """
-        if n <= CatalogTaxonomy._LARGE_COLLECTION_THRESHOLD:
-            _log.info("clustering_hdbscan", n=n, collection=collection_name)
-            clusterer = SklearnHDBSCAN(
-                min_cluster_size=5,
-                store_centers="centroid",
-                copy=True,
-            )
-            labels = clusterer.fit_predict(embeddings)
-            # HDBSCAN centroids indexed by cluster label
-            centroids = getattr(clusterer, "centroids_", np.empty((0, embeddings.shape[1])))
-            return labels, centroids
-
-        from sklearn.cluster import MiniBatchKMeans
-
-        k = max(10, int(n ** 0.5 / 3))
-        _log.info(
-            "clustering_minibatch_kmeans",
-            n=n, k=k, collection=collection_name,
-        )
-        km = MiniBatchKMeans(
-            n_clusters=k,
-            batch_size=min(1000, n),
-            n_init=3,
-            random_state=42,
-        )
-        labels = km.fit_predict(embeddings)
-        return labels, km.cluster_centers_
+    # RDR-158 P1: pure clustering primitive moved to taxonomy_compute.
+    _cluster = staticmethod(_taxonomy_compute._cluster)
 
     def discover_topics(
         self,
@@ -1939,59 +1707,8 @@ class CatalogTaxonomy:
 
         return len(topic_ids)
 
-    @staticmethod
-    def compute_discovered_topics(
-        collection_name: str,
-        doc_ids: list[str],
-        embeddings: np.ndarray,
-        texts: list[str],
-    ) -> list[dict[str, Any]]:
-        """Cluster + c-TF-IDF — the chroma-free, T2-free COMPUTE half of
-        :meth:`discover_topics` (RDR-151 Phase 3, nexus-uzay8).
-
-        Returns a list of serializable topic-spec dicts, one per real
-        (non-noise) cluster, in stable cluster order::
-
-            {"label", "terms", "doc_count", "doc_ids", "centroid", "assigned_by"}
-
-        ``terms`` is a JSON string (top-10 c-TF-IDF terms); ``centroid`` is a
-        plain ``list[float]`` so the spec survives the daemon RPC. Empty list
-        on any no-op condition (``< 5`` docs, all-noise clustering) — the same
-        short-circuits the monolithic ``discover_topics`` returned 0 for.
-        """
-        n = len(doc_ids)
-        if n < 5:
-            return []
-
-        labels, centroids = CatalogTaxonomy._cluster(
-            embeddings, n, collection_name,
-        )
-        real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
-        if not real_labels:
-            _log.warning("cluster_all_noise", n_docs=n, collection=collection_name)
-            return []
-
-        vectorizer = CountVectorizer(stop_words="english")
-        tfidf_matrix = TfidfTransformer().fit_transform(
-            vectorizer.fit_transform(texts),
-        )
-        feature_names = vectorizer.get_feature_names_out()
-
-        specs: list[dict[str, Any]] = []
-        for cid in real_labels:
-            mask = labels == cid
-            cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
-            top_idx = cluster_tfidf.argsort()[-10:][::-1]
-            top_terms = [str(feature_names[i]) for i in top_idx]
-            specs.append({
-                "label": " ".join(top_terms[:3]),
-                "terms": json.dumps(top_terms),
-                "doc_count": int(mask.sum()),
-                "doc_ids": [doc_ids[i] for i in range(n) if mask[i]],
-                "centroid": [float(x) for x in centroids[cid].tolist()],
-                "assigned_by": "hdbscan",
-            })
-        return specs
+    # RDR-158 P1: pure cluster + c-TF-IDF compute half moved to taxonomy_compute.
+    compute_discovered_topics = staticmethod(_taxonomy_compute.compute_discovered_topics)
 
     def persist_discovered_topics(
         self,
@@ -2123,7 +1840,9 @@ class CatalogTaxonomy:
 
     # ── Cross-collection centroid linking (RDR-075 Phase 3) ─────────
 
-    _PROJECTION_THRESHOLD = 0.85
+    # RDR-158 P1: canonical value lives in taxonomy_compute; re-bound here for
+    # the ``CatalogTaxonomy._PROJECTION_THRESHOLD`` access pattern.
+    _PROJECTION_THRESHOLD = _taxonomy_compute.PROJECTION_THRESHOLD
 
     @staticmethod
     def _batched_upsert(
@@ -3028,114 +2747,9 @@ class CatalogTaxonomy:
             "old_centroid_ids": old_centroid_ids,
         }
 
-    @staticmethod
-    def compute_rebuild_plan(
-        collection_name: str,
-        doc_ids: list[str],
-        embeddings: np.ndarray,
-        texts: list[str],
-        *,
-        old_centroids: np.ndarray,
-        old_labels: list[str],
-        old_review_statuses: list[str],
-        old_centroid_topic_ids: list[int],
-        manual_assignments: dict[str, int],
-    ) -> dict[str, Any]:
-        """Cluster + merge-labels + manual-transfer resolution — the
-        chroma-free, T2-write-free COMPUTE half of :meth:`rebuild_taxonomy`
-        (RDR-151 Phase 3, nexus-uzay8).
-
-        ``old_*`` state and ``manual_assignments`` are read by the caller
-        (chroma for old centroids, T2 for old labels / manual rows) and passed
-        in, so this stays pure. Returns a serializable plan::
-
-            {"specs": [{label, terms, doc_count, doc_ids, centroid,
-                        assigned_by, review_status}, ...],
-             "manual_transfers": {doc_id: spec_index}}
-
-        ``manual_transfers`` resolves Route 1 (old topic matched to a new one
-        via ``_merge_labels``) and Route 2 (doc in the current corpus, cosine
-        to a new centroid > 0.5) to a SPEC INDEX; the persist half maps that to
-        the freshly-generated topic_id. Route 3 (unplaceable) is dropped with a
-        warning. Empty ``specs`` on ``< 5`` docs / all-noise.
-        """
-        n = len(doc_ids)
-        if n < 5:
-            return {"specs": [], "manual_transfers": {}}
-
-        labels, centroids_arr = CatalogTaxonomy._cluster(
-            embeddings, n, collection_name,
-        )
-        real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
-        if not real_labels:
-            _log.warning("rebuild_all_noise", collection=collection_name, n_docs=n)
-            return {"specs": [], "manual_transfers": {}}
-
-        vectorizer = CountVectorizer(stop_words="english")
-        tfidf_matrix = TfidfTransformer().fit_transform(
-            vectorizer.fit_transform(texts),
-        )
-        feature_names = vectorizer.get_feature_names_out()
-
-        new_centroids_arr = np.array(
-            [centroids_arr[cid] for cid in real_labels], dtype=np.float32,
-        )
-        merged = CatalogTaxonomy._merge_labels(
-            old_centroids, old_labels, old_review_statuses, new_centroids_arr,
-        )
-
-        specs: list[dict[str, Any]] = []
-        for idx, cid in enumerate(real_labels):
-            mask = labels == cid
-            cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
-            top_idx = cluster_tfidf.argsort()[-10:][::-1]
-            top_terms = [str(feature_names[i]) for i in top_idx]
-            tfidf_label = " ".join(top_terms[:3])
-            merged_info = merged[idx]
-            specs.append({
-                "label": merged_info["label"] or tfidf_label,
-                "terms": json.dumps(top_terms),
-                "doc_count": int(mask.sum()),
-                "doc_ids": [doc_ids[i] for i in range(n) if mask[i]],
-                "centroid": [float(x) for x in new_centroids_arr[idx].tolist()],
-                "assigned_by": "auto-matched" if merged_info["label"] else "hdbscan",
-                "review_status": merged_info["review_status"],
-            })
-
-        # Resolve manual-assignment transfers to spec indices.
-        old_to_new_spec: dict[int, int] = {}
-        if old_centroid_topic_ids:
-            for new_idx, merge_info in enumerate(merged):
-                old_idx = merge_info.get("old_centroid_idx", -1)
-                if merge_info["label"] is not None and 0 <= old_idx < len(old_centroid_topic_ids):
-                    old_to_new_spec[old_centroid_topic_ids[old_idx]] = new_idx
-
-        manual_transfers: dict[str, int] = {}
-        if manual_assignments:
-            doc_id_to_idx = {did: i for i, did in enumerate(doc_ids)}
-            for manual_doc, old_topic_id in manual_assignments.items():
-                # Route 1: old topic matched to a new topic.
-                if old_topic_id in old_to_new_spec:
-                    manual_transfers[manual_doc] = old_to_new_spec[old_topic_id]
-                    continue
-                # Route 2: doc in the current corpus — cosine to new centroids.
-                if manual_doc in doc_id_to_idx:
-                    from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
-                    j = doc_id_to_idx[manual_doc]
-                    sims = _cos_sim(embeddings[j : j + 1], new_centroids_arr)[0]
-                    best_idx = int(sims.argmax())
-                    if float(sims[best_idx]) > 0.5:
-                        manual_transfers[manual_doc] = best_idx
-                        continue
-                # Route 3: unplaceable.
-                _log.warning(
-                    "manual_assignment_lost",
-                    doc_id=manual_doc,
-                    old_topic_id=old_topic_id,
-                    collection=collection_name,
-                )
-
-        return {"specs": specs, "manual_transfers": manual_transfers}
+    # RDR-158 P1: pure cluster + merge-labels + manual-transfer compute half
+    # moved to taxonomy_compute.
+    compute_rebuild_plan = staticmethod(_taxonomy_compute.compute_rebuild_plan)
 
     def persist_rebuild_topics(
         self,
