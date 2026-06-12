@@ -158,11 +158,17 @@ class HttpCentroidStore:
                 "n_results": n_results,
             })
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 400:
-                _log.debug(
-                    "centroid_ann_query_bad_request",
+            # Swallow to [] ONLY for the dimension-mismatch 400 — the oracle's
+            # best-effort "don't assign" when the query vector's space does not
+            # match the stored centroids (catalog_taxonomy._check_centroid_dimension).
+            # Any OTHER 400 (malformed body, n_results<1, ...) is a CALLER BUG and
+            # re-raises — never silently empty (fail-loud, M1/S3).
+            detail = e.response.text[:300]
+            if e.response.status_code == 400 and "taxonomy_centroids" in detail:
+                _log.warning(
+                    "centroid_dimension_mismatch",
                     collection=collection,
-                    detail=e.response.text[:200],
+                    detail=detail,
                 )
                 return []
             raise

@@ -50,9 +50,14 @@ class _FakeCentroidService:
 
         if request.method == "POST" and path == "/query":
             emb = body["embedding"]
-            # Simulated dim-mismatch / 5xx sentinels (O2 contract tests).
+            # Simulated sentinels (O2/M1/S3 contract tests).
             if body["collection"] == "dimmismatch":
-                return _json(400, {"error": "dimension mismatch"})
+                # Real service dim-mismatch message contains "taxonomy_centroids".
+                return _json(400, {"error": f"query embedding is {len(emb)}-dim — "
+                                            "no taxonomy_centroids_X table"})
+            if body["collection"] == "badrequest":
+                # A non-dimension 400 (caller bug) — must re-raise, not swallow.
+                return _json(400, {"error": "nResults must be >= 1"})
             if body["collection"] == "boom":
                 return _json(500, {"error": "internal"})
             cross = body.get("cross_collection", False)
@@ -220,10 +225,23 @@ def test_delete_empty_is_noop(store: HttpCentroidStore) -> None:
     assert store.delete_ids("k__d", []) == 0
 
 
+def test_nearest_none_on_empty_collection(store: HttpCentroidStore) -> None:
+    # Collection has no centroids yet (service 200 []), the first-run case before
+    # discover_topics runs — nearest() -> None, NOT an error (M2).
+    assert store.ann_query([1.0, 0.0], "k__empty") == []
+    assert store.nearest([1.0, 0.0], "k__empty") is None
+
+
 def test_o2_dim_mismatch_400_maps_to_none(store: HttpCentroidStore) -> None:
-    # HTTP 400 (dim mismatch / bad request) -> ann_query [] -> nearest None.
+    # Dimension-mismatch 400 -> ann_query [] -> nearest None (oracle best-effort).
     assert store.ann_query([1.0, 0.0], "dimmismatch") == []
     assert store.nearest([1.0, 0.0], "dimmismatch") is None
+
+
+def test_non_dimension_400_reraises_not_swallowed(store: HttpCentroidStore) -> None:
+    # A non-dim 400 (caller bug) must surface, never silently empty (M1/S3 fail-loud).
+    with pytest.raises(httpx.HTTPStatusError):
+        store.ann_query([1.0, 0.0], "badrequest")
 
 
 def test_o2_server_error_propagates_not_swallowed(store: HttpCentroidStore) -> None:
