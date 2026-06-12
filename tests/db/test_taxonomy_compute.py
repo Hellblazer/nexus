@@ -47,10 +47,15 @@ def test_module_is_connection_free() -> None:
         ln.strip() for ln in source.splitlines()
         if ln.strip().startswith(("import ", "from "))
     ]
-    # No DB-connection or backend-class import (docstring references are fine).
+    # The whole nexus.db subtree is the connection-bearing surface — guard the
+    # prefix so any future coupling path (catalog_taxonomy, memory_store,
+    # service_endpoint, chroma_quotas, ...) trips this, not just a fixed list.
+    # Docstring references are excluded (filtered to import lines above).
+    assert not any("nexus.db" in ln for ln in import_lines)
+    # Belt-and-suspenders for the stdlib / vendor connection surfaces that do
+    # not live under nexus.db.
     assert not any("sqlite3" in ln for ln in import_lines)
-    assert not any("catalog_taxonomy" in ln for ln in import_lines)
-    assert not any("memory_store" in ln for ln in import_lines)
+    assert not any("chromadb" in ln for ln in import_lines)
 
 
 def test_module_imports_standalone() -> None:

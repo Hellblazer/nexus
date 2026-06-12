@@ -43,8 +43,10 @@ from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
 if TYPE_CHECKING:
     from nexus.db.t2.memory_store import MemoryStore
 
-# c-TF-IDF label generation for the chroma-coupled paths that remain in this
-# module (e.g. detect_hubs / split orchestration).
+# c-TF-IDF label generation for the chroma-coupled paths that REMAIN in this
+# module (detect_hubs / split orchestration). The pure clustering + compute
+# halves moved to taxonomy_compute (RDR-158 P1), which owns its own sklearn
+# imports including HDBSCAN.
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 
 # RDR-158 P1 (nexus-z3znb): the backend-neutral compute core lives in
