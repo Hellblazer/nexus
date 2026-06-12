@@ -213,15 +213,39 @@ redistribution conditions** — CI should build release binaries on CE. Platform
 matrix note: GraalVM 25 dropped macOS x64 (Apple Silicon only); Mandrel has no
 macOS builds at all.
 
+### RF-157-6 (VERIFIED, executed spike 2026-06-11): native-image WORKS — both risk items cleared
+
+Executed on Oracle GraalVM 25.0.1 / macos-aarch64 against a throwaway pgvector
+container (production untouched); full record: T2 `nexus_rdr/157-P0-spike-results`.
+
+- **Tokenizers JNI: YES** — first known confirmation. The native binary served
+  /health, /version (onnx-local), a store-put that embedded server-side through
+  tokenizers + onnxruntime JNI, and a search returning it. Cold-cache caveat:
+  DJL extracts `libtokenizers` from the jar resource `native/lib/<platform>/cpu/`;
+  the tracing agent misses that resource when `~/.djl.ai` pre-exists — the
+  resource glob must be added explicitly (+11.5 MB in-image).
+- **graal#8431: does NOT bite** on this toolchain — ML-PGO active in the build
+  banner, app's ai.onnxruntime compiled cleanly across 4 builds, zero
+  workarounds needed.
+- **Metrics**: 51-54 s builds (7.4 GB peak builder RSS), 145 MB binary
+  (tokenizers embedded), 3.0-3.3 s to /health-200 (includes Liquibase + ONNX
+  init), 368-377 MB runtime RSS.
+- **Build recipe**: `native-image --no-fallback --enable-url-protocols=http,https
+  -H:ConfigurationFileDirectories=<agent-config> -jar nexus-service.jar`; the
+  agent corpus MUST cover both fresh-migration and already-migrated startups
+  (Liquibase's snapshot path needs reflection config the fresh path never hits).
+- **Remaining unknowns are mechanical**: re-run on GraalVM CE 25 (the licensing
+  choice, RF-157-5) and linux-x64/aarch64 in CI. ONNX model files stay an
+  external install-time dependency either way.
+
 ### Implications for the draft Decisions (to lock at gate)
 
 1. **Decision 1 becomes a sequence, not a choice**: release N ships per-platform
    JARs via GitHub Releases + `install-jar --from-release` (RF-157-1 makes these
    small; JDK 17+ stays a preflighted prereq); native-image binaries follow as the
    prereq-removal upgrade once the spike clears the two JNI items.
-2. **The P0 spike narrows to**: build the service with native-image on **GraalVM CE
-   for JDK 25**, tracing-agent config from the integration suite, and empirically
-   answer (a) does tokenizers' JNI load from image resources, (b) does graal#8431
-   bite on CE 25. Everything else is metadata-repo-covered.
+2. **The P0 spike is DONE and PASSED** (RF-157-6): both risk items cleared on
+   Oracle GraalVM 25; the CE-25 + linux re-runs are mechanical CI work, not
+   open questions. Native-image is promoted from desired to cleared-for-planning.
 3. Platform matrix for native binaries: linux-x64/aarch64 + macos-aarch64
    (GraalVM 25 has no macos-x64; per-platform JARs cover that tail).
