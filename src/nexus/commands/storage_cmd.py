@@ -1525,8 +1525,10 @@ def _build_store_etls(sources):
             store.close()
 
     def _aspects(sources, collector):
-        from nexus.db.t2.aspects_etl import migrate_all as migrate_aspects_all
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        # nexus-iy5se: run only document_aspects, highlights, and promotion_log
+        # here.  The queue import (aspect_extraction_queue) has a FK into
+        # catalog_documents and must run AFTER catalog -- see _aspects_queue.
+        from nexus.db.t2.aspects_etl import migrate_without_queue
         from nexus.db.t2.http_document_aspects_store import (
             HttpDocumentAspectsStore,
         )
@@ -1536,17 +1538,33 @@ def _build_store_etls(sources):
 
         aspects = HttpDocumentAspectsStore()
         highlights = HttpDocumentHighlightsStore()
-        queue = HttpAspectQueue()
         try:
-            return migrate_aspects_all(
-                sources.sqlite_path, aspects, highlights, queue,
+            return migrate_without_queue(
+                sources.sqlite_path, aspects, highlights,
                 collector=collector,
                 catalog_db_path=sources.catalog_db_path,
             )
         finally:
-            for st in (aspects, highlights, queue):
+            for st in (aspects, highlights):
                 with contextlib.suppress(Exception):
                     st.close()
+
+    def _aspects_queue(sources, collector):
+        # nexus-iy5se: queue import runs AFTER catalog so catalog_documents is
+        # populated and fk_aspect_queue_catalog_doc does not reject valid rows.
+        from nexus.db.t2.aspects_etl import migrate_queue
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+
+        queue = HttpAspectQueue()
+        try:
+            return migrate_queue(
+                sources.sqlite_path, queue,
+                collector=collector,
+                catalog_db_path=sources.catalog_db_path,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                queue.close()
 
     def _chash(sources, collector):
         from nexus.db.t2.chash_etl import migrate_chash_rows
@@ -1581,6 +1599,8 @@ def _build_store_etls(sources):
         StoreEtl("aspects", _aspects),
         StoreEtl("chash", _chash),
         StoreEtl("catalog", _catalog),
+        # nexus-iy5se: queue runs after catalog (FK safety on virgin targets)
+        StoreEtl("aspects_queue", _aspects_queue),
     ]
 
 

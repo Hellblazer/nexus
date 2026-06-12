@@ -566,6 +566,49 @@ def migrate_promotion_log(
     return {"imported": imported, "skipped": skipped, "errors": errors}
 
 
+def migrate_without_queue(
+    sqlite_path: Path,
+    http_aspects,
+    http_highlights,
+    *,
+    batch_size: int = 200,
+    collector: Any = None,
+    catalog_db_path: Path | None = None,
+) -> dict[str, dict[str, int]]:
+    """Migrate document_aspects, highlights, and promotion_log — NOT the queue.
+
+    nexus-iy5se: the aspect_extraction_queue table has a FK into
+    catalog_documents (fk_aspect_queue_catalog_doc).  On a virgin target
+    catalog_documents is empty when the aspects ladder slot runs, so queue
+    rows with VALID doc_ids would fail the FK constraint.  Splitting the
+    queue import into a post-catalog step (``migrate_queue``) fixes this.
+
+    This function handles the three tables that carry NO FK into
+    catalog_documents and therefore can safely run before catalog:
+
+    - document_aspects (FK-free against catalog)
+    - document_highlights (FK-free against catalog)
+    - aspect_promotion_log (FK-free against catalog)
+
+    Returns a summary dict with keys: aspects, highlights, promotion_log,
+    each containing {imported, skipped, errors}.
+    """
+    return {
+        "aspects": migrate_aspects(
+            sqlite_path, http_aspects, batch_size=batch_size,
+            collector=collector, catalog_db_path=catalog_db_path,
+        ),
+        "highlights": migrate_highlights(
+            sqlite_path, http_highlights, batch_size=batch_size,
+            collector=collector,
+        ),
+        "promotion_log": migrate_promotion_log(
+            sqlite_path, http_aspects, batch_size=batch_size,
+            collector=collector,
+        ),
+    }
+
+
 def migrate_all(
     sqlite_path: Path,
     http_aspects,
@@ -578,25 +621,25 @@ def migrate_all(
 ) -> dict[str, dict[str, int]]:
     """Run all four table migrations in order.
 
+    .. deprecated::
+        Prefer :func:`migrate_without_queue` (for the aspects ladder slot)
+        followed by :func:`migrate_queue` (for the aspects_queue slot, which
+        runs after catalog) so queue rows with valid doc_ids do not fail FK
+        constraints on a virgin target.  This combined form is preserved for
+        backwards-compat callers (e.g. single-store tests).
+
     Returns a summary dict with keys:
         aspects, highlights, queue, promotion_log
     each containing {imported, skipped, errors}.
     """
-    return {
-        "aspects": migrate_aspects(
-            sqlite_path, http_aspects, batch_size=batch_size,
-            collector=collector, catalog_db_path=catalog_db_path,
-        ),
-        "highlights": migrate_highlights(
-            sqlite_path, http_highlights, batch_size=batch_size,
-            collector=collector,
-        ),
-        "queue": migrate_queue(
-            sqlite_path, http_queue, batch_size=batch_size,
-            collector=collector, catalog_db_path=catalog_db_path,
-        ),
-        "promotion_log": migrate_promotion_log(
-            sqlite_path, http_aspects, batch_size=batch_size,
-            collector=collector,
-        ),
-    }
+    result = migrate_without_queue(
+        sqlite_path, http_aspects, http_highlights,
+        batch_size=batch_size,
+        collector=collector,
+        catalog_db_path=catalog_db_path,
+    )
+    result["queue"] = migrate_queue(
+        sqlite_path, http_queue, batch_size=batch_size,
+        collector=collector, catalog_db_path=catalog_db_path,
+    )
+    return result

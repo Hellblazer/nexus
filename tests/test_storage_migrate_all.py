@@ -59,7 +59,8 @@ def _fake_etls(order_sink: list[str], *, fail_store: str | None = None):
     return [
         StoreEtl(s, _runner(s))
         for s in ("catalog", "memory", "chash", "plans",
-                  "taxonomy", "telemetry", "aspects")  # deliberately shuffled
+                  "taxonomy", "telemetry", "aspects",
+                  "aspects_queue")  # deliberately shuffled
     ]
 
 
@@ -91,12 +92,15 @@ def _invoke_all(runner, tmp_path: Path, order_sink: list[str], *args,
 
 class TestMigrateAll:
     def test_runs_in_exact_ladder_order(self, runner, tmp_path: Path) -> None:
+        # nexus-iy5se: aspects_queue (queue import) runs AFTER catalog so
+        # queue rows with valid doc_ids do not fail FK constraints on a virgin
+        # target where catalog_documents is still empty.
         order: list[str] = []
         result, _ = _invoke_all(runner, tmp_path, order)
         assert result.exit_code == 0, result.output
         assert order == [
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog",
+            "aspects", "chash", "catalog", "aspects_queue",
         ]
 
     def test_single_merged_report_with_rollup(self, runner, tmp_path: Path) -> None:
@@ -111,10 +115,11 @@ class TestMigrateAll:
         stores = {s["store"] for s in report["stores"]}
         assert stores == {
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog",
+            "aspects", "chash", "catalog", "aspects_queue",
         }
-        assert report["summary"]["total_read"] == 70
-        assert report["summary"]["total_written"] == 70
+        # 8 stores x 10 rows each = 80
+        assert report["summary"]["total_read"] == 80
+        assert report["summary"]["total_written"] == 80
         assert report["summary"]["by_action"]["skipped"] == 1
         assert report["summary"]["total_failed"] == 0
         assert report["summary"]["max_severity"] == 3
@@ -329,6 +334,59 @@ class TestP3ReviewRegressions:
         assert "ETL failed" in result.output
         report = json.loads(report_path.read_text())
         assert report["summary"]["total_read"] == 2  # partial data preserved
+
+
+# ── nexus-iy5se: aspects_queue ladder order ───────────────────────────────────
+
+
+class TestAspectsQueueLadderOrder:
+    """nexus-iy5se: aspects_queue must run after catalog in LADDER_ORDER."""
+
+    def test_aspects_queue_follows_catalog_in_ladder_order(self) -> None:
+        """LADDER_ORDER constant must list aspects_queue after catalog."""
+        from nexus.migration.etl_registry import LADDER_ORDER
+
+        assert "aspects_queue" in LADDER_ORDER
+        assert LADDER_ORDER.index("aspects_queue") > LADDER_ORDER.index("catalog"), (
+            "aspects_queue must appear after catalog in LADDER_ORDER so queue "
+            "rows with valid doc_ids import after catalog_documents is populated"
+        )
+
+    def test_aspects_queue_is_separate_from_aspects_in_ladder(self) -> None:
+        """aspects and aspects_queue are distinct slots; aspects runs before catalog."""
+        from nexus.migration.etl_registry import LADDER_ORDER
+
+        assert "aspects" in LADDER_ORDER
+        assert LADDER_ORDER.index("aspects") < LADDER_ORDER.index("catalog")
+        assert LADDER_ORDER.index("aspects") < LADDER_ORDER.index("aspects_queue")
+
+    def test_aspects_without_queue_migrate_all_excludes_queue(self) -> None:
+        """aspects_etl.migrate_without_queue does NOT call migrate_queue;
+        document_aspects, highlights, and promotion_log are migrated."""
+        from unittest.mock import MagicMock, call, patch
+
+        import nexus.db.t2.aspects_etl as ae
+
+        mock_aspects = MagicMock()
+        mock_highlights = MagicMock()
+        mock_queue = MagicMock()
+        sqlite = MagicMock()
+
+        with (
+            patch.object(ae, "migrate_aspects", return_value={"imported": 1, "skipped": 0, "errors": 0}) as m_aspects,
+            patch.object(ae, "migrate_highlights", return_value={"imported": 1, "skipped": 0, "errors": 0}) as m_highlights,
+            patch.object(ae, "migrate_queue", return_value={"imported": 0, "skipped": 0, "errors": 0}) as m_queue,
+            patch.object(ae, "migrate_promotion_log", return_value={"imported": 0, "skipped": 0, "errors": 0}) as m_promo,
+        ):
+            ae.migrate_without_queue(sqlite, mock_aspects, mock_highlights, collector=None)
+            assert m_aspects.called
+            assert m_highlights.called
+            assert m_promo.called
+            assert not m_queue.called, "migrate_queue must NOT be called from migrate_without_queue"
+
+    def test_aspects_etl_has_migrate_queue_function(self) -> None:
+        """migrate_queue is a public function importable from aspects_etl."""
+        from nexus.db.t2.aspects_etl import migrate_queue  # noqa: F401
 
 
 # ── nexus-d583z: _VERIFY_TABLES / _verify_pg_counts bug fixes ────────────────
