@@ -329,3 +329,113 @@ class TestP3ReviewRegressions:
         assert "ETL failed" in result.output
         report = json.loads(report_path.read_text())
         assert report["summary"]["total_read"] == 2  # partial data preserved
+
+
+# ── nexus-d583z: _VERIFY_TABLES / _verify_pg_counts bug fixes ────────────────
+
+
+class TestVerifyPgCountsBugFixes:
+    """nexus-d583z: (a) relation names, (b) RLS-blind counts, (c) plans dedup."""
+
+    def test_verify_tables_uses_catalog_documents_not_nexus_documents(
+        self,
+    ) -> None:
+        """(a) The catalog/documents key must map to nexus.catalog_documents,
+        not nexus.documents (which does not exist in the schema)."""
+        from nexus.commands.storage_cmd import _VERIFY_TABLES
+
+        assert _VERIFY_TABLES[("catalog", "documents")] == "nexus.catalog_documents"
+
+    def test_verify_tables_uses_catalog_links_not_nexus_links(self) -> None:
+        """(a) The catalog/links key must map to nexus.catalog_links."""
+        from nexus.commands.storage_cmd import _VERIFY_TABLES
+
+        assert _VERIFY_TABLES[("catalog", "links")] == "nexus.catalog_links"
+
+    def test_verify_pg_counts_prefixes_count_with_set_tenant(
+        self, tmp_path: Path,
+    ) -> None:
+        """(b) Each psql -c must include SET nexus.tenant = 'default'; before
+        the SELECT count(*) so the admin user bypasses FORCE RLS."""
+        from nexus.commands.storage_cmd import _verify_pg_counts
+
+        captured_cmds: list[list[str]] = []
+
+        def _fake_run(cmd, **kw):
+            captured_cmds.append(cmd)
+
+            class _R:
+                returncode = 0
+                stdout = "5"
+            return _R()
+
+        report = {
+            "stores": [
+                {
+                    "store": "memory",
+                    "tables": [{"table": "memory", "written": 5}],
+                }
+            ]
+        }
+        creds = {
+            "PG_PORT": "5499",
+            "NX_DB_ADMIN_USER": "nexus_admin",
+            "NX_DB_ADMIN_PASS": "secret",
+            "NX_DB_URL": "postgresql://127.0.0.1:5499/nexus",
+        }
+        with (
+            patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            outcome = _verify_pg_counts(report, creds)
+
+        assert outcome == "verified"
+        assert len(captured_cmds) == 1
+        # The -c argument must contain the SET GUC prefix
+        cmd = captured_cmds[0]
+        c_flag_idx = cmd.index("-c")
+        query_arg = cmd[c_flag_idx + 1]
+        assert "SET nexus.tenant" in query_arg, (
+            f"Expected SET nexus.tenant in psql -c arg, got: {query_arg!r}"
+        )
+        assert "SELECT count(*)" in query_arg
+
+    def test_verify_pg_counts_plans_uses_dedup_aware_check(
+        self, tmp_path: Path,
+    ) -> None:
+        """(c) Plans use server-side dedup (UNIQUE tenant/project/query).
+        pg_count may legitimately be less than written (collapsed duplicates).
+        The check: pg_count > 0 AND pg_count <= written (not pg_count >= written).
+        """
+        from nexus.commands.storage_cmd import _verify_pg_counts
+
+        def _fake_run(cmd, **kw):
+            class _R:
+                returncode = 0
+                stdout = "80"  # pg landed 80, but 98 were 'written' (HTTP acks)
+            return _R()
+
+        report = {
+            "stores": [
+                {
+                    "store": "plans",
+                    "tables": [{"table": "plans", "written": 98}],
+                }
+            ]
+        }
+        creds = {
+            "PG_PORT": "5499",
+            "NX_DB_ADMIN_USER": "nexus_admin",
+            "NX_DB_ADMIN_PASS": "secret",
+            "NX_DB_URL": "postgresql://127.0.0.1:5499/nexus",
+        }
+        with (
+            patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            outcome = _verify_pg_counts(report, creds)
+
+        # 80 landed < 98 written: dedup-aware semantics -> NOT a mismatch
+        assert outcome == "verified", (
+            "Plans dedup collapse (pg_count < written) must not be flagged as mismatch"
+        )
