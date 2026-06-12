@@ -89,25 +89,6 @@ def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
     return (a / an) @ (b / bn).T
 
 
-def _not_on_service(method: str) -> "Any":
-    """Fail loud: this taxonomy method has no parity-correct service-backend
-    implementation yet (RDR-152 nexus-fjwxh / nexus-1di3r).
-
-    The HttpTaxonomyStore is an incomplete port of CatalogTaxonomy: the
-    BERTopic/HDBSCAN compute pipeline and several raw-cursor read methods
-    (topic-tree assembly, exclude-id merge-target listing, link upserts) are
-    not yet exposed by the Java service. Rather than crash with a TypeError on
-    a drifted signature (or, worse, return silently-wrong results), the method
-    raises a clear, actionable error. Run taxonomy in local mode meanwhile.
-    """
-    raise NotImplementedError(
-        f"taxonomy.{method} is not available on the service storage backend yet "
-        f"(tracked in nexus-1di3r). Run taxonomy commands in local mode: set "
-        f"NX_STORAGE_BACKEND_TAXONOMY=sqlite (the migrated data is still in the "
-        f"local SQLite store)."
-    )
-
-
 # ── HttpTaxonomyStore ──────────────────────────────────────────────────────────
 
 
