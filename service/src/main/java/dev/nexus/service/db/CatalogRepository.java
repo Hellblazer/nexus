@@ -195,6 +195,11 @@ public final class CatalogRepository {
 
     private static final Field<String>  EX_META_VAL   = DSL.field("EXCLUDED.value",       String.class);
     private static final Field<String>  EX_CHK_CHASH  = DSL.field("EXCLUDED.chash",       String.class);
+    private static final Field<Integer> EX_CHK_IDX   = DSL.field("EXCLUDED.chunk_index",  Integer.class);
+    private static final Field<Integer> EX_CHK_LST   = DSL.field("EXCLUDED.line_start",   Integer.class);
+    private static final Field<Integer> EX_CHK_LEN   = DSL.field("EXCLUDED.line_end",     Integer.class);
+    private static final Field<Integer> EX_CHK_CST   = DSL.field("EXCLUDED.char_start",   Integer.class);
+    private static final Field<Integer> EX_CHK_CEN   = DSL.field("EXCLUDED.char_end",     Integer.class);
 
     private final TenantScope tenantScope;
 
@@ -1492,7 +1497,14 @@ public final class CatalogRepository {
         });
     }
 
-    /** Fidelity-preserving chunk manifest row import. ON CONFLICT DO NOTHING. */
+    /**
+     * Convergent chunk manifest row import.
+     *
+     * <p>ON CONFLICT (tenant_id, doc_id, position) DO UPDATE SET — updates all
+     * data columns so a re-index with changed chunk content converges to the new
+     * state. Idempotency is preserved: when the incoming row is identical to the
+     * stored row the SET is a no-op in effect (same values written). nexus-9wz72.
+     */
     public void importChunk(String tenant, String docId, Map<String, Object> row) {
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(T_CHUNKS,
@@ -1501,7 +1513,13 @@ public final class CatalogRepository {
                .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
                        i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
                .onConflict(F_CHK_TENANT, F_CHK_DOC, F_CHK_POS)
-               .doNothing()
+               .doUpdate()
+               .set(F_CHK_CHASH, EX_CHK_CHASH)
+               .set(F_CHK_IDX,   EX_CHK_IDX)
+               .set(F_CHK_LST,   EX_CHK_LST)
+               .set(F_CHK_LEN,   EX_CHK_LEN)
+               .set(F_CHK_CST,   EX_CHK_CST)
+               .set(F_CHK_CEN,   EX_CHK_CEN)
                .execute();
             return null;
         });

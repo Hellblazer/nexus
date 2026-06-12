@@ -773,6 +773,70 @@ class CatalogRepositoryTest {
         assertThat(links).hasSize(1); // exactly one, not two
     }
 
+    @Test @Order(83)
+    void etl_chunk_convergentReimport_updatesChangedChash() {
+        // nexus-9wz72: importChunk must use DO UPDATE (convergent), not DO NOTHING.
+        // Re-importing the same (tenant, doc, position) with a DIFFERENT chash must
+        // update the row so the manifest reflects the new content hash.
+        String etlTenant = "etl-chunk-conv-tenant";
+        String docId     = "conv.1";
+
+        // Seed a parent document (FK target)
+        repo.importDocument(etlTenant, Map.of(
+            "tumbler", docId, "title", "Chunk Conv Doc",
+            "content_type", "paper", "corpus", "knowledge"
+        ));
+
+        // chash must be exactly 32 hex chars (catalog-002-2-chash-checks constraint)
+        String chashV1 = "aaa1aaa1aaa1aaa1aaa1aaa1aaa1aaa1"; // 32 chars
+        String chashV2 = "bbb2bbb2bbb2bbb2bbb2bbb2bbb2bbb2"; // 32 chars, different
+
+        // Initial chunk import
+        repo.importChunk(etlTenant, docId, Map.of(
+            "position", 0, "chash", chashV1, "chunk_index", 0,
+            "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 200
+        ));
+        var before = repo.getManifest(etlTenant, docId);
+        assertThat(before).hasSize(1);
+        assertThat(before.get(0).get("chash")).isEqualTo(chashV1);
+
+        // Re-import same (tenant, doc, position) with a DIFFERENT chash — convergence
+        repo.importChunk(etlTenant, docId, Map.of(
+            "position", 0, "chash", chashV2, "chunk_index", 0,
+            "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 200
+        ));
+        var after = repo.getManifest(etlTenant, docId);
+        assertThat(after).hasSize(1); // still exactly one row
+        assertThat(after.get(0).get("chash")).isEqualTo(chashV2); // updated, not silently dropped
+    }
+
+    @Test @Order(84)
+    void etl_chunk_idempotentReimport_sameValuesStable() {
+        // nexus-9wz72: re-importing with identical values must be a no-op (idempotent).
+        // DO UPDATE SET chash=EXCLUDED.chash, ... with the same values must not corrupt.
+        String etlTenant = "etl-chunk-idem-tenant";
+        String docId     = "idem.1";
+
+        repo.importDocument(etlTenant, Map.of(
+            "tumbler", docId, "title", "Chunk Idem Doc",
+            "content_type", "paper", "corpus", "knowledge"
+        ));
+
+        String chashStable = "ccc3ccc3ccc3ccc3ccc3ccc3ccc3ccc3"; // 32 chars
+        Map<String, Object> chunk = Map.of(
+            "position", 0, "chash", chashStable, "chunk_index", 0,
+            "line_start", 5, "line_end", 15, "char_start", 10, "char_end", 300
+        );
+        repo.importChunk(etlTenant, docId, chunk);
+        repo.importChunk(etlTenant, docId, chunk); // exact same values — must be stable
+
+        var manifest = repo.getManifest(etlTenant, docId);
+        assertThat(manifest).hasSize(1);
+        assertThat(manifest.get(0).get("chash")).isEqualTo(chashStable);
+        assertThat(manifest.get(0).get("line_start")).isEqualTo(5);
+        assertThat(manifest.get(0).get("line_end")).isEqualTo(15);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // RLS
     // ══════════════════════════════════════════════════════════════════════════

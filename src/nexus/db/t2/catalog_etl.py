@@ -15,13 +15,19 @@ IDEMPOTENT: each import route uses server-side upsert / DO NOTHING:
 - ``documents``:      ON CONFLICT (tenant_id, tumbler) DO UPDATE
                        (GREATEST source_mtime, all other fields EXCLUDED)
 - ``collections``:    ON CONFLICT (tenant_id, name) DO NOTHING
-- ``document_chunks``:ON CONFLICT (tenant_id, doc_id, position) DO NOTHING
+- ``document_chunks``:ON CONFLICT (tenant_id, doc_id, position) DO UPDATE
+                       (chash + all data cols from EXCLUDED; nexus-9wz72)
+                       Convergent: re-index with changed content updates the
+                       manifest; idempotent: same values are a no-op in effect.
 - ``links``:          ON CONFLICT (tenant_id, from_tumbler, to_tumbler,
                        link_type) DO NOTHING
 
 FIDELITY-PRESERVING:
 - source_mtime uses GREATEST (monotonic high-water mark on re-run).
-- links and chunks use DO NOTHING (event data, never overwritten).
+- links use DO NOTHING (event data, never overwritten).
+- chunks use DO UPDATE for convergence (nexus-9wz72): a re-index with
+  changed content updates chash + positional fields; same values are a
+  no-op in effect (idempotency preserved).
 - metadata JSON is copied verbatim.
 - SQLite ``_meta`` table is migrated into ``catalog_meta`` verbatim
   (key-value store for consistency markers).
