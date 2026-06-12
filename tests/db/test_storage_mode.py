@@ -32,21 +32,33 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(f"NX_STORAGE_BACKEND_{store.upper()}", raising=False)
 
 
-# ── default: all stores resolve to 'sqlite' ──────────────────────────────────
+# ── default: all stores resolve to 'service' (RDR-152 nexus-fjwxh flip) ───────
+
+
+# RDR-152 nexus-fjwxh: T1 scratch keeps its LOCAL backend as the hard default
+# (StorageBackend.SQLITE is the generic non-service marker — for T1 that local
+# backend is the Chroma-backed T1Database, NOT SQLite; T1's service backing is
+# forward-declared/incomplete). The nine T2 stores default to SERVICE. T1 still
+# follows an explicit per-store/global env flag.
+def _expected_hard_default(store: str) -> StorageBackend:
+    return StorageBackend.SQLITE if store == "t1" else StorageBackend.SERVICE
 
 
 @pytest.mark.parametrize("store", VALID_STORE_NAMES)
-def test_default_is_sqlite_for_every_store(
+def test_default_is_service_for_every_store(
     store: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # RDR-152 nexus-fjwxh: the hard default flipped SQLITE → SERVICE (T3 parity),
+    # except T1 (forward-declared service backing). _clear_env delenvs the conftest
+    # sqlite-pin too, so this sees the true default.
     _clear_env(monkeypatch)
-    assert storage_backend_for(store) == StorageBackend.SQLITE
+    assert storage_backend_for(store) == _expected_hard_default(store)
 
 
-def test_default_returns_sqlite_literal(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_returns_service_literal(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
     result = storage_backend_for("memory")
-    assert result == "sqlite"
+    assert result == "service"
 
 
 # ── per-store env override ────────────────────────────────────────────────────
@@ -63,11 +75,15 @@ def test_per_store_env_sets_service_for_that_store(
 def test_per_store_env_does_not_affect_other_stores(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Post-flip the default is SERVICE, so isolation is shown with a per-store
+    # OPT-OUT: NX_STORAGE_BACKEND_MEMORY=sqlite must not pull other stores off
+    # the service default.
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "service")
+    monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "sqlite")
+    assert storage_backend_for("memory") == StorageBackend.SQLITE
     for store in VALID_STORE_NAMES:
         if store != "memory":
-            assert storage_backend_for(store) == StorageBackend.SQLITE, store
+            assert storage_backend_for(store) == _expected_hard_default(store), store
 
 
 def test_per_store_env_sqlite_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,7 +168,7 @@ def test_empty_global_env_is_treated_as_default(monkeypatch: pytest.MonkeyPatch)
     """Empty string env var must not be treated as invalid -- it means 'unset'."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("NX_STORAGE_BACKEND", "")
-    assert storage_backend_for("memory") == StorageBackend.SQLITE
+    assert storage_backend_for("memory") == StorageBackend.SERVICE
 
 
 def test_empty_per_store_env_is_treated_as_default(
@@ -160,7 +176,7 @@ def test_empty_per_store_env_is_treated_as_default(
 ) -> None:
     _clear_env(monkeypatch)
     monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "")
-    assert storage_backend_for("memory") == StorageBackend.SQLITE
+    assert storage_backend_for("memory") == StorageBackend.SERVICE
 
 
 def test_nx_storage_mode_daemon_does_not_collide(
@@ -173,7 +189,8 @@ def test_nx_storage_mode_daemon_does_not_collide(
     """
     _clear_env(monkeypatch)
     monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
-    assert storage_backend_for("memory") == StorageBackend.SQLITE
+    # Legacy NX_STORAGE_MODE is ignored; the new resolver returns its own default.
+    assert storage_backend_for("memory") == StorageBackend.SERVICE
 
 
 # ── store name normalization ──────────────────────────────────────────────────
@@ -182,8 +199,8 @@ def test_nx_storage_mode_daemon_does_not_collide(
 def test_store_name_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
     """Callers may pass 'MEMORY' or 'Memory'; both resolve correctly."""
     _clear_env(monkeypatch)
-    assert storage_backend_for("MEMORY") == StorageBackend.SQLITE
-    assert storage_backend_for("Memory") == StorageBackend.SQLITE
+    assert storage_backend_for("MEMORY") == StorageBackend.SERVICE
+    assert storage_backend_for("Memory") == StorageBackend.SERVICE
 
 
 # ── VALID_STORE_NAMES drift guard ────────────────────────────────────────────
@@ -248,10 +265,12 @@ def test_valid_store_names_covers_t2database_attributes(
 def test_t2database_sqlite_seam_constructs_memory_store(
     tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default (sqlite) path: T2Database construction succeeds and db.memory is
-    the concrete MemoryStore.  Confirms the seam is live and routes correctly.
+    """SQLite seam: T2Database construction succeeds and db.memory is the
+    concrete MemoryStore.  Confirms the seam is live and routes correctly.
+    Pins sqlite explicitly (the default is SERVICE since nexus-fjwxh).
     """
     _clear_env(monkeypatch)
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
     from pathlib import Path
 
     import nexus.db.t2 as t2_mod

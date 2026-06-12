@@ -63,33 +63,10 @@ _SESSION_ID_ENV: str = "NX_T1_SESSION_ID"
 _HEADER_T1_SESSION: str = "X-Nexus-T1-Session"
 
 
-def _resolve_config() -> tuple[str, int, str]:
-    """Return (host, port, token) from environment.
-
-    Raises RuntimeError if NX_SERVICE_PORT or NX_SERVICE_TOKEN are not set.
-    """
-    host = os.environ.get("NX_SERVICE_HOST", "127.0.0.1")
-    port_str = os.environ.get("NX_SERVICE_PORT", "")
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-
-    if not port_str:
-        raise RuntimeError(
-            "NX_SERVICE_PORT is required when NX_STORAGE_BACKEND_T1=service. "
-            "Set it to the port where the nexus-service is listening."
-        )
-    try:
-        port = int(port_str)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"NX_SERVICE_PORT must be an integer, got: {port_str!r}"
-        ) from exc
-
-    if not token:
-        raise RuntimeError(
-            "NX_SERVICE_TOKEN is required when NX_STORAGE_BACKEND_T1=service."
-        )
-
-    return host, port, token
+# RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
+# resolver (env halves -> ServiceRegistry lease -> fail loud), so the
+# T2 service-mode default works wherever the supervisor is running.
+from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
 
 # ── HttpScratchStore ───────────────────────────────────────────────────────────

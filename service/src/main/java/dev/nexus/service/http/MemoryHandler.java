@@ -53,12 +53,12 @@ public final class MemoryHandler implements HttpHandler {
 
     private static final Logger log = LoggerFactory.getLogger(MemoryHandler.class);
 
-    // Jackson configured to handle OffsetDateTime and skip null fields in output.
+    // Jackson configured to handle OffsetDateTime and include null fields in output (SQLite-parity: every column key always present, RDR-152 nexus-fjwxh).
     static final ObjectMapper MAPPER = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-            .setSerializationInclusion(JsonInclude.Include.NON_NULL);
+            .setSerializationInclusion(JsonInclude.Include.ALWAYS);
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 

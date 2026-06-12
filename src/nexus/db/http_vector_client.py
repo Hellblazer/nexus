@@ -68,23 +68,17 @@ _lease_cache: tuple[str, str | None] | None = None
 
 
 def _discover_lease() -> tuple[str | None, str | None]:
-    """(url, token) from the supervisor's lease, or (None, None)."""
-    try:
-        from nexus.config import nexus_config_dir
-        from nexus.daemon.service_registry import ServiceRegistry
+    """(url, token) from the supervisor's lease, or (None, None).
 
-        registry = ServiceRegistry(dir=nexus_config_dir(), tier="storage_service")
-        lease = registry.discover(str(os.getuid()))
-        if lease is not None:
-            ep = lease.endpoint
-            host = str(ep.get("host", "127.0.0.1"))
-            port = int(ep.get("port", 0))
-            token = str(ep.get("token", "")) or None
-            if port > 0:
-                return f"http://{host}:{port}", token
-    except Exception as exc:  # discovery is best-effort; absence fails loud below
-        _log.debug("vector_endpoint_lease_discover_failed", error=str(exc))
-    return None, None
+    RDR-152 nexus-fjwxh: delegates to the centralized
+    :func:`nexus.db.service_endpoint.discover_lease` so every storage client
+    (T2 stores, catalog, T3) shares ONE discovery implementation. Kept as a
+    module-local name because the catalog client and the discovery tests
+    import ``_discover_lease`` from here.
+    """
+    from nexus.db.service_endpoint import discover_lease
+
+    return discover_lease()
 
 
 def _resolve_endpoint() -> tuple[str, str]:

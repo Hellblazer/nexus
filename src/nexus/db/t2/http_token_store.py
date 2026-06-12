@@ -31,30 +31,10 @@ _log = structlog.get_logger(__name__)
 DEFAULT_TENANT: str = "default"
 
 
-def _resolve_config() -> tuple[str, int, str]:
-    """Return (host, port, token) from the environment.
-
-    Raises:
-        RuntimeError: if NX_SERVICE_PORT or NX_SERVICE_TOKEN are not set.
-    """
-    host = os.environ.get("NX_SERVICE_HOST", "127.0.0.1")
-    port_str = os.environ.get("NX_SERVICE_PORT", "")
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not port_str:
-        raise RuntimeError(
-            "NX_SERVICE_PORT is required for token administration. "
-            "Set it to the port where nexus-service is listening."
-        )
-    try:
-        port = int(port_str)
-    except ValueError as exc:
-        raise RuntimeError(f"NX_SERVICE_PORT must be an integer, got: {port_str!r}") from exc
-    if not token:
-        raise RuntimeError(
-            "NX_SERVICE_TOKEN is required for token administration (the bootstrap "
-            "credential that authenticates the admin call)."
-        )
-    return host, port, token
+# RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
+# resolver (env halves -> ServiceRegistry lease -> fail loud), so the
+# T2 service-mode default works wherever the supervisor is running.
+from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
 
 class HttpTokenStore:

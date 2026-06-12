@@ -685,84 +685,31 @@ class TestAssignments:
 
 
 class TestTopicTree:
-    def test_get_topic_tree_root(self, client: HttpTaxonomyStore) -> None:
-        client.import_topic(
-            src_id=1, label="root1", parent_id=None, collection="c",
-            centroid_hash=None, doc_count=1, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        client.import_topic(
-            src_id=2, label="child1", parent_id=1, collection="c",
-            centroid_hash=None, doc_count=1, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        roots = client.get_topic_tree()
-        labels = [t["label"] for t in roots]
-        assert "root1" in labels
-        assert "child1" not in labels
+    # RDR-152 nexus-fjwxh: get_topic_tree was aligned to the CatalogTaxonomy
+    # oracle signature (collection, max_depth) and made FAIL LOUD in service
+    # mode — the old (parent_id, depth) flat roots/children shape cannot produce
+    # the oracle's recursive collection-scoped tree the CLI needs, and the CLI
+    # only ever calls the oracle shape. Full service-backend parity = nexus-1di3r.
+    def test_get_topic_tree_fails_loud(self, client: HttpTaxonomyStore) -> None:
+        import pytest
 
-    def test_get_topic_tree_children(self, client: HttpTaxonomyStore) -> None:
-        client.import_topic(
-            src_id=1, label="parent", parent_id=None, collection="c",
-            centroid_hash=None, doc_count=1, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        client.import_topic(
-            src_id=2, label="child", parent_id=1, collection="c",
-            centroid_hash=None, doc_count=1, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        children = client.get_topic_tree(parent_id=1)
-        assert len(children) == 1
-        assert children[0]["label"] == "child"
+        with pytest.raises(NotImplementedError, match="nexus-1di3r"):
+            client.get_topic_tree("c", max_depth=2)
 
 
 class TestLinks:
-    def test_upsert_and_get_links(self, client: HttpTaxonomyStore) -> None:
-        client.import_topic(
-            src_id=1, label="t1", parent_id=None, collection="c",
-            centroid_hash=None, doc_count=0, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        client.import_topic(
-            src_id=2, label="t2", parent_id=None, collection="c",
-            centroid_hash=None, doc_count=0, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        client.upsert_topic_links([(1, 2, 5)])
-        pairs = client.get_topic_link_pairs([1, 2])
-        assert len(pairs) == 1
-        assert pairs[0][2] == 5  # link_count
+    # RDR-152 nexus-fjwxh: upsert_topic_links was aligned to the oracle
+    # signature (links: list[dict]) and made FAIL LOUD in service mode. The old
+    # (pairs: list[tuple]) shape could not consume the dict payload the CLI
+    # builds (taxonomy_cmd persist_data), so it was unreachable-or-wrong via the
+    # real caller. link_types serialization parity = nexus-1di3r.
+    def test_upsert_topic_links_fails_loud(self, client: HttpTaxonomyStore) -> None:
+        import pytest
 
-    def test_upsert_link_greatest_wins(self, client: HttpTaxonomyStore) -> None:
-        client.import_topic(
-            src_id=1, label="t1", parent_id=None, collection="c",
-            centroid_hash=None, doc_count=0, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        client.import_topic(
-            src_id=2, label="t2", parent_id=None, collection="c",
-            centroid_hash=None, doc_count=0, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        client.upsert_topic_links([(1, 2, 3)])
-        client.upsert_topic_links([(1, 2, 10)])
-        pairs = client.get_topic_link_pairs([1])
-        assert pairs[0][2] == 10
-
-    def test_upsert_returns_count(self, client: HttpTaxonomyStore) -> None:
-        client.import_topic(
-            src_id=1, label="t1", parent_id=None, collection="c",
-            centroid_hash=None, doc_count=0, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        client.import_topic(
-            src_id=2, label="t2", parent_id=None, collection="c",
-            centroid_hash=None, doc_count=0, created_at="2026-01-01T00:00:00Z",
-            review_status="pending", terms=None,
-        )
-        n = client.upsert_topic_links([(1, 2, 1), (2, 1, 2)])
-        assert n == 2
+        links = [{"from_topic_id": 1, "to_topic_id": 2, "link_count": 5,
+                  "link_types": ["cooccurrence"]}]
+        with pytest.raises(NotImplementedError, match="nexus-1di3r"):
+            client.upsert_topic_links(links)
 
 
 class TestMetaAndRebalance:

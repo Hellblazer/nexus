@@ -503,7 +503,14 @@ def test_dual_population_baseline_locked():
     # the taxonomy CLI factory (raw-cursor reads + chroma-interleaved writes
     # that cannot cross the daemon RPC). Each survivor's ``# epsilon-allow:``
     # reason states why it cannot route.
-    assert result.t2database_constructions == 31, (
+    #
+    # RDR-152 nexus-fjwxh: 31 -> 33. The T2 default flipped to SERVICE, so the
+    # CLI memory (t2_handle) and MCP/index write seam (t2_index_write) short-
+    # circuit to a direct T2Database in service mode — but in service mode that
+    # T2Database routes to the HTTP service (PG arbiter), NOT a raw SQLite
+    # writer, so the single-writer concern this lint guards does not apply.
+    # Both carry an ``# epsilon-allow:`` reason saying exactly that.
+    assert result.t2database_constructions == 33, (
         f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
     )
 

@@ -104,10 +104,15 @@ fi
 
 if [[ "$RUN_JAVA" == "1" ]]; then
     echo "▸ T3 + repo-layer Java contract tests…"
-    java_out="$( cd service && mvn -q test -Dtest="$JAVA_TESTS" 2>&1 )" || rc=$?
-    echo "$java_out"
-    # Surefire prints "Tests run: N" — N==0 means the -Dtest filter matched
-    # nothing (renamed/removed class), another silent-green path.
+    # NOTE: deliberately NOT `-q` — quiet mode suppresses the surefire
+    # "Tests run: N" summary the inconclusive-detection below greps for, which
+    # would make every Java run read as INCONCLUSIVE even when green.
+    java_out="$( cd service && mvn test -Dtest="$JAVA_TESTS" 2>&1 )" || rc=$?
+    # Show the surefire per-class lines + the final reactor summary, not the
+    # full noisy build log.
+    grep -E 'Tests run:|BUILD' <<<"$java_out" | tail -20
+    # N==0 means the -Dtest filter matched nothing (renamed/removed class) — a
+    # silent-green path the gate must catch.
     if ! grep -qE 'Tests run: [1-9]' <<<"$java_out"; then
         echo "✗ Java tier INCONCLUSIVE — no tests ran (filter matched nothing?)." >&2
         rc=2
