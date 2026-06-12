@@ -448,7 +448,9 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     assert result.epsilon_allow_connects == 18, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
-    assert result.t2database_constructions == 31, (
+    # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-
+    # mode branches; both route to the HTTP service, not a raw SQLite writer).
+    assert result.t2database_constructions == 33, (
         f"t2database_constructions baseline changed: {result.t2database_constructions}"
     )
 

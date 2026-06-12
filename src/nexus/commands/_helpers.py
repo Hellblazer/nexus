@@ -70,7 +70,9 @@ def t2_handle() -> Iterator[Any]:
     if storage_backend_for("memory") == StorageBackend.SERVICE:
         from nexus.db.t2 import T2Database
 
-        db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow
+        # Service mode routes T2Database to the HTTP service (PG arbiter), not a
+        # raw SQLite writer, so the RDR-128 single-writer concern does not apply.
+        db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow: service mode routes to HTTP service, not a raw SQLite writer
         try:
             yield db
         finally:
