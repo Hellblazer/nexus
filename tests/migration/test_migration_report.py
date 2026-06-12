@@ -434,9 +434,12 @@ class TestEtlRegistry:
     def test_ladder_order_exact(self) -> None:
         from nexus.migration.etl_registry import LADDER_ORDER
 
+        # nexus-iy5se: aspects_queue moved to a post-catalog slot —
+        # fk_aspect_queue_catalog_doc requires catalog_documents populated
+        # first (first-run FK safety). Lock extended, not weakened.
         assert LADDER_ORDER == (
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog",
+            "aspects", "chash", "catalog", "aspects_queue",
         )
 
     def test_unknown_store_rejected(self) -> None:
