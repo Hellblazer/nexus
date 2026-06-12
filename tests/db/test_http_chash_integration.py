@@ -23,7 +23,10 @@ What is exercised (bead nexus-gmiaf.16 gate requirements):
   f) delete_stale removes specific PK; absent PK returns 0
   g) is_empty and count_for_collection
   h) Cross-tenant RLS negative: default tenant rows invisible to other-tenant
-  i) RLS WITH CHECK: cross-tenant INSERT rejected (fail-closed)
+  i) RLS isolation: a genuine other-tenant write is invisible to default
+  l) Phase E: tenant comes from the bearer, not the X-Nexus-Tenant header
+     (the unset-GUC fail-closed property lives at the repo layer —
+      ChashRepositoryTest / ChunksRlsBehavioralTest)
   j) ETL fidelity: migrate_chash_rows preserves created_at verbatim
   k) ETL idempotent re-run: second pass produces no duplicates
   l) Unset GUC / missing tenant returns empty (fail-closed)
@@ -352,7 +355,7 @@ class TestChashMVV:
             f"rows; got {other_rows!r}"
         )
 
-    def test_i_rls_with_check_rejected(self, service):
+    def test_i_other_tenant_write_invisible_to_default(self, service):
         """i) RLS isolation: a genuine other-tenant write is invisible to default."""
         import httpx
 
@@ -443,31 +446,45 @@ class TestChashMVV:
         assert chash_store.count_for_collection("col_idem") == 2
 
     def test_l_tenant_from_bearer_not_header(self, service):
-        """l) Phase E: tenant is resolved from the bearer, NOT the X-Nexus-Tenant
-        header. A request with NO tenant header is therefore valid and scoped to
-        the bearer's tenant — it must NOT 400, and must NEVER leak another
-        tenant's rows.
+        """l) Phase E: the X-Nexus-Tenant header is advisory-only — the bearer is
+        authoritative. A request with NO header is valid (not 400), and a SPOOFED
+        header cannot redirect the request to another tenant's view.
 
         Pre-Phase-E this asserted fail-closed-on-missing-header; the header was
         load-bearing then. Phase E (nexus-gmiaf.32.5) made the bearer
-        authoritative and the header advisory-only, so the fail-closed property
-        moved to the SQL layer (unset nexus.tenant GUC → RLS returns zero rows),
-        exercised in the repository tests. Here we pin the HTTP contract: the
-        header is non-load-bearing and the request succeeds bearer-scoped.
+        authoritative; the unset-GUC fail-closed property moved to the SQL layer
+        (ChashRepositoryTest / ChunksRlsBehavioralTest). Here we pin the HTTP
+        contract: header omitted → 200, and a spoofed header yields the IDENTICAL
+        bearer-scoped result (so it cannot leak/cross into another tenant).
         """
         import httpx
 
         base_url, token, _ = service
-        resp = httpx.get(
+
+        # No tenant header → valid, scoped to the bearer (default).
+        bare = httpx.get(
+            f"{base_url}/v1/chash/is_empty",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert bare.status_code == 200, (
+            f"missing X-Nexus-Tenant is valid under Phase E (bearer is "
+            f"authoritative); expected 200, got {bare.status_code}: {bare.text[:200]}"
+        )
+
+        # Spoofed tenant header must be IGNORED — identical result to no header.
+        # If the header were load-bearing this would switch to 'evil-spoof''s
+        # (empty) view and diverge; identical bodies prove bearer-scoping.
+        spoofed = httpx.get(
             f"{base_url}/v1/chash/is_empty",
             headers={
                 "Authorization": f"Bearer {token}",
-                # Deliberately omit X-Nexus-Tenant — the bearer carries the tenant.
+                "X-Nexus-Tenant": "evil-spoof",
             },
         )
-        assert resp.status_code == 200, (
-            f"missing X-Nexus-Tenant is valid under Phase E (bearer is "
-            f"authoritative); expected 200, got {resp.status_code}: {resp.text[:200]}"
+        assert spoofed.status_code == 200
+        assert spoofed.json() == bare.json(), (
+            "a spoofed X-Nexus-Tenant header must NOT change the tenant view — "
+            f"bearer is authoritative; got bare={bare.json()} spoofed={spoofed.json()}"
         )
 
     def test_m_registered_chashes_for_collection(self, chash_store):

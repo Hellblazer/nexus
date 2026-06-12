@@ -62,8 +62,10 @@ if [[ "$BUILD" == "1" ]]; then
     echo "▸ Building service JAR (mvn package -DskipTests)…"
     ( cd service && mvn -q -DskipTests package )
     echo "  built: $JAR"
-elif [[ ! -f "$JAR" ]]; then
-    echo "✗ $JAR missing and --no-build/--java-only set — build it first." >&2
+elif [[ "$RUN_PYTHON" == "1" && ! -f "$JAR" ]]; then
+    # Only the Python suites need a pre-built JAR (their fixtures spawn it as a
+    # subprocess). `mvn test` compiles its own, so --java-only does not need it.
+    echo "✗ $JAR missing and --no-build set — build it first." >&2
     exit 1
 fi
 
@@ -79,19 +81,37 @@ PY_SUITES=(
     tests/db/test_http_catalog_integration.py
 )
 
-# The Java T3 serving contract tests — pgvector serving + the RDR-156 stats view.
-JAVA_TESTS="PgVectorServingContractTest,PgVectorRepositoryContractTest,PgVectorHybridSearchContractTest,CollectionVectorStatsTest,SoftDeleteTest,ManifestFunctionsTest,VectorHybridHttpTest"
+# The Java tier tests: T3 pgvector serving + the RDR-156 stats view, AND the
+# repo-layer RLS contracts (incl. the unset-GUC fail-closed property that the
+# chash HTTP test_l delegates to — see test_http_chash_integration.py).
+JAVA_TESTS="PgVectorServingContractTest,PgVectorRepositoryContractTest,PgVectorHybridSearchContractTest,CollectionVectorStatsTest,SoftDeleteTest,ManifestFunctionsTest,VectorHybridHttpTest,ChashRepositoryTest,ChunksRlsBehavioralTest"
 
 rc=0
 
 if [[ "$RUN_PYTHON" == "1" ]]; then
     echo "▸ T1/T2/catalog Python integration suites (ephemeral PG + service)…"
-    uv run pytest -m integration "${PY_SUITES[@]}" -q || rc=$?
+    # Capture so an all-SKIP run (missing pg16/jar → module skipif) is reported
+    # as INCONCLUSIVE, not green. Skipped tests exit pytest 0; a gate that prints
+    # "green" having run zero assertions is the exact false-confidence a gate
+    # must not have.
+    py_out="$(uv run pytest -m integration "${PY_SUITES[@]}" -q 2>&1)" || rc=$?
+    echo "$py_out"
+    if ! grep -qE '[1-9][0-9]* passed' <<<"$py_out"; then
+        echo "✗ Python tier INCONCLUSIVE — no tests ran (prerequisites absent?)." >&2
+        rc=2
+    fi
 fi
 
 if [[ "$RUN_JAVA" == "1" ]]; then
-    echo "▸ T3 Java serving contract tests…"
-    ( cd service && mvn -q test -Dtest="$JAVA_TESTS" ) || rc=$?
+    echo "▸ T3 + repo-layer Java contract tests…"
+    java_out="$( cd service && mvn -q test -Dtest="$JAVA_TESTS" 2>&1 )" || rc=$?
+    echo "$java_out"
+    # Surefire prints "Tests run: N" — N==0 means the -Dtest filter matched
+    # nothing (renamed/removed class), another silent-green path.
+    if ! grep -qE 'Tests run: [1-9]' <<<"$java_out"; then
+        echo "✗ Java tier INCONCLUSIVE — no tests ran (filter matched nothing?)." >&2
+        rc=2
+    fi
 fi
 
 echo ""

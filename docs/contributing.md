@@ -64,13 +64,16 @@ default CI/unit run), storage-stack regressions can rot unseen. One button-press
 runs the whole tier stack:
 
 ```bash
-scripts/validate/integration-stack.sh            # build jar, run T1+T2+T3
-scripts/validate/integration-stack.sh --no-build # reuse the existing jar
+scripts/validate/integration-stack.sh               # build jar, run T1+T2+T3
+scripts/validate/integration-stack.sh --no-build    # reuse the existing jar
+scripts/validate/integration-stack.sh --python-only # T1/T2/catalog suites only
+scripts/validate/integration-stack.sh --java-only   # T3 + repo-layer Java tests only
 ```
 
 Run it after any change to the HTTP stores, the Java service handlers/schema, or
-the token/RLS model. Prereqs (dev box): a JDK/GraalVM and pg16 binaries; suites
-self-skip when absent.
+the token/RLS model. Prereqs (dev box): a JDK/GraalVM and pg16 binaries. When the
+prereqs are absent the suites self-skip and the gate reports **inconclusive**
+(non-zero exit), never a false green.
 
 ## Code Conventions
 

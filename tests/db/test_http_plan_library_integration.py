@@ -321,8 +321,13 @@ class TestPlansMVV:
             f"tenant 'default' plan id={pid}; got {row!r}"
         )
 
-    def test_f_rls_with_check_rejected(self, service):
-        """f) RLS WITH CHECK: cross-tenant INSERT rejected."""
+    def test_f_cross_tenant_write_invisible_to_default(self, service):
+        """f) RLS isolation: a gamma-plans write is invisible to the default tenant.
+
+        (Was test_f_rls_with_check_rejected — renamed: Phase E resolves tenant
+        from the bearer, so this exercises cross-tenant READ isolation with a real
+        gamma-plans bearer, not a WITH CHECK INSERT rejection.)
+        """
         import httpx
         from nexus.db.t2.http_plan_library import HttpPlanLibrary
         base_url, token, _ = service

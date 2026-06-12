@@ -35,6 +35,10 @@ CONTRACT:
 """
 from __future__ import annotations
 
+import json as _json
+import urllib.error
+import urllib.request
+
 # SQL to create nexus_svc (NOSUPERUSER NOBYPASSRLS LOGIN).
 # Applied by the test pg_instance fixture as superuser BEFORE the JAR starts.
 # Idempotent: DO-block guards against re-creation.
@@ -62,10 +66,6 @@ END $$;
 # require-minted gate 401s any X-Nexus-T1-Session header that does not resolve
 # to a live session_tokens row. Production mints via the MCP lifespan; tests
 # mint via /v1/sessions/start exactly the same way.
-
-import json as _json  # noqa: E402
-import urllib.error  # noqa: E402
-import urllib.request  # noqa: E402
 
 
 def _post_json(base_url: str, path: str, bearer: str, body: dict) -> dict:
@@ -116,6 +116,9 @@ def mint_session(base_url: str, bearer: str, session_id: str,
 
     The session is bound to *bearer*'s tenant (the body carries only the
     session_id). Returns the raw session_token to send as X-Nexus-T1-Session.
+    Re-minting the same (tenant, session_id) is safe — session_tokens has
+    UNIQUE(tenant_id, session_id) with ON CONFLICT DO UPDATE, so a second mint
+    replaces the row rather than erroring.
     """
     body: dict = {"session_id": session_id}
     if ttl_seconds is not None:
