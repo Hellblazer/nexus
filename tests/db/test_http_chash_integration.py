@@ -24,12 +24,11 @@ What is exercised (bead nexus-gmiaf.16 gate requirements):
   g) is_empty and count_for_collection
   h) Cross-tenant RLS negative: default tenant rows invisible to other-tenant
   i) RLS isolation: a genuine other-tenant write is invisible to default
+  j) ETL fidelity: migrate_chash_rows preserves created_at verbatim
+  k) ETL idempotent re-run: second pass produces no duplicates
   l) Phase E: tenant comes from the bearer, not the X-Nexus-Tenant header
      (the unset-GUC fail-closed property lives at the repo layer —
       ChashRepositoryTest / ChunksRlsBehavioralTest)
-  j) ETL fidelity: migrate_chash_rows preserves created_at verbatim
-  k) ETL idempotent re-run: second pass produces no duplicates
-  l) Unset GUC / missing tenant returns empty (fail-closed)
 
 NX_STORAGE_BACKEND is NOT touched — default SQLite path is unchanged.
 """
