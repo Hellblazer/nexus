@@ -70,6 +70,9 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/links/generate_cooccurrence generate cooccurrence links
  *   POST  /v1/taxonomy/links/refresh_projection   refresh projection links
  *   POST  /v1/taxonomy/topics/persist_split       persist topic split result
+ *   GET   /v1/taxonomy/rebuild/old_state          pre-rebuild T2 state (collection= required)
+ *   POST  /v1/taxonomy/topics/persist_rebuild     atomic rebuild persist (REPLACE semantics)
+ *   POST  /v1/taxonomy/topics/persist_discovered  atomic discover persist (existing-topics guard)
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (enforced by
@@ -162,6 +165,10 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/links/generate_cooccurrence"    -> handleGenerateCooccurrenceLinks(exchange, tenant, method);
                 case "/links/refresh_projection"       -> handleRefreshProjectionLinks(exchange, tenant, method);
                 case "/topics/persist_split"           -> handlePersistSplit(exchange, tenant, method);
+                // RDR-152 nexus-1di3r Phase 3 — chroma-free taxonomy persist/read
+                case "/rebuild/old_state"              -> handleReadRebuildOldState(exchange, tenant, method);
+                case "/topics/persist_rebuild"         -> handlePersistRebuild(exchange, tenant, method);
+                case "/topics/persist_discovered"      -> handlePersistDiscovered(exchange, tenant, method);
                 // Centroids (pgvector — RDR-156 bead nexus-t1hnc; chroma-free taxonomy)
                 case "/centroids/upsert"               -> handleCentroidUpsert(exchange, tenant, method);
                 case "/centroids/query"                -> handleCentroidQuery(exchange, tenant, method);
@@ -705,6 +712,43 @@ public final class TaxonomyHandler implements HttpHandler {
         if (childSpecs == null) childSpecs = List.of();
         var childIds = repo.persistSplit(tenant, topicId, collectionName, childSpecs);
         HttpUtil.send(ex, 200, json(Map.of("child_ids", childIds)));
+    }
+
+    // ── RDR-152 nexus-1di3r Phase 3: chroma-free taxonomy persist/read ─────────
+
+    /** GET /v1/taxonomy/rebuild/old_state?collection= — pre-rebuild T2 read half. */
+    private void handleReadRebuildOldState(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        String collection = queryParam(ex, "collection");
+        if (collection == null || collection.isBlank())
+            throw new IllegalArgumentException("missing required param: collection");
+        HttpUtil.send(ex, 200, json(repo.readRebuildOldState(tenant, collection)));
+    }
+
+    /** POST /v1/taxonomy/topics/persist_rebuild — atomic REPLACE-semantics rebuild persist. */
+    @SuppressWarnings("unchecked")
+    private void handlePersistRebuild(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String collection = requireString(body, "collection");
+        List<Map<String, Object>> specs = (List<Map<String, Object>>) body.get("specs");
+        if (specs == null) specs = List.of();
+        Map<String, Object> manualTransfers = (Map<String, Object>) body.get("manual_transfers");
+        if (manualTransfers == null) manualTransfers = Map.of();
+        var ids = repo.persistRebuildTopics(tenant, collection, specs, manualTransfers);
+        HttpUtil.send(ex, 200, json(Map.of("topic_ids", ids)));
+    }
+
+    /** POST /v1/taxonomy/topics/persist_discovered — atomic discover persist (existing-topics guard). */
+    @SuppressWarnings("unchecked")
+    private void handlePersistDiscovered(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String collection = requireString(body, "collection");
+        List<Map<String, Object>> specs = (List<Map<String, Object>>) body.get("specs");
+        if (specs == null) specs = List.of();
+        var ids = repo.persistDiscoveredTopics(tenant, collection, specs);
+        HttpUtil.send(ex, 200, json(Map.of("topic_ids", ids)));
     }
 
     // ── Centroid handlers (pgvector — RDR-156 bead nexus-t1hnc) ──────────────────

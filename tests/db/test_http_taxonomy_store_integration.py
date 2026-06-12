@@ -882,3 +882,79 @@ class TestAnalyticalMethods:
         assert not taxonomy_store.needs_rebalance("coll-greatest-test-inttest", 1001), (
             "needs_rebalance should return False (1001 vs 1000) — GREATEST preserved 1000"
         )
+
+
+class TestServiceBackedPersist:
+    """RDR-152 nexus-1di3r: cross-language shape parity for the new RELATIONAL
+    persist endpoints (persist_discovered / persist_rebuild / purge_collection +
+    the rebuild/old_state T2-read half) against the real Java service.
+
+    Centroid-dependent orchestrators (discover/rebuild/project/split full e2e)
+    need the pgvector centroid stack, which this hermetic harness does not
+    bootstrap; they are covered by the Java-side TaxonomyCentroidHandlerTest /
+    TaxonomyCentroidRepositoryTest + the Python unit parity tests.
+    """
+
+    _COLL = "knowledge__1di3r-persist-inttest"
+
+    def test_persist_discovered_returns_ids_and_guards(self, taxonomy_store) -> None:
+        specs = [
+            {"label": "pdi-0", "doc_count": 2, "terms": "[]", "assigned_by": "hdbscan",
+             "doc_ids": ["pdi-d1", "pdi-d2"]},
+            {"label": "pdi-1", "doc_count": 0, "terms": "[]", "assigned_by": "hdbscan",
+             "doc_ids": []},
+        ]
+        ids = taxonomy_store.persist_discovered_topics(self._COLL, specs)
+        assert isinstance(ids, list) and len(ids) == 2 and all(i > 0 for i in ids)
+        assert sorted(taxonomy_store.get_all_topic_doc_ids(ids[0])) == ["pdi-d1", "pdi-d2"]
+        # existing-topics guard: second call is a no-op
+        assert taxonomy_store.persist_discovered_topics(self._COLL, specs) == []
+
+    def test_persist_rebuild_replace_and_manual(self, taxonomy_store) -> None:
+        coll = "knowledge__1di3r-rebuild-inttest"  # inline, isolated (re-run safe)
+        taxonomy_store.persist_discovered_topics(
+            coll, [{"label": "prb-old", "doc_count": 1, "terms": "[]",
+                    "assigned_by": "hdbscan", "doc_ids": ["prb1"]}])
+        plan = {
+            "specs": [
+                {"label": "prb-new0", "doc_count": 2, "terms": "[]",
+                 "review_status": "pending", "assigned_by": "hdbscan",
+                 "doc_ids": ["prb1", "prb2"]},
+                {"label": "prb-new1", "doc_count": 0, "terms": "[]",
+                 "review_status": "pending", "assigned_by": "hdbscan", "doc_ids": []},
+            ],
+            "manual_transfers": {"prb-manual": 1},
+        }
+        ids = taxonomy_store.persist_rebuild_topics(coll, plan)
+        assert len(ids) == 2
+        labels = {t["label"] for t in taxonomy_store.get_all_topics(collection=coll)}
+        assert labels == {"prb-new0", "prb-new1"}  # old replaced
+        assert taxonomy_store.get_assignments_for_docs(["prb-manual"]) == {"prb-manual": ids[1]}
+
+    def test_old_state_t2_half_shape(self, taxonomy_store) -> None:
+        # Directly exercise the GET /rebuild/old_state endpoint (T2-read half) —
+        # the centroid half is composed Python-side and is unit-tested separately.
+        coll = "knowledge__1di3r-oldstate-inttest"
+        ids = taxonomy_store.persist_discovered_topics(
+            coll, [{"label": "os-t", "doc_count": 1, "terms": "[]",
+                    "assigned_by": "hdbscan", "doc_ids": ["os-d1"]}])
+        taxonomy_store.assign_topic("os-manual", ids[0], "manual")
+        raw = taxonomy_store._get("/rebuild/old_state", {"collection": coll})
+        assert set(raw) == {"old_topic_map", "manual_assignments"}
+        assert raw["old_topic_map"][0]["label"] == "os-t"
+        assert set(raw["old_topic_map"][0]) == {"id", "label", "review_status"}
+        manual = {r["doc_id"]: r["topic_id"] for r in raw["manual_assignments"]}
+        assert manual == {"os-manual": ids[0]}
+
+    def test_purge_collection_count_dict(self, taxonomy_store) -> None:
+        coll = "knowledge__1di3r-purge-inttest"
+        ids = taxonomy_store.persist_discovered_topics(
+            coll, [{"label": "pg-t", "doc_count": 1, "terms": "[]",
+                    "assigned_by": "hdbscan", "doc_ids": ["pg-d1"]}])
+        taxonomy_store.upsert_topic_links(
+            [{"from_topic_id": ids[0], "to_topic_id": ids[0], "link_count": 1,
+              "link_types": ["projection"]}])
+        out = taxonomy_store.purge_collection(coll)
+        assert set(out) == {"topics", "assignments", "links", "meta"}
+        assert out["topics"] == 1
+        assert taxonomy_store.get_all_topics(collection=coll) == []

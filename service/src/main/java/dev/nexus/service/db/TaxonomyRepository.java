@@ -34,7 +34,10 @@ import java.util.Optional;
  *   <li>topics.label: existing (operator may have renamed; do not clobber live label)</li>
  *   <li>topics.centroid_hash / terms: EXCLUDED (allow ETL to refresh)</li>
  *   <li>topic_assignments.similarity: GREATEST to preserve best projection quality</li>
- *   <li>topic_links.link_count: GREATEST(EXCLUDED, existing)</li>
+ *   <li>topic_links.link_count: GREATEST(EXCLUDED, existing) — for the ETL
+ *       {@code importTopicLink} path ONLY. The live-compute {@code upsertTopicLink}
+ *       path uses EXCLUDED (overwrite) to mirror the oracle's authoritative
+ *       full-recompute — see that method's javadoc (RDR-152 nexus-1di3r.4).</li>
  *   <li>taxonomy_meta counters: GREATEST(EXCLUDED, existing)</li>
  * </ul>
  *
@@ -514,14 +517,28 @@ public final class TaxonomyRepository {
         });
     }
 
-    /** Upsert a topic link pair (link_count uses GREATEST). */
+    /**
+     * Upsert a topic link pair from a live recompute (mirrors the oracle
+     * {@code upsert_topic_links} INSERT OR REPLACE, catalog_taxonomy.py:1405).
+     *
+     * <p>Conflict policy is EXCLUDED (overwrite), NOT GREATEST. The caller
+     * ({@code compute_topic_links}) recomputes the COMPLETE, authoritative link
+     * count for the pair on every run, so the freshly computed value IS the
+     * truth — a GREATEST would floor the stored count at a historical maximum
+     * and never reflect a decrement (catalog pruning / topic split). This is the
+     * live-compute counterpart to the ETL {@link #importTopicLink} path, which
+     * correctly uses GREATEST to avoid clobbering a live PG value that may be
+     * ahead of an older SQLite snapshot. Sister recompute methods
+     * ({@code generateCooccurrenceLinks}, {@code refreshProjectionLinks}) use
+     * EXCLUDED for the same reason (RDR-152 nexus-1di3r.4).
+     */
     public void upsertTopicLink(String tenant, long fromId, long toId, int linkCount, String linkTypes) {
         tenantScope.withTenant(tenant, ctx -> {
             ctx.execute("""
                 INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_count, link_types)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (tenant_id, from_topic_id, to_topic_id) DO UPDATE SET
-                    link_count = GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count),
+                    link_count = EXCLUDED.link_count,
                     link_types = EXCLUDED.link_types
                 """, tenant, fromId, toId, linkCount, linkTypes);
             return null;
@@ -1026,6 +1043,174 @@ public final class TaxonomyRepository {
 
             log.info("persist_split topic_id={} children={}", topicId, childIds.size());
             return childIds;
+        });
+    }
+
+    // ── RDR-152 nexus-1di3r Phase 3: chroma-free taxonomy persist/read ─────────
+
+    /**
+     * Read the pre-rebuild T2 state for {@code rebuild_taxonomy} — the read-only
+     * T2 half of oracle {@code CatalogTaxonomy.read_rebuild_old_state}
+     * (catalog_taxonomy.py:2960, RDR-151 Phase 3).
+     *
+     * <p>Pure reads. Returns {@code {old_topic_map:[{id,label,review_status}],
+     * manual_assignments:[{doc_id,topic_id}]}}. The chroma centroid half of the
+     * oracle method is supplied separately by the centroid-port
+     * ({@code get_by_collection}); the Python orchestrator composes the two.
+     */
+    public Map<String, Object> readRebuildOldState(String tenant, String collection) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            List<Map<String, Object>> oldTopicMap = ctx.fetch("""
+                SELECT id, label, review_status FROM nexus.topics WHERE collection = ?
+                """, collection).map(r -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("id",            r.get("id",            Long.class));
+                    m.put("label",         r.get("label",         String.class));
+                    m.put("review_status", r.get("review_status", String.class));
+                    return m;
+                });
+            List<Map<String, Object>> manualAssignments = ctx.fetch("""
+                SELECT ta.doc_id, ta.topic_id FROM nexus.topic_assignments ta
+                JOIN nexus.topics t ON t.id = ta.topic_id
+                WHERE ta.assigned_by = 'manual' AND t.collection = ?
+                """, collection).map(r -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("doc_id",   r.get("doc_id",   String.class));
+                    m.put("topic_id", r.get("topic_id", Long.class));
+                    return m;
+                });
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("old_topic_map", oldTopicMap);
+            out.put("manual_assignments", manualAssignments);
+            return out;
+        });
+    }
+
+    /**
+     * Apply a rebuild plan — the pure-T2 PERSIST half of oracle
+     * {@code persist_rebuild_topics} (catalog_taxonomy.py:3140, RDR-151 Phase 3).
+     *
+     * <p>ONE transaction: DELETE old topics + assignments for {@code collection},
+     * INSERT the new spec rows (+ their {@code INSERT OR IGNORE} chunk
+     * assignments), then apply {@code manualTransfers} ({@code doc_id ->
+     * spec_index} into the freshly generated topic_ids, {@code assigned_by =
+     * 'manual'}). Returns the new topic_ids aligned to {@code specs} order.
+     *
+     * <p>REPLACE semantics: the old rows are cleared even when {@code specs} is
+     * empty (the {@code < 5} docs / all-noise case), matching the monolithic
+     * {@code rebuild_taxonomy}'s unconditional clear. A non-atomic Python
+     * delete+insert loop cannot preserve this; hence a batch endpoint.
+     */
+    @SuppressWarnings("unchecked")
+    public List<Long> persistRebuildTopics(String tenant, String collection,
+                                            List<Map<String, Object>> specs,
+                                            Map<String, Object> manualTransfers) {
+        List<Map<String, Object>> safeSpecs = specs == null ? List.of() : specs;
+        Map<String, Object> transfers = manualTransfers == null ? Map.of() : manualTransfers;
+        return tenantScope.withTenant(tenant, ctx -> {
+            // REPLACE semantics — clear old rows even when there are no new specs.
+            ctx.execute("""
+                DELETE FROM nexus.topic_assignments WHERE topic_id IN
+                    (SELECT id FROM nexus.topics WHERE collection = ?)
+                """, collection);
+            ctx.execute("DELETE FROM nexus.topics WHERE collection = ?", collection);
+
+            String tsStr = fmtTs(OffsetDateTime.now(ZoneOffset.UTC));
+            List<Long> topicIds = new ArrayList<>();
+            for (var spec : safeSpecs) {
+                String label        = (String) spec.get("label");
+                int    docCount     = ((Number) spec.get("doc_count")).intValue();
+                String terms        = (String) spec.getOrDefault("terms", null);
+                String reviewStatus = (String) spec.getOrDefault("review_status", "pending");
+                String assignedBy   = (String) spec.getOrDefault("assigned_by", "hdbscan");
+                List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
+
+                var row = ctx.fetchOne("""
+                    INSERT INTO nexus.topics
+                        (tenant_id, label, collection, doc_count, created_at, terms, review_status)
+                    VALUES (?, ?, ?, ?, ?::timestamptz, ?, ?)
+                    RETURNING id
+                    """, tenant, label, collection, docCount, tsStr, terms, reviewStatus);
+                long topicId = row == null ? -1 : ((Number) row.get("id")).longValue();
+                topicIds.add(topicId);
+
+                for (String did : docIds) {
+                    ctx.execute("""
+                        INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+                        """, tenant, did, topicId, assignedBy);
+                }
+            }
+
+            for (var e : transfers.entrySet()) {
+                int specIndex = ((Number) e.getValue()).intValue();
+                if (specIndex >= 0 && specIndex < topicIds.size()) {
+                    ctx.execute("""
+                        INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by)
+                        VALUES (?, ?, ?, 'manual')
+                        ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET assigned_by = 'manual'
+                        """, tenant, e.getKey(), topicIds.get(specIndex));
+                }
+            }
+            log.info("persist_rebuild collection={} topics={}", collection, topicIds.size());
+            return topicIds;
+        });
+    }
+
+    /**
+     * Persist discovered topic specs — the pure-T2 PERSIST half of oracle
+     * {@code persist_discovered_topics} (catalog_taxonomy.py:1996, RDR-151
+     * Phase 3).
+     *
+     * <p>ONE transaction: the existing-topics guard (COUNT topics WHERE
+     * collection; return {@code []} no-op if any exist, matching the monolithic
+     * {@code discover_topics} skip), then INSERT each spec (+ its {@code INSERT
+     * OR IGNORE} chunk assignments). Returns topic_ids aligned to {@code specs}
+     * order. The batch endpoint preserves the guard atomically vs a TOCTOU
+     * Python count+loop.
+     */
+    @SuppressWarnings("unchecked")
+    public List<Long> persistDiscoveredTopics(String tenant, String collection,
+                                               List<Map<String, Object>> specs) {
+        if (specs == null || specs.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            int existing = ctx.fetchOne(
+                "SELECT COUNT(*) AS c FROM nexus.topics WHERE collection = ?", collection)
+                .get("c", Integer.class);
+            if (existing > 0) {
+                log.info("discover_skip_existing collection={} existing_topics={}",
+                         collection, existing);
+                return List.of();
+            }
+            String tsStr = fmtTs(OffsetDateTime.now(ZoneOffset.UTC));
+            List<Long> topicIds = new ArrayList<>();
+            for (var spec : specs) {
+                String label        = (String) spec.get("label");
+                int    docCount     = ((Number) spec.get("doc_count")).intValue();
+                String terms        = (String) spec.getOrDefault("terms", null);
+                String assignedBy   = (String) spec.getOrDefault("assigned_by", "hdbscan");
+                List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
+
+                var row = ctx.fetchOne("""
+                    INSERT INTO nexus.topics
+                        (tenant_id, label, collection, doc_count, created_at, terms)
+                    VALUES (?, ?, ?, ?, ?::timestamptz, ?)
+                    RETURNING id
+                    """, tenant, label, collection, docCount, tsStr, terms);
+                long topicId = row == null ? -1 : ((Number) row.get("id")).longValue();
+                topicIds.add(topicId);
+
+                for (String did : docIds) {
+                    ctx.execute("""
+                        INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+                        """, tenant, did, topicId, assignedBy);
+                }
+            }
+            log.info("persist_discovered collection={} topics={}", collection, topicIds.size());
+            return topicIds;
         });
     }
 }

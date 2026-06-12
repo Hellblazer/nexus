@@ -62,6 +62,10 @@ class TaxonomyRepositoryTest {
     private static final String PAST_TS  = "2024-03-15T08:00:00Z";
     private static final String COL_A    = "knowledge__a";
     private static final String COL_B    = "knowledge__b";
+    // RDR-152 nexus-1di3r Phase 3 — distinct collections to avoid cross-test leakage.
+    private static final String COL_OS   = "knowledge__os";
+    private static final String COL_RB   = "knowledge__rb";
+    private static final String COL_DISC = "knowledge__disc";
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
@@ -127,7 +131,11 @@ class TaxonomyRepositoryTest {
             for (String tumbler : List.of(
                     "doc-del-1", "doc-merge", "doc-manual", "doc-proj",
                     "doc-label-1", "doc-label-2", "doc-purge-only", "doc-purge-col",
-                    "icf-doc-1", "icf-doc-2", "imp-doc-1")) {
+                    "icf-doc-1", "icf-doc-2", "imp-doc-1",
+                    // RDR-152 nexus-1di3r Phase 3 fixtures
+                    "os-doc-manual", "os-doc-hdbscan",
+                    "rb-doc-1", "rb-doc-2", "rb-doc-manual",
+                    "disc-doc-1", "disc-doc-2")) {
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
                     "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
@@ -389,8 +397,11 @@ class TaxonomyRepositoryTest {
         long t1 = repo.insertTopic(TENANT_A, "link-topic-1", null, COL_A, 0, null, null);
         long t2 = repo.insertTopic(TENANT_A, "link-topic-2", null, COL_A, 0, null, null);
 
-        repo.upsertTopicLink(TENANT_A, t1, t2, 3, "co-occurrence");
-        repo.upsertTopicLink(TENANT_A, t1, t2, 5, "co-occurrence"); // GREATEST wins
+        // upsertTopicLink is the LIVE-COMPUTE path: EXCLUDED (overwrite), NOT
+        // GREATEST. A decremented recompute must lower the stored count (RDR-152
+        // nexus-1di3r.4). Contrast importTopicLink (ETL) below, which keeps GREATEST.
+        repo.upsertTopicLink(TENANT_A, t1, t2, 5, "co-occurrence");
+        repo.upsertTopicLink(TENANT_A, t1, t2, 3, "co-occurrence"); // EXCLUDED overwrites -> 3
 
         List<Map<String, Object>> pairs = repo.getTopicLinkPairs(TENANT_A, List.of(t1, t2));
         assertThat(pairs).isNotEmpty();
@@ -399,7 +410,7 @@ class TaxonomyRepositoryTest {
                       && ((Number) m.get("to_topic_id")).longValue() == t2)
             .findFirst();
         assertThat(link).isPresent();
-        assertThat(((Number) link.get().get("link_count")).intValue()).isEqualTo(5);
+        assertThat(((Number) link.get().get("link_count")).intValue()).isEqualTo(3);
     }
 
     // ── ICF ────────────────────────────────────────────────────────────────────
@@ -570,7 +581,129 @@ class TaxonomyRepositoryTest {
         }
     }
 
+    // ── RDR-152 nexus-1di3r Phase 3: chroma-free taxonomy persist/read ─────────
+
+    @SuppressWarnings("unchecked")
+    @Test @Order(28)
+    void readRebuildOldState_returnsTopicMapAndManualAssignmentsShape() {
+        long t1 = repo.insertTopic(TENANT_A, "os-topic-1", null, COL_OS, 0, PAST_TS, "[\"a\"]");
+        long t2 = repo.insertTopic(TENANT_A, "os-topic-2", null, COL_OS, 0, PAST_TS, "[\"b\"]");
+        repo.markTopicReviewed(TENANT_A, t2, "accepted");
+        // One manual assignment (must surface) + one hdbscan (must NOT surface).
+        repo.assignTopic(TENANT_A, "os-doc-manual", t1, "manual", null, null, null);
+        repo.assignTopic(TENANT_A, "os-doc-hdbscan", t1, "hdbscan", null, null, null);
+
+        Map<String, Object> state = repo.readRebuildOldState(TENANT_A, COL_OS);
+
+        assertThat(state).containsOnlyKeys("old_topic_map", "manual_assignments");
+
+        var oldTopicMap = (List<Map<String, Object>>) state.get("old_topic_map");
+        assertThat(oldTopicMap).hasSize(2);
+        assertThat(oldTopicMap.get(0)).containsOnlyKeys("id", "label", "review_status");
+        assertThat(oldTopicMap).anySatisfy(m -> {
+            assertThat(m.get("id")).isEqualTo(t2);
+            assertThat(m.get("label")).isEqualTo("os-topic-2");
+            assertThat(m.get("review_status")).isEqualTo("accepted");
+        });
+
+        var manual = (List<Map<String, Object>>) state.get("manual_assignments");
+        assertThat(manual).hasSize(1);
+        assertThat(manual.get(0)).containsOnlyKeys("doc_id", "topic_id");
+        assertThat(manual.get(0).get("doc_id")).isEqualTo("os-doc-manual");
+        assertThat(((Number) manual.get(0).get("topic_id")).longValue()).isEqualTo(t1);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test @Order(29)
+    void persistRebuildTopics_replaceSemanticsClearsOldInsertsNewAppliesManual() {
+        // Seed an "old" topic + assignment that the rebuild must clear.
+        long oldId = repo.insertTopic(TENANT_A, "rb-old", null, COL_RB, 1, PAST_TS, null);
+        repo.assignTopic(TENANT_A, "rb-doc-1", oldId, "hdbscan", null, null, null);
+
+        var specs = List.of(
+            m("label", "rb-new-0", "doc_count", 2, "terms", "[\"x\"]",
+              "review_status", "pending", "assigned_by", "hdbscan",
+              "doc_ids", List.of("rb-doc-1", "rb-doc-2")),
+            m("label", "rb-new-1", "doc_count", 0, "terms", "[\"y\"]",
+              "review_status", "pending", "assigned_by", "hdbscan",
+              "doc_ids", List.of()));
+        // Transfer the manual doc to spec index 1.
+        Map<String, Object> manualTransfers = m("rb-doc-manual", 1);
+
+        List<Long> ids = repo.persistRebuildTopics(TENANT_A, COL_RB, specs, manualTransfers);
+
+        assertThat(ids).hasSize(2);
+        // Old topic gone; exactly the two new topics remain for this collection.
+        var topics = repo.getAllTopics(TENANT_A, COL_RB);
+        assertThat(topics).hasSize(2);
+        assertThat(topics).noneSatisfy(m -> assertThat(m.get("id")).isEqualTo(oldId));
+        assertThat(topics).extracting(m -> m.get("label"))
+            .containsExactlyInAnyOrder("rb-new-0", "rb-new-1");
+
+        // Manual transfer applied to topic_ids[1], assigned_by='manual'.
+        var manual = (List<Map<String, Object>>)
+            repo.readRebuildOldState(TENANT_A, COL_RB).get("manual_assignments");
+        assertThat(manual).hasSize(1);
+        assertThat(manual.get(0).get("doc_id")).isEqualTo("rb-doc-manual");
+        assertThat(((Number) manual.get(0).get("topic_id")).longValue()).isEqualTo(ids.get(1));
+    }
+
+    @Test @Order(30)
+    void persistRebuildTopics_emptySpecsStillClearsOldRows() {
+        long oldId = repo.insertTopic(TENANT_A, "rb-stale", null, COL_RB, 1, PAST_TS, null);
+        assertThat(repo.getTopicById(TENANT_A, oldId)).isPresent();
+
+        List<Long> ids = repo.persistRebuildTopics(
+            TENANT_A, COL_RB, List.of(), Map.of());
+
+        assertThat(ids).isEmpty();
+        assertThat(repo.getAllTopics(TENANT_A, COL_RB)).isEmpty();
+    }
+
+    @Test @Order(31)
+    void persistDiscoveredTopics_insertsTopicsAndAssignmentsReturnsAlignedIds() {
+        var specs = List.of(
+            m("label", "disc-0", "doc_count", 2, "terms", "[\"p\"]",
+              "assigned_by", "hdbscan", "doc_ids", List.of("disc-doc-1", "disc-doc-2")),
+            m("label", "disc-1", "doc_count", 0, "terms", "[\"q\"]",
+              "assigned_by", "hdbscan", "doc_ids", List.of()));
+
+        List<Long> ids = repo.persistDiscoveredTopics(TENANT_A, COL_DISC, specs);
+
+        assertThat(ids).hasSize(2);
+        var topics = repo.getAllTopics(TENANT_A, COL_DISC);
+        assertThat(topics).extracting(m -> m.get("label"))
+            .containsExactlyInAnyOrder("disc-0", "disc-1");
+        // review_status defaults to 'pending' for discovered topics.
+        assertThat(topics).allSatisfy(m -> assertThat(m.get("review_status")).isEqualTo("pending"));
+        assertThat(repo.getTopicDocIds(TENANT_A, ids.get(0), 0))
+            .containsExactlyInAnyOrder("disc-doc-1", "disc-doc-2");
+    }
+
+    @Test @Order(32)
+    void persistDiscoveredTopics_existingTopicsGuardReturnsNoOp() {
+        // COL_DISC already holds the 2 topics from Order(31); add 1 pre-existing here = 3.
+        repo.insertTopic(TENANT_A, "disc-pre-existing", null, COL_DISC, 0, PAST_TS, null);
+        assertThat(repo.getAllTopics(TENANT_A, COL_DISC)).hasSize(3);
+
+        var specs = List.of(
+            m("label", "disc-should-not-insert", "doc_count", 0, "terms", "[\"z\"]",
+              "assigned_by", "hdbscan", "doc_ids", List.of()));
+        List<Long> ids = repo.persistDiscoveredTopics(TENANT_A, COL_DISC, specs);
+
+        assertThat(ids).isEmpty();
+        // Guard fired: still exactly the 3 pre-existing rows, none inserted.
+        assertThat(repo.getAllTopics(TENANT_A, COL_DISC)).hasSize(3);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    /** Build a {@code Map<String,Object>} from alternating key/value varargs (mixed value types). */
+    private static Map<String, Object> m(Object... kv) {
+        var map = new java.util.LinkedHashMap<String, Object>();
+        for (int i = 0; i < kv.length; i += 2) map.put((String) kv[i], kv[i + 1]);
+        return map;
+    }
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {
         var config = new com.zaxxer.hikari.HikariConfig();

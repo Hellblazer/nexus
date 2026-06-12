@@ -49,11 +49,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import numpy as np
 import structlog
 
 from nexus.db.t2.catalog_taxonomy import (
+    AssignResult,
     AuditHub,
     AuditReport,
+    CatalogTaxonomy,
     DEFAULT_HUB_STOPWORDS,
     HubRow,
 )
@@ -70,23 +73,20 @@ DEFAULT_TENANT: str = "default"
 from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
 
-def _not_on_service(method: str) -> "Any":
-    """Fail loud: this taxonomy method has no parity-correct service-backend
-    implementation yet (RDR-152 nexus-fjwxh / nexus-1di3r).
+def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
+    """Row-wise cosine-similarity matrix (a_rows × b_rows), i.e. ``1 - cosine
+    distance``.
 
-    The HttpTaxonomyStore is an incomplete port of CatalogTaxonomy: the
-    BERTopic/HDBSCAN compute pipeline and several raw-cursor read methods
-    (topic-tree assembly, exclude-id merge-target listing, link upserts) are
-    not yet exposed by the Java service. Rather than crash with a TypeError on
-    a drifted signature (or, worse, return silently-wrong results), the method
-    raises a clear, actionable error. Run taxonomy in local mode meanwhile.
+    Mirrors the normalized-dot the oracle's compute_assignments /
+    compute_cross_links run over chroma results, so service-mode similarities
+    match the chroma path to float precision. Zero-norm rows are guarded to 1.0
+    (same as the oracle).
     """
-    raise NotImplementedError(
-        f"taxonomy.{method} is not available on the service storage backend yet "
-        f"(tracked in nexus-1di3r). Run taxonomy commands in local mode: set "
-        f"NX_STORAGE_BACKEND_TAXONOMY=sqlite (the migrated data is still in the "
-        f"local SQLite store)."
-    )
+    an = np.linalg.norm(a, axis=1, keepdims=True)
+    an[an == 0] = 1.0
+    bn = np.linalg.norm(b, axis=1, keepdims=True)
+    bn[bn == 0] = 1.0
+    return (a / an) @ (b / bn).T
 
 
 # ── HttpTaxonomyStore ──────────────────────────────────────────────────────────
@@ -112,6 +112,7 @@ class HttpTaxonomyStore:
         tenant: str = DEFAULT_TENANT,
         *,
         _token: str | None = None,
+        centroid_store: Any | None = None,
     ) -> None:
         if base_url is not None:
             if _token is None:
@@ -127,6 +128,7 @@ class HttpTaxonomyStore:
             _token = token
 
         self._tenant = tenant
+        self._token = _token
         self._headers = {
             "Authorization": f"Bearer {_token}",
             "X-Nexus-Tenant": tenant,
@@ -137,11 +139,28 @@ class HttpTaxonomyStore:
             headers=self._headers,
             timeout=30.0,
         )
+        # Centroid R/W routes through the pgvector centroid-port (nexus-t1hnc),
+        # NOT chroma. Constructed lazily from the SAME resolved service config so
+        # both stores share one base_url/token/tenant; injectable for tests.
+        self._centroid_store = centroid_store
         _log.info("http_taxonomy_store.init", base_url=self._base_url, tenant=tenant)
+
+    @property
+    def _centroid(self) -> Any:
+        """The service-backed centroid port (lazy; shares this store's config)."""
+        if self._centroid_store is None:
+            from nexus.db.t2.http_centroid_store import HttpCentroidStore
+
+            self._centroid_store = HttpCentroidStore(
+                base_url=self._base_url, tenant=self._tenant, _token=self._token,
+            )
+        return self._centroid_store
 
     def close(self) -> None:
         """Close the keep-alive connection pool (idempotent)."""
         self._client.close()
+        if self._centroid_store is not None:
+            self._centroid_store.close()
         _log.debug("http_taxonomy_store.closed")
 
     # ── Internal helpers ───────────────────────────────────────────────────────
@@ -160,10 +179,25 @@ class HttpTaxonomyStore:
 
     # ── Topics ─────────────────────────────────────────────────────────────────
 
-    def get_topics(self, collection: str | None = None) -> list[dict[str, Any]]:
-        """Return all topics, optionally filtered by collection."""
-        params = {"collection": collection} if collection else {}
-        return self._get("/topics", params)
+    def get_topics(
+        self,
+        *,
+        parent_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return topics filtered by parent (mirrors CatalogTaxonomy.get_topics).
+
+        - ``parent_id=None`` (default): root topics (parent_id IS NULL), ordered
+          by doc_count DESC.
+        - ``parent_id=<int>``: children of that topic.
+
+        RDR-152 nexus-1di3r.5: reconciled to the oracle's parent_id-keyed
+        signature (was ``collection``) so the param-prefix tripwire goes strict.
+        Collection-scoped reads use :meth:`get_all_topics` /
+        :meth:`get_topics_for_collection`, which already hit ``/topics`` directly.
+        """
+        if parent_id is None:
+            return self._get("/topics/root")
+        return self._get("/topics/children", {"parent_id": parent_id})
 
     def get_all_topics(
         self,
@@ -212,9 +246,17 @@ class HttpTaxonomyStore:
         *,
         exclude_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Merge-target listing (CatalogTaxonomy signature). Service backend not
-        yet implemented — the exclude_id raw-cursor query has no Java endpoint."""
-        return _not_on_service("get_topics_for_collection")
+        """Return all topics (root + children) for a collection, ordered by
+        doc_count DESC (mirrors CatalogTaxonomy.get_topics_for_collection).
+
+        Backed by GET /topics?collection= (getAllTopics) with ``exclude_id``
+        applied client-side — a single-row predicate on an already-fetched list,
+        so no dedicated Java route is needed (RDR-152 nexus-1di3r.4).
+        """
+        rows = self._get("/topics", {"collection": collection})
+        if exclude_id is not None:
+            rows = [r for r in rows if r.get("id") != exclude_id]
+        return rows
 
     def get_unreviewed_topics(
         self,
@@ -356,10 +398,38 @@ class HttpTaxonomyStore:
         *,
         max_depth: int = 2,
     ) -> list[dict[str, Any]]:
-        """Collection-scoped, depth-bounded topic tree (CatalogTaxonomy
-        signature). Service backend not yet implemented — the recursive
-        collection+depth assembly has no Java endpoint."""
-        return _not_on_service("get_topic_tree")
+        """Collection-scoped, depth-bounded topic tree (mirrors
+        CatalogTaxonomy.get_topic_tree).
+
+        Each node: ``{id, label, collection, doc_count, children:[...]}``. Roots
+        are the parent_id-IS-NULL topics (filtered to ``collection`` when given,
+        matching the oracle's root-only collection filter); children are fetched
+        per node down to ``max_depth``. Client-side recursion over the existing
+        GET /topics/root + GET /topics/children routes (RDR-152 nexus-1di3r.3):
+        round-trips are bounded by node count within ``max_depth`` — acceptable
+        for this infrequent operator read — and avoids a new server-side tree
+        route. Like the oracle, the returned tree is a multi-snapshot view (each
+        fetch is an independent read), not a single-transaction snapshot.
+        """
+        roots = self._get("/topics/root")
+        if collection:
+            roots = [r for r in roots if r.get("collection") == collection]
+
+        def _build(row: dict[str, Any], depth: int) -> dict[str, Any]:
+            node: dict[str, Any] = {
+                "id": row["id"],
+                "label": row["label"],
+                "collection": row["collection"],
+                "doc_count": row["doc_count"],
+            }
+            if depth < max_depth:
+                children = self._get("/topics/children", {"parent_id": row["id"]})
+                node["children"] = [_build(c, depth + 1) for c in children]
+            else:
+                node["children"] = []
+            return node
+
+        return [_build(r, 0) for r in roots]
 
     # ── Links ──────────────────────────────────────────────────────────────────
 
@@ -375,10 +445,679 @@ class HttpTaxonomyStore:
         self,
         links: list[dict[str, Any]],
     ) -> int:
-        """Upsert topic links (CatalogTaxonomy signature: list of link dicts).
-        Service backend not yet implemented — the dict-shaped link upsert with
-        per-link type arrays has no parity-correct Java endpoint mapping yet."""
-        return _not_on_service("upsert_topic_links")
+        """Upsert inter-topic link pairs (mirrors CatalogTaxonomy.upsert_topic_links).
+
+        Each dict carries from_topic_id, to_topic_id, link_count, link_types.
+        ``link_types`` is JSON-serialized (list -> string) before sending, exactly
+        matching the oracle's ``json.dumps(link["link_types"])``; the Java
+        upsertTopicLink stores it verbatim as a string. The per-link POST loop is
+        parity-correct: INSERT OR REPLACE is per-PK idempotent with no cross-set
+        atomicity need, so projection links written by ``_discover_cross_links``
+        survive (only matching PK pairs are overwritten). Returns the number of
+        links upserted (RDR-152 nexus-1di3r.4).
+        """
+        if not links:
+            return 0
+        for link in links:
+            self._post("/links/upsert", {
+                "from_topic_id": link["from_topic_id"],
+                "to_topic_id": link["to_topic_id"],
+                "link_count": link["link_count"],
+                "link_types": json.dumps(link["link_types"]),
+            })
+        return len(links)
+
+    # ── Compute (delegate-thin) + centroid ANN (RDR-152 nexus-1di3r.7) ──────────
+    #
+    # Per design Approach A: the heavy compute statics (cluster / c-TF-IDF /
+    # KMeans / rebuild-plan) are backend-agnostic and delegated VERBATIM to
+    # CatalogTaxonomy — zero reimplementation. Only the chroma-coupled centroid
+    # ANN reads are adapted to the pgvector centroid-port: assign_single (single
+    # doc) uses the port's server-side nearest; compute_assignments /
+    # compute_cross_links (batch) fetch the centroid set ONCE via get_by_collection
+    # / get_foreign and run the cosine nearest-search in numpy LOCALLY (S2
+    # decision: never loop ann_query N times, never add a Java batch endpoint).
+
+    @staticmethod
+    def compute_discovered_topics(
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: "np.ndarray",
+        texts: list[str],
+    ) -> list[dict[str, Any]]:
+        """Delegate verbatim to the backend-agnostic oracle static."""
+        return CatalogTaxonomy.compute_discovered_topics(
+            collection_name, doc_ids, embeddings, texts,
+        )
+
+    @staticmethod
+    def compute_rebuild_plan(
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: "np.ndarray",
+        texts: list[str],
+        *,
+        old_centroids: "np.ndarray",
+        old_labels: list[str],
+        old_review_statuses: list[str],
+        old_centroid_topic_ids: list[int],
+        manual_assignments: dict[str, int],
+    ) -> dict[str, Any]:
+        """Delegate verbatim to the backend-agnostic oracle static."""
+        return CatalogTaxonomy.compute_rebuild_plan(
+            collection_name, doc_ids, embeddings, texts,
+            old_centroids=old_centroids,
+            old_labels=old_labels,
+            old_review_statuses=old_review_statuses,
+            old_centroid_topic_ids=old_centroid_topic_ids,
+            manual_assignments=manual_assignments,
+        )
+
+    @staticmethod
+    def compute_split(
+        topic_id: int,
+        doc_ids: list[str],
+        texts: list[str],
+        fetched_ids: list[str],
+        embeddings: "np.ndarray",
+        collection_name: str,
+        k: int,
+    ) -> dict[str, Any]:
+        """Delegate verbatim to the backend-agnostic oracle static."""
+        return CatalogTaxonomy.compute_split(
+            topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
+        )
+
+    def assign_single(
+        self,
+        collection_name: str,
+        embedding: "np.ndarray",
+        chroma_client: Any = None,
+        *,
+        cross_collection: bool = False,
+    ) -> "AssignResult | None":
+        """Nearest topic_id + raw cosine similarity for one embedding, via the
+        centroid-port (mirrors CatalogTaxonomy.assign_single).
+
+        ``chroma_client`` is accepted for signature-prefix parity but unused —
+        centroid R/W routes through the pgvector port. The port's ``nearest``
+        already reproduces the oracle's None-on-empty / dim-mismatch short-circuit.
+        """
+        emb = embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
+        return self._centroid.nearest(
+            emb, collection_name, cross_collection=cross_collection,
+        )
+
+    def compute_assignments(
+        self,
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: list[list[float]],
+        chroma_client: Any = None,
+        *,
+        cross_collection: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Batch nearest-topic assignments via the centroid-port (mirrors
+        CatalogTaxonomy.compute_assignments).
+
+        S2 batch path: fetch the centroid set ONCE (get_foreign for the
+        cross-collection projection slice, else get_by_collection) and run the
+        cosine nearest-search in numpy locally. Preserves the oracle's
+        projection/centroid branch, raw-cosine similarity (``1 - distance``), and
+        empty-on-no-op short-circuits (no centroids / dim mismatch) exactly.
+        ``chroma_client`` is accepted for prefix parity but unused.
+        """
+        env = (
+            self._centroid.get_foreign(collection_name)
+            if cross_collection
+            else self._centroid.get_by_collection(collection_name)
+        )
+        c_embs = env.get("embeddings") or []
+        c_metas = env.get("metadatas") or []
+        if not c_embs or not embeddings:
+            return []
+
+        cent = np.array(c_embs, dtype=np.float32)
+        q = np.array(
+            [e if isinstance(e, list) else (e.tolist() if hasattr(e, "tolist") else list(e))
+             for e in embeddings],
+            dtype=np.float32,
+        )
+        if q.size == 0 or q.shape[1] != cent.shape[1]:
+            return []  # dimension mismatch — oracle short-circuit (SC-10)
+
+        sim = _cosine_matrix(q, cent)  # docs × centroids; 1 - cosine_distance
+        nearest_idx = sim.argmax(axis=1)
+
+        by = "projection" if cross_collection else "centroid"
+        out: list[dict[str, Any]] = []
+        for i, doc_id in enumerate(doc_ids):
+            j = int(nearest_idx[i])
+            topic_id = int(c_metas[j]["topic_id"])
+            if by == "projection":
+                out.append({
+                    "doc_id": doc_id,
+                    "topic_id": topic_id,
+                    "assigned_by": by,
+                    "similarity": float(sim[i, j]),
+                    "source_collection": collection_name,
+                })
+            else:
+                out.append({
+                    "doc_id": doc_id,
+                    "topic_id": topic_id,
+                    "assigned_by": by,
+                    "similarity": None,
+                    "source_collection": None,
+                })
+        return out
+
+    def compute_cross_links(
+        self,
+        collection_name: str,
+        new_centroids: list[list[float]],
+        new_metas: list[dict[str, Any]],
+        centroid_coll: Any = None,
+    ) -> list[tuple[int, int]]:
+        """Cross-collection centroid matching via the centroid-port (mirrors
+        CatalogTaxonomy.compute_cross_links).
+
+        Fetches the foreign centroid set ONCE via get_foreign and runs the SAME
+        cosine threshold match as the oracle. Returns ``(new_topic_id,
+        other_topic_id)`` pairs above ``_PROJECTION_THRESHOLD``. ``centroid_coll``
+        accepted for prefix parity but unused.
+        """
+        env = self._centroid.get_foreign(collection_name)
+        other_embs_raw = env.get("embeddings")
+        other_metas = env.get("metadatas", [])
+        if other_embs_raw is None or len(other_embs_raw) == 0:
+            return []
+
+        other_embs = np.array(other_embs_raw, dtype=np.float32)
+        new_embs = np.array(new_centroids, dtype=np.float32)
+        if new_embs.size == 0 or new_embs.shape[1] != other_embs.shape[1]:
+            return []
+
+        sim = _cosine_matrix(new_embs, other_embs)
+        pairs: list[tuple[int, int]] = []
+        for i, meta in enumerate(new_metas):
+            new_tid = int(meta["topic_id"])
+            for j in range(sim.shape[1]):
+                if float(sim[i, j]) >= CatalogTaxonomy._PROJECTION_THRESHOLD:
+                    pairs.append((new_tid, int(other_metas[j]["topic_id"])))
+        return pairs
+
+    # ── Persist (relational -> Java; centroids -> port) (nexus-1di3r.8) ─────────
+
+    def persist_discovered_topics(
+        self,
+        collection_name: str,
+        specs: list[dict[str, Any]],
+    ) -> list[int]:
+        """Persist discovered topic specs (mirrors CatalogTaxonomy.persist_discovered_topics).
+
+        Routes to the atomic /topics/persist_discovered endpoint (existing-topics
+        guard + INSERT specs + INSERT-OR-IGNORE assignments in one txn). Returns
+        the generated topic_ids aligned to ``specs`` order (``[]`` when the guard
+        fires or specs is empty). The per-spec ``centroid`` is ignored here — the
+        orchestrator upserts centroids through the port from the returned ids.
+        """
+        r = self._post(
+            "/topics/persist_discovered",
+            {"collection": collection_name, "specs": specs},
+        )
+        return r.get("topic_ids", [])
+
+    def persist_rebuild_topics(
+        self,
+        collection_name: str,
+        plan: dict[str, Any],
+    ) -> list[int]:
+        """Apply a rebuild plan (mirrors CatalogTaxonomy.persist_rebuild_topics).
+
+        Routes to the atomic /topics/persist_rebuild endpoint (REPLACE: DELETE
+        old + INSERT new specs + manual_transfers in one txn — clears old rows
+        even when specs is empty). Returns topic_ids aligned to ``plan["specs"]``.
+        """
+        r = self._post(
+            "/topics/persist_rebuild",
+            {
+                "collection": collection_name,
+                "specs": plan["specs"],
+                "manual_transfers": plan.get("manual_transfers", {}),
+            },
+        )
+        return r.get("topic_ids", [])
+
+    def persist_assignments(self, assignments: list[dict[str, Any]]) -> int:
+        """Persist pre-computed assignments (mirrors CatalogTaxonomy.persist_assignments).
+
+        Reuses :meth:`assign_topic` per row (no duplicate persist logic),
+        preserving its projection-UPSERT / centroid-INSERT-OR-IGNORE semantics
+        and doc_count resync. Returns the number persisted.
+        """
+        for a in assignments:
+            self.assign_topic(
+                a["doc_id"],
+                a["topic_id"],
+                a["assigned_by"],
+                a.get("similarity"),
+                a.get("source_collection"),
+                a.get("assigned_at"),
+            )
+        return len(assignments)
+
+    def persist_cross_links(self, pairs: list[tuple[int, int]]) -> int:
+        """Persist projection topic_links (mirrors CatalogTaxonomy.persist_cross_links).
+
+        Each pair -> INSERT OR REPLACE link_count=1 link_types='["projection"]'
+        via the /links/upsert endpoint (EXCLUDED overwrite, per-PK idempotent —
+        the per-link loop has no cross-set atomicity need). Returns ``len(pairs)``.
+        """
+        if not pairs:
+            return 0
+        for a, b in pairs:
+            self._post("/links/upsert", {
+                "from_topic_id": a,
+                "to_topic_id": b,
+                "link_count": 1,
+                "link_types": json.dumps(["projection"]),
+            })
+        return len(pairs)
+
+    def read_rebuild_old_state(
+        self,
+        collection_name: str,
+        centroid_coll: Any = None,
+    ) -> dict[str, Any]:
+        """Read the pre-rebuild state (mirrors CatalogTaxonomy.read_rebuild_old_state).
+
+        COMPOSES the two halves: the T2 read via GET /rebuild/old_state and the
+        centroid read via the centroid-port get_by_collection. Reconstructs the
+        oracle's dict forms from the endpoint's JSON-friendly lists (the
+        nexus-1di3r.1 reshape contract): old_topic_map list -> {id:(label,status)},
+        manual_assignments list -> {doc_id:topic_id}. Returns the EXACT 6-key dict
+        compute_rebuild_plan consumes. ``centroid_coll`` kept for prefix parity,
+        unused (centroids route through the port).
+        """
+        t2 = self._get("/rebuild/old_state", {"collection": collection_name})
+        old_topic_map: dict[int, tuple[str, str]] = {
+            row["id"]: (row["label"], row["review_status"])
+            for row in t2.get("old_topic_map", [])
+        }
+        manual_assignments: dict[str, int] = {
+            row["doc_id"]: row["topic_id"] for row in t2.get("manual_assignments", [])
+        }
+
+        env = self._centroid.get_by_collection(collection_name)
+        embeddings = env.get("embeddings") or []
+        metadatas = env.get("metadatas") or []
+        old_centroid_ids = env.get("ids") or []
+
+        old_centroids = (
+            np.array(embeddings, dtype=np.float32)
+            if embeddings
+            else np.empty((0, 0), dtype=np.float32)
+        )
+        old_labels: list[str] = []
+        old_review_statuses: list[str] = []
+        old_centroid_topic_ids: list[int] = []
+        for m in metadatas:
+            tid = m.get("topic_id", -1)
+            old_centroid_topic_ids.append(tid)
+            if tid in old_topic_map:
+                old_labels.append(old_topic_map[tid][0])
+                old_review_statuses.append(old_topic_map[tid][1])
+            else:
+                old_labels.append(m.get("label") or "")
+                old_review_statuses.append("pending")
+
+        return {
+            "old_centroids": old_centroids,
+            "old_labels": old_labels,
+            "old_review_statuses": old_review_statuses,
+            "old_centroid_topic_ids": old_centroid_topic_ids,
+            "manual_assignments": manual_assignments,
+            "old_centroid_ids": old_centroid_ids,
+        }
+
+    def purge_collection(self, collection: str) -> dict[str, int]:
+        """Cascade-purge the four taxonomy tables for a collection (mirrors
+        CatalogTaxonomy.purge_collection).
+
+        Routes to the transactional /purge_collection endpoint. Returns the
+        4-key count dict ``{topics, assignments, links, meta}``. The centroid
+        cleanup is the caller's responsibility (centroid-port purge), matching
+        the oracle's "call this after the Chroma delete" contract.
+        """
+        return self._post("/purge_collection", {"collection": collection})
+
+    # ── Orchestrators (thin compose-glue) (RDR-152 nexus-1di3r.9) ──────────────
+    #
+    # compute_* (delegate) -> persist_* (Java) -> centroid R/W (port). The three
+    # T3-free orchestrators (discover/rebuild/assign_batch) take pre-computed
+    # embeddings as args and only touch the centroid-port. project_against and
+    # split_topic are HYBRID: chunk reads stay on the passed chroma_client (T3 is
+    # still chroma-served until RDR-155 pgvector-T3), centroid R/W routes through
+    # the port. chroma_client is retained on every signature for prefix parity.
+
+    @staticmethod
+    def _centroid_records_for_port(
+        collection_name: str,
+        specs: list[dict[str, Any]],
+        topic_ids: list[int],
+    ) -> list[dict[str, Any]]:
+        """Build centroid-port upsert records from compute specs + persisted ids."""
+        records: list[dict[str, Any]] = []
+        for spec, tid in zip(specs, topic_ids):
+            if spec.get("centroid") is None:
+                continue
+            records.append({
+                "collection": collection_name,
+                "topic_id": int(tid),
+                "embedding": spec["centroid"],
+                "label": spec["label"],
+                "doc_count": spec["doc_count"],
+            })
+        return records
+
+    def discover_topics(
+        self,
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: "np.ndarray",
+        texts: list[str],
+        chroma_client: Any = None,
+    ) -> int:
+        """Discover topics (mirrors CatalogTaxonomy.discover_topics): compute ->
+        persist -> centroid-port upsert -> cross-links -> record count.
+
+        Returns the number of topics created (0 if specs empty or the
+        existing-topics guard fires). chroma_client unused (centroids via port).
+        """
+        specs = self.compute_discovered_topics(collection_name, doc_ids, embeddings, texts)
+        if not specs:
+            return 0
+        topic_ids = self.persist_discovered_topics(collection_name, specs)
+        if not topic_ids:
+            return 0
+
+        records = self._centroid_records_for_port(collection_name, specs, topic_ids)
+        if records:
+            self._centroid.upsert(records)
+
+        # Cross-collection post-pass (best-effort, like the oracle). Build the
+        # centroid + meta lists from ONE aligned pass so a None-centroid spec can
+        # never desync their lengths (compute_cross_links indexes sim rows by the
+        # meta list — a length skew would IndexError inside this try/except).
+        centroid_pairs = [
+            (spec["centroid"], int(tid))
+            for spec, tid in zip(specs, topic_ids)
+            if spec.get("centroid") is not None
+        ]
+        if centroid_pairs:
+            try:
+                new_centroids = [c for c, _ in centroid_pairs]
+                new_metas = [{"topic_id": tid} for _, tid in centroid_pairs]
+                self.persist_cross_links(
+                    self.compute_cross_links(collection_name, new_centroids, new_metas)
+                )
+            except Exception:
+                _log.debug("discover_cross_links_failed", exc_info=True)
+
+        self.record_discover_count(collection_name, len(doc_ids))
+        return len(topic_ids)
+
+    def assign_batch(
+        self,
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: list[list[float]],
+        chroma_client: Any = None,
+        *,
+        cross_collection: bool = False,
+    ) -> int:
+        """Assign a batch to nearest topics (mirrors CatalogTaxonomy.assign_batch):
+        compute_assignments -> persist_assignments. Returns the number assigned."""
+        return self.persist_assignments(
+            self.compute_assignments(
+                collection_name, doc_ids, embeddings,
+                cross_collection=cross_collection,
+            )
+        )
+
+    def rebuild_taxonomy(
+        self,
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: "np.ndarray",
+        texts: list[str],
+        chroma_client: Any = None,
+    ) -> int:
+        """Full rebuild with label preservation (mirrors CatalogTaxonomy.rebuild_taxonomy):
+        read old state -> delete old centroids (port) -> compute plan -> persist
+        (REPLACE) -> upsert new centroids (port) -> record count.
+
+        Returns the number of topics after rebuild. chroma_client unused.
+        """
+        old = self.read_rebuild_old_state(collection_name)
+        old_tids = [int(t) for t in old["old_centroid_topic_ids"] if int(t) >= 0]
+        if old_tids:
+            self._centroid.delete_ids(collection_name, old_tids)
+
+        plan = self.compute_rebuild_plan(
+            collection_name, doc_ids, embeddings, texts,
+            old_centroids=old["old_centroids"],
+            old_labels=old["old_labels"],
+            old_review_statuses=old["old_review_statuses"],
+            old_centroid_topic_ids=old["old_centroid_topic_ids"],
+            manual_assignments=old["manual_assignments"],
+        )
+        topic_ids = self.persist_rebuild_topics(collection_name, plan)
+        if topic_ids:
+            records = self._centroid_records_for_port(
+                collection_name, plan["specs"], topic_ids,
+            )
+            if records:
+                self._centroid.upsert(records)
+
+        self.record_discover_count(collection_name, len(doc_ids))
+        return len(topic_ids)
+
+    def split_topic(
+        self,
+        topic_id: int,
+        k: int,
+        chroma_client: Any,
+    ) -> int:
+        """Split a topic into k children (mirrors CatalogTaxonomy.split_topic):
+        fetch texts from T3 (via chroma_client) + re-embed -> compute_split ->
+        persist_split (Java) -> centroid-port delete parent + upsert children.
+
+        HYBRID: chunk text reads stay on chroma_client (T3); centroids via port.
+        Returns the number of children created (0 on any short-circuit).
+        """
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        if k < 2:
+            return 0
+        topic = self.get_topic_by_id(topic_id)
+        if topic is None:
+            return 0
+        doc_ids = self.get_all_topic_doc_ids(topic_id)
+        if len(doc_ids) < k:
+            return 0
+
+        collection_name = topic["collection"]
+        try:
+            coll = chroma_client.get_collection(collection_name, embedding_function=None)
+        except Exception:
+            _log.warning("split_collection_not_found", collection=collection_name)
+            return 0
+
+        _PAGE = 250
+        fetched_ids: list[str] = []
+        texts: list[str] = []
+        for i in range(0, len(doc_ids), _PAGE):
+            batch = doc_ids[i:i + _PAGE]
+            result = coll.get(ids=batch, include=["documents"])
+            for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
+                if fdoc:
+                    fetched_ids.append(fid)
+                    texts.append(fdoc)
+        if len(texts) < k:
+            return 0
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        embeddings = np.array(ef(texts), dtype=np.float32)
+
+        split_result = self.compute_split(
+            topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
+        )
+        child_specs = split_result.get("child_specs", [])
+        if not child_specs:
+            return 0
+
+        child_ids = self.persist_split(split_result)
+
+        # Centroid port: drop the parent centroid, upsert the children.
+        self._centroid.delete_ids(collection_name, [topic_id])
+        records: list[dict[str, Any]] = []
+        for spec, cid in zip(child_specs, child_ids):
+            records.append({
+                "collection": collection_name,
+                "topic_id": int(cid),
+                "embedding": spec["centroid"],
+                "label": spec["label"],
+                "doc_count": spec["doc_count"],
+            })
+        if records:
+            self._centroid.upsert(records)
+        return len(child_ids)
+
+    def project_against(
+        self,
+        source_collection: str,
+        target_collections: list[str],
+        chroma_client: Any,
+        *,
+        threshold: float = 0.85,
+        top_k: int = 3,
+        icf_map: dict[int, float] | None = None,
+        progress: bool = False,
+    ) -> dict[str, Any]:
+        """Project source chunks against target centroids (mirrors
+        CatalogTaxonomy.project_against).
+
+        HYBRID: source CHUNK embeddings come from T3 via chroma_client (chunks are
+        not centroids); TARGET centroids come from the centroid-port. The cosine
+        matmul + top-K aggregation mirror the oracle exactly (raw-cosine-storage
+        invariant: stored similarity is the raw cosine; ICF only filters/ranks).
+        Raises ValueError on dimension mismatch.
+        """
+        _empty = {
+            "matched_topics": [], "novel_chunks": [],
+            "total_chunks": 0, "total_centroids": 0,
+        }
+        # 1. Source chunk embeddings from T3 (chroma_client), paginated.
+        try:
+            src_coll = chroma_client.get_collection(source_collection, embedding_function=None)
+        except Exception:
+            return dict(_empty)
+        _PAGE = 300
+        src_ids: list[str] = []
+        src_emb_pages: list[np.ndarray] = []
+        offset = 0
+        while True:
+            page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
+            page_ids = page.get("ids", [])
+            page_embs = page.get("embeddings")
+            if not page_ids or page_embs is None:
+                break
+            src_ids.extend(page_ids)
+            src_emb_pages.append(np.array(page_embs, dtype=np.float32))
+            if len(page_ids) < _PAGE:
+                break
+            offset += _PAGE
+        if not src_ids:
+            return dict(_empty)
+        src_embs = np.concatenate(src_emb_pages)
+
+        # 2. Target centroids from the centroid-port ($in target_collections).
+        ctr_raw: list[list[float]] = []
+        ctr_metas: list[dict[str, Any]] = []
+        for tc in target_collections:
+            env = self._centroid.get_by_collection(tc)
+            ctr_raw.extend(env.get("embeddings") or [])
+            ctr_metas.extend(env.get("metadatas") or [])
+        if not ctr_raw or not ctr_metas:
+            return {
+                "matched_topics": [], "novel_chunks": list(src_ids),
+                "total_chunks": len(src_ids), "total_centroids": 0,
+            }
+        ctr_embs = np.array(ctr_raw, dtype=np.float32)
+
+        # 3. Dimension check (oracle raises ValueError).
+        if src_embs.shape[1] != ctr_embs.shape[1]:
+            raise ValueError(
+                f"Dimension mismatch: source embeddings {src_embs.shape[1]}d, "
+                f"centroids {ctr_embs.shape[1]}d"
+            )
+
+        # 4-5. Cosine similarity matrix (raw) + ICF-adjusted filter matrix.
+        sim = _cosine_matrix(src_embs, ctr_embs)
+        if icf_map:
+            icf_weights = np.array(
+                [icf_map.get(int(m["topic_id"]), 1.0) for m in ctr_metas],
+                dtype=np.float32,
+            )
+            filter_sim = sim * icf_weights
+        else:
+            filter_sim = sim
+
+        # 6. Aggregate matched topics + per-chunk assignments (raw cosine stored).
+        topic_stats: dict[int, dict[str, Any]] = {}
+        novel_chunks: list[str] = []
+        chunk_assignments: list[tuple[str, int, float]] = []
+        for i, doc_id in enumerate(src_ids):
+            if float(filter_sim[i].max()) < threshold:
+                novel_chunks.append(doc_id)
+                continue
+            for idx in np.argsort(-filter_sim[i])[:top_k]:
+                if float(filter_sim[i, idx]) < threshold:
+                    break
+                meta = ctr_metas[idx]
+                tid = int(meta["topic_id"])
+                raw_sim = float(sim[i, idx])
+                chunk_assignments.append((doc_id, tid, raw_sim))
+                if tid not in topic_stats:
+                    topic_stats[tid] = {
+                        "topic_id": tid,
+                        "label": meta.get("label", ""),
+                        "collection": meta.get("collection", ""),
+                        "chunk_count": 0,
+                        "total_similarity": 0.0,
+                    }
+                topic_stats[tid]["chunk_count"] += 1
+                topic_stats[tid]["total_similarity"] += raw_sim
+
+        matched_topics = [
+            {
+                "topic_id": s["topic_id"],
+                "label": s["label"],
+                "collection": s["collection"],
+                "chunk_count": s["chunk_count"],
+                "avg_similarity": s["total_similarity"] / s["chunk_count"],
+            }
+            for s in sorted(topic_stats.values(), key=lambda x: x["chunk_count"], reverse=True)
+        ]
+        return {
+            "matched_topics": matched_topics,
+            "novel_chunks": novel_chunks,
+            "chunk_assignments": chunk_assignments,
+            "total_chunks": len(src_ids),
+            "total_centroids": len(ctr_metas),
+        }
 
     # ── ICF / analytics ────────────────────────────────────────────────────────
 

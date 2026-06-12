@@ -24,8 +24,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import numpy as np
 import pytest
 
+from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 from nexus.db.t2.http_taxonomy_store import DEFAULT_TENANT, HttpTaxonomyStore
 
 TOKEN = "fake-taxonomy-token-abc"
@@ -85,6 +87,28 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         return {k: v[0] for k, v in qs.items()}
 
+    def _insert_spec(self, collection: str, spec: dict, review_status: str) -> int:
+        """Insert a topic spec + its INSERT-OR-IGNORE assignments; return the id.
+        Shared by the persist_discovered / persist_rebuild fake handlers."""
+        tid = _next_id()
+        _TOPICS[tid] = {
+            "id": tid, "label": spec["label"], "parent_id": None,
+            "collection": collection, "centroid_hash": None,
+            "doc_count": int(spec.get("doc_count", 0)),
+            "created_at": "2026-01-01T00:00:00Z",
+            "review_status": review_status, "terms": spec.get("terms"),
+        }
+        seen = {(a["doc_id"], a["topic_id"]) for a in _ASSIGNMENTS}
+        for did in spec.get("doc_ids", []):
+            if (did, tid) in seen:
+                continue
+            _ASSIGNMENTS.append({
+                "doc_id": did, "topic_id": tid,
+                "assigned_by": spec.get("assigned_by", "hdbscan"),
+                "similarity": None, "assigned_at": None, "source_collection": None,
+            })
+        return tid
+
     def do_GET(self) -> None:
         if not self._auth_ok():
             self._json(401, {"error": "unauthorized"})
@@ -100,6 +124,9 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                     t for t in _TOPICS.values()
                     if collection is None or t["collection"] == collection
                 ]
+                # Real service sorts ORDER BY doc_count DESC — mirror it so the
+                # ordering contract is enforced, not insertion-order coincidence.
+                topics = sorted(topics, key=lambda t: -t["doc_count"])
                 self._json(200, topics)
 
             elif path == "/v1/taxonomy/topics/by_id":
@@ -125,11 +152,13 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
 
             elif path == "/v1/taxonomy/topics/root":
                 roots = [t for t in _TOPICS.values() if t.get("parent_id") is None]
+                roots = sorted(roots, key=lambda t: -t["doc_count"])  # doc_count DESC
                 self._json(200, roots)
 
             elif path == "/v1/taxonomy/topics/children":
                 pid = int(params.get("parent_id", -1))
                 children = [t for t in _TOPICS.values() if t.get("parent_id") == pid]
+                children = sorted(children, key=lambda t: -t["doc_count"])  # doc_count DESC
                 self._json(200, children)
 
             elif path == "/v1/taxonomy/topics/unreviewed":
@@ -200,6 +229,26 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                     self._json(404, {"error": "not found"})
                 else:
                     self._json(200, {"count": m.get("last_discover_doc_count", 0)})
+
+            elif path == "/v1/taxonomy/rebuild/old_state":
+                # RDR-152 nexus-1di3r.1 endpoint: lists (NOT dicts), reshaped
+                # back to dicts Python-side by read_rebuild_old_state.
+                collection = params.get("collection")
+                old_topic_map = [
+                    {"id": t["id"], "label": t["label"],
+                     "review_status": t.get("review_status", "pending")}
+                    for t in _TOPICS.values() if t["collection"] == collection
+                ]
+                coll_topic_ids = {
+                    t["id"] for t in _TOPICS.values() if t["collection"] == collection
+                }
+                manual = [
+                    {"doc_id": a["doc_id"], "topic_id": a["topic_id"]}
+                    for a in _ASSIGNMENTS
+                    if a.get("assigned_by") == "manual" and a["topic_id"] in coll_topic_ids
+                ]
+                self._json(200, {"old_topic_map": old_topic_map,
+                                 "manual_assignments": manual})
 
             else:
                 self._json(404, {"error": f"GET {path} not found"})
@@ -322,7 +371,9 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                 link_types = body.get("link_types", "[]")
                 for lk in _LINKS:
                     if lk["from_topic_id"] == from_id and lk["to_topic_id"] == to_id:
-                        lk["link_count"] = max(lk["link_count"], link_count)
+                        # EXCLUDED (overwrite) — mirrors the live-compute Java
+                        # upsertTopicLink (RDR-152 nexus-1di3r.4), NOT GREATEST.
+                        lk["link_count"] = link_count
                         lk["link_types"] = link_types
                         self._json(200, {"ok": True})
                         return
@@ -348,6 +399,9 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
 
             elif path == "/v1/taxonomy/import/topic":
                 tid = int(body["id"])
+                # Keep the autoincrement ahead of explicitly-imported ids so a
+                # later persist_* INSERT (via _next_id) never reuses one.
+                _ID_SEQ[0] = max(_ID_SEQ[0], tid)
                 _TOPICS[tid] = {
                     "id":            tid,
                     "label":         body["label"],
@@ -389,6 +443,97 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                     "last_discover_at":         body.get("last_discover_at"),
                 }
                 self._json(200, {"ok": True})
+
+            elif path == "/v1/taxonomy/topics/persist_discovered":
+                # Mirror the Java atomic endpoint: existing-topics guard + INSERT.
+                collection = body["collection"]
+                specs = body.get("specs", [])
+                existing = any(t["collection"] == collection for t in _TOPICS.values())
+                if not specs or existing:
+                    self._json(200, {"topic_ids": []})
+                    return
+                tids = []
+                for spec in specs:
+                    tids.append(self._insert_spec(collection, spec, "pending"))
+                self._json(200, {"topic_ids": tids})
+
+            elif path == "/v1/taxonomy/topics/persist_rebuild":
+                # Mirror the Java REPLACE: clear old (even on empty specs) + INSERT
+                # + apply manual_transfers.
+                collection = body["collection"]
+                specs = body.get("specs", [])
+                transfers = body.get("manual_transfers", {})
+                doomed = [tid for tid, t in _TOPICS.items() if t["collection"] == collection]
+                for tid in doomed:
+                    del _TOPICS[tid]
+                _ASSIGNMENTS[:] = [a for a in _ASSIGNMENTS if a["topic_id"] not in doomed]
+                tids = []
+                for spec in specs:
+                    tids.append(self._insert_spec(
+                        collection, spec, spec.get("review_status", "pending")))
+                for doc, idx in transfers.items():
+                    if 0 <= int(idx) < len(tids):
+                        tid = tids[int(idx)]
+                        _ASSIGNMENTS[:] = [
+                            a for a in _ASSIGNMENTS
+                            if not (a["doc_id"] == doc and a["topic_id"] == tid)
+                        ]
+                        _ASSIGNMENTS.append({
+                            "doc_id": doc, "topic_id": tid, "assigned_by": "manual",
+                            "similarity": None, "assigned_at": None, "source_collection": None,
+                        })
+                self._json(200, {"topic_ids": tids})
+
+            elif path == "/v1/taxonomy/topics/persist_split":
+                parent = int(body["topic_id"])
+                collection = body["collection_name"]
+                _ASSIGNMENTS[:] = [a for a in _ASSIGNMENTS if a["topic_id"] != parent]
+                child_ids = []
+                for spec in body.get("child_specs", []):
+                    tid = _next_id()
+                    _TOPICS[tid] = {
+                        "id": tid, "label": spec["label"], "parent_id": parent,
+                        "collection": collection, "centroid_hash": None,
+                        "doc_count": int(spec.get("doc_count", 0)),
+                        "created_at": "2026-01-01T00:00:00Z", "review_status": "pending",
+                        "terms": spec.get("terms_json"),
+                    }
+                    child_ids.append(tid)
+                    for did in spec.get("doc_ids", []):
+                        _ASSIGNMENTS.append({
+                            "doc_id": did, "topic_id": tid, "assigned_by": "split",
+                            "similarity": None, "assigned_at": None, "source_collection": None,
+                        })
+                if parent in _TOPICS:
+                    _TOPICS[parent]["doc_count"] = 0
+                self._json(200, {"child_ids": child_ids})
+
+            elif path == "/v1/taxonomy/purge_collection":
+                # Mirror the Java cascade: links touching doomed, assignments by
+                # topic OR source_collection, topics, meta.
+                collection = body["collection"]
+                doomed = {tid for tid, t in _TOPICS.items() if t["collection"] == collection}
+                links_n = len([
+                    lk for lk in _LINKS
+                    if lk["from_topic_id"] in doomed or lk["to_topic_id"] in doomed
+                ])
+                _LINKS[:] = [
+                    lk for lk in _LINKS
+                    if lk["from_topic_id"] not in doomed and lk["to_topic_id"] not in doomed
+                ]
+                assigns_n = len([
+                    a for a in _ASSIGNMENTS
+                    if a["topic_id"] in doomed or a.get("source_collection") == collection
+                ])
+                _ASSIGNMENTS[:] = [
+                    a for a in _ASSIGNMENTS
+                    if a["topic_id"] not in doomed and a.get("source_collection") != collection
+                ]
+                for tid in doomed:
+                    del _TOPICS[tid]
+                meta_n = 1 if _META.pop(collection, None) is not None else 0
+                self._json(200, {"topics": len(doomed), "assignments": assigns_n,
+                                 "links": links_n, "meta": meta_n})
 
             else:
                 self._json(404, {"error": f"POST {path} not found"})
@@ -467,7 +612,10 @@ class TestTopicCRUD:
         assert topics[0]["label"] == "machine-learning"
         assert topics[0]["doc_count"] == 10
 
-    def test_get_topics_filters_by_collection(self, client: HttpTaxonomyStore) -> None:
+    def test_get_all_topics_filters_by_collection(self, client: HttpTaxonomyStore) -> None:
+        # get_topics no longer takes a collection (RDR-152 nexus-1di3r.5 reconciled
+        # it to the oracle's parent_id-keyed signature); collection-scoped reads go
+        # through get_all_topics / get_topics_for_collection.
         client.import_topic(
             src_id=1, label="ml", parent_id=None,
             collection="coll-A", centroid_hash=None, doc_count=5,
@@ -478,9 +626,57 @@ class TestTopicCRUD:
             collection="coll-B", centroid_hash=None, doc_count=3,
             created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
         )
-        assert len(client.get_topics("coll-A")) == 1
-        assert client.get_topics("coll-A")[0]["label"] == "ml"
-        assert len(client.get_topics("coll-B")) == 1
+        assert len(client.get_all_topics(collection="coll-A")) == 1
+        assert client.get_all_topics(collection="coll-A")[0]["label"] == "ml"
+        assert len(client.get_all_topics(collection="coll-B")) == 1
+
+    def test_get_topics_roots_vs_children(self, client: HttpTaxonomyStore) -> None:
+        # parent_id=None -> roots; parent_id=X -> children of X (oracle parity).
+        client.import_topic(
+            src_id=1, label="root-big", parent_id=None,
+            collection="c", centroid_hash=None, doc_count=9,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        client.import_topic(
+            src_id=3, label="root-small", parent_id=None,
+            collection="c", centroid_hash=None, doc_count=2,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        client.import_topic(
+            src_id=2, label="child", parent_id=1,
+            collection="c", centroid_hash=None, doc_count=4,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        # roots, ordered doc_count DESC (root-big=9 before root-small=2).
+        roots = client.get_topics()
+        assert [t["label"] for t in roots] == ["root-big", "root-small"]
+        children = client.get_topics(parent_id=1)
+        assert [t["label"] for t in children] == ["child"]
+        assert client.get_topics(parent_id=999) == []
+
+    def test_get_topics_for_collection_with_exclude_id(self, client: HttpTaxonomyStore) -> None:
+        for sid, label, dc in ((1, "a", 9), (2, "b", 5), (3, "c", 1)):
+            client.import_topic(
+                src_id=sid, label=label, parent_id=None,
+                collection="coll", centroid_hash=None, doc_count=dc,
+                created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+            )
+        # Other-collection topic must not leak in.
+        client.import_topic(
+            src_id=4, label="other", parent_id=None,
+            collection="elsewhere", centroid_hash=None, doc_count=7,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        full = client.get_topics_for_collection("coll")
+        assert [t["label"] for t in full] == ["a", "b", "c"]  # doc_count DESC
+        # 9 _TOPIC_COLUMNS keys round-trip.
+        assert set(full[0]) == {
+            "id", "label", "parent_id", "collection", "centroid_hash",
+            "doc_count", "created_at", "review_status", "terms",
+        }
+        excluded = client.get_topics_for_collection("coll", exclude_id=2)
+        assert [t["label"] for t in excluded] == ["a", "c"]
+        assert all(t["id"] != 2 for t in excluded)
 
     def test_get_topic_by_id(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
@@ -685,31 +881,116 @@ class TestAssignments:
 
 
 class TestTopicTree:
-    # RDR-152 nexus-fjwxh: get_topic_tree was aligned to the CatalogTaxonomy
-    # oracle signature (collection, max_depth) and made FAIL LOUD in service
-    # mode — the old (parent_id, depth) flat roots/children shape cannot produce
-    # the oracle's recursive collection-scoped tree the CLI needs, and the CLI
-    # only ever calls the oracle shape. Full service-backend parity = nexus-1di3r.
-    def test_get_topic_tree_fails_loud(self, client: HttpTaxonomyStore) -> None:
-        import pytest
+    # RDR-152 nexus-1di3r.3: get_topic_tree is now service-backed via client-side
+    # recursion over /topics/root + /topics/children, mirroring the oracle's
+    # nested {id,label,collection,doc_count,children} shape, depth-bounded.
+    def _seed_tree(self, client: HttpTaxonomyStore) -> None:
+        rows = [
+            (1, "root", None, "c", 10),
+            (2, "child", 1, "c", 4),
+            (3, "grandchild", 2, "c", 2),
+            (9, "other-root", None, "other", 8),
+        ]
+        for sid, label, parent, coll, dc in rows:
+            client.import_topic(
+                src_id=sid, label=label, parent_id=parent,
+                collection=coll, centroid_hash=None, doc_count=dc,
+                created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+            )
 
-        with pytest.raises(NotImplementedError, match="nexus-1di3r"):
-            client.get_topic_tree("c", max_depth=2)
+    def test_get_topic_tree_nested_shape_and_collection_filter(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        self._seed_tree(client)
+        tree = client.get_topic_tree("c", max_depth=2)
+        # Collection filter scopes the roots: only "root" (other-root excluded).
+        assert len(tree) == 1
+        root = tree[0]
+        assert set(root) == {"id", "label", "collection", "doc_count", "children"}
+        assert root["label"] == "root"
+        assert root["collection"] == "c"
+        assert root["doc_count"] == 10
+        # depth 1: child present, with its grandchild at depth 2.
+        assert [c["label"] for c in root["children"]] == ["child"]
+        child = root["children"][0]
+        assert [g["label"] for g in child["children"]] == ["grandchild"]
+        # depth 2 is the max — grandchildren are leaves (children == []).
+        assert child["children"][0]["children"] == []
+
+    def test_get_topic_tree_max_depth_bounds_recursion(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        self._seed_tree(client)
+        tree = client.get_topic_tree("c", max_depth=1)
+        root = tree[0]
+        # depth 1 children fetched, but they do NOT recurse to grandchildren.
+        assert [c["label"] for c in root["children"]] == ["child"]
+        assert root["children"][0]["children"] == []
+
+    def test_get_topic_tree_no_collection_returns_all_roots(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        self._seed_tree(client)
+        tree = client.get_topic_tree(max_depth=2)
+        # All roots, ordered doc_count DESC: root=10 before other-root=8.
+        assert [n["label"] for n in tree] == ["root", "other-root"]
 
 
 class TestLinks:
-    # RDR-152 nexus-fjwxh: upsert_topic_links was aligned to the oracle
-    # signature (links: list[dict]) and made FAIL LOUD in service mode. The old
-    # (pairs: list[tuple]) shape could not consume the dict payload the CLI
-    # builds (taxonomy_cmd persist_data), so it was unreachable-or-wrong via the
-    # real caller. link_types serialization parity = nexus-1di3r.
-    def test_upsert_topic_links_fails_loud(self, client: HttpTaxonomyStore) -> None:
-        import pytest
+    # RDR-152 nexus-1di3r.4: upsert_topic_links is service-backed (dict payload,
+    # link_types json.dumps parity). NOTE: the service /links/upsert applies
+    # GREATEST(link_count) on conflict whereas the oracle INSERT OR REPLACE
+    # overwrites — a surfaced cross-backend divergence flagged on bead
+    # nexus-1di3r.6 for the Phase 4 gate. These tests pin the ACTUAL service
+    # behavior; the link_types serialization is the bead's named parity subtlety.
+    def test_upsert_topic_links_returns_count_and_serializes_link_types(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        links = [
+            {"from_topic_id": 1, "to_topic_id": 2, "link_count": 5,
+             "link_types": ["cooccurrence", "projection"]},
+            {"from_topic_id": 3, "to_topic_id": 4, "link_count": 2,
+             "link_types": ["cooccurrence"]},
+        ]
+        assert client.upsert_topic_links(links) == 2
+        # link_types persisted as a JSON STRING (list -> json.dumps), matching oracle.
+        stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
+        assert stored[(1, 2)]["link_types"] == json.dumps(["cooccurrence", "projection"])
+        assert stored[(3, 4)]["link_types"] == json.dumps(["cooccurrence"])
 
-        links = [{"from_topic_id": 1, "to_topic_id": 2, "link_count": 5,
-                  "link_types": ["cooccurrence"]}]
-        with pytest.raises(NotImplementedError, match="nexus-1di3r"):
-            client.upsert_topic_links(links)
+    def test_upsert_topic_links_empty_is_noop(self, client: HttpTaxonomyStore) -> None:
+        assert client.upsert_topic_links([]) == 0
+        assert _LINKS == []
+
+    def test_upsert_topic_links_overwrites_on_same_pk(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        # Live-compute overwrite (EXCLUDED), NOT GREATEST: a decremented recompute
+        # must lower the stored count. Pins the nexus-1di3r.4 Java flip; a revert
+        # to GREATEST would make this fail (RDR-152, bead nexus-1di3r.6).
+        client.upsert_topic_links(
+            [{"from_topic_id": 1, "to_topic_id": 2, "link_count": 10,
+              "link_types": ["cooccurrence"]}])
+        client.upsert_topic_links(
+            [{"from_topic_id": 1, "to_topic_id": 2, "link_count": 3,
+              "link_types": ["cooccurrence"]}])
+        stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
+        assert stored[(1, 2)]["link_count"] == 3  # overwritten, not GREATEST=10
+        assert client.get_topic_link_pairs([1, 2]) == [(1, 2, 3)]
+
+    def test_upsert_topic_links_does_not_clobber_other_pk(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        # Pre-seed a projection link on a DIFFERENT PK; the upsert must leave it.
+        client.upsert_topic_links(
+            [{"from_topic_id": 7, "to_topic_id": 8, "link_count": 99,
+              "link_types": ["projection"]}])
+        client.upsert_topic_links(
+            [{"from_topic_id": 1, "to_topic_id": 2, "link_count": 3,
+              "link_types": ["cooccurrence"]}])
+        stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
+        assert stored[(7, 8)]["link_count"] == 99  # untouched
+        assert stored[(7, 8)]["link_types"] == json.dumps(["projection"])
 
 
 class TestMetaAndRebalance:
@@ -842,3 +1123,539 @@ class TestMiscMethods:
         tops = client.top_topics_for_collection("coll-A")
         assert len(tops) == 1
         assert tops[0]["label"] == "ml"
+
+
+# ── Compute / centroid-ANN parity (RDR-152 nexus-1di3r.7) ──────────────────────
+
+
+class _FakeCentroidStore:
+    """In-memory centroid port for compute/assign parity tests.
+
+    Holds records ``{collection, topic_id, embedding, label, doc_count}`` and
+    serves the get_by_collection / get_foreign envelope + the single-doc
+    ``nearest`` exactly as the real HttpCentroidStore would.
+    """
+
+    def __init__(self, records: list[dict]) -> None:
+        self._records = list(records)
+        self.closed = False
+        self.calls: list[tuple] = []  # ("upsert", n) | ("delete_ids", collection, ids)
+
+    def upsert(self, records: list[dict]) -> None:
+        self.calls.append(("upsert", len(records)))
+        for r in records:
+            self._records = [
+                x for x in self._records
+                if not (x["collection"] == r["collection"] and x["topic_id"] == r["topic_id"])
+            ]
+            self._records.append(r)
+
+    def delete_ids(self, collection: str, topic_ids: list[int]) -> int:
+        self.calls.append(("delete_ids", collection, list(topic_ids)))
+        ids = set(topic_ids)
+        before = len(self._records)
+        self._records = [
+            x for x in self._records
+            if not (x["collection"] == collection and x["topic_id"] in ids)
+        ]
+        return before - len(self._records)
+
+    def _envelope(self, rows: list[dict]) -> dict:
+        return {
+            "ids": [f"{r['collection']}:{r['topic_id']}" for r in rows],
+            "embeddings": [r["embedding"] for r in rows],
+            "metadatas": [
+                {"topic_id": int(r["topic_id"]), "label": r.get("label"),
+                 "collection": r["collection"], "doc_count": r.get("doc_count")}
+                for r in rows
+            ],
+        }
+
+    def get_by_collection(self, collection: str) -> dict:
+        return self._envelope([r for r in self._records if r["collection"] == collection])
+
+    def get_foreign(self, collection: str) -> dict:
+        return self._envelope([r for r in self._records if r["collection"] != collection])
+
+    def nearest(self, embedding, collection, *, cross_collection=False):
+        from nexus.db.t2.catalog_taxonomy import AssignResult
+        import numpy as _np
+        rows = ([r for r in self._records if r["collection"] != collection]
+                if cross_collection else
+                [r for r in self._records if r["collection"] == collection])
+        if not rows:
+            return None
+        q = _np.array(embedding, dtype=_np.float32)
+        cent = _np.array([r["embedding"] for r in rows], dtype=_np.float32)
+        if q.shape[0] != cent.shape[1]:
+            return None
+        qn = q / (_np.linalg.norm(q) or 1.0)
+        cn = cent / _np.where(_np.linalg.norm(cent, axis=1, keepdims=True) == 0, 1.0,
+                              _np.linalg.norm(cent, axis=1, keepdims=True))
+        sims = cn @ qn
+        j = int(sims.argmax())
+        return AssignResult(topic_id=int(rows[j]["topic_id"]), similarity=float(sims[j]))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _seed_oracle_chroma(records: list[dict]):
+    """Build an EphemeralClient with a taxonomy__centroids collection seeded from
+    the same records, for oracle-vs-http equality checks. Clears any prior
+    collection (EphemeralClient shares in-process backend state)."""
+    import chromadb
+
+    cl = chromadb.EphemeralClient()
+    try:
+        cl.delete_collection("taxonomy__centroids")
+    except Exception:
+        pass
+    coll = cl.create_collection(
+        "taxonomy__centroids", metadata={"hnsw:space": "cosine"}, embedding_function=None,
+    )
+    coll.add(
+        ids=[f"{r['collection']}:{r['topic_id']}" for r in records],
+        embeddings=[r["embedding"] for r in records],
+        metadatas=[{"topic_id": int(r["topic_id"]), "collection": r["collection"],
+                    "label": r.get("label", ""), "doc_count": r.get("doc_count", 0)}
+                   for r in records],
+    )
+    return cl
+
+
+class TestComputeAndAssign:
+    _CENTROIDS = [
+        {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0, 0.0], "label": "x", "doc_count": 3},
+        {"collection": "c", "topic_id": 2, "embedding": [0.0, 1.0, 0.0], "label": "y", "doc_count": 2},
+        {"collection": "other", "topic_id": 9, "embedding": [0.0, 0.0, 1.0], "label": "z", "doc_count": 1},
+    ]
+
+    def _store(self, client: HttpTaxonomyStore, records=None) -> HttpTaxonomyStore:
+        client._centroid_store = _FakeCentroidStore(records if records is not None else self._CENTROIDS)
+        return client
+
+    def test_compute_assignments_centroid_matches_oracle(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        doc_ids = ["d1", "d2"]
+        embeddings = [[0.9, 0.1, 0.0], [0.2, 0.95, 0.0]]
+        http_out = store.compute_assignments("c", doc_ids, embeddings)
+
+        cl = _seed_oracle_chroma(self._CENTROIDS)
+        oracle_out = CatalogTaxonomy.compute_assignments("c", doc_ids, embeddings, cl)
+
+        # Shape + topic_id + assigned_by parity; similarity to float precision.
+        assert [a["topic_id"] for a in http_out] == [a["topic_id"] for a in oracle_out] == [1, 2]
+        assert all(a["assigned_by"] == "centroid" for a in http_out)
+        assert all(a["similarity"] is None and a["source_collection"] is None for a in http_out)
+        assert [set(a) for a in http_out] == [
+            {"doc_id", "topic_id", "assigned_by", "similarity", "source_collection"}
+        ] * 2
+
+    def test_compute_assignments_projection_matches_oracle(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        doc_ids = ["d1"]
+        embeddings = [[0.05, 0.05, 0.99]]  # nearest the foreign 'other' centroid (topic 9)
+        http_out = store.compute_assignments("c", doc_ids, embeddings, cross_collection=True)
+
+        cl = _seed_oracle_chroma(self._CENTROIDS)
+        oracle_out = CatalogTaxonomy.compute_assignments(
+            "c", doc_ids, embeddings, cl, cross_collection=True,
+        )
+        assert http_out[0]["topic_id"] == oracle_out[0]["topic_id"] == 9
+        assert http_out[0]["assigned_by"] == "projection"
+        assert http_out[0]["source_collection"] == "c"
+        # raw cosine similarity (1 - distance), matches oracle to float precision
+        assert http_out[0]["similarity"] == pytest.approx(oracle_out[0]["similarity"], abs=1e-5)
+
+    def test_compute_assignments_empty_when_no_centroids(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client, records=[])
+        assert store.compute_assignments("c", ["d1"], [[1.0, 0.0, 0.0]]) == []
+
+    def test_compute_assignments_dim_mismatch_short_circuits(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        assert store.compute_assignments("c", ["d1"], [[1.0, 0.0]]) == []  # 2-dim vs 3-dim centroids
+
+    def test_assign_single_via_port(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        res = store.assign_single("c", np.array([0.9, 0.1, 0.0], dtype=np.float32))
+        assert res is not None
+        assert res.topic_id == 1
+        assert res.similarity == pytest.approx(1.0, abs=1e-2)
+        # cross-collection routes to foreign centroids
+        res_x = store.assign_single("c", np.array([0.0, 0.0, 1.0], dtype=np.float32),
+                                    cross_collection=True)
+        assert res_x.topic_id == 9
+
+    def test_assign_single_none_on_empty(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client, records=[])
+        assert store.assign_single("c", np.array([1.0, 0.0, 0.0], dtype=np.float32)) is None
+
+    def test_compute_cross_links_matches_oracle(self, client: HttpTaxonomyStore) -> None:
+        store = self._store(client)
+        # A new centroid for 'c' that points exactly at the foreign 'other' (topic 9).
+        new_centroids = [[0.0, 0.0, 1.0]]
+        new_metas = [{"topic_id": 1}]
+        pairs = store.compute_cross_links("c", new_centroids, new_metas)
+
+        cl = _seed_oracle_chroma(self._CENTROIDS)
+        # compute_cross_links takes the COLLECTION (not the client, unlike
+        # compute_assignments).
+        coll = cl.get_collection("taxonomy__centroids", embedding_function=None)
+        oracle_pairs = CatalogTaxonomy.compute_cross_links("c", new_centroids, new_metas, coll)
+        assert pairs == oracle_pairs == [(1, 9)]
+
+    def test_compute_discovered_topics_delegates(self, client, monkeypatch) -> None:
+        called = {}
+
+        def _fake(collection_name, doc_ids, embeddings, texts):
+            called["args"] = (collection_name, doc_ids, list(embeddings), texts)
+            return [{"label": "sentinel"}]
+
+        monkeypatch.setattr(CatalogTaxonomy, "compute_discovered_topics", staticmethod(_fake))
+        out = client.compute_discovered_topics("c", ["d1"], np.array([[1.0]]), ["t"])
+        assert out == [{"label": "sentinel"}]
+        assert called["args"][0] == "c" and called["args"][1] == ["d1"]
+
+    def test_compute_split_delegates(self, client, monkeypatch) -> None:
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_split",
+            staticmethod(lambda *a, **k: {"child_specs": ["S"], "topic_id": a[0]}),
+        )
+        out = client.compute_split(7, ["d"], ["t"], ["d"], np.array([[1.0]]), "c", 2)
+        assert out == {"child_specs": ["S"], "topic_id": 7}
+
+    def test_compute_rebuild_plan_delegates(self, client, monkeypatch) -> None:
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_rebuild_plan",
+            staticmethod(lambda *a, **k: {"specs": [], "manual_transfers": k.get("manual_assignments")}),
+        )
+        out = client.compute_rebuild_plan(
+            "c", ["d"], np.array([[1.0]]), ["t"],
+            old_centroids=np.empty((0, 0)), old_labels=[], old_review_statuses=[],
+            old_centroid_topic_ids=[], manual_assignments={"d": 0},
+        )
+        assert out == {"specs": [], "manual_transfers": {"d": 0}}
+
+
+# ── Persist parity + read_rebuild_old_state reshape (RDR-152 nexus-1di3r.8) ────
+
+
+class TestPersist:
+    def _seed_topic(self, client, sid, label, collection, review="pending", dc=0):
+        client.import_topic(
+            src_id=sid, label=label, parent_id=None, collection=collection,
+            centroid_hash=None, doc_count=dc, created_at="2026-01-01T00:00:00Z",
+            review_status=review, terms=None,
+        )
+
+    def test_persist_discovered_returns_ids_and_guards_existing(self, client) -> None:
+        specs = [
+            {"label": "t0", "doc_count": 2, "terms": "[]", "assigned_by": "hdbscan",
+             "doc_ids": ["dd1", "dd2"], "centroid": [1.0, 0.0]},
+            {"label": "t1", "doc_count": 0, "terms": "[]", "assigned_by": "hdbscan",
+             "doc_ids": [], "centroid": [0.0, 1.0]},
+        ]
+        ids = client.persist_discovered_topics("c", specs)
+        assert len(ids) == 2
+        # assignments landed for spec 0
+        assert sorted(client.get_all_topic_doc_ids(ids[0])) == ["dd1", "dd2"]
+        # existing-topics guard: a second call is a no-op
+        assert client.persist_discovered_topics("c", specs) == []
+        # empty specs -> []
+        assert client.persist_discovered_topics("c2", []) == []
+
+    def test_persist_rebuild_replace_and_manual_transfer(self, client) -> None:
+        # Seed an old topic + assignment to be cleared.
+        ids0 = client.persist_discovered_topics(
+            "c", [{"label": "old", "doc_count": 1, "terms": "[]",
+                   "assigned_by": "hdbscan", "doc_ids": ["rb1"]}])
+        assert len(ids0) == 1
+        plan = {
+            "specs": [
+                {"label": "new0", "doc_count": 2, "terms": "[]", "review_status": "pending",
+                 "assigned_by": "hdbscan", "doc_ids": ["rb1", "rb2"]},
+                {"label": "new1", "doc_count": 0, "terms": "[]", "review_status": "pending",
+                 "assigned_by": "hdbscan", "doc_ids": []},
+            ],
+            "manual_transfers": {"rbm": 1},
+        }
+        ids = client.persist_rebuild_topics("c", plan)
+        assert len(ids) == 2
+        labels = {t["label"] for t in client.get_all_topics(collection="c")}
+        assert labels == {"new0", "new1"}  # old gone
+        # manual transfer applied to ids[1]
+        assert client.get_assignments_for_docs(["rbm"]) == {"rbm": ids[1]}
+
+    def test_persist_rebuild_empty_specs_clears(self, client) -> None:
+        client.persist_discovered_topics(
+            "c", [{"label": "stale", "doc_count": 0, "terms": "[]",
+                   "assigned_by": "hdbscan", "doc_ids": []}])
+        ids = client.persist_rebuild_topics("c", {"specs": [], "manual_transfers": {}})
+        assert ids == []
+        assert client.get_all_topics(collection="c") == []
+
+    def test_persist_assignments_reuses_assign_topic(self, client) -> None:
+        self._seed_topic(client, 1, "a", "c")
+        assignments = [
+            {"doc_id": "pa1", "topic_id": 1, "assigned_by": "centroid",
+             "similarity": None, "source_collection": None},
+            {"doc_id": "pa2", "topic_id": 1, "assigned_by": "projection",
+             "similarity": 0.8, "source_collection": "c"},
+        ]
+        assert client.persist_assignments(assignments) == 2
+        assert client.get_assignments_for_docs(["pa1", "pa2"]) == {"pa1": 1, "pa2": 1}
+
+    def test_persist_cross_links_projection_shape(self, client) -> None:
+        assert client.persist_cross_links([(1, 9), (2, 9)]) == 2
+        assert client.persist_cross_links([]) == 0
+        stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
+        assert stored[(1, 9)]["link_count"] == 1
+        assert stored[(1, 9)]["link_types"] == json.dumps(["projection"])
+
+    def test_purge_collection_returns_count_dict(self, client) -> None:
+        ids = client.persist_discovered_topics(
+            "c", [{"label": "p", "doc_count": 1, "terms": "[]",
+                   "assigned_by": "hdbscan", "doc_ids": ["pg1"]}])
+        client.persist_cross_links([(ids[0], ids[0])])
+        out = client.purge_collection("c")
+        assert set(out) == {"topics", "assignments", "links", "meta"}
+        assert out["topics"] == 1
+        assert out["assignments"] == 1
+        assert client.get_all_topics(collection="c") == []
+
+    def test_read_rebuild_old_state_composes_and_reshapes(self, client) -> None:
+        # T2 half: two topics in 'c' + one manual + one hdbscan assignment.
+        self._seed_topic(client, 1, "alpha", "c", review="pending")
+        self._seed_topic(client, 2, "beta", "c", review="accepted")
+        client.assign_topic("dm", 1, "manual")
+        client.assign_topic("dh", 2, "hdbscan")
+        # Centroid half: centroids for topic 1, 2 (in T2) + a ghost topic 3 (not in T2).
+        client._centroid_store = _FakeCentroidStore([
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "ignored1"},
+            {"collection": "c", "topic_id": 2, "embedding": [0.0, 1.0], "label": "ignored2"},
+            {"collection": "c", "topic_id": 3, "embedding": [0.5, 0.5], "label": "ghost"},
+        ])
+
+        state = client.read_rebuild_old_state("c")
+        assert set(state) == {
+            "old_centroids", "old_labels", "old_review_statuses",
+            "old_centroid_topic_ids", "manual_assignments", "old_centroid_ids",
+        }
+        assert state["old_centroid_topic_ids"] == [1, 2, 3]
+        # labels/review_status carried from T2 by topic_id; ghost falls back to
+        # the centroid metadata label + 'pending'.
+        assert state["old_labels"] == ["alpha", "beta", "ghost"]
+        assert state["old_review_statuses"] == ["pending", "accepted", "pending"]
+        assert state["old_centroid_ids"] == ["c:1", "c:2", "c:3"]
+        assert state["manual_assignments"] == {"dm": 1}  # hdbscan 'dh' excluded
+        assert np.array_equal(
+            state["old_centroids"], np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]], dtype=np.float32))
+
+    def test_read_rebuild_old_state_empty_centroids(self, client) -> None:
+        client._centroid_store = _FakeCentroidStore([])
+        state = client.read_rebuild_old_state("empty")
+        assert state["old_centroid_topic_ids"] == []
+        assert state["old_labels"] == []
+        assert state["manual_assignments"] == {}
+        assert state["old_centroids"].shape == (0, 0)
+
+
+# ── Orchestrator compose-glue (RDR-152 nexus-1di3r.9) ──────────────────────────
+
+
+class _FakeChromaColl:
+    """Minimal chroma collection: get() by ids (documents) or paginated (embeddings)."""
+
+    def __init__(self, *, documents=None, embeddings=None):
+        self._docs = documents or {}
+        self._embs = embeddings or {}
+        self._order = list((documents or embeddings or {}).keys())
+
+    def get(self, ids=None, include=None, limit=None, offset=None):
+        include = include or []
+        if ids is not None:
+            keys = [i for i in ids if i in self._docs or i in self._embs]
+        else:
+            start = offset or 0
+            keys = self._order[start:start + (limit or len(self._order))]
+        out = {"ids": keys}
+        if "documents" in include:
+            out["documents"] = [self._docs.get(k) for k in keys]
+        if "embeddings" in include:
+            out["embeddings"] = [self._embs.get(k) for k in keys]
+        return out
+
+
+class _FakeChromaClient:
+    def __init__(self, colls):
+        self._colls = colls
+
+    def get_collection(self, name, embedding_function=None):
+        return self._colls[name]
+
+
+class TestOrchestrators:
+    def _store(self, client, records):
+        client._centroid_store = _FakeCentroidStore(records)
+        return client
+
+    def test_discover_topics_compose(self, client, monkeypatch) -> None:
+        store = self._store(client, [])
+        specs = [{"label": "a", "terms": "[]", "doc_count": 2, "doc_ids": ["x1", "x2"],
+                  "centroid": [1.0, 0.0], "assigned_by": "hdbscan"}]
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_discovered_topics", staticmethod(lambda *a: specs))
+        n = store.discover_topics("c", ["x1", "x2"], np.array([[1.0, 0.0], [0.9, 0.1]]), ["t1", "t2"])
+        assert n == 1
+        assert {t["label"] for t in client.get_all_topics(collection="c")} == {"a"}
+        assert ("upsert", 1) in store._centroid_store.calls
+        assert len(store._centroid_store._records) == 1
+
+    def test_discover_topics_empty_specs_returns_zero(self, client, monkeypatch) -> None:
+        store = self._store(client, [])
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_discovered_topics", staticmethod(lambda *a: []))
+        assert store.discover_topics("c", [], np.array([]), []) == 0
+        assert store._centroid_store.calls == []
+
+    def test_assign_batch_compose(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0, 0.0], "label": "x", "doc_count": 1},
+        ])
+        n = store.assign_batch("c", ["d1"], [[0.9, 0.1, 0.0]])
+        assert n == 1
+        assert client.get_assignments_for_docs(["d1"]) == {"d1": 1}
+
+    def test_rebuild_taxonomy_compose(self, client, monkeypatch) -> None:
+        # Old topic id=1 in T2 + matching old centroid in the port.
+        client.import_topic(
+            src_id=1, label="old", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=1, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "old", "doc_count": 1},
+        ])
+        plan = {"specs": [{"label": "new", "doc_count": 1, "terms": "[]",
+                           "review_status": "pending", "assigned_by": "hdbscan",
+                           "doc_ids": ["d1"], "centroid": [0.0, 1.0]}],
+                "manual_transfers": {}}
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_rebuild_plan", staticmethod(lambda *a, **k: plan))
+        n = store.rebuild_taxonomy("c", ["d1"], np.array([[0.0, 1.0]]), ["t"])
+        assert n == 1
+        calls = store._centroid_store.calls
+        assert ("delete_ids", "c", [1]) in calls
+        assert ("upsert", 1) in calls
+        # T2 REPLACE: only "new" survives; the port now holds exactly the NEW
+        # centroid ([0,1]), the old one ([1,0]) deleted.
+        assert {t["label"] for t in client.get_all_topics(collection="c")} == {"new"}
+        port = store._centroid_store.get_by_collection("c")
+        assert len(port["embeddings"]) == 1
+        assert port["embeddings"][0] == [0.0, 1.0]
+        assert 1 not in {m["topic_id"] for m in port["metadatas"]}  # old id not reused
+
+    def test_rebuild_taxonomy_passes_old_state_kwargs(self, client, monkeypatch) -> None:
+        # Proves the GLUE: read_rebuild_old_state's dict reaches compute_rebuild_plan
+        # under the correct kwarg names (a compose-order test alone can't catch a
+        # wrong-kwarg bug). Spy captures kwargs instead of monkeypatching to a const.
+        client.import_topic(
+            src_id=1, label="old", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=1, created_at="2026-01-01T00:00:00Z", review_status="accepted", terms=None)
+        client.assign_topic("dm", 1, "manual")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "old", "doc_count": 1},
+        ])
+        captured: dict = {}
+
+        def _spy(collection_name, doc_ids, embeddings, texts, **kwargs):
+            captured.update(kwargs)
+            return {"specs": [], "manual_transfers": {}}
+
+        monkeypatch.setattr(CatalogTaxonomy, "compute_rebuild_plan", staticmethod(_spy))
+        store.rebuild_taxonomy("c", ["d1"], np.array([[0.0, 1.0]]), ["t"])
+
+        # kwargs must match read_rebuild_old_state's reshaped output exactly.
+        assert captured["old_labels"] == ["old"]
+        assert captured["old_review_statuses"] == ["accepted"]
+        assert captured["old_centroid_topic_ids"] == [1]
+        assert captured["manual_assignments"] == {"dm": 1}
+        assert np.array_equal(
+            captured["old_centroids"], np.array([[1.0, 0.0]], dtype=np.float32))
+
+    def test_split_topic_compose(self, client, monkeypatch) -> None:
+        client.import_topic(
+            src_id=5, label="parent", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=2, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        client.assign_topic("d1", 5, "hdbscan")
+        client.assign_topic("d2", 5, "hdbscan")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 5, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 2},
+        ])
+
+        class _EF:
+            def __init__(self, **k): pass
+            def __call__(self, texts): return [[1.0, 0.0]] * len(texts)
+
+        monkeypatch.setattr("nexus.db.local_ef.LocalEmbeddingFunction", _EF)
+        child_specs = [
+            {"label": "c0", "terms_json": "[]", "doc_count": 1, "doc_ids": ["d1"],
+             "centroid": [1.0, 0.0], "created_at": "2026-01-01T00:00:00Z"},
+            {"label": "c1", "terms_json": "[]", "doc_count": 1, "doc_ids": ["d2"],
+             "centroid": [0.0, 1.0], "created_at": "2026-01-01T00:00:00Z"},
+        ]
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_split",
+            staticmethod(lambda *a, **k: {"topic_id": 5, "collection_name": "c",
+                                          "child_specs": child_specs}))
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(documents={"d1": "t1", "d2": "t2"})})
+        n = store.split_topic(5, 2, fake_client)
+        assert n == 2
+        calls = store._centroid_store.calls
+        assert ("delete_ids", "c", [5]) in calls
+        assert ("upsert", 2) in calls
+        labels = {t["label"] for t in client.get_all_topics(collection="c")}
+        assert {"c0", "c1"} <= labels
+
+    def test_split_topic_too_few_docs(self, client) -> None:
+        client.import_topic(
+            src_id=6, label="p", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=1, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        client.assign_topic("only", 6, "hdbscan")
+        store = self._store(client, [])
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(documents={"only": "t"})})
+        assert store.split_topic(6, 5, fake_client) == 0  # 1 doc < k=5
+
+    def test_project_against_match_and_novel(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0], "label": "T7", "doc_count": 1},
+            {"collection": "tgt", "topic_id": 8, "embedding": [0.0, 1.0], "label": "T8", "doc_count": 1},
+        ])
+        src = _FakeChromaColl(embeddings={"s1": [1.0, 0.0], "s2": [0.0, 1.0], "s3": [0.7, 0.7]})
+        fake_client = _FakeChromaClient({"src": src})
+        out = store.project_against("src", ["tgt"], fake_client, threshold=0.85, top_k=3)
+
+        assert out["total_chunks"] == 3
+        assert out["total_centroids"] == 2
+        assert out["novel_chunks"] == ["s3"]  # 0.707 cosine to each < 0.85
+        assigns = {(d, t): round(s, 4) for d, t, s in out["chunk_assignments"]}
+        assert assigns[("s1", 7)] == 1.0 and assigns[("s2", 8)] == 1.0
+        matched = {m["topic_id"]: m for m in out["matched_topics"]}
+        assert set(matched) == {7, 8}
+        assert matched[7]["chunk_count"] == 1 and matched[7]["avg_similarity"] == pytest.approx(1.0)
+
+    def test_project_against_dim_mismatch_raises(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0, 0.0], "label": "T7", "doc_count": 1},
+        ])
+        src = _FakeChromaColl(embeddings={"s1": [1.0, 0.0]})  # 2d vs 3d centroid
+        fake_client = _FakeChromaClient({"src": src})
+        with pytest.raises(ValueError, match="Dimension mismatch"):
+            store.project_against("src", ["tgt"], fake_client)
+
+    def test_project_against_no_source_chunks(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0], "label": "T7", "doc_count": 1},
+        ])
+        fake_client = _FakeChromaClient({"src": _FakeChromaColl(embeddings={})})
+        out = store.project_against("src", ["tgt"], fake_client)
+        assert out["total_chunks"] == 0 and out["matched_topics"] == []

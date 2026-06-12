@@ -43,39 +43,21 @@ _STORE_PAIRS = [
 
 # Per-store method exclusions: the HTTP store legitimately does NOT cover these
 # SQLite methods. Every entry needs a written reason.
-_EXCLUSIONS: dict[str, dict[str, str]] = {
-    "taxonomy": {
-        m: (
-            "Taxonomy compute/rebuild pipeline — heavy BERTopic/HDBSCAN compute "
-            "coupled to raw ChromaDB centroids + the T2 rename lock; not exposed "
-            "over HTTP. nx taxonomy discover/rebuild/project/split fail loud in "
-            "service mode (taxonomy_cmd guards with _has_raw_access). Tracked as "
-            "nexus-1di3r; read-path methods ARE covered."
-        )
-        for m in (
-            "discover_topics", "rebuild_taxonomy", "project_against",
-            "compute_assignments",
-            "compute_discovered_topics", "compute_rebuild_plan", "compute_split",
-            "assign_batch", "assign_single", "persist_assignments",
-            "persist_cross_links", "persist_discovered_topics",
-            "persist_rebuild_topics", "read_rebuild_old_state",
-            "purge_collection", "split_topic",
-        )
-    },
-}
+#
+# RDR-152 nexus-1di3r Phase 6: the taxonomy compute/persist/orchestrator pipeline
+# is now FULLY service-backed on HttpTaxonomyStore (delegate-thin compute statics +
+# centroid-port ANN + Java relational persist), so there are NO taxonomy exclusions
+# left — the tripwire is strict for every taxonomy method.
+_EXCLUSIONS: dict[str, dict[str, str]] = {}
 
 # Per-(store, method) param-drift exemptions: the method exists on both stores
 # and is genuinely USED in service mode, but with a different (working)
 # signature than the SQLite oracle. Every entry needs a written reason.
-_PARAM_DRIFT_OK: dict[tuple[str, str], str] = {
-    ("taxonomy", "get_topics"): (
-        "HttpTaxonomyStore.get_topics(collection) is a working service-backend "
-        "read with a different shape than CatalogTaxonomy.get_topics(parent_id); "
-        "reconciling the two APIs is nexus-1di3r. The oracle-only-arg callers "
-        "(get_topic_tree/get_topics_for_collection/upsert_topic_links) already "
-        "fail loud, so this divergence cannot cause a crash or wrong results."
-    ),
-}
+#
+# RDR-152 nexus-1di3r Phase 6: get_topics was reconciled to the oracle's
+# (*, parent_id=None) signature (Phase 4.3), so the taxonomy param-drift exemption
+# is gone — the tripwire enforces signature-prefix parity for it too.
+_PARAM_DRIFT_OK: dict[tuple[str, str], str] = {}
 
 # Methods present on every store base but not part of the storage contract.
 _UNIVERSAL_IGNORE = {"close", "conn", "bootstrap_schema"}
