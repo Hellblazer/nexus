@@ -227,6 +227,37 @@ class TaxonomyCentroidHandlerTest {
     }
 
     @Test
+    void foreign_returnsAllCollectionsExceptGiven() throws Exception {
+        upsert("knowledge__fga", 1L, 1.0f, 0.0f, "a", 1);
+        upsert("docs__fgb",      2L, 0.6f, 0.8f, "b", 1);
+
+        var resp = get("/v1/taxonomy/centroids/foreign?collection=knowledge__fga", TENANT);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var rows = mapper.readValue(resp.body(), LIST_T);
+        assertThat(rows).extracting(r -> ((Number) r.get("topic_id")).longValue())
+            .contains(2L).doesNotContain(1L);
+        assertThat(rows).allSatisfy(r -> assertThat(r).containsKeys("embedding", "label", "doc_count", "collection"));
+    }
+
+    @Test
+    void malformedInput_returns400Not500() throws Exception {
+        // M1: non-object element in records
+        var r1 = post("/v1/taxonomy/centroids/upsert", TENANT, "{\"records\":[123]}");
+        assertThat(r1.statusCode()).as("non-object record element -> 400").isEqualTo(400);
+
+        // M3: non-finite embedding value (1e999 parses to Infinity server-side)
+        var r2 = post("/v1/taxonomy/centroids/query", TENANT,
+            "{\"embedding\":[1e999,0.0],\"collection\":\"knowledge__nan\","
+            + "\"cross_collection\":false,\"n_results\":1}");
+        assertThat(r2.statusCode()).as("non-finite embedding -> 400").isEqualTo(400);
+
+        // M2: non-numeric topic_ids element
+        var r3 = post("/v1/taxonomy/centroids/delete", TENANT,
+            "{\"collection\":\"knowledge__x\",\"topic_ids\":[\"foo\"]}");
+        assertThat(r3.statusCode()).as("non-numeric topic_id -> 400").isEqualTo(400);
+    }
+
+    @Test
     void auth_401OnMissingToken() throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/taxonomy/centroids/dimension"))

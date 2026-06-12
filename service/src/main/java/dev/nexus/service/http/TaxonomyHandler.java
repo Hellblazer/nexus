@@ -168,6 +168,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/centroids/count"                -> handleCentroidCount(exchange, tenant, method);
                 case "/centroids/dimension"            -> handleCentroidDimension(exchange, tenant, method);
                 case "/centroids/by_collection"        -> handleCentroidByCollection(exchange, tenant, method);
+                case "/centroids/foreign"              -> handleCentroidForeign(exchange, tenant, method);
                 case "/centroids/delete"               -> handleCentroidDelete(exchange, tenant, method);
                 case "/centroids/purge"                -> handleCentroidPurge(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
@@ -724,6 +725,9 @@ public final class TaxonomyHandler implements HttpHandler {
         List<CentroidRecord> records = new ArrayList<>();
         if (raw instanceof List<?> lst) {
             for (Object o : lst) {
+                if (!(o instanceof Map<?, ?>)) {
+                    throw new IllegalArgumentException("each element in 'records' must be a JSON object");
+                }
                 Map<String, Object> r = (Map<String, Object>) o;
                 records.add(new CentroidRecord(
                     requireString(r, "collection"),
@@ -777,7 +781,23 @@ public final class TaxonomyHandler implements HttpHandler {
     private void handleCentroidByCollection(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
         String collection = requireQueryParam(ex, "collection");
-        List<CentroidRecord> rows = centroidRepo.getByCollection(tenant, collection);
+        HttpUtil.send(ex, 200, json(centroidRows(centroidRepo.getByCollection(tenant, collection))));
+    }
+
+    /**
+     * GET /v1/taxonomy/centroids/foreign?collection= (required)
+     * All centroids in collections OTHER than the given one (cross-collection projection
+     * source set). Serves the oracle's compute_cross_links ($ne) directly and
+     * project_against ($in) via client-side filtering. Same row shape as by_collection.
+     */
+    private void handleCentroidForeign(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        String collection = requireQueryParam(ex, "collection");
+        HttpUtil.send(ex, 200, json(centroidRows(centroidRepo.getForeignCentroids(tenant, collection))));
+    }
+
+    /** Map centroid records to snake_case rows (nullable keys preserved via map()). */
+    private List<Map<String, Object>> centroidRows(List<CentroidRecord> rows) {
         List<Map<String, Object>> out = new ArrayList<>(rows.size());
         for (CentroidRecord r : rows) {
             out.add(map(
@@ -787,7 +807,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 "collection", r.collection(),
                 "doc_count",  r.docCount()));
         }
-        HttpUtil.send(ex, 200, json(out));
+        return out;
     }
 
     /**
@@ -800,7 +820,12 @@ public final class TaxonomyHandler implements HttpHandler {
         String collection = requireString(body, "collection");
         Object raw = body.get("topic_ids");
         List<Long> topicIds = raw instanceof List<?> lst
-            ? lst.stream().map(v -> ((Number) v).longValue()).toList()
+            ? lst.stream().map(v -> {
+                if (!(v instanceof Number n)) {
+                    throw new IllegalArgumentException("topic_ids must be an array of integers, got: " + v);
+                }
+                return n.longValue();
+            }).toList()
             : List.of();
         HttpUtil.send(ex, 200, json(Map.of("deleted",
             centroidRepo.deleteByIds(tenant, collection, topicIds))));
@@ -829,7 +854,14 @@ public final class TaxonomyHandler implements HttpHandler {
             if (!(e instanceof Number n)) {
                 throw new IllegalArgumentException("field '" + key + "' must be a number array");
             }
-            v[i] = n.floatValue();
+            float val = n.floatValue();
+            if (!Float.isFinite(val)) {
+                // NaN/Infinity (e.g. JSON 1e999) would render as "NaN"/"Infinity" in the
+                // pgvector literal and fail at the DB as a 500. Reject at the boundary (400).
+                throw new IllegalArgumentException(
+                    "field '" + key + "' contains a non-finite value at index " + i + ": " + val);
+            }
+            v[i] = val;
         }
         return v;
     }
@@ -844,6 +876,9 @@ public final class TaxonomyHandler implements HttpHandler {
 
     /** Build a LinkedHashMap preserving null values (JsonInclude.ALWAYS keeps the keys). */
     private static Map<String, Object> map(Object... kv) {
+        if (kv.length % 2 != 0) {
+            throw new IllegalArgumentException("map() requires an even number of args (key,value pairs)");
+        }
         Map<String, Object> m = new LinkedHashMap<>();
         for (int i = 0; i < kv.length; i += 2) {
             m.put((String) kv[i], kv[i + 1]);

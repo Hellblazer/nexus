@@ -169,6 +169,17 @@ public final class TaxonomyCentroidRepository {
      * {@code -1} when the tenant has no centroids. Mirrors the oracle's
      * {@code _check_centroid_dimension} probe: a deployment is single-dim, so this
      * resolves the active centroid space for collection-keyed ops that have no vector.
+     *
+     * <p>SINGLE-DIM INVARIANT (RDR-156 t1hnc Phase-1 review S2): this returns the FIRST
+     * non-empty table in ascending dim order. If a tenant ever has centroids in two
+     * dimensions at once — only reachable mid-migration during a model switch
+     * (e.g. MiniLM-384 -> Voyage-1024) — this reports the smaller dim and {@link #count}
+     * over-counts. The invariant the post-RDR-155 mode-switch migration MUST hold:
+     * {@link #purgeByCollection} the old-dimension centroids BEFORE
+     * {@link #upsertCentroids} at the new dimension. A doctor-level
+     * "at most one centroid dim per tenant" check is tracked as a follow-on, not built
+     * here (the storage primitive is single-dim by contract; enforcing the migration
+     * ordering belongs to the migration tool).
      */
     public int dimensionProbe(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -186,16 +197,41 @@ public final class TaxonomyCentroidRepository {
      * shape the rebuild/project paths index into.
      */
     public List<CentroidRecord> getByCollection(String tenant, String collection) {
+        return fetchCentroids(tenant, "collection = ?", collection);
+    }
+
+    /**
+     * All centroids in collections OTHER than {@code collection} (cross-collection
+     * projection source set), across all per-dim tables, ordered by (collection, topic_id).
+     *
+     * <p>Serves the oracle's two bulk centroid reads (RDR-156 t1hnc Phase-1 review S1):
+     * {@code compute_cross_links} ({@code where collection $ne name}) directly, and
+     * {@code project_against} ({@code where collection $in targets}) by client-side
+     * filtering this foreign set to the target collections (the projection matrix multiply
+     * already filters). The {@code $ne} super-set is sufficient for both; a dedicated
+     * {@code $in} endpoint was not added (YAGNI — no third caller).
+     *
+     * <p>Each row carries its own {@code collection} so the caller can group/filter; the
+     * embedding is hydrated like {@link #getByCollection}.
+     */
+    public List<CentroidRecord> getForeignCentroids(String tenant, String collection) {
+        return fetchCentroids(tenant, "collection <> ?", collection);
+    }
+
+    /** Shared per-dim centroid fetch with a parameterized collection predicate. */
+    private List<CentroidRecord> fetchCentroids(String tenant, String collectionPredicate,
+                                                String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
             List<CentroidRecord> out = new ArrayList<>();
             for (int dim : DIMS) {
                 Result<Record> rows = ctx.fetch(
-                    "SELECT topic_id, embedding::text AS embedding_text, label, doc_count FROM "
-                    + centroidTable(dim) + " WHERE collection = ? ORDER BY topic_id ASC",
+                    "SELECT collection, topic_id, embedding::text AS embedding_text, label, doc_count FROM "
+                    + centroidTable(dim) + " WHERE " + collectionPredicate
+                    + " ORDER BY collection ASC, topic_id ASC",
                     collection);
                 for (Record rec : rows) {
                     out.add(new CentroidRecord(
-                        collection,
+                        rec.get("collection", String.class),
                         rec.get("topic_id", Long.class),
                         parseVectorLiteral(rec.get("embedding_text", String.class)),
                         rec.get("label", String.class),

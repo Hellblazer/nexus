@@ -217,8 +217,12 @@ class TaxonomyCentroidRepositoryTest {
 
     @Test
     void annQuery_narrowCollection_returnsExactlyN_noSilentUnderReturn() {
-        // RDR-156: filtered HNSW silently under-returns at hnsw.max_scan_tuples without
-        // iterative_scan=relaxed_order. A 3-centroid collection MUST return exactly 3.
+        // Proves the filtered-ANN plumbing: the SET LOCAL hnsw.iterative_scan='relaxed_order'
+        // fires without error and a narrow filtered query returns its full set in distance
+        // order. NOTE (Phase-1 review O1): at 3 centroids HNSW exhausts the table regardless
+        // of iterative_scan, so this is a connectivity/ordering proof, NOT proof that
+        // relaxed_order prevents production-scale silent under-return — that recall guarantee
+        // is owned by the production-scale recall gate (RDR-156), not this fixture.
         repo.upsertCentroids(TENANT_A, List.of(
             new CentroidRecord("knowledge__narrow", 1L, unit(384, 1.0f, 0.0f), "a", 1),
             new CentroidRecord("knowledge__narrow", 2L, unit(384, 0.6f, 0.8f), "b", 1),
@@ -249,6 +253,24 @@ class TaxonomyCentroidRepositoryTest {
             tenant, unit(384, 1.0f, 0.0f), COL_A, true, 5);
         assertThat(hits).as("cross-collection excludes the source collection")
             .extracting(AnnHit::topicId).containsExactly(22L);
+    }
+
+    @Test
+    void getForeignCentroids_returnsAllCollectionsExceptGiven() {
+        // Dedicated tenant: foreign = every collection != the given one (oracle $ne).
+        String tenant = "tenant-foreign";
+        repo.upsertCentroids(tenant, List.of(
+            new CentroidRecord("knowledge__fa", 1L, unit(384, 1.0f, 0.0f), "a", 1),
+            new CentroidRecord("docs__fb",      2L, unit(384, 0.6f, 0.8f), "b", 1),
+            new CentroidRecord("rdr__fc",        3L, unit(384, 0.0f, 1.0f), "c", 1)));
+
+        List<CentroidRecord> foreign = repo.getForeignCentroids(tenant, "knowledge__fa");
+        assertThat(foreign).as("excludes the given collection, returns the other two")
+            .extracting(CentroidRecord::topicId).containsExactlyInAnyOrder(2L, 3L);
+        // Each row carries its own collection so the caller can group/filter ($in client-side).
+        assertThat(foreign).extracting(CentroidRecord::collection)
+            .containsExactlyInAnyOrder("docs__fb", "rdr__fc");
+        assertThat(foreign).allSatisfy(r -> assertThat(r.embedding().length).isEqualTo(384));
     }
 
     // ── dimensionProbe / getByCollection / delete / purge ───────────────────────
