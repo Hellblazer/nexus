@@ -87,6 +87,28 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         return {k: v[0] for k, v in qs.items()}
 
+    def _insert_spec(self, collection: str, spec: dict, review_status: str) -> int:
+        """Insert a topic spec + its INSERT-OR-IGNORE assignments; return the id.
+        Shared by the persist_discovered / persist_rebuild fake handlers."""
+        tid = _next_id()
+        _TOPICS[tid] = {
+            "id": tid, "label": spec["label"], "parent_id": None,
+            "collection": collection, "centroid_hash": None,
+            "doc_count": int(spec.get("doc_count", 0)),
+            "created_at": "2026-01-01T00:00:00Z",
+            "review_status": review_status, "terms": spec.get("terms"),
+        }
+        seen = {(a["doc_id"], a["topic_id"]) for a in _ASSIGNMENTS}
+        for did in spec.get("doc_ids", []):
+            if (did, tid) in seen:
+                continue
+            _ASSIGNMENTS.append({
+                "doc_id": did, "topic_id": tid,
+                "assigned_by": spec.get("assigned_by", "hdbscan"),
+                "similarity": None, "assigned_at": None, "source_collection": None,
+            })
+        return tid
+
     def do_GET(self) -> None:
         if not self._auth_ok():
             self._json(401, {"error": "unauthorized"})
@@ -207,6 +229,26 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                     self._json(404, {"error": "not found"})
                 else:
                     self._json(200, {"count": m.get("last_discover_doc_count", 0)})
+
+            elif path == "/v1/taxonomy/rebuild/old_state":
+                # RDR-152 nexus-1di3r.1 endpoint: lists (NOT dicts), reshaped
+                # back to dicts Python-side by read_rebuild_old_state.
+                collection = params.get("collection")
+                old_topic_map = [
+                    {"id": t["id"], "label": t["label"],
+                     "review_status": t.get("review_status", "pending")}
+                    for t in _TOPICS.values() if t["collection"] == collection
+                ]
+                coll_topic_ids = {
+                    t["id"] for t in _TOPICS.values() if t["collection"] == collection
+                }
+                manual = [
+                    {"doc_id": a["doc_id"], "topic_id": a["topic_id"]}
+                    for a in _ASSIGNMENTS
+                    if a.get("assigned_by") == "manual" and a["topic_id"] in coll_topic_ids
+                ]
+                self._json(200, {"old_topic_map": old_topic_map,
+                                 "manual_assignments": manual})
 
             else:
                 self._json(404, {"error": f"GET {path} not found"})
@@ -398,6 +440,73 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                     "last_discover_at":         body.get("last_discover_at"),
                 }
                 self._json(200, {"ok": True})
+
+            elif path == "/v1/taxonomy/topics/persist_discovered":
+                # Mirror the Java atomic endpoint: existing-topics guard + INSERT.
+                collection = body["collection"]
+                specs = body.get("specs", [])
+                existing = any(t["collection"] == collection for t in _TOPICS.values())
+                if not specs or existing:
+                    self._json(200, {"topic_ids": []})
+                    return
+                tids = []
+                for spec in specs:
+                    tids.append(self._insert_spec(collection, spec, "pending"))
+                self._json(200, {"topic_ids": tids})
+
+            elif path == "/v1/taxonomy/topics/persist_rebuild":
+                # Mirror the Java REPLACE: clear old (even on empty specs) + INSERT
+                # + apply manual_transfers.
+                collection = body["collection"]
+                specs = body.get("specs", [])
+                transfers = body.get("manual_transfers", {})
+                doomed = [tid for tid, t in _TOPICS.items() if t["collection"] == collection]
+                for tid in doomed:
+                    del _TOPICS[tid]
+                _ASSIGNMENTS[:] = [a for a in _ASSIGNMENTS if a["topic_id"] not in doomed]
+                tids = []
+                for spec in specs:
+                    tids.append(self._insert_spec(
+                        collection, spec, spec.get("review_status", "pending")))
+                for doc, idx in transfers.items():
+                    if 0 <= int(idx) < len(tids):
+                        tid = tids[int(idx)]
+                        _ASSIGNMENTS[:] = [
+                            a for a in _ASSIGNMENTS
+                            if not (a["doc_id"] == doc and a["topic_id"] == tid)
+                        ]
+                        _ASSIGNMENTS.append({
+                            "doc_id": doc, "topic_id": tid, "assigned_by": "manual",
+                            "similarity": None, "assigned_at": None, "source_collection": None,
+                        })
+                self._json(200, {"topic_ids": tids})
+
+            elif path == "/v1/taxonomy/purge_collection":
+                # Mirror the Java cascade: links touching doomed, assignments by
+                # topic OR source_collection, topics, meta.
+                collection = body["collection"]
+                doomed = {tid for tid, t in _TOPICS.items() if t["collection"] == collection}
+                links_n = len([
+                    lk for lk in _LINKS
+                    if lk["from_topic_id"] in doomed or lk["to_topic_id"] in doomed
+                ])
+                _LINKS[:] = [
+                    lk for lk in _LINKS
+                    if lk["from_topic_id"] not in doomed and lk["to_topic_id"] not in doomed
+                ]
+                assigns_n = len([
+                    a for a in _ASSIGNMENTS
+                    if a["topic_id"] in doomed or a.get("source_collection") == collection
+                ])
+                _ASSIGNMENTS[:] = [
+                    a for a in _ASSIGNMENTS
+                    if a["topic_id"] not in doomed and a.get("source_collection") != collection
+                ]
+                for tid in doomed:
+                    del _TOPICS[tid]
+                meta_n = 1 if _META.pop(collection, None) is not None else 0
+                self._json(200, {"topics": len(doomed), "assignments": assigns_n,
+                                 "links": links_n, "meta": meta_n})
 
             else:
                 self._json(404, {"error": f"POST {path} not found"})
@@ -1180,3 +1289,126 @@ class TestComputeAndAssign:
             old_centroid_topic_ids=[], manual_assignments={"d": 0},
         )
         assert out == {"specs": [], "manual_transfers": {"d": 0}}
+
+
+# ── Persist parity + read_rebuild_old_state reshape (RDR-152 nexus-1di3r.8) ────
+
+
+class TestPersist:
+    def _seed_topic(self, client, sid, label, collection, review="pending", dc=0):
+        client.import_topic(
+            src_id=sid, label=label, parent_id=None, collection=collection,
+            centroid_hash=None, doc_count=dc, created_at="2026-01-01T00:00:00Z",
+            review_status=review, terms=None,
+        )
+
+    def test_persist_discovered_returns_ids_and_guards_existing(self, client) -> None:
+        specs = [
+            {"label": "t0", "doc_count": 2, "terms": "[]", "assigned_by": "hdbscan",
+             "doc_ids": ["dd1", "dd2"], "centroid": [1.0, 0.0]},
+            {"label": "t1", "doc_count": 0, "terms": "[]", "assigned_by": "hdbscan",
+             "doc_ids": [], "centroid": [0.0, 1.0]},
+        ]
+        ids = client.persist_discovered_topics("c", specs)
+        assert len(ids) == 2
+        # assignments landed for spec 0
+        assert sorted(client.get_all_topic_doc_ids(ids[0])) == ["dd1", "dd2"]
+        # existing-topics guard: a second call is a no-op
+        assert client.persist_discovered_topics("c", specs) == []
+        # empty specs -> []
+        assert client.persist_discovered_topics("c2", []) == []
+
+    def test_persist_rebuild_replace_and_manual_transfer(self, client) -> None:
+        # Seed an old topic + assignment to be cleared.
+        ids0 = client.persist_discovered_topics(
+            "c", [{"label": "old", "doc_count": 1, "terms": "[]",
+                   "assigned_by": "hdbscan", "doc_ids": ["rb1"]}])
+        assert len(ids0) == 1
+        plan = {
+            "specs": [
+                {"label": "new0", "doc_count": 2, "terms": "[]", "review_status": "pending",
+                 "assigned_by": "hdbscan", "doc_ids": ["rb1", "rb2"]},
+                {"label": "new1", "doc_count": 0, "terms": "[]", "review_status": "pending",
+                 "assigned_by": "hdbscan", "doc_ids": []},
+            ],
+            "manual_transfers": {"rbm": 1},
+        }
+        ids = client.persist_rebuild_topics("c", plan)
+        assert len(ids) == 2
+        labels = {t["label"] for t in client.get_all_topics(collection="c")}
+        assert labels == {"new0", "new1"}  # old gone
+        # manual transfer applied to ids[1]
+        assert client.get_assignments_for_docs(["rbm"]) == {"rbm": ids[1]}
+
+    def test_persist_rebuild_empty_specs_clears(self, client) -> None:
+        client.persist_discovered_topics(
+            "c", [{"label": "stale", "doc_count": 0, "terms": "[]",
+                   "assigned_by": "hdbscan", "doc_ids": []}])
+        ids = client.persist_rebuild_topics("c", {"specs": [], "manual_transfers": {}})
+        assert ids == []
+        assert client.get_all_topics(collection="c") == []
+
+    def test_persist_assignments_reuses_assign_topic(self, client) -> None:
+        self._seed_topic(client, 1, "a", "c")
+        assignments = [
+            {"doc_id": "pa1", "topic_id": 1, "assigned_by": "centroid",
+             "similarity": None, "source_collection": None},
+            {"doc_id": "pa2", "topic_id": 1, "assigned_by": "projection",
+             "similarity": 0.8, "source_collection": "c"},
+        ]
+        assert client.persist_assignments(assignments) == 2
+        assert client.get_assignments_for_docs(["pa1", "pa2"]) == {"pa1": 1, "pa2": 1}
+
+    def test_persist_cross_links_projection_shape(self, client) -> None:
+        assert client.persist_cross_links([(1, 9), (2, 9)]) == 2
+        assert client.persist_cross_links([]) == 0
+        stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
+        assert stored[(1, 9)]["link_count"] == 1
+        assert stored[(1, 9)]["link_types"] == json.dumps(["projection"])
+
+    def test_purge_collection_returns_count_dict(self, client) -> None:
+        ids = client.persist_discovered_topics(
+            "c", [{"label": "p", "doc_count": 1, "terms": "[]",
+                   "assigned_by": "hdbscan", "doc_ids": ["pg1"]}])
+        client.persist_cross_links([(ids[0], ids[0])])
+        out = client.purge_collection("c")
+        assert set(out) == {"topics", "assignments", "links", "meta"}
+        assert out["topics"] == 1
+        assert out["assignments"] == 1
+        assert client.get_all_topics(collection="c") == []
+
+    def test_read_rebuild_old_state_composes_and_reshapes(self, client) -> None:
+        # T2 half: two topics in 'c' + one manual + one hdbscan assignment.
+        self._seed_topic(client, 1, "alpha", "c", review="pending")
+        self._seed_topic(client, 2, "beta", "c", review="accepted")
+        client.assign_topic("dm", 1, "manual")
+        client.assign_topic("dh", 2, "hdbscan")
+        # Centroid half: centroids for topic 1, 2 (in T2) + a ghost topic 3 (not in T2).
+        client._centroid_store = _FakeCentroidStore([
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "ignored1"},
+            {"collection": "c", "topic_id": 2, "embedding": [0.0, 1.0], "label": "ignored2"},
+            {"collection": "c", "topic_id": 3, "embedding": [0.5, 0.5], "label": "ghost"},
+        ])
+
+        state = client.read_rebuild_old_state("c")
+        assert set(state) == {
+            "old_centroids", "old_labels", "old_review_statuses",
+            "old_centroid_topic_ids", "manual_assignments", "old_centroid_ids",
+        }
+        assert state["old_centroid_topic_ids"] == [1, 2, 3]
+        # labels/review_status carried from T2 by topic_id; ghost falls back to
+        # the centroid metadata label + 'pending'.
+        assert state["old_labels"] == ["alpha", "beta", "ghost"]
+        assert state["old_review_statuses"] == ["pending", "accepted", "pending"]
+        assert state["old_centroid_ids"] == ["c:1", "c:2", "c:3"]
+        assert state["manual_assignments"] == {"dm": 1}  # hdbscan 'dh' excluded
+        assert np.array_equal(
+            state["old_centroids"], np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]], dtype=np.float32))
+
+    def test_read_rebuild_old_state_empty_centroids(self, client) -> None:
+        client._centroid_store = _FakeCentroidStore([])
+        state = client.read_rebuild_old_state("empty")
+        assert state["old_centroid_topic_ids"] == []
+        assert state["old_labels"] == []
+        assert state["manual_assignments"] == {}
+        assert state["old_centroids"].shape == (0, 0)

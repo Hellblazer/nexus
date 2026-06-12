@@ -666,6 +666,151 @@ class HttpTaxonomyStore:
                     pairs.append((new_tid, int(other_metas[j]["topic_id"])))
         return pairs
 
+    # ── Persist (relational -> Java; centroids -> port) (nexus-1di3r.8) ─────────
+
+    def persist_discovered_topics(
+        self,
+        collection_name: str,
+        specs: list[dict[str, Any]],
+    ) -> list[int]:
+        """Persist discovered topic specs (mirrors CatalogTaxonomy.persist_discovered_topics).
+
+        Routes to the atomic /topics/persist_discovered endpoint (existing-topics
+        guard + INSERT specs + INSERT-OR-IGNORE assignments in one txn). Returns
+        the generated topic_ids aligned to ``specs`` order (``[]`` when the guard
+        fires or specs is empty). The per-spec ``centroid`` is ignored here — the
+        orchestrator upserts centroids through the port from the returned ids.
+        """
+        r = self._post(
+            "/topics/persist_discovered",
+            {"collection": collection_name, "specs": specs},
+        )
+        return r.get("topic_ids", [])
+
+    def persist_rebuild_topics(
+        self,
+        collection_name: str,
+        plan: dict[str, Any],
+    ) -> list[int]:
+        """Apply a rebuild plan (mirrors CatalogTaxonomy.persist_rebuild_topics).
+
+        Routes to the atomic /topics/persist_rebuild endpoint (REPLACE: DELETE
+        old + INSERT new specs + manual_transfers in one txn — clears old rows
+        even when specs is empty). Returns topic_ids aligned to ``plan["specs"]``.
+        """
+        r = self._post(
+            "/topics/persist_rebuild",
+            {
+                "collection": collection_name,
+                "specs": plan["specs"],
+                "manual_transfers": plan.get("manual_transfers", {}),
+            },
+        )
+        return r.get("topic_ids", [])
+
+    def persist_assignments(self, assignments: list[dict[str, Any]]) -> int:
+        """Persist pre-computed assignments (mirrors CatalogTaxonomy.persist_assignments).
+
+        Reuses :meth:`assign_topic` per row (no duplicate persist logic),
+        preserving its projection-UPSERT / centroid-INSERT-OR-IGNORE semantics
+        and doc_count resync. Returns the number persisted.
+        """
+        for a in assignments:
+            self.assign_topic(
+                a["doc_id"],
+                a["topic_id"],
+                a["assigned_by"],
+                a.get("similarity"),
+                a.get("source_collection"),
+                a.get("assigned_at"),
+            )
+        return len(assignments)
+
+    def persist_cross_links(self, pairs: list[tuple[int, int]]) -> int:
+        """Persist projection topic_links (mirrors CatalogTaxonomy.persist_cross_links).
+
+        Each pair -> INSERT OR REPLACE link_count=1 link_types='["projection"]'
+        via the /links/upsert endpoint (EXCLUDED overwrite, per-PK idempotent —
+        the per-link loop has no cross-set atomicity need). Returns ``len(pairs)``.
+        """
+        if not pairs:
+            return 0
+        for a, b in pairs:
+            self._post("/links/upsert", {
+                "from_topic_id": a,
+                "to_topic_id": b,
+                "link_count": 1,
+                "link_types": json.dumps(["projection"]),
+            })
+        return len(pairs)
+
+    def read_rebuild_old_state(
+        self,
+        collection_name: str,
+        centroid_coll: Any = None,
+    ) -> dict[str, Any]:
+        """Read the pre-rebuild state (mirrors CatalogTaxonomy.read_rebuild_old_state).
+
+        COMPOSES the two halves: the T2 read via GET /rebuild/old_state and the
+        centroid read via the centroid-port get_by_collection. Reconstructs the
+        oracle's dict forms from the endpoint's JSON-friendly lists (the
+        nexus-1di3r.1 reshape contract): old_topic_map list -> {id:(label,status)},
+        manual_assignments list -> {doc_id:topic_id}. Returns the EXACT 6-key dict
+        compute_rebuild_plan consumes. ``centroid_coll`` kept for prefix parity,
+        unused (centroids route through the port).
+        """
+        t2 = self._get("/rebuild/old_state", {"collection": collection_name})
+        old_topic_map: dict[int, tuple[str, str]] = {
+            row["id"]: (row["label"], row["review_status"])
+            for row in t2.get("old_topic_map", [])
+        }
+        manual_assignments: dict[str, int] = {
+            row["doc_id"]: row["topic_id"] for row in t2.get("manual_assignments", [])
+        }
+
+        env = self._centroid.get_by_collection(collection_name)
+        embeddings = env.get("embeddings") or []
+        metadatas = env.get("metadatas") or []
+        old_centroid_ids = env.get("ids") or []
+
+        old_centroids = (
+            np.array(embeddings, dtype=np.float32)
+            if embeddings
+            else np.empty((0, 0), dtype=np.float32)
+        )
+        old_labels: list[str] = []
+        old_review_statuses: list[str] = []
+        old_centroid_topic_ids: list[int] = []
+        for m in metadatas:
+            tid = m.get("topic_id", -1)
+            old_centroid_topic_ids.append(tid)
+            if tid in old_topic_map:
+                old_labels.append(old_topic_map[tid][0])
+                old_review_statuses.append(old_topic_map[tid][1])
+            else:
+                old_labels.append(m.get("label") or "")
+                old_review_statuses.append("pending")
+
+        return {
+            "old_centroids": old_centroids,
+            "old_labels": old_labels,
+            "old_review_statuses": old_review_statuses,
+            "old_centroid_topic_ids": old_centroid_topic_ids,
+            "manual_assignments": manual_assignments,
+            "old_centroid_ids": old_centroid_ids,
+        }
+
+    def purge_collection(self, collection: str) -> dict[str, int]:
+        """Cascade-purge the four taxonomy tables for a collection (mirrors
+        CatalogTaxonomy.purge_collection).
+
+        Routes to the transactional /purge_collection endpoint. Returns the
+        4-key count dict ``{topics, assignments, links, meta}``. The centroid
+        cleanup is the caller's responsibility (centroid-port purge), matching
+        the oracle's "call this after the Chroma delete" contract.
+        """
+        return self._post("/purge_collection", {"collection": collection})
+
     # ── ICF / analytics ────────────────────────────────────────────────────────
 
     def compute_icf_map(
