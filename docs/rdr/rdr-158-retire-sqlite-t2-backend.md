@@ -22,28 +22,33 @@ RDR-152 (nexus-fjwxh) flipped the T2 hard default from `SQLITE` to `SERVICE`, so
 seven domain stores (memory, plans, taxonomy, telemetry, chash, aspects, aspect_queue)
 now route to the PG-backed Java service by default. But SQLite is not gone, it is
 *demoted*. It remains load-bearing in three distinct roles, and "all local PG, no
-SQLite" is not achievable until each is addressed:
+SQLite" is not achievable until each is addressed.
 
-1. **The `=sqlite` opt-out backend.** `storage_mode.py` resolves `SERVICE` as the hard
-   default but `NX_STORAGE_BACKEND[_<domain>]=sqlite` still selects the local SQLite
-   path. As long as that path exists, the SQLite store classes, schema, and migrations
-   must be maintained and tested.
+#### Gap 1: The `=sqlite` opt-out backend is still wired
 
-2. **The migration source.** The SQLite→PG migration (RDR-153) reads from the local
-   SQLite stores. Deleting SQLite before every user has migrated would strand data.
-   This is the same copy-not-move / two-release-deprecation constraint RDR-155 P4b hit
-   for Chroma: the migration reader can only be deleted in the release *after* the one
-   that ships the migration.
+`storage_mode.py` resolves `SERVICE` as the hard default but
+`NX_STORAGE_BACKEND[_<domain>]=sqlite` still selects the local SQLite path. As long as
+that path exists, the SQLite store classes, schema, and migrations must be maintained
+and tested.
 
-3. **The `CatalogTaxonomy` parity oracle (subtle, load-bearing at runtime).** RDR-152
-   nexus-1di3r made `HttpTaxonomyStore` a full drop-in, but it does so by *delegating*
-   the heavy compute statics (`compute_discovered_topics`, `compute_rebuild_plan`,
-   `compute_split`) verbatim to `CatalogTaxonomy`. Those statics are backend-agnostic
-   (numpy/sklearn/HDBSCAN, no `self.conn`), yet they live inside the SQLite-coupled
-   class. The signature-parity tripwire (`tests/db/test_http_t2_store_parity.py`) also
-   compares the HTTP store *against* `CatalogTaxonomy` as the contract oracle. So
-   "delete SQLite" cannot naively mean "delete `CatalogTaxonomy`": the compute statics
-   and the contract definition must survive in a backend-neutral form.
+#### Gap 2: SQLite is the migration source
+
+The SQLite→PG migration (RDR-153) reads from the local SQLite stores. Deleting SQLite
+before every user has migrated would strand data. This is the same copy-not-move /
+two-release-deprecation constraint RDR-155 P4b hit for Chroma: the migration reader can
+only be deleted in the release *after* the one that ships the migration.
+
+#### Gap 3: `CatalogTaxonomy` is the parity oracle (subtle, load-bearing at runtime)
+
+RDR-152 nexus-1di3r made `HttpTaxonomyStore` a full drop-in, but it does so by
+*delegating* the heavy compute statics (`compute_discovered_topics`,
+`compute_rebuild_plan`, `compute_split`) verbatim to `CatalogTaxonomy`. Those statics
+are backend-agnostic (numpy/sklearn/HDBSCAN, no `self.conn`), yet they live inside the
+SQLite-coupled class. The signature-parity tripwire
+(`tests/db/test_http_t2_store_parity.py`) also compares the HTTP store *against*
+`CatalogTaxonomy` as the contract oracle. So "delete SQLite" cannot naively mean
+"delete `CatalogTaxonomy`": the compute statics and the contract definition must survive
+in a backend-neutral form.
 
 ### Evidence
 
@@ -122,8 +127,11 @@ Draft sequencing decisions (to lock at gate):
   independent of the retirement?
 - Is a thin in-memory reference T2 impl worth keeping purely as a test oracle after
   the SQLite class is deleted, or is a frozen `Protocol` enough?
-- Telemetry/chash/aspect_queue: do all seven domains have verified service parity, or
-  is taxonomy (just completed) the last? An audit precedes P3.
+- ~~Telemetry/chash/aspect_queue: do all seven domains have verified service parity?~~
+  **RESOLVED by RF-158-1**: the tripwire covers **nine** strict pairs (the seven domains
+  plus `document_highlights` and the T1 `scratch` pair) with `_EXCLUSIONS = {}` and
+  `_PARAM_DRIFT_OK = {}`. That IS the parity audit — no separate pre-P3 audit is needed;
+  P3's only remaining gate is nexus-luxe6 + the deprecation window.
 - Coordination with conexus RDR-001 (`nx upgrade`): the user-facing migration is
   conexus-owned; this RDR consumes it as a gate, it does not define it.
 
@@ -163,13 +171,28 @@ the HTTP store (local numpy over the centroid-port), NOT delegated — they only
 moves a *small, already-pure* surface; the SQLite-coupled cursor methods (~the rest of
 the 3205-line class) are cleanly separable and deletable.
 
-**Caveat (breadth):** ten `src/` modules reference `CatalogTaxonomy`
-(`mcp_infra`, `context`, `taxonomy_backfill`, `db/t2/__init__` [the store factory],
-`db/migrations`, `db/t3`, `doc/resolvers_corpus`, `http_centroid_store`,
-`http_taxonomy_store`, plus the class itself). P4 must inverse-grep each: separate the
-"needs the SQLite store" callers (factory, migrations) from the "needs only statics/
-types" callers (backfill, the HTTP stores), and re-point the latter at the extracted
-module before deletion.
+**Caveat (breadth — three caller categories, not two):** the `src/` importers of
+`CatalogTaxonomy` are `mcp_infra`, `context`, `taxonomy_backfill`, `taxonomy_cmd`,
+`db/t2/__init__` [the store factory], `db/migrations`, `http_centroid_store`,
+`http_taxonomy_store`, plus the class itself. (Corrects RF draft: `db/t3` and
+`doc/resolvers_corpus` do **not** import it — inverse-grep is clean there.) P4 must
+inverse-grep each and bin it into one of **three** categories, not two:
+
+- **(a) SQLite-store callers** — the store factory (`db/t2/__init__`) and `db/migrations`.
+  Deleted/re-pointed when the SQLite class goes.
+- **(b) Pure compute statics** — no `self.conn`, no external client (numpy/sklearn/
+  HDBSCAN): `compute_discovered_topics`, `compute_split`, `compute_rebuild_plan`,
+  `_PROJECTION_THRESHOLD`, the four NamedTuples, `DEFAULT_HUB_STOPWORDS`. These move to
+  `taxonomy_compute` (D1). This is the "small, already-pure" surface.
+- **(c) Chroma-API statics** — `@staticmethod` but they take a `chroma_client` /
+  centroid collection: `_create_centroid_collection`, `_centroid_records_for`,
+  `_batched_upsert`, `compute_assignments(chroma_client=...)`, `compute_cross_links`.
+  Called from `taxonomy_cmd.py` (discover/split paths, ~:198/:228/:235/:960/:980/:997)
+  and `mcp_infra.py` (~:711/:715). These are **not** backend-neutral — they must NOT be
+  folded into the connection-free `taxonomy_compute` module. P4 must re-home them
+  (a Chroma-coupled helper module) or keep them until RDR-155 P4 retires Chroma and they
+  disappear with it. **Do not silently delete category (c) targets while their callers
+  remain.**
 
 ### RF-158-3 (VERIFIED, local): the deprecation-window constraint matches the RDR-155 P4b precedent exactly
 
