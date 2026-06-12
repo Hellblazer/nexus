@@ -59,6 +59,24 @@ def t2_handle() -> Iterator[Any]:
     do NOT go through this helper — they must tolerate offline mode.
     """
     import click
+
+    # RDR-152 nexus-fjwxh: in SERVICE mode the Java service (PG) is the write
+    # arbiter, so the SQLite single-writer T2 daemon is not in the picture —
+    # route directly to a service-backed T2Database (its ``.memory`` is an
+    # HttpMemoryStore with the same interface as ``T2Client.memory``). The
+    # daemon-client path below is the SQLite-mode arbiter only.
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        from nexus.db.t2 import T2Database
+
+        db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow
+        try:
+            yield db
+        finally:
+            db.close()
+        return
+
     from nexus.daemon.t2_client import (
         T2DaemonNotReachableError,
         T2SchemaVersionMismatchError,

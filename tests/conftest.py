@@ -230,6 +230,26 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.fixture(autouse=True)
+def _pin_storage_backend_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the unit suite to the SQLite storage backend (RDR-152 nexus-fjwxh).
+
+    ``storage_backend_for`` defaults to ``service`` since the T2 cutover, so a
+    bare ``T2Database(path)`` would construct the Http* stores and try to reach
+    the nexus-service — which unit tests neither run nor want. Pinning sqlite
+    here keeps the ~116 T2Database-constructing unit tests deterministic and
+    independent of ambient service/lease state (a dev box with the supervisor
+    running would otherwise auto-discover a real lease mid-unit-test).
+
+    Tests that exercise the resolver itself (``test_storage_mode.py``) carry
+    their own ``_clean_storage_env`` autouse fixture that ``delenv``s the
+    backend vars AFTER this one, so they still observe the true default. Any
+    test that wants service mode sets ``NX_STORAGE_BACKEND[_<store>]`` itself,
+    which overrides this pin (later ``setenv`` wins).
+    """
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CONFIG_DIR so child processes write under tmp_path.
 

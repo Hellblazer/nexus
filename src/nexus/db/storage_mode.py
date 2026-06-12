@@ -124,7 +124,15 @@ def storage_backend_for(store: str) -> StorageBackend:
     Resolution precedence (narrowest wins):
       1. Per-store env var ``NX_STORAGE_BACKEND_<STORE>`` (after upper-casing *store*)
       2. Global env var    ``NX_STORAGE_BACKEND``
-      3. Hard default      :attr:`StorageBackend.SQLITE`
+      3. Hard default      :attr:`StorageBackend.SERVICE`
+
+    RDR-152 nexus-fjwxh: the hard default flipped SQLITE → SERVICE, the T2
+    analog of T3's ``is_vector_service_mode`` defaulting True. The Java service
+    is the storage substrate; ``NX_STORAGE_BACKEND[_<store>]=sqlite`` is the
+    explicit opt-out (the unit suite pins it via the ``_pin_storage_backend_
+    sqlite`` conftest fixture). The service-backed stores discover the running
+    supervisor's endpoint lease centrally (``nexus.db.service_endpoint``), so no
+    NX_SERVICE_* plumbing is required wherever the supervisor is up.
 
     Parameters
     ----------
@@ -156,8 +164,8 @@ def storage_backend_for(store: str) -> StorageBackend:
     if global_raw:
         return _parse_backend(global_raw, env_key=_GLOBAL_ENV)
 
-    # 3. Hard default
-    return StorageBackend.SQLITE
+    # 3. Hard default (RDR-152 nexus-fjwxh: SERVICE; =sqlite is the opt-out)
+    return StorageBackend.SERVICE
 
 
 def _parse_backend(raw: str, env_key: str) -> StorageBackend:

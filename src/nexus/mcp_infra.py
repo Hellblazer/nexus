@@ -338,6 +338,20 @@ def t2_index_write(write_fn):
     against exactly one writer, never re-run, so there is no double-write
     risk regardless of how it handles errors.
     """
+    # RDR-152 nexus-fjwxh: in SERVICE mode the Java service (PG) is the write
+    # arbiter — the SQLite single-writer daemon is not in the picture, so route
+    # straight to a direct service-backed T2Database. Short-circuit BEFORE the
+    # daemon probe so service mode does not emit the misleading "start the T2
+    # daemon" degraded-fallback warning on every write (the probe + warning
+    # below are the SQLite-mode arbiter path only).
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        from nexus.db.t2 import T2Database
+
+        with T2Database(default_db_path(), run_migrations=False) as db:  # epsilon-allow: service mode, PG is the arbiter
+            return write_fn(db)
+
     from nexus.daemon.t2_client import (
         T2DaemonNotReachableError,
         T2SchemaVersionMismatchError,
