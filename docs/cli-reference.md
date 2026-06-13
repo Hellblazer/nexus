@@ -1868,6 +1868,33 @@ is a clean no-op. Requires `NX_SERVICE_TOKEN` and a reachable nexus-service (the
 T2 catalog ETL + manifest validation call the service). The operational
 narrative lives in [`docs/migration-runbook.md`](migration-runbook.md).
 
+## nx migration
+
+```
+nx migration [--clear-state] [--force]
+```
+
+Inspect or recover the cross-process migration sentinel (RDR-159). Bare `nx
+migration` prints the current phase read-only (`not-migrating`, `migrating`,
+`migrated`, or `migrated-failed`) with progress and any failure message.
+
+- `--clear-state` removes a **stranded** sentinel — the named escape hatch for a
+  CLI crash between a clean T3 copy and the UNLOCK clear, which would otherwise
+  leave every read surface banner-wrapped (`migrating`/`migrated-failed`)
+  forever. Clearing is **safe**: a resumed `nx migrate-to-service` recomputes
+  done-vs-total from live source-vs-target counts (the ETL is idempotent on
+  `(tenant, collection, chash)`), so it never trusts the stale marker. A no-op
+  when no sentinel is present.
+- `--force` is required to clear a `migrating` sentinel, which may belong to a
+  live migration in another process (clearing it drops the read-surface banner
+  mid-migration). A `migrated-failed` sentinel clears without `--force` — its
+  writer is already dead.
+
+This is distinct from re-running the migration itself: `nx migrate-to-service`
+transitions a `migrated-failed` sentinel back to `migrating` (resume); `nx
+migration --clear-state` drops it straight to `not-migrating` (abandon /
+recover).
+
 ## nx storage
 
 > Running a real migration window? The operational narrative (quiescence,

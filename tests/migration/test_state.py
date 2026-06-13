@@ -323,6 +323,27 @@ def test_mark_failed_records_failure_and_keeps_progress() -> None:
     assert is_migrating() is False
 
 
+def test_resume_transitions_migrated_failed_back_to_migrating() -> None:
+    """RDR-159 (nexus-3g05n) item 3: the migrated-failed -> migrating (resume)
+    edge. A run that ended migrated-failed is recoverable: re-running the guided
+    migration calls begin_migration, which transitions the sentinel back to the
+    ACTIVE migrating phase (fresh start, done reset, failure dropped) — never a
+    permanent dead end. Progress is then recomputed from live counts, so the
+    resume is safe and idempotent."""
+    begin_migration(collections_total=8, started_at=_FIXED_STARTED_AT)
+    mark_failed("count mismatch on docs__x")
+    assert current_phase() == MIGRATED_FAILED
+
+    # The user fixes the cause and re-runs: begin_migration is the resume edge.
+    resumed = begin_migration(collections_total=8, started_at="2026-06-13T09:00:00+00:00")
+    assert resumed.phase == MIGRATING
+    assert resumed.failure is None  # the prior failure message is dropped
+    assert resumed.collections_done == 0  # done reset; recomputed from live counts next
+    assert resumed.started_at == "2026-06-13T09:00:00+00:00"
+    assert current_phase() == MIGRATING
+    assert is_migrating() is True
+
+
 def test_record_progress_recomputes_from_live_counts_not_stale_marker() -> None:
     # Resumed run: a stale marker claims near-complete; detection recomputes
     # live source-vs-target counts. The DERIVED values overwrite the marker —

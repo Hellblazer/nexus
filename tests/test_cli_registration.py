@@ -36,6 +36,7 @@ def test_all_command_modules_registered():
         "config_cmd": "config",
         "context_cmd": "context",
         "migrate_cmd": "migrate-to-service",
+        "migration_cmd": "migration",
         "doctor": "doctor",
         "hook": "hook",
         "mineru": "mineru",
