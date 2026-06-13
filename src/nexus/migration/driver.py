@@ -42,6 +42,7 @@ from nexus.migration.detection import (
 )
 from nexus.migration.orchestrator import EtlSources
 from nexus.migration.sequencer import SequenceOutcome, run_sequenced_migration
+from nexus.migration.state import mark_failed
 from nexus.migration.validation import (
     ValidationOutcome,
     compose_validation_checks,
@@ -201,26 +202,38 @@ def run_guided_upgrade(
     opened: dict[str, Any] = {}
     by_collection: dict[str, Any] = {}
     try:
-        for leg in legs:
-            opened[leg] = reopen(leg)
-        for c in detection.classifications:
-            if c.has_data:
-                by_collection[c.collection] = opened[c.leg]
-        read_client = _CompositeReadClient(by_collection)
-        checks = compose_validation_checks(
-            t2_db_path=t2_db_path,
-            read_client=read_client,
-            vector_client=vector_client,
-            catalog_client=catalog_client,
-            collections=migrated_collections,
-            dims=dims,
-        )
-        validation = validate_migration(
-            taxonomy_check=checks.taxonomy_check,
-            count_check=checks.count_check,
-            manifest_orphan_check=checks.manifest_orphan_check,
-            stale_aspects_count=stale_aspects_count,
-        )
+        try:
+            for leg in legs:
+                opened[leg] = reopen(leg)
+            for c in detection.classifications:
+                if c.has_data:
+                    by_collection[c.collection] = opened[c.leg]
+            read_client = _CompositeReadClient(by_collection)
+            checks = compose_validation_checks(
+                t2_db_path=t2_db_path,
+                read_client=read_client,
+                vector_client=vector_client,
+                catalog_client=catalog_client,
+                collections=migrated_collections,
+                dims=dims,
+            )
+            validation = validate_migration(
+                taxonomy_check=checks.taxonomy_check,
+                count_check=checks.count_check,
+                manifest_orphan_check=checks.manifest_orphan_check,
+                stale_aspects_count=stale_aspects_count,
+            )
+        except Exception as exc:  # noqa: BLE001 — recorded to the sentinel, never silent
+            # The T3 copy is done (sentinel == `migrated`) but a validation-leg
+            # SETUP step raised (e.g. a reopened read leg vanished, or the gate
+            # itself crashed). Leaving the sentinel `migrated` would strand an
+            # UNVALIDATED migration looking clean — the P2/P3 CRITICAL-1 class.
+            # Transition to `migrated-failed` (degraded-LOUD, rollback offered)
+            # before re-raising so the operator gets the recovery path.
+            reason = f"validation could not be performed: {exc}"
+            _log.error("guided_upgrade_validation_setup_raised", error=str(exc))
+            mark_failed(reason)
+            raise
     finally:
         for client in opened.values():
             _close_quietly(client)

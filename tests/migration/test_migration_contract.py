@@ -12,10 +12,23 @@ Non-vacuous by construction: each assertion pins the EXACT keyword-parameter
 name set (and the dataclass field set), so a rename or re-signature of any
 consumed surface FAILS this test — the failure is the tripwire.
 
-Scope: only the surface the veneer + CLI actually consume. Adding a new private
-helper to ``nexus.migration`` does not trip it; renaming a consumed parameter
-does. If the contract legitimately changes, this test and the veneer move in the
-SAME change (the locked invariant, continuation §7).
+Scope: only the PUBLIC surface the veneer + CLI actually consume. Adding a new
+private helper to ``nexus.migration`` does not trip it; renaming a consumed
+parameter does. If the contract legitimately changes, this test and the veneer
+move in the SAME change (the locked invariant, continuation §7).
+
+Deliberately NOT pinned: private helpers such as
+``driver._CompositeReadClient``. The veneer calls ``run_guided_upgrade`` and
+never constructs the composite itself — two-leg routing is the engine's
+internal concern. Pinning a private impl detail here would over-couple the
+veneer to nexus internals, the opposite of the thin-veneer boundary.
+
+Known limit: this pins parameter NAMES (the rename tripwire), not type
+annotations or return-value semantics. A consumed function could change its
+behaviour while keeping its signature; the veneer author owns the semantic
+contract per parameter separately. Param-name pinning is the RDR-152
+parity-tripwire discipline, chosen for stability over the brittleness of
+type/return-shape assertions.
 """
 from __future__ import annotations
 

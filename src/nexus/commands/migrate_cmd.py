@@ -131,6 +131,10 @@ def _run_migration(
     from nexus.migration.driver import run_guided_upgrade
     from nexus.migration.orchestrator import EtlSources
 
+    # Process-level for this one-shot CLI invocation; HttpVectorClient +
+    # make_catalog_client_for_migration below resolve the endpoint from it.
+    # No restore (the process exits); a test harness embedding this command
+    # must isolate it with monkeypatch.setenv.
     if service_url:
         os.environ["NX_SERVICE_URL"] = service_url
 

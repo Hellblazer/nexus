@@ -17,6 +17,8 @@ sequencing + open/close discipline is verified without a live service / Chroma:
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from nexus.migration import driver
@@ -27,6 +29,15 @@ from nexus.migration.validation import ValidationChecks, ValidationOutcome
 
 _ONNX = "minilm-l6-v2-384"
 _VOYAGE = "voyage-context-3"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The validation-setup failure path calls the real ``mark_failed`` (which
+    writes the sentinel under the config dir) — isolate it off the real
+    ~/.config/nexus."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    return tmp_path
 
 
 def _cls(
@@ -314,7 +325,9 @@ def test_reopened_legs_closed_when_validation_raises(monkeypatch, _sources):
     def _boom(**_kwargs):
         raise RuntimeError("gate exploded")
 
+    marked: list[str] = []
     monkeypatch.setattr(driver, "validate_migration", _boom)
+    monkeypatch.setattr(driver, "mark_failed", lambda reason: marked.append(reason))
     with pytest.raises(RuntimeError, match="gate exploded"):
         driver.run_guided_upgrade(
             sources=_sources,
@@ -324,6 +337,40 @@ def test_reopened_legs_closed_when_validation_raises(monkeypatch, _sources):
             reopen_leg=lambda leg: _FakeClient(f"reopen-{leg}", closables=closables),
         )
     assert "reopen-local" in closables
+    # The T3 copy was done; an exploding gate must NOT strand the sentinel at
+    # an unvalidated `migrated` — it transitions to migrated-failed (HIGH-1).
+    assert marked and "gate exploded" in marked[0]
+
+
+def test_reopen_leg_raises_marks_failed_not_stranded(monkeypatch, _sources):
+    """A reopened read leg vanishing between sequence and validation must
+    transition the sentinel to migrated-failed, never leave it `migrated`."""
+    order: list[str] = []
+    closables: list[str] = []
+    marked: list[str] = []
+    _patch_engine(
+        monkeypatch,
+        detection=_detection(_cls("code__o__m__v1", "local")),
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        validation=_validation(unlocked=True),
+    )
+    monkeypatch.setattr(driver, "mark_failed", lambda reason: marked.append(reason))
+
+    def _reopen_boom(leg: str):
+        raise RuntimeError("chroma store gone")
+
+    with pytest.raises(RuntimeError, match="chroma store gone"):
+        driver.run_guided_upgrade(
+            sources=_sources,
+            vector_client=object(),
+            catalog_client=object(),
+            t2_db_path=_sources.sqlite_path,
+            reopen_leg=_reopen_boom,
+        )
+    assert "validate" not in order
+    assert marked and "validation could not be performed" in marked[0]
 
 
 def test_composite_read_client_unknown_collection_raises():
