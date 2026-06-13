@@ -2,9 +2,7 @@
 """Unit tests for nexus.db.http_vector_client (RDR-152 bead nexus-gmiaf.20)."""
 from __future__ import annotations
 
-import json
-import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -237,14 +235,33 @@ class TestPut:
 
 
 class TestGetById:
-    def test_returns_dict_when_found(self, monkeypatch):
+    def test_returns_flat_t3database_shape_when_found(self, monkeypatch):
+        # nexus-ij9hg: get_by_id must return T3Database's FLAT shape
+        # (id + content + flat metadata), NOT id/document/nested-metadata.
+        # The old nested shape silently emptied store_get content in service
+        # mode (the nexus-7zuzz divergence class).
         client = HttpVectorClient()
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
-            lambda p, b, **kw: {"ids": ["id1"], "documents": ["text"], "metadatas": [{}]}
+            lambda p, b, **kw: {
+                "ids": ["id1"],
+                "documents": ["text"],
+                "metadatas": [{"content_type": "knowledge",
+                               "embedding_model": "minilm-l6-v2-384",
+                               "title": "t"}],
+            },
         )
         result = client.get_by_id("col", "id1")
-        assert result == {"id": "id1", "document": "text", "metadata": {}}
+        assert result == {
+            "id": "id1",
+            "content": "text",
+            "content_type": "knowledge",
+            "embedding_model": "minilm-l6-v2-384",
+            "title": "t",
+        }
+        # Explicitly: no nested keys that callers (store_get / nx store get) miss.
+        assert "document" not in result
+        assert "metadata" not in result
 
     def test_returns_none_when_not_found(self, monkeypatch):
         client = HttpVectorClient()
@@ -497,7 +514,6 @@ class TestGetT3Routing:
         monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
         from nexus import mcp_infra
         from nexus.db.t3 import T3Database
-        import chromadb
         # Inject a fake T3Database instance to avoid real DB init
         fake_t3 = MagicMock(spec=T3Database)
         mcp_infra.inject_t3(fake_t3)
