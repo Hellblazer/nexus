@@ -61,8 +61,9 @@ def migrate_to_service_cmd(dry_run: bool, local_path: str | None) -> None:
         raise click.ClickException(
             "The full guided migration is not available yet — run with "
             "--dry-run to preview your Chroma footprint and what would "
-            "migrate. The orchestrated execution ships in a later release "
-            "(RDR-159 P1+)."
+            "migrate. The orchestrated execution is wired into this command by "
+            "RDR-159 P4 (nexus-ue6g7.24); the P2 sequencing driver "
+            "(nexus.migration.sequencer.run_sequenced_migration) is in place."
         )
 
     local, cloud = open_read_legs(local_path)
