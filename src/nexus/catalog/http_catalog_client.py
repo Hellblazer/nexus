@@ -378,6 +378,51 @@ class HttpCatalogClient:
         result = self._post("/docs/chunk-counts", {"doc_ids": doc_ids})
         return {k: int(v) for k, v in (result or {}).items() if v is not None}
 
+    def manifest_backfill(self) -> int:
+        """Stamp manifest collection from the owning doc where NULL; return
+        the number of rows stamped (RDR-159 P-1b).
+
+        Wraps the ``nexus.manifest_backfill()`` stored function via the
+        service (RDR-152: no direct Python PG connection). MUST be called
+        before :meth:`manifest_orphans` — pre-backfill NULL-collection rows
+        would otherwise read as false orphans.
+        """
+        result = self._post("/manifest/backfill", {})
+        return int((result or {}).get("stamped", 0))
+
+    #: dims the ``chunks_<dim>`` tables (and the stored function) accept.
+    _MANIFEST_DIMS = (384, 768, 1024)
+
+    def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
+        """Manifest rows with no chunk row in ``chunks_<dim>`` (RDR-159 P-1b).
+
+        Returns ``{"dim": d, "count": n, "orphans": [...]}`` where ``count``
+        is the exact orphan count (the non-vacuous migration-validation
+        signal — zero is clean) and ``orphans`` is a diagnostic sample capped
+        at ``limit`` (must be > 0; the count is the gate, not the sample
+        length). count and sample are computed server-side in one transaction
+        so they agree.
+
+        The result is tenant-scoped: the stored function is SECURITY INVOKER
+        and the service counts under the request tenant's RLS GUC. ``dim``
+        must be one of 384/768/1024. Call :meth:`manifest_backfill` FIRST —
+        pre-backfill (NULL-collection) rows are excluded by the function, so
+        an orphan check on an un-backfilled manifest reads a false-clean zero.
+        """
+        if dim not in self._MANIFEST_DIMS:
+            raise ValueError(
+                f"dim must be one of {self._MANIFEST_DIMS}, got {dim!r}"
+            )
+        if limit <= 0:
+            raise ValueError(f"limit must be > 0, got {limit!r}")
+        result = self._get("/manifest/orphans", dim=dim, limit=limit)
+        result = result or {}
+        return {
+            "dim": int(result.get("dim", dim)),
+            "count": int(result.get("count", 0)),
+            "orphans": result.get("orphans", []),
+        }
+
     def relation_counts(self, relations: list[str]) -> dict[str, int]:
         """Tenant-scoped row counts for migration-verify relations.
 

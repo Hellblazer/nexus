@@ -99,6 +99,19 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"rows": [{"position": 0, "chash": "abc123"}], "count": 1})
         elif op == "/manifest/chashes":
             self._send_json({"chashes": ["abc123", "def456"]})
+        elif op == "/manifest/orphans":
+            params = self._query_params()
+            dim = int(params.get("dim", "0"))
+            self._send_json({
+                "dim": dim,
+                "count": 2,
+                "orphans": [
+                    {"doc_id": "1.1.1", "position": 0, "chash": "abc",
+                     "collection": "knowledge__o__minilm-l6-v2-384__v1"},
+                    {"doc_id": "1.1.1", "position": 1, "chash": "def",
+                     "collection": "knowledge__o__minilm-l6-v2-384__v1"},
+                ],
+            })
         elif op == "/collections/list":
             self._send_json({"collections": [{"name": "code__test__voyage-code-3__v1"}]})
         elif op == "/collections/get":
@@ -142,6 +155,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/manifest/docs_for_chashes":
             # Real server: {"tumblers": [tumbler_string, ...]} (flat list, SELECT DISTINCT)
             self._send_json({"tumblers": ["1.1.1"]})
+        elif op == "/manifest/backfill":
+            self._send_json({"stamped": 7})
         elif op == "/owners/upsert":
             self._send_json({"ok": True})
         elif op == "/owners/head_hash":
@@ -353,6 +368,36 @@ class TestHttpCatalogClientRoundTrip:
         self, client: HttpCatalogClient,
     ) -> None:
         assert client.relation_counts([]) == {}
+
+    def test_manifest_backfill_returns_stamped_count(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # RDR-159 P-1b: POST /manifest/backfill → {"stamped": n}
+        assert client.manifest_backfill() == 7
+
+    def test_manifest_orphans_returns_count_and_sample(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # RDR-159 P-1b: GET /manifest/orphans?dim= → {dim, count, orphans}
+        result = client.manifest_orphans(384, limit=100)
+        assert result["dim"] == 384
+        assert result["count"] == 2
+        assert len(result["orphans"]) == 2
+        assert result["orphans"][0]["doc_id"] == "1.1.1"
+
+    def test_manifest_orphans_rejects_unsupported_dim(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="dim must be one of"):
+            client.manifest_orphans(512)
+
+    def test_manifest_orphans_rejects_nonpositive_limit(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="limit must be > 0"):
+            client.manifest_orphans(384, limit=0)
 
     def test_docs_for_chashes_uses_tumblers_key(self, client: HttpCatalogClient) -> None:
         # Real server returns {"tumblers": [tumbler_string, ...]} — flat list of tumblers,
