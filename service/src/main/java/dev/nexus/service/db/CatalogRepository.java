@@ -38,6 +38,25 @@ public final class CatalogRepository {
 
     private static final Logger log = LoggerFactory.getLogger(CatalogRepository.class);
 
+    /**
+     * RDR-159 P-1a: the fixed set of schema-qualified relations the migration
+     * count-verification may count. Mirrors {@code nexus.migration.orchestrator
+     * ._VERIFY_TABLES} on the Python side. A relation not in this set is never
+     * counted (whitelist guard against arbitrary relation names).
+     */
+    private static final Set<String> VERIFY_RELATIONS = Set.of(
+        "nexus.memory",
+        "nexus.plans",
+        "nexus.topics",
+        "nexus.topic_assignments",
+        "nexus.topic_links",
+        "nexus.hook_failures",
+        "nexus.nx_answer_runs",
+        "nexus.chash_index",
+        "nexus.catalog_documents",
+        "nexus.catalog_links"
+    );
+
     static final ObjectMapper MAPPER = new ObjectMapper()
         .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
@@ -540,6 +559,39 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.selectCount().from(T_DOCS).fetchOne(0, Long.class)
         );
+    }
+
+    /**
+     * RDR-159 P-1a (nexus-0wz93): tenant-scoped row counts for the fixed set
+     * of migration-verify relations.
+     *
+     * <p>Backs the {@code nexus.migration} count verification — a safe
+     * replacement for the legacy admin-psql shell-out (RDR-152 bars a direct
+     * Python PG connection). Each count runs under the request tenant's RLS
+     * GUC via {@link TenantScope}, so the result reflects exactly the tenant's
+     * migrated rows.
+     *
+     * <p>Relation names are whitelisted against {@link #VERIFY_RELATIONS}: an
+     * unrecognised relation is silently omitted from the result (never a SQL
+     * passthrough — the names are not user-authored beyond this fixed set).
+     * The caller treats a missing relation as INDETERMINATE, never a pass.
+     */
+    public Map<String, Long> relationCounts(String tenant, List<String> relations) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, Long> out = new LinkedHashMap<>();
+            for (String rel : relations) {
+                if (rel == null || !VERIFY_RELATIONS.contains(rel)) {
+                    continue;  // whitelist guard — no arbitrary relation counts
+                }
+                String[] parts = rel.split("\\.", 2);
+                Table<?> table = parts.length == 2
+                    ? DSL.table(DSL.name(parts[0], parts[1]))
+                    : DSL.table(DSL.name(parts[0]));
+                Long count = ctx.selectCount().from(table).fetchOne(0, Long.class);
+                out.put(rel, count != null ? count : 0L);
+            }
+            return out;
+        });
     }
 
     /** Documents by physical_collection. */

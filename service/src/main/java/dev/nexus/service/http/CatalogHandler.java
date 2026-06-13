@@ -170,6 +170,9 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Server-side tumbler assignment ────────────────────────────
                 case "/doc/register"          -> handleDocRegister(exchange, tenant, method);
 
+                // ── Migration count verification (RDR-159 P-1a) ───────────────
+                case "/verify/relation-counts" -> handleRelationCounts(exchange, tenant, method);
+
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found: " + op + "\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -898,6 +901,33 @@ public final class CatalogHandler implements HttpHandler {
             : List.of();
         var links = repo.linksFromBatch(tenant, tumblers);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(links));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // MIGRATION COUNT VERIFICATION (RDR-159 P-1a)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * POST /v1/catalog/verify/relation-counts — tenant-scoped row counts for
+     * the migration-verify relations.
+     *
+     * <p>Request:  {@code {"relations": ["nexus.memory", "nexus.plans", ...]}}
+     * Response:    {@code {"counts": {"nexus.memory": 123, ...}}}
+     *
+     * <p>The repository whitelists relation names (the fixed migration-verify
+     * set); unrecognised relations are omitted. Backs the RDR-159
+     * {@code nexus.migration} count verification without a direct PG
+     * connection from Python (RDR-152).
+     */
+    private void handleRelationCounts(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("relations");
+        List<String> relations = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        var counts = repo.relationCounts(tenant, relations);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("counts", counts)));
     }
 
     // ══════════════════════════════════════════════════════════════════════════
