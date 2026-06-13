@@ -600,6 +600,13 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # embedder assertion, so the cloud_mode fixture is not applicable.
     "tests/test_issue_1060_collection_name_overflow.py::test_short_known_voyage_name_passes",
     #
+    # RDR-159 P4 (nexus-ue6g7.24): the guided-upgrade driver's two-leg test
+    # uses a conformant voyage-named collection STRING to assert the composite
+    # read client routes it to the cloud leg + that distinct dims (384, 1024)
+    # are extracted. The engine is fully mocked; no embedder runs and no
+    # mode-dependent path executes ("string-literal-as-name" class).
+    "tests/migration/test_driver.py::test_two_leg_composes_collections_and_dims",
+    #
     # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
     # fallback. Voyage tokens appear only as realistic collection-NAME /
     # prepared-chunk-metadata fixtures (real docs collections ARE
