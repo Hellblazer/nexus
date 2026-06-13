@@ -89,6 +89,38 @@ true in the world and surfaced explicitly at closure):
 > and the window has opened.** P4b is release N+1 by construction. Starting it
 > early deletes the migration tool before users can run it.
 
+## 0.2 The migration sentinel and `nx migration --clear-state`
+
+The guided command writes a single `~/.config/nexus/migration.state` sentinel
+that every long-lived reader polls (degrade-LOUD banner while a migration is in
+flight). Its state machine:
+
+```
+not-migrating ──begin_migration──▶ migrating ──mark_migrated──▶ migrated ──clear_state(UNLOCK)──▶ not-migrating
+                                      │  ▲                                                          (serve normal)
+                          mark_failed │  │ begin_migration
+                                      ▼  │ (RESUME: done reset, failure dropped)
+                                 migrated-failed
+```
+
+- `migrating` is set FIRST (before any data moves) so every poller degrades
+  before the corpus is partial; `migrated` is the brief transient between the
+  T3 copy completing and the UNLOCK clear.
+- The **`migrated-failed → migrating` RESUME edge is load-bearing**: a failed run
+  is NOT a dead end. Re-running `nx migrate-to-service` calls `begin_migration`,
+  which transitions the sentinel back to `migrating` and recomputes progress from
+  live counts (idempotent on `(tenant, collection, chash)`).
+
+**`nx migration`** prints the current sentinel read-only (`not-migrating`,
+`migrating`, `migrated`, or `migrated-failed`). **`nx migration --clear-state`**
+is the named escape hatch for a sentinel STRANDED by a CLI crash between a clean
+copy and the UNLOCK clear (it would otherwise banner-wrap every read surface
+forever). Clearing is safe for the same idempotent-recompute reason. Clearing a
+`migrated-failed` sentinel is unambiguous (its writer is dead); clearing a
+`migrating` sentinel requires `--force` (it MAY be a live migration in another
+process — clearing drops the banner mid-migration; only do it if the migration
+process actually crashed).
+
 ## 1. Before you start: the quiescent window
 
 The vector ETL's post-write verification compares an exact source count

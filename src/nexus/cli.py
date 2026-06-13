@@ -53,6 +53,7 @@ from nexus.commands.index import index
 from nexus.commands.init import init_cmd
 from nexus.commands.memory import memory
 from nexus.commands.migrate_cmd import migrate_to_service_cmd
+from nexus.commands.migration_cmd import migration_cmd
 from nexus.commands.mineru import mineru_group
 from nexus.commands.plan import plan as plan_group
 from nexus.commands.rdr import rdr as rdr_group
@@ -109,6 +110,7 @@ main.add_command(index)
 main.add_command(init_cmd, name="init")
 main.add_command(memory)
 main.add_command(migrate_to_service_cmd, name="migrate-to-service")
+main.add_command(migration_cmd, name="migration")
 main.add_command(mineru_group, name="mineru")
 main.add_command(plan_group, name="plan")
 main.add_command(rdr_group, name="rdr")

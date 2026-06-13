@@ -218,6 +218,35 @@ def test_nx_answer_surface_degrades_loud() -> None:
     assert "min_confidence must be in" in migrating  # landed body preserved
 
 
+def test_nx_answer_banner_at_entry_not_inside_plan_run() -> None:
+    """RDR-159 (nexus-3g05n) item 2: the banner is wrapped ONCE by the outer
+    @degrade_loud_when_migrating on nx_answer itself, NOT inside plan_run (which
+    spawns a claude -p per step and would otherwise stamp the banner N times).
+
+    Two guards, because the behavioral path (min_confidence=5.0) early-returns
+    BEFORE plan_run and so cannot by itself prove the placement contract:
+
+    1. Behavioral: the entry point injects the banner exactly once (no double
+       wrap on nx_answer itself).
+    2. Structural: plan_run's source carries NO banner decorator/wrapper, so it
+       cannot inject per-step. This is the assertion that actually defends the
+       'not inside plan_run' invariant — it fails if someone decorates plan_run.
+    """
+    import inspect
+
+    from nexus.mcp.core import nx_answer
+    from nexus.plans.runner import plan_run
+
+    _set_migrating(done=4, total=9)
+    migrating = asyncio.run(nx_answer("q", min_confidence=5.0))
+    assert migrating.count("knowledge migrating: 4/9") == 1
+
+    plan_run_src = inspect.getsource(plan_run)
+    assert "degrade_loud_when_migrating" not in plan_run_src
+    assert "with_migration_banner" not in plan_run_src
+    assert "migration_banner" not in plan_run_src
+
+
 def test_nx_answer_structured_degrades_loud_top_level_key() -> None:
     # Machine-consumer path: nx_answer(structured=True) returns a dict, and the
     # outer decorator must attach migration_warning as a TOP-LEVEL key (not bury
