@@ -176,6 +176,18 @@ def _open_catalog_or_none() -> Any:
 @click.group()
 def index() -> None:
     """Index repositories, PDFs, and Markdown into T3 collections."""
+    # RDR-159 P1c (S2 quiesce): suspend ALL indexing while a guided upgrade
+    # migration is in flight. Indexing into a half-migrated store would write
+    # rows the migration cannot see, breaking the RF-6 T3 count window.
+    from nexus.migration.state import is_migrating
+
+    if is_migrating():
+        from nexus.migration.banner import migration_banner
+
+        raise click.ClickException(
+            f"{migration_banner()} — nx index is suspended until the upgrade "
+            "completes (or fails and is cleared)."
+        )
 
 
 def _discover_taxonomy(collection_name, taxonomy, chroma_client, *, force=False):
