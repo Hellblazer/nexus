@@ -914,15 +914,85 @@ class HttpVectorClient:
     def delete_collection(self, name: str) -> None:
         raise NotImplementedError("delete_collection not implemented in HttpVectorClient")
 
-    def delete_by_source(self, collection_name: str, source_path: str) -> int:
-        """Delete all chunks for a given source path.
+    def ids_for_source(self, collection_name: str, source_path: str) -> list[str]:
+        """Return all chunk IDs for a given source path. Does not fetch content.
 
-        Param name ``collection_name`` matches ``T3Database.delete_by_source``
-        (nexus-7zuzz). Currently raises NotImplementedError — the server-side
-        endpoint for source-path deletion is tracked as a follow-on bead.
-        The param name is correct for drop-in parity even while the body is a stub.
+        Mirrors ``T3Database.ids_for_source``: paginates the service's
+        ``/v1/vectors/get`` where-filter endpoint at the 300-record quota and
+        returns an empty list when the collection does not exist (the service
+        returns no ids). Param name ``collection_name`` matches the oracle
+        (nexus-7zuzz).
         """
-        raise NotImplementedError("delete_by_source not implemented in HttpVectorClient")
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        ids: list[str] = []
+        offset = 0
+        while True:
+            try:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": collection_name,
+                        "where": {"source_path": source_path},
+                        "include": [],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                # Match T3Database, which suppresses ONLY collection-not-found
+                # (404) and returns []. A 5xx / 422 / transport failure — or ANY
+                # error mid-pagination after ids were already collected — must
+                # NOT be masked as "no chunks": delete_by_source would then
+                # under-delete and report success, silently orphaning the
+                # unread chunks (review: over-broad catch). Re-raise so the
+                # prune-stale call site's except-clause reports SKIP loudly.
+                if exc.code == 404 and offset == 0:
+                    return []
+                raise
+            page = result.get("ids", []) or []
+            ids.extend(page)
+            if len(page) < page_limit:
+                break
+            offset += len(page)  # match T3Database oracle (not += page_limit)
+        return ids
+
+    def delete_by_source(self, collection_name: str, source_path: str) -> int:
+        """Delete all chunks for a given source path; return the count deleted.
+
+        nexus-vhyua: previously a NotImplementedError stub, which made
+        ``nx t3 prune-stale --no-dry-run`` print 'delete failed' per path and
+        silently do nothing in service mode (the post-P4a default). Now built
+        from existing primitives — ``ids_for_source`` (``/v1/vectors/get``
+        where-filter) + ``/v1/vectors/store-delete`` — so no new Java endpoint
+        is required. Param name ``collection_name`` matches
+        ``T3Database.delete_by_source`` (nexus-7zuzz).
+
+        Count semantics differ slightly from the oracle by design: T3Database
+        returns ``len(ids)`` (ids it asked to delete); this returns the sum of
+        the service's CONFIRMED ``deleted`` counts. They match unless a
+        concurrent delete already removed some — in which case the prune-stale
+        caller's ``deleted != len(ids)`` WARN correctly fires.
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+
+        ids = self.ids_for_source(collection_name, source_path)
+        if not ids:
+            return 0
+        # Batch at the 300-record write quota — a source with many chunks would
+        # otherwise exceed MAX_RECORDS_PER_WRITE in a single store-delete.
+        batch = QUOTAS.MAX_RECORDS_PER_WRITE
+        deleted = 0
+        for i in range(0, len(ids), batch):
+            result = _post(
+                "/v1/vectors/store-delete",
+                {"collection": collection_name, "ids": ids[i:i + batch]},
+                tenant=self._tenant,
+            )
+            deleted += int(result.get("deleted", 0))
+        return deleted
 
     # ── Utility ──────────────────────────────────────────────────────────────
 

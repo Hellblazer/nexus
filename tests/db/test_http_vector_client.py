@@ -488,10 +488,10 @@ class TestNotImplementedMethods:
         with pytest.raises(NotImplementedError):
             client.delete_collection("col")
 
-    def test_delete_by_source_raises(self):
-        client = HttpVectorClient()
-        with pytest.raises(NotImplementedError):
-            client.delete_by_source("col", "/path/to/file.py")
+    # delete_by_source was here until nexus-vhyua implemented it via
+    # ids_for_source (/v1/vectors/get where-filter) + /v1/vectors/store-delete.
+    # Behaviour coverage now lives in
+    # tests/test_http_vector_client_parity.py::TestDeleteBySource.
 
     # get_embeddings was here until nexus-pebfx.7 implemented it via
     # /v1/vectors/get-embeddings — see TestGetEmbeddings.
