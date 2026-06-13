@@ -594,6 +594,91 @@ public final class CatalogRepository {
         });
     }
 
+    /** RDR-159 dim → chunks_&lt;dim&gt; routing; the stored functions accept only these. */
+    private static final Set<Integer> MANIFEST_DIMS = Set.of(384, 768, 1024);
+
+    /**
+     * RDR-159 P-1b (nexus-avjdd): idempotent collection-stamping backfill.
+     *
+     * <p>Invokes the {@code nexus.manifest_backfill()} stored function
+     * (catalog-004) under the request tenant's RLS GUC, stamping
+     * {@code catalog_document_chunks.collection} from the owning doc's
+     * {@code physical_collection} where NULL. Returns the number of rows
+     * stamped. MUST run BEFORE {@link #manifestOrphans} — rows with a NULL
+     * collection are pre-backfill state, not orphans.
+     */
+    public long manifestBackfill(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rec = ctx.fetchOne("select nexus.manifest_backfill()");
+            return rec != null ? rec.get(0, Long.class) : 0L;
+        });
+    }
+
+    /**
+     * RDR-159 P-1b (nexus-avjdd): manifest rows with NO corresponding chunk row
+     * in {@code chunks_<dim>} — the exact count PLUS a capped sample, computed in
+     * ONE transaction (one RLS-stamped snapshot) so the count and the sample are
+     * mutually consistent (CRITICAL: a two-call count-then-sample could diverge
+     * under a concurrent write).
+     *
+     * <p>Invokes the {@code nexus.manifest_orphans(dim)} stored function
+     * (catalog-004) under the request tenant's RLS GUC. Because the function is
+     * SECURITY INVOKER and the service role is NOBYPASSRLS, FORCE RLS on the
+     * base tables (catalog_document_chunks / catalog_documents / chunks_&lt;dim&gt;)
+     * scopes the result to the request tenant — the {@code tenant} argument is
+     * load-bearing, not advisory. Tombstone-aware (excludes soft-deleted docs).
+     *
+     * <p>Returns {@code {"count": <long>, "orphans": <List<Map>>}}. {@code count}
+     * is exact; {@code orphans} is capped at {@code limit} (> 0). {@code dim}
+     * must be 384/768/1024 (validated here so an unsupported dim is a clean
+     * IllegalArgumentException → 400, not a PL/pgSQL RAISE → 500).
+     *
+     * <p>Call protocol: run {@link #manifestBackfill} FIRST — pre-backfill rows
+     * (collection IS NULL) are silently excluded by the function, so an orphan
+     * check on an un-backfilled manifest reads a false-clean zero.
+     */
+    public Map<String, Object> manifestOrphanReport(String tenant, int dim, int limit) {
+        requireSupportedDim(dim);
+        if (limit <= 0) {
+            throw new IllegalArgumentException(
+                "limit must be > 0 (the sample is bounded; use count for the gate)");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            Long count = ctx.fetchOne(
+                "select count(*) from nexus.manifest_orphans(?)", dim
+            ).get(0, Long.class);
+            var sample = ctx.fetch(
+                "select * from nexus.manifest_orphans(?) limit ?", dim, limit
+            ).map(org.jooq.Record::intoMap);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("count", count != null ? count : 0L);
+            out.put("orphans", sample);
+            return out;
+        });
+    }
+
+    /**
+     * RDR-159 P-1b (nexus-avjdd): exact count of manifest orphans for the given
+     * dim — the cheap count-only form for the migration validation gate (zero
+     * orphans is the clean signal). Tenant-scoped via the RLS GUC (see
+     * {@link #manifestOrphanReport} for the scoping rationale).
+     */
+    public long manifestOrphanCount(String tenant, int dim) {
+        requireSupportedDim(dim);
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rec = ctx.fetchOne(
+                "select count(*) from nexus.manifest_orphans(?)", dim);
+            return rec != null ? rec.get(0, Long.class) : 0L;
+        });
+    }
+
+    private static void requireSupportedDim(int dim) {
+        if (!MANIFEST_DIMS.contains(dim)) {
+            throw new IllegalArgumentException(
+                "unsupported dim " + dim + " — supported values: 384, 768, 1024");
+        }
+    }
+
     /** Documents by physical_collection. */
     public List<Map<String, Object>> documentsByCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx ->

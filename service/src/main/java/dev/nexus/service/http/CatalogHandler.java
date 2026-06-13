@@ -126,6 +126,8 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/chashes"      -> handleManifestChashes(exchange, tenant, method);
                 case "/manifest/docs_for_chashes" -> handleDocsForChashes(exchange, tenant, method);
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
+                case "/manifest/backfill"     -> handleManifestBackfill(exchange, tenant, method);
+                case "/manifest/orphans"      -> handleManifestOrphans(exchange, tenant, method);
 
                 // ── Owners ────────────────────────────────────────────────────
                 case "/owners/upsert"         -> handleOwnerUpsert(exchange, tenant, method);
@@ -901,6 +903,52 @@ public final class CatalogHandler implements HttpHandler {
             : List.of();
         var links = repo.linksFromBatch(tenant, tumblers);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(links));
+    }
+
+    /**
+     * POST /v1/catalog/manifest/backfill — stamp manifest collection from the
+     * owning doc's physical_collection where NULL (RDR-159 P-1b).
+     *
+     * <p>Response: {@code {"stamped": <n>}}. MUST run before the orphan check.
+     */
+    private void handleManifestBackfill(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        long stamped = repo.manifestBackfill(tenant);
+        HttpUtil.send(exchange, 200, "{\"stamped\":" + stamped + "}");
+    }
+
+    /**
+     * GET /v1/catalog/manifest/orphans?dim=384&limit=100 — manifest rows with no
+     * chunk row in chunks_&lt;dim&gt; (RDR-159 P-1b non-vacuous validation).
+     *
+     * <p>Response: {@code {"dim": <d>, "count": <n>, "orphans": [...]}}, count and
+     * sample computed in one transaction so they agree. {@code count} is exact;
+     * {@code orphans} is a sample capped at {@code limit} (default 100, must be
+     * &gt; 0 — the count is the gate, the sample is diagnostic). An unsupported
+     * dim or a non-positive limit is a 400.
+     */
+    private void handleManifestOrphans(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String dimRaw = queryParam(exchange, "dim");
+        if (dimRaw == null || dimRaw.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"dim query param required (384|768|1024)\"}"); return;
+        }
+        int dim;
+        try {
+            dim = Integer.parseInt(dimRaw);
+        } catch (NumberFormatException e) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"dim must be an integer (384|768|1024)\"}"); return;
+        }
+        int limit = intParam(exchange, "limit", 100);
+        if (limit <= 0) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"limit must be > 0 (bounded sample; the count field is the gate)\"}"); return;
+        }
+        // count + sample in ONE transaction so they are mutually consistent.
+        var report = repo.manifestOrphanReport(tenant, dim, limit);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("dim", dim,
+                   "count", report.get("count"),
+                   "orphans", report.get("orphans"))));
     }
 
     // ══════════════════════════════════════════════════════════════════════════

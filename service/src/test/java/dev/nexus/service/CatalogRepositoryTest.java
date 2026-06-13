@@ -100,6 +100,16 @@ class CatalogRepositoryTest {
             // Grant sequence for catalog_links BIGSERIAL
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO " + SVC_ROLE);
+            // RDR-159 P-1b: manifest functions (catalog-004) + chunks_384 read so the
+            // svc role can invoke manifestBackfill/manifestOrphans (SECURITY INVOKER).
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.manifest_backfill() TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.manifest_orphans(int) TO " + SVC_ROLE);
+            for (String ct : new String[]{"chunks_384", "chunks_768", "chunks_1024"}) {
+                su.createStatement().execute(
+                    "GRANT SELECT ON nexus." + ct + " TO " + SVC_ROLE);
+            }
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -1921,5 +1931,82 @@ class CatalogRepositoryTest {
         long countA = repo.countDocuments(TENANT_A);
         assertThat(countB).isGreaterThanOrEqualTo(2);
         assertThat(countA).isGreaterThan(countB); // TENANT_A has more rows
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // RDR-159 P-1b (nexus-avjdd): manifest backfill + orphans callables
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // Dedicated tenant so counts are EXACT (== N): no other test writes here.
+    private static final String TENANT_MIG = "mig-tenant-iso";
+    private static final String MIG_COLLECTION_384 =
+        "knowledge__mig-owner__minilm-l6-v2-384__v1";
+
+    @Test @Order(200)
+    void migration_manifestBackfill_stamps_null_collection_then_orphans_detected() {
+        // A 384-model doc with ONE manifest row whose collection is NULL
+        // (writeManifest leaves it NULL) and NO chunk row in chunks_384.
+        repo.upsertDocument(TENANT_MIG, Map.of(
+            "tumbler", "mforph.1",
+            "title", "Orphan Source",
+            "content_type", "knowledge",
+            "corpus", "knowledge",
+            "physical_collection", MIG_COLLECTION_384
+        ));
+        repo.writeManifest(TENANT_MIG, "mforph.1", List.of(
+            Map.<String, Object>of(
+                "position", 0, "chash", "f00d0000000000000000000000000000",
+                "chunk_index", 0)
+        ));
+
+        // EXACTLY one NULL-collection row in this tenant → backfill stamps 1.
+        long stamped = repo.manifestBackfill(TENANT_MIG);
+        assertThat(stamped).isEqualTo(1L);
+
+        // the row is now a 384 orphan (no chunks_384 row for that chash):
+        // count and sample come from ONE transaction and agree.
+        var report = repo.manifestOrphanReport(TENANT_MIG, 384, 100);
+        assertThat(report.get("count")).isEqualTo(1L);
+        @SuppressWarnings("unchecked")
+        var orphans = (List<Map<String, Object>>) report.get("orphans");
+        assertThat(orphans).hasSize(1);
+        assertThat(orphans.get(0).get("doc_id")).isEqualTo("mforph.1");
+
+        // count-only gate form agrees with the report.
+        assertThat(repo.manifestOrphanCount(TENANT_MIG, 384)).isEqualTo(1L);
+    }
+
+    @Test @Order(201)
+    void migration_manifestOrphans_tenant_isolated_via_rls() {
+        // The orphan seeded for TENANT_MIG must be INVISIBLE to another tenant:
+        // SECURITY INVOKER + FORCE RLS scopes the function to the GUC tenant
+        // (refutes the 'cross-tenant scan' reading — the tenant arg is real).
+        var report = repo.manifestOrphanReport(TENANT_B, 384, 100);
+        assertThat(report.get("count")).isEqualTo(0L);
+        assertThat(repo.manifestOrphanCount(TENANT_B, 384)).isEqualTo(0L);
+    }
+
+    @Test @Order(202)
+    void migration_manifestOrphans_rejects_unsupported_dim_and_bad_limit() {
+        // dim + limit validated in the repo (clean error, not a PL/pgSQL RAISE)
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> repo.manifestOrphanReport(TENANT_MIG, 999, 100)
+        ).isInstanceOf(IllegalArgumentException.class)
+         .hasMessageContaining("unsupported dim");
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> repo.manifestOrphanCount(TENANT_MIG, 512)
+        ).isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> repo.manifestOrphanReport(TENANT_MIG, 384, 0)
+        ).isInstanceOf(IllegalArgumentException.class)
+         .hasMessageContaining("limit");
+    }
+
+    @Test @Order(203)
+    void migration_manifestBackfill_is_idempotent() {
+        // Second backfill stamps nothing new — the function's WHERE collection
+        // IS NULL guard never re-stamps an already-stamped row.
+        long second = repo.manifestBackfill(TENANT_MIG);
+        assertThat(second).isEqualTo(0L);
     }
 }
