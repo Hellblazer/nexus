@@ -55,6 +55,14 @@
         <onnxruntime.version>1.20.0</onnxruntime.version>
         <djl.tokenizers.version>0.30.0</djl.tokenizers.version>
 
+        <!-- Per-platform native-lib dirs for the -Pnative image (nexus-lp2qo).
+             Default = linux amd64 (CI + the deployment target); the native-libs-*
+             OS profiles below override these on macOS / Windows / linux-aarch64
+             build hosts so each binary embeds only its own platform's embedding
+             libs. onnxruntime vs djl use different <os-arch> naming, hence two. -->
+        <onnx.native.dir>linux-x64</onnx.native.dir>
+        <djl.native.dir>linux-x86_64</djl.native.dir>
+
         <!-- Surefire tag exclusion: skip @Tag("integration") by default -->
         <!-- Override with: mvn test -Dtest.excluded.groups="" -Dgroups=integration -->
         <test.excluded.groups>integration</test.excluded.groups>
@@ -403,6 +411,36 @@
     </build>
 
     <profiles>
+        <!-- Per-platform embedding-native-lib selection (nexus-lp2qo). These
+             auto-activate by build-host OS/arch (Maven built-in <os> activation,
+             no plugin needed) and override the linux-x64 defaults so -Pnative
+             embeds only the host's onnx/djl libs. Build a Windows .exe on Windows,
+             a Mac binary on a Mac — native-image does not cross-compile. -->
+        <profile>
+            <id>native-libs-mac</id>
+            <activation><os><family>mac</family></os></activation>
+            <properties>
+                <onnx.native.dir>osx-aarch64</onnx.native.dir>
+                <djl.native.dir>osx-aarch64</djl.native.dir>
+            </properties>
+        </profile>
+        <profile>
+            <id>native-libs-windows</id>
+            <activation><os><family>windows</family></os></activation>
+            <properties>
+                <onnx.native.dir>win-x64</onnx.native.dir>
+                <djl.native.dir>win-x86_64</djl.native.dir>
+            </properties>
+        </profile>
+        <profile>
+            <id>native-libs-linux-aarch64</id>
+            <activation><os><name>linux</name><arch>aarch64</arch></os></activation>
+            <properties>
+                <onnx.native.dir>linux-aarch64</onnx.native.dir>
+                <djl.native.dir>linux-aarch64</djl.native.dir>
+            </properties>
+        </profile>
+
         <!-- -Pnative: opt-in native-image build (S0.4 C2 — CI must add Linux job) -->
         <profile>
             <id>native</id>
@@ -451,6 +489,17 @@
                                              runtime-reflection the community metadata lacked). Both also
                                              ride the jar classpath, but list them explicitly for clarity. -->
                                         <buildArg>-H:ConfigurationFileDirectories=src/main/resources/META-INF/native-image,src/main/resources/META-INF/native-image/traced</buildArg>
+                                        <!-- Per-platform embedding native libs (nexus-lp2qo). onnxruntime
+                                             and djl-tokenizers bundle a .so/.dylib/.dll per <os-arch> in the
+                                             jar; native-image only embeds resources it is told to. Rather
+                                             than bundle ALL platforms into every binary (~120MB of foreign
+                                             libs), the ${onnx.native.dir} / ${djl.native.dir} properties are
+                                             set per build host by the native-libs-* OS profiles below, so the
+                                             binary carries ONLY its own platform's libs. ExcludeResources
+                                             drops the macOS .dSYM debug-symbol dirs. -->
+                                        <buildArg>-H:IncludeResources=ai/onnxruntime/native/${onnx.native.dir}/.*</buildArg>
+                                        <buildArg>-H:IncludeResources=native/lib/${djl.native.dir}/.*</buildArg>
+                                        <buildArg>-H:ExcludeResources=.*\.dSYM/.*</buildArg>
                                         <!-- Portability: compatibility march for CI/prod (not native) -->
                                         <buildArg>-march=compatibility</buildArg>
                                     </buildArgs>

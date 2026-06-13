@@ -7,8 +7,6 @@
       {"pattern": "liquibase.build.properties"},
       {"pattern": "liquibase/.*\\.xml"},
       {"pattern": "liquibase/servicelocator/.*"},
-      {"pattern": "ai/onnxruntime/native/linux-.*"},
-      {"pattern": "native/lib/linux-x86_64/.*"},
       {"pattern": "native/lib/tokenizers.properties"}
     ]
   },
