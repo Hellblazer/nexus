@@ -286,6 +286,85 @@ def test_pregates_run_before_t2_in_order() -> None:
     assert order == ["quiesce", "models", "t2", "leg"]
 
 
+def test_model_gate_block_stops_before_t2() -> None:
+    from nexus.migration.pregate import ModelPreGateBlocked
+
+    det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
+    t2_calls: list[int] = []
+
+    def _model_gate(classifications, *, voyage_key_present) -> None:  # type: ignore[no-untyped-def]
+        raise ModelPreGateBlocked([("code__a__minilm-l6-v2-384__v1", "unservable")])
+
+    outcome = run_sequenced_migration(
+        det,
+        sources=None,
+        run_t2=lambda _s: t2_calls.append(1) or _CLEAN_T2,  # type: ignore[func-returns-value]
+        run_leg=lambda leg: _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"]),
+        voyage_key_present=False,
+        quiesce_check=_noop_quiesce,
+        model_gate=_model_gate,
+        started_at=_FIXED_STARTED_AT,
+    )
+    assert outcome.ok is False
+    assert t2_calls == []  # blocked before T2
+    assert "unservable" in (outcome.blocked_reason or "")
+    assert current_phase() == "migrated-failed"
+
+
+def test_t2_raise_transitions_to_failed_not_stuck_migrating() -> None:
+    # An in-process T2 raise must end at migrated-failed, never a false
+    # 'migrating' (CRITICAL-1): the read surfaces would otherwise lie forever.
+    det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
+    leg_calls: list[str] = []
+
+    def _run_t2(_s):  # type: ignore[no-untyped-def]
+        raise RuntimeError("service crashed mid-T2")
+
+    outcome = run_sequenced_migration(
+        det,
+        sources=None,
+        run_t2=_run_t2,
+        run_leg=lambda leg: leg_calls.append(leg) or _ok_leg("local", ["x"]),  # type: ignore[func-returns-value]
+        voyage_key_present=False,
+        quiesce_check=_noop_quiesce,
+        model_gate=_noop_model_gate,
+        started_at=_FIXED_STARTED_AT,
+    )
+    assert outcome.ok is False
+    assert leg_calls == []  # T3 never started
+    assert "service crashed mid-T2" in (outcome.blocked_reason or "")
+    assert current_phase() == "migrated-failed"  # NOT stuck at migrating
+
+
+def test_leg_raise_is_treated_as_failed_leg() -> None:
+    # A leg raising is a failed leg: remaining legs still run, refuse-partial
+    # fires, and the sentinel ends migrated-failed (never stuck migrating).
+    det = _detection(
+        _cls("code__a__minilm-l6-v2-384__v1", "local"),
+        _cls("knowledge__b__minilm-l6-v2-384__v1", "cloud"),
+    )
+
+    def _run_leg(leg: str) -> MigrationReport:
+        if leg == "cloud":
+            raise RuntimeError("cloud leg upsert exploded")
+        return _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"])
+
+    outcome = run_sequenced_migration(
+        det,
+        sources=None,
+        run_t2=lambda _s: _CLEAN_T2,
+        run_leg=_run_leg,
+        voyage_key_present=False,
+        quiesce_check=_noop_quiesce,
+        model_gate=_noop_model_gate,
+        started_at=_FIXED_STARTED_AT,
+    )
+    assert outcome.ok is False
+    assert outcome.legs_attempted == ("cloud", "local")  # both attempted
+    assert outcome.legs_ok == ("local",)  # cloud raised → not ok
+    assert current_phase() == "migrated-failed"
+
+
 def test_quiesce_block_stops_before_t2() -> None:
     det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
     t2_calls: list[int] = []

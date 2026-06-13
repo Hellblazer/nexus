@@ -100,7 +100,10 @@ def run_sequenced_migration(
         _log.info("sequencer_fresh_user_noop")
         return SequenceOutcome(
             ok=True,
-            phase=current_phase(),
+            # No migration ran; report not-migrating rather than echoing a
+            # possibly-stale prior-run sentinel (HIGH-1: avoids ok=True paired
+            # with a leftover migrated-failed phase).
+            phase="not-migrating",
             collections_total=0,
             collections_done=0,
             t2_total_failed=None,
@@ -142,8 +145,17 @@ def run_sequenced_migration(
         _log.warning("sequencer_model_gate_blocked", error=str(exc))
         return _fail(str(exc))
 
-    # 5. T2 migrate-all FIRST — require total_failed == 0 before T3.
-    t2_report = run_t2(sources)
+    # 5. T2 migrate-all FIRST — require total_failed == 0 before T3. An
+    #    in-process raise (service crash, network error) is CATCHABLE — the
+    #    process is alive, so transition the sentinel to migrated-failed rather
+    #    than leaving a false `migrating` (which the escape hatch only covers
+    #    for an uncatchable crash). CRITICAL-1.
+    try:
+        t2_report = run_t2(sources)
+    except Exception as exc:  # noqa: BLE001 — recorded to the sentinel, never silent
+        reason = f"T2 migrate-all raised unexpectedly: {exc}; T3 not started"
+        _log.error("sequencer_t2_raised", error=str(exc))
+        return _fail(reason)
     t2_total_failed = int(t2_report.get("summary", {}).get("total_failed", 0))
     if t2_total_failed != 0:
         reason = (
@@ -172,13 +184,32 @@ def run_sequenced_migration(
     done = 0
     for leg in legs:
         legs_attempted.append(leg)
-        report = run_leg(leg)
+        # A leg raising is a failed leg, not a crash: log it, leave it out of
+        # legs_ok, and continue so the refuse-partial check fires with the full
+        # picture (and the sentinel ends migrated-failed, never stuck migrating).
+        try:
+            report = run_leg(leg)
+        except Exception as exc:  # noqa: BLE001 — leg failure, recorded below
+            _log.error("sequencer_leg_raised", leg=leg, error=str(exc))
+            continue
         done += _migrated_count(report)
-        record_progress(collections_done=done, collections_total=total)
+        # Clamp the surface value: the store can gain collections between
+        # detection and ETL (idempotent re-run), and a >100% progress display
+        # is misleading. Keep the true count in the log as a drift tripwire.
+        if done > total:
+            _log.warning(
+                "sequencer_progress_overshoot",
+                migrated=done,
+                detected_total=total,
+                leg=leg,
+            )
+        shown = min(done, total)
+        record_progress(collections_done=shown, collections_total=total)
         if on_progress is not None:
-            on_progress(done, total)
+            on_progress(shown, total)
         if report.ok:
             legs_ok.append(leg)
+    done = min(done, total)
 
     # 7. Refuse partial-leg: every detected leg must be attempted AND ok.
     full_success = set(legs_ok) == set(legs)
