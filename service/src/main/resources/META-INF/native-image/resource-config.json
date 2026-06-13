@@ -1,7 +1,15 @@
 {
   "resources": {
     "includes": [
-      {"pattern": "\\Qlogback.xml\\E"}
+      {"pattern": "\\Qlogback.xml\\E"},
+      {"pattern": "db/changelog/.*\\.xml"},
+      {"pattern": "www.liquibase.org/xml/ns/dbchangelog/.*\\.xsd"},
+      {"pattern": "liquibase.build.properties"},
+      {"pattern": "liquibase/.*\\.xml"},
+      {"pattern": "liquibase/servicelocator/.*"},
+      {"pattern": "ai/onnxruntime/native/linux-.*"},
+      {"pattern": "native/lib/linux-x86_64/.*"},
+      {"pattern": "native/lib/tokenizers.properties"}
     ]
   },
   "bundles": []

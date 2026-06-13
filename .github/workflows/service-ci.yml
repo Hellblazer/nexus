@@ -81,4 +81,60 @@ jobs:
       # protection; renaming would strand required checks.
       - name: Run Java test suite
         working-directory: service
-        run: mvn -q test
+        run: ./mvnw -q test
+
+  native-image-build-and-smoke:
+    name: Native image build + smoke (nexus-lp2qo)
+    runs-on: ubuntu-latest
+    # Native-image build (~2-3m analysis + image) + jOOQ codegen testcontainer
+    # + pgvector pull + native smoke. 40m covers a cold runner.
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up GraalVM 25.0.3
+        uses: graalvm/setup-graalvm@v1
+        with:
+          # >= 25.0.2 REQUIRED: the bundled jOOQ 3.20.0 / liquibase reachability
+          # metadata use GraalVM's unified reachability-metadata SCHEMA, which
+          # 25.0.1 rejects ("installation does not provide reachability-metadata
+          # schema"). Pinned for native-build determinism (nexus-lp2qo).
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+
+      - name: Cache ChromaDB ONNX model
+        # The service initializes the ONNX embedder at startup (NX_EMBED_MODE=onnx),
+        # loading all-MiniLM-L6-v2 from ~/.cache/chroma — the native smoke needs it.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Prime ONNX model on cache miss
+        run: |
+          MODEL_DIR="$HOME/.cache/chroma/onnx_models/all-MiniLM-L6-v2"
+          if [ ! -f "$MODEL_DIR/onnx/model.onnx" ]; then
+            mkdir -p "$MODEL_DIR"
+            curl -fsSL https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz \
+              -o /tmp/onnx.tar.gz
+            tar -xzf /tmp/onnx.tar.gz -C "$MODEL_DIR"
+            test -f "$MODEL_DIR/onnx/model.onnx" || { echo "model.onnx missing after extract"; exit 1; }
+          fi
+
+      - name: Build native image
+        working-directory: service
+        # -Pnative runs jOOQ codegen (testcontainers pgvector) then native-image.
+        # The committed traced reachability-metadata.json + community metadata repo
+        # supply the reflection/resource set. This is the authoritative LINUX gate
+        # for the native path (the spike verified macOS/arm64; this proves amd64).
+        run: ./mvnw -q -Pnative -DskipTests package
+
+      - name: Native smoke test
+        working-directory: service
+        # Boots the native binary against a throwaway pgvector and asserts
+        # liquibase migration + jOOQ INSERT/SELECT/FTS all return 200.
+        run: ./native-smoke.sh
