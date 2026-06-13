@@ -40,6 +40,7 @@ DROP_IN_METHODS = [
     "search",
     "upsert_chunks",
     # Already-verified parity-OK methods — pinned as free tripwires
+    "ids_for_source",  # nexus-vhyua: implemented to match T3Database
     "get_by_id",
     "delete_by_id",
     "list_collections",
@@ -391,7 +392,7 @@ class TestPutBehavior:
             if k in actual_meta and actual_meta[k] != reference[k]
         }
         assert not mismatched, (
-            f"put() metadata values diverge from factory reference:\n"
+            "put() metadata values diverge from factory reference:\n"
             + "\n".join(f"  {k}: got={v[0]!r}, expected={v[1]!r}" for k, v in mismatched.items())
         )
 
@@ -656,7 +657,6 @@ class TestGetEmbeddingsParam:
 
     def test_collection_name_kwarg_accepted(self, monkeypatch):
         """get_embeddings(collection_name=...) must not raise TypeError."""
-        import numpy as np
 
         client = HttpVectorClient()
         monkeypatch.setattr(
@@ -690,30 +690,112 @@ class TestGetEmbeddingsParam:
         assert calls[0]["collection"] == "knowledge__nexus__minilm-l6-v2-384__v1"
 
 
-# ── Behavior: delete_by_source collection_name param ─────────────────────────
+# ── Behavior: delete_by_source / ids_for_source (nexus-vhyua) ────────────────
 
 
-class TestDeleteBySourceParam:
-    """T3Database.delete_by_source() uses 'collection_name'; Http had 'collection'.
-
-    The method body raises NotImplementedError (server-side endpoint tracked as
-    follow-on). The param-name parity test verifies the correct name is present
-    so a future implementation doesn't regress it.
+class TestDeleteBySource:
+    """nexus-vhyua: delete_by_source was a NotImplementedError stub, making
+    ``nx t3 prune-stale`` silently no-op in service mode. It is now built from
+    the existing /v1/vectors/get (where-filter) + /v1/vectors/store-delete
+    endpoints. Param name ``collection_name`` matches T3Database (nexus-7zuzz).
     """
 
-    def test_collection_name_kwarg_raises_not_implemented(self, monkeypatch):
-        """delete_by_source(collection_name=...) must raise NotImplementedError,
-        NOT TypeError — TypeError would mean the param name is wrong.
-        """
+    def test_ids_for_source_paginates_and_collects(self, monkeypatch):
+        # Two pages (300 then 2) -> single flat id list; second short page ends it.
+        pages = [
+            {"ids": [f"id{i}" for i in range(300)]},
+            {"ids": ["id300", "id301"]},
+        ]
+        calls = []
+
+        def fake_post(path, body, **kw):
+            # Index by call order, not a hard-coded page size (robust if the
+            # quota constant changes).
+            page = pages[len(calls)]
+            calls.append((path, body))
+            return page
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         client = HttpVectorClient()
-        # Patch _post so it can't mask a TypeError with a service call
+        ids = client.ids_for_source(
+            collection_name="code__nexus__minilm-l6-v2-384__v1",
+            source_path="/src/foo.py",
+        )
+        assert len(ids) == 302
+        # where-filter is by source_path; param key is collection_name's value.
+        assert calls[0][1]["where"] == {"source_path": "/src/foo.py"}
+        assert all(c[0] == "/v1/vectors/get" for c in calls)
+
+    def test_ids_for_source_404_first_page_returns_empty(self, monkeypatch):
+        # Collection-not-found (404 on page 0) is the ONLY swallowed case.
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client = HttpVectorClient()
+        assert client.ids_for_source("missing-col", "/src/foo.py") == []
+
+    def test_ids_for_source_mid_pagination_error_reraises(self, monkeypatch):
+        # A 500 on page 2 (after ids collected) must NOT be masked as "no chunks"
+        # — else delete_by_source would under-delete and report success.
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            if body["offset"] == 0:
+                return {"ids": [f"id{i}" for i in range(300)]}
+            raise VectorServiceError("server error", code=500)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client = HttpVectorClient()
+        with pytest.raises(VectorServiceError):
+            client.ids_for_source("code__nexus__minilm-l6-v2-384__v1", "/src/foo.py")
+
+    def test_delete_by_source_deletes_resolved_ids(self, monkeypatch):
+        posted = []
+
+        def fake_post(path, body, **kw):
+            posted.append((path, body))
+            if path == "/v1/vectors/get":
+                # one short page of 3 ids
+                return {"ids": ["a", "b", "c"]}
+            return {"deleted": len(body["ids"])}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client = HttpVectorClient()
+        n = client.delete_by_source(
+            collection_name="code__nexus__minilm-l6-v2-384__v1",
+            source_path="/src/foo.py",
+        )
+        assert n == 3
+        delete_calls = [b for p, b in posted if p == "/v1/vectors/store-delete"]
+        assert delete_calls and delete_calls[0]["ids"] == ["a", "b", "c"]
+
+    def test_delete_by_source_no_ids_is_noop(self, monkeypatch):
+        posted = []
+
+        def fake_post(path, body, **kw):
+            posted.append(path)
+            return {"ids": []}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client = HttpVectorClient()
+        n = client.delete_by_source(
+            collection_name="c", source_path="/none",
+        )
+        assert n == 0
+        assert "/v1/vectors/store-delete" not in posted  # no delete attempted
+
+    def test_delete_by_source_collection_name_kwarg_no_typeerror(self, monkeypatch):
+        # Param-name parity guard (nexus-7zuzz): collection_name must be accepted.
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
-            lambda *a, **kw: {"deleted": 0},
+            lambda *a, **kw: {"ids": []},
         )
-        # Must raise NotImplementedError (stub), not TypeError (wrong param name)
-        with pytest.raises(NotImplementedError):
-            client.delete_by_source(
-                collection_name="code__nexus__minilm-l6-v2-384__v1",
-                source_path="/src/foo.py",
-            )
+        client = HttpVectorClient()
+        # Must NOT raise TypeError (wrong param) or NotImplementedError (old stub).
+        assert client.delete_by_source(
+            collection_name="code__nexus__minilm-l6-v2-384__v1",
+            source_path="/src/foo.py",
+        ) == 0
