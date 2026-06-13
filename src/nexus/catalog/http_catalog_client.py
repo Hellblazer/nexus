@@ -378,6 +378,28 @@ class HttpCatalogClient:
         result = self._post("/docs/chunk-counts", {"doc_ids": doc_ids})
         return {k: int(v) for k, v in (result or {}).items() if v is not None}
 
+    def relation_counts(self, relations: list[str]) -> dict[str, int]:
+        """Tenant-scoped row counts for migration-verify relations.
+
+        RDR-159 P-1a (nexus-0wz93): backs ``nexus.migration`` count
+        verification. The service whitelists the relation names server-side
+        (the fixed migration-verify set) and counts each under the request
+        tenant's RLS GUC — so this is a safe replacement for the legacy
+        admin-psql shell-out (RDR-152 bars a direct Python PG connection).
+
+        Returns ``{relation: count}`` for the relations the service could
+        count; a relation the service does not whitelist is simply absent
+        (the caller treats a missing relation as INDETERMINATE, never a
+        pass).
+        """
+        if not relations:
+            return {}
+        result = self._post(
+            "/verify/relation-counts", {"relations": relations},
+        )
+        counts = (result or {}).get("counts", {})
+        return {k: int(v) for k, v in counts.items() if v is not None}
+
     def links_from_batch(self, tumblers: list[str]) -> dict[str, list[dict]]:
         """Batch-fetch outbound links for a set of tumblers.
 

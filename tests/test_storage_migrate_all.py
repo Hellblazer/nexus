@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-153 Phase 3 (bead nexus-o61zy, TDD-red): ``nx storage migrate all``
-orchestrator + ``--report`` emission.
+"""``nx storage migrate all`` — the CLI wrapper over the
+``nexus.migration.orchestrator.migrate_all`` callable (RDR-153 Phase 3;
+RDR-159 P-1a extracted the orchestration into the library).
 
-Contract (RDR §Approach 3): stores run in the RDR-152 Phase 2 LADDER ORDER
-exactly (memory→plans→telemetry→taxonomy→aspects→chash→catalog LAST);
-per-store results merge into ONE report document; ``--report`` defaults to
-``<config>/migration-reports/migration-<id>.json`` so a run ALWAYS
-produces an artifact; count-verification FAILS/WARNS loudly when psql is
-unresolved — never SKIP-then-'all passed' (the nexus-r0esi hollow-verify
-bug).
+The CLI is now thin: it builds the sources, calls ``migrate_all`` (which
+runs the RDR-152 ladder, builds the ONE report, and verifies pg counts
+through the service REST count source — RDR-152 bars a direct Python PG
+connection), persists the returned report, echoes the verdict loudly, and
+maps ``total_failed`` / the verification verdict onto exit codes. The
+ladder-order / report-rollup / verification-semantics contracts are
+unit-tested directly in ``tests/migration/test_orchestrator.py``; here we
+pin the CLI seam.
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ from nexus.migration.etl_registry import EtlSources, StoreEtl
 
 
 def _fake_etls(order_sink: list[str], *, fail_store: str | None = None):
-    """Seven fake StoreEtls that record execution order and feed the shared
+    """Eight fake StoreEtls that record execution order and feed the shared
     collector realistic per-store data."""
 
     def _runner(store: str):
@@ -75,22 +77,21 @@ def _invoke_all(runner, tmp_path: Path, order_sink: list[str], *args,
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "memory.db").touch()
     (config_dir / ".catalog.db").touch()
-    # _verify_pg_counts now returns (status, convergence_notes); wrap the
-    # test-fixture string into the tuple the caller unpacks.
-    verify_tuple = (verify, [])
+    # Patch the orchestrator seam: fake ETLs (no service) + a canned
+    # verification verdict so the CLI behaviour is exercised in isolation.
     with patch(
-        "nexus.commands.storage_cmd._build_store_etls",
+        "nexus.migration.orchestrator.build_store_etls",
         return_value=_fake_etls(order_sink, fail_store=fail_store),
     ), patch(
-        "nexus.commands.storage_cmd._verify_pg_counts",
-        return_value=verify_tuple,
+        "nexus.migration.orchestrator.verify_counts",
+        return_value=(verify, []),
     ), patch.dict(
         "os.environ", {"NEXUS_CONFIG_DIR": str(config_dir)},
     ):
         return runner.invoke(main, ["storage", "migrate", "all", *args]), config_dir
 
 
-# ── Orchestrator ─────────────────────────────────────────────────────────────
+# ── Orchestrator (CLI seam) ──────────────────────────────────────────────────
 
 
 class TestMigrateAll:
@@ -155,6 +156,37 @@ class TestMigrateAll:
         assert "total_failed=0" in result.output
         assert "report:" in result.output  # the artifact path is announced
 
+    def test_per_store_progress_announced(self, runner, tmp_path: Path) -> None:
+        order: list[str] = []
+        result, _ = _invoke_all(runner, tmp_path, order)
+        assert "migrating memory …" in result.output
+
+    def test_store_crash_echoed_in_real_time(self, runner, tmp_path: Path) -> None:
+        """A store-level EXCEPTION (not a recorded event) must surface a
+        per-store CRASHED line at crash time, not only in the final summary."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "memory.db").touch()
+        (config_dir / ".catalog.db").touch()
+
+        def _boom_etls(_sources):
+            def run(sources, collector):
+                raise RuntimeError("mid-run partition")
+
+            return [StoreEtl("memory", run)]
+
+        with patch(
+            "nexus.migration.orchestrator.build_store_etls", _boom_etls,
+        ), patch(
+            "nexus.migration.orchestrator.verify_counts",
+            return_value=("indeterminate", []),
+        ), patch.dict(
+            "os.environ", {"NEXUS_CONFIG_DIR": str(config_dir)},
+        ):
+            result = runner.invoke(main, ["storage", "migrate", "all"])
+        assert result.exit_code != 0  # crash → total_failed=1
+        assert "memory: CRASHED — mid-run partition" in result.output
+
 
 # ── r0esi: verification must never silently skip ─────────────────────────────
 
@@ -168,13 +200,16 @@ class TestVerificationLoudness:
         assert result.exit_code == 0, result.output  # data migrated fine
         out = result.output
         assert "VERIFICATION INDETERMINATE" in out
-        assert "psql" in out
+        assert "count source" in out
         assert "all passed" not in out.lower()
 
     def test_verified_counts_reported(self, runner, tmp_path: Path) -> None:
         order: list[str] = []
         result, _ = _invoke_all(runner, tmp_path, order, verify="verified")
         assert "verification: verified" in result.output
+        # fake etls map memory + plans + (taxonomy) topic_assignments →
+        # 3 verify relations in the checked set; the count is named, not vague.
+        assert "3 mappable relations" in result.output
 
     def test_mismatch_fails_run(self, runner, tmp_path: Path) -> None:
         order: list[str] = []
@@ -182,27 +217,23 @@ class TestVerificationLoudness:
         assert result.exit_code != 0
         assert "VERIFICATION MISMATCH" in result.output
 
-    def test_verify_pg_counts_indeterminate_without_psql(
-        self, tmp_path: Path,
+    def test_verification_verdict_recorded_in_artifact(
+        self, runner, tmp_path: Path,
     ) -> None:
-        """The unit seam: no resolvable psql → 'indeterminate', never
-        'verified' (the r0esi hollow-pass)."""
-        from nexus.commands.storage_cmd import _verify_pg_counts
-
-        with patch(
-            "nexus.commands.storage_cmd._psql_for_verify", return_value=None,
-        ):
-            status, notes = _verify_pg_counts(
-                {"summary": {"total_written": 5}, "stores": []},
-                {"PG_PORT": "5499", "NX_DB_ADMIN_USER": "a",
-                 "NX_DB_ADMIN_PASS": "p",
-                 "NX_DB_URL": "jdbc:postgresql://127.0.0.1:5499/nexus"},
-            )
-        assert status == "indeterminate"
-        assert notes == []
+        """Critic S1: the artifact must be self-contained — the Phase-4
+        triage surface reads the JSON, not the run's stdout."""
+        order: list[str] = []
+        report_path = tmp_path / "r.json"
+        result, _ = _invoke_all(
+            runner, tmp_path, order, "--report", str(report_path),
+            verify="indeterminate",
+        )
+        assert result.exit_code == 0, result.output
+        report = json.loads(report_path.read_text())
+        assert report["verification"] == "indeterminate"
 
 
-# ── Per-store --report ───────────────────────────────────────────────────────
+# ── Per-store --report (unchanged path) ──────────────────────────────────────
 
 class TestPerStoreReport:
     def test_migrate_memory_report_writes_single_store_document(
@@ -243,25 +274,6 @@ class TestPerStoreReport:
         report = json.loads(report_path.read_text())
         assert [s["store"] for s in report["stores"]] == ["memory"]
         assert report["summary"]["total_written"] == 4
-
-
-class TestP3ReviewRegressions:
-    """P3.3/P3.4 review findings (2026-06-11)."""
-
-    def test_verification_verdict_recorded_in_artifact(
-        self, runner, tmp_path: Path,
-    ) -> None:
-        """Critic S1: the artifact must be self-contained — the Phase-4
-        triage surface reads the JSON, not the run's stdout."""
-        order: list[str] = []
-        report_path = tmp_path / "r.json"
-        result, _ = _invoke_all(
-            runner, tmp_path, order, "--report", str(report_path),
-            verify="indeterminate",
-        )
-        assert result.exit_code == 0, result.output
-        report = json.loads(report_path.read_text())
-        assert report["verification"] == "indeterminate"
 
     def test_per_store_default_path_always_produces_artifact(
         self, runner, tmp_path: Path,
@@ -367,13 +379,12 @@ class TestAspectsQueueLadderOrder:
     def test_aspects_without_queue_migrate_all_excludes_queue(self) -> None:
         """aspects_etl.migrate_without_queue does NOT call migrate_queue;
         document_aspects, highlights, and promotion_log are migrated."""
-        from unittest.mock import MagicMock, call, patch
+        from unittest.mock import MagicMock, patch
 
         import nexus.db.t2.aspects_etl as ae
 
         mock_aspects = MagicMock()
         mock_highlights = MagicMock()
-        mock_queue = MagicMock()
         sqlite = MagicMock()
 
         with (
@@ -391,162 +402,3 @@ class TestAspectsQueueLadderOrder:
     def test_aspects_etl_has_migrate_queue_function(self) -> None:
         """migrate_queue is a public function importable from aspects_etl."""
         from nexus.db.t2.aspects_etl import migrate_queue  # noqa: F401
-
-
-# ── nexus-d583z: _VERIFY_TABLES / _verify_pg_counts bug fixes ────────────────
-
-
-class TestVerifyPgCountsBugFixes:
-    """nexus-d583z: (a) relation names, (b) RLS-blind counts, (c) plans dedup."""
-
-    def test_verify_tables_uses_catalog_documents_not_nexus_documents(
-        self,
-    ) -> None:
-        """(a) The catalog/documents key must map to nexus.catalog_documents,
-        not nexus.documents (which does not exist in the schema)."""
-        from nexus.commands.storage_cmd import _VERIFY_TABLES
-
-        assert _VERIFY_TABLES[("catalog", "documents")] == "nexus.catalog_documents"
-
-    def test_verify_tables_uses_catalog_links_not_nexus_links(self) -> None:
-        """(a) The catalog/links key must map to nexus.catalog_links."""
-        from nexus.commands.storage_cmd import _VERIFY_TABLES
-
-        assert _VERIFY_TABLES[("catalog", "links")] == "nexus.catalog_links"
-
-    def test_verify_pg_counts_prefixes_count_with_set_tenant(
-        self, tmp_path: Path,
-    ) -> None:
-        """(b) Each psql -c must include SET nexus.tenant = 'default'; before
-        the SELECT count(*) so the admin user bypasses FORCE RLS."""
-        from nexus.commands.storage_cmd import _verify_pg_counts
-
-        captured_cmds: list[list[str]] = []
-
-        def _fake_run(cmd, **kw):
-            captured_cmds.append(cmd)
-
-            class _R:
-                returncode = 0
-                stdout = "5"
-            return _R()
-
-        report = {
-            "stores": [
-                {
-                    "store": "memory",
-                    "tables": [{"table": "memory", "written": 5}],
-                }
-            ]
-        }
-        creds = {
-            "PG_PORT": "5499",
-            "NX_DB_ADMIN_USER": "nexus_admin",
-            "NX_DB_ADMIN_PASS": "secret",
-            "NX_DB_URL": "postgresql://127.0.0.1:5499/nexus",
-        }
-        with (
-            patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
-            patch("subprocess.run", side_effect=_fake_run),
-        ):
-            status, notes = _verify_pg_counts(report, creds)
-
-        assert status == "verified"
-        assert notes == []  # no convergence delta for normal relations
-        assert len(captured_cmds) == 1
-        # The -c argument must contain the SET GUC prefix
-        cmd = captured_cmds[0]
-        c_flag_idx = cmd.index("-c")
-        query_arg = cmd[c_flag_idx + 1]
-        assert "SET nexus.tenant" in query_arg, (
-            f"Expected SET nexus.tenant in psql -c arg, got: {query_arg!r}"
-        )
-        assert "SELECT count(*)" in query_arg
-
-    def test_verify_pg_counts_plans_uses_dedup_aware_check(
-        self, tmp_path: Path,
-    ) -> None:
-        """(c) Plans use server-side dedup (UNIQUE tenant/project/query).
-        pg_count may legitimately be less than written (collapsed duplicates).
-        The check: pg_count > 0 AND pg_count <= written (not pg_count >= written).
-        """
-        from nexus.commands.storage_cmd import _verify_pg_counts
-
-        def _fake_run(cmd, **kw):
-            class _R:
-                returncode = 0
-                stdout = "80"  # pg landed 80, but 98 were 'written' (HTTP acks)
-            return _R()
-
-        report = {
-            "stores": [
-                {
-                    "store": "plans",
-                    "tables": [{"table": "plans", "written": 98}],
-                }
-            ]
-        }
-        creds = {
-            "PG_PORT": "5499",
-            "NX_DB_ADMIN_USER": "nexus_admin",
-            "NX_DB_ADMIN_PASS": "secret",
-            "NX_DB_URL": "postgresql://127.0.0.1:5499/nexus",
-        }
-        with (
-            patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
-            patch("subprocess.run", side_effect=_fake_run),
-        ):
-            status, notes = _verify_pg_counts(report, creds)
-
-        # 80 landed < 98 written: convergence semantics -> NOT a mismatch
-        assert status == "verified", (
-            "Plans convergence collapse (pg_count < written) must not be flagged as mismatch"
-        )
-        # The delta must be surfaced in the notes for the operator artifact
-        assert len(notes) == 1, "Convergence delta must be recorded in notes"
-        assert "nexus.plans" in notes[0]
-        assert "80" in notes[0] and "98" in notes[0]
-        assert "18" in notes[0]  # delta = 98 - 80 = 18
-        assert "UNIQUE" in notes[0]
-
-    def test_verify_pg_counts_dedup_written_zero_is_trivial_pass(
-        self, tmp_path: Path,
-    ) -> None:
-        """written=0 for a plans relation must be a trivial pass even when
-        pg_count > 0 (idempotent re-run: the source had no new rows to write,
-        but PG already has rows from a prior run).  The old guard pg_count > written
-        incorrectly flagged this as a mismatch (CRE Medium, 2026-06-12)."""
-        from nexus.commands.storage_cmd import _verify_pg_counts
-
-        def _fake_run(cmd, **kw):
-            class _R:
-                returncode = 0
-                stdout = "50"  # PG has 50 rows from a prior run
-            return _R()
-
-        report = {
-            "stores": [
-                {
-                    "store": "plans",
-                    "tables": [{"table": "plans", "written": 0}],  # nothing new
-                }
-            ]
-        }
-        creds = {
-            "PG_PORT": "5499",
-            "NX_DB_ADMIN_USER": "nexus_admin",
-            "NX_DB_ADMIN_PASS": "secret",
-            "NX_DB_URL": "postgresql://127.0.0.1:5499/nexus",
-        }
-        with (
-            patch("nexus.commands.storage_cmd._psql_for_verify", return_value="/usr/bin/psql"),
-            patch("subprocess.run", side_effect=_fake_run),
-        ):
-            status, notes = _verify_pg_counts(report, creds)
-
-        # written=0 -> trivial pass even if pg_count > 0
-        assert status == "verified", (
-            "written=0 on a dedup-relation must be a trivial pass "
-            "(idempotent re-run, no new source rows)"
-        )
-        assert notes == [], "No convergence notes when written=0 (no delta)"

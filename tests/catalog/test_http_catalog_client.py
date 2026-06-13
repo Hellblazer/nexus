@@ -158,6 +158,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"imported": 1})
         elif op == "/import/link":
             self._send_json({"imported": 1})
+        elif op == "/verify/relation-counts":
+            # echo a count for each requested whitelisted relation
+            rels = body.get("relations", [])
+            self._send_json({"counts": {r: 42 for r in rels}})
         else:
             self._send_json({"ok": True})
 
@@ -336,6 +340,19 @@ class TestHttpCatalogClientRoundTrip:
     def test_chashes_for_collection(self, client: HttpCatalogClient) -> None:
         chashes = client.chashes_for_collection("code__test__v1")
         assert "abc123" in chashes
+
+    def test_relation_counts_unwraps_counts_and_casts_int(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # RDR-159 P-1a: POST /verify/relation-counts → {"counts": {rel: n}};
+        # client unwraps the "counts" key and casts to int.
+        counts = client.relation_counts(["nexus.memory", "nexus.plans"])
+        assert counts == {"nexus.memory": 42, "nexus.plans": 42}
+
+    def test_relation_counts_empty_short_circuits(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        assert client.relation_counts([]) == {}
 
     def test_docs_for_chashes_uses_tumblers_key(self, client: HttpCatalogClient) -> None:
         # Real server returns {"tumblers": [tumbler_string, ...]} — flat list of tumblers,

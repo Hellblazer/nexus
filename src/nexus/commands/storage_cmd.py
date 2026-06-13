@@ -1284,29 +1284,6 @@ def _write_report(report: dict, path: Path) -> None:
 #: impossible).  written=0 is a trivial pass for idempotent re-runs.
 #: Relations that need the convergence-aware check are listed in
 #: :data:`_VERIFY_TABLES_DEDUP`.
-_VERIFY_TABLES: dict[tuple[str, str], str] = {
-    ("memory", "memory"): "nexus.memory",
-    ("plans", "plans"): "nexus.plans",
-    ("taxonomy", "topics"): "nexus.topics",
-    ("taxonomy", "topic_assignments"): "nexus.topic_assignments",
-    ("taxonomy", "topic_links"): "nexus.topic_links",
-    ("telemetry", "hook_failures"): "nexus.hook_failures",
-    ("telemetry", "nx_answer_runs"): "nexus.nx_answer_runs",
-    ("chash", "chash_index"): "nexus.chash_index",
-    # nexus-d583z (a): actual schema relations are catalog_documents/catalog_links,
-    # not documents/links (which do not exist and cause psql rc=1 -> indeterminate).
-    ("catalog", "documents"): "nexus.catalog_documents",
-    ("catalog", "links"): "nexus.catalog_links",
-}
-
-#: Relations with DO UPDATE convergence semantics: pg_count may be less than
-#: report_written when multiple source rows share the same natural key (they
-#: converge onto one PG row via DO UPDATE).  For these relations the check is
-#: pg_count > 0 AND pg_count <= written (not >=); written=0 is a trivial pass.
-#: nexus-d583z (c): plans converge on UNIQUE (tenant_id, project, query).
-_VERIFY_TABLES_DEDUP: frozenset[str] = frozenset({"nexus.plans"})
-
-
 def _emit_store_report(
     collector, sqlite_path: Path, report_path: Path | None,
 ) -> None:
@@ -1329,300 +1306,6 @@ def _emit_store_report(
     out_path = report_path or _default_report_path(migration_id)
     _write_report(report, out_path)
     click.echo(f"report: {out_path}")
-
-
-def _psql_for_verify() -> str | None:
-    """psql via the same discovery the provisioner uses; PATH fallback.
-
-    Self-contained (no dependency on the supervisor-side helpers) so the
-    orchestrator works on any branch state.
-    """
-    try:
-        from nexus.db.pg_provision import discover_pg_binaries
-
-        return str(discover_pg_binaries().psql)
-    except Exception:
-        import shutil
-
-        return shutil.which("psql")
-
-
-def _verify_db_name(creds: dict) -> str:
-    import re as _re
-
-    url = creds.get("NX_DB_ADMIN_URL", "") or creds.get("NX_DB_URL", "")
-    m = _re.search(r"postgresql://[^/]+/([^?]+)", url)
-    return m.group(1) if m else "nexus"
-
-
-def _verify_pg_counts(report: dict, creds: dict) -> tuple[str, list[str]]:
-    """Count-verify the migration against Postgres.
-
-    Returns ``(status, convergence_notes)`` where *status* is one of
-    ``"verified"`` | ``"mismatch"`` | ``"indeterminate"`` and
-    *convergence_notes* is a list of human-readable delta strings for
-    relations that experienced DO UPDATE key convergence (source rows >
-    landed rows).  The notes are empty on non-verified outcomes.
-
-    nexus-r0esi: an unresolvable psql / unreadable target is
-    ``indeterminate`` and the CLI surfaces it LOUDLY — never the hollow
-    'SKIP … all passed' the prod-copy.sh harness produced.
-    """
-    import subprocess
-
-    psql = _psql_for_verify()
-    port = creds.get("PG_PORT", "")
-    user = creds.get("NX_DB_ADMIN_USER", "") or creds.get("NX_DB_USER", "")
-    password = (
-        creds.get("NX_DB_ADMIN_PASS", "")
-        if creds.get("NX_DB_ADMIN_USER", "")
-        else creds.get("NX_DB_PASS", "")
-    )
-    if psql is None or not port or not user:
-        return "indeterminate", []
-
-    written_by_table: dict[str, int] = {}
-    for store in report.get("stores", []):
-        for table in store.get("tables", []):
-            key = (store["store"], table["table"])
-            relation = _VERIFY_TABLES.get(key)
-            if relation is not None:
-                written_by_table[relation] = (
-                    written_by_table.get(relation, 0) + int(table["written"])
-                )
-    if not written_by_table:
-        return "indeterminate", []  # nothing mappable to verify is NOT a pass
-    # NOTE: written=0 for a mapped table passes trivially (pg_count >= 0) —
-    # correct for idempotent re-runs and empty sources; the gate predicate
-    # is the report's total_failed, never this advisory check.
-
-    # nexus-d583z (b): counts run as NX_DB_ADMIN_USER which is subject to
-    # FORCE RLS with no tenant GUC active — every count returns 0.  Fix: prefix
-    # each COUNT query with ``SET nexus.tenant = 'default'`` in the SAME psql
-    # -c so both statements execute in one session.  The migration writes under
-    # the DEFAULT_TENANT ("default"), derived from HttpMemoryStore/HttpPlanLibrary
-    # DEFAULT_TENANT constants — hard-coded here to the same string constant.
-    _VERIFY_TENANT = "default"
-
-    env = dict(os.environ)
-    env["PGPASSWORD"] = password
-    convergence_notes: list[str] = []
-    for relation, written in written_by_table.items():
-        # Build a single -c argument: SET GUC then COUNT, separated by semicolon.
-        # psql runs both in one session so the GUC applies to the SELECT.
-        count_query = (
-            f"SET nexus.tenant = '{_VERIFY_TENANT}'; "
-            f"SELECT count(*) FROM {relation}"
-        )
-        try:
-            result = subprocess.run(
-                [
-                    str(psql), "-h", "127.0.0.1", "-p", str(port), "-U", user,
-                    "-d", _verify_db_name(creds), "-t", "-A", "-X",
-                    "-c", count_query,
-                ],
-                env=env, capture_output=True, text=True, timeout=15,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return "indeterminate", []
-        if result.returncode != 0:
-            return "indeterminate", []
-        try:
-            # psql -t -A emits one line per statement; the count is the LAST line.
-            pg_count = int(result.stdout.strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            return "indeterminate", []
-
-        # nexus-d583z (c): relations with DO UPDATE convergence (e.g. plans:
-        # UNIQUE (tenant_id, project, query)) land fewer rows than acks when
-        # multiple source rows share the same key (each ack updates the same
-        # row, not a new row).  acks count source rows processed; delta =
-        # source-duplicate convergence, by schema design.  written=0 is a
-        # trivial pass (idempotent re-run with nothing new to write).
-        if relation in _VERIFY_TABLES_DEDUP:
-            if written > 0 and pg_count == 0:
-                _log.error(
-                    "migrate_all_verify_mismatch",
-                    relation=relation,
-                    pg_count=pg_count,
-                    report_written=written,
-                    note="convergence-aware: 0 rows landed from non-zero write count",
-                )
-                return "mismatch", []
-            if written > 0 and pg_count > written:
-                # truly impossible under DO UPDATE: landed MORE than sent
-                _log.error(
-                    "migrate_all_verify_mismatch",
-                    relation=relation,
-                    pg_count=pg_count,
-                    report_written=written,
-                    note="convergence-aware: pg_count exceeds written (impossible under DO UPDATE)",
-                )
-                return "mismatch", []
-            delta = written - pg_count
-            if delta > 0:
-                # written > 0 already checked above, so delta > 0 means some
-                # source rows converged onto existing PG rows via DO UPDATE.
-                _log.info(
-                    "migrate_all_verify_convergence_collapse",
-                    relation=relation,
-                    pg_count=pg_count,
-                    report_written=written,
-                    collapsed=delta,
-                    note="source-duplicate convergence via DO UPDATE unique key — by design",
-                )
-                # Record for the operator-facing artifact so the delta is
-                # visible in the report string, not just in structlog.
-                convergence_notes.append(
-                    f"{relation}: {pg_count} rows from {written} source rows; "
-                    f"{delta} converged onto existing keys by UNIQUE constraint "
-                    f"via DO UPDATE — by design"
-                )
-        else:
-            if pg_count < written:
-                _log.error(
-                    "migrate_all_verify_mismatch",
-                    relation=relation,
-                    pg_count=pg_count,
-                    report_written=written,
-                )
-                return "mismatch", []
-    return "verified", convergence_notes
-
-
-def _build_store_etls(sources):
-    """The seven RDR-152 ETL adapters, registered against the RDR-153
-    ladder (``nexus.migration.etl_registry``). Each runner constructs its
-    HTTP store lazily so a single-store failure surfaces inside the
-    orchestrated run, not at registry build time."""
-    from nexus.migration.etl_registry import StoreEtl
-
-    def _memory(sources, collector):
-        from nexus.db.t2.http_memory_store import HttpMemoryStore
-        from nexus.db.t2.memory_etl import migrate_memory_rows
-
-        store = HttpMemoryStore()
-        try:
-            return migrate_memory_rows(
-                sources.sqlite_path, store, collector=collector,
-            )
-        finally:
-            store.close()
-
-    def _plans(sources, collector):
-        from nexus.db.t2.http_plan_library import HttpPlanLibrary
-        from nexus.db.t2.plan_etl import migrate_plan_rows
-
-        store = HttpPlanLibrary()
-        try:
-            return migrate_plan_rows(
-                sources.sqlite_path, store, collector=collector,
-            )
-        finally:
-            store.close()
-
-    def _telemetry(sources, collector):
-        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
-        from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
-
-        store = HttpTelemetryStore()
-        try:
-            return migrate_telemetry_rows(
-                sources.sqlite_path, store, collector=collector,
-            )
-        finally:
-            store.close()
-
-    def _taxonomy(sources, collector):
-        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
-        from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows
-
-        store = HttpTaxonomyStore()
-        try:
-            return migrate_taxonomy_rows(
-                sources.sqlite_path, store, collector=collector,
-            )
-        finally:
-            store.close()
-
-    def _aspects(sources, collector):
-        # nexus-iy5se: run only document_aspects, highlights, and promotion_log
-        # here.  The queue import (aspect_extraction_queue) has a FK into
-        # catalog_documents and must run AFTER catalog -- see _aspects_queue.
-        from nexus.db.t2.aspects_etl import migrate_without_queue
-        from nexus.db.t2.http_document_aspects_store import (
-            HttpDocumentAspectsStore,
-        )
-        from nexus.db.t2.http_document_highlights_store import (
-            HttpDocumentHighlightsStore,
-        )
-
-        aspects = HttpDocumentAspectsStore()
-        highlights = HttpDocumentHighlightsStore()
-        try:
-            return migrate_without_queue(
-                sources.sqlite_path, aspects, highlights,
-                collector=collector,
-                catalog_db_path=sources.catalog_db_path,
-            )
-        finally:
-            for st in (aspects, highlights):
-                with contextlib.suppress(Exception):
-                    st.close()
-
-    def _aspects_queue(sources, collector):
-        # nexus-iy5se: queue import runs AFTER catalog so catalog_documents is
-        # populated and fk_aspect_queue_catalog_doc does not reject valid rows.
-        from nexus.db.t2.aspects_etl import migrate_queue
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
-
-        queue = HttpAspectQueue()
-        try:
-            return migrate_queue(
-                sources.sqlite_path, queue,
-                collector=collector,
-                catalog_db_path=sources.catalog_db_path,
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                queue.close()
-
-    def _chash(sources, collector):
-        from nexus.db.t2.chash_etl import migrate_chash_rows
-        from nexus.db.t2.http_chash_index import HttpChashIndex
-
-        store = HttpChashIndex()
-        try:
-            return migrate_chash_rows(
-                sources.sqlite_path, store, collector=collector,
-            )
-        finally:
-            store.close()
-
-    def _catalog(sources, collector):
-        from nexus.catalog.factory import make_catalog_client_for_migration
-        from nexus.db.t2.catalog_etl import migrate_catalog
-
-        token = os.environ.get("NX_SERVICE_TOKEN", "")
-        client = make_catalog_client_for_migration(base_url=None, token=token)
-        try:
-            return migrate_catalog(
-                sources.catalog_db_path, client, collector=collector,
-            )
-        finally:
-            client.close()
-
-    return [
-        StoreEtl("memory", _memory),
-        StoreEtl("plans", _plans),
-        StoreEtl("telemetry", _telemetry),
-        StoreEtl("taxonomy", _taxonomy),
-        StoreEtl("aspects", _aspects),
-        StoreEtl("chash", _chash),
-        StoreEtl("catalog", _catalog),
-        # nexus-iy5se: queue runs after catalog (FK safety on virgin targets)
-        StoreEtl("aspects_queue", _aspects_queue),
-    ]
 
 
 @migrate_group.command(name="all")
@@ -1650,63 +1333,46 @@ def migrate_all_cmd(
     db_path: Path | None,
     catalog_db_path: Path | None,
 ) -> None:
-    """Run ALL seven store migrations in the RDR-152 ladder order and emit
+    """Run ALL eight store migrations in the RDR-152 ladder order and emit
     ONE migration report (RDR-153 Phase 3).
 
     Order: memory → plans → telemetry → taxonomy → aspects → chash →
-    catalog LAST (graph-heavy). One shared IssueCollector spans the run;
-    the report is the triage/recovery artifact and the Phase-4 gate input
-    (``summary.total_failed == 0``). Post-run count verification is LOUD
-    when it cannot run (nexus-r0esi: never SKIP-then-'all passed').
+    catalog → aspects_queue (the last two trail so FK targets exist). One
+    shared IssueCollector spans the run; the report is the triage/recovery
+    artifact and the Phase-4 gate input (``summary.total_failed == 0``).
+    Post-run count verification is LOUD when it cannot run (nexus-r0esi:
+    never SKIP-then-'all passed').
     """
-    import uuid as _uuid
-
-    from nexus.migration.etl_registry import EtlSources, ordered
-    from nexus.migration.migration_report import IssueCollector, build_report
+    from nexus.migration.etl_registry import EtlSources
+    from nexus.migration.orchestrator import migrate_all
 
     sources = EtlSources(
         sqlite_path=_resolve_db_path(db_path),
         catalog_db_path=_resolve_catalog_db_path(catalog_db_path),
     )
-    collector = IssueCollector()
-    migration_id = str(_uuid.uuid4())
 
-    for etl in ordered(_build_store_etls(sources)):
-        click.echo(f"migrating {etl.store} …")
+    def _on_store(store: str) -> None:
+        click.echo(f"migrating {store} …")
         sys.stdout.flush()
-        try:
-            etl.run(sources, collector)
-        except Exception as exc:
-            # A store-level crash is recorded, the run continues — the
-            # report must cover every store it attempted (never silent).
-            collector.record_event(
-                etl.store, etl.store,
-                issue_class="unexpected",
-                constraint=etl.store,
-                reason=f"store-level ETL crash: {exc}",
-                action="failed",
-            )
-            click.echo(f"  {etl.store}: CRASHED — {exc}", err=True)
 
-    report = build_report(
-        collector,
-        source={
-            "sqlite": str(sources.sqlite_path),
-            "catalog_db": str(sources.catalog_db_path),
-        },
-        target={"service_url": os.environ.get("NX_SERVICE_URL", "(lease)")},
-        migration_id=migration_id,
+    def _on_store_failed(store: str, exc: Exception) -> None:
+        # Real-time crash signal so an operator watching a multi-minute run
+        # sees which store blew up at crash time, not only in the summary.
+        click.echo(f"  {store}: CRASHED — {exc}", err=True)
+        sys.stderr.flush()
+
+    # RDR-159 P-1a: the orchestration lives in nexus.migration now (the
+    # guided upgrade engine + the conexus veneer consume the same callable).
+    # Count verification routes through the service REST endpoint, not psql
+    # (RDR-152 bars a direct Python PG connection). The verdict is folded
+    # INTO the report so the artifact is self-contained for triage.
+    report = migrate_all(
+        sources, on_store=_on_store, on_store_failed=_on_store_failed,
     )
-    # Verification runs BEFORE the single artifact write so its verdict is
-    # recorded IN the report (P3 critique S1: the artifact must be
-    # self-contained for the Phase-4 triage surface — an operator reading
-    # the JSON tomorrow must see whether counts were checked).
-    verification, convergence_notes = _run_verification(report)
-    report["verification"] = verification
-    if convergence_notes:
-        report["verification_convergence_notes"] = convergence_notes
 
-    out_path = report_path or _default_report_path(migration_id)
+    _echo_verification(report)
+
+    out_path = report_path or _default_report_path(report["migration_id"])
     _write_report(report, out_path)
 
     summary = report["summary"]
@@ -1722,33 +1388,26 @@ def migrate_all_cmd(
             f"migration is NOT clean — total_failed={summary['total_failed']}; "
             f"triage with: nx storage migration-report show {out_path}"
         )
-    if verification == "mismatch":
+    if report["verification"] == "mismatch":
         raise click.ClickException(
             "VERIFICATION MISMATCH — Postgres counts are below the report's "
             "written totals; the report and logs identify the tables."
         )
 
 
-def _run_verification(report: dict) -> tuple[str, list[str]]:
-    """Resolve creds + run :func:`_verify_pg_counts`; print the verdict
-    loudly (nexus-r0esi: indeterminate is a WARNING, never a pass).
+def _echo_verification(report: dict) -> None:
+    """Print the report's verification verdict LOUDLY (nexus-r0esi:
+    indeterminate is a WARNING, never a silent pass).
 
-    Returns ``(status, convergence_notes)``."""
-    from nexus.config import nexus_config_dir
-    from nexus.daemon.storage_service_daemon import _read_pg_credentials
-
-    creds_path = nexus_config_dir() / "pg_credentials"
-    creds: dict = {}
-    if creds_path.exists():
-        try:
-            creds = _read_pg_credentials(creds_path)
-        except OSError:
-            creds = {}
-    verification, convergence_notes = _verify_pg_counts(report, creds)
+    The verdict was computed by :func:`nexus.migration.orchestrator.migrate_all`
+    and is already recorded in ``report["verification"]``; this only renders
+    it for the operator.
+    """
+    verification = report.get("verification", "indeterminate")
+    convergence_notes = report.get("verification_convergence_notes", [])
+    checked = report.get("relations_checked", 0)
     if verification == "verified":
-        checked = len(_VERIFY_TABLES)
         if convergence_notes:
-            # Emit delta prominently so the operator sees it without tailing logs.
             notes_str = "; ".join(convergence_notes)
             click.echo(
                 f"verification: verified ({checked} relations checked; "
@@ -1763,14 +1422,13 @@ def _run_verification(report: dict) -> tuple[str, list[str]]:
         click.echo("verification: VERIFICATION MISMATCH", err=True)
     else:
         click.echo(
-            "verification: VERIFICATION INDETERMINATE — psql/credentials "
+            "verification: VERIFICATION INDETERMINATE — count source "
             "unresolved; counts were NOT checked (this is a warning, not a "
             "pass — fix the environment and re-run, the ETL is idempotent)",
             err=True,
         )
     sys.stdout.flush()
     sys.stderr.flush()
-    return verification, convergence_notes
 
 
 def _resolve_catalog_db_path(explicit: Path | None) -> Path:

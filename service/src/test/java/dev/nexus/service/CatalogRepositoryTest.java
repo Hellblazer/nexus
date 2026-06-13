@@ -275,6 +275,40 @@ class CatalogRepositoryTest {
         assertThat(count).isGreaterThan(0);
     }
 
+    /**
+     * RDR-159 P-1a (nexus-0wz93): relationCounts returns tenant-scoped row
+     * counts for whitelisted migration-verify relations and OMITS any
+     * relation outside the whitelist (no arbitrary relation counts).
+     *
+     * <p>Scoped to the catalog relations the svc role can SELECT
+     * (catalog_documents / catalog_links); other verify relations
+     * (nexus.memory, …) are exercised in production where the service role
+     * holds the grants.
+     */
+    @Test @Order(40)
+    void migration_relationCounts_whitelisted_and_tenant_scoped() {
+        var counts = repo.relationCounts(TENANT_A, List.of(
+            "nexus.catalog_documents",
+            "nexus.catalog_links",
+            "nexus.pg_class",            // not whitelisted → omitted
+            "nexus.catalog_owners"       // not in the verify set → omitted
+        ));
+        // catalog_documents has rows for TENANT_A from earlier ordered tests
+        assertThat(counts).containsKey("nexus.catalog_documents");
+        assertThat(counts.get("nexus.catalog_documents")).isGreaterThan(0L);
+        assertThat(counts).containsKey("nexus.catalog_links");
+        // non-whitelisted relations are silently omitted
+        assertThat(counts).doesNotContainKey("nexus.pg_class");
+        assertThat(counts).doesNotContainKey("nexus.catalog_owners");
+    }
+
+    @Test @Order(41)
+    void migration_relationCounts_is_tenant_isolated() {
+        // TENANT_B has no catalog_documents; its count is 0, not TENANT_A's.
+        var counts = repo.relationCounts(TENANT_B, List.of("nexus.catalog_documents"));
+        assertThat(counts.get("nexus.catalog_documents")).isEqualTo(0L);
+    }
+
     @Test @Order(16)
     void document_documentsByCollection() {
         repo.upsertDocument(TENANT_A, Map.of(
