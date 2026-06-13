@@ -633,7 +633,17 @@ class HttpVectorClient:
         return results
 
     def get_by_id(self, collection: str, doc_id: str) -> dict | None:
-        """Fetch a single chunk by ID."""
+        """Fetch a single chunk by ID.
+
+        Returns a FLAT dict of ``id`` + ``content`` + all metadata fields, to
+        match ``T3Database.get_by_id`` (the drop-in oracle). nexus-ij9hg: the
+        prior shape (``id``/``document``/nested ``metadata``) diverged from the
+        SQLite oracle, so MCP ``store_get`` / ``store_get_many`` and
+        ``nx store get`` — which read ``entry["content"]`` / ``entry["title"]``
+        etc. — silently rendered EMPTY content in service mode (the
+        post-P4a default). That is the nexus-7zuzz behavioural-divergence class
+        signature parity cannot catch.
+        """
         try:
             result = _post(
                 "/v1/vectors/store-get",
@@ -648,10 +658,11 @@ class HttpVectorClient:
             return None
         docs = result.get("documents") or []
         metas = result.get("metadatas") or []
+        meta = metas[0] if metas else {}
         return {
             "id": ids[0],
-            "document": docs[0] if docs else "",
-            "metadata": metas[0] if metas else {},
+            "content": docs[0] if docs else "",
+            **(meta if isinstance(meta, dict) else {}),
         }
 
     def delete_by_id(self, collection: str, doc_id: str) -> bool:

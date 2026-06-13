@@ -363,3 +363,92 @@ def test_indexer_seam_b_index_search_round_trip(
         f"None of the search results contain the indexed phrase.\n"
         f"Got: {result_texts}"
     )
+
+
+# ── nexus-ij9hg: MCP store_put -> store_get round-trip (7zuzz regression pin) ──
+
+
+def test_store_put_get_roundtrip_ij9hg(
+    local_service: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Service-mode MCP store_put -> store_get -> search round-trip.
+
+    nexus-ij9hg (critic SIG-3 on nexus-7zuzz): signature-parity tests pin
+    request shapes via monkeypatched POSTs, but the incident class — store_put
+    SUCCEEDS yet the content is not findable (store_put live-broken for a day+,
+    HttpVectorClient ``collection`` vs ``collection_name`` / ``collections`` vs
+    ``collection_names`` kwarg drift vs T3Database) — is only detectable
+    END-TO-END. This drives the real MCP store_put/store_get/search code path
+    against a live HttpVectorClient + running nexus-service and asserts the
+    stored content round-trips AND carries content_type + embedding_model
+    metadata. Signature parity alone cannot catch this behavioural divergence.
+    """
+    base_url, token = local_service
+
+    # Route the MCP T3 path through the live service (HttpVectorClient).
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_SERVICE_URL", base_url)
+    monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+    monkeypatch.delenv("NX_LOCAL", raising=False)
+    monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+
+    from nexus.db.http_vector_client import (
+        get_http_vector_client,
+        reset_http_vector_client_for_tests,
+    )
+    reset_http_vector_client_for_tests()
+
+    from nexus.mcp.core import store_get, store_put
+
+    collection = "knowledge__ij9hg-roundtrip__minilm-l6-v2-384__v1"
+    marker = "ij9hg_roundtrip_marker_unique_phrase_7zuzz"
+    content = (
+        "This document pins the store_put round-trip in service mode.\n"
+        f"It contains the unique phrase: {marker}.\n"
+    )
+
+    # 1) store_put MUST succeed and surface a doc_id (not an Error: string).
+    put_result = store_put(content, collection=collection, title="ij9hg pin")
+    assert put_result.startswith("Stored: "), (
+        f"store_put failed in service mode: {put_result!r} "
+        "(the nexus-7zuzz live-broken class)"
+    )
+    doc_id = put_result.removeprefix("Stored: ").split(" -> ", 1)[0].strip()
+    assert len(doc_id) == 32, f"unexpected doc_id from store_put: {doc_id!r}"
+
+    # 2) store_get MUST return the original content — put-succeeds-but-not-
+    #    findable is the exact incident. Content fidelity is the pin.
+    got = store_get(doc_id, collection=collection)
+    assert "Not found" not in got and not got.startswith("Error:"), (
+        f"store_get could not retrieve a just-stored doc_id: {got!r}"
+    )
+    assert marker in got, (
+        f"store_get did not return the stored content (round-trip broken):\n{got}"
+    )
+
+    # 3) Metadata keys content_type + embedding_model must be present on the
+    #    stored chunk (denormalised identity the read/search path relies on).
+    client = get_http_vector_client()
+    entry = client.get_by_id(collection, doc_id)
+    assert entry is not None, "get_by_id returned None for a just-stored chunk"
+    # Assert the FLAT T3Database shape DIRECTLY — not entry.get("metadata", entry),
+    # which would pass for BOTH the flat fix and the old nested shape (the bug),
+    # making the pin non-discriminating (review C1). These fail if get_by_id
+    # regresses to {id, document, metadata:{...}}.
+    assert "metadata" not in entry, (
+        f"get_by_id returned the old nested shape (bug): keys={sorted(entry)}"
+    )
+    assert "content" in entry, f"get_by_id missing flat 'content': keys={sorted(entry)}"
+    assert "content_type" in entry, f"content_type missing from flat entry: {sorted(entry)}"
+    assert "embedding_model" in entry, f"embedding_model missing from flat entry: {sorted(entry)}"
+
+    # 4) The content must be findable via semantic search (collection_names
+    #    kwarg — the exact T3Database-vs-HttpVectorClient drift of nexus-7zuzz).
+    results = client.search(marker, [collection], n_results=5)
+    assert results, "search returned no results — stored chunk is not findable"
+    assert any(marker in r.get("content", "") for r in results), (
+        f"search results do not contain the stored marker: "
+        f"{[r.get('content', '')[:60] for r in results]}"
+    )
