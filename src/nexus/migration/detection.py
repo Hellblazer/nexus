@@ -76,7 +76,10 @@ def wired_models(*, voyage_key_present: bool) -> frozenset[str]:
 
 
 def classify_model_support(
-    model: str | None, *, voyage_key_present: bool
+    model: str | None,
+    *,
+    voyage_key_present: bool,
+    wired: frozenset[str] | None = None,
 ) -> tuple[Support, str]:
     """Resolve a model token to a support class + diagnostic reason.
 
@@ -88,6 +91,13 @@ def classify_model_support(
     * voyage model + no key → point at the cheap fix (add ``NX_VOYAGE_API_KEY``);
     * a model wired by no embedder in any mode (e.g. bge-768) → point at the
       expensive fix (re-index), distinct from the credential diagnostic.
+
+    ``wired`` overrides the wired-model set used for the membership decision.
+    P0 (detection) leaves it ``None`` and uses the pure deployment-mode
+    :func:`wired_models` (no running service). The RDR-159 P1 pre-gate passes
+    the LIVE ``EmbedderRouter`` registry here so the classification is resolved
+    against what the service actually wired — belt-and-suspenders over the pure
+    function, never a static onnx-vs-voyage assumption.
     """
     if model is None:
         return "unsupported", (
@@ -95,7 +105,8 @@ def classify_model_support(
             "(<content_type>__<owner>__<model>__v<n>) — cannot resolve an "
             "embedding model; re-index under a conformant name"
         )
-    wired = wired_models(voyage_key_present=voyage_key_present)
+    if wired is None:
+        wired = wired_models(voyage_key_present=voyage_key_present)
     if model == _ONNX_MODEL:
         return "supported-onnx-384", ""
     if model in wired:

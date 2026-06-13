@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""RDR-159 P1d (nexus-ue6g7.12): the per-collection-model pre-gate, idempotent
+service-stack provisioning, and the fresh-user no-op.
+
+Before any ETL call, the guided migration confirms every data-bearing
+collection's embedding model is actually servable. The authority is the LIVE
+service ``EmbedderRouter`` registry — the ``/version`` handshake's
+``embedding_models`` list (``EmbedderRouter.availableModels()``) — resolved by
+the service, NOT a static onnx-vs-voyage assumption on the client. This is a
+belt-and-suspenders confirmation over the P0 pure :func:`detection.wired_models`
+function (which is the source of truth pre-provisioning): when the service is
+unreachable the gate falls back to the pure deployment-mode floor, never to
+something weaker.
+
+Gate decisions (per data-bearing collection, RF-2 / gates S1 + C3):
+
+* model wired by the live service → PROCEED (onnx is wired in every mode);
+* voyage model not wired (service has no voyage embedder) → BLOCK with the
+  credential diagnostic (add ``NX_VOYAGE_API_KEY`` to the service) — gate C3;
+* a model wired by no embedder (e.g. bge-768) → BLOCK with the re-index
+  diagnostic — gate S1.
+
+A mixed store fires the gate only on its unsupported subset. Empty collections
+are not gated (nothing to migrate). A fresh user with no data-bearing leg is a
+clean no-op success.
+"""
+from __future__ import annotations
+
+from typing import Callable, Protocol, runtime_checkable
+
+import structlog
+
+from nexus.migration.detection import (
+    CollectionClassification,
+    DetectionReport,
+    classify_model_support,
+    wired_models,
+)
+
+_log = structlog.get_logger(__name__)
+
+
+@runtime_checkable
+class WiredModelSource(Protocol):
+    """Source of the set of embedding-model tokens the service has wired.
+
+    Returns ``None`` when the live set cannot be obtained (service down / older
+    JAR without the ``/version`` handshake), signalling the caller to fall back
+    to the pure deployment-mode floor.
+    """
+
+    def wired_models(self) -> frozenset[str] | None: ...
+
+
+class LiveServiceWiredModels:
+    """Default :class:`WiredModelSource`: the live ``EmbedderRouter`` registry.
+
+    Reads the running service's ``/version`` handshake (``embedding_models``)
+    via the same discovery every HTTP storage client uses. Any failure —
+    no lease, unreachable service, malformed payload — degrades to ``None`` so
+    the pre-gate falls back to the pure floor rather than failing the migration
+    on a transient probe error.
+    """
+
+    def wired_models(self) -> frozenset[str] | None:
+        try:
+            from nexus.daemon.jar_lifecycle import fetch_service_version
+            from nexus.db.service_endpoint import resolve_service_config
+
+            host, port, _token = resolve_service_config()
+            handshake = fetch_service_version(host, port)
+        except Exception as exc:  # noqa: BLE001 - probe must never raise upward
+            _log.debug("pregate_live_wired_unreachable", error=str(exc))
+            return None
+        if not isinstance(handshake, dict):
+            return None
+        models = handshake.get("embedding_models")
+        if not isinstance(models, list) or not models:
+            return None
+        return frozenset(str(m) for m in models)
+
+
+def resolve_wired_models(
+    source: WiredModelSource, *, voyage_key_present: bool
+) -> frozenset[str]:
+    """Return the live wired set, or the pure deployment-mode floor if absent.
+
+    Belt-and-suspenders: the live registry confirms what the service actually
+    wired; the pure :func:`wired_models` floor is used only when the live set
+    is unreachable. The result is never weaker than the floor (the live set, by
+    construction, is the deployment's true superset-or-equal of ONNX).
+    """
+    live = source.wired_models()
+    if live is not None:
+        return live
+    return wired_models(voyage_key_present=voyage_key_present)
+
+
+class ModelPreGateBlocked(RuntimeError):
+    """Raised before any ETL when one or more collections are unservable.
+
+    ``.blocked`` is the ``(collection, diagnostic)`` list; ``.collections`` is
+    the affected-collection names for a terse operator summary.
+    """
+
+    def __init__(self, blocked: list[tuple[str, str]]) -> None:
+        self.blocked = blocked
+        self.collections = [c for c, _ in blocked]
+        lines = "\n".join(f"  - {c}: {reason}" for c, reason in blocked)
+        super().__init__(
+            f"migration blocked: {len(blocked)} collection(s) use an embedding "
+            "model the service cannot serve. Resolve each before migrating "
+            "(no data has been touched):\n" + lines
+        )
+
+
+def assert_models_supported(
+    classifications: list[CollectionClassification] | tuple[CollectionClassification, ...],
+    *,
+    voyage_key_present: bool,
+    source: WiredModelSource | None = None,
+) -> None:
+    """Pre-gate: BLOCK before any ETL if a data-bearing collection is unservable.
+
+    Each data-bearing collection's model is re-resolved against the live wired
+    set (falling back to the pure floor). Empty collections are skipped. Raises
+    :class:`ModelPreGateBlocked` listing every affected collection; returns
+    ``None`` when every data-bearing collection is servable.
+    """
+    src = source if source is not None else LiveServiceWiredModels()
+    wired = resolve_wired_models(src, voyage_key_present=voyage_key_present)
+
+    blocked: list[tuple[str, str]] = []
+    for c in classifications:
+        if not c.has_data:
+            continue
+        support, reason = classify_model_support(
+            c.model, voyage_key_present=voyage_key_present, wired=wired
+        )
+        if support == "unsupported":
+            blocked.append((c.collection, reason))
+
+    if blocked:
+        _log.warning(
+            "pregate_blocked",
+            collections=[c for c, _ in blocked],
+            wired=sorted(wired),
+        )
+        raise ModelPreGateBlocked(blocked)
+    _log.info("pregate_clear", wired=sorted(wired))
+
+
+def ensure_service_stack(
+    *, is_up: Callable[[], bool], start: Callable[[], None]
+) -> bool:
+    """Idempotently ensure the service stack is up. Returns ``True`` iff it was
+    started here, ``False`` when it was already up (a no-op).
+
+    Callables are injected so the orchestrator wires the real probes
+    (``nx daemon service start`` / a health check) and tests stay hermetic.
+    """
+    if is_up():
+        _log.info("ensure_service_stack_already_up")
+        return False
+    _log.info("ensure_service_stack_starting")
+    start()
+    return True
+
+
+def is_fresh_user(report: DetectionReport) -> bool:
+    """True iff the detected footprint has no data-bearing leg.
+
+    A fresh user (no Chroma at all, or only empty collections) is a clean
+    no-op: there is nothing to migrate and the whole flow succeeds without
+    touching the service.
+    """
+    return not report.legs_with_data
