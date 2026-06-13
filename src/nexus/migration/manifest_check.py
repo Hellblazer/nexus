@@ -37,15 +37,23 @@ _MANIFEST_DIMS: tuple[int, ...] = (384, 768, 1024)
 
 
 def build_manifest_orphan_check(
-    catalog_client: Any, *, dims: tuple[int, ...] = _MANIFEST_DIMS
+    catalog_client: Any, *, dims: tuple[int, ...]
 ) -> Callable[[], int]:
     """Return a ``() -> int`` orphan-count check for the P3 validation gate.
 
+    ``dims`` are the embedding dims actually present in THIS migration (the
+    caller derives them from the detection report), NOT the static
+    384/768/1024 superset. Passing the static superset would check dims with no
+    data; the count leg (``verify_counts``) is the primary guard against a
+    partial T3 (an un-migrated collection reads target=0 -> mismatch -> block),
+    while this leg guards the catalog-empty (T2-absent) vacuous-pass.
+
     The returned callable:
 
-    1. probes ``relation_counts([nexus.catalog_documents])`` — an empty migrated
-       catalog means T2 has not run, so it raises :class:`ValidationCheckVacuous`
-       (the gate turns that into a loud block) rather than a false-clean zero;
+    1. probes ``relation_counts([nexus.catalog_documents])`` — distinguishing an
+       UNREACHABLE/absent relation from an EMPTY catalog, raising
+       :class:`ValidationCheckVacuous` (a loud block) for either rather than a
+       false-clean zero;
     2. calls ``manifest_backfill`` FIRST (locked P-1b order — pre-backfill
        NULL-collection rows read as false orphans);
     3. sums ``manifest_orphans(dim)["count"]`` across ``dims`` and returns it
@@ -55,9 +63,16 @@ def build_manifest_orphan_check(
     def _check() -> int:
         counts = catalog_client.relation_counts([_CATALOG_DOCS_RELATION])
         doc_count = counts.get(_CATALOG_DOCS_RELATION)
-        if not doc_count:
-            # 0 rows, or the relation absent (not whitelisted / unreachable):
-            # either way the orphan check cannot be non-vacuous here.
+        if doc_count is None:
+            # Relation absent from the result: not whitelisted, or the service
+            # is unreachable. Cannot validate — do not report a clean zero.
+            raise ValidationCheckVacuous(
+                "manifest-orphan check is vacuous — the migrated-catalog "
+                f"relation ({_CATALOG_DOCS_RELATION}) is unavailable (service "
+                "unreachable or not whitelisted). Cannot confirm orphans; "
+                "refusing a false-clean pass. Verify the service and re-validate."
+            )
+        if doc_count == 0:
             raise ValidationCheckVacuous(
                 "manifest-orphan check is vacuous — the migrated catalog "
                 f"({_CATALOG_DOCS_RELATION}) is empty, so T2 migrate-all has "

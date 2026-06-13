@@ -32,7 +32,12 @@ from pathlib import Path
 import pytest
 
 from nexus.migration.state import begin_migration, current_phase, mark_migrated
-from nexus.migration.validation import ValidationOutcome, validate_migration
+from nexus.migration.validation import (
+    ValidationChecks,
+    compose_validation_checks,
+    validate_migration,
+)
+from nexus.migration.validation import ValidationOutcome
 
 _FIXED_STARTED_AT = "2026-06-13T00:00:00+00:00"
 
@@ -104,21 +109,66 @@ def test_taxonomy_orphan_blocks_unlock() -> None:
     assert current_phase() == "migrated-failed"  # marker stays, still degraded-LOUD
 
 
-def test_taxonomy_floor_runs_regardless_of_other_legs() -> None:
+def test_all_legs_run_regardless_no_short_circuit() -> None:
     _set_migrated()
-    called = {"taxonomy": False}
+    called = {"taxonomy": 0, "counts": 0, "manifest": 0}
 
     def _taxonomy() -> list[str]:
-        called["taxonomy"] = True
-        return []
+        called["taxonomy"] += 1
+        return ["knowledge__x__minilm-l6-v2-384__v1"]  # blocking
 
-    # Even with a manifest orphan that would block, the taxonomy floor still runs.
+    def _counts() -> dict[str, tuple[int, int]]:
+        called["counts"] += 1
+        return {"code__a__minilm-l6-v2-384__v1": (10, 9)}  # blocking
+
+    def _manifest() -> int:
+        called["manifest"] += 1
+        return 5  # blocking
+
+    # Every leg blocks; the gate must still call ALL THREE exactly once
+    # (no short-circuit on the first failure).
     validate_migration(
-        taxonomy_check=_taxonomy,
-        count_check=_clean_counts,
-        manifest_orphan_check=lambda: 5,
+        taxonomy_check=_taxonomy, count_check=_counts, manifest_orphan_check=_manifest
     )
-    assert called["taxonomy"] is True  # never short-circuited away
+    assert called == {"taxonomy": 1, "counts": 1, "manifest": 1}
+
+
+# --------------------------------------------------------------------------
+# A check that RAISES is a hard block (migrated-failed), not a stranded sentinel
+# --------------------------------------------------------------------------
+
+
+def test_taxonomy_check_raise_blocks_not_strands_sentinel() -> None:
+    _set_migrated()
+
+    def _boom() -> list[str]:
+        raise RuntimeError("pgvector service unreachable")
+
+    outcome = validate_migration(
+        taxonomy_check=_boom,
+        count_check=_clean_counts,
+        manifest_orphan_check=_clean_manifest,
+    )
+    assert outcome.unlocked is False
+    assert any("taxonomy" in r and "could not be performed" in r for r in outcome.blocking_reasons)
+    # NOT left stranded at an unvalidated 'migrated' (which serves normally).
+    assert current_phase() == "migrated-failed"
+
+
+def test_count_check_raise_blocks_not_strands_sentinel() -> None:
+    _set_migrated()
+
+    def _boom() -> dict[str, tuple[int, int]]:
+        raise RuntimeError("count endpoint 503")
+
+    outcome = validate_migration(
+        taxonomy_check=_clean_taxonomy,
+        count_check=_boom,
+        manifest_orphan_check=_clean_manifest,
+    )
+    assert outcome.unlocked is False
+    assert any("count" in r.lower() and "could not be performed" in r for r in outcome.blocking_reasons)
+    assert current_phase() == "migrated-failed"
 
 
 # --------------------------------------------------------------------------
@@ -195,6 +245,52 @@ def test_stale_aspects_is_advisory_only_and_does_not_block_unlock() -> None:
 # --------------------------------------------------------------------------
 # Multiple blocks accumulate (no short-circuit) + rollback offered
 # --------------------------------------------------------------------------
+
+
+def test_compose_validation_checks_adapts_real_primitive_signatures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The P3→P4 seam: compose the differing real signatures onto the gate's
+    # zero-arg Callable contract so P4 does not re-derive them from fixtures.
+    seen: dict[str, object] = {}
+
+    def _fake_taxonomy(t2_db_path, vector_client):  # type: ignore[no-untyped-def]
+        seen["taxonomy_args"] = (t2_db_path, vector_client)
+        return []
+
+    def _fake_counts(read_client, vector_client, collections):  # type: ignore[no-untyped-def]
+        seen["count_args"] = (read_client, vector_client, collections)
+        return {c: (1, 1) for c in collections}
+
+    monkeypatch.setattr(
+        "nexus.migration.vector_etl.verify_taxonomy_consistency", _fake_taxonomy
+    )
+    monkeypatch.setattr("nexus.migration.vector_etl.verify_counts", _fake_counts)
+
+    class _Cat:
+        def relation_counts(self, relations):  # type: ignore[no-untyped-def]
+            return {"nexus.catalog_documents": 5}
+
+        def manifest_backfill(self):  # type: ignore[no-untyped-def]
+            return 0
+
+        def manifest_orphans(self, dim, *, limit=100):  # type: ignore[no-untyped-def]
+            return {"dim": dim, "count": 0, "orphans": []}
+
+    checks = compose_validation_checks(
+        t2_db_path="t2.db",
+        read_client="READ",
+        vector_client="VEC",
+        catalog_client=_Cat(),
+        collections=["code__a__minilm-l6-v2-384__v1"],
+        dims=(384,),
+    )
+    assert isinstance(checks, ValidationChecks)
+    assert checks.taxonomy_check() == []
+    assert seen["taxonomy_args"] == ("t2.db", "VEC")
+    assert checks.count_check() == {"code__a__minilm-l6-v2-384__v1": (1, 1)}
+    assert seen["count_args"] == ("READ", "VEC", ["code__a__minilm-l6-v2-384__v1"])
+    assert checks.manifest_orphan_check() == 0
 
 
 def test_multiple_blocks_accumulate_and_offer_rollback() -> None:

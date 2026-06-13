@@ -55,7 +55,7 @@ class _FakeCatalogClient:
 
 def test_vacuous_when_catalog_empty_raises_loud() -> None:
     client = _FakeCatalogClient(doc_count=0, orphans_by_dim={})
-    check = build_manifest_orphan_check(client)
+    check = build_manifest_orphan_check(client, dims=(1024,))
     with pytest.raises(ValidationCheckVacuous) as exc:
         check()
     assert "T2 migrate-all has not populated" in str(exc.value)
@@ -66,7 +66,7 @@ def test_vacuous_when_catalog_empty_raises_loud() -> None:
 
 def test_vacuous_when_relation_absent_raises_loud() -> None:
     client = _FakeCatalogClient(doc_count=None, orphans_by_dim={})
-    check = build_manifest_orphan_check(client)
+    check = build_manifest_orphan_check(client, dims=(1024,))
     with pytest.raises(ValidationCheckVacuous):
         check()
 
@@ -117,7 +117,7 @@ def test_vacuous_manifest_blocks_the_gate_loud() -> None:
     outcome = validate_migration(
         taxonomy_check=lambda: [],
         count_check=lambda: {"code__a__minilm-l6-v2-384__v1": (10, 10)},
-        manifest_orphan_check=build_manifest_orphan_check(client),
+        manifest_orphan_check=build_manifest_orphan_check(client, dims=(1024,)),
     )
     assert outcome.unlocked is False
     assert outcome.manifest_vacuous is True

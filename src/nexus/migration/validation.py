@@ -54,6 +54,49 @@ class ValidationCheckVacuous(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ValidationChecks:
+    """The three composed validation legs ready to hand to :func:`validate_migration`."""
+
+    taxonomy_check: Callable[[], list[str]]
+    count_check: Callable[[], dict[str, tuple[int, int]]]
+    manifest_orphan_check: Callable[[], int]
+
+
+def compose_validation_checks(
+    *,
+    t2_db_path: object,
+    read_client: object,
+    vector_client: object,
+    catalog_client: object,
+    collections: list[str],
+    dims: tuple[int, ...],
+) -> ValidationChecks:
+    """Compose the REAL validation legs from live clients (the P3→P4 seam).
+
+    Adapts the production primitives' differing signatures onto the gate's
+    zero-arg ``Callable`` contract so P4 (the CLI/veneer wiring) does not have to
+    rediscover them: ``verify_taxonomy_consistency(t2_db_path, vector_client)``,
+    ``verify_counts(read_client, vector_client, collections)``, and
+    ``build_manifest_orphan_check(catalog_client, dims=dims)``. ``dims`` are the
+    dims actually present in this migration (from the detection report), not the
+    static superset.
+    """
+    # Lazy imports: manifest_check imports ValidationCheckVacuous from this
+    # module, so a top-level import here would be circular.
+    from nexus.migration.manifest_check import build_manifest_orphan_check
+    from nexus.migration.vector_etl import (
+        verify_counts,
+        verify_taxonomy_consistency,
+    )
+
+    return ValidationChecks(
+        taxonomy_check=lambda: verify_taxonomy_consistency(t2_db_path, vector_client),
+        count_check=lambda: verify_counts(read_client, vector_client, collections),
+        manifest_orphan_check=build_manifest_orphan_check(catalog_client, dims=dims),
+    )
+
+
+@dataclass(frozen=True)
 class ValidationOutcome:
     """The validation verdict + the evidence behind it.
 
@@ -90,14 +133,35 @@ def validate_migration(
     block ``on_block(reason)`` leaves it ``migrated-failed`` and rollback is
     offered (not invoked). ``stale_aspects_count`` is advisory and never blocks.
     """
+    blocking_reasons: list[str] = []
+
+    # Every leg runs (no short-circuit). A leg that RAISES (e.g. the service is
+    # unreachable and verify_taxonomy_consistency raises) is a hard BLOCK, not a
+    # silent unlock: convert it to a blocking reason so the sentinel ends
+    # migrated-failed instead of stranded at an unvalidated `migrated` (the P2
+    # CRITICAL-1 class — a catchable in-process error must mark_failed).
+
     # The taxonomy floor runs first and unconditionally — it is the non-vacuous
     # check the production vacuous-pass (RDR-159 gap #2) lacked.
-    taxonomy_orphans = tuple(taxonomy_check())
-    counts = count_check()
-    count_mismatches = tuple(
-        name for name, (src, tgt) in counts.items() if src != tgt
-    )
-    count_indeterminate = len(counts) == 0
+    taxonomy_orphans: tuple[str, ...] = ()
+    try:
+        taxonomy_orphans = tuple(taxonomy_check())
+    except Exception as exc:  # noqa: BLE001 — recorded as a block, never silent
+        _log.warning("validation_taxonomy_check_raised", error=str(exc))
+        blocking_reasons.append(f"taxonomy: check could not be performed: {exc}")
+
+    count_mismatches: tuple[str, ...] = ()
+    count_indeterminate = False
+    try:
+        counts = count_check()
+        count_mismatches = tuple(
+            name for name, (src, tgt) in counts.items() if src != tgt
+        )
+        count_indeterminate = len(counts) == 0
+    except Exception as exc:  # noqa: BLE001 — recorded as a block, never silent
+        _log.warning("validation_count_check_raised", error=str(exc))
+        blocking_reasons.append(f"counts: check could not be performed: {exc}")
+
     # The manifest leg may signal it could not validate (empty migrated catalog
     # → a clean zero would be a FALSE pass). Treat that as a hard block, never a
     # silent unlock.
@@ -109,8 +173,10 @@ def validate_migration(
     except ValidationCheckVacuous as exc:
         manifest_vacuous = True
         manifest_vacuous_reason = str(exc)
+    except Exception as exc:  # noqa: BLE001 — recorded as a block, never silent
+        _log.warning("validation_manifest_check_raised", error=str(exc))
+        blocking_reasons.append(f"manifest: check could not be performed: {exc}")
 
-    blocking_reasons: list[str] = []
     if taxonomy_orphans:
         blocking_reasons.append(
             f"taxonomy: {len(taxonomy_orphans)} unresolved source_collection(s) "
