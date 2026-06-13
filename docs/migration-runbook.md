@@ -19,7 +19,7 @@ T2 `nexus_rdr/155-production-migration-complete`).
 
 `nx migrate-to-service` wraps and sequences everything in sections 2-6 into one
 survivable command: detect the Chroma footprint, set the cross-process
-migration sentinel (reads degrade-LOUD, never bare-empty), quiesce background
+migration sentinel (reads degraded-LOUD, never bare-empty), quiesce background
 indexing, pre-gate per-collection model support, run T2 `migrate all` then T3
 vectors for every detected leg, validate (taxonomy + counts + manifest
 orphans), and unlock on a clean verdict. On a validation block it leaves the
@@ -60,21 +60,30 @@ actually migrate before N+1 removes the escape hatch.
 **Gating the lift of `nexus-luxe6`** (the standing release blocker: develop is
 unreleasable until the service-stack install + user-migration story ships). The
 blocker lifts only when ALL of the following hold; do not close it on RDR-159
-completion alone:
+completion alone.
 
-1. The RDR-159 E2E oracle (bead `nexus-ue6g7.28`) is green: both upgrade paths,
-   the unsupported-model block, and the forced-failure rollback all proven.
+**RDR-159 phase deliverables** (satisfied when Phase 4 closes; verify the
+artifacts exist, not merely that the beads are marked done):
+
+1. The RDR-159 E2E oracle (bead `nexus-ue6g7.28`) is green across all five
+   scenarios: cloud/Voyage, local-only/ONNX, the unsupported-model block, the
+   forced-failure rollback, AND the two-leg-simultaneous run (local + cloud
+   migrated in one invocation, validation counting both legs via the composite
+   read client). The fifth scenario closes the only known integration gap in
+   the multi-leg path (unit-covered by `test_two_leg_composes_collections_and_dims`,
+   no E2E exercise until `.28` adds it).
 2. This runbook (bead `nexus-ue6g7.26`) is in place: the operator narrative and
-   this cadence.
-3. **External gate:** conexus `xr7.8.9` production-scale recall / hybrid-parity
-   go-live. The served backend must be proven at production scale.
-4. **External gate:** the deprecation-window cadence is actually running, i.e.
-   a migration-capable release N has shipped and the window is open, so N+1
-   (the Chroma deletion) has a release-N predecessor to follow.
+   this cadence. This is the act of authoring the document you are reading; it
+   is a phase prerequisite, not an independently re-checkable runtime gate.
 
-Items 3 and 4 are not engine code and are not satisfied by merging RDR-159; they
-are release-process facts that must be true in the world. Surface them
-explicitly when the blocker is considered for closure.
+**External gates** (NOT engine code; not satisfied by merging RDR-159; must be
+true in the world and surfaced explicitly at closure):
+
+3. conexus `xr7.8.9` production-scale recall / hybrid-parity go-live. The served
+   backend must be proven at production scale.
+4. The deprecation-window cadence is actually running, i.e. a migration-capable
+   release N has shipped and the window is open, so N+1 (the Chroma deletion)
+   has a release-N predecessor to follow.
 
 > **Do not start RDR-155 P4b (the Chroma deletion) until release N has shipped
 > and the window has opened.** P4b is release N+1 by construction. Starting it
