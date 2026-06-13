@@ -73,18 +73,28 @@ There are **two orthogonal axes**, and both must be handled:
   service re-embeds per-collection accordingly (ONNX for 384 collections, Voyage
   for voyage collections — `service/.../Main.java` `EmbedderRouter`).
 
-These axes are independent. The two user-facing **upgrade paths** are therefore:
+These axes are independent. The user-facing **upgrade paths**, keyed on the
+service's wired embedders (`EmbedderRouter.modelEmbedders`), are:
 
 1. **Cloud / Voyage user** — collections `*__voyage-*__v1` (1024-dim). Re-embed is
    server-side via Voyage; **requires `NX_VOYAGE_API_KEY`**.
 2. **Local-only / ONNX user** — collections `*__minilm-l6-v2-384__v1` (384-dim).
    Re-embed is server-side via local ONNX; **requires NO Voyage key**.
+3. **Unsupported-model collections** — a model segment the service wires in **no**
+   mode in the current deployment (e.g. `bge-base-en-v15-768`: present in the
+   Python `vector_etl._MODEL_DIMS` registry but absent from `EmbedderRouter` in both
+   local and cloud mode, so the service would 422-reject its upserts). These MUST be
+   **detected and BLOCKED pre-migration** with a diagnostic listing the affected
+   collections (re-index required) — never run into a `migrated-failed` dead end
+   (gate S1). This is why detection (RF-2) classifies model per-collection and
+   PRE-GATE checks each model against the live service's wired embedders, not just a
+   static ONNX-vs-Voyage assumption.
 
-A user may also be **mixed** (local Chroma holding some voyage collections). The
-gate and re-embed path are therefore **per-collection-model**, not global. (See
-§Proposed Solution PRE-GATE; this corrects gap #4 below, which an earlier draft
-hardened into an *unconditional* Voyage gate that would have blocked every
-local-only user.)
+A user may also be **mixed** (local Chroma holding voyage collections, or a mix of
+supported + unsupported models). The gate and re-embed path are therefore
+**per-collection-model**, resolved against the live service's embedder registry,
+not global. (This corrects gap #4 below, which an earlier draft hardened into an
+*unconditional* Voyage gate that would have blocked every local-only user.)
 
 ### What already exists (the proven primitives)
 
@@ -205,11 +215,15 @@ veneer) that **wraps and sequences** the proven primitives:
                (no Chroma) → no-op success.
 2. PROVISION   ensure the service stack is up (delegate to nx init --service /
                nx daemon service start); idempotent.
-3. QUIESCE     drain / suspend background indexing (aspect_worker, nx index);
-               required for the T3 count check (RF-6). Loud gate if it cannot.
-4. PRE-GATE    PER-COLLECTION-MODEL: if ANY to-migrate collection is voyage-model,
-               HARD-FAIL unless NX_VOYAGE_API_KEY is present. Local-only (all
-               onnx-384) proceeds with NO key. (Mixed: gate on the voyage subset.)
+3. QUIESCE     CROSS-PROCESS suspend of background indexing via the migration-state
+               sentinel (every aspect worker + nx index polls it); required for the
+               T3 count check (RF-6). PRE-GATE verifies no live cross-process
+               aspect-worker write-locks remain; BLOCK with offending pids if they do.
+4. PRE-GATE    PER-COLLECTION-MODEL, resolved against the live service embedder
+               registry: (a) unsupported-model collections (no wired embedder, e.g.
+               bge-768) → BLOCK with a re-index diagnostic; (b) voyage-model
+               collections → HARD-FAIL unless NX_VOYAGE_API_KEY present; (c)
+               onnx-384 → proceed with NO key. Mixed: evaluate each subset.
 5. SERVE-MODE  enter "migrating" state: the CLI/MCP serve degraded-with-LOUD-warning
                ("knowledge migrating — results incomplete until upgrade completes"),
                NEVER silent empty results (gate C1). Chroma is not re-served (it is
@@ -226,25 +240,43 @@ veneer) that **wraps and sequences** the proven primitives:
                keep Chroma intact, leave the marker set (still degraded-loud).
 ```
 
-### Serving-window state machine (gate C1)
+### Cross-process migration state (gates C1 + S2 — one mechanism)
 
-The adversarial moment: post-P4a the service serves pgvector unconditionally, but an
-upgrading user's pgvector is **empty** at step 6 and Chroma serving is retired. The
-flow MUST NOT let a user query an empty index mid-migration and conclude their data
-is lost. A **migration state marker** (`~/.config/nexus/migration.state` or a T2
-row) gates serving:
+Two needs share one root: the serving-window banner (C1) and the indexing quiesce
+(S2) both require the **separate, long-lived MCP processes** to observe a state the
+CLI migration process sets. `aspect_worker.drain_worker` is process-local (it stops
+only the calling process's worker; resident MCP-process workers keep indexing), and
+`mcp/core.py` read surfaces have no migration awareness. A CLI-local flag is
+therefore insufficient — the mechanism MUST be cross-process.
 
-- **not-migrating** (default / post-unlock): serve normally.
-- **migrating**: every read surface (`nx search`, MCP `search`/`store_get`, plan
-  runner) prepends a LOUD banner — "knowledge migrating: N/M collections done,
-  results incomplete" — and the progress surface is queryable. Reads still return
-  whatever has landed (monotonically improving), never a bare empty result with no
-  explanation.
-- **migrated-failed**: marker persists with the failure; reads stay degraded-loud +
-  point at the report and the rollback option.
+**Design:** a single migration-state record polled by every process —
+a `~/.config/nexus/migration.state` sentinel file (atomic write; cheap stat-poll;
+survives the CLI process exiting) holding `{phase, started_at, collections_total,
+collections_done, failure?}`. Both the read surfaces and the aspect workers poll it:
 
-The marker is set at step 5, cleared at step 9 (UNLOCK), and is the single source of
-truth for "has this install completed migration."
+- **Read-surface coverage (enumerated, locked for P2):** `mcp/core.py` `search()`,
+  `store_get()`, `store_get_many()`, the `nx_answer` plan runner, and the `nx search`
+  CLI. Each, when `phase == migrating`, prepends a LOUD banner ("knowledge
+  migrating: N/M collections done, results incomplete") and returns whatever has
+  landed (monotonically improving) — never a bare empty result. `phase ==
+  migrated-failed` keeps the banner + points at the report and rollback.
+- **Indexing quiesce (S2):** each aspect worker (and `nx index`) checks `phase` at
+  the top of each work cycle and **suspends** while `migrating` — a cross-process
+  suspend the process-local `drain_worker` cannot provide. A PRE-GATE check verifies
+  no live aspect-worker write-locks remain across processes before T3 starts; if any
+  persist, BLOCK with the offending pids (do not silently run into the false-failure
+  count mismatch of RF-6).
+
+**State values:** `not-migrating` (default / post-unlock, serve normally) →
+`migrating` (set at step 5, banner + suspend) → `migrated`/cleared at step 9
+(UNLOCK) or `migrated-failed`. `collections_done/total` drives the progress surface;
+on a resumed run the orchestrator recomputes done-vs-total by source-vs-target count
+at detection (the upsert is idempotent on `(tenant, collection, chash)`, so re-runs
+are safe and the progress is derived, not trusted from a stale marker).
+
+The sentinel is the single source of truth for "has this install completed
+migration" and is the load-bearing new mechanism this RDR introduces; everything
+else wraps existing primitives.
 
 Design principles: wrap-don't-reimplement (zero new ETL); idempotent + resumable
 (re-running skips completed legs/collections); fail-loud + gate-hard at every step;
@@ -299,22 +331,36 @@ evidence.
 
 0. **P-1 — prerequisites (named, locked at accept).** Two nexus beads BLOCK the
    engine: (a) **RF-4** extract the T2 `migrate all` orchestration into
-   `nexus.migration` (~300 LOC, structured report return); (b) **RF-3** expose
-   `nexus.manifest_orphans(dim)` / `manifest_backfill()` as a Python-callable
+   `nexus.migration` (~300 LOC, structured report return). This includes a
+   verification-path decision (gate S3): `migrate_all_cmd._run_verification` shells
+   out to psql, which the library call cannot keep (RDR-152 bars a direct PG
+   connection in Python). Lock at accept: route count verification through a service
+   REST endpoint, OR accept an INDETERMINATE verification surfaced as a non-blocking
+   warning (the `total_failed == 0` gate still holds on the report). (b) **RF-3**
+   expose `nexus.manifest_orphans(dim)` / `manifest_backfill()` as a Python-callable
    (service REST endpoint or `HttpVectorClient` method).
 1. **P0 — Detection + dry-run preview (nexus).** Per-collection classifier (source
-   leg × embedding model) + `--dry-run` reporting what would migrate (per-leg,
-   per-model counts; cost/time estimate) without touching anything.
-2. **P1 — Pre-gate + provisioning + quiesce (nexus).** Per-collection-model Voyage
-   gate (C3); idempotent service-stack ensure; **drain/suspend indexing** (RF-6);
-   fresh-user no-op.
-3. **P2 — T2-then-T3 sequencing + serving-window marker (nexus).** Set the
-   "migrating" marker (C1); drive `migrate all` (require `total_failed == 0`), then
-   `migrate vectors` for every detected leg; refuse partial-leg success.
+   leg × embedding model, model resolved against the live service embedder
+   registry) + `--dry-run` reporting what would migrate (per-leg, per-model counts;
+   unsupported-model collections flagged; cost/time estimate) without touching
+   anything.
+2. **P1 — Cross-process state mechanism + pre-gate + provisioning (nexus).** The
+   `migration.state` sentinel (atomic write, cross-process poll) — the load-bearing
+   new mechanism; wire the **read-surface banner** (enumerated: `mcp/core.py`
+   `search`/`store_get`/`store_get_many`, `nx_answer` plan runner, `nx search` CLI)
+   AND the **aspect-worker / nx-index suspend** to poll it (C1 + S2). Per-collection
+   pre-gate (unsupported→block, voyage→key, onnx→proceed; C3/S1); cross-process
+   write-lock audit (RF-6); idempotent service-stack ensure; fresh-user no-op.
+3. **P2 — T2-then-T3 sequencing (nexus).** Set `phase=migrating`; drive `migrate
+   all` (require `total_failed == 0`), then `migrate vectors` for every detected
+   leg; refuse partial-leg success; update `collections_done/total` for the progress
+   surface.
 4. **P3 — Non-vacuous validation + unlock/rollback (nexus).** Both checks
    (taxonomy floor + manifest-orphans via the P-1 prerequisite) + counts;
    indeterminate/mismatch BLOCKS unlock; rollback path (RF-5); clear the marker on
-   unlock. Stale-aspects (nexus-f1m8s): re-extract or flag explicitly in the report.
+   unlock. Stale-aspects (nexus-f1m8s): **advisory-only, never blocks unlock** —
+   the report names the stale `document_aspects` count and points at re-extraction
+   (`nx enrich aspects`); enrichment degrades until then but knowledge is served.
 5. **P4 — conexus veneer + release sequencing.** Thin `conexus upgrade` calling the
    engine; a contract test pinning the consumed entry points; the two-release
    deprecation-window runbook (release N = both paths + this tool; release N+1 =
@@ -327,16 +373,22 @@ hybrid-parity go-live; the deprecation-window release cadence.
 
 - **Detection unit tests** — per-collection classification across {local, cloud} ×
   {onnx-384, voyage-1024} × {empty, has-data}; malformed store → loud error.
-- **Two-path end-to-end (sandbox, marked)** — (a) **cloud/Voyage**: key required,
+- **Path end-to-end (sandbox, marked)** — (a) **cloud/Voyage**: key required,
   voyage-1024 collections, full detect→migrate→verify→unlock; (b)
   **local-only/ONNX**: NO key, minilm-384 collections, same flow succeeds; (c)
-  **mixed**: local Chroma with both models — gate fires only on the voyage subset.
+  **mixed**: local Chroma with multiple models — gate fires only on the voyage
+  subset; (d) **unsupported-model** (bge-768): detected and BLOCKED pre-migration
+  with a re-index diagnostic, no data touched, no `migrated-failed` dead end (S1).
 - **Pre-gate tests** — voyage collection + absent key BLOCKS before any ETL call;
-  local-only + absent key PROCEEDS.
-- **Quiesce tests (RF-6)** — active indexing → drain occurs (or loud gate) before
-  T3; a count-mismatch under simulated concurrent write is attributed, not a silent
-  rollback.
-- **Serving-window tests (C1)** — `migrating` marker makes reads degrade-LOUD (never
+  local-only + absent key PROCEEDS; unsupported-model BLOCKS with the affected
+  collection list.
+- **Cross-process tests (C1 + S2)** — a separate process polling `migration.state`
+  observes `migrating` and (read surface) degrades-LOUD / (aspect worker) suspends;
+  the pre-gate write-lock audit BLOCKS when a foreign aspect-worker lock is live; a
+  count-mismatch under simulated concurrent write is attributed, not a silent
+  rollback. Cover EACH enumerated read surface (`search`, `store_get`,
+  `store_get_many`, plan runner, CLI) — not CLI-only.
+- **Serving-window tests (C1)** — `migrating` makes reads degrade-LOUD (never
   bare-empty); `migrated-failed` persists the warning; unlock clears it.
 - **Sequencing tests** — T2 `total_failed > 0` BLOCKS T3; single leg ≠ multi-leg
   success.
@@ -376,3 +428,9 @@ hybrid-parity go-live; the deprecation-window release cadence.
   C1 serving-window state machine, C2 manifest-callable prerequisite (RF-3 resolved
   NO), C3 two-upgrade-paths / per-collection-model Voyage gate, S2 T2-extraction
   prerequisite, S3 quiescent-window step, O1 stale-aspects disposition.
+- 2026-06-13 — Re-gate (2nd) folded in: 3 new findings — C1' cross-process
+  serving-window marker (CLI-local flag insufficient; MCP processes are separate) +
+  S2 cross-process aspect-worker quiesce UNIFIED into one `migration.state` sentinel
+  polled by read surfaces AND workers; S1 third model class (unsupported, e.g.
+  bge-768) detected+BLOCKED pre-migration; S3 T2-extraction psql-verification
+  decision locked to P-1a; stale-aspects = advisory-only. Read surfaces enumerated.
