@@ -18,6 +18,7 @@ from nexus.corpus import (
     t3_collection_name,
 )
 from nexus.db.t3 import verify_collection_deep
+from nexus.migration.banner import degrade_loud_when_migrating
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_hooks as _install_default_hooks
@@ -771,6 +772,7 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
     title="Semantic Search",
     annotations={"readOnlyHint": True},
 )
+@degrade_loud_when_migrating
 def search(
     query: str,
     corpus: str = "knowledge,code,docs",
@@ -1457,6 +1459,7 @@ def store_put(
     title="Retrieve Knowledge Document",
     annotations={"readOnlyHint": True},
 )
+@degrade_loud_when_migrating
 def store_get(doc_id: str, collection: str = "knowledge") -> str:
     """Retrieve the full content and metadata of a T3 knowledge entry by document ID or title.
 
@@ -1513,6 +1516,7 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
     title="Batch-Retrieve Documents",
     annotations={"readOnlyHint": True},
 )
+@degrade_loud_when_migrating
 def store_get_many(
     ids: str | list,
     collections: str | list = "knowledge",
@@ -3820,6 +3824,7 @@ def _load_ad_hoc_ttl() -> int:
     title="Multi-Step Knowledge Answer",
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
+@degrade_loud_when_migrating
 async def nx_answer(
     question: str,
     scope: str = "",

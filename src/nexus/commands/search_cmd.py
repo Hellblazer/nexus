@@ -236,6 +236,15 @@ def search_cmd(
     --corpus may be a prefix (code, docs, knowledge) or a fully-qualified
     collection name (code__myrepo).  Repeat --corpus to search multiple corpora.
     """
+    # RDR-159 P1b: degrade LOUD while a guided upgrade migration is in
+    # flight. The banner goes to stderr so it never corrupts --json/--vimgrep
+    # stdout, but is emitted FIRST so results are never mistaken for complete.
+    from nexus.migration.banner import migration_banner
+
+    _migration_banner = migration_banner()
+    if _migration_banner:
+        click.echo(_migration_banner, err=True)
+
     if threshold is not None and no_threshold:
         raise click.UsageError(
             "--threshold and --no-threshold are mutually exclusive"

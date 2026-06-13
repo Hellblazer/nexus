@@ -457,6 +457,13 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # explicitly via the ``voyage_key_present`` argument, never the ambient
     # cloud_mode fixture (the classifier is a pure deployment-mode function).
     "test_detection.py",
+    # RDR-159 P1d pre-gate + P1c quiesce: voyage tokens are collection-NAME /
+    # wired-model-set fixtures driving the support gate and the count-mismatch
+    # attribution message; mode is pinned explicitly via the injected
+    # WiredModelSource / ``voyage_key_present`` argument, never the ambient
+    # cloud_mode fixture.
+    "test_pregate.py",
+    "test_quiesce.py",
     "test_catalog_path.py",
     "test_chroma_retry.py",
     "test_collection_cmd.py",
