@@ -2,12 +2,12 @@
 title: "Guided Chroma-to-Service Upgrade Migration: One Survivable Command over the Proven ETL Primitives"
 id: RDR-159
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-13
-accepted_date:
+accepted_date: 2026-06-13
 related_issues: [nexus-luxe6]
 related: [RDR-152, RDR-153, RDR-155, RDR-156]
 related_external: [conexus:RDR-001, conexus:RDR-002]

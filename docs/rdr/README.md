@@ -174,7 +174,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-156](rdr-156-vector-store-capability-leverage.md) | Vector-Store Capability Leverage — Unify the Retrieval Substrate: Combined Queries, Schema-Enforced Integrity, and Specialized Functions over the RDR-155 pgvector Chunk Tables | Architecture | Accepted | 2026-06-10 |
 | [RDR-157](rdr-157-end-user-distribution-and-installation.md) | End-User Distribution and Installation: JAR Channel, PG16+pgvector Provisioning, One-Command init --service | Architecture | Draft | 2026-06-11 |
 | [RDR-158](rdr-158-retire-sqlite-t2-backend.md) | Retire the SQLite T2 Backend: Make the PG Service the Only T2 Path | Architecture | Accepted | 2026-06-12 |
-| [RDR-159](rdr-159-guided-upgrade-migration.md) | Guided Chroma-to-Service Upgrade Migration: One Survivable Command over the Proven ETL Primitives | Architecture | Draft | 2026-06-13 |
+| [RDR-159](rdr-159-guided-upgrade-migration.md) | Guided Chroma-to-Service Upgrade Migration: One Survivable Command over the Proven ETL Primitives | Architecture | Accepted | 2026-06-13 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 
