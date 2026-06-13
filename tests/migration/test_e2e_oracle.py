@@ -35,6 +35,15 @@ Invariant asserted across ALL hermetic scenarios: the user never reaches a clean
 ``ok=True`` over an unvalidated or empty migration, and a block leaves rollback
 OFFERED (never auto-invoked) with the Chroma source unmodified (copy-not-move).
 Exact assertions (``== N``) throughout.
+
+SCOPING (the "never a bare empty index" invariant): this oracle covers the
+SENTINEL-WRITE end — a block leaves ``migrated-failed`` (degrade-LOUD), never a
+cleared sentinel over moved data. The read-surface end (each MCP surface —
+``search`` / ``store_get`` / ``store_get_many`` / plan runner / CLI — prepending
+the degrade banner when the phase is ``migrating`` / ``migrated-failed``) is
+owned by ``test_read_surface_degrade.py`` (in CI). The end-to-end composition is
+sentinel-write (here) + banner-consumption (there); neither file alone proves
+the full chain, and that split is deliberate (no duplication).
 """
 from __future__ import annotations
 
@@ -241,10 +250,20 @@ def _drive(
     monkeypatch.setattr(driver, "open_read_legs", _open_read_legs)
     monkeypatch.setattr(driver, "migrate_cloud", _migrate_cloud)
 
-    legs = {"local": local_client, "cloud": cloud_store}
-    if reopen_overrides:
-        legs.update(reopen_overrides)
-    reopen_leg = lambda leg: legs[leg]  # noqa: E731
+    def _reopen(leg: str) -> Any:
+        if reopen_overrides and leg in reopen_overrides:
+            return reopen_overrides[leg]
+        if leg == "cloud":
+            assert cloud_store is not None
+            return cloud_store
+        # Mirror production (_default_reopen_leg): validation reopens a FRESH
+        # local read client. The detection client was already closed before the
+        # ETL; reusing it for validation only "works" by a chromadb refcount
+        # accident (CRITICAL-1) and would flip every clean scenario to ok=False
+        # the moment migrate_local closes its client properly.
+        return chromadb.PersistentClient(path=str(local_path))
+
+    reopen_leg = _reopen
 
     return driver.run_guided_upgrade(
         sources=EtlSources(sqlite_path=t2_path, catalog_db_path=t2_path),
@@ -269,7 +288,10 @@ class TestHermeticOracle:
         store = tmp_path / "chroma"
         name = _coll("oracle-local", model=_MODEL_384)
         ids = _seed_local_store(store, {name: 5})
-        t2 = _make_t2(tmp_path / "t2.db")
+        # Seed a taxonomy assignment that resolves to the migrated collection, so
+        # the taxonomy floor runs NON-vacuously (referenced != {} AND maps to a
+        # migrated collection -> clean, not clean-because-empty).
+        t2 = _make_t2(tmp_path / "t2.db", assignments=(name,))
         vc = FakeVectorClient()
         cc = _FakeCatalogClient(doc_count=1, orphans_by_dim={384: 0})
 
@@ -320,6 +342,12 @@ class TestHermeticOracle:
         # NO data touched — the block is pre-migration.
         assert vc.store == {}
         assert cc.backfill_calls == 0
+        # The sentinel is migrated-failed (NOT a bare-empty index): the sequencer
+        # sets it BEFORE the pre-gate so reads degrade-LOUD, and a model block
+        # leaves it there with rollback offered. "No dead end" = recoverable
+        # (fix the model + re-run, idempotent), not a cleared sentinel. This
+        # matches the locked P2 contract (test_sequencer.py model-gate-block).
+        assert current_phase() == MIGRATED_FAILED
 
     def test_scenario1_cloud_voyage_unlocks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -433,6 +461,40 @@ class TestHermeticOracle:
         assert sorted(cc.orphan_dim_queries) == [384, 1024]
         assert read_state() is None
 
+    def test_scenario_c_mixed_models_blocks_on_voyage_subset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MIXED-MODELS (RDR §Test Plan (c)): ONE local store with both an
+        onnx-384 AND a voyage-1024 collection, NO key. The pre-gate is
+        all-or-nothing, so the whole run BLOCKS pre-migration (no data moved),
+        and the diagnostic names ONLY the voyage subset as the blocker — the
+        onnx collection is not at fault."""
+        store = tmp_path / "chroma"
+        onnx_name = _coll("oracle-mixed-onnx", model=_MODEL_384)
+        voyage_name = _coll("oracle-mixed-voyage", model=_MODEL_VOYAGE)
+        _seed_local_store(store, {onnx_name: 3, voyage_name: 2})
+        t2 = _make_t2(tmp_path / "t2.db")
+        vc = FakeVectorClient()
+        cc = _FakeCatalogClient()
+
+        result = _drive(
+            monkeypatch,
+            local_path=store,
+            vector_client=vc,
+            catalog_client=cc,
+            t2_path=t2,
+            voyage_key_present=False,  # voyage collection is unsupported here
+        )
+
+        assert result.ok is False
+        assert result.validation is None
+        assert vc.store == {}  # all-or-nothing: NOTHING migrated, not even onnx
+        assert current_phase() == MIGRATED_FAILED
+        # The diagnostic names only the voyage subset as the blocker.
+        reason = result.sequence.blocked_reason or ""
+        assert voyage_name in reason
+        assert onnx_name not in reason
+
 
 # ── Integration layer (real stack) — the literal served-on-pgvector MVV ───────
 
@@ -450,17 +512,49 @@ class TestServedOnPgvectorMVV:
     service actually serves the migrated vectors on pgvector.
     """
 
-    def test_served_on_pgvector_end_to_end(self) -> None:
+    def test_served_on_pgvector_end_to_end(self, tmp_path: Path) -> None:
+        """Drive the REAL guided upgrade end to end against a live service:
+        seed a local ONNX store, run ``run_guided_upgrade`` with the real
+        ``HttpVectorClient`` + catalog client (the exact wiring
+        ``nx migrate-to-service`` uses), and assert the migrated chunks are
+        SERVED on pgvector. A SINGLE conditional skip (no unconditional skip):
+        the body is reachable the moment a credentialed service is present, so
+        the obligation is genuinely deferred, not permanently inert."""
         import os
 
-        if not os.environ.get("NX_SERVICE_TOKEN"):
+        token = os.environ.get("NX_SERVICE_TOKEN")
+        if not token:
             pytest.skip(
                 "served-on-pgvector MVV needs a live nexus-service "
                 "(NX_SERVICE_TOKEN + reachable endpoint + Voyage key); run in "
                 "the sandbox once nexus-luxe6's install story lands."
             )
-        pytest.skip(
-            "RDR-159 .28 integration body lands with the nexus-luxe6 sandbox "
-            "harness (real PG+JAR+ChromaCloud); the hermetic layer is the "
-            "CI-enforceable gate until then."
+
+        from nexus.catalog.factory import make_catalog_client_for_migration
+        from nexus.db.http_vector_client import HttpVectorClient, _resolve_endpoint
+
+        try:
+            _resolve_endpoint()
+        except RuntimeError as exc:
+            pytest.skip(f"nexus-service endpoint unresolved: {exc}")
+
+        store = tmp_path / "chroma"
+        name = _coll("oracle-integration", model=_MODEL_384)
+        ids = _seed_local_store(store, {name: 5})
+        t2 = _make_t2(tmp_path / "t2.db", assignments=(name,))
+
+        result = driver.run_guided_upgrade(
+            sources=EtlSources(sqlite_path=t2, catalog_db_path=t2),
+            vector_client=HttpVectorClient(),
+            catalog_client=make_catalog_client_for_migration(token=token),
+            t2_db_path=t2,
+            local_path=store,
+            voyage_key_present=False,
         )
+
+        assert result.ok is True
+        assert result.validation is not None and result.validation.unlocked is True
+        # The literal MVV: the migrated chunks are SERVED on pgvector.
+        served = HttpVectorClient()
+        assert served.count(name) == 5
+        assert len(ids[name]) == 5
