@@ -1836,6 +1836,38 @@ nx service token list [--tenant TENANT]
 
 List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revoked`), label, expiry, and revocation time. Never prints the raw token. Use the id prefix with `nx service token revoke`.
 
+## nx migrate-to-service
+
+```
+nx migrate-to-service [--dry-run] [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL]
+```
+
+The single guided Chroma-to-service upgrade (RDR-159) — it wraps and sequences
+the proven `nx storage migrate` primitives into one survivable command so a
+user never hand-sequences the ~8-step gauntlet.
+
+- `--dry-run` ships the read-only front half: it classifies the Chroma
+  footprint per collection (source leg × embedding model, resolved against the
+  deployment's wired embedders) and previews what would migrate — per-leg /
+  per-model counts, a coarse token + time estimate, and unsupported collections
+  flagged for re-index. It touches no data, and exits non-zero when any
+  unsupported collection is present (a real run would block on it).
+- The bare invocation runs the full flow: **detect** → **sequence** (set the
+  cross-process migration sentinel, quiesce background indexing, per-collection
+  model pre-gate, T2 `migrate all` requiring `total_failed == 0`, then T3
+  vectors for every detected leg, refusing partial-leg success) → **validate**
+  (taxonomy floor + source==target counts + manifest-orphans, no short-circuit)
+  → **unlock** on a clean verdict (clear the sentinel; serve from pgvector).
+
+On any validation block the migrated copy is left in place, reads stay
+degraded-LOUD (the `migrated-failed` sentinel stands in for a bare empty index),
+and rollback is **offered, never auto-invoked** — the Chroma source is untouched
+(copy-not-move), so `nx storage migrate vectors --rollback [--cloud]` returns
+the user to a fully-working pre-upgrade state. A fresh user with no Chroma data
+is a clean no-op. Requires `NX_SERVICE_TOKEN` and a reachable nexus-service (the
+T2 catalog ETL + manifest validation call the service). The operational
+narrative lives in [`docs/migration-runbook.md`](migration-runbook.md).
+
 ## nx storage
 
 > Running a real migration window? The operational narrative (quiescence,

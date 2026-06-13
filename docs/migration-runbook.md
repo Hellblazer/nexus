@@ -8,6 +8,27 @@ read the artifacts. Precedent: the 2026-06-10 production run (115,716
 chunks, ~10:46 to 15:05 PT, zero lost, est. $4-6 Voyage; permanent record:
 T2 `nexus_rdr/155-production-migration-complete`).
 
+## 0. The guided path: `nx migrate-to-service`
+
+> **Status (RDR-159 P4, in progress).** The guided command exists and runs the
+> full flow; the consolidated operator narrative for it — the two-release
+> deprecation-window cadence, the prompt/preview UX, and the production-window
+> checklist rewritten around one command — is authored under bead
+> `nexus-ue6g7.26` and lands before the `nexus-luxe6` release-blocker lifts.
+> Until then, sections 1-7 below remain the authoritative manual order of
+> operations, and the guided command sequences exactly those same primitives.
+
+`nx migrate-to-service` wraps and sequences everything in sections 2-6 into one
+survivable command: detect the Chroma footprint, set the cross-process
+migration sentinel (reads degrade-LOUD, never bare-empty), quiesce background
+indexing, pre-gate per-collection model support, run T2 `migrate all` then T3
+vectors for every detected leg, validate (taxonomy + counts + manifest
+orphans), and unlock on a clean verdict. On a validation block it leaves the
+migrated copy in place (sentinel `migrated-failed`) and OFFERS — never
+auto-invokes — `nx storage migrate vectors --rollback` (§6); the Chroma source
+is untouched. Preview first with `nx migrate-to-service --dry-run`. Flag
+reference: [`cli-reference.md` § nx migrate-to-service](cli-reference.md#nx-migrate-to-service).
+
 ## 1. Before you start: the quiescent window
 
 The vector ETL's post-write verification compares an exact source count

@@ -471,11 +471,6 @@ class TestMigrateToServiceCli:
         )
         return CliRunner().invoke(migrate_cmd.migrate_to_service_cmd, args)
 
-    def test_non_dry_run_errors_not_yet_available(self, monkeypatch) -> None:
-        result = self._run(monkeypatch, [])
-        assert result.exit_code != 0
-        assert "not available yet" in result.output
-
     def test_dry_run_fresh_user_noop(self, monkeypatch) -> None:
         result = self._run(monkeypatch, ["--dry-run"], local=None, cloud=None)
         assert result.exit_code == 0
@@ -527,3 +522,137 @@ class TestMigrateToServiceCli:
         assert result.exit_code != 0
         assert "NameError" not in result.output
         assert "corrupt" in str(result.exception or result.output).lower()
+
+
+# ---------------------------------------------------------------------------
+# nx migrate-to-service CLI — the non-dry-run guided run (RDR-159 P4,
+# nexus-ue6g7.24). The command is a THIN renderer over run_guided_upgrade; these
+# pin the wiring (clients/paths built, engine called) + the result rendering.
+# ---------------------------------------------------------------------------
+class TestMigrateToServiceRun:
+    def _result(self, *, phase, ok, validation):
+        from nexus.migration.detection import DetectionReport
+        from nexus.migration.driver import GuidedUpgradeResult
+        from nexus.migration.sequencer import SequenceOutcome
+
+        cls = CollectionClassification(
+            collection="code__o__minilm-l6-v2-384__v1",
+            leg="local",
+            model=ONNX_384,
+            dim=384,
+            support="supported-onnx-384",
+            source_count=10,
+            has_data=True,
+        )
+        seq = SequenceOutcome(
+            ok=ok,
+            phase=phase,
+            collections_total=1,
+            collections_done=1 if ok else 0,
+            t2_total_failed=0,
+            legs_attempted=("local",),
+            legs_ok=("local",) if ok else (),
+            blocked_reason=None if ok else "dirty T2: total_failed=2",
+            t2_report=None,
+        )
+        return GuidedUpgradeResult(
+            detection=DetectionReport(classifications=(cls,)),
+            sequence=seq,
+            validation=validation,
+            ok=ok and (validation is None or validation.unlocked),
+        )
+
+    def _validation(self, *, unlocked):
+        from nexus.migration.validation import ValidationOutcome
+
+        return ValidationOutcome(
+            unlocked=unlocked,
+            verdict="verified" if unlocked else "blocked",
+            blocking_reasons=() if unlocked else ("counts: 1 collection mismatch",),
+            taxonomy_orphans=(),
+            count_mismatches=() if unlocked else ("code__o__minilm-l6-v2-384__v1",),
+            count_indeterminate=False,
+            manifest_orphan_count=0,
+            manifest_vacuous=False,
+            stale_aspects=0,
+            advisory_notes=(),
+            rollback_available=not unlocked,
+        )
+
+    def _run(self, monkeypatch, tmp_path, *, result, token="tok"):
+        from click.testing import CliRunner
+
+        from nexus.catalog import factory
+        from nexus.commands import migrate_cmd
+        from nexus.db import http_vector_client
+        from nexus.migration import driver
+
+        captured: dict = {}
+
+        def _fake_run_guided_upgrade(**kwargs):
+            captured.update(kwargs)
+            return result
+
+        monkeypatch.setattr(http_vector_client, "_resolve_endpoint", lambda: ("u", "t"))
+        monkeypatch.setattr(http_vector_client, "HttpVectorClient", lambda *a, **k: object())
+        monkeypatch.setattr(
+            factory, "make_catalog_client_for_migration", lambda **k: object()
+        )
+        monkeypatch.setattr(driver, "run_guided_upgrade", _fake_run_guided_upgrade)
+        if token is None:
+            monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        else:
+            monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+
+        db = tmp_path / "memory.db"
+        cat = tmp_path / ".catalog.db"
+        db.write_text("")
+        cat.write_text("")
+        cli = CliRunner().invoke(
+            migrate_cmd.migrate_to_service_cmd,
+            ["--db", str(db), "--catalog-db", str(cat)],
+        )
+        return cli, captured
+
+    def test_clean_run_reports_verified(self, monkeypatch, tmp_path) -> None:
+        result = self._result(
+            phase="migrated", ok=True, validation=self._validation(unlocked=True)
+        )
+        cli, captured = self._run(monkeypatch, tmp_path, result=result)
+        assert cli.exit_code == 0, cli.output
+        assert "VERIFIED" in cli.output
+        # The engine was driven with the resolved sources/paths.
+        assert captured["t2_db_path"].name == "memory.db"
+        assert captured["sources"].catalog_db_path.name == ".catalog.db"
+
+    def test_fresh_user_noop_reported(self, monkeypatch, tmp_path) -> None:
+        result = self._result(phase="not-migrating", ok=True, validation=None)
+        cli, _ = self._run(monkeypatch, tmp_path, result=result)
+        assert cli.exit_code == 0, cli.output
+        assert "nothing to migrate" in cli.output.lower()
+
+    def test_sequence_block_exits_nonzero(self, monkeypatch, tmp_path) -> None:
+        result = self._result(phase="migrated-failed", ok=False, validation=None)
+        cli, _ = self._run(monkeypatch, tmp_path, result=result)
+        assert cli.exit_code == 1
+        assert "BLOCKED before completion" in cli.output
+        assert "dirty T2" in cli.output
+
+    def test_validation_block_offers_rollback(self, monkeypatch, tmp_path) -> None:
+        result = self._result(
+            phase="migrated", ok=False, validation=self._validation(unlocked=False)
+        )
+        cli, _ = self._run(monkeypatch, tmp_path, result=result)
+        assert cli.exit_code == 1
+        assert "FAILED validation" in cli.output
+        assert "nx storage migrate vectors --rollback" in cli.output
+
+    def test_missing_service_token_errors_early(self, monkeypatch, tmp_path) -> None:
+        result = self._result(
+            phase="migrated", ok=True, validation=self._validation(unlocked=True)
+        )
+        cli, captured = self._run(monkeypatch, tmp_path, result=result, token=None)
+        assert cli.exit_code != 0
+        assert "NX_SERVICE_TOKEN is required" in cli.output
+        # The engine was never reached.
+        assert captured == {}
