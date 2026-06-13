@@ -44,6 +44,10 @@ _STANDALONE_SKILLS = {
     # boundaries. Restored from archive/develop-2026-05-19 as RDR-120 P0
     # prerequisite (2026-05-19).
     "phase-review-gate",
+    # RDR-159 P4 — thin Chroma-to-service upgrade veneer. Pointer skill wrapping
+    # the nexus.migration engine (nx migrate-to-service); no agent dispatch,
+    # no relay structure.
+    "upgrade",
 }
 
 
