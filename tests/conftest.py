@@ -452,6 +452,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # test pins mode explicitly via T3Database(local_mode=...), not the
     # ambient cloud_mode fixture.
     "test_local_daemon_client_embed.py",
+    # RDR-159 P0 detection classifier: voyage tokens are collection-NAME
+    # fixtures driving the support matrix; every test pins deployment mode
+    # explicitly via the ``voyage_key_present`` argument, never the ambient
+    # cloud_mode fixture (the classifier is a pure deployment-mode function).
+    "test_detection.py",
     "test_catalog_path.py",
     "test_chroma_retry.py",
     "test_collection_cmd.py",
