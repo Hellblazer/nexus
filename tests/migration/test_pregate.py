@@ -86,6 +86,29 @@ def test_resolve_uses_live_set_when_reachable() -> None:
     assert got == _WIRED_WITH_VOYAGE  # live wins over the client-side key flag
 
 
+def test_resolve_live_is_authoritative_even_when_stricter_than_floor() -> None:
+    # Service started without a Voyage key returns {onnx} even though the
+    # client-side floor (voyage_key_present=True) would be the larger
+    # {onnx, voyage-*}. The live set is authoritative and STRICTER — it
+    # correctly blocks voyage collections the floor would have passed.
+    got = resolve_wired_models(_FixedSource(_WIRED_ONNX_ONLY), voyage_key_present=True)
+    assert got == _WIRED_ONNX_ONLY  # live wins, narrower than the floor
+
+
+def test_gate_blocks_voyage_when_live_onnx_only_despite_client_key() -> None:
+    # The "live authoritative even when stricter" path at the gate level: a
+    # voyage collection blocks because the live service has no voyage embedder,
+    # regardless of the client asserting voyage_key_present=True.
+    classifications = [_cls("knowledge__art__voyage-context-3__v1", _VOYAGE)]
+    with pytest.raises(ModelPreGateBlocked) as exc:
+        assert_models_supported(
+            classifications,
+            voyage_key_present=True,  # client says key present...
+            source=_FixedSource(_WIRED_ONNX_ONLY),  # ...but service wired none
+        )
+    assert exc.value.collections == ["knowledge__art__voyage-context-3__v1"]
+
+
 def test_resolve_falls_back_to_pure_floor_when_unreachable() -> None:
     # Live source returns None (service down) → pure deployment-mode floor.
     assert resolve_wired_models(_FixedSource(None), voyage_key_present=False) == frozenset(

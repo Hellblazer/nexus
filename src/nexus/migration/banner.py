@@ -74,6 +74,16 @@ def with_migration_banner(result: Any) -> Any:
     * anything else → returned untouched.
 
     A no-op (returns ``result`` unchanged) when no banner applies.
+
+    Note on structured (dict) consumers: ``migration_warning`` is a SIBLING key,
+    not embedded in any content field. A per-step ``search(structured=True)``
+    dispatched inside the ``nx_answer`` plan runner carries the key through, but
+    no plan operator reads it — the warning for the ``nx_answer`` surface is the
+    OUTER ``@degrade_loud_when_migrating`` on ``nx_answer`` itself, which adds
+    ``migration_warning`` to the final ``nx_answer`` return (a top-level key in
+    structured mode, a prepended banner in the default string mode). A machine
+    consumer of ``nx_answer(structured=True)`` must read the top-level
+    ``migration_warning`` key, not ``final_text``.
     """
     banner = migration_banner()
     if banner is None:

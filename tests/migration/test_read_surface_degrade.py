@@ -218,6 +218,20 @@ def test_nx_answer_surface_degrades_loud() -> None:
     assert "min_confidence must be in" in migrating  # landed body preserved
 
 
+def test_nx_answer_structured_degrades_loud_top_level_key() -> None:
+    # Machine-consumer path: nx_answer(structured=True) returns a dict, and the
+    # outer decorator must attach migration_warning as a TOP-LEVEL key (not bury
+    # it in final_text). Driven down the same cheap early-return path, which in
+    # structured mode returns the _result() dict.
+    from nexus.mcp.core import nx_answer
+
+    _set_migrating(done=4, total=9)
+    out = asyncio.run(nx_answer("q", min_confidence=5.0, structured=True))
+    assert isinstance(out, dict)
+    assert "knowledge migrating: 4/9" in out["migration_warning"]
+    assert "final_text" in out  # landed structured payload preserved
+
+
 # --------------------------------------------------------------------------
 # Surface 5: nx search CLI
 # --------------------------------------------------------------------------

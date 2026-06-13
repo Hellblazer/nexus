@@ -24,6 +24,16 @@ Gate decisions (per data-bearing collection, RF-2 / gates S1 + C3):
 A mixed store fires the gate only on its unsupported subset. Empty collections
 are not gated (nothing to migrate). A fresh user with no data-bearing leg is a
 clean no-op success.
+
+**Intended P2 call order (the seam this phase exposes).** The P2 orchestrator
+must sequence the P1 primitives as: (1) ``state.begin_migration`` so every
+separate process observes ``migrating`` and suspends FIRST; (2)
+``quiesce.assert_quiescent_for_migration`` so no foreign write-lock survives the
+now-visible sentinel; (3) ``assert_models_supported`` so an unservable model
+fails before any ETL; only then drive the ETL. Setting the sentinel before the
+write-lock audit is load-bearing — auditing first leaves a window where a worker
+starts a cycle between the audit and the sentinel write. The ordering is a
+P1→P2 contract; P1 ships the primitives, P2 owns the sequencing.
 """
 from __future__ import annotations
 
@@ -86,10 +96,16 @@ def resolve_wired_models(
 ) -> frozenset[str]:
     """Return the live wired set, or the pure deployment-mode floor if absent.
 
-    Belt-and-suspenders: the live registry confirms what the service actually
-    wired; the pure :func:`wired_models` floor is used only when the live set
-    is unreachable. The result is never weaker than the floor (the live set, by
-    construction, is the deployment's true superset-or-equal of ONNX).
+    Belt-and-suspenders: when the live registry is reachable it is AUTHORITATIVE
+    and used verbatim — it reflects what the service actually wired and may be
+    STRICTER or MORE PERMISSIVE than the client-side deployment-mode floor (e.g.
+    a service started without a Voyage key returns ``{onnx}`` even when the
+    caller's ``voyage_key_present`` is True; the live set then correctly blocks
+    voyage collections the floor would have passed). The pure :func:`wired_models`
+    floor is the fallback used ONLY when the live set is unreachable. The live
+    set always includes ONNX (wired in every service mode), so onnx collections
+    are never blocked by this resolution; voyage support tracks the live service,
+    not the client assumption.
     """
     live = source.wired_models()
     if live is not None:

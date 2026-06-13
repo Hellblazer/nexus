@@ -179,13 +179,15 @@ def index() -> None:
     # RDR-159 P1c (S2 quiesce): suspend ALL indexing while a guided upgrade
     # migration is in flight. Indexing into a half-migrated store would write
     # rows the migration cannot see, breaking the RF-6 T3 count window.
-    from nexus.migration.state import is_migrating
+    # Single sentinel read (migration_banner() is non-None iff migrating /
+    # migrated-failed) — avoids a TOCTOU "None —" message if the sentinel
+    # clears between two separate reads.
+    from nexus.migration.banner import migration_banner
 
-    if is_migrating():
-        from nexus.migration.banner import migration_banner
-
+    _banner = migration_banner()
+    if _banner:
         raise click.ClickException(
-            f"{migration_banner()} — nx index is suspended until the upgrade "
+            f"{_banner} — nx index is suspended until the upgrade "
             "completes (or fails and is cleared)."
         )
 
