@@ -10,17 +10,16 @@ T2 `nexus_rdr/155-production-migration-complete`).
 
 ## 0. The guided path: `nx migrate-to-service`
 
-> **Status (RDR-159 P4, in progress).** The guided command exists and runs the
-> full flow; the consolidated operator narrative for it — the two-release
-> deprecation-window cadence, the prompt/preview UX, and the production-window
-> checklist rewritten around one command — is authored under bead
-> `nexus-ue6g7.26` and lands before the `nexus-luxe6` release-blocker lifts.
-> Until then, sections 1-7 below remain the authoritative manual order of
-> operations, and the guided command sequences exactly those same primitives.
+> **Status (RDR-159 P4).** The guided command exists and runs the full flow.
+> The two-release deprecation-window cadence is documented in the next section.
+> Sections 1-7 below remain the authoritative manual order of operations; the
+> guided command sequences exactly those same primitives. The consumer-facing
+> entry is the conexus `/upgrade` slash-command — a thin veneer over this same
+> `nx migrate-to-service` that owns no migration logic.
 
 `nx migrate-to-service` wraps and sequences everything in sections 2-6 into one
 survivable command: detect the Chroma footprint, set the cross-process
-migration sentinel (reads degrade-LOUD, never bare-empty), quiesce background
+migration sentinel (reads degraded-LOUD, never bare-empty), quiesce background
 indexing, pre-gate per-collection model support, run T2 `migrate all` then T3
 vectors for every detected leg, validate (taxonomy + counts + manifest
 orphans), and unlock on a clean verdict. On a validation block it leaves the
@@ -28,6 +27,67 @@ migrated copy in place (sentinel `migrated-failed`) and OFFERS — never
 auto-invokes — `nx storage migrate vectors --rollback` (§6); the Chroma source
 is untouched. Preview first with `nx migrate-to-service --dry-run`. Flag
 reference: [`cli-reference.md` § nx migrate-to-service](cli-reference.md#nx-migrate-to-service).
+
+## 0.1 The two-release deprecation window (release cadence)
+
+ChromaDB is retired across **two** releases, never one. The ordering is an
+invariant, not a preference: the release that *deletes* the Chroma read path
+can only ship *after* a release that gives users a way off Chroma.
+
+| | **Release N** (migration-capable) | **Release N+1** (Chroma deletion) |
+|---|---|---|
+| Upgrade paths | BOTH ship: cloud/Voyage (1024-dim) and local-only/ONNX (384-dim) | (already migrated) |
+| Migration tool | `nx migrate-to-service` + the `/upgrade` veneer ship | **deleted** with the Chroma read path |
+| Chroma read path | present (rollback target, immutable) | **deleted** (RDR-155 P4b, bead `nexus-g37fr`) |
+| User action | run the guided upgrade any time in the window | none (must already be on the service) |
+
+**Why the order is load-bearing.** RDR-155 P4b deletes
+`src/nexus/migration/vector_etl.py` (and the rest of the Chroma read path)
+wholesale. The migration tool *reads from Chroma* to copy chunks into pgvector,
+so **deleting the Chroma read path deletes the migration tool itself.** A
+release that deleted Chroma without a prior migration-capable release would
+strand every not-yet-migrated user with no upgrade path and no rollback target.
+Hence: ship the tool in N, delete it in N+1, and never collapse the two.
+
+**The window between N and N+1** is the user's migration runway. Throughout it
+the Chroma sources (local and ChromaCloud) stay **immutable** (copy-not-move,
+RF-5, never modifies the source), so a blocked or regretted migration is fully
+recoverable via `nx storage migrate vectors --rollback` (§6). Once N+1 ships and
+the Chroma read path is gone, rollback is gone with it; that is the whole point
+of giving the window first. The window must be long enough for the user base to
+actually migrate before N+1 removes the escape hatch.
+
+**Gating the lift of `nexus-luxe6`** (the standing release blocker: develop is
+unreleasable until the service-stack install + user-migration story ships). The
+blocker lifts only when ALL of the following hold; do not close it on RDR-159
+completion alone.
+
+**RDR-159 phase deliverables** (satisfied when Phase 4 closes; verify the
+artifacts exist, not merely that the beads are marked done):
+
+1. The RDR-159 E2E oracle (bead `nexus-ue6g7.28`) is green across all five
+   scenarios: cloud/Voyage, local-only/ONNX, the unsupported-model block, the
+   forced-failure rollback, AND the two-leg-simultaneous run (local + cloud
+   migrated in one invocation, validation counting both legs via the composite
+   read client). The fifth scenario closes the only known integration gap in
+   the multi-leg path (unit-covered by `test_two_leg_composes_collections_and_dims`,
+   no E2E exercise until `.28` adds it).
+2. This runbook (bead `nexus-ue6g7.26`) is in place: the operator narrative and
+   this cadence. This is the act of authoring the document you are reading; it
+   is a phase prerequisite, not an independently re-checkable runtime gate.
+
+**External gates** (NOT engine code; not satisfied by merging RDR-159; must be
+true in the world and surfaced explicitly at closure):
+
+3. conexus `xr7.8.9` production-scale recall / hybrid-parity go-live. The served
+   backend must be proven at production scale.
+4. The deprecation-window cadence is actually running, i.e. a migration-capable
+   release N has shipped and the window is open, so N+1 (the Chroma deletion)
+   has a release-N predecessor to follow.
+
+> **Do not start RDR-155 P4b (the Chroma deletion) until release N has shipped
+> and the window has opened.** P4b is release N+1 by construction. Starting it
+> early deletes the migration tool before users can run it.
 
 ## 1. Before you start: the quiescent window
 

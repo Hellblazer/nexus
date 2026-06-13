@@ -375,6 +375,14 @@ standalone_skills:
       - "plan-match-first retrieval"
     tools: []
 
+  upgrade:
+    description: "Guided Chroma-to-service upgrade — preview then run nx migrate-to-service; thin surface over the nexus.migration engine (RDR-159)"
+    triggers:
+      - "upgrade an existing Chroma store to the nexus service stack"
+      - "migrate permanent vectors off ChromaDB onto PG16+pgvector"
+      - "how to run the guided migration"
+    tools: [Bash]
+
   serena-code-nav:
     description: "LSP-backed symbol navigation via Serena MCP — find definitions, all callers, type hierarchies, safe rename, and symbol-scoped editing. Use instead of Grep for any symbol-level task."
     triggers:
@@ -655,6 +663,11 @@ utility_commands:
   continuation:
     slash_command: /continuation
     description: "Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers"
+    disable_model_invocation: false
+
+  upgrade:
+    slash_command: /upgrade
+    description: "Guided Chroma-to-service upgrade — preview via nx migrate-to-service --dry-run, then run the full guided migration (RDR-159)"
     disable_model_invocation: false
 
 
