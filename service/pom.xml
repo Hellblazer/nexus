@@ -22,7 +22,7 @@
         <junit.version>5.11.4</junit.version>
         <assertj.version>3.27.3</assertj.version>
         <testcontainers.version>1.21.4</testcontainers.version>
-        <liquibase.version>4.29.2</liquibase.version>
+        <liquibase.version>4.29.0</liquibase.version>
 
         <mainClass>dev.nexus.service.Main</mainClass>
 
@@ -54,6 +54,14 @@
         <!-- Seam B — local ONNX embedding (S0.2 proven stack) -->
         <onnxruntime.version>1.20.0</onnxruntime.version>
         <djl.tokenizers.version>0.30.0</djl.tokenizers.version>
+
+        <!-- Per-platform native-lib dirs for the -Pnative image (nexus-lp2qo).
+             Default = linux amd64 (CI + the deployment target); the native-libs-*
+             OS profiles below override these on macOS / Windows / linux-aarch64
+             build hosts so each binary embeds only its own platform's embedding
+             libs. onnxruntime vs djl use different <os-arch> naming, hence two. -->
+        <onnx.native.dir>linux-x64</onnx.native.dir>
+        <djl.native.dir>linux-x86_64</djl.native.dir>
 
         <!-- Surefire tag exclusion: skip @Tag("integration") by default -->
         <!-- Override with: mvn test -Dtest.excluded.groups="" -Dgroups=integration -->
@@ -111,6 +119,18 @@
             <groupId>org.liquibase</groupId>
             <artifactId>liquibase-core</artifactId>
             <version>${liquibase.version}</version>
+        </dependency>
+        <!-- nexus-lp2qo spike: picocli is an OPTIONAL dep of liquibase-core (CLI only).
+             The native-image community metadata registers liquibase's commandline
+             classes for reflection; without picocli on the classpath
+             LiquibaseCommandLine fails to link ("Type not found during analysis").
+             The service uses liquibase via the Java API (SchemaMigrator), not the
+             CLI, but the metadata forces the class reachable — supply picocli so it
+             resolves. Harmless on the jlink/JVM path. -->
+        <dependency>
+            <groupId>info.picocli</groupId>
+            <artifactId>picocli</artifactId>
+            <version>4.7.7</version>
         </dependency>
 
         <!-- Seam B: local ONNX embedding (onnxruntime-java + DJL HF tokenizer) -->
@@ -391,6 +411,36 @@
     </build>
 
     <profiles>
+        <!-- Per-platform embedding-native-lib selection (nexus-lp2qo). These
+             auto-activate by build-host OS/arch (Maven built-in <os> activation,
+             no plugin needed) and override the linux-x64 defaults so -Pnative
+             embeds only the host's onnx/djl libs. Build a Windows .exe on Windows,
+             a Mac binary on a Mac — native-image does not cross-compile. -->
+        <profile>
+            <id>native-libs-mac</id>
+            <activation><os><family>mac</family></os></activation>
+            <properties>
+                <onnx.native.dir>osx-aarch64</onnx.native.dir>
+                <djl.native.dir>osx-aarch64</djl.native.dir>
+            </properties>
+        </profile>
+        <profile>
+            <id>native-libs-windows</id>
+            <activation><os><family>windows</family></os></activation>
+            <properties>
+                <onnx.native.dir>win-x64</onnx.native.dir>
+                <djl.native.dir>win-x86_64</djl.native.dir>
+            </properties>
+        </profile>
+        <profile>
+            <id>native-libs-linux-aarch64</id>
+            <activation><os><name>linux</name><arch>aarch64</arch></os></activation>
+            <properties>
+                <onnx.native.dir>linux-aarch64</onnx.native.dir>
+                <djl.native.dir>linux-aarch64</djl.native.dir>
+            </properties>
+        </profile>
+
         <!-- -Pnative: opt-in native-image build (S0.4 C2 — CI must add Linux job) -->
         <profile>
             <id>native</id>
@@ -399,7 +449,7 @@
                     <plugin>
                         <groupId>org.graalvm.buildtools</groupId>
                         <artifactId>native-maven-plugin</artifactId>
-                        <version>0.10.4</version>
+                        <version>1.1.2</version>
                         <extensions>true</extensions>
                         <executions>
                             <execution>
@@ -423,35 +473,43 @@
                                         <!-- Logback/SLF4J: initialize at build time -->
                                         <buildArg>--initialize-at-build-time=org.slf4j,ch.qos.logback</buildArg>
                                         <!-- jOOQ 3.20.11 + GraalVM 25 native-image initialization.
-                                             nexus-gmiaf.9 resolution: community metadata 3.18.2
-                                             typeReachable guards for SQLDataType cause DefaultDataType
-                                             to be partially analyzed at build time. Even with the
-                                             org.jooq runtime-init flag, the TYPES_BY_NAME array is
-                                             null when SQLDataType static-init runs at runtime (NPE).
-                                             Fix: exclude org.jooq from community metadata entirely;
-                                             rely on our hand-crafted reflect-config.json instead. -->
-                                        <buildArg>--initialize-at-run-time=org.jooq</buildArg>
-                                        <!-- Reachability config from traced metadata -->
-                                        <buildArg>-H:ConfigurationFileDirectories=src/main/resources/META-INF/native-image</buildArg>
+                                             nexus-lp2qo spike (2026-06-12): community metadata now
+                                             ships a jOOQ 3.20.0 entry (tested 3.20.0-3.21.5, covers
+                                             3.20.11) via native-build-tools 1.1.2 — the proper
+                                             reachability set for the 3.20.x line. We now CONSUME it
+                                             (un-excluded below) instead of the prior workaround
+                                             (exclude 3.18.2 metadata + a run-time-init flag for
+                                             org.jooq, nexus-gmiaf.9), whose typeReachable guards partially
+                                             analyzed DefaultDataType at build time and left
+                                             TYPES_BY_NAME null at runtime (NPE). -->
+                                        <!-- Hand-crafted reflect/resource config (app classes, logback,
+                                             postgres/hikari, liquibase changelog + XSD resources) AND the
+                                             agent-traced reachability-metadata.json (nexus-lp2qo: captured
+                                             from a live migrate+jOOQ-CRUD+embed run; supplies the liquibase
+                                             runtime-reflection the community metadata lacked). Both also
+                                             ride the jar classpath, but list them explicitly for clarity. -->
+                                        <buildArg>-H:ConfigurationFileDirectories=src/main/resources/META-INF/native-image,src/main/resources/META-INF/native-image/traced</buildArg>
+                                        <!-- Per-platform embedding native libs (nexus-lp2qo). onnxruntime
+                                             and djl-tokenizers bundle a .so/.dylib/.dll per <os-arch> in the
+                                             jar; native-image only embeds resources it is told to. Rather
+                                             than bundle ALL platforms into every binary (~120MB of foreign
+                                             libs), the ${onnx.native.dir} / ${djl.native.dir} properties are
+                                             set per build host by the native-libs-* OS profiles below, so the
+                                             binary carries ONLY its own platform's libs. ExcludeResources
+                                             drops the macOS .dSYM debug-symbol dirs. -->
+                                        <buildArg>-H:IncludeResources=ai/onnxruntime/native/${onnx.native.dir}/.*</buildArg>
+                                        <buildArg>-H:IncludeResources=native/lib/${djl.native.dir}/.*</buildArg>
+                                        <buildArg>-H:ExcludeResources=.*\.dSYM/.*</buildArg>
                                         <!-- Portability: compatibility march for CI/prod (not native) -->
                                         <buildArg>-march=compatibility</buildArg>
-                                        <!-- Diagnostics during bring-up -->
-                                        <buildArg>--emit=build-report</buildArg>
-                                        <buildArg>--enable-monitoring</buildArg>
                                     </buildArgs>
                                     <metadataRepository>
                                         <enabled>true</enabled>
-                                        <!-- Exclude jOOQ community metadata: 3.18.2 typeReachable
-                                             guards for SQLDataType cause DefaultDataType TYPES_BY_NAME
-                                             (ConcurrentHashMap) to be null at runtime init (NPE in
-                                             ConcurrentHashMap.putVal). nexus-gmiaf.9 C3 fix. -->
-                                        <dependencies>
-                                            <dependency>
-                                                <groupId>org.jooq</groupId>
-                                                <artifactId>jooq</artifactId>
-                                                <excluded>true</excluded>
-                                            </dependency>
-                                        </dependencies>
+                                        <!-- nexus-lp2qo spike: jOOQ metadata NO LONGER excluded.
+                                             native-build-tools 1.1.2 bundles org.jooq/jooq/3.20.0
+                                             (reachability-metadata.json, tested 3.20.0-3.21.5) which
+                                             is the correct set for our 3.20.11 and supersedes the
+                                             3.18.2 entry that forced the gmiaf.9 exclusion. -->
                                     </metadataRepository>
                                 </configuration>
                             </execution>
@@ -464,7 +522,7 @@
                 <dependency>
                     <groupId>org.graalvm.buildtools</groupId>
                     <artifactId>graalvm-reachability-metadata</artifactId>
-                    <version>0.10.4</version>
+                    <version>1.1.2</version>
                     <classifier>repository</classifier>
                     <type>zip</type>
                     <scope>provided</scope>
