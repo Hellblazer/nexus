@@ -274,6 +274,15 @@ on a resumed run the orchestrator recomputes done-vs-total by source-vs-target c
 at detection (the upsert is idempotent on `(tenant, collection, chash)`, so re-runs
 are safe and the progress is derived, not trusted from a stale marker).
 
+**Atomicity + crash recovery (gate-3 condition):** writes to `migration.state` use a
+`.tmp` sibling + `os.rename()` (POSIX-atomic) — NOT a bare `write_text` (the existing
+`phase_review_sentinel` precedent is non-atomic and would let a poller read a partial
+payload). Because the marker outlives the writing process, a CLI crash between a
+valid T3 completion and the UNLOCK clear would strand a permanent `migrating`/
+`migrated-failed` state; a named escape hatch (`nx migration --clear-state`, tracked
+as a bead) lets the user recover — after re-running detection, which recomputes
+done-vs-total from live counts, so clearing is safe.
+
 The sentinel is the single source of truth for "has this install completed
 migration" and is the load-bearing new mechanism this RDR introduces; everything
 else wraps existing primitives.
@@ -408,9 +417,15 @@ hybrid-parity go-live; the deprecation-window release cadence.
 
 ## Finalization Gate
 
-> Re-gate pending (the first gate, against conexus:RDR-002, returned
-> pass-with-conditions: 2 Critical + 3 Significant — all folded into this revision).
-> Record: T2 `nexus_rdr/rdr002-gate-2026-06-13`.
+**PASSED (2026-06-13)** after three rounds (substantive-critic, code-verified each
+round). R1 (vs conexus:RDR-002): serving-window, manifest-callable, two-paths,
+T2-extraction, quiescent-window. R2: cross-process marker+quiesce unified into one
+sentinel, third (unsupported) model class, psql-verify decision. R3 (convergence):
+all prior fixes verified coherent; the sole remaining condition — sentinel
+atomic-write + crash escape hatch — is closed in §Proposed Solution; the two
+Significants were explicitly downgraded by the gate to phase-plan beads (not RDR
+conditions). Records: T2 `nexus_rdr/rdr002-gate-2026-06-13`,
+`nexus/critique-rdr159-re-gate-2026-06-13`.
 
 ## References
 
