@@ -151,9 +151,11 @@ class PgVectorCombinedQueryContractTest {
             .containsExactly("m1", "m2");
         Map<String, Object> top = rows.get(0);
         assertThat(top.keySet())
-            .as("flat envelope: exactly id, content, distance, collection")
-            .containsExactlyInAnyOrder("id", "content", "distance", "collection");
+            .as("flat envelope: id, content, distance, collection, chash (catalog-008 "
+                + "added the matched-chunk chash for the query() repoint / RDR-086)")
+            .containsExactlyInAnyOrder("id", "content", "distance", "collection", "chash");
         assertThat(top.get("collection")).isEqualTo(COLL_M);
+        assertThat((String) top.get("chash")).as("chash is the matched chunk's hash").isNotBlank();
         assertThat(((Number) top.get("distance")).doubleValue()).isCloseTo(0.0, within());
     }
 

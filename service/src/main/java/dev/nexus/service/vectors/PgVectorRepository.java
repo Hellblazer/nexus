@@ -876,14 +876,35 @@ public final class PgVectorRepository {
      * de-duplication (keep best distance per id) is the {@code query}-tool repoint's
      * responsibility, not this method's.
      *
+     * <p>nexus-889ff extends the catalog dance coverage so the {@code query}-tool repoint
+     * can fully collapse: {@code subtree} is a tumbler-prefix scope; {@code where} is a
+     * chunk-metadata equality map (JSONB containment); {@code author} is matched
+     * case-insensitively as a SUBSTRING (ILIKE) — mirroring {@code query()}'s
+     * {@code author.lower() IN} semantics, not exact equality. Each returned row also
+     * carries the MATCHED chunk's {@code chash} (audit HIGH: the repoint populates the
+     * RDR-086 {@code chunk_text_hash} from it).
+     *
      * @param contentType catalog content_type filter; null = no filter
-     * @param author      catalog author filter; null = no filter
+     * @param author      catalog author SUBSTRING filter (ILIKE); null = no filter
      * @param year        catalog year filter; null = no filter
      * @param corpus      catalog corpus filter; null = no filter
+     * @param subtree     tumbler-prefix scope — DESCENDANTS only (root-exclusive, matching
+     *                    {@code cat.descendants()}); also filters alias rows; null = no filter
+     * @param where       chunk-metadata equality predicates (JSONB containment); null/empty
+     *                    = no filter
      */
     public List<Map<String, Object>> searchMetadataScoped(
             String tenant, String queryText, List<String> collectionNames,
             String contentType, String author, Integer year, String corpus, int nResults) {
+        return searchMetadataScoped(tenant, queryText, collectionNames, contentType, author,
+                                    year, corpus, null, null, nResults);
+    }
+
+    /** Full metadata-scoped search with subtree + where + ILIKE author + chash (nexus-889ff). */
+    public List<Map<String, Object>> searchMetadataScoped(
+            String tenant, String queryText, List<String> collectionNames,
+            String contentType, String author, Integer year, String corpus,
+            String subtree, Map<String, Object> where, int nResults) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
@@ -892,11 +913,12 @@ public final class PgVectorRepository {
         }
         int dim = requireHomogeneousDim(collectionNames);
         float[] queryVec = embedQuery(collectionNames.get(0), queryText, dim);
+        String whereJson = (where == null || where.isEmpty()) ? null : toJson(where);
 
-        String sql = "SELECT id, content, collection, distance"
+        String sql = "SELECT id, content, collection, distance, chash"
                    + " FROM nexus.search_metadata_scoped_" + dim
                    + "(?::vector, ARRAY[" + placeholders(collectionNames.size()) + "]::text[],"
-                   + " ?::text, ?::text, ?::int, ?::text, ?)";
+                   + " ?::text, ?::text, ?::int, ?::text, ?::text, ?::jsonb, ?)";
         List<Object> binds = new ArrayList<>();
         binds.add(vectorLiteral(queryVec));
         binds.addAll(collectionNames);
@@ -904,9 +926,11 @@ public final class PgVectorRepository {
         binds.add(author);
         binds.add(year);
         binds.add(corpus);
+        binds.add(subtree);
+        binds.add(whereJson);
         binds.add(nResults);
 
-        return runCombinedQuery(tenant, sql, binds);
+        return runCombinedQueryWithChash(tenant, sql, binds);
     }
 
     /**

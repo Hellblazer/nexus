@@ -641,18 +641,23 @@ class HttpVectorClient:
         author: str | None = None,
         year: int | None = None,
         corpus: str | None = None,
+        subtree: str | None = None,
+        where: dict | None = None,
         n_results: int = 10,
     ) -> list[dict]:
-        """Metadata-scoped combined search (RDR-156 P4, Decision 5).
+        """Metadata-scoped combined search (RDR-156 P4, Decision 5; catalog-008).
 
         Routes to ``POST /v1/vectors/search-metadata-scoped`` —
-        ``nexus.search_metadata_scoped_<dim>`` (catalog-006), which joins the
-        chunk table to the catalog manifest + documents and filters by the
-        catalog metadata dimensions in ONE statement (the unification of the
-        ``query`` tool's app-side catalog-routing dance). A ``None`` filter is
-        omitted from the body (no filter on that dimension). Returns the flat
-        ``{id, content, distance, collection}`` row list; ``id`` is the document
-        tumbler (document-level retrieval — de-dup per id is the caller's job).
+        ``nexus.search_metadata_scoped_<dim>``, which joins the chunk table to
+        the catalog manifest + documents and filters by the catalog dimensions
+        in ONE statement (the unification of the ``query`` tool's app-side
+        catalog-routing dance). A ``None``/empty filter is omitted (no filter on
+        that dimension). ``author`` is matched case-insensitively as a SUBSTRING
+        (ILIKE), ``subtree`` is a tumbler-prefix scope, ``where`` is a
+        chunk-metadata equality map (JSONB containment). Returns the flat
+        ``{id, content, distance, collection, chash}`` row list; ``id`` is the
+        document tumbler (de-dup per id is the caller's job); ``chash`` is the
+        matched chunk's hash (RDR-086 ``chunk_text_hash`` source).
         """
         body: dict[str, Any] = {
             "query": query,
@@ -667,6 +672,10 @@ class HttpVectorClient:
             body["year"] = year
         if corpus is not None:
             body["corpus"] = corpus
+        if subtree is not None:
+            body["subtree"] = subtree
+        if where:
+            body["where"] = where
         return _post("/v1/vectors/search-metadata-scoped", body, tenant=self._tenant)
 
     def search_topic_scoped(

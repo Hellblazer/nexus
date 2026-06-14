@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 P4 follow-on, bead nexus-889ff — extend search_metadata_scoped_<dim> so the
+    `query` tool's catalog dance can FULLY collapse onto the combined function (the
+    remaining cases beyond catalog-006's content_type/author/year/corpus).
+
+    Three additions + the shared audit-HIGH chash output:
+
+      * subtree (p_subtree): tumbler-prefix scope. Matches query()'s cat.descendants(),
+        which is ROOT-EXCLUSIVE (LIKE 'prefix.%' / startswith(prefix + '.') in both the
+        SQLite and HTTP catalog impls) — so the predicate is d.tumbler LIKE p_subtree||'.%'
+        WITHOUT a self-equality arm. Including the root would diverge from query() and the
+        repoint (rzqto) would silently change results. Also filters alias_of = '' so the
+        function never returns alias tumblers (query() dereferences via resolve(follow_alias);
+        a doc-level address is the canonical tumbler). query()'s subtree-depth>=3 guard stays
+        app-side in the repoint.
+
+      * where (p_where jsonb): chunk-metadata equality via JSONB containment
+        (c.metadata @> p_where). Mirrors the existing service `where` semantics
+        (hybridSearch's metadata equality) — equality only, which is all the service
+        ever supported; comparison ops (bib_year>=) were never service-side and map to
+        the typed catalog params (p_year) instead.
+
+      * author match-mode: catalog-006 did exact d.author = p_author, but query() uses
+        author.lower() IN (r.author or '').lower() — a case-insensitive SUBSTRING match.
+        Exact would silently regress "Hildebrand" vs "Hal Hildebrand". Switched to
+        d.author ILIKE '%' || p_author || '%'.
+
+      * chash output column (audit HIGH, shared with nexus-houg9): the function now
+        returns the MATCHED chunk's chash so the repoint (rzqto) populates the RDR-086
+        chunk_text_hash from the matched chunk, never a per-doc manifest guess.
+        chunks_<dim>.chash is the caller-provided id, never recomputed.
+
+    The 9-arg function REPLACES the catalog-006 7-arg version (dropped here so there is one
+    canonical signature; rollback recreates the 7-arg). Same discipline as catalog-006:
+    LANGUAGE sql STABLE SECURITY INVOKER NOT STRICT, query-vector-as-argument, inline
+    tombstone filter (deleted_at IS NULL), not joined to a view (keeps HNSW usable).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-008-1" author="nexus-889ff">
+        <comment>search_metadata_scoped_384: add subtree + where(jsonb) + author ILIKE + chash output; replaces the 7-arg catalog-006 version</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_384(vector, text[], text, text, int, text, int);
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+    p_query        vector(384),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8,
+           c.chash
+      FROM nexus.chunks_384 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_384(vector, text[], text, text, int, text, text, jsonb, int);
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+    p_query vector(384), p_collections text[], p_content_type text, p_author text,
+    p_year int, p_corpus text, p_n int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql STABLE SECURITY INVOKER AS $$
+    SELECT d.tumbler, c.chunk_text, c.collection, (c.embedding &lt;=&gt; p_query)::float8
+      FROM nexus.chunks_384 c
+      JOIN nexus.catalog_document_chunks m ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections) AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author IS NULL OR d.author = p_author)
+       AND (p_year IS NULL OR d.year = p_year)
+       AND (p_corpus IS NULL OR d.corpus = p_corpus)
+     ORDER BY c.embedding &lt;=&gt; p_query LIMIT p_n
+$$;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-008-2" author="nexus-889ff">
+        <comment>search_metadata_scoped_768: subtree + where + author ILIKE + chash</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_768(vector, text[], text, text, int, text, int);
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+    p_query        vector(768),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8,
+           c.chash
+      FROM nexus.chunks_768 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_768(vector, text[], text, text, int, text, text, jsonb, int);
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+    p_query vector(768), p_collections text[], p_content_type text, p_author text,
+    p_year int, p_corpus text, p_n int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql STABLE SECURITY INVOKER AS $$
+    SELECT d.tumbler, c.chunk_text, c.collection, (c.embedding &lt;=&gt; p_query)::float8
+      FROM nexus.chunks_768 c
+      JOIN nexus.catalog_document_chunks m ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections) AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author IS NULL OR d.author = p_author)
+       AND (p_year IS NULL OR d.year = p_year)
+       AND (p_corpus IS NULL OR d.corpus = p_corpus)
+     ORDER BY c.embedding &lt;=&gt; p_query LIMIT p_n
+$$;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-008-3" author="nexus-889ff">
+        <comment>search_metadata_scoped_1024: subtree + where + author ILIKE + chash</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024(vector, text[], text, text, int, text, int);
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+    p_query        vector(1024),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8,
+           c.chash
+      FROM nexus.chunks_1024 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024(vector, text[], text, text, int, text, text, jsonb, int);
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+    p_query vector(1024), p_collections text[], p_content_type text, p_author text,
+    p_year int, p_corpus text, p_n int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql STABLE SECURITY INVOKER AS $$
+    SELECT d.tumbler, c.chunk_text, c.collection, (c.embedding &lt;=&gt; p_query)::float8
+      FROM nexus.chunks_1024 c
+      JOIN nexus.catalog_document_chunks m ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections) AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author IS NULL OR d.author = p_author)
+       AND (p_year IS NULL OR d.year = p_year)
+       AND (p_corpus IS NULL OR d.corpus = p_corpus)
+     ORDER BY c.embedding &lt;=&gt; p_query LIMIT p_n
+$$;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
