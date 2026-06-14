@@ -112,6 +112,27 @@ public final class CceEmbedder implements Embedder {
     }
 
     /**
+     * Embed a batch of texts and return vectors plus the accumulated token count
+     * from {@code usage.total_tokens} across all per-text CCE API calls
+     * (bead nexus-ehc4q).
+     *
+     * <p>One API call per text (CCE per-text convention); total_tokens is summed
+     * across all N calls.
+     */
+    @Override
+    public EmbedResult embedWithUsage(List<String> texts) {
+        if (texts == null || texts.isEmpty()) return new EmbedResult(List.of(), 0L);
+        List<float[]> result = new ArrayList<>(texts.size());
+        long totalTokens = 0L;
+        for (String text : texts) {
+            EmbedResult oneResult = embedOneWithUsage(text);
+            result.add(oneResult.embeddings().get(0));
+            totalTokens += oneResult.tokens();
+        }
+        return new EmbedResult(result, totalTokens);
+    }
+
+    /**
      * Embed a batch of texts, preserving full double (float64) precision.
      *
      * <p>Decodes base64 as float32, then promotes float32 → float64 exactly.
@@ -137,6 +158,66 @@ public final class CceEmbedder implements Embedder {
         } catch (Exception e) {
             throw new RuntimeException("CCE float parse failed for text: " + text.substring(0, Math.min(40, text.length())), e);
         }
+    }
+
+    /**
+     * Embed one text and return the vector plus the token count from
+     * {@code usage.total_tokens} in the CCE response (bead nexus-ehc4q).
+     *
+     * <p>CCE response root:
+     * <pre>
+     * {
+     *   "data":  [...],
+     *   "usage": {"total_tokens": N}
+     * }
+     * </pre>
+     *
+     * <p>Parses the JSON body ONCE and extracts both the vector and the usage count
+     * from the same {@code root} map (avoids double-deserialisation).
+     */
+    private EmbedResult embedOneWithUsage(String text) {
+        String json = buildJson(text);
+        String body = callApi(json);
+        try {
+            return parseOneFloatWithUsage(body);
+        } catch (Exception e) {
+            throw new RuntimeException("CCE embedOneWithUsage failed for text: " + text.substring(0, Math.min(40, text.length())), e);
+        }
+    }
+
+    /** Parse a CCE response body ONCE: extract the float32 vector AND {@code usage.total_tokens}. */
+    @SuppressWarnings("unchecked")
+    private EmbedResult parseOneFloatWithUsage(String body) throws Exception {
+        Map<String, Object> root = mapper.readValue(body, Map.class);
+        // ── vector ────────────────────────────────────────────────────────────────
+        List<Map<String, Object>> outerData = (List<Map<String, Object>>) root.get("data");
+        if (outerData == null || outerData.isEmpty()) {
+            throw new RuntimeException("CCE response missing data array: " + body);
+        }
+        outerData.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
+        List<Map<String, Object>> innerData = (List<Map<String, Object>>) outerData.get(0).get("data");
+        if (innerData == null || innerData.isEmpty()) {
+            throw new RuntimeException("CCE response: doc group has empty data array");
+        }
+        innerData.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
+        Object emb = innerData.get(0).get("embedding");
+        if (emb == null) throw new RuntimeException("CCE response: chunk missing 'embedding'");
+        float[] vec;
+        if (emb instanceof String b64) {
+            vec = decodeBase64Float32(b64);
+        } else {
+            List<Number> rawEmb = (List<Number>) emb;
+            vec = new float[rawEmb.size()];
+            for (int i = 0; i < rawEmb.size(); i++) vec[i] = rawEmb.get(i).floatValue();
+        }
+        // ── usage ─────────────────────────────────────────────────────────────────
+        long tokens = 0L;
+        Map<String, Object> usage = (Map<String, Object>) root.get("usage");
+        if (usage != null) {
+            Object totalTokens = usage.get("total_tokens");
+            if (totalTokens instanceof Number n) tokens = n.longValue();
+        }
+        return new EmbedResult(java.util.List.of(vec), tokens);
     }
 
     private double[] embedOneDouble(String text) {
@@ -171,6 +252,10 @@ public final class CceEmbedder implements Embedder {
         }
     }
 
+    // nexus-ehc4q billing note: on transient-error retries, usage.total_tokens is
+    // taken from the final successful response only; tokens from prior failed
+    // attempts are not accumulated — a billing UNDER-count on retried calls (safe
+    // direction: under-charges the customer). Documented, not corrected.
     private String callApi(String json) {
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
