@@ -349,19 +349,54 @@ def _init_cluster(bins: PgBinaries, pgdata: Path, os_user: str) -> bool:
 
 
 def _configure_cluster(pgdata: Path, port: int) -> None:
-    """Append port and listen_addresses to postgresql.conf."""
+    """Append port, listen_addresses, and (empty) unix_socket_directories.
+
+    We run TCP-only (``listen_addresses = '127.0.0.1'``; all clients connect via
+    ``-h 127.0.0.1``). Omitting ``-k`` from pg_ctl does NOT suppress the Unix
+    socket — Postgres still opens one in the config-default
+    ``unix_socket_directories``, which on Debian/PGDG is the postgres-owned
+    ``/var/run/postgresql``. A non-``postgres`` OS user then fails at startup
+    (``could not create lock file …/.s.PGSQL.<port>.lock: Permission denied``).
+    Setting it empty disables the socket entirely, which also sidesteps the
+    macOS 104-char socket-path limit that motivated dropping ``-k``. (nexus-6laob)
+    """
     conf_path = pgdata / "postgresql.conf"
     conf_text = conf_path.read_text() if conf_path.exists() else ""
-    # Remove any lines we previously wrote so re-running is idempotent.
-    lines = [
-        l for l in conf_text.splitlines()
-        if not l.startswith("# nexus-managed:")
-    ]
+    # Drop the entire prior nexus-managed block so re-running is idempotent.
+    # The block is delimited by BEGIN/END sentinels — filtering only the comment
+    # lines (the old behaviour) left the value lines to accumulate on every
+    # re-run, duplicating directives (nexus-6laob).
+    begin, end = "# nexus-managed: BEGIN", "# nexus-managed: END"
+    lines: list[str] = []
+    skipping = False
+    for l in conf_text.splitlines():
+        if l == begin:
+            skipping = True
+            continue
+        if l == end:
+            skipping = False
+            continue
+        if skipping:
+            continue
+        # Drop stale pre-sentinel managed comment lines (e.g. "# nexus-managed:
+        # port") left by an older nexus. Their value lines (port =, listen_
+        # addresses =) are left untouched — PG last-wins makes the new block
+        # authoritative, and we must not clobber a user's own directive.
+        if l.startswith("# nexus-managed:"):
+            continue
+        lines.append(l)
+    if skipping:
+        # An earlier write was truncated mid-block (BEGIN without END). Don't
+        # silently swallow everything after it — surface the anomaly.
+        _log.warning("pg_conf_unterminated_managed_block", path=str(conf_path))
     lines += [
-        f"# nexus-managed: port",
+        begin,
         f"port = {port}",
-        f"# nexus-managed: listen_addresses",
         f"listen_addresses = '127.0.0.1'",
+        # Omitting -k does NOT disable the Unix socket; empty disables it (see
+        # docstring). Required for non-postgres OS users on Debian/Ubuntu.
+        f"unix_socket_directories = ''",
+        end,
     ]
     conf_path.write_text("\n".join(lines) + "\n")
 
@@ -793,9 +828,13 @@ def provision(
     # ── initdb ─────────────────────────────────────────────────────────────────
     result.cluster_created = _init_cluster(bins, pgdata, os_user)
 
-    # ── Configure port (only for newly created clusters) ──────────────────────
-    if result.cluster_created:
-        _configure_cluster(pgdata, port)
+    # ── Configure conf (port, TCP-only, socket-disabled) ──────────────────────
+    # Unconditional (idempotent via the BEGIN/END sentinel block): re-provisioning
+    # an EXISTING but stopped cluster must repair a conf written by an older nexus
+    # that lacks unix_socket_directories='' — otherwise the start below fails on
+    # Debian/Ubuntu for a non-postgres OS user (nexus-6laob). The fast path above
+    # returns before here for an already-running cluster (its conf already works).
+    _configure_cluster(pgdata, port)
 
     # ── Start cluster ──────────────────────────────────────────────────────────
     _start_cluster(bins, pgdata, port)
