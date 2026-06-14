@@ -254,8 +254,11 @@ is release N+1.
    (nexus-ykrhb, PR #1172): no — the full native service is CI-green on linux-amd64.
    jOOQ generated-record metadata + ONNX/DJL JNI handled via agent-traced reachability
    metadata + IncludeResources.**
-2. Embedded-PG wheels: does any maintained wheel ship pgvector for darwin-arm64 +
-   linux-x86_64? What is the disk/install-time cost?
+2. ~~Embedded-PG wheels: does any maintained wheel ship pgvector for darwin-arm64 +
+   linux-x86_64?~~ **RESOLVED 2026-06-14 (RF-157-7): no off-the-shelf relocatable
+   PG16+pgvector exists; the project owns a CI bundle-build matrix (zonky PG16 +
+   CI-built pgvector). The pip-wheel form is rejected (Alternatives). Open sub-question
+   folded into the P1 CA-3 gate: disk/extract cost is measured by the CA-2 spike.**
 3. ~~Windows: out of scope for release N?~~ **RESOLVED 2026-06-14 (owner): Windows
    ships in release N+1, not the gating release N. It is the long pole for both the
    native-image build and the pgvector MSVC source build (RF-157-7); release N targets
