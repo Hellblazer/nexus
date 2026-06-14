@@ -105,6 +105,15 @@ public final class PgVectorRepository {
             "bge-base-en-v15-768",  768,
             "minilm-l6-v2-384",     384);
 
+    /**
+     * Pairs a value with the embedding token count consumed to produce it (bead nexus-ehc4q).
+     *
+     * <p>Returned by the {@code *WithTokens} sibling methods so the caller (VectorHandler)
+     * receives the token count as a plain return value rather than via a side-channel.
+     * Tokens = 0 means the embedder does not report billable usage (e.g. ONNX local-mode).
+     */
+    public record Tokened<T>(T value, long tokens) {}
+
     private final TenantScope    tenantScope;
     private final Embedder       docEmbedder;
     private final Embedder       queryEmbedder;
@@ -206,10 +215,34 @@ public final class PgVectorRepository {
      * @param documents  chunk texts (embedded server-side)
      * @param metadatas  per-chunk metadata maps (stored as JSONB; may contain nulls)
      */
+    /**
+     * Token-aware sibling of {@link #upsertChunks} (bead nexus-ehc4q).
+     * Returns the chunk IDs upserted alongside the embedding token count.
+     * The token count is 0 when the embedder does not report billable usage
+     * (e.g. ONNX local-mode; see {@link OnnxEmbedder#embedWithUsage}).
+     */
+    public Tokened<Integer> upsertChunksWithTokens(String tenant, String collection,
+                                                    List<String> ids,
+                                                    List<String> documents,
+                                                    List<Map<String, Object>> metadatas) {
+        long[] tokensOut = {0L};
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut);
+        return new Tokened<>(ids.size(), tokensOut[0]);
+    }
+
+    /** Delegates to {@link #upsertChunksInternal}; discards the token count. */
     public void upsertChunks(String tenant, String collection,
                              List<String> ids,
                              List<String> documents,
                              List<Map<String, Object>> metadatas) {
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null);
+    }
+
+    private void upsertChunksInternal(String tenant, String collection,
+                                      List<String> ids,
+                                      List<String> documents,
+                                      List<Map<String, Object>> metadatas,
+                                      long[] tokensOut) {
         if (ids.isEmpty()) return;
         int dim = dimForCollection(collection);
 
@@ -252,9 +285,14 @@ public final class PgVectorRepository {
 
         // Server-side embed - collection-aware routing when wired with the router
         // (production / Seam B path), identical to the Chroma VectorRepository flow.
-        List<float[]> embeddings = (docRouter != null)
-                ? docRouter.embedForCollection(collection, dedupDocs)
-                : docEmbedder.embed(dedupDocs);
+        // Uses *WithUsage variant to capture the token count (bead nexus-ehc4q);
+        // the count is surfaced to VectorHandler via the Tokened<T> return value of
+        // upsertChunksWithTokens (not a ThreadLocal side-channel).
+        EmbedResult embedResult = (docRouter != null)
+                ? docRouter.embedForCollectionWithUsage(collection, dedupDocs)
+                : docEmbedder.embedWithUsage(dedupDocs);
+        if (tokensOut != null) tokensOut[0] = embedResult.tokens();
+        List<float[]> embeddings = embedResult.embeddings();
 
         // Fail loud BEFORE any SQL if the embedder's output does not match the
         // dispatched table dimension (no truncation, no padding).
@@ -334,12 +372,24 @@ public final class PgVectorRepository {
      *         chunk's metadata keys flattened in (same shape as the Chroma path's
      *         flattened rows so handlers port unchanged)
      */
+    /** Delegates to {@link #searchWithTokens}; discards the token count. */
     public List<Map<String, Object>> search(String tenant, String queryText,
                                             List<String> collectionNames,
                                             int nResults,
                                             Map<String, Object> where) {
+        return searchWithTokens(tenant, queryText, collectionNames, nResults, where).value();
+    }
+
+    /**
+     * Token-aware sibling of {@link #search} (bead nexus-ehc4q).
+     * Returns search results alongside the embedding token count.
+     */
+    public Tokened<List<Map<String, Object>>> searchWithTokens(String tenant, String queryText,
+                                                               List<String> collectionNames,
+                                                               int nResults,
+                                                               Map<String, Object> where) {
         if (collectionNames == null || collectionNames.isEmpty()) {
-            return List.of();
+            return new Tokened<>(List.of(), 0L);
         }
         int dim = dimForCollection(collectionNames.get(0));
         for (String col : collectionNames) {
@@ -355,14 +405,8 @@ public final class PgVectorRepository {
         // Route by the first collection - the same-dim check above guarantees the set is
         // homogeneous, and the Python client never mixes embedder families in one call
         // (same convention as the Chroma path).
-        float[] queryVec = (queryRouter != null)
-                ? queryRouter.embedOneForCollection(collectionNames.get(0), queryText)
-                : queryEmbedder.embedOne(queryText);
-        if (queryVec.length != dim) {
-            throw new IllegalArgumentException(
-                "query embedder produced a " + queryVec.length
-                + "-dim vector but the collections dispatch to chunks_" + dim);
-        }
+        EmbedResult embedResult = embedQuery(collectionNames.get(0), queryText, dim);
+        float[] queryVec = embedResult.embeddings().get(0);
 
         StringBuilder sql = new StringBuilder()
             .append("SELECT chash, chunk_text, collection, metadata::text AS metadata_json,")
@@ -400,7 +444,7 @@ public final class PgVectorRepository {
             row.putAll(fromJson(rec.get("metadata_json", String.class)));
             rows.add(row);
         }
-        return rows;
+        return new Tokened<>(rows, embedResult.tokens());
     }
 
     /**
@@ -489,11 +533,27 @@ public final class PgVectorRepository {
      * @throws IllegalArgumentException if {@code nResults < 1} (a non-positive LIMIT would
      *                                  silently unbound the query: LIMIT -1 means no limit)
      */
+    /** Delegates to the 6-arg overload with {@link #SELECTIVE_GATE_MAX}; discards token count. */
     public List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                                   List<String> collectionNames,
                                                   int nResults,
                                                   Map<String, Object> where) {
         return hybridSearch(tenant, queryText, collectionNames, nResults, where, SELECTIVE_GATE_MAX);
+    }
+
+    /**
+     * Token-aware sibling of {@link #hybridSearch} (bead nexus-ehc4q).
+     * Returns hybrid search results alongside the embedding token count.
+     */
+    public Tokened<List<Map<String, Object>>> hybridSearchWithTokens(String tenant, String queryText,
+                                                                      List<String> collectionNames,
+                                                                      int nResults,
+                                                                      Map<String, Object> where) {
+        long[] tokensOut = {0L};
+        List<Map<String, Object>> rows =
+            hybridSearch(tenant, queryText, collectionNames, nResults, where, SELECTIVE_GATE_MAX,
+                         tokensOut);
+        return new Tokened<>(rows, tokensOut[0]);
     }
 
     /**
@@ -508,11 +568,21 @@ public final class PgVectorRepository {
      *                         gate to HNSW-first and re-enable the collapse, so it is
      *                         rejected).
      */
+    /** Package-private overload for tests pinning selectiveGateMax; discards token count. */
     public List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                            List<String> collectionNames,
                                            int nResults,
                                            Map<String, Object> where,
                                            int selectiveGateMax) {
+        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null);
+    }
+
+    private List<Map<String, Object>> hybridSearch(String tenant, String queryText,
+                                           List<String> collectionNames,
+                                           int nResults,
+                                           Map<String, Object> where,
+                                           int selectiveGateMax,
+                                           long[] tokensOut) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
@@ -543,14 +613,9 @@ public final class PgVectorRepository {
             }
         }
 
-        float[] queryVec = (queryRouter != null)
-                ? queryRouter.embedOneForCollection(collectionNames.get(0), queryText)
-                : queryEmbedder.embedOne(queryText);
-        if (queryVec.length != dim) {
-            throw new IllegalArgumentException(
-                "query embedder produced a " + queryVec.length
-                + "-dim vector but the collections dispatch to chunks_" + dim);
-        }
+        EmbedResult hybridEmbed = embedQuery(collectionNames.get(0), queryText, dim);
+        if (tokensOut != null) tokensOut[0] = hybridEmbed.tokens();
+        float[] queryVec = hybridEmbed.embeddings().get(0);
 
         // Text gate fragment, shared by the COUNT probe and the ranked query. FTS lexeme
         // match OR word-trigram similarity: the <% operator form (word_similarity >=
@@ -772,9 +837,21 @@ public final class PgVectorRepository {
      */
     public String put(String tenant, String collection, String docId,
                       String content, Map<String, Object> metadata) {
-        upsertChunks(tenant, collection, List.of(docId), List.of(content),
-                     List.of(metadata != null ? metadata : Map.of()));
+        putWithTokens(tenant, collection, docId, content, metadata);
         return docId;
+    }
+
+    /**
+     * Token-aware sibling of {@link #put} (bead nexus-ehc4q).
+     * Delegates to {@link #upsertChunksWithTokens}; the token count is the
+     * embedding cost for the single chunk.
+     */
+    public Tokened<String> putWithTokens(String tenant, String collection, String docId,
+                                          String content, Map<String, Object> metadata) {
+        Tokened<Integer> result = upsertChunksWithTokens(
+            tenant, collection, List.of(docId), List.of(content),
+            List.of(metadata != null ? metadata : Map.of()));
+        return new Tokened<>(docId, result.tokens());
     }
 
     /**
@@ -881,17 +958,29 @@ public final class PgVectorRepository {
      * @param year        catalog year filter; null = no filter
      * @param corpus      catalog corpus filter; null = no filter
      */
+    /** Delegates to {@link #searchMetadataScopedWithTokens}; discards the token count. */
     public List<Map<String, Object>> searchMetadataScoped(
             String tenant, String queryText, List<String> collectionNames,
             String contentType, String author, Integer year, String corpus, int nResults) {
+        return searchMetadataScopedWithTokens(
+            tenant, queryText, collectionNames, contentType, author, year, corpus, nResults).value();
+    }
+
+    /**
+     * Token-aware sibling of {@link #searchMetadataScoped} (bead nexus-ehc4q).
+     */
+    public Tokened<List<Map<String, Object>>> searchMetadataScopedWithTokens(
+            String tenant, String queryText, List<String> collectionNames,
+            String contentType, String author, Integer year, String corpus, int nResults) {
         if (collectionNames == null || collectionNames.isEmpty()) {
-            return List.of();
+            return new Tokened<>(List.of(), 0L);
         }
         if (nResults < 1) {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
         int dim = requireHomogeneousDim(collectionNames);
-        float[] queryVec = embedQuery(collectionNames.get(0), queryText, dim);
+        EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
+        float[] queryVec = embed.embeddings().get(0);
 
         String sql = "SELECT id, content, collection, distance"
                    + " FROM nexus.search_metadata_scoped_" + dim
@@ -906,7 +995,7 @@ public final class PgVectorRepository {
         binds.add(corpus);
         binds.add(nResults);
 
-        return runCombinedQuery(tenant, sql, binds);
+        return new Tokened<>(runCombinedQuery(tenant, sql, binds), embed.tokens());
     }
 
     /**
@@ -919,16 +1008,26 @@ public final class PgVectorRepository {
      * matching {@link #search}). Same query-vector-as-argument + iterative_scan discipline
      * as {@link #searchMetadataScoped}.
      */
+    /** Delegates to {@link #searchTopicScopedWithTokens}; discards the token count. */
     public List<Map<String, Object>> searchTopicScoped(
             String tenant, String queryText, String topicLabel, String collection, int nResults) {
+        return searchTopicScopedWithTokens(tenant, queryText, topicLabel, collection, nResults).value();
+    }
+
+    /**
+     * Token-aware sibling of {@link #searchTopicScoped} (bead nexus-ehc4q).
+     */
+    public Tokened<List<Map<String, Object>>> searchTopicScopedWithTokens(
+            String tenant, String queryText, String topicLabel, String collection, int nResults) {
         if (collection == null || collection.isBlank()) {
-            return List.of();
+            return new Tokened<>(List.of(), 0L);
         }
         if (nResults < 1) {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
         int dim = dimForCollection(collection);
-        float[] queryVec = embedQuery(collection, queryText, dim);
+        EmbedResult embed = embedQuery(collection, queryText, dim);
+        float[] queryVec = embed.embeddings().get(0);
 
         String sql = "SELECT id, content, collection, distance"
                    + " FROM nexus.search_topic_scoped_" + dim
@@ -939,7 +1038,7 @@ public final class PgVectorRepository {
         binds.add(collection);
         binds.add(nResults);
 
-        return runCombinedQuery(tenant, sql, binds);
+        return new Tokened<>(runCombinedQuery(tenant, sql, binds), embed.tokens());
     }
 
     /**
@@ -967,12 +1066,23 @@ public final class PgVectorRepository {
      * @param depth     BFS depth (clamped to [1,3])
      * @param direction "out" | "in" | "both"
      */
+    /** Delegates to {@link #searchGraphHopWithTokens}; discards the token count. */
     public List<Map<String, Object>> searchGraphHop(
+            String tenant, String queryText, List<String> seeds, List<String> collectionNames,
+            String linkType, int depth, String direction, int nResults) {
+        return searchGraphHopWithTokens(
+            tenant, queryText, seeds, collectionNames, linkType, depth, direction, nResults).value();
+    }
+
+    /**
+     * Token-aware sibling of {@link #searchGraphHop} (bead nexus-ehc4q).
+     */
+    public Tokened<List<Map<String, Object>>> searchGraphHopWithTokens(
             String tenant, String queryText, List<String> seeds, List<String> collectionNames,
             String linkType, int depth, String direction, int nResults) {
         if (seeds == null || seeds.isEmpty()
                 || collectionNames == null || collectionNames.isEmpty()) {
-            return List.of();
+            return new Tokened<>(List.of(), 0L);
         }
         if (nResults < 1) {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
@@ -984,7 +1094,8 @@ public final class PgVectorRepository {
         }
         int clampedDepth = Math.min(Math.max(depth, 1), 3);  // mirror graphBFS bound
         int dim = requireHomogeneousDim(collectionNames);
-        float[] queryVec = embedQuery(collectionNames.get(0), queryText, dim);
+        EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
+        float[] queryVec = embed.embeddings().get(0);
 
         String sql = "SELECT id, content, collection, distance, chash"
                    + " FROM nexus.search_graph_hop_" + dim
@@ -1000,7 +1111,7 @@ public final class PgVectorRepository {
         binds.add(dir);
         binds.add(nResults);
 
-        return runCombinedQueryWithChash(tenant, sql, binds);
+        return new Tokened<>(runCombinedQueryWithChash(tenant, sql, binds), embed.tokens());
     }
 
     /**
@@ -1021,17 +1132,22 @@ public final class PgVectorRepository {
         return dim;
     }
 
-    /** Embed the query server-side, routing by collection; fail loud on dim mismatch. */
-    private float[] embedQuery(String collection, String queryText, int dim) {
-        float[] queryVec = (queryRouter != null)
-                ? queryRouter.embedOneForCollection(collection, queryText)
-                : queryEmbedder.embedOne(queryText);
+    /**
+     * Embed the query server-side, routing by collection; fail loud on dim mismatch.
+     * Returns the embedding result including the token count so callers can propagate
+     * it as a return value (bead nexus-ehc4q — no ThreadLocal side-channel).
+     */
+    private EmbedResult embedQuery(String collection, String queryText, int dim) {
+        EmbedResult result = (queryRouter != null)
+                ? queryRouter.embedOneForCollectionWithUsage(collection, queryText)
+                : queryEmbedder.embedWithUsage(List.of(queryText));
+        float[] queryVec = result.embeddings().get(0);
         if (queryVec.length != dim) {
             throw new IllegalArgumentException(
                 "query embedder produced a " + queryVec.length
                 + "-dim vector but the collection dispatches to chunks_" + dim);
         }
-        return queryVec;
+        return result;
     }
 
     /**

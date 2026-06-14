@@ -137,6 +137,33 @@ public final class EmbedderRouter implements Embedder {
     }
 
     /**
+     * Embed texts for a specific collection and return both the vectors and the
+     * token count consumed by the embedding call (bead nexus-ehc4q).
+     *
+     * <p>Routes to the same embedder as {@link #embedForCollection}, then
+     * delegates to {@link Embedder#embedWithUsage} to capture the token count.
+     * No second embed call — the token count comes from the same API response.
+     *
+     * @param collection collection name (four-segment conformant), used for routing
+     * @param texts      texts to embed
+     * @return {@link EmbedResult} carrying vectors aligned with input and the token count
+     */
+    public EmbedResult embedForCollectionWithUsage(String collection, List<String> texts) {
+        Embedder embedder = resolveEmbedderStrict(collection);
+        log.debug("event=embed_router_with_usage collection={} embedder={} count={}",
+                collection, embedder.getClass().getSimpleName(), texts.size());
+        return embedder.embedWithUsage(texts);
+    }
+
+    /**
+     * Embed a single text for a specific collection, returning the vector and token count
+     * (bead nexus-ehc4q). Convenience wrapper over {@link #embedForCollectionWithUsage}.
+     */
+    public EmbedResult embedOneForCollectionWithUsage(String collection, String text) {
+        return embedForCollectionWithUsage(collection, List.of(text));
+    }
+
+    /**
      * Embed texts for a collection, preserving full double (float64) precision.
      *
      * <p>Used by the parity gate ({@code /v1/vectors/embed}) to avoid the float32

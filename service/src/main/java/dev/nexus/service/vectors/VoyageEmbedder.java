@@ -98,6 +98,24 @@ public final class VoyageEmbedder implements Embedder {
     }
 
     /**
+     * Embed a batch of texts and return vectors plus the token count from
+     * {@code usage.total_tokens} in the Voyage response (bead nexus-ehc4q).
+     *
+     * <p>Reuses the same {@link #callApi} / parse path; no second HTTP call.
+     */
+    @Override
+    public EmbedResult embedWithUsage(List<String> texts) {
+        if (texts == null || texts.isEmpty()) return new EmbedResult(List.of(), 0L);
+        String json = buildJson(texts);
+        String responseBody = callApi(json);
+        try {
+            return parseResponseWithUsage(responseBody);
+        } catch (Exception e) {
+            throw new RuntimeException("Voyage embedWithUsage parse failed", e);
+        }
+    }
+
+    /**
      * Embed texts preserving full double (float64) precision for the parity gate.
      *
      * <p>The Python SDK uses base64 encoding and decodes as float32 binary.  This method
@@ -136,6 +154,10 @@ public final class VoyageEmbedder implements Embedder {
         }
     }
 
+    // nexus-ehc4q billing note: on transient-error retries, usage.total_tokens is
+    // taken from the final successful response only; tokens from prior failed
+    // attempts are not accumulated — a billing UNDER-count on retried calls (safe
+    // direction: under-charges the customer). Documented, not corrected.
     private String callApi(String json) {
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
@@ -190,6 +212,41 @@ public final class VoyageEmbedder implements Embedder {
         }
         data.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
         return data;
+    }
+
+    /**
+     * Parse the Voyage response returning both the float32 vectors and the token count
+     * from {@code usage.total_tokens} (bead nexus-ehc4q).
+     *
+     * <p>The Voyage {@code /v1/embeddings} response root structure:
+     * <pre>
+     * {
+     *   "data":  [...],
+     *   "usage": {"total_tokens": N}
+     * }
+     * </pre>
+     */
+    @SuppressWarnings("unchecked")
+    private EmbedResult parseResponseWithUsage(String body) throws Exception {
+        Map<String, Object> root = mapper.readValue(body, Map.class);
+        List<Map<String, Object>> data = (List<Map<String, Object>>) root.get("data");
+        if (data == null || data.isEmpty()) {
+            throw new RuntimeException("Voyage AI returned empty data array: " + body);
+        }
+        data.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
+
+        List<float[]> result = new ArrayList<>(data.size());
+        for (Map<String, Object> item : data) {
+            result.add(decodeBase64Float32(getEmbeddingField(item, body)));
+        }
+
+        long tokens = 0L;
+        Map<String, Object> usage = (Map<String, Object>) root.get("usage");
+        if (usage != null) {
+            Object totalTokens = usage.get("total_tokens");
+            if (totalTokens instanceof Number n) tokens = n.longValue();
+        }
+        return new EmbedResult(result, tokens);
     }
 
     /**
