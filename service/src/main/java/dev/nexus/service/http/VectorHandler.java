@@ -113,6 +113,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/hybrid-search" -> handleHybridSearch(exchange, method);  // RDR-155 P3
                 case "/search-metadata-scoped" -> handleSearchMetadataScoped(exchange, method);  // RDR-156 P4
                 case "/search-topic-scoped"    -> handleSearchTopicScoped(exchange, method);     // RDR-156 P4
+                case "/search-graph-hop"       -> handleSearchGraphHop(exchange, method);        // RDR-156 P4 (houg9)
                 case "/store-put"     -> handleStorePut(exchange, method);
                 case "/get"           -> handleGet(exchange, method);
                 case "/store-get"     -> handleStoreGet(exchange, method);
@@ -308,6 +309,35 @@ public final class VectorHandler implements HttpHandler {
         int nResults      = optInt(body, "n_results", 10);
 
         var results = repo.searchTopicScoped(tenant, queryText, topicLabel, collection, nResults);
+        HttpUtil.send(ex, 200, json(results));
+    }
+
+    /**
+     * POST /v1/vectors/search-graph-hop (RDR-156 P4 follow-on, Decision 5, bead nexus-houg9).
+     *
+     * <p>The combined graph-hop query that retires the {@code query} tool's
+     * {@code follow_links} app-side BFS dance. Request:
+     * {@code {"query": "...", "seeds": [...], "collections": [...], "link_type": "cites",
+     * "depth": 1, "direction": "both", "n_results": 10}} — link_type may be omitted
+     * (follow all edge types); direction defaults to "both"; depth defaults to 1.
+     * Document-level rows, each carrying the matched chunk's {@code chash}.
+     */
+    private void handleSearchGraphHop(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String queryText         = requireString(body, "query");
+        List<String> seeds       = requireStringList(body, "seeds");
+        List<String> collections = requireStringList(body, "collections");
+        String linkType          = optString(body, "link_type");
+        int depth                = optInt(body, "depth", 1);
+        String direction         = optString(body, "direction");
+        if (direction == null) direction = "both";
+        int nResults             = optInt(body, "n_results", 10);
+
+        var results = repo.searchGraphHop(
+            tenant, queryText, seeds, collections, linkType, depth, direction, nResults);
         HttpUtil.send(ex, 200, json(results));
     }
 

@@ -255,7 +255,7 @@ _RETRIEVAL_TOOLS: frozenset[str] = frozenset(
     {"search", "query", "store_get_many",
      # RDR-156 P4 (nexus-joesk): combined-query primitives — structured=True so
      # $stepN.ids/tumblers resolve from the {ids, tumblers, distances, collections} shape.
-     "search_metadata_scoped", "search_topic_scoped"},
+     "search_metadata_scoped", "search_topic_scoped", "search_graph_hop"},
 )
 
 #: Args keys that may carry a collection name. The runner extracts
