@@ -88,6 +88,15 @@
          placed after catalog-004 to keep the catalog-NNN sequence in file order. -->
     <include file="db/changelog/catalog-005-collection-vector-stats.xml"/>
 
+    <!-- Combined-query functions (bead nexus-70r3c.15, RDR-156 P4.2):
+         per-dim search_metadata_scoped_<dim> + search_topic_scoped_<dim> set-returning
+         SQL functions (Decision 5). Inlinable LANGUAGE sql, SECURITY INVOKER, query
+         vector as a plan-time argument (Finding 5a) so the HNSW index survives the join;
+         tombstone-filtered (deleted_at IS NULL). Depends on vectors-001 (chunks_<dim>),
+         catalog-001 (documents/manifest), catalog-003 (deleted_at), taxonomy-001
+         (topics/topic_assignments). Contract: CombinedQueryParityTest (P4.1). -->
+    <include file="db/changelog/catalog-006-combined-query-functions.xml"/>
+
     <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
          taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB
          collection into Postgres so service-mode taxonomy compute is chroma-free.
