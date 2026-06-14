@@ -169,8 +169,18 @@ $$;
          topic-scoped search — per dim (384 / 768 / 1024)
          ════════════════════════════════════════════════════════════════════════ -->
 
+    <!--
+        Topic membership is CHUNK-level: topic_assignments.doc_id is a chunk content-hash
+        (chash), NOT a document tumbler (nexus-sa14p — the HDBSCAN taxonomy clusters chunk
+        embeddings). The join is therefore chunks_<dim>.chash = topic_assignments.doc_id
+        directly, and the returned id is the chunk chash (chunk-level retrieval, matching
+        raw search()). Tombstone filtering uses the live_chunks predicate inline (a chunk
+        is live if it has no manifest rows — MCP note chunk — or at least one manifest row
+        to a live document); inlined rather than joined to the view so the HNSW index on
+        the raw chunks table still engages.
+    -->
     <changeSet id="catalog-006-4" author="nexus-70r3c.15">
-        <comment>search_topic_scoped_384: chunks_384 ⋈ manifest ⋈ catalog_documents ⋈ topic_assignments ⋈ topics</comment>
+        <comment>search_topic_scoped_384: chunks_384 ⋈ topic_assignments(chash) ⋈ topics; chunk-level, live-filtered</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
     p_query       vector(384),
@@ -182,23 +192,25 @@ LANGUAGE sql
 STABLE
 SECURITY INVOKER
 AS $$
-    SELECT d.tumbler,
+    SELECT c.chash,
            c.chunk_text,
            c.collection,
            (c.embedding &lt;=&gt; p_query)::float8
       FROM nexus.chunks_384 c
-      JOIN nexus.catalog_document_chunks m
-        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
-      JOIN nexus.catalog_documents d
-        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
       JOIN nexus.topic_assignments ta
-        ON ta.tenant_id = d.tenant_id AND ta.doc_id = d.tumbler
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
       JOIN nexus.topics t
         ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
      WHERE c.collection = p_collection
        AND t.collection = p_collection
        AND t.label = p_topic_label
-       AND d.deleted_at IS NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
      ORDER BY c.embedding &lt;=&gt; p_query
      LIMIT p_n
 $$;
@@ -219,23 +231,25 @@ LANGUAGE sql
 STABLE
 SECURITY INVOKER
 AS $$
-    SELECT d.tumbler,
+    SELECT c.chash,
            c.chunk_text,
            c.collection,
            (c.embedding &lt;=&gt; p_query)::float8
       FROM nexus.chunks_768 c
-      JOIN nexus.catalog_document_chunks m
-        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
-      JOIN nexus.catalog_documents d
-        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
       JOIN nexus.topic_assignments ta
-        ON ta.tenant_id = d.tenant_id AND ta.doc_id = d.tumbler
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
       JOIN nexus.topics t
         ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
      WHERE c.collection = p_collection
        AND t.collection = p_collection
        AND t.label = p_topic_label
-       AND d.deleted_at IS NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
      ORDER BY c.embedding &lt;=&gt; p_query
      LIMIT p_n
 $$;
@@ -256,23 +270,25 @@ LANGUAGE sql
 STABLE
 SECURITY INVOKER
 AS $$
-    SELECT d.tumbler,
+    SELECT c.chash,
            c.chunk_text,
            c.collection,
            (c.embedding &lt;=&gt; p_query)::float8
       FROM nexus.chunks_1024 c
-      JOIN nexus.catalog_document_chunks m
-        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
-      JOIN nexus.catalog_documents d
-        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
       JOIN nexus.topic_assignments ta
-        ON ta.tenant_id = d.tenant_id AND ta.doc_id = d.tumbler
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
       JOIN nexus.topics t
         ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
      WHERE c.collection = p_collection
        AND t.collection = p_collection
        AND t.label = p_topic_label
-       AND d.deleted_at IS NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
      ORDER BY c.embedding &lt;=&gt; p_query
      LIMIT p_n
 $$;

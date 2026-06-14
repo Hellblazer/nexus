@@ -32,9 +32,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       filters by the catalog metadata dimensions the {@code query} tool routes on
  *       (NULL arg = no filter on that dimension), ranks by cosine distance ascending.</li>
  *   <li>{@code nexus.search_topic_scoped_<dim>(p_query vector, p_topic_label text,
- *       p_collection text, p_n int)} — joins {@code chunks_<dim> ⋈ catalog_document_chunks
- *       ⋈ topic_assignments ⋈ topics}, scoped to the named topic label within a
- *       collection, ranks by cosine distance ascending.</li>
+ *       p_collection text, p_n int)} — chunk-level: joins {@code chunks_<dim> ⋈
+ *       topic_assignments} on {@code chash = topic_assignments.doc_id} (topic membership
+ *       is chunk-keyed, nexus-sa14p) {@code ⋈ topics}, scoped to the named topic label
+ *       within a collection, live-filtered (live_chunks predicate), ranks by cosine
+ *       distance ascending, returns the chunk chash as id.</li>
  * </ul>
  *
  * <p><strong>The four mandatory encodings (bead nexus-70r3c.14)</strong>, mapped to
@@ -302,7 +304,7 @@ class CombinedQueryParityTest {
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
             "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, " + topicId + ", '" + COLL_EXPLAIN + "', " +
+            "SELECT '" + TENANT_A + "', lpad(g::text, 32, '0'), " + topicId + ", '" + COLL_EXPLAIN + "', " +
             "'2026-01-01T00:00:00+00'::timestamptz FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
     }
 
@@ -435,10 +437,10 @@ class CombinedQueryParityTest {
     void topic_scopedToLabel_excludesVectorCloserOtherTopic() throws Exception {
         try (Connection su = pg.createConnection("")) {
             assertThat(callTopic(su, 1024, COLL_T, TOPIC_VEC, 10))
-                .as("topic='Vector Search' → {t1,t2} by distance (0.0,0.4). t3 is "
+                .as("topic='Vector Search' → chunks {t1,t2} by distance (0.0,0.4). t3 is "
                     + "vector-CLOSER (0.2) but under topic 'Cooking' — its exclusion "
                     + "proves the topic gate is load-bearing, not a vector passthrough")
-                .containsExactly("t1", "t2");
+                .containsExactly(chashOf("t1"), chashOf("t2"));
         }
     }
 
@@ -446,8 +448,8 @@ class CombinedQueryParityTest {
     void topic_otherLabel_returnsOnlyItsMembers() throws Exception {
         try (Connection su = pg.createConnection("")) {
             assertThat(callTopic(su, 1024, COLL_T, TOPIC_OTHER, 10))
-                .as("topic='Cooking' → {t3} only")
-                .containsExactly("t3");
+                .as("topic='Cooking' → chunk {t3} only")
+                .containsExactly(chashOf("t3"));
         }
     }
 
@@ -519,8 +521,11 @@ class CombinedQueryParityTest {
     // COLL_NARROW has exactly 3 chunks; the query vector (1,0) is semantically distant
     // from all three (they cluster near (0,1)). The combined query must return ALL 3
     // (== N exact, never a >= threshold). At container scale this is the correctness
-    // pin; the production max_scan_tuples ceiling reproduction is conexus xr7.8.9.
-    // A naive HNSW path that under-returns (the "2 of LIMIT 10" failure) cannot pass.
+    // pin; the production max_scan_tuples ceiling reproduction is conexus xr7.8.9. This
+    // does NOT prove a selectivity-strategy switch fires — the inlinable SQL functions
+    // have no switch; the planner picks filter-first vs HNSW by cost. The production
+    // max_scan_tuples defense (tuned hnsw.iterative_scan at the repoint) is tracked
+    // separately. This test pins exact-recall correctness only.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(40)
@@ -571,8 +576,8 @@ class CombinedQueryParityTest {
         try (Connection su = pg.createConnection("")) {
             List<String> stitched = stitchedTopicOracle(su, 1024, COLL_T, TOPIC_VEC);
             assertThat(stitched)
-                .as("CONTROL: stitched topic oracle for 'Vector Search' is [t1,t2]")
-                .containsExactly("t1", "t2");
+                .as("CONTROL: stitched topic oracle for 'Vector Search' is chunks [t1,t2]")
+                .containsExactly(chashOf("t1"), chashOf("t2"));
             assertThat(callTopic(su, 1024, COLL_T, TOPIC_VEC, 10))
                 .as("combined topic query must return EXACTLY the stitched path's result")
                 .containsExactlyElementsOf(stitched);
@@ -610,16 +615,19 @@ class CombinedQueryParityTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             assertThat(callTopic(su, 1024, COLL_T, TOPIC_VEC, 10))
-                .as("baseline topic 'Vector Search' → [t1,t2]").containsExactly("t1", "t2");
+                .as("baseline topic 'Vector Search' → chunks [t1,t2]")
+                .containsExactly(chashOf("t1"), chashOf("t2"));
 
             setDeleted(su, TENANT_A, "t2", true);
             assertThat(callTopic(su, 1024, COLL_T, TOPIC_VEC, 10))
-                .as("tombstoned doc t2 must drop from topic-scoped results")
-                .containsExactly("t1");
+                .as("tombstoned doc t2 must drop from topic-scoped results "
+                    + "(its chunk's only manifest row points to a tombstoned doc)")
+                .containsExactly(chashOf("t1"));
 
             setDeleted(su, TENANT_A, "t2", false);
             assertThat(callTopic(su, 1024, COLL_T, TOPIC_VEC, 10))
-                .as("restored doc t2 must return").containsExactly("t1", "t2");
+                .as("restored doc t2 must return")
+                .containsExactly(chashOf("t1"), chashOf("t2"));
         }
     }
 
@@ -661,11 +669,19 @@ class CombinedQueryParityTest {
 
     @Test @Order(71)
     void rls_topicScoped_tenantSeesOnlyOwnRows() throws Exception {
+        // CONTROL: superuser (BYPASSRLS) sees tenant-B's topic chunk — proves the
+        // foreign row exists, so the svc assertion below is non-vacuous.
+        try (Connection su = pg.createConnection("")) {
+            assertThat(callTopic(su, 1024, COLL_B, TOPIC_VEC, 10))
+                .as("CONTROL: superuser sees tenant-B topic chunk b2 (foreign rows exist)")
+                .containsExactly(chashOf("b2"));
+        }
         try (Connection svc = svcDs.getConnection()) {
             svc.createStatement().execute(
                 "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
             assertThat(callTopic(svc, 1024, COLL_B, TOPIC_VEC, 10))
-                .as("svc GUC=A must see ZERO tenant-B topic rows").isEmpty();
+                .as("svc GUC=A must see ZERO tenant-B topic rows (SECURITY INVOKER — "
+                    + "caller RLS on chunks_1024 applies)").isEmpty();
         }
     }
 
@@ -689,8 +705,8 @@ class CombinedQueryParityTest {
     void perDim_topicScoped_384_behavesIdentically() throws Exception {
         try (Connection su = pg.createConnection("")) {
             assertThat(callTopic(su, 384, COLL_T_384, TOPIC_VEC, 10))
-                .as("search_topic_scoped_384 must exist and behave identically")
-                .containsExactly("t384a");
+                .as("search_topic_scoped_384 must exist and behave identically (chunk-level)")
+                .containsExactly(chashOf("t384a"));
         }
     }
 
@@ -756,6 +772,9 @@ class CombinedQueryParityTest {
             // remaining plan is the HNSW Index Scan through the join — and a join-sourced
             // vector (the Finding-5a regression) could NOT use the index even then, so
             // the assertion still distinguishes a correct impl from the regression.
+            // NOTE: enable_nestloop stays ON — the HNSW-ordered chunk scan joins to the
+            // catalog/topic tables via nested loop; disabling it would defeat the very
+            // plan this test asserts.
             for (String guc : List.of("enable_seqscan", "enable_bitmapscan",
                     "enable_sort", "enable_hashjoin")) {
                 su.createStatement().execute("SET " + guc + " = off");
@@ -769,8 +788,9 @@ class CombinedQueryParityTest {
 
     private static List<String> runIds(Connection conn, String sql) throws Exception {
         List<String> out = new ArrayList<>();
-        ResultSet rs = conn.createStatement().executeQuery(sql);
-        while (rs.next()) out.add(rs.getString(1));
+        try (var st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) out.add(rs.getString(1));
+        }
         return out;
     }
 
@@ -806,20 +826,22 @@ class CombinedQueryParityTest {
     private List<String> stitchedTopicOracle(Connection conn, int dim, String collection,
                                              String topicLabel) throws Exception {
         String sql =
-            "SELECT d.tumbler AS id " +
-            "  FROM nexus.topics t " +
+            "SELECT c.chash AS id " +
+            "  FROM nexus.chunks_" + dim + " c " +
             "  JOIN nexus.topic_assignments ta " +
-            "    ON ta.tenant_id = t.tenant_id AND ta.topic_id = t.id " +
-            "  JOIN nexus.catalog_documents d " +
-            "    ON d.tenant_id = ta.tenant_id AND d.tumbler = ta.doc_id " +
-            "  JOIN nexus.catalog_document_chunks m " +
-            "    ON m.tenant_id = d.tenant_id AND m.doc_id = d.tumbler " +
-            "  JOIN nexus.chunks_" + dim + " c " +
-            "    ON c.tenant_id = m.tenant_id AND c.collection = m.collection " +
-            "   AND c.chash = m.chash " +
-            " WHERE t.label = " + sqlText(topicLabel) + " " +
+            "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash " +
+            "  JOIN nexus.topics t " +
+            "    ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id " +
+            " WHERE c.collection = '" + collection + "' " +
             "   AND t.collection = '" + collection + "' " +
-            "   AND d.deleted_at IS NULL " +
+            "   AND t.label = " + sqlText(topicLabel) + " " +
+            "   AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m " +
+            "                     WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash) " +
+            "        OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m " +
+            "                     JOIN nexus.catalog_documents d " +
+            "                       ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
+            "                    WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash " +
+            "                      AND d.deleted_at IS NULL)) " +
             " ORDER BY c.embedding <=> " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
@@ -854,9 +876,11 @@ class CombinedQueryParityTest {
         String tenant = tenantFor(collection);
         insertCatalogDocumentFull(su, tenant, tumbler, collection,
                                   "paper", "topicauthor", 2024, "research");
-        insertTopicAssignment(su, tenant, tumbler, topicId, collection);
         insertManifestRow(su, tenant, tumbler, 0, chash, collection);
         insertChunk(su, dim, tenant, collection, chash, tumbler, x, y);
+        // Topic membership is CHUNK-level: topic_assignments.doc_id is the chunk chash
+        // (nexus-sa14p), NOT the document tumbler.
+        insertTopicAssignment(su, tenant, chash, topicId, collection);
     }
 
     /** COLL_B belongs to tenant B; everything else to tenant A. */
@@ -897,12 +921,14 @@ class CombinedQueryParityTest {
     /** Insert a topic; returns its generated id. */
     private static long insertTopic(Connection su, String tenantId, String label,
                                     String collection) throws Exception {
-        ResultSet rs = su.createStatement().executeQuery(
-            "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) " +
-            "VALUES ('" + tenantId + "', " + sqlText(label) + ", '" + collection + "', " +
-            "'2026-01-01T00:00:00+00'::timestamptz) RETURNING id");
-        rs.next();
-        return rs.getLong(1);
+        try (var st = su.createStatement();
+             ResultSet rs = st.executeQuery(
+                "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) " +
+                "VALUES ('" + tenantId + "', " + sqlText(label) + ", '" + collection + "', " +
+                "'2026-01-01T00:00:00+00'::timestamptz) RETURNING id")) {
+            rs.next();
+            return rs.getLong(1);
+        }
     }
 
     private static void insertTopicAssignment(Connection su, String tenantId, String docId,
@@ -937,11 +963,13 @@ class CombinedQueryParityTest {
 
     private static long rawChunkCount(Connection conn, int dim, String tenantId,
                                       String collection) throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT count(*) FROM nexus.chunks_" + dim +
-            " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'");
-        rs.next();
-        return rs.getLong(1);
+        try (var st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                "SELECT count(*) FROM nexus.chunks_" + dim +
+                " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'")) {
+            rs.next();
+            return rs.getLong(1);
+        }
     }
 
     // ── value helpers ────────────────────────────────────────────────────────
@@ -969,8 +997,32 @@ class CombinedQueryParityTest {
         return v == null ? "NULL" : "'" + v.replace("'", "''") + "'";
     }
 
-    /** Length-32 chash deterministically derived from seed (catalog-002 CHECK). */
+    /**
+     * Length-32 lowercase-hex chash deterministically derived from seed (catalog-002
+     * CHECK). SHA-256-based so distinct tumblers get distinct chashes — a naive
+     * char-substitution derivation collapses e.g. "m2" and "t2" to the same value, and
+     * because chunks are content-addressed (the live-chunk predicate is chash-scoped,
+     * NOT collection-scoped), a collision lets a live doc in one collection keep a
+     * tombstoned doc's shared chash alive in another.
+     */
     private static String validChash(String seed) {
-        return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+        try {
+            byte[] h = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : h) sb.append(String.format("%02x", b));
+            return sb.substring(0, 32);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    /**
+     * The chunk chash for a fixture tumbler — same derivation seedMetaDoc/seedTopicDoc
+     * use. Topic-scoped search is chunk-level (topic_assignments.doc_id is a chash,
+     * nexus-sa14p), so topic assertions match on chash, not tumbler.
+     */
+    private static String chashOf(String tumbler) {
+        return validChash(tumbler);
     }
 }
