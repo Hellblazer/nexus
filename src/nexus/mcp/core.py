@@ -1077,6 +1077,10 @@ def search_metadata_scoped(
                 "tumblers": ids,
                 "distances": [r.get("distance", 0.0) for r in rows],
                 "collections": [r.get("collection", "") for r in rows],
+                # contents inline so plan steps can summarize directly via
+                # $stepN.contents WITHOUT store_get_many hydration (which is
+                # chash-keyed and would miss these document tumblers).
+                "contents": [r.get("content", "") for r in rows],
             }
         if not rows:
             return "No documents found."
@@ -1144,6 +1148,9 @@ def search_topic_scoped(
                 "tumblers": ["" for _ in merged],
                 "distances": [r.get("distance", 0.0) for r in merged],
                 "collections": [r.get("collection", "") for r in merged],
+                # contents inline so plan steps summarize via $stepN.contents
+                # without hydration (topic ids are chunk chashes).
+                "contents": [r.get("content", "") for r in merged],
             }
         if not merged:
             return f"No chunks found for topic {topic!r}."

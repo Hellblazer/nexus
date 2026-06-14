@@ -61,6 +61,7 @@ class TestSearchMetadataScopedTool:
             "tumblers": ["1.2.3", "1.2.4"],   # document-level: tumblers == ids
             "distances": [0.1, 0.3],
             "collections": ["c1", "c1"],
+            "contents": ["a", "b"],
         }
         # filters forwarded; year=0/"" → None handled by the tool
         assert t3.meta_calls == [("q", ["c1"], "paper", "alice", 2024, None, 5)]
@@ -92,6 +93,7 @@ class TestSearchMetadataScopedTool:
         out = core.search_metadata_scoped("q", structured=True)
         assert out["ids"] == ["1.2.3", "1.2.4"]
         assert out["distances"] == [0.1, 0.2]  # 1.2.3 kept at its best (0.1), not 0.9
+        assert out["contents"] == ["near chunk", "other doc"]  # best-distance row's content
 
 
 class TestSearchTopicScopedTool:
@@ -112,6 +114,7 @@ class TestSearchTopicScopedTool:
         assert out["collections"] == ["c2", "c1"]
         # chunk-level: no document tumblers
         assert out["tumblers"] == ["", ""]
+        assert out["contents"] == ["y", "x"]  # inline contents, distance order
         assert [c[2] for c in t3.topic_calls] == ["c1", "c2"]
 
     def test_non_service_mode_errors(self, monkeypatch):

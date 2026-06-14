@@ -1,12 +1,13 @@
 name: type-scoped-search
 description: >-
   Search within a single content type (code, paper, rdr, knowledge).
-  Routes through the catalog to resolve the content-type bucket, runs the
-  semantic query against only those collections, hydrates the matches,
-  and summarises the findings. Useful when the caller already knows the
-  artefact kind (for example, "search code for X" or "search RDRs for Y")
-  but not the specific document, and wants the answer scoped narrowly
-  enough that unrelated corpora do not dilute the ranking.
+  Routes through the combined metadata-scoped query (RDR-156 P4): one
+  statement joins the vector chunks to the catalog and filters by content
+  type, ranks the matches semantically, and summarises the findings.
+  Useful when the caller knows the artefact kind (for example, "search code
+  for X" or "search RDRs for Y") but not the specific document, and wants
+  the answer scoped narrowly enough that unrelated corpora do not dilute the
+  ranking.
 dimensions:
   verb: research
   scope: global
@@ -18,19 +19,18 @@ optional_bindings:
   - limit
 default_bindings:
   limit: 10
-tags: builtin-template,rdr-092,catalog,type-scoped
+tags: builtin-template,rdr-092,rdr-156,catalog,type-scoped,combined-query
 plan_json:
   steps:
-    - tool: query
+    # RDR-156 P4 (nexus-zo0zt): combined metadata-scoped query replaces the
+    # query()-tool catalog dance + store_get_many hydration; summarize reads
+    # $step1.contents inline. Service-mode (pgvector) only.
+    - tool: search_metadata_scoped
       args:
-        question: $question
+        query: $question
         content_type: $content_type
         limit: $limit
         corpus: all
-    - tool: store_get_many
-      args:
-        ids: $step1.ids
-        collections: $step1.collections
     - tool: summarize
       args:
-        inputs: $step2.contents
+        inputs: $step1.contents
