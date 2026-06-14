@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.EmbeddingModelUnavailableException;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -83,6 +84,14 @@ public final class VectorHandler implements HttpHandler {
             .setSerializationInclusion(JsonInclude.Include.ALWAYS);
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+
+    /**
+     * Engine↔conexus protocol header name (bead nexus-ehc4q).
+     * The conexus edge proxy reads this value and injects it into the usage counter.
+     * Absent (not "0") when {@code tokens == 0} — zero means "no billable usage" (e.g.
+     * ONNX local-mode), which is meaningless to the proxy and must not be ingested.
+     */
+    public static final String USAGE_TOKENS_HEADER = "X-Nexus-Usage-Tokens";
 
     private final EmbedderRouter      embedderRouter;
     private final PgVectorRepository  pgRepo;
@@ -210,7 +219,9 @@ public final class VectorHandler implements HttpHandler {
                     "ids length " + ids.size() + " != documents length " + documents.size());
         }
 
-        repo.upsertChunks(tenant, collection, ids, documents, metadatas);
+        var upsertResult = repo.upsertChunksWithTokens(tenant, collection, ids, documents, metadatas);
+        // Emit token count from the doc-embedding call (bead nexus-ehc4q).
+        emitTokenUsage(ex, upsertResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
     }
 
@@ -239,8 +250,10 @@ public final class VectorHandler implements HttpHandler {
         int nResults                  = optInt(body, "n_results", 10);
         Map<String, Object> where     = optMap(body, "where");
 
-        var results = repo.search(tenant, queryText, collections, nResults, where);
-        HttpUtil.send(ex, 200, json(results));
+        var searchResult = repo.searchWithTokens(tenant, queryText, collections, nResults, where);
+        // Emit token count from the query-embedding call (bead nexus-ehc4q).
+        emitTokenUsage(ex, searchResult.tokens());
+        HttpUtil.send(ex, 200, json(searchResult.value()));
     }
 
     /**
@@ -260,8 +273,10 @@ public final class VectorHandler implements HttpHandler {
         int nResults              = optInt(body, "n_results", 10);
         Map<String, Object> where = optMap(body, "where");
 
-        var results = repo.hybridSearch(tenant, queryText, collections, nResults, where);
-        HttpUtil.send(ex, 200, json(results));
+        var hybridResult = repo.hybridSearchWithTokens(tenant, queryText, collections, nResults, where);
+        // Emit token count from the query-embedding call (bead nexus-ehc4q).
+        emitTokenUsage(ex, hybridResult.tokens());
+        HttpUtil.send(ex, 200, json(hybridResult.value()));
     }
 
     /**
@@ -288,10 +303,12 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> where = optMap(body, "where");
         int nResults             = optInt(body, "n_results", 10);
 
-        var results = repo.searchMetadataScoped(
+        var metaResult = repo.searchMetadataScopedWithTokens(
             tenant, queryText, collections, contentType, author, year, corpus,
             subtree, where, nResults);
-        HttpUtil.send(ex, 200, json(results));
+        // Emit token count from the query-embedding call (bead nexus-ehc4q).
+        emitTokenUsage(ex, metaResult.tokens());
+        HttpUtil.send(ex, 200, json(metaResult.value()));
     }
 
     /**
@@ -311,8 +328,10 @@ public final class VectorHandler implements HttpHandler {
         String collection = requireString(body, "collection");
         int nResults      = optInt(body, "n_results", 10);
 
-        var results = repo.searchTopicScoped(tenant, queryText, topicLabel, collection, nResults);
-        HttpUtil.send(ex, 200, json(results));
+        var topicResult = repo.searchTopicScopedWithTokens(tenant, queryText, topicLabel, collection, nResults);
+        // Emit token count from the query-embedding call (bead nexus-ehc4q).
+        emitTokenUsage(ex, topicResult.tokens());
+        HttpUtil.send(ex, 200, json(topicResult.value()));
     }
 
     /**
@@ -339,9 +358,11 @@ public final class VectorHandler implements HttpHandler {
         if (direction == null) direction = "both";
         int nResults             = optInt(body, "n_results", 10);
 
-        var results = repo.searchGraphHop(
+        var graphResult = repo.searchGraphHopWithTokens(
             tenant, queryText, seeds, collections, linkType, depth, direction, nResults);
-        HttpUtil.send(ex, 200, json(results));
+        // Emit token count from the query-embedding call (bead nexus-ehc4q).
+        emitTokenUsage(ex, graphResult.tokens());
+        HttpUtil.send(ex, 200, json(graphResult.value()));
     }
 
     /**
@@ -370,8 +391,10 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> metadata = optMap(body, "metadata");
         if (metadata == null) metadata = Map.of();
 
-        String returnedId = repo.put(tenant, collection, docId, content, metadata);
-        HttpUtil.send(ex, 200, json(Map.of("id", returnedId)));
+        var putResult = repo.putWithTokens(tenant, collection, docId, content, metadata);
+        // Emit token count from the doc-embedding call (bead nexus-ehc4q).
+        emitTokenUsage(ex, putResult.tokens());
+        HttpUtil.send(ex, 200, json(Map.of("id", putResult.value())));
     }
 
     /**
@@ -621,20 +644,46 @@ public final class VectorHandler implements HttpHandler {
         String collection     = requireString(body, "collection");
         List<String> texts    = requireStringList(body, "texts");
 
-        // Use embedDoubleForCollection to preserve full JSON double precision.
-        // embedForCollection (float32) round-trips through float32 serialization, causing
-        // cosine ≈ 0.9999669 drift vs Python. embedDoubleForCollection returns the raw
-        // double values from the Voyage API JSON, giving cosine == 1.0 exactly.
-        List<double[]> vecs = embedderRouter.embedDoubleForCollection(collection, texts);
+        // Use embedForCollectionWithUsage to get both embeddings and token count in one
+        // API call (bead nexus-ehc4q). The float32 vectors are promoted to double exactly
+        // (same float32 binary as embedDoubleForCollection — both decode the same base64
+        // blob; the only difference was that embedDouble skipped the Java float intermediate,
+        // but the source bits are identical). This avoids a double-embed while capturing tokens.
+        EmbedResult embedResult = embedderRouter.embedForCollectionWithUsage(collection, texts);
+        List<float[]> float32Vecs = embedResult.embeddings();
 
-        // Convert to List<List<Double>> for JSON serialization
-        List<List<Double>> embeddings = new ArrayList<>(vecs.size());
-        for (double[] v : vecs) {
-            List<Double> row = new ArrayList<>(v.length);
-            for (double d : v) row.add(d);
+        // Convert to List<List<Double>> for JSON serialization, promoting float32 → double.
+        List<List<Double>> embeddings = new ArrayList<>(float32Vecs.size());
+        for (float[] fv : float32Vecs) {
+            List<Double> row = new ArrayList<>(fv.length);
+            for (float f : fv) row.add((double) f);
             embeddings.add(row);
         }
+        // Emit token count before sending (bead nexus-ehc4q).
+        emitTokenUsage(ex, embedResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("embeddings", embeddings)));
+    }
+
+    // ── Token-usage header helper (bead nexus-ehc4q) ─────────────────────────
+
+    /**
+     * Emit the {@code X-Nexus-Usage-Tokens} response header when the embedding
+     * call consumed a non-zero token count (bead nexus-ehc4q).
+     *
+     * <p>Must be called BEFORE {@link HttpUtil#send} — once headers are written
+     * the exchange is committed and further header mutations are silently ignored.
+     *
+     * <p>Only sets the header when {@code tokens > 0}: a zero value means the
+     * embedder did not report usage (test fakes, ONNX default path, non-embedding
+     * endpoints).
+     *
+     * @param ex     the in-flight HTTP exchange
+     * @param tokens token count from the embedding call (0 = not available)
+     */
+    private static void emitTokenUsage(HttpExchange ex, long tokens) {
+        if (tokens > 0) {
+            ex.getResponseHeaders().set(USAGE_TOKENS_HEADER, Long.toString(tokens));
+        }
     }
 
     // ── Request parsing helpers ───────────────────────────────────────────────

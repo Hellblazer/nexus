@@ -105,6 +105,39 @@ public final class OnnxEmbedder implements Embedder {
         }
     }
 
+    /**
+     * Embed a batch of texts and return vectors plus the token count from the
+     * HuggingFace tokenizer (bead nexus-ehc4q).
+     *
+     * <p>Token count = sum of {@code encoding.getIds().length} across the batch,
+     * i.e. the total number of wordpiece/BPE tokens produced by the tokenizer
+     * (before MAX_SEQ_LEN clamping — the raw token count, not the truncated one,
+     * to mirror what an API would report as "input tokens consumed").
+     */
+    @Override
+    public EmbedResult embedWithUsage(List<String> texts) {
+        if (texts == null || texts.isEmpty()) return new EmbedResult(List.of(), 0L);
+        try {
+            return embedBatchWithUsage(texts);
+        } catch (Exception e) {
+            throw new RuntimeException("OnnxEmbedder.embedWithUsage failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Returns embeddings with {@code tokens = 0} (bead nexus-ehc4q).
+     *
+     * <p>ONNX is local-only — it has no API cost and no usage counter in any
+     * upstream billing service.  Emitting a nonzero count would pollute the
+     * {@code X-Nexus-Usage-Tokens} header with meaningless data that the conexus
+     * edge proxy would ingest as billable tokens.  The tokenizer-ID sum approach
+     * that was here before removal also pre-clamp-over-counted (counted BEFORE the
+     * MAX_SEQ_LEN truncation that the ONNX model applies).
+     */
+    private EmbedResult embedBatchWithUsage(List<String> texts) throws Exception {
+        return new EmbedResult(embedBatch(texts), 0L);
+    }
+
     private List<float[]> embedBatch(List<String> texts) throws Exception {
         int batchSize = texts.size();
 

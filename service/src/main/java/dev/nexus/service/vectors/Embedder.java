@@ -32,6 +32,23 @@ public interface Embedder extends AutoCloseable {
     }
 
     /**
+     * Embed a batch of texts and return both the vectors and the token count
+     * consumed by the embedding call (bead nexus-ehc4q).
+     *
+     * <p>Default implementation returns 0 for {@code tokens} so that
+     * {@link FakeEmbedder} and any custom implementations compile without
+     * change. Production embedders ({@link VoyageEmbedder}, {@link CceEmbedder},
+     * {@link OnnxEmbedder}) override this to return the real count.
+     *
+     * @param texts list of text strings to embed
+     * @return {@link EmbedResult} carrying vectors (aligned with input) and
+     *         the total token count ({@code 0} when unknown)
+     */
+    default EmbedResult embedWithUsage(List<String> texts) {
+        return new EmbedResult(embed(texts), 0L);
+    }
+
+    /**
      * RDR-103 embedding-model token this embedder produces (the collection-name
      * model segment, e.g. {@code "voyage-code-3"}, {@code "minilm-l6-v2-384"}).
      *
