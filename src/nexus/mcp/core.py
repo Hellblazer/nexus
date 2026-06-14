@@ -1017,10 +1017,18 @@ def search_metadata_scoped(
     The single-statement unification of the ``query`` tool's catalog-routing
     dance: ``nexus.search_metadata_scoped_<dim>`` joins the chunk table to the
     catalog manifest + documents and filters by catalog metadata in one query
-    (HNSW survives the join). Document-level results (``id`` is the tumbler).
+    (HNSW survives the join). Document-level results (``id`` is the tumbler),
+    deduped to one row per tumbler at the best (nearest) distance.
 
     Service-mode only — the combined-query functions live in the pgvector
     Postgres; in local/Chroma mode this returns an error.
+
+    PLAN-RUNNER CAVEAT: the structured ``ids``/``tumblers`` are document tumblers,
+    NOT chunk chashes. The runner's auto-hydration (``store_get_many``) is
+    chash-keyed, so feeding ``$stepN.ids`` straight into an operator returns empty
+    content — use a tumbler-aware hydration path (tracked: nexus-zekpl). The
+    ``catalog_documents.corpus`` filter the SQL function supports is NOT exposed
+    here (``corpus`` is the collection-routing arg); add it explicitly if needed.
 
     Args:
         query: Search query string.
@@ -1098,7 +1106,12 @@ def search_topic_scoped(
     ``topic_assignments`` on chunk chash (topic membership is chunk-level,
     nexus-sa14p) and ranks by vector distance. Chunk-level results (``id`` is
     the chunk chash). Resolved across every collection in *corpus* (topics are
-    per-collection), merged by distance.
+    per-collection — a label belongs to one collection's taxonomy, so the
+    multi-collection loop is usually single-hit), merged by distance. NOTE: the
+    merge is per-collection-limit-then-merge-then-truncate, so for a label genuinely
+    present in multiple collections the global top-N can drop a collection's
+    (limit+1)th row that would have ranked; over-fetch per collection if that case
+    becomes real.
 
     Service-mode only.
 

@@ -158,6 +158,24 @@ class PgVectorCombinedQueryContractTest {
     }
 
     @Test
+    void metadataScoped_multiCollection_arrayBind_rankedUnion() {
+        // Exercises the ARRAY[?,?]::text[] bind path with >1 same-dim collection
+        // (the single-element happy paths never reach the multi-element SQL).
+        // COLL_T also holds tenant-A paper docs (tv1/tv2 via seedTopicChunk).
+        List<String> got = ids(repo.searchMetadataScoped(
+            TENANT_A, Q, List.of(COLL_M, COLL_T), "paper", null, null, null, 10));
+        // m1 & tv1 both embed (1,0) → distance 0 (tie, no secondary sort), then
+        // m2 (0.2), tv2 (0.4); m3 is code → excluded. Tie-safe assertion.
+        assertThat(got).hasSize(4);
+        assertThat(got.subList(0, 2))
+            .as("the two distance-0 papers (m1, tv1) rank first, any tie order")
+            .containsExactlyInAnyOrder("m1", "tv1");
+        assertThat(got.subList(2, 4))
+            .as("then m2 (0.2) then tv2 (0.4), in distance order")
+            .containsExactly("m2", "tv2");
+    }
+
+    @Test
     void metadataScoped_nResultsTruncates() {
         assertThat(ids(repo.searchMetadataScoped(TENANT_A, Q, List.of(COLL_M), "paper", null, null, null, 1)))
             .as("nResults=1 → nearest paper only").containsExactly("m1");

@@ -776,9 +776,13 @@ public final class PgVectorRepository {
      * catalog_documents}, filters by the catalog metadata dimensions (NULL = skip),
      * tombstone-filters, and ranks by cosine distance. The query vector is embedded
      * server-side and passed as a function ARGUMENT so the HNSW index engages
-     * (Finding 5a). {@code SET LOCAL hnsw.iterative_scan='relaxed_order'} is the
-     * narrow-collection {@code max_scan_tuples} defense (Finding 5b) at the call site —
-     * the inlinable SQL function deliberately has no in-function selectivity switch.
+     * (Finding 5a). {@code runCombinedQuery} applies {@code SET LOCAL
+     * hnsw.iterative_scan='relaxed_order'} — the same filtered-ANN setting
+     * {@link #search}/{@link #hybridSearch} use; the inlinable SQL function has no
+     * in-function selectivity switch (kept inlinable by decision). NOTE: this alone does
+     * NOT tune {@code hnsw.max_scan_tuples}, so the Finding-5b narrow/distant scoped
+     * under-return ceiling is not yet fully defended — tracked separately (nexus-0zcn9);
+     * the production-scale recall gate is owned by conexus xr7.8.9.
      *
      * <p>Returns the document tumbler as {@code id} (document-level retrieval). A
      * document with multiple matching chunks can appear more than once; consumer-side
