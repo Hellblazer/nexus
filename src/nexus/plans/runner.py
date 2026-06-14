@@ -252,7 +252,10 @@ _NON_EMBEDDING_TOOLS: frozenset[str] = frozenset({"traverse"})
 #: otherwise have to thread ``structured=True`` into every YAML
 #: hydration step.
 _RETRIEVAL_TOOLS: frozenset[str] = frozenset(
-    {"search", "query", "store_get_many"},
+    {"search", "query", "store_get_many",
+     # RDR-156 P4 (nexus-joesk): combined-query primitives — structured=True so
+     # $stepN.ids/tumblers resolve from the {ids, tumblers, distances, collections} shape.
+     "search_metadata_scoped", "search_topic_scoped"},
 )
 
 #: Args keys that may carry a collection name. The runner extracts
