@@ -1,5 +1,5 @@
 ---
-title: "End-User Distribution and Installation: JAR Channel, PG16+pgvector Provisioning, One-Command init --service"
+title: "End-User Distribution and Installation: Native-Image Binaries, Embedded PG16+pgvector, Two-Distribution Model"
 id: RDR-157
 type: Architecture
 status: draft
@@ -21,27 +21,48 @@ related: [RDR-144, RDR-152, RDR-155, RDR-076]
 Since RDR-155 P4a, T3 serving routes exclusively through the PG16 + pgvector + Java
 nexus-service stack. `pip install conexus` (or the plugin marketplace install) delivers
 none of that stack. A release cut from develop today requires every user to
-hand-assemble:
+hand-assemble it. The gaps below are framed in their **post-decision** form (native
+binary default + two distributions + embedded PG, locked 2026-06-14); the original
+prerequisite framing (JAR channel, JRE) is preserved in the Decision section's research
+trail.
 
-1. **The service JAR** — a 134 MB Maven fat JAR with **no distribution channel**.
-   PyPI cannot carry it (size limits, wrong artifact type); users today need a repo
-   checkout and a Maven build. `nx daemon service install-jar` (nexus-pebfx.4) solved
-   the *local lifecycle* (well-known location, sha256 provenance sidecar, schema-skew
-   gate) but not *acquisition*.
-2. **A Java 17+ runtime** — the supervisor's `_find_java()` requires JAVA_HOME or
-   PATH. A second hidden prerequisite end users will not have.
-3. **PostgreSQL 16 with the pgvector extension** — `discover_pg_binaries()` assumes
-   homebrew `postgresql@16`; the pgvector brew formula targeting the wrong PG major
-   was empirically hit on the dev machine (2026-06-09). `nx init --service` provisions
-   a cluster from found binaries but does not get the binaries there, and is missing
-   `CREATE EXTENSION` wiring (nexus-jdpn9 item 3).
-4. **Voyage key plumbing** — solved (nexus-pebfx.2: credential-chain resolution,
-   fail-loud ONNX refusal of voyage-token collections); local-only mode works with the
-   bundled ONNX MiniLM. Listed for completeness: the *decision* a new user makes here
-   is an onboarding question (RDR-144 pattern), not a packaging one.
+#### Gap 1: No per-OS/arch distribution channel for the service binary
 
-This is the substance of release blocker `nexus-luxe6`: prerequisites (1)–(3) are the
-undesigned legs. The operability of an *assembled* stack is largely done
+The service has **no distribution channel**. Today users need a repo checkout and a
+Maven (or native-image) build. `nx daemon service install-jar` (nexus-pebfx.4) solved
+the *local lifecycle* (well-known location, sha256 provenance sidecar, schema-skew
+gate) but not *acquisition*. With the native-image decision (RF-157-6/7), the artifact
+is a per-OS/arch native binary published via a release channel, not a 134 MB fat JAR —
+but that channel and its per-platform build matrix are undesigned. (This also retires
+the former Java-runtime prerequisite: a native binary needs no JRE.)
+
+#### Gap 2: The local distribution has no PostgreSQL 16 + pgvector to provision from
+
+`discover_pg_binaries()` assumes a host PG (homebrew `postgresql@16`); the pgvector
+brew formula targeting the wrong PG major was empirically hit on the dev machine
+(2026-06-09), and the Debian/Ubuntu socket failure (nexus-6laob, fixed 2026-06-14)
+showed host-PG provisioning is itself fragile per-platform. `nx init --service`
+provisions a cluster from *found* binaries but does not get the binaries there. The
+locked decision is to **embed a relocatable PG16 + pgvector** in the local
+distribution (CA-1/CA-2 verified feasible); the bundle build matrix and the first-run
+extract→provision wiring are undesigned.
+
+#### Gap 3: The cloud distribution has no skip-provision + validate-remote path
+
+The cloud distribution ships the native binary with **no DB**: it must connect to a
+managed PG that already has pgvector, skip `pg_provision` entirely, validate the remote
+(pgvector present + supported major, fail loud), run Liquibase, and serve. That
+cloud-mode split does not exist today (`nx init --service` always provisions locally).
+
+#### Gap 4 (resolved prerequisites, tracked for completeness)
+
+**Java runtime** — eliminated by the native-image decision. **Voyage key plumbing** —
+already solved (nexus-pebfx.2: credential-chain resolution, fail-loud ONNX refusal of
+voyage-token collections); local-only mode works with the bundled ONNX MiniLM; the
+embedder choice is an onboarding question (RDR-144), not a packaging one.
+
+This is the substance of release blocker `nexus-luxe6`: Gaps 1–3 are the undesigned
+legs. The operability of an *assembled* stack is largely done
 (epic nexus-pebfx, 8/9: endpoint discovery via registry lease, status surface,
 JAR lifecycle, embedding fail-loud, ETL operability, migration runbook, supervisor
 PG-recovery, daemon observability). The *migration engine* is production-proven
@@ -157,22 +178,51 @@ The original draft option enumeration is retained below as the research trail.
    ships this RDR's install path + both storage paths + the migration tool;
    release N+1 ships RDR-155 P4b Chroma deletion. This RDR gates release N.
 
-## Approach (phased, draft)
+## Approach (phased)
 
-1. **P0 — research + channel decision.** Verify GitHub Releases asset size limits and
-   download UX (auth-less), GraalVM native-image feasibility spike for the service
-   (jOOQ/Liquibase reflection inventory), embedded-postgres wheel landscape
-   (pgvector inclusion per platform), and the pgvector-formula-major detection story.
-   Output: locked Decision 1 + 3 choices.
-2. **P1 — JAR channel.** Release-workflow attachment of the service artifact +
-   `install-jar --from-release` downloader (sha256 verification against a published
-   manifest; provenance sidecar recorded as today).
-3. **P2 — provisioning preflight.** `nx doctor`/`init --service` preflight for java,
-   PG binaries, pgvector extension (incl. wrong-major detection); `CREATE EXTENSION`
-   wiring; guided-install hints or embedded-PG dependency per the P0 decision.
-4. **P3 — the one-command collapse.** `nx init --service` end-to-end with idempotent
-   steps; release-sandbox E2E proving fresh-machine → serving with zero manual steps.
-5. **P4 — handoff to conexus RDR-001.** The upgrade-orchestration consumes P1–P3
+Reconciled with the 2026-06-14 locked Decision (native-image default, two
+distributions, embedded PG). **P0 research is complete** (RF-157-1…8); the phases below
+are the build-out. Release N targets {linux-amd64, linux-aarch64, mac-arm64}; Windows
+is release N+1.
+
+1. **P0 — research (DONE).** Native-image feasibility (RF-157-6, executed spike),
+   distribution/licensing (RF-157-5), CA-1 relocatable PG+pgvector (RF-157-7), CA-2
+   in-binary embed + fallback (RF-157-8). Decision locked.
+2. **P1 — CA-3 live test (gate before build-out).** Extract a real zonky PG16 bundle
+   for one linux target, inject a CI-built pgvector `.so` (matching PG16 minor +
+   glibc), set `NEXUS_PG_BIN` at it, run `pg_provision` + `check_pgvector_available`,
+   assert: cluster starts, `pg_config --sharedir` resolves from the extracted dir, and
+   `CREATE EXTENSION vector` succeeds. Record as **RF-157-9** (VERIFIED or FAILED +
+   fallback). Pin the **minimum glibc** per linux target to zonky's baseline as an
+   explicit go/no-go (else `dlopen` of `vector.so` fails on older distros at extension
+   load, not at preflight). If FAILED, fall back to Strategy B (build PG from source).
+3. **P2 — native-image build matrix.** Per-platform GitHub Actions runners
+   (linux-amd64, linux-aarch64, mac-arm64) producing the native binary; release-workflow
+   attaches each as a GitHub Releases asset (RF-157-5: < 2 GiB, unconstrained).
+   Parity discipline extends to the native binary's version stamp. Supply-chain: ship a
+   sha256 manifest for release N; evaluate Sigstore/cosign signing for N+1 (the binary
+   runs with DB credentials and is opaque to static inspection — see Open Q4).
+4. **P3 — embedded-PG bundle + the two distributions.**
+   - **Bundle build (per OS/arch):** Strategy A (zonky PG16 + CI-built pgvector injected
+     into the bundle `pkglibdir`/`sharedir`), or Strategy B if CA-3 forced it. Smoke:
+     extract → `initdb` → `CREATE EXTENSION vector` in CI.
+   - **Embed vs ship-alongside (CA-2):** spike `-H:IncludeResources` of the bundle +
+     first-run self-extract; measure build cost + binary bloat + extract latency. Fall
+     back to ship-alongside (`{binary, pg-<plat>.txz}` archive) if unacceptable.
+   - **Cloud distribution:** native binary, no DB. A cloud mode skips `pg_provision`,
+     points at the managed `NX_DB_URL`, and **validates the remote**: pgvector present
+     AND version ≥ the floor RDR-155 requires (0.8+ for `iterative_scan`), fail loud
+     with the remedy.
+   - **Local distribution:** native binary + embedded/bundled PG; first run extract →
+     `initdb` → provision (the socket fix nexus-6laob applies) → serve.
+5. **P4 — one-command collapse + fresh-machine E2E.** `nx init --service` end-to-end,
+   idempotent. Release-sandbox E2E proves **fresh-machine → serving with zero manual
+   steps**, bounded to: (a) **local mode** requires the bundled ONNX MiniLM model —
+   depends on `nexus-jrrve` (model fetch on service install) being closed, OR the model
+   pre-positioned in the bundle; (b) **cloud mode** requires a pre-supplied Voyage
+   credential. The E2E names which mode it exercises; `nexus-jrrve` is a declared P4
+   dependency, not an orthogonal nicety.
+6. **P5 — handoff to conexus RDR-001.** The upgrade-orchestration consumes P1–P4
    primitives; not implemented here.
 
 ## Alternatives considered
@@ -189,9 +239,13 @@ The original draft option enumeration is retained below as the research trail.
 
 - Release N's gate acquires concrete, testable criteria (fresh-machine E2E in the
   release sandbox) instead of a standing prose blocker.
-- The release workflow grows a Maven build + artifact-attach step (CI time).
-- A second artifact lineage (service JAR or native binary) becomes part of the
-  pinned-source release discipline — parity tests must cover its version stamp.
+- The release workflow grows a **per-platform native-image build matrix** (3 targets
+  for release N; the native build is ~tens of seconds per runner per RF-157-6) **plus a
+  per-platform embedded-PG bundle-build job** — materially more CI than a single Maven
+  artifact-attach, and a per-platform build farm to keep green.
+- The native binary (and, for the local distro, the embedded-PG bundle) becomes part of
+  the pinned-source release discipline — parity tests must cover its version stamp.
+- A second OS/arch dimension enters the release matrix; Windows (N+1) adds MSVC.
 
 ## Open Questions
 
@@ -200,14 +254,21 @@ The original draft option enumeration is retained below as the research trail.
    (nexus-ykrhb, PR #1172): no — the full native service is CI-green on linux-amd64.
    jOOQ generated-record metadata + ONNX/DJL JNI handled via agent-traced reachability
    metadata + IncludeResources.**
-2. Embedded-PG wheels: does any maintained wheel ship pgvector for darwin-arm64 +
-   linux-x86_64? What is the disk/install-time cost?
+2. ~~Embedded-PG wheels: does any maintained wheel ship pgvector for darwin-arm64 +
+   linux-x86_64?~~ **RESOLVED 2026-06-14 (RF-157-7): no off-the-shelf relocatable
+   PG16+pgvector exists; the project owns a CI bundle-build matrix (zonky PG16 +
+   CI-built pgvector). The pip-wheel form is rejected (Alternatives). Open sub-question
+   folded into the P1 CA-3 gate: disk/extract cost is measured by the CA-2 spike.**
 3. ~~Windows: out of scope for release N?~~ **RESOLVED 2026-06-14 (owner): Windows
    ships in release N+1, not the gating release N. It is the long pole for both the
    native-image build and the pgvector MSVC source build (RF-157-7); release N targets
    linux-amd64, linux-aarch64, mac-arm64.**
-4. Should `install-jar --from-release` verify a detached signature in addition to
-   sha256 (supply-chain posture), given the artifact executes with DB credentials?
+4. **Supply-chain signing for the native binary.** (The original `install-jar`
+   form is moot — the JAR channel is rejected.) Should the GitHub Releases **native
+   binary** carry a detached signature (Sigstore/cosign) beyond a sha256 manifest? It
+   executes with DB credentials and is opaque to static inspection, so the posture
+   matters more than for a JAR. Position: sha256 manifest for release N; evaluate
+   signing for N+1 (P2 / Approach).
 
 ## Research Findings
 
@@ -373,14 +434,19 @@ bloat is unacceptable, fall back to ship-alongside** — the per-OS/arch archive
 zero native-image involvement, guaranteed to work. Either way CA-2 does not gate the
 two-distribution architecture; it only decides single-file-vs-archive packaging.
 
-### Implications for the draft Decisions (to lock at gate)
+### Implications for the draft Decisions — SUPERSEDED by the 2026-06-14 lock
 
-1. **Decision 1 becomes a sequence, not a choice**: release N ships per-platform
-   JARs via GitHub Releases + `install-jar --from-release` (RF-157-1 makes these
-   small; JDK 17+ stays a preflighted prereq); native-image binaries follow as the
-   prereq-removal upgrade once the spike clears the two JNI items.
+> **Historical research trail. Superseded by `## Decision — UPDATED 2026-06-14` and the
+> reconciled `## Approach (phased)`.** The 2026-06-14 owner lock chose native-image as
+> the default artifact outright (no JAR-first sequence) and embedded PG for the local
+> distribution. The notes below — written when the native path was still "desired, not
+> gating" — are retained only to show how the decision evolved; do not plan from them.
+
+1. ~~Decision 1 becomes a sequence, not a choice: release N ships per-platform JARs…
+   native-image binaries follow…~~ — superseded: native-image is the default, not a
+   later upgrade.
 2. **The P0 spike is DONE and PASSED** (RF-157-6): both risk items cleared on
-   Oracle GraalVM 25; the CE-25 + linux re-runs are mechanical CI work, not
-   open questions. Native-image is promoted from desired to cleared-for-planning.
-3. Platform matrix for native binaries: linux-x64/aarch64 + macos-aarch64
-   (GraalVM 25 has no macos-x64; per-platform JARs cover that tail).
+   Oracle GraalVM 25. (Still current.)
+3. Platform matrix for native binaries: linux-amd64 + linux-aarch64 + mac-arm64 for
+   release N (GraalVM 25 has no mac-x64, which is out of scope per the owner call);
+   Windows is release N+1.
