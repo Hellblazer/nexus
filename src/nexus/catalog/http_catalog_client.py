@@ -78,7 +78,8 @@ def _to_entry(d: dict) -> CatalogEntry:
 
     All CatalogEntry fields are non-optional; coerce None / missing values
     to the same empty-string / 0 / {} defaults the SQLite Catalog uses.
-    CatalogEntry has no bib fields — those live only in T3 metadata.
+    The Java catalog document payload (CatalogRepository.docRowFromRecord)
+    carries the RDR-101 bib_* columns; surface them on the entry (nexus-rzqto).
     """
     return CatalogEntry(
         tumbler=Tumbler.parse(d["tumbler"]),
@@ -96,6 +97,10 @@ def _to_entry(d: dict) -> CatalogEntry:
         source_mtime=d.get("source_mtime") or 0.0,
         alias_of=d.get("alias_of") or "",
         source_uri=d.get("source_uri") or "",
+        bib_year=d.get("bib_year") or 0,
+        bib_authors=d.get("bib_authors") or "",
+        bib_venue=d.get("bib_venue") or "",
+        bib_citation_count=d.get("bib_citation_count") or 0,
     )
 
 
