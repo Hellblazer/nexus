@@ -108,6 +108,14 @@
          vectors-001 (chunks_<dim>). Contract: GraphHopParityTest. -->
     <include file="db/changelog/catalog-007-graph-hop-functions.xml"/>
 
+    <!-- Combined-query metadata-scoped extensions (bead nexus-889ff, RDR-156 P4 follow-on):
+         extends search_metadata_scoped_<dim> with subtree (tumbler prefix), where (jsonb
+         chunk-metadata containment), author ILIKE substring, and the matched-chunk chash
+         output column — the remaining query()-dance cases so the repoint (rzqto) can fully
+         collapse. Replaces the catalog-006 7-arg version with a 9-arg signature. Depends on
+         catalog-006. -->
+    <include file="db/changelog/catalog-008-combined-query-extensions.xml"/>
+
     <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
          taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB
          collection into Postgres so service-mode taxonomy compute is chroma-free.

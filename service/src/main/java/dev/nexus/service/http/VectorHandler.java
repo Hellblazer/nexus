@@ -299,10 +299,13 @@ public final class VectorHandler implements HttpHandler {
         String author            = optString(body, "author");
         Integer year             = optInteger(body, "year");
         String corpus            = optString(body, "corpus");
+        String subtree           = optString(body, "subtree");
+        Map<String, Object> where = optMap(body, "where");
         int nResults             = optInt(body, "n_results", 10);
 
         var metaResult = repo.searchMetadataScopedWithTokens(
-            tenant, queryText, collections, contentType, author, year, corpus, nResults);
+            tenant, queryText, collections, contentType, author, year, corpus,
+            subtree, where, nResults);
         // Emit token count from the query-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, metaResult.tokens());
         HttpUtil.send(ex, 200, json(metaResult.value()));

@@ -79,6 +79,23 @@ class TestSearchMetadataScoped:
         _patch_post(monkeypatch, lambda p, b: [])
         assert HttpVectorClient().search_metadata_scoped("q", ["code__a__model-x__v1"]) == []
 
+    def test_subtree_and_where_forwarded(self, monkeypatch):
+        # catalog-008 (nexus-889ff): subtree + where(dict) reach the body; empty where omitted.
+        calls = _patch_post(monkeypatch, lambda p, b: [])
+        HttpVectorClient().search_metadata_scoped(
+            "q", ["code__a__model-x__v1"], subtree="1.2", where={"lang": "java"})
+        _, body = calls[0]
+        assert body["subtree"] == "1.2"
+        assert body["where"] == {"lang": "java"}
+
+    def test_empty_where_omitted(self, monkeypatch):
+        calls = _patch_post(monkeypatch, lambda p, b: [])
+        HttpVectorClient().search_metadata_scoped(
+            "q", ["code__a__model-x__v1"], where={})
+        _, body = calls[0]
+        assert "where" not in body
+        assert "subtree" not in body
+
 
 class TestSearchTopicScoped:
     def test_posts_to_topic_route(self, monkeypatch):
