@@ -111,6 +111,8 @@ public final class VectorHandler implements HttpHandler {
                 case "/search"        -> handleSearch(exchange, method);
                 case "/query"         -> handleSearch(exchange, method);   // alias
                 case "/hybrid-search" -> handleHybridSearch(exchange, method);  // RDR-155 P3
+                case "/search-metadata-scoped" -> handleSearchMetadataScoped(exchange, method);  // RDR-156 P4
+                case "/search-topic-scoped"    -> handleSearchTopicScoped(exchange, method);     // RDR-156 P4
                 case "/store-put"     -> handleStorePut(exchange, method);
                 case "/get"           -> handleGet(exchange, method);
                 case "/store-get"     -> handleStoreGet(exchange, method);
@@ -258,6 +260,54 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> where = optMap(body, "where");
 
         var results = repo.hybridSearch(tenant, queryText, collections, nResults, where);
+        HttpUtil.send(ex, 200, json(results));
+    }
+
+    /**
+     * POST /v1/vectors/search-metadata-scoped (RDR-156 P4, Decision 5).
+     *
+     * <p>The combined metadata-scoped query that retires the {@code query} MCP tool's
+     * app-side catalog-routing dance. Request:
+     * {@code {"query": "...", "collections": [...], "content_type": "...", "author": "...",
+     * "year": 2024, "corpus": "...", "n_results": 10}} — any of content_type/author/year/
+     * corpus may be omitted (no filter on that dimension). Returns document-level rows.
+     */
+    private void handleSearchMetadataScoped(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String queryText         = requireString(body, "query");
+        List<String> collections = requireStringList(body, "collections");
+        String contentType       = optString(body, "content_type");
+        String author            = optString(body, "author");
+        Integer year             = optInteger(body, "year");
+        String corpus            = optString(body, "corpus");
+        int nResults             = optInt(body, "n_results", 10);
+
+        var results = repo.searchMetadataScoped(
+            tenant, queryText, collections, contentType, author, year, corpus, nResults);
+        HttpUtil.send(ex, 200, json(results));
+    }
+
+    /**
+     * POST /v1/vectors/search-topic-scoped (RDR-156 P4, Decision 5).
+     *
+     * <p>The combined topic-scoped query. Request:
+     * {@code {"query": "...", "topic": "...", "collection": "...", "n_results": 10}}.
+     * Chunk-level results (topic membership is chunk-keyed, nexus-sa14p).
+     */
+    private void handleSearchTopicScoped(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String queryText  = requireString(body, "query");
+        String topicLabel = requireString(body, "topic");
+        String collection = requireString(body, "collection");
+        int nResults      = optInt(body, "n_results", 10);
+
+        var results = repo.searchTopicScoped(tenant, queryText, topicLabel, collection, nResults);
         HttpUtil.send(ex, 200, json(results));
     }
 
@@ -622,6 +672,25 @@ public final class VectorHandler implements HttpHandler {
     private int optInt(Map<String, Object> body, String key, int defaultValue) {
         Object val = body.get(key);
         if (val == null) return defaultValue;
+        if (val instanceof Number n) return n.intValue();
+        try { return Integer.parseInt(val.toString()); }
+        catch (NumberFormatException e) {
+            throw new IllegalArgumentException("field '" + key + "' must be an integer");
+        }
+    }
+
+    /** Optional string field; null/blank → null (no-filter semantics for combined queries). */
+    private String optString(Map<String, Object> body, String key) {
+        Object val = body.get(key);
+        if (val == null) return null;
+        String s = val.toString();
+        return s.isBlank() ? null : s;
+    }
+
+    /** Optional integer field; null → null (no-filter on that dimension). */
+    private Integer optInteger(Map<String, Object> body, String key) {
+        Object val = body.get(key);
+        if (val == null) return null;
         if (val instanceof Number n) return n.intValue();
         try { return Integer.parseInt(val.toString()); }
         catch (NumberFormatException e) {

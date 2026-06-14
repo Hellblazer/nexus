@@ -768,6 +768,148 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Metadata-scoped combined search (RDR-156 P4, Decision 5, bead nexus-70r3c.15/joesk).
+     *
+     * <p>Unifies the {@code query} MCP tool's catalog-aware-routing dance into one
+     * planner-optimizable statement: calls {@code nexus.search_metadata_scoped_<dim>}
+     * (catalog-006) which joins {@code chunks_<dim> ⋈ catalog_document_chunks ⋈
+     * catalog_documents}, filters by the catalog metadata dimensions (NULL = skip),
+     * tombstone-filters, and ranks by cosine distance. The query vector is embedded
+     * server-side and passed as a function ARGUMENT so the HNSW index engages
+     * (Finding 5a). {@code runCombinedQuery} applies {@code SET LOCAL
+     * hnsw.iterative_scan='relaxed_order'} — the same filtered-ANN setting
+     * {@link #search}/{@link #hybridSearch} use; the inlinable SQL function has no
+     * in-function selectivity switch (kept inlinable by decision). NOTE: this alone does
+     * NOT tune {@code hnsw.max_scan_tuples}, so the Finding-5b narrow/distant scoped
+     * under-return ceiling is not yet fully defended — tracked separately (nexus-0zcn9);
+     * the production-scale recall gate is owned by conexus xr7.8.9.
+     *
+     * <p>Returns the document tumbler as {@code id} (document-level retrieval). A
+     * document with multiple matching chunks can appear more than once; consumer-side
+     * de-duplication (keep best distance per id) is the {@code query}-tool repoint's
+     * responsibility, not this method's.
+     *
+     * @param contentType catalog content_type filter; null = no filter
+     * @param author      catalog author filter; null = no filter
+     * @param year        catalog year filter; null = no filter
+     * @param corpus      catalog corpus filter; null = no filter
+     */
+    public List<Map<String, Object>> searchMetadataScoped(
+            String tenant, String queryText, List<String> collectionNames,
+            String contentType, String author, Integer year, String corpus, int nResults) {
+        if (collectionNames == null || collectionNames.isEmpty()) {
+            return List.of();
+        }
+        if (nResults < 1) {
+            throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
+        }
+        int dim = requireHomogeneousDim(collectionNames);
+        float[] queryVec = embedQuery(collectionNames.get(0), queryText, dim);
+
+        String sql = "SELECT id, content, collection, distance"
+                   + " FROM nexus.search_metadata_scoped_" + dim
+                   + "(?::vector, ARRAY[" + placeholders(collectionNames.size()) + "]::text[],"
+                   + " ?::text, ?::text, ?::int, ?::text, ?)";
+        List<Object> binds = new ArrayList<>();
+        binds.add(vectorLiteral(queryVec));
+        binds.addAll(collectionNames);
+        binds.add(contentType);
+        binds.add(author);
+        binds.add(year);
+        binds.add(corpus);
+        binds.add(nResults);
+
+        return runCombinedQuery(tenant, sql, binds);
+    }
+
+    /**
+     * Topic-scoped combined search (RDR-156 P4, Decision 5, bead nexus-70r3c.15/joesk).
+     *
+     * <p>Calls {@code nexus.search_topic_scoped_<dim>} (catalog-006). Topic membership is
+     * CHUNK-level: {@code topic_assignments.doc_id} is a chunk chash (nexus-sa14p), so the
+     * function joins {@code chunks_<dim>.chash = topic_assignments.doc_id}, live-filters,
+     * and ranks by cosine distance. Returns the chunk chash as {@code id} (chunk-level,
+     * matching {@link #search}). Same query-vector-as-argument + iterative_scan discipline
+     * as {@link #searchMetadataScoped}.
+     */
+    public List<Map<String, Object>> searchTopicScoped(
+            String tenant, String queryText, String topicLabel, String collection, int nResults) {
+        if (collection == null || collection.isBlank()) {
+            return List.of();
+        }
+        if (nResults < 1) {
+            throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
+        }
+        int dim = dimForCollection(collection);
+        float[] queryVec = embedQuery(collection, queryText, dim);
+
+        String sql = "SELECT id, content, collection, distance"
+                   + " FROM nexus.search_topic_scoped_" + dim
+                   + "(?::vector, ?::text, ?::text, ?)";
+        List<Object> binds = new ArrayList<>();
+        binds.add(vectorLiteral(queryVec));
+        binds.add(topicLabel);
+        binds.add(collection);
+        binds.add(nResults);
+
+        return runCombinedQuery(tenant, sql, binds);
+    }
+
+    /**
+     * Validate every collection dispatches to the same dim and return it.
+     * Mirrors the same-dim guard in {@link #search}.
+     */
+    private static int requireHomogeneousDim(List<String> collectionNames) {
+        int dim = dimForCollection(collectionNames.get(0));
+        for (String col : collectionNames) {
+            int colDim = dimForCollection(col);
+            if (colDim != dim) {
+                throw new IllegalArgumentException(
+                    "mixed dimensions in one combined-query call: '" + collectionNames.get(0)
+                    + "' is " + dim + "-dim but '" + col + "' is " + colDim
+                    + "-dim - one query vector cannot serve both spaces");
+            }
+        }
+        return dim;
+    }
+
+    /** Embed the query server-side, routing by collection; fail loud on dim mismatch. */
+    private float[] embedQuery(String collection, String queryText, int dim) {
+        float[] queryVec = (queryRouter != null)
+                ? queryRouter.embedOneForCollection(collection, queryText)
+                : queryEmbedder.embedOne(queryText);
+        if (queryVec.length != dim) {
+            throw new IllegalArgumentException(
+                "query embedder produced a " + queryVec.length
+                + "-dim vector but the collection dispatches to chunks_" + dim);
+        }
+        return queryVec;
+    }
+
+    /**
+     * Execute a combined-query function call under the tenant RLS scope with the
+     * filtered-ANN session setting, and map the (id, content, collection, distance)
+     * rows to the flat search() envelope.
+     */
+    private List<Map<String, Object>> runCombinedQuery(
+            String tenant, String sql, List<Object> binds) {
+        Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
+            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            return ctx.fetch(sql, binds.toArray());
+        });
+        List<Map<String, Object>> rows = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id",         rec.get("id", String.class));
+            row.put("content",    rec.get("content", String.class));
+            row.put("distance",   rec.get("distance", Double.class));
+            row.put("collection", rec.get("collection", String.class));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /**
      * Per-collection vector statistics for {@code tenant} (RDR-156 P3, Decision 4,
      * bead nexus-70r3c.12).
      *

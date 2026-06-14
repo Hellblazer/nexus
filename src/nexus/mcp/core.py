@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-14 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+16 registered tools + 3 demoted (plain functions, no @mcp.tool()).
 """
 from __future__ import annotations
 
@@ -968,6 +968,197 @@ def search(
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
 
         return "\n\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
+    """Resolve a comma-separated corpus/collection spec to collection names.
+
+    Mirrors the ``search`` tool's routing: ``all`` expands to every live
+    prefix; a ``__``-qualified part is a collection name; a bare part is a
+    corpus prefix resolved against the live collection list.
+    """
+    all_names = _get_collection_names()
+    if corpus == "all":
+        seen: list[str] = []
+        for n in all_names:
+            prefix = n.split("__", 1)[0]
+            if prefix and prefix not in seen:
+                seen.append(prefix)
+        corpus = ",".join(seen) if seen else "knowledge,code,docs,rdr"
+    target: list[str] = []
+    for part in corpus.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "__" in part:
+            target.append(t3_collection_name(part, t3=t3))
+        else:
+            target.extend(resolve_corpus(part, all_names))
+    return list(dict.fromkeys(target))
+
+
+@mcp.tool(
+    title="Metadata-Scoped Combined Search",
+    annotations={"readOnlyHint": True},
+)
+def search_metadata_scoped(
+    query: str,
+    corpus: str = "knowledge,code,docs",
+    limit: int = 10,
+    content_type: str = "",
+    author: str = "",
+    year: int = 0,
+    structured: bool = False,
+) -> "str | dict":
+    """Metadata-scoped combined search (RDR-156 P4, Decision 5).
+
+    The single-statement unification of the ``query`` tool's catalog-routing
+    dance: ``nexus.search_metadata_scoped_<dim>`` joins the chunk table to the
+    catalog manifest + documents and filters by catalog metadata in one query
+    (HNSW survives the join). Document-level results (``id`` is the tumbler),
+    deduped to one row per tumbler at the best (nearest) distance.
+
+    Service-mode only — the combined-query functions live in the pgvector
+    Postgres; in local/Chroma mode this returns an error.
+
+    PLAN-RUNNER CAVEAT: the structured ``ids``/``tumblers`` are document tumblers,
+    NOT chunk chashes. The runner's auto-hydration (``store_get_many``) is
+    chash-keyed, so feeding ``$stepN.ids`` straight into an operator returns empty
+    content — use a tumbler-aware hydration path (tracked: nexus-zekpl). The
+    ``catalog_documents.corpus`` filter the SQL function supports is NOT exposed
+    here (``corpus`` is the collection-routing arg); add it explicitly if needed.
+
+    Args:
+        query: Search query string.
+        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
+        limit: Max rows.
+        content_type: Catalog content_type filter ("" = no filter).
+        author: Catalog author filter ("" = no filter).
+        year: Catalog year filter (0 = no filter).
+        structured: Return ``{ids, tumblers, distances, collections}`` for the plan runner.
+    """
+    try:
+        from nexus.db.http_vector_client import is_service_backed
+
+        t3 = _get_t3()
+        if not is_service_backed(t3):
+            return ("Error: search_metadata_scoped requires service mode "
+                    "(pgvector); not available in local/Chroma mode")
+        target = _resolve_corpus_target(corpus, t3)
+        if not target:
+            return f"No collections match corpus {corpus!r}"
+        rows = t3.search_metadata_scoped(
+            query, target,
+            content_type=content_type or None,
+            author=author or None,
+            year=(year or None),
+            n_results=limit,
+        )
+        # Metadata-scoped is document-level: the function returns one row per
+        # matching CHUNK, so a multi-chunk document repeats its tumbler. Collapse
+        # to one row per id, keeping the best (nearest) distance. Rows arrive
+        # distance-ascending, so the FIRST occurrence of each id is its best.
+        seen_ids: set[str] = set()
+        deduped: list[dict] = []
+        for r in rows:
+            rid = r.get("id", "")
+            if rid in seen_ids:
+                continue
+            seen_ids.add(rid)
+            deduped.append(r)
+        rows = deduped
+        if structured:
+            # id IS the document tumbler for metadata-scoped (document-level).
+            ids = [r.get("id", "") for r in rows]
+            return {
+                "ids": ids,
+                "tumblers": ids,
+                "distances": [r.get("distance", 0.0) for r in rows],
+                "collections": [r.get("collection", "") for r in rows],
+                # contents inline so plan steps can summarize directly via
+                # $stepN.contents WITHOUT store_get_many hydration (which is
+                # chash-keyed and would miss these document tumblers).
+                "contents": [r.get("content", "") for r in rows],
+            }
+        if not rows:
+            return "No documents found."
+        return "\n\n".join(
+            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
+            f"\n{r.get('content', '')}"
+            for r in rows
+        )
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool(
+    title="Topic-Scoped Combined Search",
+    annotations={"readOnlyHint": True},
+)
+def search_topic_scoped(
+    query: str,
+    topic: str,
+    corpus: str = "knowledge,code,docs",
+    limit: int = 10,
+    structured: bool = False,
+) -> "str | dict":
+    """Topic-scoped combined search (RDR-156 P4, Decision 5).
+
+    ``nexus.search_topic_scoped_<dim>`` joins the chunk table to
+    ``topic_assignments`` on chunk chash (topic membership is chunk-level,
+    nexus-sa14p) and ranks by vector distance. Chunk-level results (``id`` is
+    the chunk chash). Resolved across every collection in *corpus* (topics are
+    per-collection — a label belongs to one collection's taxonomy, so the
+    multi-collection loop is usually single-hit), merged by distance. NOTE: the
+    merge is per-collection-limit-then-merge-then-truncate, so for a label genuinely
+    present in multiple collections the global top-N can drop a collection's
+    (limit+1)th row that would have ranked; over-fetch per collection if that case
+    becomes real.
+
+    Service-mode only.
+
+    Args:
+        query: Search query string.
+        topic: Topic label (from ``nx taxonomy discover``).
+        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
+        limit: Max rows.
+        structured: Return ``{ids, tumblers, distances, collections}`` for the plan runner.
+    """
+    try:
+        from nexus.db.http_vector_client import is_service_backed
+
+        t3 = _get_t3()
+        if not is_service_backed(t3):
+            return ("Error: search_topic_scoped requires service mode "
+                    "(pgvector); not available in local/Chroma mode")
+        target = _resolve_corpus_target(corpus, t3)
+        if not target:
+            return f"No collections match corpus {corpus!r}"
+        merged: list[dict] = []
+        for col in target:
+            merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit))
+        merged.sort(key=lambda r: r.get("distance", 0.0))
+        merged = merged[:limit]
+        if structured:
+            # Chunk-level: ids are chunk chashes; no document tumbler.
+            return {
+                "ids": [r.get("id", "") for r in merged],
+                "tumblers": ["" for _ in merged],
+                "distances": [r.get("distance", 0.0) for r in merged],
+                "collections": [r.get("collection", "") for r in merged],
+                # contents inline so plan steps summarize via $stepN.contents
+                # without hydration (topic ids are chunk chashes).
+                "contents": [r.get("content", "") for r in merged],
+            }
+        if not merged:
+            return f"No chunks found for topic {topic!r}."
+        return "\n\n".join(
+            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
+            f"\n{r.get('content', '')}"
+            for r in merged
+        )
     except Exception as e:
         return f"Error: {e}"
 

@@ -1,12 +1,12 @@
 name: find-by-author
 description: >-
   Find documents attributed to a specific author. Routes through the
-  catalog's author index to locate every entry by that person, hydrates
-  the matching documents' content, and summarises their contribution
-  surface so a downstream agent can characterise what the author has
-  written and published. Useful for "who is X" and "what has X published"
-  lookups where the caller already has an author name but not a specific
-  title.
+  combined metadata-scoped query (RDR-156 P4): one statement joins the
+  vector chunks to the catalog and filters by author, ranking by relevance
+  to the author's contribution surface, then summarises so a downstream
+  agent can characterise what the author has written. Useful for "who is X"
+  and "what has X published" lookups where the caller has an author name
+  but not a specific title.
 dimensions:
   verb: research
   scope: global
@@ -17,19 +17,20 @@ optional_bindings:
   - limit
 default_bindings:
   limit: 10
-tags: builtin-template,rdr-092,catalog,author
+tags: builtin-template,rdr-092,rdr-156,catalog,author,combined-query
 plan_json:
   steps:
-    - tool: query
+    # RDR-156 P4 (nexus-zo0zt): combined metadata-scoped query replaces the
+    # query()-tool catalog dance + store_get_many hydration. The structured
+    # output carries contents inline, so summarize reads $step1.contents
+    # directly (no chash-keyed store_get_many — these ids are document
+    # tumblers). Service-mode (pgvector) only.
+    - tool: search_metadata_scoped
       args:
-        question: $author research contributions
+        query: $author
         author: $author
         limit: $limit
         corpus: all
-    - tool: store_get_many
-      args:
-        ids: $step1.ids
-        collections: $step1.collections
     - tool: summarize
       args:
-        inputs: $step2.contents
+        inputs: $step1.contents

@@ -632,6 +632,67 @@ class HttpVectorClient:
             }
         return results
 
+    def search_metadata_scoped(
+        self,
+        query: str,
+        collection_names: list[str],
+        *,
+        content_type: str | None = None,
+        author: str | None = None,
+        year: int | None = None,
+        corpus: str | None = None,
+        n_results: int = 10,
+    ) -> list[dict]:
+        """Metadata-scoped combined search (RDR-156 P4, Decision 5).
+
+        Routes to ``POST /v1/vectors/search-metadata-scoped`` —
+        ``nexus.search_metadata_scoped_<dim>`` (catalog-006), which joins the
+        chunk table to the catalog manifest + documents and filters by the
+        catalog metadata dimensions in ONE statement (the unification of the
+        ``query`` tool's app-side catalog-routing dance). A ``None`` filter is
+        omitted from the body (no filter on that dimension). Returns the flat
+        ``{id, content, distance, collection}`` row list; ``id`` is the document
+        tumbler (document-level retrieval — de-dup per id is the caller's job).
+        """
+        body: dict[str, Any] = {
+            "query": query,
+            "collections": collection_names,
+            "n_results": n_results,
+        }
+        if content_type is not None:
+            body["content_type"] = content_type
+        if author is not None:
+            body["author"] = author
+        if year is not None:
+            body["year"] = year
+        if corpus is not None:
+            body["corpus"] = corpus
+        return _post("/v1/vectors/search-metadata-scoped", body, tenant=self._tenant)
+
+    def search_topic_scoped(
+        self,
+        query: str,
+        topic: str,
+        collection: str,
+        *,
+        n_results: int = 10,
+    ) -> list[dict]:
+        """Topic-scoped combined search (RDR-156 P4, Decision 5).
+
+        Routes to ``POST /v1/vectors/search-topic-scoped`` —
+        ``nexus.search_topic_scoped_<dim>`` (catalog-006). Topic membership is
+        chunk-level (``topic_assignments.doc_id`` is a chunk chash, nexus-sa14p),
+        so results are chunk-level (``id`` is the chunk chash). Returns the flat
+        ``{id, content, distance, collection}`` row list.
+        """
+        body: dict[str, Any] = {
+            "query": query,
+            "topic": topic,
+            "collection": collection,
+            "n_results": n_results,
+        }
+        return _post("/v1/vectors/search-topic-scoped", body, tenant=self._tenant)
+
     def get_by_id(self, collection: str, doc_id: str) -> dict | None:
         """Fetch a single chunk by ID.
 
