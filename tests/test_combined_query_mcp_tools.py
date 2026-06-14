@@ -29,9 +29,10 @@ class _FakeServiceT3:
         self.graph_calls: list[tuple] = []
 
     def search_metadata_scoped(self, query, collection_names, *, content_type=None,
-                               author=None, year=None, corpus=None, n_results=10):
+                               author=None, year=None, corpus=None, subtree=None,
+                               where=None, n_results=10):
         self.meta_calls.append((query, list(collection_names), content_type, author,
-                                year, corpus, n_results))
+                                year, corpus, subtree, where, n_results))
         return self.meta_rows
 
     def search_topic_scoped(self, query, topic, collection, *, n_results=10):
@@ -61,9 +62,11 @@ class TestSearchMetadataScopedTool:
         t3 = _FakeServiceT3(meta_rows=rows)
         _wire(monkeypatch, t3, ["c1"])
 
+        rows[0]["chash"] = "a" * 32
+        rows[1]["chash"] = "b" * 32
         out = core.search_metadata_scoped(
             "q", corpus="knowledge", content_type="paper", author="alice",
-            year=2024, limit=5, structured=True)
+            year=2024, subtree="1.2", where="lang=java", limit=5, structured=True)
 
         assert out == {
             "ids": ["1.2.3", "1.2.4"],
@@ -71,15 +74,40 @@ class TestSearchMetadataScopedTool:
             "distances": [0.1, 0.3],
             "collections": ["c1", "c1"],
             "contents": ["a", "b"],
+            "chashes": ["a" * 32, "b" * 32],
         }
-        # filters forwarded; year=0/"" → None handled by the tool
-        assert t3.meta_calls == [("q", ["c1"], "paper", "alice", 2024, None, 5)]
+        # filters forwarded; year=0/"" → None; where string parsed to a dict
+        assert t3.meta_calls == [
+            ("q", ["c1"], "paper", "alice", 2024, None, "1.2", {"lang": "java"}, 5)]
 
     def test_empty_filters_become_none(self, monkeypatch):
         t3 = _FakeServiceT3(meta_rows=[])
         _wire(monkeypatch, t3, ["c1"])
         core.search_metadata_scoped("q", corpus="knowledge", structured=True)
-        assert t3.meta_calls == [("q", ["c1"], None, None, None, None, 10)]
+        assert t3.meta_calls == [
+            ("q", ["c1"], None, None, None, None, None, None, 10)]
+
+    def test_where_multi_pair_parsed(self, monkeypatch):
+        t3 = _FakeServiceT3(meta_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+        core.search_metadata_scoped("q", where="lang=java, kind=fn", structured=True)
+        assert t3.meta_calls[0][7] == {"lang": "java", "kind": "fn"}
+
+    def test_where_range_operator_rejected_loudly(self, monkeypatch):
+        # Equality-only: a comparison op must error, NOT silently parse to a bogus key
+        # ("bib_year>") that matches nothing and drops the filter (nexus-889ff review C2).
+        t3 = _FakeServiceT3(meta_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+        out = core.search_metadata_scoped("q", where="bib_year>=2020", structured=True)
+        assert isinstance(out, str) and out.startswith("Error:") and "equality-only" in out
+        assert t3.meta_calls == []  # rejected before dispatch
+
+    def test_where_numeric_equality_typed(self, monkeypatch):
+        # parse_where_str coerces known numeric fields → JSONB number, not string.
+        t3 = _FakeServiceT3(meta_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+        core.search_metadata_scoped("q", where="page_count=3", structured=True)
+        assert t3.meta_calls[0][7] == {"page_count": 3}
 
     def test_non_service_mode_errors(self, monkeypatch):
         t3 = _FakeServiceT3()

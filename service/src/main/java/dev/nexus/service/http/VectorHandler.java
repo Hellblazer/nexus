@@ -284,10 +284,13 @@ public final class VectorHandler implements HttpHandler {
         String author            = optString(body, "author");
         Integer year             = optInteger(body, "year");
         String corpus            = optString(body, "corpus");
+        String subtree           = optString(body, "subtree");
+        Map<String, Object> where = optMap(body, "where");
         int nResults             = optInt(body, "n_results", 10);
 
         var results = repo.searchMetadataScoped(
-            tenant, queryText, collections, contentType, author, year, corpus, nResults);
+            tenant, queryText, collections, contentType, author, year, corpus,
+            subtree, where, nResults);
         HttpUtil.send(ex, 200, json(results));
     }
 

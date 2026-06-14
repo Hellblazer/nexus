@@ -1010,15 +1010,18 @@ def search_metadata_scoped(
     content_type: str = "",
     author: str = "",
     year: int = 0,
+    subtree: str = "",
+    where: str = "",
     structured: bool = False,
 ) -> "str | dict":
-    """Metadata-scoped combined search (RDR-156 P4, Decision 5).
+    """Metadata-scoped combined search (RDR-156 P4, Decision 5; catalog-008).
 
     The single-statement unification of the ``query`` tool's catalog-routing
     dance: ``nexus.search_metadata_scoped_<dim>`` joins the chunk table to the
     catalog manifest + documents and filters by catalog metadata in one query
     (HNSW survives the join). Document-level results (``id`` is the tumbler),
-    deduped to one row per tumbler at the best (nearest) distance.
+    deduped to one row per tumbler at the best (nearest) distance. Each row also
+    carries the matched chunk's ``chash`` (RDR-086 ``chunk_text_hash`` source).
 
     Service-mode only — the combined-query functions live in the pgvector
     Postgres; in local/Chroma mode this returns an error.
@@ -1035,9 +1038,14 @@ def search_metadata_scoped(
         corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
         limit: Max rows.
         content_type: Catalog content_type filter ("" = no filter).
-        author: Catalog author filter ("" = no filter).
+        author: Catalog author SUBSTRING filter, case-insensitive (ILIKE; "" = no filter).
         year: Catalog year filter (0 = no filter).
-        structured: Return ``{ids, tumblers, distances, collections}`` for the plan runner.
+        subtree: Tumbler-prefix scope, e.g. "1.2" → the DESCENDANTS of 1.2 (root-exclusive,
+            matching the catalog's descendants()); alias rows excluded ("" = no filter).
+        where: Chunk-metadata equality filter, ``KEY=VALUE`` comma-separated, e.g.
+            "lang=java,kind=fn" ("" = no filter). Equality only (matches the service
+            ``where`` semantics); applied as JSONB containment on chunk metadata.
+        structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
     """
     try:
         from nexus.db.http_vector_client import is_service_backed
@@ -1049,11 +1057,31 @@ def search_metadata_scoped(
         target = _resolve_corpus_target(corpus, t3)
         if not target:
             return f"No collections match corpus {corpus!r}"
+        # Parse the KEY=VALUE,... where string into a typed equality dict (applied as
+        # JSONB containment on chunk metadata). search_metadata_scoped is EQUALITY-ONLY
+        # (matches the service `where` semantics); reject comparison operators LOUDLY
+        # rather than silently mis-parsing them (a raw split would turn "bib_year>=2020"
+        # into the bogus key "bib_year>" and drop the filter — nexus-889ff review).
+        where_map: dict | None = None
+        if where.strip():
+            from nexus.filters import parse_where_str
+
+            parsed = parse_where_str(where)
+            if parsed and (
+                "$and" in parsed or "$or" in parsed
+                or any(isinstance(v, dict) for v in parsed.values())
+            ):
+                return ("Error: search_metadata_scoped `where` is equality-only "
+                        "(KEY=VALUE, comma-separated); comparison operators "
+                        "(>=, <=, >, <, !=) are not supported in service mode")
+            where_map = parsed or None
         rows = t3.search_metadata_scoped(
             query, target,
             content_type=content_type or None,
             author=author or None,
             year=(year or None),
+            subtree=(subtree or None),
+            where=(where_map or None),
             n_results=limit,
         )
         # Metadata-scoped is document-level: the function returns one row per
@@ -1081,6 +1109,9 @@ def search_metadata_scoped(
                 # $stepN.contents WITHOUT store_get_many hydration (which is
                 # chash-keyed and would miss these document tumblers).
                 "contents": [r.get("content", "") for r in rows],
+                # matched-chunk chash per row — the repoint wires this into the
+                # structured chunk_text_hash (RDR-086 chash-citations).
+                "chashes": [r.get("chash", "") for r in rows],
             }
         if not rows:
             return "No documents found."

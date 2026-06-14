@@ -114,6 +114,9 @@ class CombinedQueryParityTest {
     // is rightly NOT chosen — that is not what GROUP 3 is asserting.
     private static final String COLL_EXPLAIN = "knowledge__cqp-explain__voyage-context-3__v1";  // 1024
     private static final int    EXPLAIN_ROWS = 500;
+    // catalog-008 (nexus-889ff): subtree (dotted tumblers) + where (chunk metadata) fixtures.
+    private static final String COLL_SUB   = "knowledge__cqp-sub__voyage-context-3__v1";       // 1024
+    private static final String COLL_WHERE = "knowledge__cqp-where__voyage-context-3__v1";     // 1024
 
     // ── Topic labels ─────────────────────────────────────────────────────────
     private static final String TOPIC_VEC   = "Vector Search";
@@ -264,6 +267,22 @@ class CombinedQueryParityTest {
             seedMetaDoc(su, 1024, COLL_B, "b1", "paper", "zed", 2024, "research", 1.0, 0.0);
             seedTopicDoc(su, 1024, COLL_B, "b2", topicVecB, 1.0, 0.0);
 
+            // ----- subtree fixture (1024): dotted tumblers for the prefix predicate -----
+            // subtree="1.2" must match {1.2, 1.2.3, 1.2.4} (self + descendants) but NOT
+            // 1.3.1 (sibling subtree) and NOT 1.20 (prefix-string-but-not-tumbler-child).
+            insertCollection(su, TENANT_A, COLL_SUB);
+            seedMetaDoc(su, 1024, COLL_SUB, "1.2",   "paper", "sa", 2024, "research", 1.0, 0.0);  // 0.0
+            seedMetaDoc(su, 1024, COLL_SUB, "1.2.3", "paper", "sa", 2024, "research", 0.8, 0.6);  // 0.2
+            seedMetaDoc(su, 1024, COLL_SUB, "1.2.4", "paper", "sa", 2024, "research", 0.6, 0.8);  // 0.4
+            seedMetaDoc(su, 1024, COLL_SUB, "1.3.1", "paper", "sa", 2024, "research", 0.0, 1.0);  // 1.0 (sibling)
+            seedMetaDoc(su, 1024, COLL_SUB, "1.20",  "paper", "sa", 2024, "research", -1.0, 0.0); // 2.0 (string-prefix trap)
+
+            // ----- where fixture (1024): chunks carry metadata for the @> containment gate -----
+            insertCollection(su, TENANT_A, COLL_WHERE);
+            seedMetaDocMeta(su, COLL_WHERE, "w1", 1.0, 0.0, "{\"lang\": \"java\"}");   // 0.0
+            seedMetaDocMeta(su, COLL_WHERE, "w2", 0.8, 0.6, "{\"lang\": \"py\"}");     // 0.2
+            seedMetaDocMeta(su, COLL_WHERE, "w3", 0.6, 0.8, "{\"lang\": \"java\"}");   // 0.4
+
             // ----- large fixture for the EXPLAIN group (GROUP 3) -----
             seedExplainFixture(su);
 
@@ -334,12 +353,15 @@ class CombinedQueryParityTest {
                 .startsWith("p_query vector");
             assertThat(args)
                 .as("metadata-scoped signature pins the catalog dimensions the query "
-                    + "tool routes on: collections[], content_type, author, year, corpus, n")
+                    + "tool routes on: collections[], content_type, author, year, corpus, "
+                    + "subtree, where, n (catalog-008 added subtree + where(jsonb))")
                 .contains("p_collections text[]")
                 .contains("p_content_type text")
                 .contains("p_author text")
                 .contains("p_year integer")
                 .contains("p_corpus text")
+                .contains("p_subtree text")
+                .contains("p_where jsonb")
                 .contains("p_n integer");
         }
     }
@@ -711,6 +733,71 @@ class CombinedQueryParityTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 9 — catalog-008 (nexus-889ff): subtree + where + author ILIKE + chash
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(90)
+    void author_ilikeSubstring_caseInsensitive() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            // query() uses author.lower() IN (substring) — NOT exact. A substring of the
+            // author and a different case must still match.
+            assertThat(callMeta(su, 1024, COLL_M, null, "lic", null, null, 10))
+                .as("author='lic' (substring of 'alice') → {m1,m3,m4} by distance — ILIKE "
+                    + "substring, not exact equality (exact would return nothing)")
+                .containsExactly("m1", "m3", "m4");
+            assertThat(callMeta(su, 1024, COLL_M, null, "ALICE", null, null, 10))
+                .as("author='ALICE' (wrong case) → same {m1,m3,m4} — ILIKE is case-insensitive")
+                .containsExactly("m1", "m3", "m4");
+        }
+    }
+
+    @Test @Order(91)
+    void subtree_matchesDescendants_notRootSiblingsOrStringPrefix() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            // ROOT-EXCLUSIVE, matching query()'s cat.descendants() (LIKE 'prefix.%'): the
+            // subtree root 1.2 itself is NOT returned — only descendants. Including the root
+            // would diverge from query() and silently change the repoint's results.
+            assertThat(callMetaFull(su, 1024, COLL_SUB, null, null, null, null, "1.2", null, 10))
+                .as("subtree='1.2' → descendants {1.2.3,1.2.4} ranked by distance; root 1.2 "
+                    + "EXCLUDED (matches cat.descendants), sibling 1.3.1 and string-prefix-trap "
+                    + "1.20 EXCLUDED")
+                .containsExactly("1.2.3", "1.2.4");
+        }
+    }
+
+    @Test @Order(92)
+    void where_jsonbContainment_filtersChunkMetadata() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            assertThat(callMetaFull(su, 1024, COLL_WHERE, null, null, null, null, null,
+                                    "{\"lang\": \"java\"}", 10))
+                .as("where={lang:java} → {w1,w3} by distance (0.0,0.4); w2 (py) excluded")
+                .containsExactly("w1", "w3");
+            assertThat(callMetaFull(su, 1024, COLL_WHERE, null, null, null, null, null,
+                                    "{\"lang\": \"py\"}", 10))
+                .as("where={lang:py} → {w2} only")
+                .containsExactly("w2");
+        }
+    }
+
+    @Test @Order(93)
+    void chashColumn_isMatchedChunkChash() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT id, chash FROM nexus.search_metadata_scoped_1024(" +
+                queryVecLiteral(1024) + ", ARRAY['" + COLL_M + "']::text[], 'paper', " +
+                "NULL, NULL::int, NULL, NULL::text, NULL::jsonb, 10) ORDER BY distance");
+            int seen = 0;
+            while (rs.next()) {
+                assertThat(rs.getString("chash"))
+                    .as("chash column must be the matched chunk's chash for doc " + rs.getString("id"))
+                    .isEqualTo(validChash(rs.getString("id")));
+                seen++;
+            }
+            assertThat(seen).as("type=paper → m1,m2,m4,m5").isEqualTo(4);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // CALL HELPERS (combined-query functions)
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -718,6 +805,16 @@ class CombinedQueryParityTest {
     private List<String> callMeta(Connection conn, int dim, String collection,
                                   String contentType, String author, Integer year,
                                   String corpus, int n) throws Exception {
+        return callMetaFull(conn, dim, collection, contentType, author, year, corpus,
+                            null, null, n);
+    }
+
+    /** Full metadata-scoped call with subtree + where (catalog-008). whereJson is a raw
+     *  JSON object literal (e.g. {@code "{\"tags\":\"arch\"}"}) or null. */
+    private List<String> callMetaFull(Connection conn, int dim, String collection,
+                                      String contentType, String author, Integer year,
+                                      String corpus, String subtree, String whereJson,
+                                      int n) throws Exception {
         String sql =
             "SELECT id FROM nexus.search_metadata_scoped_" + dim + "(" +
             queryVecLiteral(dim) + ", " +
@@ -726,6 +823,8 @@ class CombinedQueryParityTest {
             sqlText(author) + ", " +
             (year == null ? "NULL::int" : year.toString()) + ", " +
             sqlText(corpus) + ", " +
+            sqlText(subtree) + ", " +
+            (whereJson == null ? "NULL::jsonb" : "'" + whereJson.replace("'", "''") + "'::jsonb") + ", " +
             n + ")";
         return runIds(conn, sql);
     }
@@ -748,7 +847,7 @@ class CombinedQueryParityTest {
         String inner =
             "SELECT id FROM nexus.search_metadata_scoped_" + dim + "(" +
             queryVecLiteral(dim) + ", ARRAY['" + collection + "']::text[], " +
-            sqlText(contentType) + ", NULL, NULL::int, NULL, 10)";
+            sqlText(contentType) + ", NULL, NULL::int, NULL, NULL::text, NULL::jsonb, 10)";
         return explain(inner);
     }
 
@@ -817,7 +916,7 @@ class CombinedQueryParityTest {
             " WHERE m.collection = '" + collection + "' " +
             "   AND d.deleted_at IS NULL " +
             (contentType == null ? "" : "   AND d.content_type = " + sqlText(contentType) + " ") +
-            (author == null ? "" : "   AND d.author = " + sqlText(author) + " ") +
+            (author == null ? "" : "   AND d.author ILIKE '%' || " + sqlText(author) + " || '%' ") +
             " ORDER BY c.embedding <=> " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
@@ -864,6 +963,23 @@ class CombinedQueryParityTest {
                                   year, corpus);
         insertManifestRow(su, tenant, tumbler, 0, chash, collection);
         insertChunk(su, dim, tenant, collection, chash, tumbler, x, y);
+    }
+
+    /**
+     * Seed a 1024-dim doc whose CHUNK carries {@code metaJson} JSONB metadata — for the
+     * catalog-008 {@code where} containment gate (c.metadata @&gt; p_where).
+     */
+    private void seedMetaDocMeta(Connection su, String collection, String tumbler,
+                                 double x, double y, String metaJson) throws Exception {
+        String tenant = tenantFor(collection);
+        String chash = validChash(tumbler);
+        insertCatalogDocumentFull(su, tenant, tumbler, collection, "paper", "wa", 2024, "research");
+        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
+        su.createStatement().execute(
+            "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata)"
+            + " VALUES ('" + tenant + "', '" + collection + "', '" + chash + "', '" + tumbler + "', "
+            + vec2(1024, x, y) + "::vector, '" + metaJson.replace("'", "''") + "'::jsonb)"
+            + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
     /**
