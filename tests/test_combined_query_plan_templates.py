@@ -109,6 +109,25 @@ class TestRepointedExecution:
         assert disp.calls[1][1]["inputs"] == step1_out["contents"]
 
     @pytest.mark.asyncio
+    async def test_local_mode_synthesized_shape_has_contents(self, monkeypatch):
+        # In local/Chroma mode search_metadata_scoped returns an Error string.
+        # _default_dispatcher must synthesize the empty retrieval shape WITH a
+        # contents key so a downstream $stepN.contents resolves to [] (graceful
+        # empty summarize) instead of raising PlanRunStepRefError.
+        from nexus.mcp import core
+        from nexus.plans.runner import _default_dispatcher
+
+        monkeypatch.setattr(
+            core, "search_metadata_scoped",
+            lambda **kw: "Error: search_metadata_scoped requires service mode")
+
+        out = await _default_dispatcher("search_metadata_scoped",
+                                        {"query": "q", "collections": ["c1"]})
+        assert out["contents"] == []
+        assert out["ids"] == [] and out["tumblers"] == []
+        assert "error" in out
+
+    @pytest.mark.asyncio
     async def test_type_scoped_binds_content_type(self):
         from nexus.plans.runner import plan_run
 

@@ -961,9 +961,13 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # (catalog not initialized, subtree too deep, …) with a bare
     # ``"Error: …"`` string even when ``structured=True`` is passed.
     # In that case synthesize the empty structured shape so the plan
-    # step still conforms to ``{ids, tumblers, distances, collections}``
-    # and downstream ``$stepN.tumblers`` refs don't crash; preserve the
-    # error text in an ``error`` key for visibility.
+    # step still conforms to ``{ids, tumblers, distances, collections,
+    # contents}`` and downstream ``$stepN.tumblers`` / ``$stepN.contents``
+    # refs don't crash; preserve the error text in an ``error`` key for
+    # visibility. ``contents`` is included so combined-query consumers
+    # (RDR-156 P4 search_metadata_scoped / search_topic_scoped, whose
+    # structured output carries chunk text inline) degrade to an empty
+    # summarize in local mode rather than raising PlanRunStepRefError.
     if isinstance(result, str):
         if tool in _RETRIEVAL_TOOLS:
             # Retrieval error strings usually indicate a plan-binding
@@ -980,6 +984,7 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
             )
             return {
                 "ids": [], "tumblers": [], "distances": [], "collections": [],
+                "contents": [],
                 "error": result,
             }
         return {"text": result}
