@@ -856,6 +856,67 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Graph-hop combined search (RDR-156 P4 follow-on, Decision 5, bead nexus-houg9).
+     *
+     * <p>Calls {@code nexus.search_graph_hop_<dim>} (catalog-007): a {@code WITH
+     * RECURSIVE} BFS over {@code nexus.catalog_links} from {@code seeds} to {@code depth}
+     * hops collects the reachable document set, which is joined to {@code chunks_<dim>}
+     * and vector-ranked. This retires the {@code query} tool's app-side {@code follow_links}
+     * dance ({@link dev.nexus.service.db.CatalogRepository#graphBFS} + per-collection
+     * search + re-join). Traversal semantics mirror {@code graphBFS} exactly: seeds are
+     * at depth 0 and included; {@code direction} is {@code "out"}/{@code "in"}/{@code "both"}
+     * (default {@code "both"}, matching {@code Catalog.graph}); a {@code null} link type
+     * follows all edge types. {@code depth} is clamped to [1,3] — the same bound graphBFS
+     * applies.
+     *
+     * <p>Returns the document tumbler as {@code id} (document-level, like
+     * {@link #searchMetadataScoped}) AND the matched chunk's {@code chash} (audit HIGH:
+     * the {@code query}-repoint populates the RDR-086 {@code chunk_text_hash} from this
+     * matched-chunk chash, never a per-doc manifest guess). A document with multiple
+     * matching chunks can appear more than once; consumer-side de-dup is the repoint's job.
+     *
+     * @param seeds     seed document tumblers to traverse from
+     * @param linkType  catalog link_type filter; null = follow all types
+     * @param depth     BFS depth (clamped to [1,3])
+     * @param direction "out" | "in" | "both"
+     */
+    public List<Map<String, Object>> searchGraphHop(
+            String tenant, String queryText, List<String> seeds, List<String> collectionNames,
+            String linkType, int depth, String direction, int nResults) {
+        if (seeds == null || seeds.isEmpty()
+                || collectionNames == null || collectionNames.isEmpty()) {
+            return List.of();
+        }
+        if (nResults < 1) {
+            throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
+        }
+        String dir = (direction == null || direction.isBlank()) ? "both" : direction;
+        if (!dir.equals("out") && !dir.equals("in") && !dir.equals("both")) {
+            throw new IllegalArgumentException(
+                "direction must be 'out', 'in', or 'both', got '" + direction + "'");
+        }
+        int clampedDepth = Math.min(Math.max(depth, 1), 3);  // mirror graphBFS bound
+        int dim = requireHomogeneousDim(collectionNames);
+        float[] queryVec = embedQuery(collectionNames.get(0), queryText, dim);
+
+        String sql = "SELECT id, content, collection, distance, chash"
+                   + " FROM nexus.search_graph_hop_" + dim
+                   + "(?::vector, ARRAY[" + placeholders(seeds.size()) + "]::text[],"
+                   + " ARRAY[" + placeholders(collectionNames.size()) + "]::text[],"
+                   + " ?::text, ?::int, ?::text, ?)";
+        List<Object> binds = new ArrayList<>();
+        binds.add(vectorLiteral(queryVec));
+        binds.addAll(seeds);
+        binds.addAll(collectionNames);
+        binds.add(linkType);
+        binds.add(clampedDepth);
+        binds.add(dir);
+        binds.add(nResults);
+
+        return runCombinedQueryWithChash(tenant, sql, binds);
+    }
+
+    /**
      * Validate every collection dispatches to the same dim and return it.
      * Mirrors the same-dim guard in {@link #search}.
      */
@@ -904,6 +965,30 @@ public final class PgVectorRepository {
             row.put("content",    rec.get("content", String.class));
             row.put("distance",   rec.get("distance", Double.class));
             row.put("collection", rec.get("collection", String.class));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /**
+     * Like {@link #runCombinedQuery} but also maps the matched chunk's {@code chash}
+     * column (graph-hop, bead nexus-houg9). Kept separate because the metadata/topic
+     * functions do not expose chash — {@code rec.get("chash", ...)} would throw there.
+     */
+    private List<Map<String, Object>> runCombinedQueryWithChash(
+            String tenant, String sql, List<Object> binds) {
+        Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
+            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            return ctx.fetch(sql, binds.toArray());
+        });
+        List<Map<String, Object>> rows = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id",         rec.get("id", String.class));
+            row.put("content",    rec.get("content", String.class));
+            row.put("distance",   rec.get("distance", Double.class));
+            row.put("collection", rec.get("collection", String.class));
+            row.put("chash",      rec.get("chash", String.class));
             rows.add(row);
         }
         return rows;

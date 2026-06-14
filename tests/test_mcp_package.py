@@ -39,8 +39,8 @@ def test_core_registered_tools():
         "operator_groupby", "operator_aggregate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
         "daemon_uninstall",
-        # RDR-156 P4 combined-query primitives (nexus-joesk)
-        "search_metadata_scoped", "search_topic_scoped",
+        # RDR-156 P4 combined-query primitives (nexus-joesk, nexus-houg9)
+        "search_metadata_scoped", "search_topic_scoped", "search_graph_hop",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

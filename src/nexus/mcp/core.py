@@ -1164,6 +1164,105 @@ def search_topic_scoped(
 
 
 @mcp.tool(
+    title="Graph-Hop Combined Search",
+    annotations={"readOnlyHint": True},
+)
+def search_graph_hop(
+    query: str,
+    seeds: list[str] | str,
+    corpus: str = "knowledge,code,docs",
+    limit: int = 10,
+    link_type: str = "",
+    depth: int = 1,
+    direction: str = "both",
+    structured: bool = False,
+) -> "str | dict":
+    """Graph-hop combined search (RDR-156 P4 follow-on, Decision 5, bead nexus-houg9).
+
+    The single-statement unification of the ``query`` tool's ``follow_links`` dance:
+    ``nexus.search_graph_hop_<dim>`` runs a ``WITH RECURSIVE`` BFS over
+    ``catalog_links`` from *seeds* to *depth* hops, collects the reachable document
+    set, joins ``chunks_<dim>`` and vector-ranks — replacing the app-side graphBFS +
+    per-collection search + re-join. Document-level results (``id`` is the tumbler),
+    deduped to one row per tumbler at the best (nearest) distance. Each row also carries
+    the MATCHED chunk's ``chash`` (so the query() repoint populates the RDR-086
+    ``chunk_text_hash`` from it, never a per-doc manifest guess).
+
+    Seeds are document tumblers; ``depth`` is clamped to [1,3] service-side; an empty
+    ``link_type`` follows all edge types; ``direction`` is ``"out"``/``"in"``/``"both"``
+    (default ``"both"``, matching ``Catalog.graph`` / the ``query`` tool's follow_links).
+
+    Service-mode only — the combined-query functions live in the pgvector Postgres; in
+    local/Chroma mode this returns an error.
+
+    Args:
+        query: Search query string.
+        seeds: Seed document tumbler(s) to traverse from (list, or a single string).
+        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
+        limit: Max rows.
+        link_type: Catalog link_type filter ("" = follow all edge types).
+        depth: BFS depth (clamped to [1,3]).
+        direction: "out" | "in" | "both".
+        structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
+    """
+    try:
+        from nexus.db.http_vector_client import is_service_backed
+
+        t3 = _get_t3()
+        if not is_service_backed(t3):
+            return ("Error: search_graph_hop requires service mode "
+                    "(pgvector); not available in local/Chroma mode")
+        seed_list = [seeds] if isinstance(seeds, str) else list(seeds)
+        seed_list = [s for s in seed_list if s]
+        if not seed_list:
+            return "No seeds provided."
+        target = _resolve_corpus_target(corpus, t3)
+        if not target:
+            return f"No collections match corpus {corpus!r}"
+        rows = t3.search_graph_hop(
+            query, seed_list, target,
+            link_type=(link_type or None),
+            depth=depth,
+            direction=direction,
+            n_results=limit,
+        )
+        # Document-level: collapse to one row per tumbler, keeping the best (nearest)
+        # distance. Rows arrive distance-ascending, so the FIRST occurrence is best.
+        seen_ids: set[str] = set()
+        deduped: list[dict] = []
+        for r in rows:
+            rid = r.get("id", "")
+            if rid in seen_ids:
+                continue
+            seen_ids.add(rid)
+            deduped.append(r)
+        rows = deduped
+        if structured:
+            ids = [r.get("id", "") for r in rows]
+            return {
+                "ids": ids,
+                "tumblers": ids,
+                "distances": [r.get("distance", 0.0) for r in rows],
+                "collections": [r.get("collection", "") for r in rows],
+                # contents inline so plan steps summarize via $stepN.contents WITHOUT
+                # store_get_many hydration (which is chash-keyed and would miss tumblers).
+                "contents": [r.get("content", "") for r in rows],
+                # the matched chunk's chash per row — rzqto wires this into the
+                # structured chunk_text_hash (RDR-086 chash-citations).
+                "chashes": [r.get("chash", "") for r in rows],
+            }
+        if not rows:
+            return "No documents found."
+        return "\n\n".join(
+            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
+            f"\n{r.get('content', '')}"
+            for r in rows
+        )
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool(
     title="Catalog-Aware Document Query",
     annotations={"readOnlyHint": True},
 )

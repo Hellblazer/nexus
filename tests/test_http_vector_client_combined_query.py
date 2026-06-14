@@ -17,6 +17,7 @@ from nexus.db.http_vector_client import HttpVectorClient
 
 META_PATH = "/v1/vectors/search-metadata-scoped"
 TOPIC_PATH = "/v1/vectors/search-topic-scoped"
+GRAPH_PATH = "/v1/vectors/search-graph-hop"
 
 
 def _patch_post(monkeypatch, handler) -> list[tuple[str, dict]]:
@@ -104,3 +105,52 @@ class TestSearchTopicScoped:
         HttpVectorClient().search_topic_scoped("q", "T", "knowledge__b__minilm-l6-v2-384__v1")
         _, body = calls[0]
         assert body["n_results"] == 10
+
+
+class TestSearchGraphHop:
+    """nexus-houg9: graph-hop client leg for POST /v1/vectors/search-graph-hop."""
+
+    def test_posts_to_graph_route_with_link_type(self, monkeypatch):
+        rows = [{"id": "1.2.3", "content": "z", "distance": 0.1,
+                 "collection": "rdr__a__voyage-context-3__v1",
+                 "chash": "0" * 32}]
+        calls = _patch_post(monkeypatch, lambda p, b: rows)
+
+        got = HttpVectorClient().search_graph_hop(
+            "how does x work", ["1.2.3"], ["rdr__a__voyage-context-3__v1"],
+            link_type="cites", depth=2, direction="out", n_results=5)
+
+        assert got == rows
+        assert len(calls) == 1
+        path, body = calls[0]
+        assert path == GRAPH_PATH
+        assert body == {
+            "query": "how does x work",
+            "seeds": ["1.2.3"],
+            "collections": ["rdr__a__voyage-context-3__v1"],
+            "link_type": "cites",
+            "depth": 2,
+            "direction": "out",
+            "n_results": 5,
+        }
+
+    def test_omits_none_link_type_and_defaults(self, monkeypatch):
+        calls = _patch_post(monkeypatch, lambda p, b: [])
+
+        HttpVectorClient().search_graph_hop("q", ["1.1"], ["rdr__a__voyage-context-3__v1"])
+
+        _, body = calls[0]
+        assert body == {
+            "query": "q",
+            "seeds": ["1.1"],
+            "collections": ["rdr__a__voyage-context-3__v1"],
+            "depth": 1,
+            "direction": "both",
+            "n_results": 10,
+        }
+        assert "link_type" not in body
+
+    def test_returns_empty_list_passthrough(self, monkeypatch):
+        _patch_post(monkeypatch, lambda p, b: [])
+        assert HttpVectorClient().search_graph_hop(
+            "q", ["1.1"], ["rdr__a__voyage-context-3__v1"]) == []
