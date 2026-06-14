@@ -97,6 +97,17 @@
          (topics/topic_assignments). Contract: CombinedQueryParityTest (P4.1). -->
     <include file="db/changelog/catalog-006-combined-query-functions.xml"/>
 
+    <!-- Graph-hop combined-query function (bead nexus-houg9, RDR-156 P4 follow-on):
+         per-dim search_graph_hop_<dim> — a WITH RECURSIVE BFS over catalog_links collects
+         the reachable doc set, then joins chunks_<dim> and vector-ranks (Decision 5
+         "graph-hop + rank"). Retires the query() follow_links app-side graphBFS dance.
+         Recursive CTE is non-inlinable (Function Scan accepted); the reachable set is
+         materialized before the rank so HNSW survives the outer join. Returns the matched
+         chunk's chash (audit HIGH: rzqto populates RDR-086 chunk_text_hash from it).
+         Depends on catalog-001 (links/documents/manifest), catalog-003 (deleted_at),
+         vectors-001 (chunks_<dim>). Contract: GraphHopParityTest. -->
+    <include file="db/changelog/catalog-007-graph-hop-functions.xml"/>
+
     <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
          taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB
          collection into Postgres so service-mode taxonomy compute is chroma-free.

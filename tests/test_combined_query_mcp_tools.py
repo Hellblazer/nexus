@@ -19,11 +19,14 @@ class _FakeServiceT3:
     """Records combined-query client calls; stands in for HttpVectorClient."""
 
     def __init__(self, meta_rows: list[dict] | None = None,
-                 topic_rows_by_col: dict[str, list[dict]] | None = None) -> None:
+                 topic_rows_by_col: dict[str, list[dict]] | None = None,
+                 graph_rows: list[dict] | None = None) -> None:
         self.meta_rows = meta_rows or []
         self.topic_rows_by_col = topic_rows_by_col or {}
+        self.graph_rows = graph_rows or []
         self.meta_calls: list[tuple] = []
         self.topic_calls: list[tuple] = []
+        self.graph_calls: list[tuple] = []
 
     def search_metadata_scoped(self, query, collection_names, *, content_type=None,
                                author=None, year=None, corpus=None, n_results=10):
@@ -34,6 +37,12 @@ class _FakeServiceT3:
     def search_topic_scoped(self, query, topic, collection, *, n_results=10):
         self.topic_calls.append((query, topic, collection, n_results))
         return self.topic_rows_by_col.get(collection, [])
+
+    def search_graph_hop(self, query, seeds, collection_names, *, link_type=None,
+                         depth=1, direction="both", n_results=10):
+        self.graph_calls.append((query, list(seeds), list(collection_names),
+                                 link_type, depth, direction, n_results))
+        return self.graph_rows
 
 
 def _wire(monkeypatch, t3, target, *, service=True):
@@ -124,12 +133,78 @@ class TestSearchTopicScopedTool:
         assert isinstance(out, str) and out.startswith("Error:")
 
 
+class TestSearchGraphHopTool:
+    """nexus-houg9: graph-hop tool — doc-level dedup + chash in the structured shape."""
+
+    def test_structured_doc_level_with_chashes(self, monkeypatch):
+        rows = [
+            {"id": "1.2.3", "content": "a", "distance": 0.1, "collection": "c1",
+             "chash": "a" * 32},
+            {"id": "1.2.4", "content": "b", "distance": 0.3, "collection": "c1",
+             "chash": "b" * 32},
+        ]
+        t3 = _FakeServiceT3(graph_rows=rows)
+        _wire(monkeypatch, t3, ["c1"])
+
+        out = core.search_graph_hop(
+            "q", ["1.2.0"], corpus="rdr", link_type="cites", depth=2,
+            direction="out", limit=5, structured=True)
+
+        assert out == {
+            "ids": ["1.2.3", "1.2.4"],
+            "tumblers": ["1.2.3", "1.2.4"],
+            "distances": [0.1, 0.3],
+            "collections": ["c1", "c1"],
+            "contents": ["a", "b"],
+            "chashes": ["a" * 32, "b" * 32],
+        }
+        assert t3.graph_calls == [("q", ["1.2.0"], ["c1"], "cites", 2, "out", 5)]
+
+    def test_single_string_seed_accepted(self, monkeypatch):
+        t3 = _FakeServiceT3(graph_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+        core.search_graph_hop("q", "1.2.0", corpus="rdr", structured=True)
+        assert t3.graph_calls == [("q", ["1.2.0"], ["c1"], None, 1, "both", 10)]
+
+    def test_empty_seeds_short_circuit(self, monkeypatch):
+        t3 = _FakeServiceT3(graph_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+        out = core.search_graph_hop("q", [], corpus="rdr")
+        assert isinstance(out, str) and "No seeds" in out
+        assert t3.graph_calls == []
+
+    def test_multichunk_doc_deduped_keeps_best_distance(self, monkeypatch):
+        rows = [
+            {"id": "1.2.3", "content": "near", "distance": 0.1, "collection": "c1",
+             "chash": "a" * 32},
+            {"id": "1.2.4", "content": "other", "distance": 0.2, "collection": "c1",
+             "chash": "c" * 32},
+            {"id": "1.2.3", "content": "far", "distance": 0.9, "collection": "c1",
+             "chash": "d" * 32},
+        ]
+        t3 = _FakeServiceT3(graph_rows=rows)
+        _wire(monkeypatch, t3, ["c1"])
+        out = core.search_graph_hop("q", ["1.2.0"], structured=True)
+        assert out["ids"] == ["1.2.3", "1.2.4"]
+        assert out["distances"] == [0.1, 0.2]
+        assert out["chashes"] == ["a" * 32, "c" * 32]  # best-distance row's chash
+
+    def test_non_service_mode_errors(self, monkeypatch):
+        t3 = _FakeServiceT3()
+        _wire(monkeypatch, t3, ["c1"], service=False)
+        out = core.search_graph_hop("q", ["1.2.0"], structured=True)
+        assert isinstance(out, str) and out.startswith("Error:")
+        assert t3.graph_calls == []
+
+
 class TestPlanRunnerRegistration:
     def test_tools_registered_as_retrieval(self):
         from nexus.plans.runner import _RETRIEVAL_TOOLS
         assert "search_metadata_scoped" in _RETRIEVAL_TOOLS
         assert "search_topic_scoped" in _RETRIEVAL_TOOLS
+        assert "search_graph_hop" in _RETRIEVAL_TOOLS
 
     def test_tools_resolvable_on_core(self):
         assert callable(getattr(core, "search_metadata_scoped"))
         assert callable(getattr(core, "search_topic_scoped"))
+        assert callable(getattr(core, "search_graph_hop"))
