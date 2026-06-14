@@ -80,6 +80,39 @@ Collection registration is enforced server-side at two layers:
 Python clients write directly to Chroma (bypassing PostgreSQL) and are outside this rule's
 scope until RDR-155 P4b removes the Chroma path.
 
+## Capability-selection discipline (RDR-156 Decision 8)
+
+When a schema-level invariant or read shape needs enforcing, choose the **least powerful
+mechanism that suffices**, in this order (the RDR-154 P3 boundary, carried forward):
+
+> **declarative FK / constraint  >  stored function  >  `security_invoker` view  >  trigger**
+
+A trigger is the last resort — admissible **only for an invariant the application layer
+genuinely cannot enforce** ("app-unfixable"). Every RDR-156 choice was recorded against
+this ladder; the entries below are the deliverable (not an aspiration), so a future change
+that reaches for a heavier mechanism has to argue past them.
+
+| RDR-156 decision | Mechanism chosen | Why not heavier |
+|---|---|---|
+| chunk → collection referential integrity | **declarative FK** (`chunks_<dim>/chash_index/topic_assignments` → `catalog_collections`, `NOT VALID` until RDR-153, then `VALIDATE`) | A FK is declarative and authoritative-by-construction; no function/trigger needed. Cost is one index probe per upsert (negligible vs the embedding call). |
+| manifest → chunk integrity (orphan detection) | **stored function** `nexus.manifest_orphans(dim)` + the P2.1 fail-loud read backstop | A FK is impossible (`catalog_document_chunks.chash` can't reference chunks split across three dim tables); the orphan class is adequately served on-demand by a function — no parent table, no trigger. |
+| manifest backfill / document reconstruction | **stored functions** `manifest_backfill()`, `document_text(doc_id)` | Replace generated-SQL-string artifacts with first-class DB objects callable by doctor / migration validation; no triggers, no app round-trips. |
+| per-collection stats | **`security_invoker` view** `collection_vector_stats` | Read-only aggregate; a view under the caller's RLS is exactly right — replaces remote `count()` calls. No function needed. |
+| combined-query read shapes | **set-returning `LANGUAGE sql` functions** (`search_metadata_scoped` / `search_topic_scoped` / `search_graph_hop`) | Must take the query vector as a plan-time argument (a view can't), and stay inlinable so HNSW survives the join. Functions, not views, not triggers. |
+| soft delete (tombstone) | **plain column + partial indexes + view filters** (`deleted_at`, `live_chunks`) | **Adds ZERO triggers.** Tombstoning is an `UPDATE`, so the `ON DELETE CASCADE` chains do not fire; restore clears one column. Cascade semantics are declarative. |
+| collection registration-before-write | **app-side ordering in `upsertChunks` + the FK** (see the section above) | The FK makes the ordering load-bearing; the registration is done in the same transaction. No trigger to maintain the invariant. |
+
+### The `chunks_registry` trigger — recorded NOT-worth-it (this RDR's entry)
+
+A trigger-maintained `chunks_registry` parent table was considered as a real FK anchor for
+`catalog_document_chunks.chash`. **Rejected today**: it adds a trigger on the hottest write
+path (chunk upsert), couples write-ordering (chunk row before manifest row) onto the hot
+indexing path, and sits outside the "app-unfixable only" bar — the orphan class it would
+guard is already served by `manifest_orphans()` + the fail-loud read backstop. **Revisit only
+if orphan incidents recur post-RDR-153.** (Other rejected anchors: a single partitioned
+`chunks` table — impossible, `vector(n)` is fixed-dimension per column; `manifest.chash →
+chash_index` — wrong lifecycle.)
+
 ## Hot rules
 
 - **No ORM.** SQLAlchemy etc. is banned. Direct `sqlite3` only.
