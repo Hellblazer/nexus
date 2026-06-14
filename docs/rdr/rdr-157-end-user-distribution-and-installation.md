@@ -7,7 +7,7 @@ priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-11
-related_issues: [nexus-luxe6, nexus-pebfx, nexus-jdpn9]
+related_issues: [nexus-luxe6, nexus-pebfx, nexus-jdpn9, nexus-ykrhb, nexus-lqb9j, nexus-6laob]
 related: [RDR-144, RDR-152, RDR-155, RDR-076]
 ---
 
@@ -57,6 +57,58 @@ of this RDR's install primitives.
 - 4 supervisor silent-deaths in 48h before observability landed (nexus-ovbr7) — an
   end user has no `mvn package` recourse when the JAR is missing or stale.
 - The 134 MB JAR exceeds PyPI's default limits and dwarfs the 'conexus' wheel itself.
+
+## Decision — UPDATED 2026-06-14 (owner-locked; supersedes the draft options below)
+
+Two prerequisites that gated the draft options are now resolved, so the owner has
+locked the architecture:
+
+- **Native-image is feasible and shipped.** The draft's Open Question 1 / RF-157-4
+  risk (ONNX + DJL JNI under native-image) was retired by the native-image
+  productionization (epic `nexus-ykrhb`, PR #1172, merged 2026-06-12): the full
+  service — Liquibase migration + jOOQ + ONNX/DJL embedding — runs as a native
+  binary, with a CI native-build+smoke job green on linux-amd64 and per-OS/arch
+  `native-libs-*` profiles wired. The native-vs-jlink default decision
+  (`nexus-lqb9j`) is closed in favour of native.
+- **TCP-only provisioning is portable.** The Debian/Ubuntu Unix-socket bug
+  (`nexus-6laob`, merged 2026-06-14, found by `tests/e2e/migration-rehearsal`) is
+  fixed, so a provisioned cluster comes up for a non-`postgres` OS user.
+
+**Locked decisions:**
+
+1. **Artifact = GraalVM native-image (draft option 1(b) promoted).** The JAR channel
+   (1(a)) and jlink (1(c)) are rejected as the shipping default. This eliminates the
+   Java-runtime prerequisite (draft Decision 2) outright.
+2. **Two distributions:**
+   - **Cloud** — native binary, **no DB**. Connects to a managed PG that already has
+     pgvector. Cloud mode skips `pg_provision` entirely; it validates the remote
+     (pgvector present + supported major, fail loud), runs Liquibase, and serves.
+   - **Local** (per OS/arch) — native binary **+ embedded relocatable PG16+pgvector**.
+     "No reason not to embed." PG stays a separate process (it cannot be linked into
+     the native executable — it is a multi-process C server); "embedded" means the
+     relocatable PG+pgvector is carried in the distribution — ideally as an
+     `-H:IncludeResources` payload inside the native binary, self-extracted to a cache
+     dir on first run (the same mechanism the binary already uses for the ONNX/DJL
+     native libs), with ship-alongside-in-the-archive as the fallback if in-binary
+     embedding proves too heavy. First run: extract → `initdb` → provision → serve.
+3. **PG provisioning = embedded bundle (draft option 3(a) promoted, 3(b) becomes the
+   fallback).** `pg_provision` already has the seam: point `NEXUS_PG_BIN` (or a new
+   candidate dir) at the extracted bundle; `check_pgvector_available` is satisfied by
+   bundling `vector.control` + `vector--*.sql` + `vector.{so,dylib,dll}` in the
+   relocatable PG's sharedir/pkglibdir. The PG build must be relocatable so
+   `pg_config --sharedir` resolves from the cache dir.
+
+**Critical assumptions to verify in research (P0):**
+- **CA-1**: relocatable PG16 **+ matching pgvector** builds are obtainable (or
+  buildable in CI) for every target — {linux-amd64, linux-aarch64, mac-arm64,
+  windows}. (mac-x64 is explicitly out of scope — owner call 2026-06-14.)
+- **CA-2**: a PG tarball embedded via `-H:IncludeResources` in the native image
+  self-extracts and runs on first launch (size/startup cost acceptable; else
+  ship-alongside).
+- **CA-3**: `pg_provision`'s `NEXUS_PG_BIN` seam + `check_pgvector_available` work
+  unchanged against the extracted relocatable bundle (TCP-only; socket fix applies).
+
+The original draft option enumeration is retained below as the research trail.
 
 ## Decision (draft — options enumerated, to be resolved in research)
 
@@ -143,11 +195,17 @@ of this RDR's install primitives.
 
 ## Open Questions
 
-1. Does anything in the service preclude native-image (jOOQ codegen reflection,
-   Liquibase changelog parsing, ONNX runtime JNI for minilm)? (P0 spike.)
+1. ~~Does anything in the service preclude native-image (jOOQ codegen reflection,
+   Liquibase changelog parsing, ONNX runtime JNI for minilm)?~~ **RESOLVED 2026-06-12
+   (nexus-ykrhb, PR #1172): no — the full native service is CI-green on linux-amd64.
+   jOOQ generated-record metadata + ONNX/DJL JNI handled via agent-traced reachability
+   metadata + IncludeResources.**
 2. Embedded-PG wheels: does any maintained wheel ship pgvector for darwin-arm64 +
    linux-x86_64? What is the disk/install-time cost?
-3. Windows: out of scope for release N? (Current daemon substrate is POSIX-leaning.)
+3. ~~Windows: out of scope for release N?~~ **RESOLVED 2026-06-14 (owner): Windows
+   ships in release N+1, not the gating release N. It is the long pole for both the
+   native-image build and the pgvector MSVC source build (RF-157-7); release N targets
+   linux-amd64, linux-aarch64, mac-arm64.**
 4. Should `install-jar --from-release` verify a detached signature in addition to
    sha256 (supply-chain posture), given the artifact executes with DB credentials?
 
@@ -237,6 +295,83 @@ container (production untouched); full record: T2 `nexus_rdr/157-P0-spike-result
 - **Remaining unknowns are mechanical**: re-run on GraalVM CE 25 (the licensing
   choice, RF-157-5) and linux-x64/aarch64 in CI. ONNX model files stay an
   external install-time dependency either way.
+
+### RF-157-7 (CA-1, VERIFIED 2026-06-14, web): relocatable PG16 + pgvector per target
+
+**Verdict: CA-1 SUPPORTED for {linux-amd64, linux-aarch64, mac-arm64, windows}.** No
+single distributor ships a relocatable PG16 **with** pgvector off the shelf, so the
+project must own a CI bundle-build matrix — but every piece exists and the
+combination is proven prior art.
+
+- **Relocatable vanilla PG16 exists per target.** `io.zonky.test.postgres`
+  embedded-postgres-binaries ship reduced-size, extract-and-run PG16 (BOM 16.x) as
+  Maven artifacts, Docker-cross-compiled, for `linux-amd64`, `linux-arm64v8`
+  (= aarch64), `darwin-arm64v8` (= mac-arm64), and `windows-amd64`. Relocatability is
+  their entire purpose (extract to a tmp dir, `initdb`, run) — which is exactly our
+  first-run flow, so `pg_config --sharedir` resolves post-extract (satisfies CA-3
+  mechanically, pending a live test).
+- **pgvector is a per-platform source build, not a relocatable download.** pgvector
+  (the `vector` extension) supports PG13+ (incl. 16). Build needs `make` + `pg_config`
+  + **PG server dev headers** (`postgres.h`); Windows uses `nmake /F Makefile.win`
+  under MSVC. Produces `vector.{so,dylib,dll}` + `vector.control` + `vector--*.sql`.
+  zonky's own extension mechanism (PostGIS via `postgisVersion`) **explicitly excludes
+  Windows and macOS**, so we cannot lean on zonky to add pgvector — we build it.
+- **The combined bundle is proven feasible.** `boomship/postgres-vector-embedded`
+  ships a precompiled **relocatable PG17.5 + pgvector 0.8.0** bundle for mac-arm64,
+  mac-x64, linux-x64, linux-arm64, and windows-x64 (Windows shipped *lite* only — no
+  SSL/JIT). Different PG major and Node-oriented, but it demonstrates the exact
+  artifact we need across exactly our targets.
+
+**Construction strategies (P1 decides):**
+- **A — assemble (lean):** pull zonky relocatable PG16 per platform; in the same
+  per-platform CI runner, build pgvector from source against a matching full PG16
+  (for headers), then inject `vector.*` into the bundle's `pkglibdir`/`sharedir`.
+  Risk: zonky bundles are "reduced for testing" (verify they `initdb`+serve our
+  workload, not header-stripped past use); the injected `.so` must ABI-match zonky's
+  PG build (same PG16 minor, libc/compiler).
+- **B — build both from source in the existing native-image CI matrix:** guaranteed
+  ABI match, full-featured PG, version-pinned; higher CI cost and PG-from-source on
+  Windows/MSVC is the painful part.
+
+**Recommendation:** Strategy A for linux-amd64/linux-aarch64/mac-arm64 (fast, low
+risk); treat **Windows as the long pole** (MSVC pgvector build + zonky's no-extension
+story + boomship's lite-only Windows) and **defer Windows to release N+1** — it is the
+long pole for the native-image build too (RDR-157 Open Q3), so deferring de-risks the
+gating release without holding up linux/mac. ONNX model fetch (`nexus-jrrve`) is an
+orthogonal install-time dependency either way.
+
+### RF-157-8 (CA-2, VERIFIED 2026-06-14, web + local): embed PG tarball via IncludeResources + self-extract
+
+**Verdict: CA-2 FEASIBLE pending a small build-spike; not a blocker — every mechanical
+piece is already proven locally, and ship-alongside is a zero-risk fallback.**
+
+- **The extract-and-run model is exactly how zonky already ships PG.** Each zonky
+  artifact is a jar containing `postgres-{platform}-{arch}.txz` — a compressed PG
+  tarball extracted to a dir at runtime. That `.txz` is precisely the
+  `-H:IncludeResources` payload we would embed; first-run = extract `.txz` → `initdb`
+  → provision (the flow `pg_provision` already runs).
+- **Our native binary already embeds + extracts native payloads.** The service pom
+  passes `-H:IncludeResources=ai/onnxruntime/native/...` and `native/lib/<djl>/.*`;
+  the onnxruntime-java / DJL loaders extract those `.so`/`.dylib` from the binary to a
+  temp dir at load. So "embed a binary blob as a resource, extract on first use, then
+  use it" is **already working in our native image** — the PG case differs only in
+  size and that the extracted artifact is exec'd as a subprocess (ProcessBuilder works
+  unchanged under native-image).
+- **`-H:IncludeResources` embeds arbitrary files (Java-regex selectors), no documented
+  hard size cap.** Included resources are kept verbatim in the binary's data section.
+
+**Unverified delta (the spike's job, < 1 day):**
+1. Build-time cost + binary bloat of a ~30–50 MB `.txz` IncludeResources payload.
+   GraalVM has reports of large embedded resources raising build memory; 30–50 MB is
+   moderate against our already-~100 MB binary, but must be measured.
+2. First-run extract + `initdb` latency (one-time, then cached) — measure it's
+   acceptable.
+
+**Recommendation:** spike the in-binary embed (the "chef's kiss"); **if build cost or
+bloat is unacceptable, fall back to ship-alongside** — the per-OS/arch archive carries
+`{native binary, pg-<plat>.txz}` and extracts on first run. Identical runtime path,
+zero native-image involvement, guaranteed to work. Either way CA-2 does not gate the
+two-distribution architecture; it only decides single-file-vs-archive packaging.
 
 ### Implications for the draft Decisions (to lock at gate)
 
