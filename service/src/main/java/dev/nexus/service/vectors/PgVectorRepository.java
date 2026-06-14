@@ -404,6 +404,15 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Gate-selectivity cutoff for {@link #hybridSearch} plan dispatch (nexus-lcogi). At or
+     * below this many text-gate matches the gate is materialized first and ranked by exact
+     * distance (bounds materialization at ~{@code SELECTIVE_GATE_MAX × 4 KB} of embeddings);
+     * above it, the HNSW-first plan is kept (a dense gate is found within the scan budget).
+     * Heuristic — superseded by the RDR-156 P5.2 unified selectivity-aware RRF plan.
+     */
+    static final int SELECTIVE_GATE_MAX = 5000;
+
+    /**
      * RDR-155 Phase 3 - hybrid search: text signals ({@code tsvector} FTS + {@code pg_trgm}
      * trigram similarity) gate the candidate set, vector cosine distance ranks it, fused in
      * ONE query against the dispatched {@code chunks_<dim>} table. Replaces the engine's
@@ -433,13 +442,19 @@ public final class PgVectorRepository {
      *       union, metadata {@code where} equality predicates ANDed with the text gate,
      *       {@code nResults} cap, flat row shape ({@code id}, {@code content},
      *       {@code distance}, {@code collection}, metadata flattened in).
-     *   <li><strong>Filtered-ANN session setting.</strong> The implementation MUST run
-     *       {@code SET LOCAL hnsw.iterative_scan = 'relaxed_order'} before the query,
-     *       exactly like {@link #search} - the text gate + RLS + {@code where} predicates
-     *       narrow the candidate set even harder than plain search, which is precisely the
-     *       filtered-recall risk the setting exists for (RDR-155 research resolution; the
-     *       fixture-scale suite cannot detect its absence, the conexus xr7.8.9
-     *       production-scale recall gate can).
+     *   <li><strong>Selectivity-aware dispatch (nexus-lcogi).</strong> A cheap COUNT over
+     *       the text gate picks the plan. For a SELECTIVE gate ({@code count <=}
+     *       {@link #SELECTIVE_GATE_MAX}) the gate is materialized FIRST via a
+     *       {@code MATERIALIZED} CTE (GIN bitmap on {@code chunk_tsv} + {@code gin_trgm_ops})
+     *       and the small gated set is ranked by EXACT cosine distance — the lcogi fix:
+     *       the prior HNSW-first plan ({@code ORDER BY embedding}, gate as scan filter)
+     *       collapsed here because a few matches in a large corpus rank past
+     *       {@code hnsw.max_scan_tuples} (lcogi: 6/116k → 0). For a NON-SELECTIVE gate the
+     *       HNSW-first plan is kept (a dense gate is found within the scan budget, and
+     *       materializing a huge gated set would spill {@code work_mem} and risk the same
+     *       timeout). Superseded by RDR-156 P5.2 server-side RRF fusion (unified
+     *       selectivity-aware); its P5.G gate verifies the selective case at production
+     *       scale rather than re-fixing it.
      *   <li><strong>Trigram gate calibration anchor.</strong> The contract fixture
      *       pins the gate's discriminating range, not an exact threshold: the typo probe's
      *       candidate rows sit at word-similarity ≈ 0.9 (and plain trigram similarity
@@ -478,6 +493,26 @@ public final class PgVectorRepository {
                                                   List<String> collectionNames,
                                                   int nResults,
                                                   Map<String, Object> where) {
+        return hybridSearch(tenant, queryText, collectionNames, nResults, where, SELECTIVE_GATE_MAX);
+    }
+
+    /**
+     * Overload exposing the gate-selectivity threshold (nexus-lcogi). The 5-arg method
+     * delegates here with {@link #SELECTIVE_GATE_MAX}; a caller (or test) that knows its
+     * gate's selectivity can pin the dispatch — passing a small value forces the
+     * non-selective (HNSW-first) branch on a fixture-scale corpus without seeding
+     * {@code > SELECTIVE_GATE_MAX} matching rows.
+     *
+     * @param selectiveGateMax gate-match cutoff for the text-first vs HNSW-first dispatch;
+     *                         must be {@code >= 1} (a non-positive value would route every
+     *                         gate to HNSW-first and re-enable the collapse, so it is
+     *                         rejected).
+     */
+    public List<Map<String, Object>> hybridSearch(String tenant, String queryText,
+                                           List<String> collectionNames,
+                                           int nResults,
+                                           Map<String, Object> where,
+                                           int selectiveGateMax) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
@@ -489,6 +524,13 @@ public final class PgVectorRepository {
             // LIMIT -1 is "no limit" in Postgres - a non-positive value would silently
             // unbound the query instead of capping it.
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
+        }
+        if (selectiveGateMax < 1) {
+            // A non-positive threshold routes EVERY gate to the HNSW-first branch
+            // (matchCount >= 0 is always > a non-positive cutoff), silently re-enabling
+            // the lcogi selective-gate collapse. Reject rather than mis-dispatch.
+            throw new IllegalArgumentException(
+                "selectiveGateMax must be >= 1, got " + selectiveGateMax);
         }
         int dim = dimForCollection(collectionNames.get(0));
         for (String col : collectionNames) {
@@ -510,46 +552,91 @@ public final class PgVectorRepository {
                 + "-dim vector but the collections dispatch to chunks_" + dim);
         }
 
-        // Text gate: FTS lexeme match OR word-trigram similarity. The <% operator form
-        // (word_similarity(query, chunk_text) >= pg_trgm.word_similarity_threshold) is
-        // chosen over the explicit function call because only the operator family is
-        // supported by the gin_trgm_ops index (vectors-002); the threshold GUC is pinned
-        // per-transaction below so the gate never depends on cluster config.
-        // word_similarity (not plain similarity): plain similarity dilutes with
-        // chunk_text length and would silently kill the trgm leg on production-size
-        // chunks; word_similarity matches the query against the best continuous extent.
-        StringBuilder sql = new StringBuilder()
-            .append("SELECT chash, chunk_text, collection, metadata::text AS metadata_json,")
-            .append(" (embedding <=> ?::vector) AS distance")
-            .append(" FROM ").append(chunksTable(dim))
+        // Text gate fragment, shared by the COUNT probe and the ranked query. FTS lexeme
+        // match OR word-trigram similarity: the <% operator form (word_similarity >=
+        // pg_trgm.word_similarity_threshold) is gin_trgm_ops-indexable (vectors-002) where
+        // the function-call form is not; word_similarity (vs plain similarity) does not
+        // dilute with chunk_text length. The threshold GUC is pinned per-transaction below.
+        StringBuilder gate = new StringBuilder()
             .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")")
             .append(" AND (chunk_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)");
-        List<Object> binds = new ArrayList<>();
-        binds.add(vectorLiteral(queryVec));
-        binds.addAll(collectionNames);
-        binds.add(queryText);
-        binds.add(queryText);
+        List<Object> gateBinds = new ArrayList<>();
+        gateBinds.addAll(collectionNames);
+        gateBinds.add(queryText);
+        gateBinds.add(queryText);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
-                sql.append(" AND metadata->>? = ?");
-                binds.add(e.getKey());
-                binds.add(String.valueOf(e.getValue()));
+                gate.append(" AND metadata->>? = ?");
+                gateBinds.add(e.getKey());
+                gateBinds.add(String.valueOf(e.getValue()));
             }
         }
-        sql.append(" ORDER BY distance ASC, chash ASC LIMIT ?");
-        binds.add(nResults);
+        final String table = chunksTable(dim);
+        final String gateSql = gate.toString();
+        final String vecLit = vectorLiteral(queryVec);
 
+        // SELECTIVITY-AWARE DISPATCH (nexus-lcogi). A cheap COUNT over the text gate (GIN
+        // bitmap, no embedding fetch) picks the plan that serves the gate's match count:
+        //
+        //   * SELECTIVE gate (count <= SELECTIVE_GATE_MAX): a MATERIALIZED CTE evaluates the
+        //     gate FIRST via the GIN indexes (optimization fence), then ranks the small
+        //     gated set by EXACT cosine distance. This is the lcogi fix — the prior
+        //     single-query HNSW-first plan (ORDER BY embedding, gate as scan filter)
+        //     collapsed here: a handful of matches in a large corpus rank past
+        //     hnsw.max_scan_tuples from the query vector, so the scan stops before reaching
+        //     them and the endpoint returns 0 rows (6 / 116k -> 0; full recall ~95s past
+        //     every HTTP timeout). Materializing the gate first is instant and exact, with
+        //     NO dependence on hnsw.max_scan_tuples / iterative_scan.
+        //
+        //   * NON-SELECTIVE gate (count > SELECTIVE_GATE_MAX): keep the HNSW-first plan
+        //     (gate as filter, iterative_scan). A dense gate is USUALLY found within the
+        //     scan budget at corpus-average embedding distributions, so it does not
+        //     collapse — and materializing a huge gated set (embeddings are ~4 KB/row: 80k
+        //     matches ≈ 320 MB) would spill work_mem and risk the very timeout lcogi is
+        //     about. NOTE this is a heuristic, not a guarantee: a SEMI-selective gate
+        //     (count in (SELECTIVE_GATE_MAX, hnsw.max_scan_tuples] whose matches all cluster
+        //     FAR from the query vector) can still under-return on this branch — the same
+        //     geometry as the original bug, in a narrower window. P5.2's RRF fusion closes
+        //     that window; the conexus xr7.8.9 gate should verify the non-selective path too
+        //     (latency + recall), not only the 6/116k selective case.
+        //
+        // COST: the non-selective path evaluates the gate TWICE (the COUNT probe + the scan
+        // filter), an accepted overhead of the targeted dispatch that P5.2 eliminates.
+        //
+        // count == 0 falls into the selective branch and returns an empty gated set — no
+        // special case.
         Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
-            // Filtered-ANN recall: the text gate + RLS + where predicates narrow the
-            // candidate set even harder than plain search - keep HNSW scanning past
-            // ef_search (contract requirement; SET LOCAL is txn-scoped, pool-safe).
-            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
-            // Trigram gate calibration (contract anchor): word_similarity >= 0.6,
-            // pg_trgm's default - typo-probe candidates sit at ~0.9 and pass, no-signal
-            // rows at ~0.1 do not. Pinned per-transaction so the gate is independent of
-            // cluster-level GUC configuration.
+            // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
+            // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
+            // do not. Pinned per-transaction so the gate is independent of cluster config.
             ctx.execute("SET LOCAL pg_trgm.word_similarity_threshold = 0.6");
-            return ctx.fetch(sql.toString(), binds.toArray());
+
+            long matchCount = ctx.fetchOne(
+                "SELECT count(*) FROM " + table + gateSql, gateBinds.toArray())
+                .get(0, Long.class);
+
+            if (matchCount <= selectiveGateMax) {
+                // Text-first: gate materialized via GIN, ranked by exact distance.
+                String sql = "WITH gated AS MATERIALIZED ("
+                    + "SELECT chash, chunk_text, collection, metadata, embedding FROM " + table + gateSql + ")"
+                    + " SELECT chash, chunk_text, collection, metadata::text AS metadata_json,"
+                    + " (embedding <=> ?::vector) AS distance"
+                    + " FROM gated ORDER BY distance ASC, chash ASC LIMIT ?";
+                List<Object> b = new ArrayList<>(gateBinds);
+                b.add(vecLit);
+                b.add(nResults);
+                return ctx.fetch(sql, b.toArray());
+            }
+            // HNSW-first for a dense gate: keep HNSW scanning past ef_search.
+            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            String sql = "SELECT chash, chunk_text, collection, metadata::text AS metadata_json,"
+                + " (embedding <=> ?::vector) AS distance FROM " + table + gateSql
+                + " ORDER BY distance ASC, chash ASC LIMIT ?";
+            List<Object> b = new ArrayList<>();
+            b.add(vecLit);
+            b.addAll(gateBinds);
+            b.add(nResults);
+            return ctx.fetch(sql, b.toArray());
         });
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
