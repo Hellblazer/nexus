@@ -21,27 +21,48 @@ related: [RDR-144, RDR-152, RDR-155, RDR-076]
 Since RDR-155 P4a, T3 serving routes exclusively through the PG16 + pgvector + Java
 nexus-service stack. `pip install conexus` (or the plugin marketplace install) delivers
 none of that stack. A release cut from develop today requires every user to
-hand-assemble:
+hand-assemble it. The gaps below are framed in their **post-decision** form (native
+binary default + two distributions + embedded PG, locked 2026-06-14); the original
+prerequisite framing (JAR channel, JRE) is preserved in the Decision section's research
+trail.
 
-1. **The service JAR** — a 134 MB Maven fat JAR with **no distribution channel**.
-   PyPI cannot carry it (size limits, wrong artifact type); users today need a repo
-   checkout and a Maven build. `nx daemon service install-jar` (nexus-pebfx.4) solved
-   the *local lifecycle* (well-known location, sha256 provenance sidecar, schema-skew
-   gate) but not *acquisition*.
-2. **A Java 17+ runtime** — the supervisor's `_find_java()` requires JAVA_HOME or
-   PATH. A second hidden prerequisite end users will not have.
-3. **PostgreSQL 16 with the pgvector extension** — `discover_pg_binaries()` assumes
-   homebrew `postgresql@16`; the pgvector brew formula targeting the wrong PG major
-   was empirically hit on the dev machine (2026-06-09). `nx init --service` provisions
-   a cluster from found binaries but does not get the binaries there, and is missing
-   `CREATE EXTENSION` wiring (nexus-jdpn9 item 3).
-4. **Voyage key plumbing** — solved (nexus-pebfx.2: credential-chain resolution,
-   fail-loud ONNX refusal of voyage-token collections); local-only mode works with the
-   bundled ONNX MiniLM. Listed for completeness: the *decision* a new user makes here
-   is an onboarding question (RDR-144 pattern), not a packaging one.
+#### Gap 1: No per-OS/arch distribution channel for the service binary
 
-This is the substance of release blocker `nexus-luxe6`: prerequisites (1)–(3) are the
-undesigned legs. The operability of an *assembled* stack is largely done
+The service has **no distribution channel**. Today users need a repo checkout and a
+Maven (or native-image) build. `nx daemon service install-jar` (nexus-pebfx.4) solved
+the *local lifecycle* (well-known location, sha256 provenance sidecar, schema-skew
+gate) but not *acquisition*. With the native-image decision (RF-157-6/7), the artifact
+is a per-OS/arch native binary published via a release channel, not a 134 MB fat JAR —
+but that channel and its per-platform build matrix are undesigned. (This also retires
+the former Java-runtime prerequisite: a native binary needs no JRE.)
+
+#### Gap 2: The local distribution has no PostgreSQL 16 + pgvector to provision from
+
+`discover_pg_binaries()` assumes a host PG (homebrew `postgresql@16`); the pgvector
+brew formula targeting the wrong PG major was empirically hit on the dev machine
+(2026-06-09), and the Debian/Ubuntu socket failure (nexus-6laob, fixed 2026-06-14)
+showed host-PG provisioning is itself fragile per-platform. `nx init --service`
+provisions a cluster from *found* binaries but does not get the binaries there. The
+locked decision is to **embed a relocatable PG16 + pgvector** in the local
+distribution (CA-1/CA-2 verified feasible); the bundle build matrix and the first-run
+extract→provision wiring are undesigned.
+
+#### Gap 3: The cloud distribution has no skip-provision + validate-remote path
+
+The cloud distribution ships the native binary with **no DB**: it must connect to a
+managed PG that already has pgvector, skip `pg_provision` entirely, validate the remote
+(pgvector present + supported major, fail loud), run Liquibase, and serve. That
+cloud-mode split does not exist today (`nx init --service` always provisions locally).
+
+#### Gap 4 (resolved prerequisites, tracked for completeness)
+
+**Java runtime** — eliminated by the native-image decision. **Voyage key plumbing** —
+already solved (nexus-pebfx.2: credential-chain resolution, fail-loud ONNX refusal of
+voyage-token collections); local-only mode works with the bundled ONNX MiniLM; the
+embedder choice is an onboarding question (RDR-144), not a packaging one.
+
+This is the substance of release blocker `nexus-luxe6`: Gaps 1–3 are the undesigned
+legs. The operability of an *assembled* stack is largely done
 (epic nexus-pebfx, 8/9: endpoint discovery via registry lease, status surface,
 JAR lifecycle, embedding fail-loud, ETL operability, migration runbook, supervisor
 PG-recovery, daemon observability). The *migration engine* is production-proven
