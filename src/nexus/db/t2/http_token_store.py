@@ -64,16 +64,42 @@ class HttpTokenStore:
             host, port, token = _resolve_config()
             self._base_url = f"http://{host}:{port}"
             _token = token
-        self._client = httpx.Client(
+        self._tenant = tenant
+        self._auth_token = _token or ""
+        self._client = self._build_client()
+        _log.info("http_token_store.init", base_url=self._base_url)
+
+    def _build_client(self) -> httpx.Client:
+        return httpx.Client(
             base_url=self._base_url,
             headers={
-                "Authorization": f"Bearer {_token}",
-                "X-Nexus-Tenant": tenant,
+                "Authorization": f"Bearer {self._auth_token}",
+                "X-Nexus-Tenant": self._tenant,
                 "Content-Type": "application/json",
             },
             timeout=30.0,
         )
-        _log.info("http_token_store.init", base_url=self._base_url)
+
+    def _rebind_from_lease(self) -> bool:
+        """nexus-om64x: on connection-refused, re-resolve the endpoint from the
+        ServiceRegistry lease (bypassing the stale env port) and rebuild the
+        client. Returns True if rebound to a NEW endpoint, False otherwise."""
+        from nexus.db.service_endpoint import recover_endpoint_from_lease
+
+        recovered = recover_endpoint_from_lease(self._base_url)
+        if recovered is None:
+            return False
+        new_url, new_token = recovered
+        _log.warning("http_token_store.rebind", old=self._base_url, new=new_url)
+        self._base_url = new_url
+        if new_token:
+            self._auth_token = new_token
+        try:
+            self._client.close()
+        except Exception:
+            pass
+        self._client = self._build_client()
+        return True
 
     def close(self) -> None:
         """Close the connection pool (idempotent)."""
@@ -86,7 +112,18 @@ class HttpTokenStore:
         self.close()
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        resp = self._client.post(path, json=body)
+        try:
+            resp = self._client.post(path, json=body)
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
+            # nexus-om64x: stale endpoint (supervisor restarted on a new port; our
+            # env port is dead). ConnectError = connect-refused (store reconnects
+            # post-restart); RemoteProtocolError/ReadError = TCP RST on a pooled
+            # keep-alive connection that was in flight when the JVM was SIGTERM'd
+            # (mirrors http_vector_client's reset handling). Re-resolve from the
+            # lease and retry ONCE.
+            if not self._rebind_from_lease():
+                raise
+            resp = self._client.post(path, json=body)
         resp.raise_for_status()
         return resp.json()
 
