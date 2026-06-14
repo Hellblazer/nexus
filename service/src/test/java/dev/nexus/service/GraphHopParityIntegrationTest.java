@@ -74,6 +74,15 @@ class GraphHopParityIntegrationTest {
     private static final String LINK   = "cites";
     private static final int DEPTH     = 2;
 
+    // Branching fixture (collection COLL2) for the reachable-set equivalence sweep: a
+    // diamond + inbound + cross-type + cycle topology that DISCRIMINATES a wrong
+    // direction/CASE impl. Every doc shares a probe word so vector search returns the
+    // whole set and the GRAPH gate is the sole discriminator (K large → no truncation,
+    // so the assertion is reachable-set equality, not vector-order).
+    private static final String COLL2  = "knowledge__ghparity2__minilm-l6-v2-384__v1";
+    private static final String B_SEED = "b-a";
+    private static final String B_PROBE = "alpha bravo";   // present in every COLL2 doc
+
     private static final int GH_SIZE = Integer.getInteger("nx.ghparity.size", 60);
     private static final int K        = Integer.getInteger("nx.ghparity.k", 10);
     private static final String TOMB_TUMBLER = "gh-doc-tombstoned";
@@ -96,6 +105,7 @@ class GraphHopParityIntegrationTest {
 
     final List<GhDoc> docs = new ArrayList<>();
     final List<String> queries = new ArrayList<>();
+    final List<String> branchTumblers = new ArrayList<>();   // COLL2 doc tumblers
 
     @BeforeAll
     void startAll() throws Exception {
@@ -208,6 +218,62 @@ class GraphHopParityIntegrationTest {
                 + "', 'test') ON CONFLICT DO NOTHING");
             // UNREACH_TUMBLER intentionally has NO edges.
         }
+
+        seedBranchingFixture();
+    }
+
+    /**
+     * Diamond + inbound + cross-type + cycle topology in COLL2, every doc sharing
+     * B_PROBE so the vector leg returns all of them and the GRAPH is the discriminator:
+     * <pre>
+     *   b-x --cites--> b-a            (inbound to the seed)
+     *   b-a --cites--> b-b, b-c       (fan-out)
+     *   b-b --cites--> b-d            (diamond left)
+     *   b-c --cites--> b-d            (diamond merge — reached via two paths)
+     *   b-d --cites--> b-e            (depth chain)
+     *   b-b --relates-> b-c           (cross edge, DIFFERENT type)
+     *   b-e --cites--> b-b            (cycle b-b→b-d→b-e→b-b)
+     *   b-z                           (isolated — unreachable)
+     * </pre>
+     */
+    private void seedBranchingFixture() throws Exception {
+        String[] names = {"b-x", "b-a", "b-b", "b-c", "b-d", "b-e", "b-z"};
+        List<String> chashes = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        for (String n : names) {
+            branchTumblers.add(n);
+            chashes.add(sha256Hex32("bchash-" + n));
+            texts.add(B_PROBE + " " + n.replace("-", ""));
+        }
+        pgRepo.upsertChunks(TENANT, COLL2, chashes, texts,
+            texts.stream().map(t -> Map.<String, Object>of()).toList());
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            for (int i = 0; i < names.length; i++) {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_documents "
+                    + "(tenant_id, tumbler, title, author, content_type, physical_collection) "
+                    + "VALUES ('" + TENANT + "', '" + names[i] + "', 'Doc', 'ada', 'paper', '"
+                    + COLL2 + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_document_chunks "
+                    + "(tenant_id, doc_id, position, chash, collection) "
+                    + "VALUES ('" + TENANT + "', '" + names[i] + "', 0, '" + chashes.get(i)
+                    + "', '" + COLL2 + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+            }
+            String[][] edges = {
+                {"b-x", "b-a", "cites"}, {"b-a", "b-b", "cites"}, {"b-a", "b-c", "cites"},
+                {"b-b", "b-d", "cites"}, {"b-c", "b-d", "cites"}, {"b-d", "b-e", "cites"},
+                {"b-b", "b-c", "relates"}, {"b-e", "b-b", "cites"},
+            };
+            for (String[] e : edges) {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_links "
+                    + "(tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
+                    + "VALUES ('" + TENANT + "', '" + e[0] + "', '" + e[1] + "', '" + e[2]
+                    + "', 'test') ON CONFLICT DO NOTHING");
+            }
+        }
     }
 
     @Test
@@ -304,6 +370,78 @@ class GraphHopParityIntegrationTest {
             assertThat((String) r.get("chash"))
                 .as("row %s chash must be its matched chunk's chash", r.get("id"))
                 .isEqualTo(tumblerToChash.get((String) r.get("id")));
+        }
+    }
+
+    @Test
+    void graphHop_reachableSetEqualsGraphBFS_acrossDirectionsAndTopology() {
+        // The genuine cross-impl equivalence proof the unit GROUP-9 in-SQL oracle can't
+        // give: the function's reachable set MUST equal the real Java graphBFS's visited
+        // set across directions ('out'/'in'/'both'), depths (1..3) over a diamond + cycle
+        // + cross-type topology, and link-type filtering (null = all types). K is large
+        // so there is no top-K truncation — the assertion is reachable-set equality, not
+        // vector ordering. This is where a wrong direction CASE / over- or under-reach
+        // would surface (it does not for cites/out/linear-chain alone).
+        int bigK = branchTumblers.size() + 5;
+        String[] directions = {"out", "in", "both"};
+        // null linkType = follow all edge types (graphBFS: empty linkTypes list).
+        String[] linkTypes = {"cites", null};
+        Map<String, String> tumblerToChash = docs2Chashes();
+
+        for (String linkType : linkTypes) {
+            List<String> bfsTypes = linkType == null ? List.of() : List.of(linkType);
+            for (String dir : directions) {
+                for (int depth = 1; depth <= 3; depth++) {
+                    // Oracle: production graphBFS reachable tumblers (all live here).
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> nodes = (List<Map<String, Object>>) catRepo
+                        .graphBFS(TENANT, List.of(B_SEED), bfsTypes, dir, depth).get("nodes");
+                    Set<String> bfsReachable = nodes.stream()
+                        .map(n -> (String) n.get("tumbler"))
+                        .filter(tumblerToChash::containsKey)   // COLL2 docs only
+                        .collect(Collectors.toSet());
+
+                    // Function: returned tumblers (deduped — single-chunk fixture).
+                    Set<String> fnReachable = new java.util.HashSet<>(ids(pgRepo.searchGraphHop(
+                        TENANT, B_PROBE, List.of(B_SEED), List.of(COLL2),
+                        linkType, depth, dir, bigK)));
+
+                    assertThat(fnReachable)
+                        .as("reachable set divergence: linkType=%s dir=%s depth=%d — "
+                            + "search_graph_hop must equal graphBFS. fn=%s bfs=%s",
+                            linkType, dir, depth, fnReachable, bfsReachable)
+                        .isEqualTo(bfsReachable);
+                }
+            }
+        }
+        // Non-vacuity: the topology genuinely varies with direction/depth (otherwise the
+        // sweep above could pass trivially on a constant set).
+        Set<String> out1 = new java.util.HashSet<>(ids(pgRepo.searchGraphHop(
+            TENANT, B_PROBE, List.of(B_SEED), List.of(COLL2), "cites", 1, "out", bigK)));
+        Set<String> out3 = new java.util.HashSet<>(ids(pgRepo.searchGraphHop(
+            TENANT, B_PROBE, List.of(B_SEED), List.of(COLL2), "cites", 3, "out", bigK)));
+        assertThat(out3).as("depth 3 must reach strictly more than depth 1 (diamond+chain)")
+            .containsAll(out1).hasSizeGreaterThan(out1.size());
+        Set<String> in1 = new java.util.HashSet<>(ids(pgRepo.searchGraphHop(
+            TENANT, B_PROBE, List.of(B_SEED), List.of(COLL2), "cites", 1, "in", bigK)));
+        assertThat(in1).as("direction 'in' from b-a reaches the inbound b-x")
+            .contains("b-x").doesNotContain("b-b");
+        assertThat(out1).as("direction 'out' from b-a reaches b-b, not the inbound b-x")
+            .contains("b-b").doesNotContain("b-x");
+    }
+
+    /** Tumbler→chash map for the COLL2 branching docs. */
+    private Map<String, String> docs2Chashes() {
+        Map<String, String> m = new java.util.HashMap<>();
+        for (String t : branchTumblers) m.put(t, sha256HexUnchecked("bchash-" + t));
+        return m;
+    }
+
+    private static String sha256HexUnchecked(String seed) {
+        try {
+            return sha256Hex32(seed);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
         }
     }
 

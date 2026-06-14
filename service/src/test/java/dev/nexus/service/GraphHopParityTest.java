@@ -479,9 +479,16 @@ class GraphHopParityTest {
 
     @Test @Order(100)
     void explain_reachedThenRank_usesHnswIndex_notSeqScan() throws Exception {
-        // The outer shape the function uses once `reached` is materialized: rank the
-        // chunks of the reached doc set. Modelled here with the reached set sourced from
-        // the (non-recursive) star edges, so the probe vector stays a plan-time literal.
+        // SCOPE: this EXPLAINs the OUTER materialize-then-rank shape in isolation (the
+        // reached set sourced from a non-recursive subquery), NOT a call to
+        // nexus.search_graph_hop_1024 — that call is an opaque Function Scan (the
+        // recursive CTE is non-inlinable), so EXPLAIN of the call site reveals nothing
+        // about the inner rank. What this proves: ranking the reached set OUTSIDE the
+        // recursion keeps the probe vector a plan-time literal so HNSW is reachable (the
+        // audit's structural decision). It does NOT prove the planner picks HNSW for the
+        // real function call at corpus scale — that recall/latency gate is conexus
+        // xr7.8.9 / nexus-0zcn9, deferred per the houg9 audit. The disabled GUCs force
+        // reachability, not representativeness.
         String inner =
             "SELECT d.tumbler " +
             "  FROM nexus.chunks_1024 c " +
@@ -556,8 +563,13 @@ class GraphHopParityTest {
      * Reachable-set-then-rank oracle: a recursive BFS over catalog_links (the explicit
      * traversal {@link dev.nexus.service.db.CatalogRepository#graphBFS} does app-side),
      * then a raw vector rank over the reachable docs' chunks. Tombstone-filtered.
-     * Written as the literal SQL the app-stitch is equivalent to, so parity is a real
-     * cross-check, not a copy of the function body.
+     * NOTE: this oracle is an algorithmic ALIAS of the function body (same recursive
+     * CTE shape), so it pins the materialize-then-rank contract but is NOT an independent
+     * traversal check — a shared error in the direction CASE would pass here. The
+     * INDEPENDENT cross-impl oracle is {@code GraphHopParityIntegrationTest}, which
+     * compares the function against the real Java {@code CatalogRepository.graphBFS}
+     * across directions/topologies. Keep both: this for fast in-memory SQL contract,
+     * that for genuine function-vs-app-stitch equivalence.
      */
     private List<String> stitchedGraphOracle(Connection conn, int dim, String collection,
                                              String seed, String linkType, int depth,
@@ -572,7 +584,8 @@ class GraphHopParityTest {
             "  UNION " +
             "    SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END, r.d + 1 " +
             "    FROM reach r JOIN nexus.catalog_links l ON " + dirPred + " " +
-            "    WHERE r.d < " + depth + " AND l.link_type = " + sqlText(linkType) +
+            "    WHERE r.d < " + depth +
+            "      AND (" + sqlText(linkType) + " IS NULL OR l.link_type = " + sqlText(linkType) + ") " +
             "), reached AS (SELECT DISTINCT tumbler FROM reach) " +
             "SELECT d.tumbler AS id " +
             "  FROM nexus.chunks_" + dim + " c " +
