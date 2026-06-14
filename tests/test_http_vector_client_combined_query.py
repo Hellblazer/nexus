@@ -112,12 +112,12 @@ class TestSearchGraphHop:
 
     def test_posts_to_graph_route_with_link_type(self, monkeypatch):
         rows = [{"id": "1.2.3", "content": "z", "distance": 0.1,
-                 "collection": "rdr__a__voyage-context-3__v1",
+                 "collection": "rdr__a__model-x__v1",
                  "chash": "0" * 32}]
         calls = _patch_post(monkeypatch, lambda p, b: rows)
 
         got = HttpVectorClient().search_graph_hop(
-            "how does x work", ["1.2.3"], ["rdr__a__voyage-context-3__v1"],
+            "how does x work", ["1.2.3"], ["rdr__a__model-x__v1"],
             link_type="cites", depth=2, direction="out", n_results=5)
 
         assert got == rows
@@ -127,7 +127,7 @@ class TestSearchGraphHop:
         assert body == {
             "query": "how does x work",
             "seeds": ["1.2.3"],
-            "collections": ["rdr__a__voyage-context-3__v1"],
+            "collections": ["rdr__a__model-x__v1"],
             "link_type": "cites",
             "depth": 2,
             "direction": "out",
@@ -137,13 +137,13 @@ class TestSearchGraphHop:
     def test_omits_none_link_type_and_defaults(self, monkeypatch):
         calls = _patch_post(monkeypatch, lambda p, b: [])
 
-        HttpVectorClient().search_graph_hop("q", ["1.1"], ["rdr__a__voyage-context-3__v1"])
+        HttpVectorClient().search_graph_hop("q", ["1.1"], ["rdr__a__model-x__v1"])
 
         _, body = calls[0]
         assert body == {
             "query": "q",
             "seeds": ["1.1"],
-            "collections": ["rdr__a__voyage-context-3__v1"],
+            "collections": ["rdr__a__model-x__v1"],
             "depth": 1,
             "direction": "both",
             "n_results": 10,
@@ -153,4 +153,4 @@ class TestSearchGraphHop:
     def test_returns_empty_list_passthrough(self, monkeypatch):
         _patch_post(monkeypatch, lambda p, b: [])
         assert HttpVectorClient().search_graph_hop(
-            "q", ["1.1"], ["rdr__a__voyage-context-3__v1"]) == []
+            "q", ["1.1"], ["rdr__a__model-x__v1"]) == []
