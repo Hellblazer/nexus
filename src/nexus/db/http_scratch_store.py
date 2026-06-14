@@ -136,11 +136,7 @@ class HttpScratchStore:
             _HEADER_T1_SESSION: self._session_token,
             "Content-Type": "application/json",
         }
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=30.0,
-        )
+        self._client = self._build_client()
         _log.info(
             "http_scratch_store.init",
             base_url=self._base_url,
@@ -159,6 +155,31 @@ class HttpScratchStore:
         """Close the keep-alive connection pool (idempotent)."""
         self._client.close()
         _log.debug("http_scratch_store.closed")
+
+    def _rebind_from_lease(self) -> bool:
+        """nexus-om64x: on connection-refused (supervisor restarted on a new
+        port; our env port is stale), re-resolve the endpoint from the
+        ServiceRegistry lease and rebuild the client. Returns True if rebound to
+        a NEW endpoint, False otherwise (genuine outage — let the error stand)."""
+        from nexus.db.service_endpoint import recover_endpoint_from_lease
+
+        recovered = recover_endpoint_from_lease(self._base_url)
+        if recovered is None:
+            return False
+        new_url, new_token = recovered
+        _log.warning("http_scratch_store.rebind", old=self._base_url, new=new_url)
+        self._base_url = new_url
+        if new_token:
+            self._headers["Authorization"] = f"Bearer {new_token}"
+        try:
+            self._client.close()
+        except Exception:
+            pass
+        self._client = self._build_client()
+        return True
+
+    def _build_client(self) -> httpx.Client:
+        return httpx.Client(base_url=self._base_url, headers=self._headers, timeout=30.0)
 
     def close_session(self) -> int:
         """Delete all scratch entries for this session. Returns count deleted.
@@ -405,6 +426,16 @@ class HttpScratchStore:
         """
         try:
             resp = self._client.post(path, json=payload)
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
+            # nexus-om64x: stale endpoint after a supervisor restart (connect-refused
+            # OR TCP RST on a pooled in-flight connection) — re-resolve from the lease
+            # and retry ONCE before failing.
+            if not self._rebind_from_lease():
+                raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
+            try:
+                resp = self._client.post(path, json=payload)
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
         if not resp.is_success:
@@ -417,6 +448,15 @@ class HttpScratchStore:
         """POST *payload* to *path* and return parsed JSON without raising on 404-class."""
         try:
             resp = self._client.post(path, json=payload)
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
+            # nexus-om64x: stale endpoint after a supervisor restart (connect-refused
+            # OR TCP RST on a pooled in-flight connection) — re-resolve + retry once.
+            if not self._rebind_from_lease():
+                raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
+            try:
+                resp = self._client.post(path, json=payload)
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
         if resp.status_code == 404:

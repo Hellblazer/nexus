@@ -57,6 +57,43 @@ def discover_lease() -> tuple[str | None, str | None]:
     return None, None
 
 
+def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None] | None:
+    """Connection-refused recovery (nexus-om64x).
+
+    After a supervisor ``_respawn`` allocates a NEW port, a long-lived MCP
+    process still carries the OLD ``NX_SERVICE_PORT`` in its environment — so
+    env-first :func:`resolve_service_config` keeps handing back the dead port and
+    a store that resolved ONCE at construction is stuck (session mint + T1
+    scratch hit connection-refused until the MCP restarts).
+
+    This consults the :class:`ServiceRegistry` lease DIRECTLY (the supervisor's
+    source of truth, republished on every restart — it deliberately bypasses the
+    stale env). Returns ``(new_base_url, token)`` when the lease points somewhere
+    DIFFERENT from *current_base_url* (the store should rebind + retry), or
+    ``None`` when there is no lease or it matches the current endpoint (a genuine
+    outage — let the original connection error propagate).
+
+    SCOPE / known residuals (nexus-om64x, P2 targeting the FATAL paths):
+
+    * **Phase-1 restart window**: the old lease is NOT relinquished on SIGTERM; it
+      lingers until its heartbeat TTL (~3s) expires, and the NEW lease only
+      publishes after the replacement JVM is ready. So a request that fails DURING
+      that window sees either the old (==current) lease or no lease → this returns
+      ``None`` and the error propagates. A request that arrives once the restart
+      has SETTLED (the common case) sees the new lease and recovers via the
+      caller's single retry. Closing the in-window case would need a relinquish on
+      stop or a backoff loop — out of scope for this P2.
+    * **Coverage**: only ``http_token_store`` + ``http_scratch_store`` (the
+      session-mint + T1-scratch FATAL paths) wire this recovery today. The other
+      long-lived service-backed stores (memory/taxonomy/plan/aspect/chash/…) share
+      the resolve-once pattern and remain unguarded — tracked for a sweep follow-on.
+    """
+    lease_url, lease_token = discover_lease()
+    if lease_url is not None and lease_url.rstrip("/") != (current_base_url or "").rstrip("/"):
+        return lease_url.rstrip("/"), lease_token
+    return None
+
+
 def resolve_service_config() -> tuple[str, int, str]:
     """``(host, port, token)`` — env halves, then the lease, then fail loud.
 
