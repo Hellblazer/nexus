@@ -172,7 +172,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-154](rdr-154-deliberate-postgres-capability-leverage.md) | Deliberate Postgres-Capability Leverage for the RDR-152 Schema — Computed Views, Trigger-Maintained Invariants, security_invoker Discipline, and Counter-Drift Elimination | Architecture | Accepted | 2026-06-08 |
 | [RDR-155](rdr-155-pgvector-t3-consolidation.md) | Replace ChromaDB with pgvector for T3: Consolidate Permanent Vectors into the RDR-152 Postgres (Engine Side of conexus RDR-001) | Architecture | Accepted | 2026-06-09 |
 | [RDR-156](rdr-156-vector-store-capability-leverage.md) | Vector-Store Capability Leverage — Unify the Retrieval Substrate: Combined Queries, Schema-Enforced Integrity, and Specialized Functions over the RDR-155 pgvector Chunk Tables | Architecture | Accepted | 2026-06-10 |
-| [RDR-157](rdr-157-end-user-distribution-and-installation.md) | End-User Distribution and Installation: JAR Channel, PG16+pgvector Provisioning, One-Command init --service | Architecture | Draft | 2026-06-11 |
+| [RDR-157](rdr-157-end-user-distribution-and-installation.md) | End-User Distribution and Installation: Native-Image Binaries, Embedded PG16+pgvector, Two-Distribution Model | Architecture | Accepted | 2026-06-11 |
 | [RDR-158](rdr-158-retire-sqlite-t2-backend.md) | Retire the SQLite T2 Backend: Make the PG Service the Only T2 Path | Architecture | Accepted | 2026-06-12 |
 | [RDR-159](rdr-159-guided-upgrade-migration.md) | Guided Chroma-to-Service Upgrade Migration: One Survivable Command over the Proven ETL Primitives | Architecture | Accepted | 2026-06-13 |
 

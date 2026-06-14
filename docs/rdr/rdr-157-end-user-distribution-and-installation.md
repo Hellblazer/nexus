@@ -2,7 +2,8 @@
 title: "End-User Distribution and Installation: Native-Image Binaries, Embedded PG16+pgvector, Two-Distribution Model"
 id: RDR-157
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-06-14
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
