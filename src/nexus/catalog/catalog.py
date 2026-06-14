@@ -440,6 +440,14 @@ class CatalogEntry:
     # URIs (chroma://, https://, etc.) are stored verbatim. ''
     # only on legacy entries that predate P2.1's column migration.
     source_uri: str = ""
+    # nexus-rzqto: bibliographic enrichment surfaced from catalog_documents
+    # (RDR-101 columns) so the document-level query() text form can render
+    # bib metadata in service mode without reading chunk metadata. Defaults
+    # keep every existing CatalogEntry construction site compiling.
+    bib_year: int = 0
+    bib_authors: str = ""
+    bib_venue: str = ""
+    bib_citation_count: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -458,6 +466,10 @@ class CatalogEntry:
             "source_mtime": self.source_mtime,
             "alias_of": self.alias_of,
             "source_uri": self.source_uri,
+            "bib_year": self.bib_year,
+            "bib_authors": self.bib_authors,
+            "bib_venue": self.bib_venue,
+            "bib_citation_count": self.bib_citation_count,
         }
 
 

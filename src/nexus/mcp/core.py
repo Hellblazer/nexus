@@ -1366,13 +1366,208 @@ def query(
             if cat is None:
                 return "Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'"
 
-            # Resolve seed entries for catalog routing
-            seed_entries: list = []
+            # Guard: document-level subtree address (3+ segments) cannot have descendants
             if subtree:
-                # Depth check: document-level (3+ segments) has no descendants in the catalog
                 subtree_depth = len(subtree.split("."))
                 if subtree_depth >= 3:
                     return f"Error: subtree '{subtree}' is a document-level address — use an owner prefix (e.g., '{'.'.join(subtree.split('.')[:2])}') to search a subtree"
+
+            # ── SERVICE-MODE BRANCH (nexus-rzqto) ────────────────────────────
+            # When the T3 backend is the pgvector service, route through the
+            # combined-query SQL functions (search_metadata_scoped /
+            # search_graph_hop) instead of the app-side catalog dance +
+            # search_cross_corpus.  The SQL functions perform the catalog-
+            # metadata join server-side and return document-level rows
+            # (id=tumbler, content, distance, collection, chash).
+            #
+            # bib richness (nexus-rzqto): the combined functions return only
+            # (id=tumbler, content, distance, collection, chash), so the text
+            # form re-hydrates title/author/year AND bib_year/bib_authors/
+            # bib_venue/bib_citation_count per tumbler from CatalogEntry — the
+            # Java catalog already serializes the bib_* columns
+            # (CatalogRepository.docRowFromRecord), surfaced onto CatalogEntry.
+            from nexus.db.http_vector_client import is_service_backed
+            _where_dict = _parse_where_str(where)
+            # H2: follow_links + where — search_graph_hop has no `where` param.
+            # Fall back to the dance path so the caller's where filter is
+            # honored instead of being silently dropped.
+            _skip_service = follow_links and bool(_where_dict)
+            if is_service_backed(t3) and not _skip_service:
+                # Broad corpus target: the SQL functions filter by catalog
+                # metadata internally, so pass the full corpus set.
+                target = _resolve_corpus_target(corpus, t3)
+                if not target:
+                    return f"No collections match corpus {corpus!r}"
+
+                where_dict = _where_dict
+                fetch_n = limit * 10
+
+                _no_docs_msg = (
+                    f"No documents found matching catalog filters "
+                    f"(author={author!r}, content_type={content_type!r}, "
+                    f"subtree={subtree!r}, follow_links={follow_links!r})"
+                )
+
+                if follow_links:
+                    # Graph-hop path: seeds resolved app-side, BFS in SQL.
+                    seed_tumblers: list[str] = []
+                    if subtree:
+                        desc = cat.descendants(subtree)
+                        seed_tumblers = [d["tumbler"] for d in desc if d.get("tumbler")]
+                    elif author or content_type:
+                        if content_type and not author:
+                            seed_entries_svc = cat.by_content_type(content_type)
+                        else:
+                            seed_entries_svc = cat.find(author, content_type=content_type or None)
+                            seed_entries_svc = [
+                                r for r in seed_entries_svc
+                                if author.lower() in (r.author or "").lower()
+                            ]
+                        seed_tumblers = [str(r.tumbler) for r in seed_entries_svc if r.tumbler]
+                    else:
+                        # follow_links only: use question as catalog seed
+                        seed_results_svc = cat.find(question)
+                        seed_tumblers = [str(r.tumbler) for r in seed_results_svc[:5] if r.tumbler]
+
+                    if not seed_tumblers:
+                        # No graph seeds resolved — fall through to
+                        # search_metadata_scoped over the broad target
+                        # (mirrors the dance path's fallback to broad search
+                        # when catalog_collections stays None).
+                        rows = t3.search_metadata_scoped(
+                            question, target,
+                            content_type=content_type or None,
+                            author=author or None,
+                            subtree=(subtree or None),
+                            where=(where_dict or None),
+                            n_results=fetch_n,
+                        )
+                    else:
+                        rows = t3.search_graph_hop(
+                            question, seed_tumblers, target,
+                            link_type=(follow_links or None),
+                            depth=depth,
+                            n_results=fetch_n,
+                        )
+                else:
+                    # Metadata-scoped path: catalog filters pushed into SQL.
+                    rows = t3.search_metadata_scoped(
+                        question, target,
+                        content_type=content_type or None,
+                        author=author or None,
+                        subtree=(subtree or None),
+                        where=(where_dict or None),
+                        n_results=fetch_n,
+                    )
+
+                # Dedup: one row per tumbler, keeping best (lowest) distance.
+                # Rows arrive distance-ascending so first occurrence is best.
+                seen_svc: set[str] = set()
+                deduped_svc: list[dict] = []
+                for r in rows:
+                    rid = r.get("id", "")
+                    if rid in seen_svc:
+                        continue
+                    seen_svc.add(rid)
+                    deduped_svc.append(r)
+                rows = deduped_svc[:limit]
+
+                if not rows:
+                    if structured:
+                        return {
+                            "ids": [], "tumblers": [], "distances": [],
+                            "collections": [], "chunk_collections": [],
+                            "chunk_text_hash": [],
+                        }
+                    return _no_docs_msg
+
+                if structured:
+                    tumblers_svc = [r.get("id", "") for r in rows]
+                    return {
+                        "ids": tumblers_svc,
+                        "tumblers": tumblers_svc,
+                        "distances": [float(r.get("distance", 0.0)) for r in rows],
+                        # sorted distinct across rows (mirrors existing dance path)
+                        "collections": sorted({r.get("collection", "") for r in rows}),
+                        # per-row aligned (RDR-086 / review #7)
+                        "chunk_collections": [r.get("collection", "") for r in rows],
+                        # HIGH-1: chash per matched chunk row, not a manifest guess
+                        "chunk_text_hash": [r.get("chash", "") for r in rows],
+                    }
+
+                # Text form: re-hydrate per tumbler from the catalog to build
+                # the same format as the existing dance path.
+                parts_note = []
+                if author:
+                    parts_note.append(f"author={author!r}")
+                if content_type:
+                    parts_note.append(f"content_type={content_type!r}")
+                if subtree:
+                    parts_note.append(f"subtree={subtree!r}")
+                if follow_links:
+                    parts_note.append(f"follow_links={follow_links!r}")
+                routing_note_svc = (
+                    f"[Catalog routing: {', '.join(parts_note)} -> {len(target)} collections]"
+                )
+                header_svc = (
+                    f"Found {len(rows)} documents "
+                    f"(from {len(deduped_svc)} across {len(target)} collections)"
+                )
+                lines_svc: list[str] = [f"{routing_note_svc}\n{header_svc}"]
+                lines_svc.append("")
+                for i, row in enumerate(rows, 1):
+                    tumbler_str = row.get("id", "")
+                    dist = f"{row.get('distance', 0.0):.4f}"
+                    # Re-hydrate from catalog
+                    try:
+                        entry_svc = cat.resolve(Tumbler.parse(tumbler_str)) if tumbler_str else None
+                    except Exception:
+                        entry_svc = None
+                    title_svc = (entry_svc.title if entry_svc else tumbler_str or "")[:70]
+                    # Mirror the dance path's bib richness: prefer bib_* (RDR-101
+                    # enrichment), fall back to the plain author/year fields.
+                    bib_year_svc = (entry_svc.bib_year or entry_svc.year) if entry_svc else 0
+                    bib_authors_svc = (entry_svc.bib_authors or entry_svc.author) if entry_svc else ""
+                    bib_venue_svc = entry_svc.bib_venue if entry_svc else ""
+                    bib_citation_count_svc = entry_svc.bib_citation_count if entry_svc else 0
+                    try:
+                        chunk_count_svc = len(cat.get_manifest(tumbler_str)) if tumbler_str else 0
+                    except Exception:
+                        chunk_count_svc = 0
+                    snippet_svc = row.get("content", "")[:300].replace("\n", " ")
+                    collection_svc = row.get("collection", "")
+
+                    lines_svc.append(f"{i}. [{dist}] {title_svc}")
+                    bib_svc: list[str] = []
+                    if bib_year_svc:
+                        bib_svc.append(str(bib_year_svc))
+                    if bib_authors_svc:
+                        bib_svc.append(bib_authors_svc[:60])
+                    if bib_venue_svc:
+                        bib_svc.append(bib_venue_svc[:30])
+                    if bib_citation_count_svc:
+                        bib_svc.append(f"{bib_citation_count_svc} citations")
+                    if bib_svc:
+                        lines_svc.append(f"   {' · '.join(bib_svc)}")
+                    if chunk_count_svc:
+                        lines_svc.append(f"   [{chunk_count_svc} chunks]")
+                    lines_svc.append(f"   {collection_svc}")
+                    lines_svc.append(f"   {snippet_svc}")
+                    lines_svc.append("")
+
+                if len(deduped_svc) > limit:
+                    lines_svc.append(
+                        f"\n--- showing 1-{len(rows)} of {len(deduped_svc)} documents. "
+                        f"Results are capped at limit={limit}."
+                    )
+                return "\n".join(lines_svc)
+            # ── END SERVICE-MODE BRANCH ───────────────────────────────────────
+
+            # FALLBACK: local/Chroma mode — existing app-side catalog dance below.
+
+            # Resolve seed entries for catalog routing
+            seed_entries: list = []
+            if subtree:
                 # Use descendants() directly — NOT catalog_search(owner=) which has depth-equality bug
                 desc = cat.descendants(subtree)
                 catalog_collections = {d["physical_collection"] for d in desc if d.get("physical_collection")}
@@ -1483,7 +1678,9 @@ def query(
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
-                "collections": list({r.collection for r in page}),
+                # H1 (nexus-rzqto): sorted for deterministic ordering across
+                # local and service modes.
+                "collections": sorted({r.collection for r in page}),
                 # Review #7: per-result aligned list for consumers
                 # that need per-chunk origin (e.g. nx_answer envelope).
                 "chunk_collections": [r.collection for r in page],

@@ -135,7 +135,8 @@ class _DocumentOps:
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, alias_of, source_uri "
+            "metadata, source_mtime, alias_of, source_uri, "
+            "bib_year, bib_authors, bib_venue, bib_citation_count "
             "FROM documents WHERE tumbler = ?",
             (str(target),),
         ).fetchone()
@@ -157,6 +158,11 @@ class _DocumentOps:
             source_mtime=row[12] or 0.0,
             alias_of=row[13] or "",
             source_uri=row[14] or "",
+            # nexus-rzqto: bib_* surfaced for the service-mode query() text form.
+            bib_year=row[15] or 0,
+            bib_authors=row[16] or "",
+            bib_venue=row[17] or "",
+            bib_citation_count=row[18] or 0,
         )
 
     def list_by_collection(
