@@ -11,6 +11,7 @@ Usage: ``python scripts/assert_ca3_ran.py <junit.xml>``
 """
 from __future__ import annotations
 
+import os
 import sys
 import xml.etree.ElementTree as ET
 
@@ -22,6 +23,15 @@ _CORE_TEST = "test_create_extension_vector_loads"
 
 
 def main(junit_path: str) -> None:
+    # A missing JUnit file means pytest crashed before writing it (import error,
+    # fixture failure, OOM) — fail with the real cause, not a bare
+    # FileNotFoundError that points at the wrong place (code-review M3).
+    if not os.path.exists(junit_path):
+        raise SystemExit(
+            f"CA-3 JUnit output not found at '{junit_path}' — pytest likely crashed "
+            "before writing it (import error / fixture failure / OOM). Check the "
+            "'Run CA-3 live test' step log above."
+        )
     root = ET.parse(junit_path).getroot()
     bundle_skips = passed = 0
     core_ok = False

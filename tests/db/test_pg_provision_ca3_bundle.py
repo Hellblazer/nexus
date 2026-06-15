@@ -228,7 +228,7 @@ def provisioned(bins: PgBinaries, tmp_path_factory):
 
 # ── Test 1: the bundle ships a complete PG17 with consistent paths ──────────────
 
-class TestCompletePg16Bundle:
+class TestCompletePg17Bundle:
     def test_binaries_discovered_via_env_seam(self, bins):
         assert bins.all_present(), "bundle missing one of initdb/pg_ctl/psql/createdb"
 

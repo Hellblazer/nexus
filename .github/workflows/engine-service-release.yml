@@ -22,11 +22,14 @@ name: Engine Service Native Release
 #                         linux-amd64 native binary + its sha256 (what conexus
 #                         pins and pulls).
 #
-# Per-platform matrix (nexus-vwvv5.6): linux-amd64 + linux-arm64 native binaries
-# on their own runners (native-image does not cross-compile). mac-arm64 is
-# deferred (nexus-f6j31) — GH macOS runners lack Docker for the -Pnative jOOQ
-# codegen. conexus pins/pulls the linux-amd64 asset; local-distro users grab
-# their arch.
+# Per-platform matrix (nexus-vwvv5.6): linux-amd64 + linux-arm64 + mac-arm64
+# native binaries on their own runners (native-image does not cross-compile).
+# The jOOQ decouple (nexus-f6j31) pre-generates sources on a Docker-capable linux
+# runner and passes them as an artifact, so mac-arm64 can BUILD without Docker.
+# mac-arm64 is build+publish but UNSMOKED: native-smoke.sh needs Docker (throwaway
+# pgvector) which GH macOS lacks, so its runtime correctness rests on the
+# mac-arm64 CA-3 gate + the lp2qo native-serving spike, not a per-build smoke.
+# conexus pins/pulls the linux-amd64 asset; local-distro users grab their arch.
 
 on:
   workflow_dispatch:
@@ -85,9 +88,9 @@ jobs:
         target:
           - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true }
           - { arch: linux-arm64, runner: ubuntu-24.04-arm, smoke: true }
-          # mac-arm64: build-only. native-smoke.sh needs Docker (throwaway
-          # pgvector) which GH macOS lacks; macOS runtime correctness is covered
-          # by the mac-arm64 CA-3 gate + the lp2qo native-serving spike.
+          # mac-arm64: build + publish, but UNSMOKED. native-smoke.sh needs Docker
+          # (throwaway pgvector) which GH macOS lacks; macOS runtime correctness is
+          # covered by the mac-arm64 CA-3 gate + the lp2qo native-serving spike.
           - { arch: mac-arm64,   runner: macos-14,          smoke: false }
     env:
       ASSET: nexus-service-${{ matrix.target.arch }}
@@ -193,6 +196,35 @@ jobs:
           ls -la dist
           file "dist/$ASSET" || true
 
+      - name: Assert binary ABI floor (code-review M1)
+        # The release native image is built on ubuntu-latest (~glibc 2.39) — a
+        # HIGHER floor than the CA-3 bundle gate (manylinux 2.28). Enforcement was
+        # previously deferred entirely to conexus deploy/engine/build-image.sh, so a
+        # runner bump that pushed the floor ABOVE the consumer base would surface
+        # only at image-build time. Assert it here too: linux max-required GLIBC
+        # must be <= the conexus runtime base (debian:trixie-slim = 2.41). For mac,
+        # report the Mach-O minos (informational; no Docker smoke covers it).
+        run: |
+          set -euo pipefail
+          asset="dist/$ASSET"
+          case "${{ matrix.target.arch }}" in
+            linux-*)
+              # Max GLIBC_x.y.z token referenced by the binary's dynamic symbols.
+              maxglibc=$(objdump -T "$asset" 2>/dev/null \
+                | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+                | sed 's/GLIBC_//' | sort -V | tail -1)
+              echo "max required GLIBC: ${maxglibc:-none}"
+              ceiling="2.41"  # conexus runtime base (debian:trixie-slim)
+              if [ -n "$maxglibc" ] && [ "$(printf '%s\n%s\n' "$maxglibc" "$ceiling" | sort -V | tail -1)" != "$ceiling" ]; then
+                echo "FAIL: binary requires GLIBC $maxglibc > consumer base $ceiling" >&2
+                exit 1
+              fi
+              ;;
+            mac-*)
+              otool -l "$asset" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print "Mach-O "$0; f=0}' || true
+              ;;
+          esac
+
       - name: Upload Actions artifact (always — dev smoke / non-tag path)
         uses: actions/upload-artifact@v4
         with:
@@ -214,8 +246,13 @@ jobs:
             "run with no embedded PG, pointed at a managed Postgres via NX_DB_URL" \
             "(skips pg_provision). Consumed by conexus deploy/engine (build the" \
             "runtime image FROM the linux-amd64 binary). Per-platform assets +" \
-            "sha256 attached: nexus-service-linux-amd64, nexus-service-linux-arm64." \
-            "(mac-arm64 deferred — nexus-f6j31.)" \
+            "sha256 attached: nexus-service-linux-amd64, nexus-service-linux-arm64," \
+            "nexus-service-mac-arm64." \
+            "" \
+            "NOTE: the mac-arm64 binary is UNSMOKED (GH macOS runners have no Docker" \
+            "for native-smoke.sh). Its runtime correctness rests on the mac-arm64" \
+            "CA-3 gate + the lp2qo native-serving spike, not a per-build smoke —" \
+            "treat it as experimental. The linux binaries ARE smoke-tested." \
             "" \
             "glibc floor: linux binaries built on ubuntu-latest (~2.39). The runtime" \
             "base must have glibc >= that (conexus uses debian:trixie-slim = 2.41);" \
@@ -228,8 +265,19 @@ jobs:
             "" \
             "Provenance: sha256 only for now; cosign/Sigstore signing tracked for N+1." \
             > notes.md
-          # Matrix-safe: create the release once (whichever arch job wins; the
-          # losers' create fails 'already exists' -> ignored), then each job
-          # uploads its OWN arch assets (--clobber for re-runs).
-          gh release create "$tag" --title "nexus-service (native) ${tag}" --notes-file notes.md 2>/dev/null || true
+          # Matrix-safe: create the release once (whichever arch job wins), then
+          # each job uploads its OWN arch assets (--clobber for re-runs). Use
+          # view-then-create rather than `create ... 2>/dev/null || true`: the old
+          # idiom swallowed auth/network/rate-limit failures identically to the
+          # expected 'already exists', then fell through to `upload` which failed
+          # with a confusing 'release not found' (code-review H1).
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            # Tolerate ONLY the matrix race (another arch job created it between the
+            # view and this create); surface auth/network/anything else.
+            if ! gh release create "$tag" --title "nexus-service (native) ${tag}" \
+                   --notes-file notes.md 2>create_err.txt; then
+              grep -qi "already exists" create_err.txt \
+                || { echo "release create failed:" >&2; cat create_err.txt >&2; exit 1; }
+            fi
+          fi
           gh release upload "$tag" --clobber "dist/$ASSET" "dist/$ASSET.sha256"
