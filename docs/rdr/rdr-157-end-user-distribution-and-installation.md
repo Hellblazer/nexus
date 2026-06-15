@@ -48,12 +48,19 @@ locked decision is to **embed a relocatable PG16 + pgvector** in the local
 distribution (CA-1/CA-2 verified feasible); the bundle build matrix and the first-run
 extract→provision wiring are undesigned.
 
-#### Gap 3: The cloud distribution has no skip-provision + validate-remote path
+#### Gap 3: The cloud distribution has no client-side managed-endpoint path
 
-The cloud distribution ships the native binary with **no DB**: it must connect to a
-managed PG that already has pgvector, skip `pg_provision` entirely, validate the remote
-(pgvector present + supported major, fail loud), run Liquibase, and serve. That
-cloud-mode split does not exist today (`nx init --service` always provisions locally).
+*(CORRECTED 2026-06-15 — see the topology correction under § Decision. The original
+text below described the local binary connecting to a managed remote PG; that violates
+the local-Java-↔-local-PG-only invariant and is struck.)*
+
+In cloud mode there is **no local Java service and no local PG**: the `nx` CLI and the
+local MCP server talk HTTPS to the managed nexus service at `api.conexus-nexus.com`,
+which owns its own cloud Postgres + pgvector server-side. The client never runs
+`pg_provision`, never connects to Postgres, and never runs Liquibase. The missing piece
+is purely client-side: a cloud-mode endpoint configuration + an HTTP
+reachability/capability validation (fail loud) — distinct from local mode, which always
+provisions a local cluster. (`nx init --service` today always provisions locally.)
 
 #### Gap 4 (resolved prerequisites, tracked for completeness)
 
@@ -101,10 +108,17 @@ locked the architecture:
 1. **Artifact = GraalVM native-image (draft option 1(b) promoted).** The JAR channel
    (1(a)) and jlink (1(c)) are rejected as the shipping default. This eliminates the
    Java-runtime prerequisite (draft Decision 2) outright.
-2. **Two distributions:**
-   - **Cloud** — native binary, **no DB**. Connects to a managed PG that already has
-     pgvector. Cloud mode skips `pg_provision` entirely; it validates the remote
-     (pgvector present + supported major, fail loud), runs Liquibase, and serves.
+2. **Two distributions:** *(topology CORRECTED 2026-06-15 — see note below; the
+   original "local native binary connects to a managed remote PG" framing was wrong
+   and is struck.)*
+   - **Cloud** — there is **no local stack at all**. The client (`nx` CLI + the local
+     MCP server) talks **HTTPS to the managed nexus service** at
+     `api.conexus-nexus.com`. No local native binary, no local PG, no `pg_provision`.
+     The managed service owns its own cloud Postgres + pgvector entirely server-side
+     (conexus RDR-001 multitenant epic `nexus-w5v8j`); the client never connects to
+     Postgres. Client-side "cloud distribution" work is therefore just: configure the
+     endpoint and **validate the managed service is reachable and capability-compatible
+     over HTTP, fail loud** — NOT a pgvector SQL version check.
    - **Local** (per OS/arch) — native binary **+ embedded relocatable PG16+pgvector**.
      "No reason not to embed." PG stays a separate process (it cannot be linked into
      the native executable — it is a multi-process C server); "embedded" means the
@@ -113,6 +127,30 @@ locked the architecture:
      dir on first run (the same mechanism the binary already uses for the ONNX/DJL
      native libs), with ship-alongside-in-the-archive as the fallback if in-binary
      embedding proves too heavy. First run: extract → `initdb` → provision → serve.
+     *(CA-2 RESOLVED 2026-06-15, bead `nexus-vwvv5.11`: **ship-alongside chosen**, not
+     embed. Measured on the real P3.1 artifact — compressed bundle 5.74 MB, not the
+     30–50 MB estimated; the decisive factor was build/distribution reuse, not bloat.
+     The local distribution is an archive `{native binary, pg-<plat>.txz}`; first run
+     extracts the `.txz` (~0.65 s) → `initdb` → provision → serve. Verdict in T2
+     `nexus_rdr/157-P3.2-CA2-verdict-ship-alongside-2026-06-15`.)*
+
+   > **Topology correction (2026-06-15).** The original cloud-distribution decision
+   > described a *local native binary running Liquibase against a managed remote PG*.
+   > That is wrong: **the local Java service connects ONLY to a LOCAL Postgres over
+   > JDBC — never to a remote PG.** The corrected client/server boundary is:
+   > - **Cloud mode:** `nx` CLI + local MCP server → **HTTPS** → managed service at
+   >   `api.conexus-nexus.com`. No local Java service, no local PG, no `pg_provision`.
+   >   The managed service runs its own Java service + cloud PG entirely server-side.
+   > - **Local mode:** `nx` CLI + local MCP server → **HTTP** → `localhost:<port>`
+   >   local Java native service → **JDBC** → **LOCAL** Postgres.
+   >
+   > Consequence for P3: the pgvector ≥ 0.8 (`iterative_scan`) floor is validated
+   > wherever the JDBC connection actually lives — **locally** by the local service
+   > against its local PG (`pg_provision.check_pgvector_available`, already shipped),
+   > and **in the cloud** by the managed service against its own PG (conexus RDR-001 /
+   > `nexus-w5v8j`, server-side). There is no client-side remote-pgvector SQL check.
+   > The client-side "cloud distribution" deliverable shrinks to: configure the
+   > managed endpoint + an HTTP reachability/capability probe that fails loud.
 3. **PG provisioning = embedded bundle (draft option 3(a) promoted, 3(b) becomes the
    fallback).** `pg_provision` already has the seam: point `NEXUS_PG_BIN` (or a new
    candidate dir) at the extracted bundle; `check_pgvector_available` is satisfied by
@@ -219,19 +257,26 @@ is release N+1.
    - **Embed vs ship-alongside (CA-2):** spike `-H:IncludeResources` of the bundle +
      first-run self-extract; measure build cost + binary bloat + extract latency. Fall
      back to ship-alongside (`{binary, pg-<plat>.txz}` archive) if unacceptable.
-   - **Cloud distribution:** native binary, no DB. A cloud mode skips `pg_provision`,
-     points at the managed `NX_DB_URL`, and **validates the remote**: pgvector present
-     AND version ≥ the floor RDR-155 requires (0.8+ for `iterative_scan`), fail loud
-     with the remedy.
-   - **Local distribution:** native binary + embedded/bundled PG; first run extract →
-     `initdb` → provision (the socket fix nexus-6laob applies) → serve.
+   - **Cloud distribution** *(CORRECTED 2026-06-15)***:** no local stack. The client
+     (`nx` CLI + local MCP server) points its endpoint at the managed service
+     (`api.conexus-nexus.com`) and **validates that endpoint over HTTP** — reachable +
+     capability/version-compatible — failing loud with the remedy on mismatch. No
+     `pg_provision`, no Postgres connection, no Liquibase on the client side. The
+     pgvector ≥ 0.8 (`iterative_scan`) floor is the managed service's own server-side
+     concern (conexus RDR-001 / `nexus-w5v8j`), validated there against its cloud PG.
+   - **Local distribution:** native binary + ship-alongside PG bundle (CA-2, ship not
+     embed); first run extract `pg-<plat>.txz` → `initdb` → provision (the socket fix
+     nexus-6laob applies) → serve. The pgvector floor is validated here by the local
+     service against its **local** PG (`check_pgvector_available`).
 5. **P4 — one-command collapse + fresh-machine E2E.** `nx init --service` end-to-end,
    idempotent. Release-sandbox E2E proves **fresh-machine → serving with zero manual
    steps**, bounded to: (a) **local mode** requires the bundled ONNX MiniLM model —
    depends on `nexus-jrrve` (model fetch on service install) being closed, OR the model
-   pre-positioned in the bundle; (b) **cloud mode** requires a pre-supplied Voyage
-   credential. The E2E names which mode it exercises; `nexus-jrrve` is a declared P4
-   dependency, not an orthogonal nicety.
+   pre-positioned in the bundle; (b) **cloud mode** requires a credential for the
+   managed endpoint (`api.conexus-nexus.com`) — embeddings run server-side, so the
+   client holds a managed-service credential, not a raw Voyage key (the exact credential
+   model is a conexus RDR-001 concern). The E2E names which mode it exercises;
+   `nexus-jrrve` is a declared P4 dependency, not an orthogonal nicety.
 6. **P5 — handoff to conexus RDR-001.** The upgrade-orchestration consumes P1–P4
    primitives; not implemented here.
 
