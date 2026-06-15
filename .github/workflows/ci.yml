@@ -181,7 +181,7 @@ jobs:
               tar -xjf pg.tar.bz2
               cd "postgresql-${PG_VERSION}"
               # Minimal deps: a functional server + client + headers + pgxs.
-              # The dropped options are safe for nx's embedded, loopback-only PG
+              # The dropped options are safe for the nexus embedded, loopback-only PG
               # and these same flags carry forward to the P3 bundle build:
               #   --without-icu      : provision runs `initdb --no-locale` (C
               #                        collation), so ICU is unused; keeps the
@@ -189,7 +189,7 @@ jobs:
               #   --without-readline : psql is driven headlessly (subprocess).
               #   --without-zlib     : no wire compression / pg_dump -Fc needed.
               #   --without-openssl  : loopback-only; EXPLICIT so an image that
-              #                        later ships openssl-devel can't silently
+              #                        later ships openssl-devel cannot silently
               #                        link libssl and break startup on the runner.
               ./configure --prefix="${bundle}" \
                 --without-icu --without-zlib --without-readline --without-openssl >/dev/null
