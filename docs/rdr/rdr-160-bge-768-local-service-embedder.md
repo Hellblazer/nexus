@@ -13,7 +13,13 @@ related: [RDR-144, RDR-152, RDR-155, RDR-157]
 
 # RDR-160: bge-768 as the Local-Mode T3 Embedder in the Java Service
 
-## Context / Problem
+## Problem Statement
+
+Owner decision (2026-06-15): **bge-768 is the local-mode T3 default; MiniLM-384 is
+strictly for T1** (the Python-side chromadb scratch tier, not the Java service). The
+service must embed local T3 with bge-768 via ONNX. Today it does not. Three gaps.
+
+#### Gap 1: The Java service's local embedder is MiniLM-384, not bge-768
 
 Since RDR-152 (`nexus-gmiaf.20`, server-side embedding) the Java storage service's
 ONLY local embedder is `OnnxEmbedder`, which loads **MiniLM-384**
@@ -22,28 +28,32 @@ ONLY local embedder is `OnnxEmbedder`, which loads **MiniLM-384**
 collection. There is no bge-768 embedder anywhere in the service
 (`service/src/main/java/dev/nexus/service/vectors/`), even though the storage
 schema already supports it (`PgVectorRepository` maps `bge-base-en-v15-768 →
-chunks_768`).
+chunks_768`). RDR-155 noted "local = MiniLM 384 **or** bge-base" and shipped MiniLM;
+bge-768 for the service was never implemented.
 
-Meanwhile the Python onboarding (`nx init`, RDR-144) presents **bge-768 as the
-RECOMMENDED local embedder**. So the two halves disagree: the user is told bge-768
-is the local default, but the actual T3 backend silently embeds everything with
-MiniLM-384. RDR-155 explicitly noted "local = MiniLM 384 **or** bge-base" and
-shipped MiniLM; bge-768 for the service was never implemented.
+#### Gap 2: The onboarding promises bge-768 that the backend does not deliver
 
-Owner decision (2026-06-15): **bge-768 is the local-mode T3 default; MiniLM-384 is
-strictly for T1** (the Python-side chromadb scratch tier, not the Java service).
-The service must embed local T3 with bge-768 via ONNX.
+The Python onboarding (`nx init`, RDR-144) presents **bge-768 as the RECOMMENDED
+local embedder** and persists that choice. But the actual T3 backend silently embeds
+everything with MiniLM-384. The user is told one thing and gets another — a silent
+quality downgrade (384-dim MiniLM vs the 768-dim bge they chose).
 
-This also subsumes `nexus-jrrve` — the "fresh `nx init --service` boot-fails because
-nothing fetches the ONNX model" bug. That boot failure is a symptom of the deeper
-issue (wrong/unprovisioned local embedder); the fix is to provision the *correct*
-model (bge-768), not the wrong one (MiniLM-384).
+#### Gap 3: Migration compatibility — existing 5.x.x bge-768 data needs a bge-768 service
 
-**Greenfield (load-bearing).** The service stack is pre-release (develop
-unreleasable since RDR-155 P4a, `nexus-luxe6`). There are no production local-mode
-(no-Voyage) T3 collections embedded with MiniLM-384 to strand. Fixing the default
-NOW — before any local user exists — costs nothing; deferring creates a forced
-re-embed for every future local user.
+The released 5.x.x series embeds local T3 with **bge-768** (fastembed, ChromaDB
+path). When that data migrates into the service's pgvector, the service MUST embed
+with bge-768 too, or migrated vectors (768-dim bge) and service-produced vectors
+(384-dim MiniLM) live in different spaces and search breaks. This makes bge-768 in
+the service a correctness requirement for the upgrade path, not merely a quality
+preference. (Also subsumes `nexus-jrrve`: the "fresh `nx init --service` boot-fails
+because nothing fetches the ONNX model" bug is a symptom — the fix is to provision
+the *correct* model, bge-768, not MiniLM-384.)
+
+**Greenfield (load-bearing).** The service stack is pre-release (develop unreleasable
+since RDR-155 P4a, `nexus-luxe6`). There are no production local-mode (no-Voyage) T3
+collections embedded with MiniLM-384 *in the service* to strand. Fixing the default
+NOW — before any local service user exists — costs nothing; deferring creates a
+forced re-embed for every future local user.
 
 ## Decision
 
@@ -86,14 +96,24 @@ re-embed for every future local user.
    local-mode constructor wires the bge embedder for all collections; `Main.java`
    constructs it; route to `chunks_768`. Remove the MiniLM `OnnxEmbedder` from the
    service local path (decide P0: delete the class vs keep dormant — see Open Q).
-3. **P3 — Warmup + distribution.** `nx init --service` (local mode) fetches the bge
-   ONNX + tokenizer to the Java-read path (fastembed downloads it; expose/copy to a
-   stable location the service loads). Reconcile with **RDR-157**: its P4
-   "local mode requires the bundled ONNX MiniLM model — depends on nexus-jrrve"
-   flips to bge-768 (the RDR-157 PG bundle is unaffected; only the embedder model
-   changes). Update RDR-157 §Approach P4 accordingly.
+3. **P3 — Warmup + distribution + onboarding reconciliation.** `nx init --service`
+   (local mode) fetches the **standard fp32** bge ONNX + tokenizer to the Java-read
+   path. NOTE (CA-1): this is NOT fastembed's cached `model_optimized.onnx` (it fails
+   to load on onnxruntime-java); the CLI fetches a standard export and copies it to a
+   stable location the service loads. Reconcile with **RDR-157** §Approach P4
+   ("local mode requires the bundled ONNX MiniLM model — depends on nexus-jrrve") →
+   bge-768 (PG bundle unaffected; model is fetched separately at ~416 MB, not part of
+   the PG archive); that RDR-157 edit is made under this RDR. **Also reconcile
+   RDR-144 onboarding:** for SERVICE installs the embedder choice is locked to
+   bge-768 with an advisory — the minilm-384 onboarding option is non-operative for
+   the service T3 path (the service routes all collections to bge-768 regardless), so
+   a silently-ignored minilm-384 choice must not be presented. (minilm-384 remains a
+   valid T1 Python choice; only the service-install path is locked.)
 4. **P4 — Close-out.** phase-review-gate cross-walk + stacked review (code-review-
-   expert + substantive-critic) of the parity gate and router rewire; close
+   expert + substantive-critic) of the parity gate and router rewire. **Dispose of
+   the existing MiniLM `EmbedParityTest` (`nexus-gmiaf.21`):** retire it for the
+   service path or re-scope it to the T1 Python MiniLM context — do not leave it to
+   pass vacuously or break silently when MiniLM is un-wired from the service. Close
    `nexus-jrrve` as subsumed.
 
 ## Critical Assumptions (P0)
@@ -135,14 +155,17 @@ re-embed for every future local user.
 - **Run fastembed inside the JVM.** Rejected: no maintained JVM fastembed; the
   service already embeds via onnxruntime-java — loading the bge ONNX directly is
   the established pattern.
-- **Bundle bge ONNX into the native image (`-H:IncludeResources`, ~140 MB).**
+- **Bundle bge ONNX into the native image (`-H:IncludeResources`, ~416 MB fp32).**
   Deferred to RDR-157 distribution mechanics; orthogonal to this embedder change
-  (the warmup-fetch path works for both bundled and ship-alongside).
+  (the warmup-fetch path works for both bundled and ship-alongside). Note the fp32
+  size makes ship-alongside / first-run fetch more attractive than in-binary embed.
 
 ## Consequences
 
-- The local distribution (RDR-157) carries/fetches the bge ONNX (~140 MB) instead
-  of MiniLM-384; the PG bundle is unaffected.
+- The local distribution (RDR-157) carries/fetches the standard **fp32** bge ONNX
+  (**~416 MB** — quantized variants were ruled out by the parity gate, CA-3) instead
+  of MiniLM-384. It is fetched SEPARATELY at first run, not part of the ~6 MB PG
+  archive; the PG bundle itself is unaffected.
 - `chunks_384` is unused on the local path; MiniLM-384 survives only as the T1
   Python default.
 - Any future need for a 384-dim service path (e.g. a deliberately-cheap tier) would
