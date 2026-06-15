@@ -149,12 +149,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Path-gate the expensive PG-from-source build. The job ALWAYS runs (so the
+      # required status check always reports), but the build/test/smoke steps run
+      # only when the assemble surface changed — avoiding a ~10min PG build on
+      # every unrelated PR. nexus-vwvv5.6 follow-up.
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            ca3:
+              - 'src/nexus/db/pg_provision.py'
+              - 'tests/db/test_pg_provision_ca3_bundle.py'
+              - 'scripts/assert_ca3_ran.py'
+              - 'scripts/liquibase_bundle_smoke.sh'
+              - '.github/workflows/ci.yml'
+              - 'service/src/main/resources/db/changelog/**'
+
       - uses: astral-sh/setup-uv@v5
+        if: steps.changes.outputs.ca3 == 'true'
         with:
           python-version: "3.12"
           enable-cache: false
 
       - name: Cache uv wheel cache
+        if: steps.changes.outputs.ca3 == 'true'
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/setup-uv-cache
@@ -163,9 +181,11 @@ jobs:
             uv-${{ runner.os }}-${{ matrix.target.arch }}-3.12-
 
       - name: Install project + dev deps
+        if: steps.changes.outputs.ca3 == 'true'
         run: uv sync --group dev
 
       - name: Build complete PG + pgvector from source (Strategy B, glibc 2.28)
+        if: steps.changes.outputs.ca3 == 'true'
         run: |
           set -euo pipefail
           # The bundle is installed at its build prefix and mounted at the SAME
@@ -228,6 +248,7 @@ jobs:
           echo "Built: $("$bundle/bin/initdb" --version); vector.so at $pkglib"
 
       - name: Run CA-3 live test (asserts it actually ran, not skipped)
+        if: steps.changes.outputs.ca3 == 'true'
         run: |
           set -euo pipefail
           # -o addopts="" clears the repo default `-m 'not integration'` so the
@@ -244,7 +265,7 @@ jobs:
         # uses `docker --network host` to reach the provisioned PG. One arch is
         # enough — the schema is arch-independent; this validates the lean
         # configure flags, not the platform.
-        if: matrix.target.arch == 'linux-amd64'
+        if: matrix.target.arch == 'linux-amd64' && steps.changes.outputs.ca3 == 'true'
         run: bash scripts/liquibase_bundle_smoke.sh
 
   ca3-pgvector-bundle-macos:
@@ -266,15 +287,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Path-gate the expensive native PG build (same rationale as the linux CA-3
+      # job): the job always runs so the required check reports, but the build/test
+      # run only when the assemble surface changed.
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            ca3:
+              - 'src/nexus/db/pg_provision.py'
+              - 'tests/db/test_pg_provision_ca3_bundle.py'
+              - 'scripts/assert_ca3_ran.py'
+              - 'scripts/liquibase_bundle_smoke.sh'
+              - '.github/workflows/ci.yml'
+              - 'service/src/main/resources/db/changelog/**'
+
       - uses: astral-sh/setup-uv@v5
+        if: steps.changes.outputs.ca3 == 'true'
         with:
           python-version: "3.12"
           enable-cache: false
 
       - name: Install project + dev deps
+        if: steps.changes.outputs.ca3 == 'true'
         run: uv sync --group dev
 
       - name: Build complete PG + pgvector from source (native, deployment-target 13.0)
+        if: steps.changes.outputs.ca3 == 'true'
         run: |
           set -euo pipefail
           # PG's build needs a newer flex/bison than macOS ships; Xcode CLT
@@ -311,6 +350,7 @@ jobs:
           echo "Built: $("$bundle/bin/initdb" --version); vector.dylib at $pkglib"
 
       - name: Run CA-3 live test (asserts it actually ran, not skipped)
+        if: steps.changes.outputs.ca3 == 'true'
         run: |
           set -euo pipefail
           uv run pytest tests/db/test_pg_provision_ca3_bundle.py \
