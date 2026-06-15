@@ -1,29 +1,40 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CA-3 live test: relocatable zonky PG16 + injected pgvector (RDR-157 P1, bead nexus-vwvv5.2).
+"""CA-3 live test: complete PG16 tree + pgvector (RDR-157 P1, bead nexus-vwvv5.2).
 
-RDR-157 Critical Assumption 3 (CA-3): the *assemble* strategy (Strategy A,
-RF-157-7) works end to end — a relocatable zonky PG16 binary bundle, with a
-CI-built ``vector.so`` injected into its ``pkglibdir``/``sharedir``, can be
-driven by ``nx``'s own provisioner to a running cluster that loads pgvector.
+RDR-157 Critical Assumption 3 (CA-3): the *assemble* strategy works end to end —
+a complete PG16 binary tree, with a CI-built ``vector.so`` in its
+``pkglibdir``/``sharedir``, can be driven by ``nx``'s own provisioner to a
+running cluster that loads pgvector, with the binaries' glibc floor pinned.
 
-This is the gate before the P2/P3 build-out. If it FAILS, RDR-157 falls back to
-Strategy B (build PostgreSQL from source in the native-image CI matrix).
+This is the gate before the P2/P3 build-out.
+
+Strategy B, not zonky. CA-3 empirically falsified the original "zonky reduced
+bundle + inject pgvector" plan (RF-157-7): zonky's
+``embedded-postgres-binaries`` reduced bundle ships ONLY initdb/pg_ctl/postgres
+— no ``pg_config``/``psql``/``createdb``/headers — so pgvector cannot be built
+against it AND ``discover_pg_binaries`` (which requires psql+createdb) cannot
+use it. The RDR pre-authorized **Strategy B** (build PostgreSQL from source) as
+the CA-3-failure fallback; this gate proves that path.
 
 How the bundle is materialized
 ------------------------------
-These tests do not download or build anything themselves — they are pure
-*verification* over a pre-materialized bundle so they stay deterministic and
-hermetic. The CI job ``ca3-pgvector-bundle`` (``.github/workflows/ci.yml``)
-performs the side-effecting work:
+These tests do not build anything themselves — they are pure *verification* over
+a pre-materialized bundle so they stay deterministic and hermetic. The CI job
+``ca3-pgvector-bundle`` (``.github/workflows/ci.yml``) performs the
+side-effecting work inside a **manylinux_2_28 (glibc 2.28)** container:
 
-  1. fetch ``io.zonky.test.postgres:embedded-postgres-binaries-linux-amd64:16.x``
-     from Maven Central and extract its inner ``postgres-linux-x86_64.txz``,
-  2. build ``pgvector`` against the extracted tree's ``pg_config`` inside a
-     **manylinux_2_28 (glibc 2.28)** container so the ``.so``'s glibc floor
-     matches zonky's broad-compat baseline rather than the runner's glibc,
-  3. ``make install`` the extension into the extracted tree,
-  4. export ``NEXUS_CA3_BUNDLE=<extracted-root>`` and run this module with
+  1. ``./configure --prefix=<bundle> && make && make install`` PostgreSQL 16
+     from source — a complete tree (initdb, pg_ctl, postgres, psql, createdb,
+     pg_config, headers, pgxs),
+  2. build ``pgvector`` against that ``pg_config`` and ``make install`` it,
+  3. export ``NEXUS_CA3_BUNDLE=<bundle>`` and run this module with
      ``-m integration``.
+
+The bundle is built at, and mounted at, the same path it is consumed from, so
+``pg_config``'s compiled-in paths agree with the runtime location. True
+extract-to-arbitrary-dir relocation (where ``pg_config``'s build-prefix-boundness
+becomes a real concern) is a P3 bundle-build problem (``nexus-vwvv5.9``), not
+this gate.
 
 Locally (e.g. on a darwin dev box) the bundle is absent, so every test skips
 with a reason that names the providing CI job. The CI job additionally asserts
@@ -74,7 +85,7 @@ GLIBC_FLOOR: tuple[int, int] = (2, 28)
 # ── Bundle discovery / skip gate ───────────────────────────────────────────────
 
 def _bundle_root() -> Path | None:
-    """The extracted zonky bundle root, or None when not materialized.
+    """The PG16 bundle root, or None when not materialized.
 
     Set by the CI ``ca3-pgvector-bundle`` job. Absent locally → tests skip.
     """
@@ -92,8 +103,8 @@ pytestmark = [
     pytest.mark.skipif(
         _BUNDLE is None,
         reason=(
-            "skipped: no CA-3 zonky bundle — set NEXUS_CA3_BUNDLE to an extracted "
-            "PG16 tree with pgvector injected (provided by the ci.yml "
+            "skipped: no CA-3 bundle — set NEXUS_CA3_BUNDLE to a complete PG16 "
+            "tree with pgvector (provided by the ci.yml "
             "'ca3-pgvector-bundle' job)"
         ),
     ),
@@ -159,7 +170,7 @@ def provisioned(bins: PgBinaries, tmp_path_factory):
     """Provision a hermetic cluster *from the bundle* (NEXUS_PG_BIN points at it).
 
     Mirrors the production path: discover_pg_binaries honours NEXUS_PG_BIN, so
-    provision() builds the cluster with the relocatable bundle binaries.
+    provision() builds the cluster with the bundle binaries.
     """
     config_dir = tmp_path_factory.mktemp("nexus_ca3_bundle")
     old_cfg = os.environ.get("NEXUS_CONFIG_DIR")
@@ -184,11 +195,11 @@ def provisioned(bins: PgBinaries, tmp_path_factory):
         pass
 
 
-# ── Test 1: zonky bundle ships a complete, relocatable PG16 ─────────────────────
+# ── Test 1: the bundle ships a complete PG16 with consistent paths ──────────────
 
-class TestZonkyBundle:
+class TestCompletePg16Bundle:
     def test_binaries_discovered_via_env_seam(self, bins):
-        assert bins.all_present(), "zonky bundle missing one of initdb/pg_ctl/psql/createdb"
+        assert bins.all_present(), "bundle missing one of initdb/pg_ctl/psql/createdb"
 
     def test_reports_postgres_16(self, bins):
         out = subprocess.run(
@@ -198,14 +209,14 @@ class TestZonkyBundle:
         assert "16." in out, f"expected PostgreSQL 16.x, got: {out.strip()!r}"
 
     def test_sharedir_resolves_inside_bundle(self, bins):
-        """Relocatable proof: pg_config --sharedir is UNDER the extracted root,
-        not a hard-coded system path baked at zonky's build time."""
+        """pg_config --sharedir resolves UNDER the bundle root (the bundle is
+        built at, and consumed from, the same prefix)."""
         sharedir = Path(_pg_config(bins, "--sharedir")).resolve()
         assert _BUNDLE is not None
         root = _BUNDLE.resolve()
         assert root in sharedir.parents or sharedir == root, (
-            f"sharedir {sharedir} is not inside the relocated bundle {root} — "
-            "binaries are not relocatable"
+            f"sharedir {sharedir} is not inside the bundle {root} — "
+            "pg_config paths disagree with the bundle location"
         )
 
 
@@ -256,14 +267,14 @@ class TestGlibcFloor:
         )
 
     def test_postgres_binary_within_pinned_floor(self, bins):
-        """The zonky server binary's own glibc floor must also hold — the
+        """The server binary's own glibc floor must also hold — the
         effective install floor is max(postgres, vector.so)."""
         postgres = bins.bin_dir / "postgres"
         required = _max_glibc_requirement(postgres)
         assert required <= GLIBC_FLOOR, (
-            f"zonky postgres binary requires GLIBC_{required[0]}.{required[1]} > "
-            f"pinned floor GLIBC_{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1]} — zonky's "
-            "linux-amd64 baseline drifted above the documented target (RF-157-9)"
+            f"postgres binary requires GLIBC_{required[0]}.{required[1]} > "
+            f"pinned floor GLIBC_{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1]} — the build "
+            "baseline drifted above the documented target (RF-157-9)"
         )
 
 
