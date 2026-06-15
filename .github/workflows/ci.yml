@@ -165,7 +165,9 @@ jobs:
             ca3:
               - 'src/nexus/db/pg_provision.py'
               - 'tests/db/test_pg_provision_ca3_bundle.py'
+              - 'tests/db/test_pg_bundle_relocation.py'
               - 'scripts/assert_ca3_ran.py'
+              - 'scripts/build_pg_bundle.sh'
               - 'scripts/liquibase_bundle_smoke.sh'
               - '.github/workflows/ci.yml'
               - 'service/src/main/resources/db/changelog/**'
@@ -201,64 +203,24 @@ jobs:
         if: steps.changes.outputs.ca3 == 'true'
         run: |
           set -euo pipefail
-          # The bundle is installed at its build prefix and mounted at the SAME
-          # path inside the container, so pg_config's compiled-in paths agree with
-          # the host (no relocation mismatch for the gate). True extract-to-
-          # arbitrary-dir relocation — where pg_config's build-prefix-boundness
-          # makes path resolution a real concern — is a P3 bundle-build problem
-          # (nexus-vwvv5.9), not this gate.
+          # Single source of truth for the build is scripts/build_pg_bundle.sh
+          # (RDR-157 P3.1, bead nexus-vwvv5.10) — the CA-3 gate and the P3 bundle
+          # artifact build the SAME tree. The bundle is installed at its build
+          # prefix and mounted at the SAME path inside the container, so
+          # pg_config's compiled-in paths agree with the host for the CA-3 gate.
+          # The relocation step below additionally proves an extract to a
+          # DIFFERENT dir works (the P3 shippable-bundle contract).
           bundle="$GITHUB_WORKSPACE/bundle"
           mkdir -p "$bundle"
-          # set -x traces every command; no pipefail (cmd|head SIGPIPEs -> 141).
           docker run --rm \
-            -e PG_VERSION -e PGVECTOR_VERSION -e bundle="$bundle" \
-            -v "$bundle:$bundle" \
+            -e PG_VERSION -e PGVECTOR_VERSION -e BUNDLE_PREFIX="$bundle" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             "$MANYLINUX_IMAGE" /bin/bash -c '
               set -eux
-              echo "=== ENTER container ==="
-              head -2 /etc/os-release; ldd --version | head -1
-              # PostgreSQL build prereqs not in the base toolchain image.
-              dnf -y -q install flex bison perl >/dev/null
-              cd /tmp
-              curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" -o pg.tar.bz2
-              tar -xjf pg.tar.bz2
-              cd "postgresql-${PG_VERSION}"
-              # Minimal deps: a functional server + client + headers + pgxs.
-              # The dropped options are safe for the nexus embedded, loopback-only PG
-              # and these same flags carry forward to the P3 bundle build:
-              #   --without-icu      : provision runs `initdb --no-locale` (C
-              #                        collation), so ICU is unused; keeps the
-              #                        binary off an ICU .so absent on old distros.
-              #   --without-readline : psql is driven headlessly (subprocess).
-              #   --without-zlib     : no wire compression / pg_dump -Fc needed.
-              #   --without-openssl  : loopback-only; EXPLICIT so an image that
-              #                        later ships openssl-devel cannot silently
-              #                        link libssl and break startup on the runner.
-              ./configure --prefix="${bundle}" \
-                --without-icu --without-zlib --without-readline --without-openssl >/dev/null
-              make -s -j"$(nproc)" >/dev/null
-              make -s install >/dev/null
-              # Contrib extensions the schema needs (pg_trgm, RDR-155). Core
-              # `make install` does NOT build contrib — the bundle would be
-              # missing pg_trgm and the full migration would fail.
-              make -s -C contrib/pg_trgm install >/dev/null
-              # pgvector against the freshly-built pg_config (same major + glibc).
-              cd /tmp
-              git clone --depth 1 --branch "${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
-              cd pgvector
-              make -s PG_CONFIG="${bundle}/bin/pg_config"
-              make -s PG_CONFIG="${bundle}/bin/pg_config" install
+              echo "=== ENTER container ==="; head -2 /etc/os-release; ldd --version | head -1
+              bash "'"$GITHUB_WORKSPACE"'/scripts/build_pg_bundle.sh"
             '
-          # Sanity on the host: complete tool set + injected extension present.
-          for b in initdb pg_ctl postgres psql createdb pg_config; do
-            test -x "$bundle/bin/$b" || { echo "missing $bundle/bin/$b"; exit 1; }
-          done
-          pkglib="$("$bundle/bin/pg_config" --pkglibdir)"
-          sharedir="$("$bundle/bin/pg_config" --sharedir)"
-          test -f "$pkglib/vector.so" || { ls -la "$pkglib"; exit 1; }
-          test -f "$sharedir/extension/vector.control" || { ls -la "$sharedir/extension"; exit 1; }
           echo "NEXUS_CA3_BUNDLE=$bundle" >> "$GITHUB_ENV"
-          echo "Built: $("$bundle/bin/initdb" --version); vector.so at $pkglib"
 
       - name: Run CA-3 live test (asserts it actually ran, not skipped)
         if: steps.changes.outputs.ca3 == 'true'
@@ -271,6 +233,40 @@ jobs:
           # Non-vacuity gate: platform-conditional tests (GLIBC on mac / minos on
           # linux) skip legitimately; only a bundle-absence skip is a vacuous gate.
           uv run python scripts/assert_ca3_ran.py ca3.xml
+
+      - name: Package bundle + relocation smoke (P3.1, nexus-vwvv5.10)
+        # Tar the built tree to a shippable .txz, then EXTRACT it to a dir other
+        # than the build prefix and prove the relocated tree still provisions +
+        # loads pgvector (closes the relocation concern CA-3 deferred). The
+        # glibc-2.28-built binaries run on the ubuntu-latest host (glibc ~2.39,
+        # forward-compatible) — that the relocated tree runs OUTSIDE its build
+        # container is itself part of the portability proof.
+        if: steps.changes.outputs.ca3 == 'true'
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/bundle"
+          txz="$RUNNER_TEMP/nexus-pg-${{ matrix.target.arch }}.txz"
+          # -C parent + basename preserves the relative bin/ lib/ share/ layout
+          # that relocation depends on.
+          tar -cJf "$txz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
+          reloc="$RUNNER_TEMP/relocated"
+          mkdir -p "$reloc"
+          tar -xJf "$txz" -C "$reloc"
+          export NEXUS_PG_BUNDLE_ROOT="$reloc/$(basename "$bundle")"
+          uv run pytest tests/db/test_pg_bundle_relocation.py \
+            -o addopts="" -m integration -q -rs --junit-xml=reloc.xml
+          # Reuse the CA-3 non-vacuity asserter (keys on the shared
+          # "no CA-3 bundle" skip phrase + the CREATE EXTENSION core test).
+          uv run python scripts/assert_ca3_ran.py reloc.xml
+
+      - name: Upload bundle artifact (P3.1, consumed by P3.2/P3.4)
+        if: steps.changes.outputs.ca3 == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-pg-${{ matrix.target.arch }}
+          path: ${{ runner.temp }}/nexus-pg-${{ matrix.target.arch }}.txz
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Liquibase-against-bundle smoke (nexus-ywts8, linux-amd64 only)
         # Applies the service's full SQL changelog to the lean bundle PG, proving
@@ -315,7 +311,9 @@ jobs:
             ca3:
               - 'src/nexus/db/pg_provision.py'
               - 'tests/db/test_pg_provision_ca3_bundle.py'
+              - 'tests/db/test_pg_bundle_relocation.py'
               - 'scripts/assert_ca3_ran.py'
+              - 'scripts/build_pg_bundle.sh'
               - 'scripts/liquibase_bundle_smoke.sh'
               - '.github/workflows/ci.yml'
               - 'service/src/main/resources/db/changelog/**'
@@ -351,48 +349,16 @@ jobs:
 
       - name: Build complete PG + pgvector from source (native, deployment-target 13.0)
         if: steps.changes.outputs.ca3 == 'true'
+        env:
+          BUNDLE_PREFIX: ${{ github.workspace }}/bundle
         run: |
           set -euo pipefail
-          # PG's build needs a newer flex/bison than macOS ships; Xcode CLT
-          # provides clang/make. curl/perl/otool are present on the runner.
-          brew install -q flex bison >/dev/null
-          export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
-          # Make the deployment-target floor EXPLICIT in the compiler flags rather
-          # than relying on apple-clang implicitly honouring MACOSX_DEPLOYMENT_TARGET.
-          # pgvector's Makefile invokes the compiler directly; if a future pgvector
-          # restructures its Makefile and drops the env, the dylib could build with a
-          # higher minos. TestMacosFloor (otool minos <= 13.0) is the backstop, but
-          # passing -mmacosx-version-min through CFLAGS removes the implicit dependency
-          # (code-review M2).
-          export CFLAGS="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}${CFLAGS:+ ${CFLAGS}}"
-          bundle="$GITHUB_WORKSPACE/bundle"
-          mkdir -p "$bundle"
-          cd "$RUNNER_TEMP"
-          curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" -o pg.tar.bz2
-          tar -xjf pg.tar.bz2
-          cd "postgresql-${PG_VERSION}"
-          # Same lean flags as the linux gate (safe for nexus's loopback PG).
-          ./configure --prefix="${bundle}" \
-            --without-icu --without-zlib --without-readline --without-openssl >/dev/null
-          make -s -j"$(sysctl -n hw.ncpu)" >/dev/null
-          make -s install >/dev/null
-          # Contrib extensions the schema needs (pg_trgm, RDR-155).
-          make -s -C contrib/pg_trgm install >/dev/null
-          cd "$RUNNER_TEMP"
-          git clone --depth 1 --branch "${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
-          cd pgvector
-          make -s PG_CONFIG="${bundle}/bin/pg_config"
-          make -s PG_CONFIG="${bundle}/bin/pg_config" install
-          # Sanity: complete tool set + injected dylib + control.
-          for b in initdb pg_ctl postgres psql createdb pg_config; do
-            test -x "$bundle/bin/$b" || { echo "missing $bundle/bin/$b"; exit 1; }
-          done
-          pkglib="$("$bundle/bin/pg_config" --pkglibdir)"
-          sharedir="$("$bundle/bin/pg_config" --sharedir)"
-          test -f "$pkglib/vector.dylib" || { ls -la "$pkglib"; exit 1; }
-          test -f "$sharedir/extension/vector.control" || { ls -la "$sharedir/extension"; exit 1; }
-          echo "NEXUS_CA3_BUNDLE=$bundle" >> "$GITHUB_ENV"
-          echo "Built: $("$bundle/bin/initdb" --version); vector.dylib at $pkglib"
+          # Single source of truth: scripts/build_pg_bundle.sh (same script the
+          # linux CA-3 job runs inside its container). It installs flex/bison via
+          # brew, applies MACOSX_DEPLOYMENT_TARGET / -mmacosx-version-min, builds
+          # PG + pg_trgm + pgvector, and records the build prefix marker.
+          bash scripts/build_pg_bundle.sh
+          echo "NEXUS_CA3_BUNDLE=$BUNDLE_PREFIX" >> "$GITHUB_ENV"
 
       - name: Run CA-3 live test (asserts it actually ran, not skipped)
         if: steps.changes.outputs.ca3 == 'true'
@@ -401,6 +367,33 @@ jobs:
           uv run pytest tests/db/test_pg_provision_ca3_bundle.py \
             -o addopts="" -m integration -q -rs --junit-xml=ca3.xml
           uv run python scripts/assert_ca3_ran.py ca3.xml
+
+      - name: Package bundle + relocation smoke (P3.1, nexus-vwvv5.10)
+        # Same relocation proof as the linux job: tar the tree, extract to a dir
+        # other than the build prefix, prove the relocated tree provisions +
+        # loads pgvector (vector.dylib via dyld) from the new location.
+        if: steps.changes.outputs.ca3 == 'true'
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/bundle"
+          txz="$RUNNER_TEMP/nexus-pg-mac-arm64.txz"
+          tar -cJf "$txz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
+          reloc="$RUNNER_TEMP/relocated"
+          mkdir -p "$reloc"
+          tar -xJf "$txz" -C "$reloc"
+          export NEXUS_PG_BUNDLE_ROOT="$reloc/$(basename "$bundle")"
+          uv run pytest tests/db/test_pg_bundle_relocation.py \
+            -o addopts="" -m integration -q -rs --junit-xml=reloc.xml
+          uv run python scripts/assert_ca3_ran.py reloc.xml
+
+      - name: Upload bundle artifact (P3.1, consumed by P3.2/P3.4)
+        if: steps.changes.outputs.ca3 == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-pg-mac-arm64
+          path: ${{ runner.temp }}/nexus-pg-mac-arm64.txz
+          retention-days: 7
+          if-no-files-found: error
 
   engine-service-build:
     # S2 (substantive-critic): engine-service-release.yml runs ONLY on
