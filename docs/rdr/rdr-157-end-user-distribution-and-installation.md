@@ -204,9 +204,18 @@ is release N+1.
    sha256 manifest for release N; evaluate Sigstore/cosign signing for N+1 (the binary
    runs with DB credentials and is opaque to static inspection — see Open Q4).
 4. **P3 — embedded-PG bundle + the two distributions.**
-   - **Bundle build (per OS/arch):** Strategy A (zonky PG16 + CI-built pgvector injected
-     into the bundle `pkglibdir`/`sharedir`), or Strategy B if CA-3 forced it. Smoke:
-     extract → `initdb` → `CREATE EXTENSION vector` in CI.
+   - **Bundle build (per OS/arch):** **Strategy B — build PostgreSQL 16 from source**
+     (locked by CA-3 / RF-157-9: Strategy A's zonky reduced bundle is incomplete —
+     no pg_config/psql/createdb/headers). Build pgvector against the from-source
+     `pg_config`. Smoke: `initdb` → `CREATE EXTENSION vector` in CI (proven for
+     linux-amd64 by the P1 gate). **Two carry-forwards from the gate:** (a) the
+     `--without-icu/zlib/readline/openssl` configure flags (safe for nx's loopback,
+     `--no-locale` PG — rationale in the CI job); (b) **relocation: `pg_config`
+     reports build-time absolute paths, so `pg_provision` must be made
+     relocation-aware (resolve sharedir/pkglibdir relative to the binary, not via
+     `pg_config`) BEFORE the bundle is extracted to a user-local path** — tracked as
+     a code bead (`nexus-1e205`), distinct from this packaging step. A
+     Liquibase-against-bundle-PG smoke completes the local-distro proof.
    - **Embed vs ship-alongside (CA-2):** spike `-H:IncludeResources` of the bundle +
      first-run self-extract; measure build cost + binary bloat + extract latency. Fall
      back to ship-alongside (`{binary, pg-<plat>.txz}` archive) if unacceptable.

@@ -270,10 +270,23 @@ class TestGlibcFloor:
         )
 
     def test_postgres_binary_within_pinned_floor(self, bins):
-        """The server binary's own glibc floor must also hold — the
-        effective install floor is max(postgres, vector.so)."""
+        """The server binary's own *direct* glibc floor must also hold — the
+        effective install floor is max(postgres, vector.so).
+
+        Note: ``objdump -T`` reports only the symbols the ELF references
+        directly, not those reached transitively through shared libraries it
+        links. The from-source build deliberately drops icu/zlib/readline/ssl
+        (see the CI configure flags), so postgres' transitive surface is
+        essentially libc, making the direct check representative here."""
         postgres = bins.bin_dir / "postgres"
         required = _max_glibc_requirement(postgres)
+        # Same non-vacuity guard as vector.so: a dynamically-linked postgres
+        # always references versioned glibc symbols; (0, 0) means objdump saw
+        # none (wrong path / static build) and the floor check would be vacuous.
+        assert required > (0, 0), (
+            f"no GLIBC_x.y symbols found in {postgres} — objdump produced no "
+            "versioned references; the floor check would be vacuous"
+        )
         assert required <= GLIBC_FLOOR, (
             f"postgres binary requires GLIBC_{required[0]}.{required[1]} > "
             f"pinned floor GLIBC_{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1]} — the build "

@@ -180,9 +180,19 @@ jobs:
               curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" -o pg.tar.bz2
               tar -xjf pg.tar.bz2
               cd "postgresql-${PG_VERSION}"
-              # Minimal deps: a functional server + client + headers + pgxs. No
-              # icu/zlib/readline/openssl keeps the build fast and the .so deps lean.
-              ./configure --prefix="${bundle}" --without-icu --without-zlib --without-readline >/dev/null
+              # Minimal deps: a functional server + client + headers + pgxs.
+              # The dropped options are safe for nx's embedded, loopback-only PG
+              # and these same flags carry forward to the P3 bundle build:
+              #   --without-icu      : provision runs `initdb --no-locale` (C
+              #                        collation), so ICU is unused; keeps the
+              #                        binary off an ICU .so absent on old distros.
+              #   --without-readline : psql is driven headlessly (subprocess).
+              #   --without-zlib     : no wire compression / pg_dump -Fc needed.
+              #   --without-openssl  : loopback-only; EXPLICIT so an image that
+              #                        later ships openssl-devel can't silently
+              #                        link libssl and break startup on the runner.
+              ./configure --prefix="${bundle}" \
+                --without-icu --without-zlib --without-readline --without-openssl >/dev/null
               make -s -j"$(nproc)" >/dev/null
               make -s install >/dev/null
               # pgvector against the freshly-built pg_config (same major + glibc).
