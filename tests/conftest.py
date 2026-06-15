@@ -791,3 +791,39 @@ def multipage_pdf(pdf_fixtures_dir: Path) -> Path:
 @pytest.fixture(scope="session")
 def type3_pdf(pdf_fixtures_dir: Path) -> Path:
     return pdf_fixtures_dir / "type3_font.pdf"
+
+
+# ── RDR-157 P3.4: synthetic PG bundle factory (bead nexus-vwvv5.13) ─────────────
+
+
+@pytest.fixture
+def make_pg_bundle_txz():
+    """Factory building a synthetic ``nexus-pg-*.txz`` for bundle-extract tests.
+
+    Mirrors the real P3.1 artifact shape: a ``bundle/`` root containing
+    ``bin/{initdb,pg_ctl,psql,createdb}`` (stub executables), ``include/``,
+    ``lib/``, ``share/``, and the ``.build_prefix`` relocation marker that
+    ``scripts/build_pg_bundle.sh`` stamps. Single source of truth so a layout
+    change (e.g. a new required binary) is a one-site edit.
+    """
+    import tarfile
+
+    def _factory(tmp: Path, name: str = "nexus-pg-test.txz", *, with_build_prefix: bool = True) -> Path:
+        staging = tmp / f"_stage_{name}"
+        bundle = staging / "bundle"
+        bin_dir = bundle / "bin"
+        bin_dir.mkdir(parents=True)
+        for b in ("initdb", "pg_ctl", "psql", "createdb"):
+            f = bin_dir / b
+            f.write_text("#!/bin/sh\nexit 0\n")
+            f.chmod(0o755)
+        for sub in ("include", "lib", "share"):
+            (bundle / sub).mkdir()
+        if with_build_prefix:
+            (bundle / ".build_prefix").write_text("/build/prefix/nexus-pg\n")
+        archive = tmp / name
+        with tarfile.open(archive, "w:xz") as tf:
+            tf.add(bundle, arcname="bundle")
+        return archive
+
+    return _factory
