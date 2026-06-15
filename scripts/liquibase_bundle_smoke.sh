@@ -67,10 +67,18 @@ echo "==> databasechangelog rows: ${applied}"
 # row even when the contrib extension is absent and the statement no-ops. That is
 # exactly the gap that hid the pg_trgm miss (nexus-ywts8). Assert both required
 # extensions are actually installed (substantive-critic O3).
+#
+# vector + pg_trgm are the ONLY extensions in the changelog today. If a future
+# changeset adds a third (uuid-ossp, pg_stat_statements, ...), add it to the list
+# below — the expected count is derived from the list, so the assertion stays in
+# sync and won't silently undercount a missing new extension (substantive-critic O-C).
+required_exts="vector pg_trgm"
+expected=$(printf '%s\n' $required_exts | wc -l | tr -d ' ')
+in_list=$(printf "'%s'," $required_exts | sed 's/,$//')
 exts=$(PGPASSWORD="${NX_DB_ADMIN_PASS}" "$bundle/bin/psql" \
   -h 127.0.0.1 -p "${PG_PORT}" -U "${NX_DB_ADMIN_USER}" -d nexus -tAc \
-  "SELECT count(*) FROM pg_extension WHERE extname IN ('vector','pg_trgm')")
-echo "==> required extensions present (vector, pg_trgm): ${exts}/2"
-[ "${exts:-0}" -eq 2 ] || { echo "FAIL: expected vector + pg_trgm installed, found ${exts}"; exit 1; }
+  "SELECT count(*) FROM pg_extension WHERE extname IN (${in_list})")
+echo "==> required extensions present (${required_exts}): ${exts}/${expected}"
+[ "${exts:-0}" -eq "$expected" ] || { echo "FAIL: expected ${required_exts} installed, found ${exts}"; exit 1; }
 
 echo "LIQUIBASE-AGAINST-BUNDLE SMOKE PASS (${applied} changesets, vector+pg_trgm verified)"

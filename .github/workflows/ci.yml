@@ -172,7 +172,9 @@ jobs:
               # A dep bump can change test collection / the Python env the CA-3
               # tests depend on without touching any path above; gate on the
               # lockfile + manifest so such a change re-runs the gate instead of
-              # passing vacuously green (substantive-critic S1).
+              # passing vacuously green (substantive-critic S1). Deliberate cost:
+              # every dep-bump PR now pays the ~10min PG-from-source build x3 arches
+              # — accepted as the price of a non-vacuous gate (substantive-critic O-A).
               - 'uv.lock'
               - 'pyproject.toml'
 
@@ -320,7 +322,9 @@ jobs:
               # A dep bump can change test collection / the Python env the CA-3
               # tests depend on without touching any path above; gate on the
               # lockfile + manifest so such a change re-runs the gate instead of
-              # passing vacuously green (substantive-critic S1).
+              # passing vacuously green (substantive-critic S1). Deliberate cost:
+              # every dep-bump PR now pays the ~10min PG-from-source build x3 arches
+              # — accepted as the price of a non-vacuous gate (substantive-critic O-A).
               - 'uv.lock'
               - 'pyproject.toml'
 
@@ -410,6 +414,12 @@ jobs:
     # NOT a required check — a normal job whose expensive steps are path-gated, so
     # unrelated PRs see a fast no-op. (A required job MUST always run; this one is
     # advisory, so gating the whole job's work via step `if:` is fine.)
+    #
+    # ADVISORY, NOT BLOCKING (substantive-critic S2, nexus-a5rj8): because it is not
+    # a required check, a RED result here does not block merge — it converts "zero
+    # build visibility on PRs" into "visible but ignorable". Promoting it to a
+    # required check (paying ~40min native build on every service/** PR) is an open
+    # decision tracked in nexus-a5rj8.
     name: engine-service native build (PR trip-wire)
     runs-on: ubuntu-latest
     timeout-minutes: 40

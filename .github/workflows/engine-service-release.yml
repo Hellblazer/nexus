@@ -29,6 +29,8 @@ name: Engine Service Native Release
 # mac-arm64 is build+publish but UNSMOKED: native-smoke.sh needs Docker (throwaway
 # pgvector) which GH macOS lacks, so its runtime correctness rests on the
 # mac-arm64 CA-3 gate + the lp2qo native-serving spike, not a per-build smoke.
+# That coverage gap (no per-build macOS service-binary smoke) is tracked in
+# nexus-4xf5m (substantive-critic O-B).
 # conexus pins/pulls the linux-amd64 asset; local-distro users grab their arch.
 
 on:
@@ -204,6 +206,14 @@ jobs:
         # only at image-build time. Assert it here too: linux max-required GLIBC
         # must be <= the conexus runtime base (debian:trixie-slim = 2.41). For mac,
         # report the Mach-O minos (informational; no Docker smoke covers it).
+        #
+        # CROSS-REPO COUPLING (substantive-critic M1): the 2.41 ceiling is the glibc
+        # of conexus's runtime base, whose canonical definition lives in the conexus
+        # repo (deploy/engine/build-image.sh / its FROM image), NOT here. If conexus
+        # changes its runtime base distro/version, UPDATE this ceiling in lockstep —
+        # nothing in nexus/ will alert you otherwise. Keep this the looser (>=) of
+        # the two bases if they ever diverge so the assertion never blocks a release
+        # that the consumer would actually accept.
         run: |
           set -euo pipefail
           asset="dist/$ASSET"
@@ -213,15 +223,26 @@ jobs:
               maxglibc=$(objdump -T "$asset" 2>/dev/null \
                 | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
                 | sed 's/GLIBC_//' | sort -V | tail -1)
-              echo "max required GLIBC: ${maxglibc:-none}"
-              ceiling="2.41"  # conexus runtime base (debian:trixie-slim)
-              if [ -n "$maxglibc" ] && [ "$(printf '%s\n%s\n' "$maxglibc" "$ceiling" | sort -V | tail -1)" != "$ceiling" ]; then
-                echo "FAIL: binary requires GLIBC $maxglibc > consumer base $ceiling" >&2
-                exit 1
+              if [ -z "$maxglibc" ]; then
+                # No GLIBC tokens: a statically-linked binary (no floor to enforce).
+                # GraalVM on linux currently emits DYNAMIC binaries, so flag this as
+                # a surprising build change rather than silently passing (code-review L1).
+                echo "NOTE: no GLIBC symbol references in $asset — statically linked? (no floor to assert)"
+              else
+                echo "max required GLIBC: $maxglibc"
+                ceiling="2.41"  # conexus runtime base (debian:trixie-slim) — see header note
+                if [ "$(printf '%s\n%s\n' "$maxglibc" "$ceiling" | sort -V | tail -1)" != "$ceiling" ]; then
+                  echo "FAIL: binary requires GLIBC $maxglibc > consumer base $ceiling" >&2
+                  exit 1
+                fi
               fi
               ;;
             mac-*)
               otool -l "$asset" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print "Mach-O "$0; f=0}' || true
+              ;;
+            *)
+              echo "FAIL: unhandled arch '${{ matrix.target.arch }}' — no ABI floor check defined" >&2
+              exit 1
               ;;
           esac
 
