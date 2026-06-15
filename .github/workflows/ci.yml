@@ -205,6 +205,10 @@ jobs:
                 --without-icu --without-zlib --without-readline --without-openssl >/dev/null
               make -s -j"$(nproc)" >/dev/null
               make -s install >/dev/null
+              # Contrib extensions the schema needs (pg_trgm, RDR-155). Core
+              # `make install` does NOT build contrib — the bundle would be
+              # missing pg_trgm and the full migration would fail.
+              make -s -C contrib/pg_trgm install >/dev/null
               # pgvector against the freshly-built pg_config (same major + glibc).
               cd /tmp
               git clone --depth 1 --branch "${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
@@ -288,6 +292,8 @@ jobs:
             --without-icu --without-zlib --without-readline --without-openssl >/dev/null
           make -s -j"$(sysctl -n hw.ncpu)" >/dev/null
           make -s install >/dev/null
+          # Contrib extensions the schema needs (pg_trgm, RDR-155).
+          make -s -C contrib/pg_trgm install >/dev/null
           cd "$RUNNER_TEMP"
           git clone --depth 1 --branch "${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
           cd pgvector
