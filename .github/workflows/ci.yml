@@ -176,7 +176,9 @@ jobs:
             -w /pgvector \
             -v "$PWD/bundle:/bundle" -v "$PWD/pgvector:/pgvector" \
             "$MANYLINUX_IMAGE" /bin/bash -c '
-              set -euxo pipefail
+              # NB: no pipefail — `cmd | head` makes head close the pipe early,
+              # the producer takes SIGPIPE, and pipefail+-e would abort (141).
+              set -eux
               echo "=== ENTER container ==="
               head -2 /etc/os-release
               command -v gcc make
