@@ -101,11 +101,24 @@ pytestmark = [
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _bundle_bins() -> PgBinaries:
-    """Resolve the bundle's binaries via the production NEXUS_PG_BIN seam."""
+@pytest.fixture(scope="module")
+def bundle_bin_env():
+    """Point NEXUS_PG_BIN at the bundle for the module, restore on teardown.
+
+    The restore matters: without it the bundle path leaks into the process
+    environment and a later pg_provision test in the same pytest invocation
+    would resolve the bundle binaries instead of the system PostgreSQL.
+    """
     assert _BUNDLE is not None  # guarded by pytestmark
+    old = os.environ.get("NEXUS_PG_BIN")
     os.environ["NEXUS_PG_BIN"] = str(_BUNDLE / "bin")
-    return discover_pg_binaries()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("NEXUS_PG_BIN", None)
+        else:
+            os.environ["NEXUS_PG_BIN"] = old
 
 
 def _pg_config(bins: PgBinaries, flag: str) -> str:
@@ -135,8 +148,9 @@ def _max_glibc_requirement(so_path: Path) -> tuple[int, int]:
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
-def bins() -> PgBinaries:
-    return _bundle_bins()
+def bins(bundle_bin_env) -> PgBinaries:
+    """Resolve the bundle's binaries via the production NEXUS_PG_BIN seam."""
+    return discover_pg_binaries()
 
 
 @pytest.fixture(scope="module")
@@ -226,6 +240,14 @@ class TestGlibcFloor:
         dlopen on an older distro."""
         pkglibdir = Path(_pg_config(bins, "--pkglibdir"))
         required = _max_glibc_requirement(pkglibdir / "vector.so")
+        # Non-vacuity guard: a real pgvector .so always references versioned
+        # glibc symbols. (0, 0) means objdump found none — wrong file, empty
+        # output, or static-libc linkage — which would let the floor check
+        # pass without proving anything.
+        assert required > (0, 0), (
+            f"no GLIBC_x.y symbols found in {pkglibdir / 'vector.so'} — objdump "
+            "produced no versioned references; the floor check would be vacuous"
+        )
         assert required <= GLIBC_FLOOR, (
             f"vector.so requires GLIBC_{required[0]}.{required[1]} > pinned floor "
             f"GLIBC_{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1]}; build pgvector on "
@@ -256,7 +278,7 @@ class TestCreateExtensionLive:
         return subprocess.run(
             [str(bins.bin_dir / "psql"), "-h", "127.0.0.1", "-p", str(port),
              "-U", os_user, "-d", NEXUS_DB_NAME, "-t", "-A", "-c", sql],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30,
         )
 
     def test_cluster_accepts_connections(self, provisioned):

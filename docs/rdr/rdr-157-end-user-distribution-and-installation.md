@@ -467,10 +467,20 @@ not the CI runner's (ubuntu-latest ≈ glibc 2.39, which would `dlopen`-fail on
 RHEL7/CentOS7/old-Debian). Decision: build in **manylinux2014 (glibc 2.17)** to match
 zonky's broad-compat baseline; the test pins `GLIBC_FLOOR=(2,17)` and `objdump -T`
 asserts **both** `vector.so` and the zonky `postgres` binary require ≤ `GLIBC_2.17`. A
-builder drift that raises the floor fails the test, not the user. **linux-aarch64**
-floor is the same `manylinux2014_aarch64` baseline (glibc 2.17), documented here; its
-**live** run is deferred to the P2/P3 build matrix (needs an arm64 runner) — flagged,
-not silently dropped.
+builder drift that raises the floor fails the test, not the user.
+
+**Per-target coverage (release N = linux-amd64 + linux-aarch64 + mac-arm64 per CA-1).**
+The P1 gate covers **linux-amd64** live. The other two release-N targets are deferred to
+P3 with **named beads** so the deferral is traceable, not silent:
+- **linux-aarch64** (`nexus-xqk5r`): same `manylinux2014_aarch64` baseline (glibc 2.17,
+  `GLIBC_FLOOR` already applies); runs the existing test against the zonky
+  `linux-arm64v8` bundle on an arm64 runner.
+- **mac-arm64** (`nexus-0ixqc`): darwin-specific unknowns the linux gate does NOT
+  exercise — pgvector produces a `.dylib` (not `.so`), the loader is `dyld` (no glibc
+  floor; pin the macOS deployment-target/`minos` via `otool`/`vtool` instead), and
+  code-signing/SIP can reject an unsigned `.dylib` at load. Needs its own darwin test
+  variant on a `macos-14` runner. P3 must not start the mac-arm64 bundle build assuming
+  the linux result transfers.
 
 **FAILED path → Strategy B trigger.** If the live job fails (zonky's reduced bundle is
 incomplete, ABI mismatch on the same PG16 minor, pgvector won't build against the

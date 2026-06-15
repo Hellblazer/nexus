@@ -169,7 +169,8 @@ jobs:
           docker run --rm \
             -v "$PWD/bundle:/bundle" -v "$PWD/pgvector:/pgvector" \
             "$MANYLINUX_IMAGE" bash -euo pipefail -c '
-              source /opt/rh/devtoolset-10/enable 2>/dev/null || true
+              source /opt/rh/devtoolset-10/enable 2>/dev/null \
+                || echo "WARNING: devtoolset-10 absent; using default gcc: $(gcc --version | head -1)"
               cd /pgvector
               make CC=gcc PG_CONFIG=/bundle/bin/pg_config
               make CC=gcc PG_CONFIG=/bundle/bin/pg_config install
@@ -199,9 +200,13 @@ jobs:
                   skipped += 1
               elif not is_fail:
                   passed += 1
-              if c.get("name") == "test_create_extension_vector_loads" and not is_skip and not is_fail:
+              # endswith, not ==: future pytest may qualify @name with the class.
+              if c.get("name", "").endswith("test_create_extension_vector_loads") and not is_skip and not is_fail:
                   core_ok = True
           assert skipped == 0, f"{skipped} CA-3 test(s) skipped — bundle not materialized; gate is vacuous"
-          assert core_ok, "core CREATE EXTENSION vector test did not pass — Strategy A unproven"
+          assert core_ok, (
+              "core CREATE EXTENSION vector test did not pass — Strategy A unproven "
+              "(or the testcase @name no longer ends with 'test_create_extension_vector_loads')"
+          )
           print(f"CA-3 PASS: {passed} passed, 0 skipped, pgvector load + glibc floor verified")
           PY
