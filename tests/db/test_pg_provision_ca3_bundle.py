@@ -76,9 +76,10 @@ from nexus.db.pg_provision import (
 # manylinux_2_28 == glibc 2.28 (AlmaLinux 8 baseline: RHEL8 / Debian 10 /
 # Ubuntu 18.10+). The CI job builds vector.so in that image precisely so this
 # floor holds. (manylinux2014 / glibc 2.17 was rejected: CentOS 7 is EOL with
-# dead in-container repos.) linux-aarch64's live run is deferred to the P2/P3
-# build matrix (needs an arm64 runner); its floor is the same
-# manylinux_2_28_aarch64 baseline (glibc 2.28), exercised live when that job lands.
+# dead in-container repos.) Both linux targets run this module live in CI
+# (linux-amd64 + linux-arm64, via the ci.yml matrix); the floor is the same
+# manylinux_2_28 baseline (glibc 2.28) on both. mac-arm64 needs a darwin variant
+# (dyld/otool minos, not GLIBC) — nexus-0ixqc.
 GLIBC_FLOOR: tuple[int, int] = (2, 28)
 
 

@@ -117,11 +117,20 @@ jobs:
     # pre-authorized Strategy B as the CA-3-failure fallback. See RF-157-9 /
     # T2 nexus_rdr/157-CA3-FINDING-zonky-reduced-insufficient.
     #
-    # linux-amd64 only for release N; linux-aarch64 (nexus-xqk5r) and mac-arm64
-    # (nexus-0ixqc) live runs are deferred to P3 with named beads.
-    name: CA-3 live (PG from source + pgvector, linux-amd64)
-    runs-on: ubuntu-latest
+    # Both linux targets run live (nexus-xqk5r closed aarch64). mac-arm64
+    # (nexus-0ixqc) is still deferred — it needs a darwin test variant
+    # (vector.dylib / dyld / otool minos floor, not GLIBC).
+    name: CA-3 live (PG from source + pgvector, ${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # arch values are the check-context suffixes; keep stable (branch
+          # protection requires "...(linux-amd64)" and "...(linux-arm64)").
+          - { arch: linux-amd64, runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64" }
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64" }
     env:
       # Pinned for determinism. pgvector >= 0.8 is the RDR-155 iterative_scan floor
       # (a pgvector version, not a PG major). nexus is aligned on PG17 to match the
@@ -129,14 +138,13 @@ jobs:
       PG_VERSION: "17.5"
       PGVECTOR_VERSION: "v0.8.2"
       # manylinux_2_28 == glibc 2.28 (AlmaLinux 8 baseline: RHEL8 / Debian 10 /
-      # Ubuntu 18.10+). Building the tree + vector.so here pins their glibc floor
-      # to a broadly compatible baseline instead of the runner's glibc (~2.39), so
-      # the binaries dlopen-load on older distros. We deliberately do NOT use
-      # manylinux2014 (glibc 2.17 / CentOS 7): CentOS 7 is EOL and its in-container
-      # yum mirrors are dead. glibc 2.28 is a defensible 2026 floor and the image
-      # ships a working gcc/make. Must match GLIBC_FLOOR in
-      # tests/db/test_pg_provision_ca3_bundle.py.
-      MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
+      # Ubuntu 18.10+), per-arch image from the matrix. Building the tree +
+      # vector.so here pins their glibc floor to a broadly compatible baseline
+      # instead of the runner's glibc (~2.39), so the binaries dlopen-load on older
+      # distros. We deliberately do NOT use manylinux2014 (glibc 2.17 / CentOS 7):
+      # CentOS 7 is EOL and its in-container yum mirrors are dead. glibc 2.28 is a
+      # defensible 2026 floor. GLIBC_FLOOR=(2,28) in the test holds for both arches.
+      MANYLINUX_IMAGE: ${{ matrix.target.image }}
 
     steps:
       - uses: actions/checkout@v4
@@ -150,9 +158,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/setup-uv-cache
-          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          key: uv-${{ runner.os }}-${{ matrix.target.arch }}-3.12-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            uv-${{ runner.os }}-3.12-
+            uv-${{ runner.os }}-${{ matrix.target.arch }}-3.12-
 
       - name: Install project + dev deps
         run: uv sync --group dev
