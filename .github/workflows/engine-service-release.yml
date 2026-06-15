@@ -22,10 +22,11 @@ name: Engine Service Native Release
 #                         linux-amd64 native binary + its sha256 (what conexus
 #                         pins and pulls).
 #
-# linux-amd64 only here (the conexus cloud habitat). The full per-platform
-# desktop matrix (linux-aarch64, mac-arm64) for the LOCAL distribution is the
-# rest of nexus-vwvv5.6. native-image does not cross-compile, so each target
-# needs its own native runner.
+# Per-platform matrix (nexus-vwvv5.6): linux-amd64 + linux-arm64 native binaries
+# on their own runners (native-image does not cross-compile). mac-arm64 is
+# deferred (nexus-f6j31) — GH macOS runners lack Docker for the -Pnative jOOQ
+# codegen. conexus pins/pulls the linux-amd64 asset; local-distro users grab
+# their arch.
 
 on:
   workflow_dispatch:
@@ -42,11 +43,24 @@ concurrency:
 
 jobs:
   build-publish:
-    name: Build + smoke + publish native nexus-service (linux-amd64)
-    runs-on: ubuntu-latest
+    name: Build + smoke + publish native nexus-service (${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.runner }}
     # Native-image build (~2-3m analysis + image) + jOOQ codegen testcontainer +
     # pgvector pull + native smoke. 40m covers a cold runner (mirrors service-ci).
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { arch: linux-amd64, runner: ubuntu-latest }
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm }
+          # mac-arm64 is DEFERRED (nexus-f6j31): GitHub-hosted macOS runners have
+          # no Docker, but -Pnative runs jOOQ codegen via testcontainers (needs
+          # Docker). Needs codegen decoupling (pre-generate sources on linux) or a
+          # self-hosted mac runner. The mac-arm64 CA-3 gate (PG+pgvector, no
+          # codegen) already passes; only the native-SERVICE build is blocked.
+    env:
+      ASSET: nexus-service-${{ matrix.target.arch }}
 
     steps:
       - uses: actions/checkout@v4
@@ -68,9 +82,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/chroma
-          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          key: chromadb-onnx-${{ runner.os }}-${{ matrix.target.arch }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            chromadb-onnx-${{ runner.os }}-
+            chromadb-onnx-${{ runner.os }}-${{ matrix.target.arch }}-
 
       - name: Prime ONNX model on cache miss
         run: |
@@ -134,15 +148,15 @@ jobs:
           sz=$(stat -c%s "$src")
           test "$sz" -gt 20000000 || { echo "native binary suspiciously small ($sz bytes)"; exit 1; }
           mkdir -p dist
-          cp "$src" dist/nexus-service-linux-amd64
-          ( cd dist && sha256sum nexus-service-linux-amd64 > nexus-service-linux-amd64.sha256 )
+          cp "$src" "dist/$ASSET"
+          ( cd dist && sha256sum "$ASSET" > "$ASSET.sha256" )
           ls -la dist
-          file dist/nexus-service-linux-amd64 || true
+          file "dist/$ASSET" || true
 
       - name: Upload Actions artifact (always — dev smoke / non-tag path)
         uses: actions/upload-artifact@v4
         with:
-          name: nexus-service-linux-amd64
+          name: ${{ env.ASSET }}
           path: dist/*
           retention-days: 14
           if-no-files-found: error
@@ -156,13 +170,15 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           # printf (not a heredoc): immune to YAML run-block indentation.
           printf '%s\n' \
-            "Native nexus-service binary for the RDR-157 cloud habitat: run with no" \
-            "embedded PG, pointed at a managed Postgres via NX_DB_URL (skips" \
-            "pg_provision). Consumed by conexus deploy/engine (build the runtime" \
-            "image FROM this binary). sha256 attached." \
+            "Native nexus-service binaries for the RDR-157 cloud + local habitats:" \
+            "run with no embedded PG, pointed at a managed Postgres via NX_DB_URL" \
+            "(skips pg_provision). Consumed by conexus deploy/engine (build the" \
+            "runtime image FROM the linux-amd64 binary). Per-platform assets +" \
+            "sha256 attached: nexus-service-linux-amd64, nexus-service-linux-arm64." \
+            "(mac-arm64 deferred — nexus-f6j31.)" \
             "" \
-            "glibc floor: built on ubuntu-latest (~2.39). The runtime base must have" \
-            "glibc >= the binary's floor (conexus uses debian:trixie-slim = 2.41);" \
+            "glibc floor: linux binaries built on ubuntu-latest (~2.39). The runtime" \
+            "base must have glibc >= that (conexus uses debian:trixie-slim = 2.41);" \
             "deploy/engine/build-image.sh enforces this via objdump." \
             "" \
             "ONNX model NOT bundled — the binary loads all-MiniLM-L6-v2 from the" \
@@ -172,14 +188,8 @@ jobs:
             "" \
             "Provenance: sha256 only for now; cosign/Sigstore signing tracked for N+1." \
             > notes.md
-          # Idempotent: re-run on the same tag (e.g. after a partial failure)
-          # updates the assets instead of failing with "release already exists".
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" --clobber \
-              dist/nexus-service-linux-amd64 dist/nexus-service-linux-amd64.sha256
-          else
-            gh release create "$tag" \
-              --title "nexus-service (native, linux-amd64) ${tag}" \
-              --notes-file notes.md \
-              dist/nexus-service-linux-amd64 dist/nexus-service-linux-amd64.sha256
-          fi
+          # Matrix-safe: create the release once (whichever arch job wins; the
+          # losers' create fails 'already exists' -> ignored), then each job
+          # uploads its OWN arch assets (--clobber for re-runs).
+          gh release create "$tag" --title "nexus-service (native) ${tag}" --notes-file notes.md 2>/dev/null || true
+          gh release upload "$tag" --clobber "dist/$ASSET" "dist/$ASSET.sha256"
