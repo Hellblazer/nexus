@@ -113,12 +113,19 @@ re-embed for every future local user.
   L2-normalize**, 512-token truncation, `token_type_ids` all-zero, **no prefix**.
   Python raw-onnxruntime: CLS+norm = cosine 1.000000 vs fastembed; mean-pool = 0.825
   (confirms it is NOT MiniLM-style mean-pooling).
-- **CA-3 (model source/distribution) — REFINED, OPEN.** The service needs a STANDARD
-  bge ONNX (NOT fastembed's optimized cache file — that one fails to load). It
-  cannot simply point at `~/.local/share/nexus/fastembed_cache`. Decide the source
-  and form: ship/fetch a standard `model.onnx` (fp32 ≈ 436 MB) or a standard
-  **quantized** variant (smaller; verify parity if used). Determines the P3
-  warmup/distribution mechanism and the local-distribution payload size.
+- **CA-3 (model source/distribution) — RESOLVED 2026-06-15 (RF-160-2): standard
+  fp32.** Measured all Xenova bge ONNX variants vs the fastembed reference:
+  `model.onnx` (fp32, 416 MB) = **0.999992**; every standard *quantized* variant
+  (int8/uint8/q4/bnb4, 105–142 MB) scores **0.95–0.99 — below the 0.9999 gate**;
+  fp16 variants fail to load on this ORT. Insight: fastembed's own model is qdrant's
+  quantized `-onnx-q` (the ground truth existing 5.x.x bge-768 data was embedded
+  with); the fp32 standard matches it at 0.999992, while standard-quantized uses a
+  *different* quant scheme and diverges — so quantizing the service model would
+  break the very parity this RDR exists to preserve. **Decision: ship/fetch the
+  standard fp32 bge ONNX (~416 MB) + `tokenizer.json`.** Distribution (one-time
+  fetch, not hot path) is handed to RDR-157 local-distribution mechanics. A
+  calibrated int8 export that re-verifies ≥0.9999 is a possible size follow-up, not
+  baseline.
 
 ## Alternatives Considered
 
