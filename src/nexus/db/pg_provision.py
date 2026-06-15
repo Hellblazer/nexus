@@ -30,13 +30,13 @@ IDEMPOTENCY:
       service's env configuration.
 
 BINARY DISCOVERY:
-  The provisioner requires system-installed PostgreSQL 16 (or 15) binaries.
+  The provisioner requires system-installed PostgreSQL 17 (or 16/15) binaries.
   Search order:
     1. ``NEXUS_PG_BIN`` env var override (tests + custom installs).
-    2. ``/opt/homebrew/opt/postgresql@16/bin`` (macOS Homebrew PG 16).
+    2. ``/opt/homebrew/opt/postgresql@17/bin`` (macOS Homebrew PG 17).
     3. ``/opt/homebrew/opt/postgresql@15/bin`` (macOS Homebrew PG 15).
     4. ``initdb`` on PATH (Linux; ``shutil.which`` → parent directory).
-    5. ``/usr/lib/postgresql/16/bin`` (Debian/Ubuntu system install).
+    5. ``/usr/lib/postgresql/17/bin`` (Debian/Ubuntu system install).
     6. ``/usr/lib/postgresql/15/bin`` (Debian/Ubuntu PG 15 fallback).
 
   Fails loudly with a platform-appropriate install hint when no binaries
@@ -122,24 +122,28 @@ def _install_hint() -> str:
     """Return a platform-appropriate install hint."""
     if sys.platform == "darwin":
         return (
-            "Install PostgreSQL 16 with Homebrew:\n"
-            "  brew install postgresql@16\n"
-            "  brew services start postgresql@16\n"
+            "Install PostgreSQL 17 with Homebrew:\n"
+            "  brew install postgresql@17\n"
+            "  brew services start postgresql@17\n"
             "Then re-run `nx init --service`."
         )
     return (
-        "Install PostgreSQL 16:\n"
+        "Install PostgreSQL 17:\n"
         "  # Debian/Ubuntu:\n"
-        "  sudo apt-get install postgresql-16\n"
+        "  sudo apt-get install postgresql-17\n"
         "  # RHEL/Fedora:\n"
         "  sudo dnf install postgresql-server\n"
         "Then re-run `nx init --service`."
     )
 
 
+# nexus is aligned on PG17 (matches the deployed conexus stack; nexus-41bso).
+# 16/15 remain as fallbacks so an existing host install still works.
 _CANDIDATE_DIRS: list[Path] = [
+    Path("/opt/homebrew/opt/postgresql@17/bin"),
     Path("/opt/homebrew/opt/postgresql@16/bin"),
     Path("/opt/homebrew/opt/postgresql@15/bin"),
+    Path("/usr/lib/postgresql/17/bin"),
     Path("/usr/lib/postgresql/16/bin"),
     Path("/usr/lib/postgresql/15/bin"),
 ]
@@ -234,7 +238,7 @@ def check_pgvector_available(bins: PgBinaries) -> None:
         f"The pgvector extension is not installed for the PostgreSQL at "
         f"{bins.bin_dir} (no {control}).\n"
         "The Homebrew 'pgvector' formula targets the default postgresql "
-        "major — for a versioned install (e.g. postgresql@16) build from "
+        "major — for a versioned install (e.g. postgresql@17) build from "
         "source against THIS pg_config:\n"
         f"  git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git\n"
         f"  cd pgvector && PG_CONFIG={pg_config} make && "

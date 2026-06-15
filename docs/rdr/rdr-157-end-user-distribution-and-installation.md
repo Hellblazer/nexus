@@ -204,7 +204,7 @@ is release N+1.
    sha256 manifest for release N; evaluate Sigstore/cosign signing for N+1 (the binary
    runs with DB credentials and is opaque to static inspection — see Open Q4).
 4. **P3 — embedded-PG bundle + the two distributions.**
-   - **Bundle build (per OS/arch):** **Strategy B — build PostgreSQL 16 from source**
+   - **Bundle build (per OS/arch):** **Strategy B — build PostgreSQL 17 from source**
      (locked by CA-3 / RF-157-9: Strategy A's zonky reduced bundle is incomplete —
      no pg_config/psql/createdb/headers). Build pgvector against the from-source
      `pg_config`. Smoke: `initdb` → `CREATE EXTENSION vector` in CI (proven for
@@ -447,9 +447,15 @@ two-distribution architecture; it only decides single-file-vs-archive packaging.
 ### RF-157-9 (CA-3, P1 gate, VERIFIED 2026-06-15): Strategy A falsified → Strategy B proven
 
 **Verdict: Strategy A (zonky reduced bundle + inject pgvector) FAILED on completeness;
-Strategy B (build PG16 from source) VERIFIED green in CI. Bead `nexus-vwvv5.2`.**
+Strategy B (build PG from source) VERIFIED green in CI. Bead `nexus-vwvv5.2`.**
 
-CA-3 is the go/no-go before the P2/P3 build-out: can a complete PG16 tree + pgvector be
+> **PG major (nexus-41bso):** nexus is aligned on **PG17** to match the deployed conexus
+> stack. The PG major is **not load-bearing** — the only hard constraint is pgvector
+> ≥ 0.8 (iterative_scan, RDR-155), available on both 16 and 17. CA-3 was first proven
+> green on PG16.4 (the mechanism is major-agnostic) and the gate now builds **PG17.5**;
+> the "16" references in this section are the original run.
+
+CA-3 is the go/no-go before the P2/P3 build-out: can a complete PG tree + pgvector be
 driven by nx's own provisioner to a cluster that loads pgvector, with the glibc floor
 pinned?
 
@@ -473,10 +479,10 @@ PG16 from source. Two artifacts:
   loudly (named CI job) when no bundle.
 - **`.github/workflows/ci.yml` job `ca3-pgvector-bundle`** (linux-amd64) — inside a
   **manylinux_2_28 (glibc 2.28)** container: `./configure --prefix=<bundle> && make &&
-  make install` PostgreSQL **16.4** from source (a complete tree), build pgvector
-  `v0.8.2` against that pg_config, then run the test with a junit parse asserting
-  **0 skipped + `CREATE EXTENSION` passed** (no silent all-skip). **Green 2026-06-15:
-  11 passed, 0 skipped, glibc floor verified.**
+  make install` PostgreSQL **17.5** from source (a complete tree; first proven green on
+  16.4), build pgvector `v0.8.2` against that pg_config, then run the test with a junit
+  parse asserting **0 skipped + `CREATE EXTENSION` passed** (no silent all-skip). Green
+  on 16.4 2026-06-15 (11 passed, 0 skipped); re-verified on 17.5 under nexus-41bso.
 
 **Glibc floor.** `check_pgvector_available` only stats `vector.control`; it never
 `dlopen`s. The ABI/glibc failure surfaces at extension LOAD, not preflight — so the tree
