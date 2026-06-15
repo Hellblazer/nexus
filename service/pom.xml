@@ -411,6 +411,34 @@
     </build>
 
     <profiles>
+        <!-- -Pprebuilt-jooq: compile PRE-GENERATED jOOQ sources instead of running
+             the Docker-dependent testcontainers codegen (nexus-f6j31). The
+             engine-service-release.yml `jooq-codegen` job runs codegen once on a
+             Docker-capable linux runner and uploads ${jooq.generated.dir}; the
+             per-platform native build jobs download it here and build with this
+             profile, so they need no Docker — unblocking the mac-arm64 native
+             binary (GH macOS runners have no Docker). Unbinds the codegen
+             execution (phase=none); build-helper still registers the populated
+             dir as a source root. The sources must already be present in
+             ${jooq.generated.dir} (do NOT `mvn clean` after downloading them). -->
+        <profile>
+            <id>prebuilt-jooq</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.testcontainers</groupId>
+                        <artifactId>testcontainers-jooq-codegen-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>generate-jooq-sources</id>
+                                <phase>none</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
         <!-- Per-platform embedding-native-lib selection (nexus-lp2qo). These
              auto-activate by build-host OS/arch (Maven built-in <os> activation,
              no plugin needed) and override the linux-x64 defaults so -Pnative

@@ -42,23 +42,53 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Generate jOOQ sources ONCE on a Docker-capable runner (testcontainers codegen
+  # needs Docker), upload them. The per-platform native builds then consume the
+  # artifact with -Pprebuilt-jooq and need no Docker — which unblocks mac-arm64
+  # (GH macOS runners have no Docker). nexus-f6j31.
+  jooq-codegen:
+    name: jOOQ codegen (linux, Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up GraalVM 25.0.3
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+      - name: Run testcontainers jOOQ codegen
+        working-directory: service
+        # generate-sources triggers testcontainers-jooq-codegen (boots pgvector,
+        # applies the master changelog, generates into target/generated-sources/jooq).
+        run: ./mvnw -q generate-sources
+      - name: Upload generated jOOQ sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: jooq-sources
+          path: service/target/generated-sources/jooq
+          if-no-files-found: error
+          retention-days: 3
+
   build-publish:
     name: Build + smoke + publish native nexus-service (${{ matrix.target.arch }})
     runs-on: ${{ matrix.target.runner }}
-    # Native-image build (~2-3m analysis + image) + jOOQ codegen testcontainer +
-    # pgvector pull + native smoke. 40m covers a cold runner (mirrors service-ci).
+    needs: jooq-codegen
+    # Native-image build (~2-3m analysis + image) + native smoke (linux only).
+    # No jOOQ codegen here — sources come from the jooq-codegen artifact, so no
+    # Docker is needed to BUILD (mac-arm64 can build). 40m covers a cold runner.
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         target:
-          - { arch: linux-amd64, runner: ubuntu-latest }
-          - { arch: linux-arm64, runner: ubuntu-24.04-arm }
-          # mac-arm64 is DEFERRED (nexus-f6j31): GitHub-hosted macOS runners have
-          # no Docker, but -Pnative runs jOOQ codegen via testcontainers (needs
-          # Docker). Needs codegen decoupling (pre-generate sources on linux) or a
-          # self-hosted mac runner. The mac-arm64 CA-3 gate (PG+pgvector, no
-          # codegen) already passes; only the native-SERVICE build is blocked.
+          - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true }
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm, smoke: true }
+          # mac-arm64: build-only. native-smoke.sh needs Docker (throwaway
+          # pgvector) which GH macOS lacks; macOS runtime correctness is covered
+          # by the mac-arm64 CA-3 gate + the lp2qo native-serving spike.
+          - { arch: mac-arm64,   runner: macos-14,          smoke: false }
     env:
       ASSET: nexus-service-${{ matrix.target.arch }}
 
@@ -117,24 +147,32 @@ jobs:
             echo "version=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Download pre-generated jOOQ sources
+        # From the jooq-codegen job — compiled by -Pprebuilt-jooq below. No Docker
+        # needed to build, which is what lets mac-arm64 build here.
+        uses: actions/download-artifact@v4
+        with:
+          name: jooq-sources
+          path: service/target/generated-sources/jooq
+
       - name: Stamp release version into the pom (tag push only)
         if: steps.ver.outputs.version != ''
         working-directory: service
         run: ./mvnw -q versions:set -DnewVersion="${{ steps.ver.outputs.version }}" -DgenerateBackupPoms=false
 
-      - name: Build native image (-Pnative)
+      - name: Build native image (-Pnative -Pprebuilt-jooq)
         working-directory: service
-        # -Pnative runs jOOQ codegen (testcontainers pgvector) then native-image,
-        # producing service/target/nexus-service (imageName=nexus-service).
-        # NOTE: the jOOQ-codegen + native smoke run against pgvector/pgvector:pg17.
-        # The cloud managed-PG major is a deploy contract item — keep this aligned
-        # with the actual managed target (tracked alongside nexus-6o0bc).
-        run: ./mvnw -q -Pnative -DskipTests package
+        # -Pprebuilt-jooq unbinds the testcontainers codegen and compiles the
+        # downloaded sources → no Docker needed (mac-arm64 builds here).
+        # Do NOT `clean`: it would wipe the downloaded target/generated-sources/jooq.
+        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests package
 
       - name: Native smoke test (boot against throwaway pgvector)
+        if: matrix.target.smoke
         working-directory: service
         # Asserts liquibase migration + jOOQ INSERT/SELECT/FTS return 200 against
         # a real Postgres — the cloud runtime path. Don't publish a broken binary.
+        # linux only: needs Docker, which GH macOS lacks (mac is build-only).
         run: ./native-smoke.sh
 
       - name: Stage artifact + sha256
@@ -145,11 +183,13 @@ jobs:
           test -x "$src" || { echo "native binary missing at $src"; ls -la service/target; exit 1; }
           # Size floor: a native image is tens of MB. A truncated/empty build that
           # still had its exec bit set would otherwise pass the -x check.
-          sz=$(stat -c%s "$src")
+          # wc -c (not stat -c%s) for macOS/BSD portability.
+          sz=$(wc -c < "$src")
           test "$sz" -gt 20000000 || { echo "native binary suspiciously small ($sz bytes)"; exit 1; }
           mkdir -p dist
           cp "$src" "dist/$ASSET"
-          ( cd dist && sha256sum "$ASSET" > "$ASSET.sha256" )
+          # sha256sum on linux, shasum -a 256 on macOS (identical file format).
+          ( cd dist && { command -v sha256sum >/dev/null && sha256sum "$ASSET" || shasum -a 256 "$ASSET"; } > "$ASSET.sha256" )
           ls -la dist
           file "dist/$ASSET" || true
 
