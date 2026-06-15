@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CA-3 live test: complete PG16 tree + pgvector (RDR-157 P1, bead nexus-vwvv5.2).
+"""CA-3 live test: complete PG17 tree + pgvector (RDR-157 P1, bead nexus-vwvv5.2).
 
 RDR-157 Critical Assumption 3 (CA-3): the *assemble* strategy works end to end —
-a complete PG16 binary tree, with a CI-built ``vector.so`` in its
+a complete PG17 binary tree, with a CI-built ``vector.so`` in its
 ``pkglibdir``/``sharedir``, can be driven by ``nx``'s own provisioner to a
 running cluster that loads pgvector, with the binaries' glibc floor pinned.
 
@@ -23,7 +23,7 @@ a pre-materialized bundle so they stay deterministic and hermetic. The CI job
 ``ca3-pgvector-bundle`` (``.github/workflows/ci.yml``) performs the
 side-effecting work inside a **manylinux_2_28 (glibc 2.28)** container:
 
-  1. ``./configure --prefix=<bundle> && make && make install`` PostgreSQL 16
+  1. ``./configure --prefix=<bundle> && make && make install`` PostgreSQL 17
      from source — a complete tree (initdb, pg_ctl, postgres, psql, createdb,
      pg_config, headers, pgxs),
   2. build ``pgvector`` against that ``pg_config`` and ``make install`` it,
@@ -85,7 +85,7 @@ GLIBC_FLOOR: tuple[int, int] = (2, 28)
 # ── Bundle discovery / skip gate ───────────────────────────────────────────────
 
 def _bundle_root() -> Path | None:
-    """The PG16 bundle root, or None when not materialized.
+    """The PG17 bundle root, or None when not materialized.
 
     Set by the CI ``ca3-pgvector-bundle`` job. Absent locally → tests skip.
     """
@@ -106,7 +106,7 @@ pytestmark = [
     pytest.mark.skipif(
         _BUNDLE is None,
         reason=(
-            "skipped: no CA-3 bundle — set NEXUS_CA3_BUNDLE to a complete PG16 "
+            "skipped: no CA-3 bundle — set NEXUS_CA3_BUNDLE to a complete PG17 "
             "tree with pgvector (provided by the ci.yml "
             "'ca3-pgvector-bundle' job)"
         ),
@@ -198,18 +198,18 @@ def provisioned(bins: PgBinaries, tmp_path_factory):
         pass
 
 
-# ── Test 1: the bundle ships a complete PG16 with consistent paths ──────────────
+# ── Test 1: the bundle ships a complete PG17 with consistent paths ──────────────
 
 class TestCompletePg16Bundle:
     def test_binaries_discovered_via_env_seam(self, bins):
         assert bins.all_present(), "bundle missing one of initdb/pg_ctl/psql/createdb"
 
-    def test_reports_postgres_16(self, bins):
+    def test_reports_postgres_17(self, bins):
         out = subprocess.run(
             [str(bins.bin_dir / "initdb"), "--version"],
             capture_output=True, text=True, check=True,
         ).stdout
-        assert "16." in out, f"expected PostgreSQL 16.x, got: {out.strip()!r}"
+        assert "17." in out, f"expected PostgreSQL 17.x, got: {out.strip()!r}"
 
     def test_sharedir_resolves_inside_bundle(self, bins):
         """pg_config --sharedir resolves UNDER the bundle root (the bundle is
