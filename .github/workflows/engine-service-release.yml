@@ -1,0 +1,185 @@
+name: Engine Service Native Release
+
+# RDR-157 P2 / beads nexus-vwvv5.6 + nexus-6o0bc.
+#
+# Publishes the native `nexus-service` binary (the engine storage server) as a
+# consumable artifact so conexus `deploy/engine` can build its runtime image
+# FROM the published binary instead of throwaway-cloning + JAR/jlink. This is
+# the RDR-157 "cloud habitat" variant: the same native binary, run with no
+# embedded PG — it connects to a managed Postgres via NX_DB_URL and skips
+# pg_provision.
+#
+# CHANNEL — deliberately separate from the `conexus` PyPI release (`vX.Y.Z`
+# tags / release.yml). The engine-service binary is a DIFFERENT artifact from
+# the conexus package, so an `engine-service-v*` tag here does NOT trip the
+# develop release boundary (RDR-155 P4a) and publishes nothing to PyPI.
+#
+#   - workflow_dispatch : build + smoke + upload an Actions artifact only
+#                         (reversible dev path — download it to smoke conexus
+#                         locally / in the cloud, no GitHub Release created).
+#   - push tag engine-service-v*
+#                       : build + smoke + create a GitHub Release and attach the
+#                         linux-amd64 native binary + its sha256 (what conexus
+#                         pins and pulls).
+#
+# linux-amd64 only here (the conexus cloud habitat). The full per-platform
+# desktop matrix (linux-aarch64, mac-arm64) for the LOCAL distribution is the
+# rest of nexus-vwvv5.6. native-image does not cross-compile, so each target
+# needs its own native runner.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'engine-service-v*'
+
+permissions:
+  contents: write  # create the GitHub Release + upload assets on tag push
+
+concurrency:
+  group: engine-service-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-publish:
+    name: Build + smoke + publish native nexus-service (linux-amd64)
+    runs-on: ubuntu-latest
+    # Native-image build (~2-3m analysis + image) + jOOQ codegen testcontainer +
+    # pgvector pull + native smoke. 40m covers a cold runner (mirrors service-ci).
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up GraalVM 25.0.3
+        # SHA-pinned (not @v1): this is a PUBLISH path that creates a GitHub
+        # Release, so a floating tag is a supply-chain hole. bef4b0e == v1.
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f
+        with:
+          # >= 25.0.2 REQUIRED: the bundled jOOQ / liquibase reachability metadata
+          # use GraalVM's unified reachability-metadata schema (nexus-lp2qo).
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+
+      - name: Cache ChromaDB ONNX model
+        # The service constructs the ONNX embedder at startup (NX_EMBED_MODE=onnx),
+        # loading all-MiniLM-L6-v2 from ~/.cache/chroma — the native smoke needs it.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Prime ONNX model on cache miss
+        run: |
+          MODEL_DIR="$HOME/.cache/chroma/onnx_models/all-MiniLM-L6-v2"
+          if [ ! -f "$MODEL_DIR/onnx/model.onnx" ]; then
+            echo "ONNX model not in cache; downloading."
+            mkdir -p "$MODEL_DIR"
+            curl -fsSL https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz \
+              -o /tmp/onnx.tar.gz
+            tar -xzf /tmp/onnx.tar.gz -C "$MODEL_DIR"
+            test -f "$MODEL_DIR/onnx/model.onnx" || { echo "model.onnx missing after extract"; exit 1; }
+          else
+            echo "ONNX model restored from cache."
+          fi
+
+      - name: Resolve engine-service version
+        id: ver
+        # On a tag push, the published version is the tag minus the
+        # 'engine-service-v' prefix. On workflow_dispatch (dev/smoke) there is no
+        # release version, so keep the pom's SNAPSHOT. The version must be stamped
+        # into the binary so its /version endpoint (VersionHandler reads
+        # pom.properties) does not report 1.0-SNAPSHOT under a real release tag —
+        # nx clients negotiate schema skew off /version (nexus-pebfx.4).
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF}" == refs/tags/engine-service-v* ]]; then
+            echo "version=${ref#engine-service-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stamp release version into the pom (tag push only)
+        if: steps.ver.outputs.version != ''
+        working-directory: service
+        run: ./mvnw -q versions:set -DnewVersion="${{ steps.ver.outputs.version }}" -DgenerateBackupPoms=false
+
+      - name: Build native image (-Pnative)
+        working-directory: service
+        # -Pnative runs jOOQ codegen (testcontainers pgvector) then native-image,
+        # producing service/target/nexus-service (imageName=nexus-service).
+        # NOTE: the jOOQ-codegen + native smoke run against pgvector/pgvector:pg17.
+        # The cloud managed-PG major is a deploy contract item — keep this aligned
+        # with the actual managed target (tracked alongside nexus-6o0bc).
+        run: ./mvnw -q -Pnative -DskipTests package
+
+      - name: Native smoke test (boot against throwaway pgvector)
+        working-directory: service
+        # Asserts liquibase migration + jOOQ INSERT/SELECT/FTS return 200 against
+        # a real Postgres — the cloud runtime path. Don't publish a broken binary.
+        run: ./native-smoke.sh
+
+      - name: Stage artifact + sha256
+        id: stage
+        run: |
+          set -euo pipefail
+          src="service/target/nexus-service"
+          test -x "$src" || { echo "native binary missing at $src"; ls -la service/target; exit 1; }
+          # Size floor: a native image is tens of MB. A truncated/empty build that
+          # still had its exec bit set would otherwise pass the -x check.
+          sz=$(stat -c%s "$src")
+          test "$sz" -gt 20000000 || { echo "native binary suspiciously small ($sz bytes)"; exit 1; }
+          mkdir -p dist
+          cp "$src" dist/nexus-service-linux-amd64
+          ( cd dist && sha256sum nexus-service-linux-amd64 > nexus-service-linux-amd64.sha256 )
+          ls -la dist
+          file dist/nexus-service-linux-amd64 || true
+
+      - name: Upload Actions artifact (always — dev smoke / non-tag path)
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-service-linux-amd64
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (engine-service-v* tag only)
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # printf (not a heredoc): immune to YAML run-block indentation.
+          printf '%s\n' \
+            "Native nexus-service binary for the RDR-157 cloud habitat: run with no" \
+            "embedded PG, pointed at a managed Postgres via NX_DB_URL (skips" \
+            "pg_provision). Consumed by conexus deploy/engine (build the runtime" \
+            "image FROM this binary). sha256 attached." \
+            "" \
+            "glibc floor: built on ubuntu-latest (~2.39). The runtime base must have" \
+            "glibc >= the binary's floor (conexus uses debian:trixie-slim = 2.41);" \
+            "deploy/engine/build-image.sh enforces this via objdump." \
+            "" \
+            "ONNX model NOT bundled — the binary loads all-MiniLM-L6-v2 from the" \
+            "filesystem at runtime. Before building the runtime image, stage it:" \
+            "  mkdir -p ~/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx" \
+            "  curl -fsSL https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz | tar -xz -C ~/.cache/chroma/onnx_models/all-MiniLM-L6-v2" \
+            "" \
+            "Provenance: sha256 only for now; cosign/Sigstore signing tracked for N+1." \
+            > notes.md
+          # Idempotent: re-run on the same tag (e.g. after a partial failure)
+          # updates the assets instead of failing with "release already exists".
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" --clobber \
+              dist/nexus-service-linux-amd64 dist/nexus-service-linux-amd64.sha256
+          else
+            gh release create "$tag" \
+              --title "nexus-service (native, linux-amd64) ${tag}" \
+              --notes-file notes.md \
+              dist/nexus-service-linux-amd64 dist/nexus-service-linux-amd64.sha256
+          fi
