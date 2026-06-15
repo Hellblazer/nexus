@@ -164,13 +164,22 @@ jobs:
             https://github.com/pgvector/pgvector.git pgvector
           # Build against the EXTRACTED tree's pg_config so make install lands
           # vector.so in the bundle's pkglibdir and vector.control in its sharedir.
-          # CC=gcc: zonky's Makefile.global may name a compiler absent in the
-          # container; the devtoolset gcc is the portable choice.
+          # manylinux2014 (CentOS 7, glibc 2.17) ships gcc via a toolset whose
+          # enable-script path drifts across image revisions; rather than guess,
+          # install the base toolchain explicitly (yum) and fail loud if the
+          # compiler still isn't resolvable. pgvector is plain C — CentOS 7's
+          # gcc is sufficient and keeps the glibc 2.17 floor.
           docker run --rm \
             -v "$PWD/bundle:/bundle" -v "$PWD/pgvector:/pgvector" \
             "$MANYLINUX_IMAGE" bash -euo pipefail -c '
-              source /opt/rh/devtoolset-10/enable 2>/dev/null \
-                || echo "WARNING: devtoolset-10 absent; using default gcc: $(gcc --version | head -1)"
+              yum -y -q install make gcc >/dev/null 2>&1 || true
+              # Prefer a devtoolset/gcc-toolset gcc if one is enabled; otherwise
+              # the yum-installed system gcc. Glob the enable script so we are not
+              # pinned to a single toolset version.
+              for f in /opt/rh/*/enable; do source "$f" 2>/dev/null || true; done
+              command -v make >/dev/null || { echo "FATAL: make not found in container"; exit 127; }
+              command -v gcc  >/dev/null || { echo "FATAL: gcc not found in container";  exit 127; }
+              echo "toolchain: $(gcc --version | head -1); $(make --version | head -1); glibc $(ldd --version | head -1)"
               cd /pgvector
               make CC=gcc PG_CONFIG=/bundle/bin/pg_config
               make CC=gcc PG_CONFIG=/bundle/bin/pg_config install
