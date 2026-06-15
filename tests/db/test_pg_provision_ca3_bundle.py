@@ -100,6 +100,9 @@ _BUNDLE = _bundle_root()
 
 pytestmark = [
     pytest.mark.integration,
+    # CA-3 drives PostgreSQL directly via psql; it never launches the JVM
+    # service jar, so exempt it from tests/db/conftest.py's jar-freshness gate.
+    pytest.mark.no_service_jar,
     pytest.mark.skipif(
         _BUNDLE is None,
         reason=(

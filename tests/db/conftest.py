@@ -38,9 +38,14 @@ def _service_jar_freshness(
 
     Only acts on tests carrying the ``integration`` marker — unit tests in
     tests/db neither build nor launch the jar and must not be gated on it.
+    Tests that opt out with ``@pytest.mark.no_service_jar`` are also exempt:
+    some integration suites (e.g. the RDR-157 CA-3 pgvector gate) drive
+    PostgreSQL directly via psql and never touch the JVM service.
     SKIP locally, FAIL in CI (a missing/stale jar in CI is a build defect).
     """
     if request.node.get_closest_marker("integration") is None:
+        return
+    if request.node.get_closest_marker("no_service_jar") is not None:
         return
     if _jar_freshness_reason is not None:
         if _IN_CI:
