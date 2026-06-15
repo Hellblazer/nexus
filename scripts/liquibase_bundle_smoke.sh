@@ -21,12 +21,20 @@ export NEXUS_PG_BIN="$bundle/bin"
 cfg="$(mktemp -d)"
 export NEXUS_CONFIG_DIR="$cfg"
 
-cleanup() { "$bundle/bin/pg_ctl" -D "$cfg/postgres" -m immediate stop >/dev/null 2>&1 || true; }
+cleanup() {
+  # Logged so a CI reader can tell "provision failed, PG never started, no-op
+  # stop" apart from "PG started, teardown" (code-review L2).
+  echo "==> cleanup: pg_ctl stop (immediate)" >&2
+  "$bundle/bin/pg_ctl" -D "$cfg/postgres" -m immediate stop >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 echo "==> provisioning bundle cluster (nexus_admin + nexus_svc + nexus DB)"
 uv run python -c "from nexus.db.pg_provision import provision; provision()"
 
+# Dot-source the generated credentials. Safe because pg_provision emits
+# alphanumeric-only passwords (no shell metacharacters); if that generation ever
+# changes to include $, ", `, etc., this source would misparse (code-review L3).
 # shellcheck disable=SC1091
 set -a; . "$cfg/pg_credentials"; set +a
 echo "==> provisioned: port=${PG_PORT} admin=${NX_DB_ADMIN_USER}"
@@ -54,4 +62,23 @@ applied=$(PGPASSWORD="${NX_DB_ADMIN_PASS}" "$bundle/bin/psql" \
 echo "==> databasechangelog rows: ${applied}"
 [ "${applied:-0}" -gt 0 ] || { echo "FAIL: no changesets recorded"; exit 1; }
 
-echo "LIQUIBASE-AGAINST-BUNDLE SMOKE PASS (${applied} changesets on the lean bundle)"
+# Row count proves the migration RAN and was recorded, not that the extension
+# LAYER is intact: a `CREATE EXTENSION IF NOT EXISTS pg_trgm` changeset records a
+# row even when the contrib extension is absent and the statement no-ops. That is
+# exactly the gap that hid the pg_trgm miss (nexus-ywts8). Assert both required
+# extensions are actually installed (substantive-critic O3).
+#
+# vector + pg_trgm are the ONLY extensions in the changelog today. If a future
+# changeset adds a third (uuid-ossp, pg_stat_statements, ...), add it to the list
+# below — the expected count is derived from the list, so the assertion stays in
+# sync and won't silently undercount a missing new extension (substantive-critic O-C).
+required_exts="vector pg_trgm"
+expected=$(printf '%s\n' $required_exts | wc -l | tr -d ' ')
+in_list=$(printf "'%s'," $required_exts | sed 's/,$//')
+exts=$(PGPASSWORD="${NX_DB_ADMIN_PASS}" "$bundle/bin/psql" \
+  -h 127.0.0.1 -p "${PG_PORT}" -U "${NX_DB_ADMIN_USER}" -d nexus -tAc \
+  "SELECT count(*) FROM pg_extension WHERE extname IN (${in_list})")
+echo "==> required extensions present (${required_exts}): ${exts}/${expected}"
+[ "${exts:-0}" -eq "$expected" ] || { echo "FAIL: expected ${required_exts} installed, found ${exts}"; exit 1; }
+
+echo "LIQUIBASE-AGAINST-BUNDLE SMOKE PASS (${applied} changesets, vector+pg_trgm verified)"

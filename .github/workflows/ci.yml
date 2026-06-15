@@ -117,9 +117,9 @@ jobs:
     # pre-authorized Strategy B as the CA-3-failure fallback. See RF-157-9 /
     # T2 nexus_rdr/157-CA3-FINDING-zonky-reduced-insufficient.
     #
-    # Both linux targets run live (nexus-xqk5r closed aarch64). mac-arm64
-    # (nexus-0ixqc) is still deferred — it needs a darwin test variant
-    # (vector.dylib / dyld / otool minos floor, not GLIBC).
+    # Both linux targets run live (nexus-xqk5r closed aarch64). mac-arm64 runs
+    # live in the separate ca3-pgvector-bundle-macos job below (nexus-0ixqc) — it
+    # needs a darwin variant (vector.dylib / dyld / otool minos floor, not GLIBC).
     name: CA-3 live (PG from source + pgvector, ${{ matrix.target.arch }})
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 30
@@ -153,7 +153,12 @@ jobs:
       # required status check always reports), but the build/test/smoke steps run
       # only when the assemble surface changed — avoiding a ~10min PG build on
       # every unrelated PR. nexus-vwvv5.6 follow-up.
-      - uses: dorny/paths-filter@v3
+      # SHA-pinned (not @v3): this filter's `ca3` output gates whether EVERY
+      # build/test step in a REQUIRED check runs. A floating tag that was
+      # compromised to always emit ca3='false' would skip the PG build + tests
+      # while the job still reports green — the exact vacuous gate the
+      # always-run-job pattern exists to prevent. de90cc6 == v3.0.2.
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
         id: changes
         with:
           filters: |
@@ -164,6 +169,14 @@ jobs:
               - 'scripts/liquibase_bundle_smoke.sh'
               - '.github/workflows/ci.yml'
               - 'service/src/main/resources/db/changelog/**'
+              # A dep bump can change test collection / the Python env the CA-3
+              # tests depend on without touching any path above; gate on the
+              # lockfile + manifest so such a change re-runs the gate instead of
+              # passing vacuously green (substantive-critic S1). Deliberate cost:
+              # every dep-bump PR now pays the ~10min PG-from-source build x3 arches
+              # — accepted as the price of a non-vacuous gate (substantive-critic O-A).
+              - 'uv.lock'
+              - 'pyproject.toml'
 
       - uses: astral-sh/setup-uv@v5
         if: steps.changes.outputs.ca3 == 'true'
@@ -290,7 +303,12 @@ jobs:
       # Path-gate the expensive native PG build (same rationale as the linux CA-3
       # job): the job always runs so the required check reports, but the build/test
       # run only when the assemble surface changed.
-      - uses: dorny/paths-filter@v3
+      # SHA-pinned (not @v3): this filter's `ca3` output gates whether EVERY
+      # build/test step in a REQUIRED check runs. A floating tag that was
+      # compromised to always emit ca3='false' would skip the PG build + tests
+      # while the job still reports green — the exact vacuous gate the
+      # always-run-job pattern exists to prevent. de90cc6 == v3.0.2.
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
         id: changes
         with:
           filters: |
@@ -301,12 +319,31 @@ jobs:
               - 'scripts/liquibase_bundle_smoke.sh'
               - '.github/workflows/ci.yml'
               - 'service/src/main/resources/db/changelog/**'
+              # A dep bump can change test collection / the Python env the CA-3
+              # tests depend on without touching any path above; gate on the
+              # lockfile + manifest so such a change re-runs the gate instead of
+              # passing vacuously green (substantive-critic S1). Deliberate cost:
+              # every dep-bump PR now pays the ~10min PG-from-source build x3 arches
+              # — accepted as the price of a non-vacuous gate (substantive-critic O-A).
+              - 'uv.lock'
+              - 'pyproject.toml'
 
       - uses: astral-sh/setup-uv@v5
         if: steps.changes.outputs.ca3 == 'true'
         with:
           python-version: "3.12"
           enable-cache: false
+
+      - name: Cache uv wheel cache
+        # Mirror the linux CA-3 jobs so a gated mac run reuses wheels instead of
+        # re-downloading from scratch (code-review L1).
+        if: steps.changes.outputs.ca3 == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-mac-arm64-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-mac-arm64-3.12-
 
       - name: Install project + dev deps
         if: steps.changes.outputs.ca3 == 'true'
@@ -320,6 +357,14 @@ jobs:
           # provides clang/make. curl/perl/otool are present on the runner.
           brew install -q flex bison >/dev/null
           export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
+          # Make the deployment-target floor EXPLICIT in the compiler flags rather
+          # than relying on apple-clang implicitly honouring MACOSX_DEPLOYMENT_TARGET.
+          # pgvector's Makefile invokes the compiler directly; if a future pgvector
+          # restructures its Makefile and drops the env, the dylib could build with a
+          # higher minos. TestMacosFloor (otool minos <= 13.0) is the backstop, but
+          # passing -mmacosx-version-min through CFLAGS removes the implicit dependency
+          # (code-review M2).
+          export CFLAGS="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}${CFLAGS:+ ${CFLAGS}}"
           bundle="$GITHUB_WORKSPACE/bundle"
           mkdir -p "$bundle"
           cd "$RUNNER_TEMP"
@@ -356,3 +401,57 @@ jobs:
           uv run pytest tests/db/test_pg_provision_ca3_bundle.py \
             -o addopts="" -m integration -q -rs --junit-xml=ca3.xml
           uv run python scripts/assert_ca3_ran.py ca3.xml
+
+  engine-service-build:
+    # S2 (substantive-critic): engine-service-release.yml runs ONLY on
+    # workflow_dispatch + engine-service-v* tags, so PR CI never compiles the
+    # service. A jOOQ-apply, Liquibase, or GraalVM-reachability regression in
+    # service/** can merge to develop unseen until a human cuts a release tag.
+    # This is a PR trip-wire: on service/** changes, regenerate jOOQ sources
+    # (testcontainers codegen, Docker) and run the SAME native build the release
+    # does (-Pnative -Pprebuilt-jooq -DskipTests), minus smoke + publish.
+    #
+    # NOT a required check — a normal job whose expensive steps are path-gated, so
+    # unrelated PRs see a fast no-op. (A required job MUST always run; this one is
+    # advisory, so gating the whole job's work via step `if:` is fine.)
+    #
+    # ADVISORY, NOT BLOCKING (substantive-critic S2, nexus-a5rj8): because it is not
+    # a required check, a RED result here does not block merge — it converts "zero
+    # build visibility on PRs" into "visible but ignorable". Promoting it to a
+    # required check (paying ~40min native build on every service/** PR) is an open
+    # decision tracked in nexus-a5rj8.
+    name: engine-service native build (PR trip-wire)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+        id: changes
+        with:
+          filters: |
+            svc:
+              - 'service/**'
+              - '.github/workflows/ci.yml'
+
+      - name: Set up GraalVM 25.0.3
+        if: steps.changes.outputs.svc == 'true'
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+
+      - name: Generate jOOQ sources (testcontainers codegen, Docker)
+        if: steps.changes.outputs.svc == 'true'
+        working-directory: service
+        run: ./mvnw -q generate-sources
+
+      - name: Build native image (-Pnative -Pprebuilt-jooq, no smoke/publish)
+        if: steps.changes.outputs.svc == 'true'
+        working-directory: service
+        # The same build the release performs, minus smoke + publish — catches
+        # jOOQ-apply and GraalVM-reachability regressions on the PR instead of at
+        # tag-cut. Do NOT `clean`: generate-sources just populated
+        # target/generated-sources/jooq, and -Pprebuilt-jooq compiles it in place.
+        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests package
