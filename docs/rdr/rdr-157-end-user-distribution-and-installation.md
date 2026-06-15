@@ -435,6 +435,50 @@ bloat is unacceptable, fall back to ship-alongside** — the per-OS/arch archive
 zero native-image involvement, guaranteed to work. Either way CA-2 does not gate the
 two-distribution architecture; it only decides single-file-vs-archive packaging.
 
+### RF-157-9 (CA-3, P1 gate, test + CI authored 2026-06-14): Strategy A assemble path — live verification
+
+**Verdict: pending the first green CI run (the test and the `ca3-pgvector-bundle` job
+that drives it are implemented; the VERIFIED/FAILED stamp lands when it runs on the PR).
+Bead `nexus-vwvv5.2`.**
+
+CA-3 is the go/no-go before the P2/P3 build-out: does Strategy A (assemble — zonky PG16
+bundle + CI-built pgvector injected) actually work end to end under nx's own
+provisioner? The verification is two artifacts:
+
+- **`tests/db/test_pg_provision_ca3_bundle.py`** — pure verification over a
+  pre-materialized bundle (so it stays hermetic): discovers the bundle via the
+  production `NEXUS_PG_BIN` seam, asserts the binaries are PG16 and **relocatable**
+  (`pg_config --sharedir` resolves *inside* the extracted tree), that pgvector is
+  injected and passes `check_pgvector_available`, and — the load-bearing assertion —
+  provisions a hermetic cluster from the bundle and runs `CREATE EXTENSION vector`,
+  which forces `dlopen(vector.so)`. Locally (no bundle) every test skips with a reason
+  naming the CI job.
+- **`.github/workflows/ci.yml` job `ca3-pgvector-bundle`** (linux-amd64) — fetches
+  `embedded-postgres-binaries-linux-amd64:16.4.0` from Maven Central, extracts the inner
+  `.txz`, builds pgvector `v0.8.2` against the extracted `pg_config` **inside
+  manylinux2014 (glibc 2.17)**, `make install`s it into the bundle, then runs the test
+  with a junit parse that asserts **0 skipped + the `CREATE EXTENSION` case passed** —
+  so a silent all-skip cannot masquerade as a green gate.
+
+**Glibc floor (the actionable finding).** `check_pgvector_available` only stats
+`vector.control`; it never `dlopen`s. The ABI/glibc failure surfaces at extension LOAD,
+not preflight — so pgvector must be built on the **oldest reasonable glibc baseline**,
+not the CI runner's (ubuntu-latest ≈ glibc 2.39, which would `dlopen`-fail on
+RHEL7/CentOS7/old-Debian). Decision: build in **manylinux2014 (glibc 2.17)** to match
+zonky's broad-compat baseline; the test pins `GLIBC_FLOOR=(2,17)` and `objdump -T`
+asserts **both** `vector.so` and the zonky `postgres` binary require ≤ `GLIBC_2.17`. A
+builder drift that raises the floor fails the test, not the user. **linux-aarch64**
+floor is the same `manylinux2014_aarch64` baseline (glibc 2.17), documented here; its
+**live** run is deferred to the P2/P3 build matrix (needs an arm64 runner) — flagged,
+not silently dropped.
+
+**FAILED path → Strategy B trigger.** If the live job fails (zonky's reduced bundle is
+incomplete, ABI mismatch on the same PG16 minor, pgvector won't build against the
+extracted tree, or `dlopen` fails despite the manylinux build), RDR-157 falls back to
+**Strategy B**: build PostgreSQL 16 from source in the existing native-image CI matrix
+and build pgvector against that (ABI-safe, costlier; Windows MSVC PG-from-source is the
+long pole — release N+1 regardless). CA-1 (RF-157-7) already names B as the fallback.
+
 ### Implications for the draft Decisions — SUPERSEDED by the 2026-06-14 lock
 
 > **Historical research trail. Superseded by `## Decision — UPDATED 2026-06-14` and the

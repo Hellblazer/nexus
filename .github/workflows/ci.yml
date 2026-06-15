@@ -102,3 +102,106 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests/ -q --durations=25
+
+  ca3-pgvector-bundle:
+    # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove Strategy A — a relocatable
+    # zonky PG16 binary bundle + a CI-built pgvector .so injected into it — can be
+    # driven by nx's own provisioner to a cluster that LOADS pgvector. This is the
+    # go/no-go before the P2/P3 build-out; FAILURE means falling back to Strategy B
+    # (build PostgreSQL from source). linux-amd64 only for release N; linux-aarch64
+    # live-run is deferred to the P2/P3 build matrix (needs an arm64 runner).
+    name: CA-3 live (zonky PG16 + pgvector, linux-amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Pinned for determinism. zonky ships relocatable, broad-compat linux-amd64
+      # PG16 binaries; pgvector >= 0.8 is the RDR-155 iterative_scan floor.
+      ZONKY_PG_VERSION: "16.4.0"
+      PGVECTOR_VERSION: "v0.8.2"
+      # manylinux2014 == glibc 2.17 (CentOS 7). Building vector.so here pins its
+      # glibc floor to zonky's broad-compat baseline instead of the runner's glibc
+      # (~2.39), so the binary dlopen-loads on old distros. Must match GLIBC_FLOOR
+      # in tests/db/test_pg_provision_ca3_bundle.py.
+      MANYLINUX_IMAGE: "quay.io/pypa/manylinux2014_x86_64"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Fetch + extract relocatable zonky PG16 bundle
+        run: |
+          set -euo pipefail
+          jar="embedded-postgres-binaries-linux-amd64-${ZONKY_PG_VERSION}.jar"
+          url="https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-linux-amd64/${ZONKY_PG_VERSION}/${jar}"
+          curl -fsSL -o pg.jar "$url"
+          mkdir -p jarx bundle
+          (cd jarx && unzip -q ../pg.jar)
+          # The jar wraps a single postgres-linux-x86_64.txz of the PG tree.
+          tar -xJf jarx/postgres-linux-x86_64.txz -C bundle
+          test -x bundle/bin/initdb
+          echo "NEXUS_CA3_BUNDLE=$PWD/bundle" >> "$GITHUB_ENV"
+          echo "Extracted: $(bundle/bin/initdb --version)"
+
+      - name: Build + inject pgvector (manylinux2014, glibc 2.17)
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${PGVECTOR_VERSION}" \
+            https://github.com/pgvector/pgvector.git pgvector
+          # Build against the EXTRACTED tree's pg_config so make install lands
+          # vector.so in the bundle's pkglibdir and vector.control in its sharedir.
+          # CC=gcc: zonky's Makefile.global may name a compiler absent in the
+          # container; the devtoolset gcc is the portable choice.
+          docker run --rm \
+            -v "$PWD/bundle:/bundle" -v "$PWD/pgvector:/pgvector" \
+            "$MANYLINUX_IMAGE" bash -euo pipefail -c '
+              source /opt/rh/devtoolset-10/enable 2>/dev/null || true
+              cd /pgvector
+              make CC=gcc PG_CONFIG=/bundle/bin/pg_config
+              make CC=gcc PG_CONFIG=/bundle/bin/pg_config install
+            '
+          # pg_config on the host reports the relocated (host) pkglibdir; docker
+          # mounted that same dir, so make install wrote vector.so straight into it.
+          pkglib="$(bundle/bin/pg_config --pkglibdir)"
+          test -f "$pkglib/vector.so" || { ls -la "$pkglib"; exit 1; }
+          echo "Injected: $pkglib/vector.so"
+
+      - name: Run CA-3 live test (asserts it actually ran, not skipped)
+        run: |
+          set -euo pipefail
+          # -o addopts="" clears the repo default `-m 'not integration'` so the
+          # integration-marked CA-3 module is collected.
+          uv run pytest tests/db/test_pg_provision_ca3_bundle.py \
+            -o addopts="" -m integration -q -rs --junit-xml=ca3.xml
+          uv run python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("ca3.xml").getroot()
+          skipped = passed = 0
+          core_ok = False
+          for c in root.iter("testcase"):
+              is_skip = c.find("skipped") is not None
+              is_fail = c.find("failure") is not None or c.find("error") is not None
+              if is_skip:
+                  skipped += 1
+              elif not is_fail:
+                  passed += 1
+              if c.get("name") == "test_create_extension_vector_loads" and not is_skip and not is_fail:
+                  core_ok = True
+          assert skipped == 0, f"{skipped} CA-3 test(s) skipped — bundle not materialized; gate is vacuous"
+          assert core_ok, "core CREATE EXTENSION vector test did not pass — Strategy A unproven"
+          print(f"CA-3 PASS: {passed} passed, 0 skipped, pgvector load + glibc floor verified")
+          PY
