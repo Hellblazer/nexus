@@ -31,14 +31,17 @@ uv run python -c "from nexus.db.pg_provision import provision; provision()"
 set -a; . "$cfg/pg_credentials"; set +a
 echo "==> provisioned: port=${PG_PORT} admin=${NX_DB_ADMIN_USER}"
 
-changelog_dir="$PWD/service/src/main/resources/db/changelog"
-test -f "$changelog_dir/db.changelog-master.xml" \
-  || { echo "FAIL: master changelog not found at $changelog_dir"; exit 1; }
+# Mount the resources ROOT (not just db/changelog), because the master
+# changelog's <include file="db/changelog/...">s are relative to the classpath
+# root. searchPath=/cl + changeLogFile=db/changelog/db.changelog-master.xml.
+resources_dir="$PWD/service/src/main/resources"
+test -f "$resources_dir/db/changelog/db.changelog-master.xml" \
+  || { echo "FAIL: master changelog not found under $resources_dir"; exit 1; }
 
 echo "==> applying master changelog via liquibase CLI ($LIQUIBASE_IMAGE)"
-docker run --rm --network host -v "$changelog_dir:/cl:ro" "$LIQUIBASE_IMAGE" \
+docker run --rm --network host -v "$resources_dir:/cl:ro" "$LIQUIBASE_IMAGE" \
   --searchPath=/cl \
-  --changeLogFile=db.changelog-master.xml \
+  --changeLogFile=db/changelog/db.changelog-master.xml \
   --url="jdbc:postgresql://127.0.0.1:${PG_PORT}/nexus" \
   --username="${NX_DB_ADMIN_USER}" \
   --password="${NX_DB_ADMIN_PASS}" \
