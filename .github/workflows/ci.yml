@@ -102,3 +102,143 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests/ -q --durations=25
+
+  ca3-pgvector-bundle:
+    # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a
+    # COMPLETE PG16 tree + pgvector — can be driven by nx's own provisioner to a
+    # cluster that LOADS pgvector, with the binary's glibc floor pinned. This is
+    # the go/no-go before the P2/P3 build-out.
+    #
+    # Strategy B (build from source), NOT zonky. CA-3 empirically falsified the
+    # original "zonky reduced bundle + inject pgvector" plan: zonky's
+    # embedded-postgres-binaries reduced bundle ships ONLY initdb/pg_ctl/postgres
+    # — no pg_config/psql/createdb/headers — so pgvector cannot be built against
+    # it AND nx's provisioner (which needs psql+createdb) cannot use it. The RDR
+    # pre-authorized Strategy B as the CA-3-failure fallback. See RF-157-9 /
+    # T2 nexus_rdr/157-CA3-FINDING-zonky-reduced-insufficient.
+    #
+    # linux-amd64 only for release N; linux-aarch64 (nexus-xqk5r) and mac-arm64
+    # (nexus-0ixqc) live runs are deferred to P3 with named beads.
+    name: CA-3 live (PG16 from source + pgvector, linux-amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Pinned for determinism. pgvector >= 0.8 is the RDR-155 iterative_scan floor.
+      PG_VERSION: "16.4"
+      PGVECTOR_VERSION: "v0.8.2"
+      # manylinux_2_28 == glibc 2.28 (AlmaLinux 8 baseline: RHEL8 / Debian 10 /
+      # Ubuntu 18.10+). Building the tree + vector.so here pins their glibc floor
+      # to a broadly compatible baseline instead of the runner's glibc (~2.39), so
+      # the binaries dlopen-load on older distros. We deliberately do NOT use
+      # manylinux2014 (glibc 2.17 / CentOS 7): CentOS 7 is EOL and its in-container
+      # yum mirrors are dead. glibc 2.28 is a defensible 2026 floor and the image
+      # ships a working gcc/make. Must match GLIBC_FLOOR in
+      # tests/db/test_pg_provision_ca3_bundle.py.
+      MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Build complete PG16 + pgvector from source (Strategy B, glibc 2.28)
+        run: |
+          set -euo pipefail
+          # The bundle is installed at its build prefix and mounted at the SAME
+          # path inside the container, so pg_config's compiled-in paths agree with
+          # the host (no relocation mismatch for the gate). True extract-to-
+          # arbitrary-dir relocation — where pg_config's build-prefix-boundness
+          # makes path resolution a real concern — is a P3 bundle-build problem
+          # (nexus-vwvv5.9), not this gate.
+          bundle="$GITHUB_WORKSPACE/bundle"
+          mkdir -p "$bundle"
+          # set -x traces every command; no pipefail (cmd|head SIGPIPEs -> 141).
+          docker run --rm \
+            -e PG_VERSION -e PGVECTOR_VERSION -e bundle="$bundle" \
+            -v "$bundle:$bundle" \
+            "$MANYLINUX_IMAGE" /bin/bash -c '
+              set -eux
+              echo "=== ENTER container ==="
+              head -2 /etc/os-release; ldd --version | head -1
+              # PostgreSQL build prereqs not in the base toolchain image.
+              dnf -y -q install flex bison perl >/dev/null
+              cd /tmp
+              curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" -o pg.tar.bz2
+              tar -xjf pg.tar.bz2
+              cd "postgresql-${PG_VERSION}"
+              # Minimal deps: a functional server + client + headers + pgxs.
+              # The dropped options are safe for the nexus embedded, loopback-only PG
+              # and these same flags carry forward to the P3 bundle build:
+              #   --without-icu      : provision runs `initdb --no-locale` (C
+              #                        collation), so ICU is unused; keeps the
+              #                        binary off an ICU .so absent on old distros.
+              #   --without-readline : psql is driven headlessly (subprocess).
+              #   --without-zlib     : no wire compression / pg_dump -Fc needed.
+              #   --without-openssl  : loopback-only; EXPLICIT so an image that
+              #                        later ships openssl-devel cannot silently
+              #                        link libssl and break startup on the runner.
+              ./configure --prefix="${bundle}" \
+                --without-icu --without-zlib --without-readline --without-openssl >/dev/null
+              make -s -j"$(nproc)" >/dev/null
+              make -s install >/dev/null
+              # pgvector against the freshly-built pg_config (same major + glibc).
+              cd /tmp
+              git clone --depth 1 --branch "${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
+              cd pgvector
+              make -s PG_CONFIG="${bundle}/bin/pg_config"
+              make -s PG_CONFIG="${bundle}/bin/pg_config" install
+            '
+          # Sanity on the host: complete tool set + injected extension present.
+          for b in initdb pg_ctl postgres psql createdb pg_config; do
+            test -x "$bundle/bin/$b" || { echo "missing $bundle/bin/$b"; exit 1; }
+          done
+          pkglib="$("$bundle/bin/pg_config" --pkglibdir)"
+          sharedir="$("$bundle/bin/pg_config" --sharedir)"
+          test -f "$pkglib/vector.so" || { ls -la "$pkglib"; exit 1; }
+          test -f "$sharedir/extension/vector.control" || { ls -la "$sharedir/extension"; exit 1; }
+          echo "NEXUS_CA3_BUNDLE=$bundle" >> "$GITHUB_ENV"
+          echo "Built: $("$bundle/bin/initdb" --version); vector.so at $pkglib"
+
+      - name: Run CA-3 live test (asserts it actually ran, not skipped)
+        run: |
+          set -euo pipefail
+          # -o addopts="" clears the repo default `-m 'not integration'` so the
+          # integration-marked CA-3 module is collected.
+          uv run pytest tests/db/test_pg_provision_ca3_bundle.py \
+            -o addopts="" -m integration -q -rs --junit-xml=ca3.xml
+          uv run python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("ca3.xml").getroot()
+          skipped = passed = 0
+          core_ok = False
+          for c in root.iter("testcase"):
+              is_skip = c.find("skipped") is not None
+              is_fail = c.find("failure") is not None or c.find("error") is not None
+              if is_skip:
+                  skipped += 1
+              elif not is_fail:
+                  passed += 1
+              # endswith, not ==: future pytest may qualify @name with the class.
+              if c.get("name", "").endswith("test_create_extension_vector_loads") and not is_skip and not is_fail:
+                  core_ok = True
+          assert skipped == 0, f"{skipped} CA-3 test(s) skipped — bundle not materialized; gate is vacuous"
+          assert core_ok, (
+              "core CREATE EXTENSION vector test did not pass — assemble path unproven "
+              "(or the testcase @name no longer ends with 'test_create_extension_vector_loads')"
+          )
+          print(f"CA-3 PASS: {passed} passed, 0 skipped, pgvector load + glibc floor verified")
+          PY

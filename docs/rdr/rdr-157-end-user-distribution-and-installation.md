@@ -204,9 +204,18 @@ is release N+1.
    sha256 manifest for release N; evaluate Sigstore/cosign signing for N+1 (the binary
    runs with DB credentials and is opaque to static inspection — see Open Q4).
 4. **P3 — embedded-PG bundle + the two distributions.**
-   - **Bundle build (per OS/arch):** Strategy A (zonky PG16 + CI-built pgvector injected
-     into the bundle `pkglibdir`/`sharedir`), or Strategy B if CA-3 forced it. Smoke:
-     extract → `initdb` → `CREATE EXTENSION vector` in CI.
+   - **Bundle build (per OS/arch):** **Strategy B — build PostgreSQL 16 from source**
+     (locked by CA-3 / RF-157-9: Strategy A's zonky reduced bundle is incomplete —
+     no pg_config/psql/createdb/headers). Build pgvector against the from-source
+     `pg_config`. Smoke: `initdb` → `CREATE EXTENSION vector` in CI (proven for
+     linux-amd64 by the P1 gate). **Two carry-forwards from the gate:** (a) the
+     `--without-icu/zlib/readline/openssl` configure flags (safe for nx's loopback,
+     `--no-locale` PG — rationale in the CI job); (b) **relocation: `pg_config`
+     reports build-time absolute paths, so `pg_provision` must be made
+     relocation-aware (resolve sharedir/pkglibdir relative to the binary, not via
+     `pg_config`) BEFORE the bundle is extracted to a user-local path** — tracked as
+     a code bead (`nexus-1e205`), distinct from this packaging step. A
+     Liquibase-against-bundle-PG smoke completes the local-distro proof.
    - **Embed vs ship-alongside (CA-2):** spike `-H:IncludeResources` of the bundle +
      first-run self-extract; measure build cost + binary bloat + extract latency. Fall
      back to ship-alongside (`{binary, pg-<plat>.txz}` archive) if unacceptable.
@@ -434,6 +443,74 @@ bloat is unacceptable, fall back to ship-alongside** — the per-OS/arch archive
 `{native binary, pg-<plat>.txz}` and extracts on first run. Identical runtime path,
 zero native-image involvement, guaranteed to work. Either way CA-2 does not gate the
 two-distribution architecture; it only decides single-file-vs-archive packaging.
+
+### RF-157-9 (CA-3, P1 gate, VERIFIED 2026-06-15): Strategy A falsified → Strategy B proven
+
+**Verdict: Strategy A (zonky reduced bundle + inject pgvector) FAILED on completeness;
+Strategy B (build PG16 from source) VERIFIED green in CI. Bead `nexus-vwvv5.2`.**
+
+CA-3 is the go/no-go before the P2/P3 build-out: can a complete PG16 tree + pgvector be
+driven by nx's own provisioner to a cluster that loads pgvector, with the glibc floor
+pinned?
+
+**Strategy A empirically falsified.** The original plan was "zonky
+`embedded-postgres-binaries-linux-amd64` + CI-built pgvector injected." Extracting that
+bundle (16.4.0) shows it ships **only** `initdb`, `pg_ctl`, `postgres` — no `pg_config`,
+`psql`, `createdb`, headers, or pgxs (zonky's reduced bundle is by design for embedded
+test servers). Two independent blockers: (1) pgvector cannot be built against it (no
+pg_config/headers/pgxs); (2) nx's own `discover_pg_binaries` requires `psql`+`createdb`,
+so the provisioner can't even use it. This is the CA-1 "reduced bundle completeness"
+risk, confirmed fatal. There is no "full" zonky artifact.
+
+**Strategy B verified.** The CA-3 gate was pivoted (owner-approved) to build a complete
+PG16 from source. Two artifacts:
+- **`tests/db/test_pg_provision_ca3_bundle.py`** — pure verification over a
+  pre-materialized bundle via the production `NEXUS_PG_BIN` seam: PG16 binaries present
+  and complete (`all_present` incl. psql+createdb), `pg_config --sharedir` resolves inside
+  the bundle, pgvector present + `check_pgvector_available` passes, the pinned glibc
+  floor holds, and — the load-bearing assertion — provisions a hermetic cluster and runs
+  `CREATE EXTENSION vector` (forces `dlopen(vector.so)`) + a vector distance op. Skips
+  loudly (named CI job) when no bundle.
+- **`.github/workflows/ci.yml` job `ca3-pgvector-bundle`** (linux-amd64) — inside a
+  **manylinux_2_28 (glibc 2.28)** container: `./configure --prefix=<bundle> && make &&
+  make install` PostgreSQL **16.4** from source (a complete tree), build pgvector
+  `v0.8.2` against that pg_config, then run the test with a junit parse asserting
+  **0 skipped + `CREATE EXTENSION` passed** (no silent all-skip). **Green 2026-06-15:
+  11 passed, 0 skipped, glibc floor verified.**
+
+**Glibc floor.** `check_pgvector_available` only stats `vector.control`; it never
+`dlopen`s. The ABI/glibc failure surfaces at extension LOAD, not preflight — so the tree
++ pgvector must be built on the **oldest reasonable glibc baseline**, not the CI runner's
+(ubuntu-latest ≈ glibc 2.39, which would `dlopen`-fail on older distros). Decision: build
+in **manylinux_2_28 (glibc 2.28** = RHEL8 / Debian 10 / Ubuntu 18.10+, a defensible 2026
+floor; manylinux2014 / glibc 2.17 was rejected — CentOS 7 is EOL with dead in-container
+repos). The test pins `GLIBC_FLOOR=(2,28)` and `objdump -T` asserts **both** `vector.so`
+and the `postgres` binary require ≤ `GLIBC_2.28`. A builder drift that raises the floor
+fails the test, not the user.
+
+**Relocation caveat (P3).** The gate builds the bundle at, and consumes it from, the same
+prefix, so `pg_config`'s compiled-in paths agree with the runtime location. True
+extract-to-arbitrary-dir relocation is **not** proven here: `pg_config` reports build-time
+absolute paths, so any nx path resolution via `pg_config` (e.g. `check_pgvector_available`'s
+sharedir lookup) is not relocation-safe. The local-distribution bundle build must either
+install at a fixed runtime prefix or resolve paths relative to the binary (PostgreSQL's
+`find_my_exec`). Tracked as P3 work (`nexus-vwvv5.9`).
+
+**Per-target coverage (release N = linux-amd64 + linux-aarch64 + mac-arm64 per CA-1).**
+The P1 gate covers **linux-amd64** live. The other two release-N targets are deferred to
+P3 with **named beads** so the deferral is traceable, not silent:
+- **linux-aarch64** (`nexus-xqk5r`): same `manylinux_2_28_aarch64` baseline (glibc 2.28,
+  `GLIBC_FLOOR` applies); runs the same from-source build on an arm64 runner.
+- **mac-arm64** (`nexus-0ixqc`): darwin-specific unknowns the linux gate does NOT
+  exercise — pgvector produces a `.dylib` (not `.so`), the loader is `dyld` (no glibc
+  floor; pin the macOS deployment-target/`minos` via `otool`/`vtool` instead), and
+  code-signing/SIP can reject an unsigned `.dylib` at load. Needs its own darwin test
+  variant on a `macos-14` runner. P3 must not start the mac-arm64 bundle build assuming
+  the linux result transfers.
+
+**Consequence for P3.** The embedded-PG bundle is built from PostgreSQL source per
+OS/arch (not repackaged from zonky). Windows MSVC PG-from-source remains the long pole
+(release N+1).
 
 ### Implications for the draft Decisions — SUPERSEDED by the 2026-06-14 lock
 
