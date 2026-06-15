@@ -117,11 +117,20 @@ jobs:
     # pre-authorized Strategy B as the CA-3-failure fallback. See RF-157-9 /
     # T2 nexus_rdr/157-CA3-FINDING-zonky-reduced-insufficient.
     #
-    # linux-amd64 only for release N; linux-aarch64 (nexus-xqk5r) and mac-arm64
-    # (nexus-0ixqc) live runs are deferred to P3 with named beads.
-    name: CA-3 live (PG from source + pgvector, linux-amd64)
-    runs-on: ubuntu-latest
+    # Both linux targets run live (nexus-xqk5r closed aarch64). mac-arm64
+    # (nexus-0ixqc) is still deferred — it needs a darwin test variant
+    # (vector.dylib / dyld / otool minos floor, not GLIBC).
+    name: CA-3 live (PG from source + pgvector, ${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # arch values are the check-context suffixes; keep stable (branch
+          # protection requires "...(linux-amd64)" and "...(linux-arm64)").
+          - { arch: linux-amd64, runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64" }
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64" }
     env:
       # Pinned for determinism. pgvector >= 0.8 is the RDR-155 iterative_scan floor
       # (a pgvector version, not a PG major). nexus is aligned on PG17 to match the
@@ -129,14 +138,13 @@ jobs:
       PG_VERSION: "17.5"
       PGVECTOR_VERSION: "v0.8.2"
       # manylinux_2_28 == glibc 2.28 (AlmaLinux 8 baseline: RHEL8 / Debian 10 /
-      # Ubuntu 18.10+). Building the tree + vector.so here pins their glibc floor
-      # to a broadly compatible baseline instead of the runner's glibc (~2.39), so
-      # the binaries dlopen-load on older distros. We deliberately do NOT use
-      # manylinux2014 (glibc 2.17 / CentOS 7): CentOS 7 is EOL and its in-container
-      # yum mirrors are dead. glibc 2.28 is a defensible 2026 floor and the image
-      # ships a working gcc/make. Must match GLIBC_FLOOR in
-      # tests/db/test_pg_provision_ca3_bundle.py.
-      MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
+      # Ubuntu 18.10+), per-arch image from the matrix. Building the tree +
+      # vector.so here pins their glibc floor to a broadly compatible baseline
+      # instead of the runner's glibc (~2.39), so the binaries dlopen-load on older
+      # distros. We deliberately do NOT use manylinux2014 (glibc 2.17 / CentOS 7):
+      # CentOS 7 is EOL and its in-container yum mirrors are dead. glibc 2.28 is a
+      # defensible 2026 floor. GLIBC_FLOOR=(2,28) in the test holds for both arches.
+      MANYLINUX_IMAGE: ${{ matrix.target.image }}
 
     steps:
       - uses: actions/checkout@v4
@@ -150,9 +158,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/setup-uv-cache
-          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          key: uv-${{ runner.os }}-${{ matrix.target.arch }}-3.12-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            uv-${{ runner.os }}-3.12-
+            uv-${{ runner.os }}-${{ matrix.target.arch }}-3.12-
 
       - name: Install project + dev deps
         run: uv sync --group dev
@@ -222,25 +230,74 @@ jobs:
           # integration-marked CA-3 module is collected.
           uv run pytest tests/db/test_pg_provision_ca3_bundle.py \
             -o addopts="" -m integration -q -rs --junit-xml=ca3.xml
-          uv run python - <<'PY'
-          import xml.etree.ElementTree as ET
-          root = ET.parse("ca3.xml").getroot()
-          skipped = passed = 0
-          core_ok = False
-          for c in root.iter("testcase"):
-              is_skip = c.find("skipped") is not None
-              is_fail = c.find("failure") is not None or c.find("error") is not None
-              if is_skip:
-                  skipped += 1
-              elif not is_fail:
-                  passed += 1
-              # endswith, not ==: future pytest may qualify @name with the class.
-              if c.get("name", "").endswith("test_create_extension_vector_loads") and not is_skip and not is_fail:
-                  core_ok = True
-          assert skipped == 0, f"{skipped} CA-3 test(s) skipped — bundle not materialized; gate is vacuous"
-          assert core_ok, (
-              "core CREATE EXTENSION vector test did not pass — assemble path unproven "
-              "(or the testcase @name no longer ends with 'test_create_extension_vector_loads')"
-          )
-          print(f"CA-3 PASS: {passed} passed, 0 skipped, pgvector load + glibc floor verified")
-          PY
+          # Non-vacuity gate: platform-conditional tests (GLIBC on mac / minos on
+          # linux) skip legitimately; only a bundle-absence skip is a vacuous gate.
+          uv run python scripts/assert_ca3_ran.py ca3.xml
+
+  ca3-pgvector-bundle-macos:
+    # RDR-157 CA-3 for mac-arm64 (bead nexus-0ixqc). Same assemble gate as the
+    # linux job, but macOS has no manylinux container: build PG + pgvector
+    # NATIVELY on a macos-14 (arm64) runner. pgvector produces vector.dylib; the
+    # loader is dyld, so the floor is the Mach-O LC_BUILD_VERSION minos
+    # (MACOSX_DEPLOYMENT_TARGET), not GLIBC — asserted by TestMacosFloor.
+    name: CA-3 live (PG from source + pgvector, mac-arm64)
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.2"
+      # The dyld analog of the glibc floor: build back-deployable to macOS 13
+      # (Ventura). Must match MACOS_MIN_FLOOR in the test.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Build complete PG + pgvector from source (native, deployment-target 13.0)
+        run: |
+          set -euo pipefail
+          # PG's build needs a newer flex/bison than macOS ships; Xcode CLT
+          # provides clang/make. curl/perl/otool are present on the runner.
+          brew install -q flex bison >/dev/null
+          export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
+          bundle="$GITHUB_WORKSPACE/bundle"
+          mkdir -p "$bundle"
+          cd "$RUNNER_TEMP"
+          curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" -o pg.tar.bz2
+          tar -xjf pg.tar.bz2
+          cd "postgresql-${PG_VERSION}"
+          # Same lean flags as the linux gate (safe for nexus's loopback PG).
+          ./configure --prefix="${bundle}" \
+            --without-icu --without-zlib --without-readline --without-openssl >/dev/null
+          make -s -j"$(sysctl -n hw.ncpu)" >/dev/null
+          make -s install >/dev/null
+          cd "$RUNNER_TEMP"
+          git clone --depth 1 --branch "${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
+          cd pgvector
+          make -s PG_CONFIG="${bundle}/bin/pg_config"
+          make -s PG_CONFIG="${bundle}/bin/pg_config" install
+          # Sanity: complete tool set + injected dylib + control.
+          for b in initdb pg_ctl postgres psql createdb pg_config; do
+            test -x "$bundle/bin/$b" || { echo "missing $bundle/bin/$b"; exit 1; }
+          done
+          pkglib="$("$bundle/bin/pg_config" --pkglibdir)"
+          sharedir="$("$bundle/bin/pg_config" --sharedir)"
+          test -f "$pkglib/vector.dylib" || { ls -la "$pkglib"; exit 1; }
+          test -f "$sharedir/extension/vector.control" || { ls -la "$sharedir/extension"; exit 1; }
+          echo "NEXUS_CA3_BUNDLE=$bundle" >> "$GITHUB_ENV"
+          echo "Built: $("$bundle/bin/initdb" --version); vector.dylib at $pkglib"
+
+      - name: Run CA-3 live test (asserts it actually ran, not skipped)
+        run: |
+          set -euo pipefail
+          uv run pytest tests/db/test_pg_provision_ca3_bundle.py \
+            -o addopts="" -m integration -q -rs --junit-xml=ca3.xml
+          uv run python scripts/assert_ca3_ran.py ca3.xml
