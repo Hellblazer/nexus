@@ -234,6 +234,15 @@ jobs:
           # linux) skip legitimately; only a bundle-absence skip is a vacuous gate.
           uv run python scripts/assert_ca3_ran.py ca3.xml
 
+      - name: Liquibase-against-bundle smoke (nexus-ywts8, linux-amd64 only)
+        # Applies the service's full SQL changelog to the lean bundle PG, proving
+        # the ICU-less / --no-locale build handles the real schema. linux-only:
+        # uses `docker --network host` to reach the provisioned PG. One arch is
+        # enough — the schema is arch-independent; this validates the lean
+        # configure flags, not the platform.
+        if: matrix.target.arch == 'linux-amd64'
+        run: bash scripts/liquibase_bundle_smoke.sh
+
   ca3-pgvector-bundle-macos:
     # RDR-157 CA-3 for mac-arm64 (bead nexus-0ixqc). Same assemble gate as the
     # linux job, but macOS has no manylinux container: build PG + pgvector
