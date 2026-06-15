@@ -204,10 +204,53 @@ def discover_pg_binaries() -> PgBinaries:
 # ── Port helpers ───────────────────────────────────────────────────────────────
 
 
+def _pg_config_value(pg_config: Path, flag: str) -> str | None:
+    """Return a ``pg_config <flag>`` value, or None when indeterminate."""
+    try:
+        result = subprocess.run(
+            [str(pg_config), flag],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log.warning("pgvector_preflight_indeterminate", error=str(exc), flag=flag)
+        return None
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        _log.warning("pgvector_preflight_indeterminate", returncode=result.returncode, flag=flag)
+        return None
+    return value
+
+
+def _candidate_sharedirs(pg_config: Path, bin_dir: Path, sharedir: str) -> list[Path]:
+    """Sharedir locations to probe for ``extension/vector.control``.
+
+    ``pg_config`` reports the **build-time absolute** sharedir. For a relocatable
+    bundle extracted to a new prefix (RDR-157 local distribution) that path does
+    not exist on the target — so we ALSO re-anchor the sharedir on the actual
+    ``bin_dir`` using its offset from ``pg_config``'s reported ``--bindir``
+    (PostgreSQL keeps the internal tree layout stable across relocation, which is
+    how the server itself resolves paths via ``find_my_exec``). Both the reported
+    and the re-anchored paths are probed; non-relocated installs collapse to one.
+    """
+    candidates = [Path(sharedir)]
+    bindir = _pg_config_value(pg_config, "--bindir")
+    if bindir:
+        try:
+            rel = os.path.relpath(sharedir, bindir)
+            reanchored = (bin_dir / rel).resolve()
+            if reanchored not in candidates:
+                candidates.append(reanchored)
+        except ValueError:
+            pass  # e.g. different drives on Windows — skip re-anchoring
+    return candidates
+
+
 def check_pgvector_available(bins: PgBinaries) -> None:
     """Fail loud when pgvector is not installed for THIS PostgreSQL.
 
-    Checks for ``<sharedir>/extension/vector.control`` via ``pg_config``.
+    Checks for ``<sharedir>/extension/vector.control``. ``pg_config`` reports the
+    build-time sharedir, which is wrong for a relocated bundle, so we also probe
+    the binary-relative (re-anchored) sharedir — see :func:`_candidate_sharedirs`.
     Indeterminate (pg_config missing/failing) does NOT block — provisioning
     will fail loud at CREATE EXTENSION anyway; this gate exists to move the
     common failure earlier, not to add a new way to be wrong.
@@ -216,24 +259,13 @@ def check_pgvector_available(bins: PgBinaries) -> None:
     if not pg_config.is_file():
         _log.warning("pgvector_preflight_no_pg_config", bin_dir=str(bins.bin_dir))
         return
-    try:
-        result = subprocess.run(
-            [str(pg_config), "--sharedir"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _log.warning("pgvector_preflight_indeterminate", error=str(exc))
+    sharedir = _pg_config_value(pg_config, "--sharedir")
+    if sharedir is None:
         return
-    sharedir = result.stdout.strip()
-    if result.returncode != 0 or not sharedir:
-        _log.warning(
-            "pgvector_preflight_indeterminate",
-            returncode=result.returncode,
-        )
+    candidates = _candidate_sharedirs(pg_config, bins.bin_dir, sharedir)
+    if any((c / "extension" / "vector.control").is_file() for c in candidates):
         return
-    control = Path(sharedir) / "extension" / "vector.control"
-    if control.is_file():
-        return
+    control = candidates[0] / "extension" / "vector.control"
     raise PgVectorNotInstalledError(
         f"The pgvector extension is not installed for the PostgreSQL at "
         f"{bins.bin_dir} (no {control}).\n"
