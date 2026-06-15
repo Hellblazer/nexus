@@ -205,6 +205,10 @@ jobs:
                 --without-icu --without-zlib --without-readline --without-openssl >/dev/null
               make -s -j"$(nproc)" >/dev/null
               make -s install >/dev/null
+              # Contrib extensions the schema needs (pg_trgm, RDR-155). Core
+              # `make install` does NOT build contrib — the bundle would be
+              # missing pg_trgm and the full migration would fail.
+              make -s -C contrib/pg_trgm install >/dev/null
               # pgvector against the freshly-built pg_config (same major + glibc).
               cd /tmp
               git clone --depth 1 --branch "${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
@@ -233,6 +237,15 @@ jobs:
           # Non-vacuity gate: platform-conditional tests (GLIBC on mac / minos on
           # linux) skip legitimately; only a bundle-absence skip is a vacuous gate.
           uv run python scripts/assert_ca3_ran.py ca3.xml
+
+      - name: Liquibase-against-bundle smoke (nexus-ywts8, linux-amd64 only)
+        # Applies the service's full SQL changelog to the lean bundle PG, proving
+        # the ICU-less / --no-locale build handles the real schema. linux-only:
+        # uses `docker --network host` to reach the provisioned PG. One arch is
+        # enough — the schema is arch-independent; this validates the lean
+        # configure flags, not the platform.
+        if: matrix.target.arch == 'linux-amd64'
+        run: bash scripts/liquibase_bundle_smoke.sh
 
   ca3-pgvector-bundle-macos:
     # RDR-157 CA-3 for mac-arm64 (bead nexus-0ixqc). Same assemble gate as the
@@ -279,6 +292,8 @@ jobs:
             --without-icu --without-zlib --without-readline --without-openssl >/dev/null
           make -s -j"$(sysctl -n hw.ncpu)" >/dev/null
           make -s install >/dev/null
+          # Contrib extensions the schema needs (pg_trgm, RDR-155).
+          make -s -C contrib/pg_trgm install >/dev/null
           cd "$RUNNER_TEMP"
           git clone --depth 1 --branch "${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
           cd pgvector
