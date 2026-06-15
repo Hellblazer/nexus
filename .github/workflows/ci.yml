@@ -118,11 +118,15 @@ jobs:
       # PG16 binaries; pgvector >= 0.8 is the RDR-155 iterative_scan floor.
       ZONKY_PG_VERSION: "16.4.0"
       PGVECTOR_VERSION: "v0.8.2"
-      # manylinux2014 == glibc 2.17 (CentOS 7). Building vector.so here pins its
-      # glibc floor to zonky's broad-compat baseline instead of the runner's glibc
-      # (~2.39), so the binary dlopen-loads on old distros. Must match GLIBC_FLOOR
+      # manylinux_2_28 == glibc 2.28 (AlmaLinux 8 baseline: RHEL8 / Debian 10 /
+      # Ubuntu 18.10+). Building vector.so here pins its glibc floor to a broadly
+      # compatible baseline instead of the runner's glibc (~2.39), so the binary
+      # dlopen-loads on older distros. We deliberately do NOT use manylinux2014
+      # (glibc 2.17 / CentOS 7): CentOS 7 is EOL and its in-container yum mirrors
+      # are dead, so a toolchain top-up is impossible. glibc 2.28 is a defensible
+      # 2026 floor and the image ships a working gcc/make. Must match GLIBC_FLOOR
       # in tests/db/test_pg_provision_ca3_bundle.py.
-      MANYLINUX_IMAGE: "quay.io/pypa/manylinux2014_x86_64"
+      MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
 
     steps:
       - uses: actions/checkout@v4
@@ -164,25 +168,22 @@ jobs:
             https://github.com/pgvector/pgvector.git pgvector
           # Build against the EXTRACTED tree's pg_config so make install lands
           # vector.so in the bundle's pkglibdir and vector.control in its sharedir.
-          # manylinux2014 (CentOS 7, glibc 2.17) ships gcc via a toolset whose
-          # enable-script path drifts across image revisions; rather than guess,
-          # install the base toolchain explicitly (yum) and fail loud if the
-          # compiler still isn't resolvable. pgvector is plain C — CentOS 7's
-          # gcc is sufficient and keeps the glibc 2.17 floor.
+          # manylinux_2_28 ships a working gcc/make toolchain on PATH (gcc-toolset);
+          # no package top-up needed. set -x traces every command so a build break
+          # is diagnosable from the log rather than a bare exit code. pgvector is
+          # plain C and PGXS picks the compiler from pg_config's Makefile.global.
           docker run --rm \
+            -w /pgvector \
             -v "$PWD/bundle:/bundle" -v "$PWD/pgvector:/pgvector" \
-            "$MANYLINUX_IMAGE" bash -euo pipefail -c '
-              yum -y -q install make gcc >/dev/null 2>&1 || true
-              # Prefer a devtoolset/gcc-toolset gcc if one is enabled; otherwise
-              # the yum-installed system gcc. Glob the enable script so we are not
-              # pinned to a single toolset version.
-              for f in /opt/rh/*/enable; do source "$f" 2>/dev/null || true; done
-              command -v make >/dev/null || { echo "FATAL: make not found in container"; exit 127; }
-              command -v gcc  >/dev/null || { echo "FATAL: gcc not found in container";  exit 127; }
-              echo "toolchain: $(gcc --version | head -1); $(make --version | head -1); glibc $(ldd --version | head -1)"
-              cd /pgvector
-              make CC=gcc PG_CONFIG=/bundle/bin/pg_config
-              make CC=gcc PG_CONFIG=/bundle/bin/pg_config install
+            "$MANYLINUX_IMAGE" /bin/bash -c '
+              set -euxo pipefail
+              echo "=== ENTER container ==="
+              head -2 /etc/os-release
+              command -v gcc make
+              gcc --version | head -1
+              ldd --version | head -1
+              make PG_CONFIG=/bundle/bin/pg_config
+              make PG_CONFIG=/bundle/bin/pg_config install
             '
           # pg_config on the host reports the relocated (host) pkglibdir; docker
           # mounted that same dir, so make install wrote vector.so straight into it.

@@ -19,7 +19,7 @@ performs the side-effecting work:
   1. fetch ``io.zonky.test.postgres:embedded-postgres-binaries-linux-amd64:16.x``
      from Maven Central and extract its inner ``postgres-linux-x86_64.txz``,
   2. build ``pgvector`` against the extracted tree's ``pg_config`` inside a
-     **manylinux2014 (glibc 2.17)** container so the ``.so``'s glibc floor
+     **manylinux_2_28 (glibc 2.28)** container so the ``.so``'s glibc floor
      matches zonky's broad-compat baseline rather than the runner's glibc,
   3. ``make install`` the extension into the extracted tree,
   4. export ``NEXUS_CA3_BUNDLE=<extracted-root>`` and run this module with
@@ -62,12 +62,13 @@ from nexus.db.pg_provision import (
 
 # ── Pinned glibc floor per linux target (RF-157-9) ─────────────────────────────
 #
-# manylinux2014 == glibc 2.17 (CentOS 7 baseline). The CI job builds vector.so
-# in that image precisely so this floor holds. linux-aarch64's live run is
-# deferred to the P2/P3 build matrix (needs an arm64 runner); its floor is the
-# same manylinux2014_aarch64 baseline (glibc 2.17) and is asserted here as the
-# documented target value, exercised live when the aarch64 bundle job lands.
-GLIBC_FLOOR: tuple[int, int] = (2, 17)
+# manylinux_2_28 == glibc 2.28 (AlmaLinux 8 baseline: RHEL8 / Debian 10 /
+# Ubuntu 18.10+). The CI job builds vector.so in that image precisely so this
+# floor holds. (manylinux2014 / glibc 2.17 was rejected: CentOS 7 is EOL with
+# dead in-container repos.) linux-aarch64's live run is deferred to the P2/P3
+# build matrix (needs an arm64 runner); its floor is the same
+# manylinux_2_28_aarch64 baseline (glibc 2.28), exercised live when that job lands.
+GLIBC_FLOOR: tuple[int, int] = (2, 28)
 
 
 # ── Bundle discovery / skip gate ───────────────────────────────────────────────
@@ -236,7 +237,7 @@ class TestGlibcFloor:
     def test_vector_so_within_pinned_floor(self, bins):
         """vector.so must not require a glibc newer than the pinned per-target
         floor. A builder that silently raises the requirement (e.g. building on
-        ubuntu-latest instead of manylinux2014) fails HERE, not at a user's
+        ubuntu-latest instead of manylinux_2_28) fails HERE, not at a user's
         dlopen on an older distro."""
         pkglibdir = Path(_pg_config(bins, "--pkglibdir"))
         required = _max_glibc_requirement(pkglibdir / "vector.so")
@@ -251,7 +252,7 @@ class TestGlibcFloor:
         assert required <= GLIBC_FLOOR, (
             f"vector.so requires GLIBC_{required[0]}.{required[1]} > pinned floor "
             f"GLIBC_{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1]}; build pgvector on "
-            "manylinux2014 (glibc 2.17) to match zonky's baseline (RF-157-9)"
+            "manylinux_2_28 (glibc 2.28) to match a broad-compat baseline (RF-157-9)"
         )
 
     def test_postgres_binary_within_pinned_floor(self, bins):
