@@ -56,6 +56,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,15 @@ from nexus.db.pg_provision import (
 # manylinux_2_28 baseline (glibc 2.28) on both. mac-arm64 needs a darwin variant
 # (dyld/otool minos, not GLIBC) — nexus-0ixqc.
 GLIBC_FLOOR: tuple[int, int] = (2, 28)
+
+# Per-OS shared-object name + floor mechanism. On macOS pgvector builds
+# ``vector.dylib`` and the loader is ``dyld`` (no GLIBC); the analog of the
+# glibc floor is the Mach-O ``LC_BUILD_VERSION`` minos — the binary won't load
+# on a macOS older than its deployment target. The macOS CI job pins
+# MACOSX_DEPLOYMENT_TARGET to this value (nexus-0ixqc).
+_IS_DARWIN = sys.platform == "darwin"
+_VECTOR_LIB = "vector.dylib" if _IS_DARWIN else "vector.so"
+MACOS_MIN_FLOOR: tuple[int, int] = (13, 0)  # macOS 13 Ventura — a defensible 2026 floor
 
 
 # ── Bundle discovery / skip gate ───────────────────────────────────────────────
@@ -161,6 +171,23 @@ def _max_glibc_requirement(so_path: Path) -> tuple[int, int]:
     return max(versions) if versions else (0, 0)
 
 
+def _macos_minos(macho_path: Path) -> tuple[int, int]:
+    """macOS deployment-target (LC_BUILD_VERSION minos) of a Mach-O object.
+
+    Parses ``otool -l`` for the ``minos X.Y`` line. Returns (0, 0) when no
+    LC_BUILD_VERSION/LC_VERSION_MIN load command is present.
+    """
+    out = subprocess.run(
+        ["otool", "-l", str(macho_path)],
+        capture_output=True, text=True, check=True,
+    )
+    versions: list[tuple[int, int]] = []
+    for m in re.finditer(r"minos (\d+)\.(\d+)", out.stdout):
+        versions.append((int(m.group(1)), int(m.group(2))))
+    # The binary's effective floor is the HIGHEST minos across its load commands.
+    return max(versions) if versions else (0, 0)
+
+
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
@@ -234,8 +261,8 @@ class TestPgvectorInjected:
 
     def test_shared_object_present(self, bins):
         pkglibdir = Path(_pg_config(bins, "--pkglibdir"))
-        assert (pkglibdir / "vector.so").is_file(), (
-            f"vector.so not injected into {pkglibdir}"
+        assert (pkglibdir / _VECTOR_LIB).is_file(), (
+            f"{_VECTOR_LIB} not injected into {pkglibdir}"
         )
 
     def test_preflight_passes(self, bins):
@@ -246,8 +273,9 @@ class TestPgvectorInjected:
             pytest.fail(f"preflight wrongly reported pgvector missing: {exc}")
 
 
-# ── Test 3: glibc floor pinned (RF-157-9 regression guard) ──────────────────────
+# ── Test 3: glibc floor pinned (RF-157-9 regression guard; linux only) ──────────
 
+@pytest.mark.skipif(_IS_DARWIN, reason="GLIBC floor is linux-only; macOS uses TestMacosFloor")
 class TestGlibcFloor:
     def test_vector_so_within_pinned_floor(self, bins):
         """vector.so must not require a glibc newer than the pinned per-target
@@ -292,6 +320,44 @@ class TestGlibcFloor:
             f"postgres binary requires GLIBC_{required[0]}.{required[1]} > "
             f"pinned floor GLIBC_{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1]} — the build "
             "baseline drifted above the documented target (RF-157-9)"
+        )
+
+
+# ── Test 3 (macOS): deployment-target floor pinned (dyld analog of the glibc floor) ─
+
+@pytest.mark.skipif(not _IS_DARWIN, reason="macOS minos floor; linux uses TestGlibcFloor")
+class TestMacosFloor:
+    def test_vector_dylib_within_minos_floor(self, bins):
+        """vector.dylib must not require a macOS newer than the pinned deployment
+        target. A build that silently raises minos (e.g. forgetting
+        MACOSX_DEPLOYMENT_TARGET, so it targets the runner's OS) fails HERE, not
+        at a user's dyld load on an older macOS."""
+        pkglibdir = Path(_pg_config(bins, "--pkglibdir"))
+        minos = _macos_minos(pkglibdir / _VECTOR_LIB)
+        assert minos > (0, 0), (
+            f"no LC_BUILD_VERSION minos in {pkglibdir / _VECTOR_LIB} — otool found "
+            "no deployment target; the floor check would be vacuous"
+        )
+        assert minos <= MACOS_MIN_FLOOR, (
+            f"vector.dylib requires macOS {minos[0]}.{minos[1]} > pinned floor "
+            f"{MACOS_MIN_FLOOR[0]}.{MACOS_MIN_FLOOR[1]}; set "
+            f"MACOSX_DEPLOYMENT_TARGET={MACOS_MIN_FLOOR[0]}.{MACOS_MIN_FLOOR[1]} "
+            "when building (nexus-0ixqc)"
+        )
+
+    def test_postgres_binary_within_minos_floor(self, bins):
+        """The server binary's own deployment-target floor must also hold — the
+        effective install floor is max(postgres, vector.dylib)."""
+        postgres = bins.bin_dir / "postgres"
+        minos = _macos_minos(postgres)
+        assert minos > (0, 0), (
+            f"no LC_BUILD_VERSION minos in {postgres} — otool found no deployment "
+            "target; the floor check would be vacuous"
+        )
+        assert minos <= MACOS_MIN_FLOOR, (
+            f"postgres binary requires macOS {minos[0]}.{minos[1]} > pinned floor "
+            f"{MACOS_MIN_FLOOR[0]}.{MACOS_MIN_FLOOR[1]} — the build's "
+            "MACOSX_DEPLOYMENT_TARGET drifted above the documented target (nexus-0ixqc)"
         )
 
 
