@@ -12,6 +12,8 @@ cloud credentials and ``is_local_mode()`` defaults to True there
 """
 from __future__ import annotations
 
+import os
+
 from pathlib import Path
 
 import pytest
@@ -598,3 +600,77 @@ def _wrap(fn):
         fn()
 
     return _cmd
+
+
+# ── RDR-157 P3.4: first-run bundled-PG selection (bead nexus-vwvv5.13) ──────────
+
+
+def test_select_bundled_pg_sets_env_from_bundle(tmp_path, monkeypatch, make_pg_bundle_txz) -> None:
+    from nexus.commands.init import _select_bundled_pg
+    from nexus.db import pg_bundle
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    archive = make_pg_bundle_txz(tmp_path, "nexus-pg-x.txz")
+    monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(archive))
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+
+    bin_dir = _select_bundled_pg(config_dir)
+
+    assert bin_dir is not None
+    assert os.environ["NEXUS_PG_BIN"] == str(bin_dir)
+    assert str(bin_dir).startswith(str(config_dir))
+
+
+def test_select_bundled_pg_none_without_bundle(tmp_path, monkeypatch) -> None:
+    from nexus.commands.init import _select_bundled_pg
+    from nexus.db import pg_bundle
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    monkeypatch.delenv(pg_bundle.BUNDLE_ENV, raising=False)
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+
+    # Deterministic: explicit empty search dir (no reliance on what sits next to
+    # the test interpreter).
+    result = _select_bundled_pg(config_dir, search_dirs=[tmp_path / "empty"])
+    assert result is None
+    assert not os.environ.get("NEXUS_PG_BIN")
+
+
+def test_select_bundled_pg_respects_existing_env_override(tmp_path, monkeypatch, make_pg_bundle_txz) -> None:
+    from nexus.commands.init import _select_bundled_pg
+    from nexus.db import pg_bundle
+
+    # Operator already pointed NEXUS_PG_BIN somewhere -> bundle not consulted.
+    monkeypatch.setenv("NEXUS_PG_BIN", "/opt/my/pg/bin")
+    archive = make_pg_bundle_txz(tmp_path, "nexus-pg-y.txz")
+    monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(archive))
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+
+    assert _select_bundled_pg(config_dir) is None
+    assert os.environ["NEXUS_PG_BIN"] == "/opt/my/pg/bin"
+
+
+def test_provision_step_aborts_loud_on_broken_bundle(tmp_path, monkeypatch) -> None:
+    """M2: a set-but-missing NEXUS_PG_BUNDLE must SystemExit(1), never reach provision."""
+    import nexus.commands.init as init_mod
+    from nexus.db import pg_bundle
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(tmp_path / "does-not-exist.txz"))
+    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path / "cfg")
+
+    called = {"provision": False}
+
+    def _fail_if_called(*a, **k):  # provision must NOT run when the bundle is broken
+        called["provision"] = True
+        raise AssertionError("provision() must not be reached on a broken bundle")
+
+    monkeypatch.setattr("nexus.db.pg_provision.provision", _fail_if_called)
+
+    with pytest.raises(SystemExit) as exc:
+        init_mod._provision_postgres_step()
+    assert exc.value.code == 1
+    assert called["provision"] is False

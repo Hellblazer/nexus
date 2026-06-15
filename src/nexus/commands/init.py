@@ -285,6 +285,32 @@ def _warmup_bge() -> None:
 # ── P5 (A) Postgres provisioning ──────────────────────────────────────────────
 
 
+def _select_bundled_pg(
+    config_dir: Path, *, search_dirs: list[Path] | None = None
+) -> Path | None:
+    """First-run: extract the ship-alongside PG bundle and select it for provisioning.
+
+    RDR-157 P3.4 (bead nexus-vwvv5.13). When a ``nexus-pg-<platform>.txz`` is
+    locatable (``NEXUS_PG_BUNDLE`` or next to the binary), extract it once under the
+    config dir and point ``NEXUS_PG_BIN`` at it so ``provision`` discovers the
+    bundle's PostgreSQL ahead of any host install. Returns the selected ``bin/`` dir,
+    or ``None`` when no bundle is present (dev / host-PG mode) — in which case
+    discovery proceeds unchanged.
+
+    An explicit pre-existing ``NEXUS_PG_BIN`` wins (operator override / tests): the
+    bundle is not consulted, so a deliberately pointed PG is never overridden.
+    """
+    if os.environ.get("NEXUS_PG_BIN", "").strip():
+        return None
+    from nexus.db.pg_bundle import ensure_pg_bundle
+
+    bin_dir = ensure_pg_bundle(config_dir, search_dirs=search_dirs)
+    if bin_dir is not None:
+        os.environ["NEXUS_PG_BIN"] = str(bin_dir)
+        _log.info("pg_bundle_selected", bin_dir=str(bin_dir))
+    return bin_dir
+
+
 def _provision_postgres_step() -> None:
     """Provision (or verify) the nx-managed local Postgres cluster.
 
@@ -299,6 +325,16 @@ def _provision_postgres_step() -> None:
 
     config_dir = _config.nexus_config_dir()
     click.echo("\nProvisioning local Postgres cluster for the service backend …")
+
+    # First-run local distribution: extract + select the ship-alongside PG bundle
+    # (no-op when none is shipped — host PG is then discovered as before).
+    try:
+        if _select_bundled_pg(config_dir) is not None:
+            click.echo("  Using bundled PostgreSQL (extracted on first run).")
+    except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
+        _log.error("pg_bundle_extract_failed", error=str(exc))
+        click.echo(f"\nBundled PostgreSQL extraction failed: {exc}", err=True)
+        raise SystemExit(1)
 
     try:
         result = provision(config_dir)

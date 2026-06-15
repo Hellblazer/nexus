@@ -180,6 +180,22 @@ def discover_pg_binaries() -> PgBinaries:
             + _install_hint()
         )
 
+    # 1.5. Already-extracted ship-alongside PG bundle under the config dir
+    #      (RDR-157 P3.4, bead nexus-vwvv5.13). This makes EVERY caller —
+    #      not just the one-shot `nx init` process that extracted it — discover
+    #      the bundle on a local-distribution machine, in particular the
+    #      storage-service daemon's PG-restart path (`_ensure_pg_running`).
+    #      Lazy import avoids a pg_bundle <-> pg_provision import cycle.
+    from nexus.config import nexus_config_dir  # local import to avoid circular
+    from nexus.db.pg_bundle import extracted_bin_dir
+
+    bundle_bin = extracted_bin_dir(nexus_config_dir())
+    if bundle_bin is not None:
+        bins = PgBinaries.from_dir(bundle_bin)
+        if bins.all_present():
+            _log.debug("pg_binaries_from_bundle", bin_dir=str(bundle_bin))
+            return bins
+
     # 2. Fixed candidate directories.
     for d in _CANDIDATE_DIRS:
         bins = PgBinaries.from_dir(d)
