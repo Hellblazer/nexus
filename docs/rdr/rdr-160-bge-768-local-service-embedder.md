@@ -61,11 +61,14 @@ re-embed for every future local user.
    on raw input — no `"Represent this sentence…"` prefix). MiniLM used
    mean-pooling; getting bge's pooling/normalization wrong silently produces
    incomparable vectors, so the parity gate is mandatory, not optional.
-4. **The CLI fetches, the service reads.** `nx init --service` warms the bge ONNX
-   model into a stable, Java-loadable path (the CLI is the network-facing side;
-   the service only reads the cached file — consistent with the topology
-   invariant that the local Java service makes no outbound HTTP). This reuses the
-   warmup mechanism prototyped under `nexus-jrrve`.
+4. **The CLI fetches, the service reads.** `nx init --service` provisions a
+   **standard (un-fused) bge ONNX** + tokenizer into a stable, Java-loadable path
+   (the CLI is the network-facing side; the service only reads the file —
+   consistent with the topology invariant that the local Java service makes no
+   outbound HTTP). NOTE (CA-1/RF-160-1): this is NOT fastembed's cached
+   `model_optimized.onnx` (that fails to load on onnxruntime-java); the service
+   needs its own standard export. The CLI-fetches/service-reads *mechanism* from
+   `nexus-jrrve` is reused; the model artifact differs.
 5. **MiniLM-384 stays only as the T1 Python chromadb default** (untouched there).
    It is removed from the Java service's local T3 path.
 6. **Greenfield: no migration.** Folds `nexus-jrrve` as a symptom.
@@ -93,19 +96,29 @@ re-embed for every future local user.
    expert + substantive-critic) of the parity gate and router rewire; close
    `nexus-jrrve` as subsumed.
 
-## Critical Assumptions (P0 — verify in research before P1)
+## Critical Assumptions (P0)
 
-- **CA-1 (parity feasibility).** onnxruntime-java + DJL `HuggingFaceTokenizer` can
-  load the bge-base-en-v1.5 ONNX model fastembed uses, and CLS-pool + L2-normalize
-  in Java reproduces fastembed's vectors within tolerance. (Highest risk; the
-  whole RDR rests on it.)
-- **CA-2 (preprocessing identity).** fastembed bge-base-en-v1.5 applies CLS pooling
-  + normalize and NO instruction prefix by default. Partially verified
-  (`local_ef` passes raw input); confirm fastembed's internal pooling/normalization
-  so the Java side matches exactly.
-- **CA-3 (model availability).** The bge ONNX + `tokenizer.json` land at a stable
-  path the Java service can load (fastembed cache layout, or a fetch/copy step in
-  the warmup). Determines the P3 distribution mechanism.
+- **CA-1 (parity feasibility) — VERIFIED 2026-06-15 (RF-160-1).** onnxruntime-java
+  1.20.0 + DJL `HuggingFaceTokenizer` 0.30.0 reproduce fastembed bge-768 at **min
+  cosine 0.99999229** across 5 texts (incl. empty + multiline/unicode), well above
+  the 0.9999 gate. Proven by `Bge768ParitySpikeTest`. **Caveat (load-bearing):**
+  fastembed ships qdrant's `model_optimized.onnx`, which uses the MS contrib fused
+  op `SkipLayerNormalization` that onnxruntime-java 1.20.0 **cannot run**
+  (`ORT_RUNTIME_EXCEPTION … Missing Input … LayerNorm.weight`). The service MUST use
+  a **standard (un-fused) bge ONNX export** (core ops only). A standard export
+  (Xenova/bge-base-en-v1.5 `model.onnx`) matches fastembed's optimized output at
+  cosine 0.999992 in Python (fusion is numerically equivalent), and the Java spike
+  on that standard model passes.
+- **CA-2 (preprocessing identity) — VERIFIED.** Recipe is **CLS pooling (token 0) +
+  L2-normalize**, 512-token truncation, `token_type_ids` all-zero, **no prefix**.
+  Python raw-onnxruntime: CLS+norm = cosine 1.000000 vs fastembed; mean-pool = 0.825
+  (confirms it is NOT MiniLM-style mean-pooling).
+- **CA-3 (model source/distribution) — REFINED, OPEN.** The service needs a STANDARD
+  bge ONNX (NOT fastembed's optimized cache file — that one fails to load). It
+  cannot simply point at `~/.local/share/nexus/fastembed_cache`. Decide the source
+  and form: ship/fetch a standard `model.onnx` (fp32 ≈ 436 MB) or a standard
+  **quantized** variant (smaller; verify parity if used). Determines the P3
+  warmup/distribution mechanism and the local-distribution payload size.
 
 ## Alternatives Considered
 
