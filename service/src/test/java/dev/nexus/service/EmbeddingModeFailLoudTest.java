@@ -125,9 +125,11 @@ class EmbeddingModeFailLoudTest {
 
     @Test
     void unknownModelSegment_refusedInBothModes() {
-        // bge-base-en-v15-768 is a known RDR-103 token (chunks_768 exists) but
-        // no embedder is wired for it — must refuse, not ONNX-embed into a
-        // 768-dim table.
+        // Mechanism test: the routers built here are MiniLM-wired (onnx), so a
+        // bge-base-en-v15-768 segment has no embedder and must REFUSE, not
+        // ONNX-embed into a 768-dim table. (Production local mode now wires bge
+        // per RDR-160 P2 — see EmbedderRouterBge768Test for that path, where it
+        // is the minilm-l6-v2-384 segment that is refused.)
         EmbedderRouter local = new EmbedderRouter(onnx, "document");
         EmbedderRouter cloud = new EmbedderRouter(onnx, "dummy-key", "document");
         assertThatThrownBy(() -> local.resolveEmbedderStrict(
