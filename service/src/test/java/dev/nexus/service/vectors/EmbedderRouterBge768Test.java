@@ -2,8 +2,11 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -80,5 +83,31 @@ class EmbedderRouterBge768Test {
         // Legacy non-conformant names use prefix routing → the local embedder.
         Embedder e = router.resolveEmbedderStrict("knowledge__test");
         assertThat(e.modelToken()).isEqualTo("bge-base-en-v15-768");
+    }
+
+    /**
+     * RDR-160 P4.3 (bead nexus-x9cjh) — the production embed-dispatch composition
+     * with the REAL Bge768Embedder (not FakeBge): provisioned model → router
+     * resolves a bge collection to it → embedDoubleForCollection yields a 768-dim
+     * vector. Closes the fetch→load→embed→768 chain that the fake cannot.
+     * Skipped (loud) when the 416MB model is absent; the live HTTP layer over this
+     * is model-agnostic and covered by VectorHandlerEmbeddingModeTest.
+     */
+    @Test
+    void realBge_embedForCollection_yields768Dim() {
+        String modelPath = System.getProperty("nexus.bge.modelPath", Bge768Embedder.DEFAULT_MODEL_PATH);
+        String tokPath = System.getProperty("nexus.bge.tokenizerPath", Bge768Embedder.DEFAULT_TOKENIZER_PATH);
+        Assumptions.assumeTrue(
+                Files.isRegularFile(Path.of(modelPath)) && Files.isRegularFile(Path.of(tokPath)),
+                "bge-768 model absent — provision via `nx init --service` (RDR-160 P3)");
+
+        try (Bge768Embedder bge = new Bge768Embedder(modelPath, tokPath)) {
+            EmbedderRouter real = new EmbedderRouter(bge, "document");
+            // a conformant bge collection (→ chunks_768) routes to the real embedder
+            List<double[]> vecs = real.embedDoubleForCollection(
+                    "knowledge__nexus__bge-base-en-v15-768__v1", List.of("fresh --service boot smoke"));
+            assertThat(vecs).hasSize(1);
+            assertThat(vecs.get(0)).hasSize(768);
+        }
     }
 }
