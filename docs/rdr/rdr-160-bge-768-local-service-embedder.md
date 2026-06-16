@@ -170,8 +170,12 @@ forced re-embed for every future local user.
 - `chunks_384` is unused on the local path; MiniLM-384 survives only as the T1
   Python default.
 - Any future need for a 384-dim service path (e.g. a deliberately-cheap tier) would
-  re-introduce a model token + parity gate — the P1 generalization should leave
-  that seam clean.
+  re-introduce a model token + parity gate. P1 implements `Bge768Embedder` as a
+  distinct class (Open Q1 resolved), leaving the MiniLM `OnnxEmbedder` pristine; the
+  `EmbedderRouter` generalization that makes the seam fully clean (widening its
+  local-mode field/constructor from the concrete `OnnxEmbedder` to the `Embedder`
+  interface) is **P2** work, done when bge-768 is wired into `modelEmbedders`. P1
+  does not touch the router.
 
 ## Open Questions
 

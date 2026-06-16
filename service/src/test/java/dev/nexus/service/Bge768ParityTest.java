@@ -50,7 +50,7 @@ class Bge768ParityTest {
     /** Min cosine across all fixture texts. CA-1 measured 0.99999229 headroom. */
     private static final double PARITY_MIN_COSINE = 0.9999;
     private static final int    EXPECTED_DIM       = 768;
-    private static final int    EXPECTED_FIXTURE_TEXTS = 5;
+    private static final int    EXPECTED_FIXTURE_TEXTS = 6;
 
     private List<String>  texts;
     private List<float[]> referenceVectors;

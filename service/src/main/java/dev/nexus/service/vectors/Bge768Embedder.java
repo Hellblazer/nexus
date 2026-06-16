@@ -89,23 +89,31 @@ public final class Bge768Embedder implements Embedder {
      * @param tokenizerPath path to {@code tokenizer.json}
      */
     public Bge768Embedder(String modelPath, String tokenizerPath) {
-        try {
-            this.ortEnv = OrtEnvironment.getEnvironment();
+        this.ortEnv = OrtEnvironment.getEnvironment();
 
-            var sessionOpts = new OrtSession.SessionOptions();
-            this.session = ortEnv.createSession(modelPath, sessionOpts);
-            this.wantsTokenTypeIds = session.getInputNames().contains("token_type_ids");
+        OrtSession          sess = null;
+        HuggingFaceTokenizer tok  = null;
+        // SessionOptions is AutoCloseable; it holds no state once createSession returns.
+        try (var sessionOpts = new OrtSession.SessionOptions()) {
+            sess = ortEnv.createSession(modelPath, sessionOpts);
 
-            this.tokenizer = HuggingFaceTokenizer.builder()
+            tok = HuggingFaceTokenizer.builder()
                     .optTokenizerPath(Path.of(tokenizerPath))
                     .optMaxLength(MAX_SEQ_LEN)
                     .optTruncation(true)
                     .optPadding(false)   // we pad in embedBatch() so the batch tensor is rectangular
                     .build();
 
+            this.session = sess;
+            this.tokenizer = tok;
+            this.wantsTokenTypeIds = sess.getInputNames().contains("token_type_ids");
+
             log.info("event=bge768_embedder_loaded model={} tokenizer={} token_type_ids={}",
                     modelPath, tokenizerPath, wantsTokenTypeIds);
         } catch (Exception e) {
+            // Don't leak the native OrtSession handle if tokenizer construction fails.
+            if (tok != null)  { try { tok.close();  } catch (Exception ignored) {} }
+            if (sess != null) { try { sess.close(); } catch (Exception ignored) {} }
             throw new RuntimeException("Failed to initialise Bge768Embedder: " + e.getMessage(), e);
         }
     }
@@ -147,7 +155,6 @@ public final class Bge768Embedder implements Embedder {
 
         long[] inputIdsFlat      = new long[batchSize * maxLen];
         long[] attentionMaskFlat = new long[batchSize * maxLen];
-        long[] tokenTypeIdsFlat  = new long[batchSize * maxLen]; // all zeros
 
         for (int i = 0; i < batchSize; i++) {
             long[] ids  = encodings[i].getIds();
@@ -175,6 +182,7 @@ public final class Bge768Embedder implements Embedder {
             inputs.put("input_ids", inputIdsTensor);
             inputs.put("attention_mask", attentionMaskTensor);
             if (wantsTokenTypeIds) {
+                long[] tokenTypeIdsFlat = new long[batchSize * maxLen]; // all zeros
                 tokenTypeIdsTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(tokenTypeIdsFlat), shape);
                 inputs.put("token_type_ids", tokenTypeIdsTensor);
             }
@@ -206,7 +214,10 @@ public final class Bge768Embedder implements Embedder {
      *
      * @param hidden shape [seq, 768] — one row per token; row 0 is {@code [CLS]}
      */
-    private static float[] clsPoolNormalize(float[][] hidden) {
+    // Package-private (not private) so the pooling math has a model-free unit-test
+    // guard on CI, where the 416MB ONNX is absent and the parity gate is skipped
+    // (RDR-160 P1 review S1). See Bge768EmbedderMathTest.
+    static float[] clsPoolNormalize(float[][] hidden) {
         float[] cls = hidden[0].clone();   // [CLS] token
 
         double sumSq = 0.0;
