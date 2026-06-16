@@ -251,10 +251,12 @@ jobs:
 
       - name: Install cosign (release tag only)
         # nexus-1odsm: keyless Sigstore signing. Only needed on the publish path.
-        # sigstore-official installer; version-tag pinned like the actions/* above
-        # (dorny/paths-filter is the one SHA-pinned third-party action).
+        # SHA-pinned (not @v3.7.0): this is the tool that installs the release
+        # signing primitive, so a floating tag is the supply-chain hole this whole
+        # bead exists to close — same reasoning as the SHA-pinned graalvm action
+        # above. SHA backs v3.7.0.
         if: startsWith(github.ref, 'refs/tags/engine-service-v')
-        uses: sigstore/cosign-installer@v3.7.0
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409  # v3.7.0
 
       - name: Sign release asset (cosign keyless, release tag only)
         # nexus-1odsm: the native binary runs with DB credentials in the conexus
@@ -318,12 +320,11 @@ jobs:
             "  curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json -o \$MODEL_DIR/tokenizer.json" \
             "" \
             "Provenance: each asset carries a sha256 AND a keyless cosign/Sigstore" \
-            "signature bundle (<asset>.cosign.bundle). Verify before use with" \
-            "'cosign verify-blob <asset> --bundle <asset>.cosign.bundle', passing" \
-            "--certificate-oidc-issuer https://token.actions.githubusercontent.com and" \
-            "--certificate-identity-regexp matching this workflow at an" \
-            "engine-service-v* tag ref. conexus deploy verifies this bundle before" \
-            "docker run (see ECR_PUSH.md)." \
+            "signature bundle (<asset>.cosign.bundle). Verify before use:" \
+            "  cosign verify-blob <asset> --bundle <asset>.cosign.bundle \\" \
+            "    --certificate-oidc-issuer https://token.actions.githubusercontent.com \\" \
+            "    --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@refs/tags/engine-service-v.*'" \
+            "conexus deploy verifies this bundle before docker run (see ECR_PUSH.md)." \
             > notes.md
           # Matrix-safe: create the release once (whichever arch job wins), then
           # each job uploads its OWN arch assets (--clobber for re-runs). Use

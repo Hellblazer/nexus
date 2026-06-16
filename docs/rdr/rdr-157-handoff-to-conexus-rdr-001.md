@@ -31,7 +31,7 @@ the consumer.**
   cosign verify-blob <asset> --bundle <asset>.cosign.bundle \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
     --certificate-identity-regexp \
-      'https://github.com/<owner>/nexus/.github/workflows/engine-service-release.yml@refs/tags/engine-service-v.*'
+      'https://github.com/Hellblazer/nexus/.github/workflows/engine-service-release.yml@refs/tags/engine-service-v.*'
   ```
   conexus deploy/engine must run this check before `docker run` (track in
   conexus `ECR_PUSH.md`, which already verifies the pushed image's signature).
@@ -151,4 +151,8 @@ engine-side blocker and hands the install/upgrade primitives above to RDR-001.
 - Native-binary live E2E through the Python init path (the native spawn is
   unit-covered with a mocked `Popen`; the Java `/health` is covered by the
   engine-service-release CI smoke).
-- `cosign`/Sigstore signing of the published binary (bead `nexus-1odsm`, N+1).
+- `cosign`/Sigstore signing of the published binary: the **publisher half**
+  (sign + self-verify + publish the bundle) is delivered (`nexus-1odsm`,
+  primitive 1 above). The **consumer half** (conexus deploy verifies the bundle
+  before `docker run`, documented in conexus `ECR_PUSH.md`) is the remaining
+  RDR-001 consumer task, tracked by a child bead under `nexus-w5v8j`.
