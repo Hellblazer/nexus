@@ -24,6 +24,10 @@ _JAVA_EMBEDDER = (
 def bge_dir(tmp_path, monkeypatch):
     d = tmp_path / "onnx"
     monkeypatch.setenv("NX_SERVICE_BGE_DIR", str(d))
+    # Lower the size floors so tiny fake payloads count as complete; the real
+    # floors (200 MB / 100 KB) are exercised by test_truncated_model_triggers_refetch.
+    monkeypatch.setattr(sbm, "_MIN_MODEL_BYTES", 1)
+    monkeypatch.setattr(sbm, "_MIN_TOKENIZER_BYTES", 1)
     return d
 
 
@@ -81,6 +85,35 @@ def test_offline_failure_is_loud_no_silent_fallback(bge_dir):
     assert "model_optimized.onnx" in msg  # warns off the wrong (fused) artifact
     assert str(bge_dir / "model.onnx") in msg
     # nothing half-written left claiming success
+    assert sbm.service_bge_model_present() is False
+
+
+def test_truncated_model_triggers_refetch(bge_dir, monkeypatch):
+    # A too-small model.onnx (truncated download, or a quantized/wrong substitute)
+    # must NOT satisfy idempotency — it is re-fetched, not silently served.
+    monkeypatch.setattr(sbm, "_MIN_MODEL_BYTES", 100)
+    bge_dir.mkdir(parents=True)
+    (bge_dir / "model.onnx").write_bytes(b"x" * 10)        # below floor
+    (bge_dir / "tokenizer.json").write_bytes(b"y")
+    assert sbm.service_bge_model_present() is False
+
+    dl = _fake_downloader({"onnx/model.onnx": b"x" * 200, "tokenizer.json": b"TOK"})
+    sbm.fetch_service_bge_onnx(downloader=dl)
+    assert (bge_dir / "model.onnx").read_bytes() == b"x" * 200  # re-fetched
+
+
+def test_partial_failure_cleans_orphan_model(bge_dir):
+    # Model download succeeds, tokenizer download fails: the lone model.onnx must
+    # be removed so the dir does not read as a (partial) install.
+    def _dl(url, dest):
+        if url.endswith("onnx/model.onnx"):
+            dest.write_bytes(b"MODEL")
+            return
+        raise OSError("connection reset")
+
+    with pytest.raises(RuntimeError):
+        sbm.fetch_service_bge_onnx(downloader=_dl)
+    assert not (bge_dir / "model.onnx").exists()
     assert sbm.service_bge_model_present() is False
 
 

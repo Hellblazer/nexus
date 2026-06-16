@@ -46,8 +46,27 @@ _ENV_DIR = "NX_SERVICE_BGE_DIR"
 #: quantized model — that variant is rejected by the parity gate, RDR-160 CA-3).
 SERVICE_BGE_DOWNLOAD_HINT = "~416 MB"
 
-#: ``(url, dest)`` → streams ``url`` into ``dest``. Injectable for tests.
+#: Sanity floors for "this file is the real artifact, not a truncated download or
+#: the ~140 MB quantized/fused substitute". The standard fp32 model is ~416 MB;
+#: 200 MB cleanly separates it from a quantized (~140 MB) or truncated file. A
+#: file below the floor is treated as ABSENT, so idempotency never locks in a
+#: corrupt artifact that would later fail the service's ONNX load opaquely
+#: (RDR-160 CA-1/CA-3). Module-level so tests can lower them.
+_MIN_MODEL_BYTES = 200_000_000
+_MIN_TOKENIZER_BYTES = 100_000
+
+#: ``(url, dest)`` → streams ``url`` into ``dest``. MUST be atomic: write to a
+#: temp path and rename on success, leaving no partial file at ``dest`` on
+#: failure (the default :func:`_httpx_stream` does this). Injectable for tests.
 Downloader = Callable[[str, Path], None]
+
+
+def _file_ok(path: Path, min_bytes: int) -> bool:
+    """True when *path* exists and is at least *min_bytes* (not truncated)."""
+    try:
+        return path.is_file() and path.stat().st_size >= min_bytes
+    except OSError:
+        return False
 
 
 def service_bge_model_dir() -> Path:
@@ -63,22 +82,40 @@ def service_bge_model_dir() -> Path:
 
 
 def service_bge_model_present() -> bool:
-    """True when both the model and tokenizer are already at the Java-read path."""
+    """True when a COMPLETE model + tokenizer are at the Java-read path.
+
+    Applies the size floors, so a truncated download or a wrong (e.g. quantized)
+    substitute reads as not-present and is re-fetched rather than silently served.
+    """
     d = service_bge_model_dir()
-    return (d / MODEL_FILENAME).is_file() and (d / TOKENIZER_FILENAME).is_file()
+    return _file_ok(d / MODEL_FILENAME, _MIN_MODEL_BYTES) and _file_ok(
+        d / TOKENIZER_FILENAME, _MIN_TOKENIZER_BYTES
+    )
 
 
 def _httpx_stream(url: str, dest: Path) -> None:
-    """Stream ``url`` to ``dest`` atomically (``.part`` then rename)."""
+    """Stream ``url`` to ``dest`` atomically (``.part`` then rename).
+
+    On any failure the ``.part`` file is removed, so a stalled/aborted download
+    never accumulates 400 MB of litter and never leaves a partial at ``dest``.
+    """
     import httpx
 
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as resp:
-        resp.raise_for_status()
-        with open(tmp, "wb") as fh:
-            for chunk in resp.iter_bytes(chunk_size=1 << 20):
-                fh.write(chunk)
-    os.replace(tmp, dest)
+    # read=None: no per-chunk read timeout — a 416 MB transfer on a slow link
+    # must not be killed by a 60 s gap between chunks (CDN throttle/backpressure).
+    # A connect guard still fails fast on a genuinely unreachable host.
+    timeout = httpx.Timeout(timeout=None, connect=30.0)
+    try:
+        with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as resp:
+            resp.raise_for_status()
+            with open(tmp, "wb") as fh:
+                for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                    fh.write(chunk)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def fetch_service_bge_onnx(
@@ -98,7 +135,12 @@ def fetch_service_bge_onnx(
     model_dest = dest_dir / MODEL_FILENAME
     tok_dest = dest_dir / TOKENIZER_FILENAME
 
-    if not force and model_dest.is_file() and tok_dest.is_file():
+    # Idempotency keys on COMPLETE files (size floors), so a truncated or wrong
+    # (e.g. quantized/fused) artifact left by a prior run is corrected, not
+    # locked in — the latter would only surface as an opaque ONNX load failure.
+    if not force and _file_ok(model_dest, _MIN_MODEL_BYTES) and _file_ok(
+        tok_dest, _MIN_TOKENIZER_BYTES
+    ):
         _log.debug("service_bge_already_present", dir=str(dest_dir))
         return dest_dir
 
@@ -109,6 +151,11 @@ def fetch_service_bge_onnx(
         fetch(_HF_RESOLVE.format(repo=STANDARD_BGE_REPO, path=_MODEL_REPO_PATH), model_dest)
         fetch(_HF_RESOLVE.format(repo=STANDARD_BGE_REPO, path=_TOKENIZER_REPO_PATH), tok_dest)
     except Exception as exc:
+        # Don't leave a lone model.onnx (model ok, tokenizer failed): the size-
+        # floor idempotency would otherwise re-fetch the 416 MB model needlessly,
+        # and a half-provisioned dir reads as a failed install.
+        if model_dest.is_file() and not tok_dest.is_file():
+            model_dest.unlink(missing_ok=True)
         raise RuntimeError(
             f"failed to provision the standard bge-768 ONNX for the service "
             f"(offline or download failed): {exc}. The Java service embeds local "
