@@ -201,6 +201,54 @@ def _find_service_jar() -> Path:
     )
 
 
+def _find_service_binary(config_dir: Path) -> Path | None:
+    """Locate the nexus-service NATIVE binary, or None when none is installed.
+
+    RDR-157 ships per-OS/arch native-image binaries (no JVM). When one is
+    present the supervisor execs it directly; absence is NOT an error here —
+    the caller falls back to the ``java -jar`` path.
+
+    Search order:
+    1. ``NEXUS_SERVICE_BIN`` env override. Set-but-missing FAILS LOUD (mirrors
+       ``_find_service_jar``'s ``NEXUS_SERVICE_JAR`` contract) — an operator who
+       named a binary that does not exist made a mistake worth surfacing.
+    2. The well-known installed location ``<config_dir>/service/nexus-service``.
+    """
+    # NOTE (RDR-157 P4.2, bead nexus-vwvv5.18): positioning the binary at the
+    # well-known path / setting NEXUS_SERVICE_BIN is the distribution launcher's
+    # job, delivered by the fresh-machine E2E. P4.1 only makes the supervisor
+    # ABLE to launch a binary that is already present.
+    env_override = os.environ.get("NEXUS_SERVICE_BIN", "").strip()
+    if env_override:
+        p = Path(env_override)
+        if p.is_file():
+            return _require_executable(p, "NEXUS_SERVICE_BIN")
+        raise StorageServiceStartError(
+            f"NEXUS_SERVICE_BIN is set to {env_override!r} but the file does not "
+            "exist. Point it at a built native nexus-service binary, or unset it "
+            "to use the JAR."
+        )
+
+    from nexus.daemon.jar_lifecycle import well_known_binary_path
+    well_known = well_known_binary_path(config_dir)
+    if well_known.is_file():
+        return _require_executable(well_known, "nexus-service")
+    return None
+
+
+def _require_executable(p: Path, label: str) -> Path:
+    """Return *p* if it carries the execute bit; fail loud with a chmod remedy.
+
+    A present-but-non-executable binary would otherwise surface as a bare
+    ``PermissionError`` from ``subprocess.Popen`` — an errno, not a remedy.
+    """
+    if not os.access(p, os.X_OK):
+        raise StorageServiceStartError(
+            f"{label} at {p} is not executable. Make it runnable: chmod +x {p}"
+        )
+    return p
+
+
 # ── Port helpers ───────────────────────────────────────────────────────────────
 
 
@@ -296,15 +344,30 @@ class StorageServiceSupervisor:
         self,
         *,
         config_dir: Path,
-        jar_path: Path,
+        jar_path: Path | None = None,
         pg_port: int,
         service_port: int,
         creds: dict[str, str],
+        binary_path: Path | None = None,
         lease_clock: Callable[[], float] = time.time,
         supervised: bool = False,
     ) -> None:
+        # Exactly one launch artifact must be resolvable: a native binary
+        # (RDR-157, preferred) or a JAR (dev / JVM fallback). The native binary
+        # wins when both are present.
+        if binary_path is None and jar_path is None:
+            raise StorageServiceStartError(
+                "StorageServiceSupervisor needs a native binary or a JAR to launch; "
+                "neither was provided."
+            )
         self._config_dir = config_dir
         self._jar_path = jar_path
+        self._binary_path = binary_path
+        # RDR-157: the launch artifact kind drives log naming + crash-triage
+        # event fields so a native-only operator never sees "jar" labels for a
+        # process that is not a JAR.
+        self._launch_mode = "native" if binary_path is not None else "jar"
+        self._svc_log_name = f"storage_service_{self._launch_mode}"
         self._pg_port = pg_port
         self._service_port = service_port
         self._creds = creds
@@ -369,7 +432,13 @@ class StorageServiceSupervisor:
     # -- Internal helpers ---------------------------------------------------
 
     def _spawn_service(self) -> tuple[subprocess.Popen[bytes], int]:
-        """Spawn the Java JAR with env vars, returning (proc, port)."""
+        """Spawn the service process with env vars, returning (proc, port).
+
+        Prefers the RDR-157 native binary (``self._binary_path``); falls back to
+        ``java -jar`` when only a JAR is available. Configuration reaches the
+        service ENTIRELY via the environment below, so the two launch modes are
+        argv-only variants of each other.
+        """
         port = _allocate_free_port()
         env = dict(os.environ)
         # Credentials from pg_credentials
@@ -408,34 +477,44 @@ class StorageServiceSupervisor:
                     hint="set VOYAGE_API_KEY or `nx config set voyage_api_key <key>`",
                 )
 
-        java_bin = self._find_java()
+        # Native binary (RDR-157) wins over the JAR when both are present.
+        if self._binary_path is not None:
+            argv = [str(self._binary_path)]
+            artifact = str(self._binary_path)
+        else:
+            assert self._jar_path is not None  # guaranteed by __init__
+            argv = [self._find_java(), "-jar", str(self._jar_path)]
+            artifact = str(self._jar_path)
         # nexus-ovbr7: the jar's logback config is console-only, so DEVNULL
         # here discarded every Java log line AND the JVM-level output logback
         # can't capture (OOM banners, hs_err preambles). Route both streams
         # to one file so interleaved output keeps its order; O_APPEND means a
-        # respawn never truncates the previous jar's final (crash) output.
+        # respawn never truncates the previous process's final (crash) output.
+        # Log stem follows the launch mode so a native host writes
+        # storage_service_native.log, a JAR host storage_service_jar.log.
         from nexus.logging_setup import open_child_log_or_devnull
 
-        jar_log = open_child_log_or_devnull("storage_service_jar", self._config_dir)
+        svc_log = open_child_log_or_devnull(self._svc_log_name, self._config_dir)
         try:
             proc = subprocess.Popen(
-                [java_bin, "-jar", str(self._jar_path)],
+                argv,
                 env=env,
-                stdout=jar_log,
-                stderr=jar_log,
+                stdout=svc_log,
+                stderr=svc_log,
                 start_new_session=True,
             )
         finally:
             # The child holds its own duplicated fd; the parent's handle is
             # no longer needed (and must not leak across respawns).
-            if not isinstance(jar_log, int):
-                jar_log.close()
+            if not isinstance(svc_log, int):
+                svc_log.close()
         _log.info(
             "storage_service_spawned",
             pid=proc.pid,
             port=port,
-            jar=str(self._jar_path),
-            jar_log=getattr(jar_log, "name", "DEVNULL"),
+            launch_mode=self._launch_mode,
+            artifact=artifact,
+            service_log=getattr(svc_log, "name", "DEVNULL"),
         )
         return proc, port
 
@@ -689,8 +768,17 @@ class StorageServiceSupervisor:
         # Liquibase silently ignores applied changesets it does not know, so an
         # old JAR would boot cleanly and fail undiagnosably at runtime. Gate
         # AFTER PG is up (it reads databasechangelog) and BEFORE the spawn.
-        from nexus.daemon.jar_lifecycle import check_schema_skew
-        check_schema_skew(self._jar_path, self._creds)
+        # JAR-only: check_schema_skew introspects the JAR's bundled changelog,
+        # which a native binary (RDR-157) cannot expose. A native binary ships
+        # its changelog baked at build time alongside the schema, so the
+        # old-artifact-vs-new-schema risk this guards against is a dev-JAR
+        # concern; skip it for native launches rather than fail.
+        if self._binary_path is None:
+            from nexus.daemon.jar_lifecycle import check_schema_skew
+            assert self._jar_path is not None  # guaranteed by __init__
+            check_schema_skew(self._jar_path, self._creds)
+        else:
+            _log.info("schema_skew_check_skipped", reason="native-binary")
 
         # Step 2: spawn the Java JAR.
         proc, port = self._spawn_service()
@@ -793,15 +881,18 @@ class StorageServiceSupervisor:
             return False, False
         if (rc := self._proc.poll()) is not None:
             # nexus-ovbr7: the returncode is the single cheapest diagnostic a
-            # dead jar leaves behind (137=SIGKILL/oom, 143=SIGTERM, 1=java
-            # error) — record it, plus where the jar's own output went.
+            # dead service process leaves behind (137=SIGKILL/oom, 143=SIGTERM,
+            # 1=error) — record it, plus where the process's own output went.
+            # launch_mode distinguishes a native-binary exit from a JAR exit so
+            # triage is not misdirected on native-only hosts.
             _log.warning(
                 "storage_service_jar_exit_detected",
                 pid=self._proc.pid,
                 returncode=rc,
-                jar_log=str(self._config_dir / "logs" / "storage_service_jar.log"),
+                launch_mode=self._launch_mode,
+                service_log=str(self._config_dir / "logs" / f"{self._svc_log_name}.log"),
             )
-            return False, False  # jar exited; signal the run loop to respawn
+            return False, False  # process exited; signal the run loop to respawn
 
         jar_alive = _pid_is_alive(self._proc.pid)
         service_ok = self._service_healthy()
@@ -927,9 +1018,12 @@ def start_storage_service(
         )
     pg_port = int(pg_port_str)
 
-    if jar_path is None:
+    # RDR-157: prefer a native binary; only require a JAR when none is present.
+    # An explicit jar_path argument (tests / operator override) still wins.
+    binary_path = None if jar_path is not None else _find_service_binary(config_dir)
+    if binary_path is None and jar_path is None:
         jar_path = _find_service_jar()
-    elif not jar_path.is_file():
+    elif jar_path is not None and not jar_path.is_file():
         raise StorageServiceStartError(
             f"nexus-service JAR not found at {jar_path}. "
             "Build it first: cd service && mvn package -DskipTests -q"
@@ -938,6 +1032,7 @@ def start_storage_service(
     sup = StorageServiceSupervisor(
         config_dir=config_dir,
         jar_path=jar_path,
+        binary_path=binary_path,
         pg_port=pg_port,
         service_port=0,  # allocated inside start()
         creds=creds,
@@ -1003,13 +1098,16 @@ def run_storage_supervisor(
         )
     pg_port = int(pg_port_str)
 
-    if jar_path is None:
+    # RDR-157: prefer a native binary; require a JAR only when none is present.
+    binary_path = None if jar_path is not None else _find_service_binary(config_dir)
+    if binary_path is None and jar_path is None:
         jar_path = _find_service_jar()
 
     _log.info(
         "storage_service_supervisor_started",
         pid=os.getpid(),
-        jar_path=str(jar_path),
+        launch_mode="native" if binary_path is not None else "jar",
+        artifact=str(binary_path if binary_path is not None else jar_path),
         pg_port=pg_port,
         config_dir=str(config_dir),
     )
@@ -1017,6 +1115,7 @@ def run_storage_supervisor(
     sup = StorageServiceSupervisor(
         config_dir=config_dir,
         jar_path=jar_path,
+        binary_path=binary_path,
         pg_port=pg_port,
         service_port=0,
         creds=creds,
@@ -1065,7 +1164,8 @@ def _supervise_until_stopped(
                 # the loop) — do not call sup.stop() mid-loop.
                 _log.warning(
                     "storage_service_jar_and_pg_died",
-                    msg="jar and PG both down; restarting PG before jar respawn",
+                    launch_mode=sup._launch_mode,
+                    msg="service process and PG both down; restarting PG before respawn",
                 )
                 try:
                     sup._ensure_pg_running()
@@ -1078,7 +1178,11 @@ def _supervise_until_stopped(
                     )
                     exit_code = 4
                     break
-            _log.warning("storage_service_jar_exited", msg="jar child gone; attempting restart")
+            _log.warning(
+                "storage_service_jar_exited",
+                launch_mode=sup._launch_mode,
+                msg="service child gone; attempting restart",
+            )
             try:
                 sup._respawn()
                 _log.info("storage_service_restarted_successfully")

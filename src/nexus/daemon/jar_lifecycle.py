@@ -38,6 +38,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "well_known_jar_path",
+    "well_known_binary_path",
     "sidecar_path",
     "extract_jar_provenance",
     "install_jar",
@@ -49,6 +50,7 @@ __all__ = [
 
 _WELL_KNOWN_SUBDIR = "service"
 _WELL_KNOWN_JAR_NAME = "nexus-service.jar"
+_WELL_KNOWN_BINARY_NAME = "nexus-service"
 _SIDECAR_NAME = "nexus-service.jar.meta.json"
 
 # Liquibase changeSet identity is (id, author); attribute order in the XML is
@@ -70,6 +72,16 @@ _CHANGELOG_MEMBER_RE = re.compile(r"^db/changelog/[^/]+\.xml$")
 def well_known_jar_path(config_dir: Path) -> Path:
     """``<config_dir>/service/nexus-service.jar`` — the installed-user JAR home."""
     return config_dir / _WELL_KNOWN_SUBDIR / _WELL_KNOWN_JAR_NAME
+
+
+def well_known_binary_path(config_dir: Path) -> Path:
+    """``<config_dir>/service/nexus-service`` — the installed-user NATIVE binary.
+
+    RDR-157 ships per-OS/arch native-image binaries (no JVM). When one is
+    positioned here (by the distribution launcher / ``nx init --service``), the
+    storage-service supervisor execs it directly instead of ``java -jar``.
+    """
+    return config_dir / _WELL_KNOWN_SUBDIR / _WELL_KNOWN_BINARY_NAME
 
 
 def sidecar_path(config_dir: Path) -> Path:
