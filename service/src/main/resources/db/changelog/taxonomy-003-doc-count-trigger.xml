@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-154 P0 bead nexus-i7ivk — topics.doc_count trigger as SOLE writer.
+
+    Replaces the scattered in-app doc_count recomputes (TaxonomyRepository
+    updateDocCount / assignTopic resync / mergeTopics resync / persistSplit
+    zero-out) with two statement-level triggers on nexus.topic_assignments
+    that recompute doc_count for the affected topics. This closes the
+    cascade/purge-delete hole that application code structurally cannot see:
+    deleting assignments (purge_assignments_for_doc) leaves the surviving
+    topics row, whose doc_count would otherwise strand stale-high.
+
+    Trigger functions are SECURITY INVOKER (never DEFINER). A DEFINER function
+    would run as its owner — not NOBYPASSRLS — and its UPDATE nexus.topics
+    would bypass FORCE ROW LEVEL SECURITY, allowing a cross-tenant write when
+    an assignment in tenant A references a topic owned by tenant B (the FK
+    check bypasses RLS, so such a row can exist). As INVOKER the recompute
+    inherits the session's nexus.tenant GUC and the FORCE-RLS policy scopes
+    the UPDATE to the session tenant's rows only.
+
+    Statement-level (not per-row) bounds the cost on the bulk-ETL assignment
+    path; affected topics are derived from the NEW/OLD transition tables.
+
+    doc_count is hereby a trigger-maintained column and MUST NOT participate
+    in any ETL ON CONFLICT DO UPDATE merge (RDR-154 Decision 1). The live
+    taxonomy-001-baseline.xml comment instructing GREATEST(EXCLUDED.doc_count,
+    topics.doc_count) is SUPERSEDED; a Liquibase changeset cannot edit a prior
+    one, so this changeset records the supersession via COMMENT ON COLUMN and
+    the taxonomy ETL upsert drops the column from its merge.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: recompute functions (SECURITY INVOKER) ───────────────── -->
+    <changeSet id="taxonomy-003-1" author="nexus-i7ivk">
+        <comment>doc_count statement-level recompute functions (SECURITY INVOKER)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_ins()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+BEGIN
+    UPDATE nexus.topics t
+       SET doc_count = (
+           SELECT COUNT(*)
+             FROM nexus.topic_assignments ta
+            WHERE ta.topic_id = t.id
+              AND ta.tenant_id = t.tenant_id
+       )
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM new_rows) a
+     WHERE t.id = a.topic_id
+       AND t.tenant_id = a.tenant_id;
+    RETURN NULL;
+END;
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.topics_doc_count_recount_ins()</rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-003-2" author="nexus-i7ivk">
+        <comment>doc_count DELETE-path recompute function (SECURITY INVOKER)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_del()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+BEGIN
+    UPDATE nexus.topics t
+       SET doc_count = (
+           SELECT COUNT(*)
+             FROM nexus.topic_assignments ta
+            WHERE ta.topic_id = t.id
+              AND ta.tenant_id = t.tenant_id
+       )
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a
+     WHERE t.id = a.topic_id
+       AND t.tenant_id = a.tenant_id;
+    RETURN NULL;
+END;
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.topics_doc_count_recount_del()</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: statement-level triggers w/ transition tables ────────── -->
+    <changeSet id="taxonomy-003-3" author="nexus-i7ivk">
+        <comment>Statement-level AFTER INSERT / AFTER DELETE triggers on topic_assignments</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TRIGGER trg_topic_assignments_doc_count_ins
+    AFTER INSERT ON nexus.topic_assignments
+    REFERENCING NEW TABLE AS new_rows
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION nexus.topics_doc_count_recount_ins();
+
+CREATE TRIGGER trg_topic_assignments_doc_count_del
+    AFTER DELETE ON nexus.topic_assignments
+    REFERENCING OLD TABLE AS old_rows
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION nexus.topics_doc_count_recount_del();
+        </sql>
+        <rollback>
+            DROP TRIGGER IF EXISTS trg_topic_assignments_doc_count_del ON nexus.topic_assignments;
+            DROP TRIGGER IF EXISTS trg_topic_assignments_doc_count_ins ON nexus.topic_assignments;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: supersede the ETL GREATEST instruction (RDR-154) ─────── -->
+    <changeSet id="taxonomy-003-4" author="nexus-i7ivk">
+        <comment>Mark doc_count trigger-maintained: do-not-ETL-write (supersedes taxonomy-001 GREATEST)</comment>
+        <sql splitStatements="false" stripComments="false">
+COMMENT ON COLUMN nexus.topics.doc_count IS
+    'Trigger-maintained (RDR-154 P0, bead nexus-i7ivk): sole writers are '
+    'trg_topic_assignments_doc_count_ins / _del. Do NOT hand-resync or '
+    'ETL-write this column; it is NOT an ON CONFLICT DO UPDATE merge '
+    'participant. Supersedes the taxonomy-001-baseline GREATEST instruction.';
+        </sql>
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

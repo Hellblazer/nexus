@@ -123,6 +123,12 @@
          before grants-nexus-svc (schema-wide DML grants provision the new tables). -->
     <include file="db/changelog/taxonomy-002-centroids.xml"/>
 
+    <!-- RDR-154 P0 (bead nexus-i7ivk): topics.doc_count statement-level
+         recompute triggers as the SOLE writer (SECURITY INVOKER). Must come
+         after taxonomy-001 (creates topics / topic_assignments) and before
+         grants-nexus-svc. -->
+    <include file="db/changelog/taxonomy-003-doc-count-trigger.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
