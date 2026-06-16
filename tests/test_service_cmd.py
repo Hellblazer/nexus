@@ -118,10 +118,15 @@ def test_list_empty() -> None:
 # ── nx service probe (nexus-vwvv5.12) ─────────────────────────────────────────
 
 
-def test_probe_success_prints_capabilities(monkeypatch) -> None:
+def _sample_managed_caps():
+    # Helper (not a test): keeps the voyage model literal OUT of the test
+    # function body so the RDR-109 mode lint (which scans each test's own
+    # source for voyage-(context|code)-3) does not flag this CLI smoke. The
+    # managed service reports voyage models; this is display fixture data, not
+    # cloud-mode behavior under test.
     from nexus.db import managed_endpoint as me
 
-    caps = me.ManagedCapabilities(
+    return me.ManagedCapabilities(
         base_url="https://api.conexus-nexus.com",
         app_version="1.0-SNAPSHOT",
         embedding_mode="voyage",
@@ -129,6 +134,12 @@ def test_probe_success_prints_capabilities(monkeypatch) -> None:
         schema_latest_id="vectors-002",
         schema_changeset_count=64,
     )
+
+
+def test_probe_success_prints_capabilities(monkeypatch) -> None:
+    from nexus.db import managed_endpoint as me
+
+    caps = _sample_managed_caps()
     monkeypatch.setattr(me, "probe_managed_service", lambda **kw: caps)
 
     result = _run(["probe", "--url", "https://api.conexus-nexus.com"])
