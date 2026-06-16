@@ -619,7 +619,8 @@ def migrate_taxonomy_cmd(
     topic_links, taxonomy_meta) and writes them through the service HTTP API.
     The ETL is idempotent:
 
-    - topics: GREATEST for doc_count; existing label/created_at preserved;
+    - topics: doc_count is NOT merged on conflict (trigger-maintained since
+      RDR-154 P0, nexus-i7ivk); existing label/created_at preserved;
       review_status/centroid_hash/terms always updated from source.
     - topic_assignments: GREATEST for similarity; other columns from source.
     - topic_links: GREATEST for link_count.
