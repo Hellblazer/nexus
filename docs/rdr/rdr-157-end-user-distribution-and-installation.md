@@ -66,8 +66,9 @@ provisions a local cluster. (`nx init --service` today always provisions locally
 
 **Java runtime** — eliminated by the native-image decision. **Voyage key plumbing** —
 already solved (nexus-pebfx.2: credential-chain resolution, fail-loud ONNX refusal of
-voyage-token collections); local-only mode works with the bundled ONNX MiniLM; the
-embedder choice is an onboarding question (RDR-144), not a packaging one.
+voyage-token collections); local-only mode works with the bundled local ONNX embedder
+(bge-768 per RDR-160; was MiniLM); the embedder choice is an onboarding question
+(RDR-144), not a packaging one.
 
 This is the substance of release blocker `nexus-luxe6`: Gaps 1–3 are the undesigned
 legs. The operability of an *assembled* stack is largely done
@@ -270,9 +271,11 @@ is release N+1.
      service against its **local** PG (`check_pgvector_available`).
 5. **P4 — one-command collapse + fresh-machine E2E.** `nx init --service` end-to-end,
    idempotent. Release-sandbox E2E proves **fresh-machine → serving with zero manual
-   steps**, bounded to: (a) **local mode** requires the bundled ONNX MiniLM model —
-   depends on `nexus-jrrve` (model fetch on service install) being closed, OR the model
-   pre-positioned in the bundle; (b) **cloud mode** requires a credential for the
+   steps**, bounded to: (a) **local mode** requires the local-T3 embedding model —
+   *(CORRECTED 2026-06-15: this is the **bge-768** standard fp32 ONNX (~416 MB),
+   provisioned by `nx init --service`, NOT MiniLM — see RDR-160, which makes bge-768
+   the local-mode service embedder and subsumes `nexus-jrrve`)*; (b) **cloud mode**
+   requires a credential for the
    managed endpoint (`api.conexus-nexus.com`) — embeddings run server-side, so the
    client holds a managed-service credential, not a raw Voyage key (the exact credential
    model is a conexus RDR-001 concern). The E2E names which mode it exercises;

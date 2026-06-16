@@ -4,6 +4,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.Bge768Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.OnnxEmbedder;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -107,7 +108,6 @@ public final class Main {
         // PgVectorRepository takes the ROUTER constructor — EmbedderRouter through the
         // plain-Embedder constructor would fall back to ONNX for ALL collections and
         // break cloud-mode routing (caught only at the first upsert's dim check).
-        OnnxEmbedder onnx = new OnnxEmbedder();
         String voyageKey = System.getenv("NX_VOYAGE_API_KEY");
         EmbedderRouter docEmbedRouter;
         EmbedderRouter qryEmbedRouter;
@@ -116,13 +116,20 @@ public final class Main {
         // mode was invisible; onnx-local now logs at WARN and names the refusal
         // behaviour so a missing key is unmissable in the service log.
         if (voyageKey != null && !voyageKey.isBlank()) {
+            // Cloud mode: Voyage routing. The MiniLM ONNX embedder is retained
+            // ONLY as the non-conformant-prefix fallback (legacy names).
+            OnnxEmbedder onnx = new OnnxEmbedder();
             docEmbedRouter = new EmbedderRouter(onnx, voyageKey, "document");
             qryEmbedRouter = new EmbedderRouter(onnx, voyageKey, "query");
             log.info("event=embedding_mode_banner mode={} models={} backend=pgvector",
                     docEmbedRouter.modeName(), docEmbedRouter.availableModels());
         } else {
-            docEmbedRouter = new EmbedderRouter(onnx, "document");
-            qryEmbedRouter = new EmbedderRouter(onnx, "query");
+            // Local mode (RDR-160): bge-768 serves EVERY collection. MiniLM is
+            // NOT loaded on the local path (Decision 5) — a non-bge collection
+            // is REFUSED (422), never silently embedded at the wrong dim.
+            Bge768Embedder bge = new Bge768Embedder();
+            docEmbedRouter = new EmbedderRouter(bge, "document");
+            qryEmbedRouter = new EmbedderRouter(bge, "query");
             log.warn("event=embedding_mode_banner mode={} models={} backend=pgvector "
                     + "voyage_collections=REFUSED_422 hint=\"set NX_VOYAGE_API_KEY (or let "
                     + "the supervisor plumb it from VOYAGE_API_KEY / config.yml credentials) "
@@ -140,6 +147,10 @@ public final class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");
             service.stop();
+            // Close the embedder's native ONNX session + tokenizer once. doc and
+            // qry routers share the SAME embedder instance, so closing one is
+            // sufficient (a second close is harmless — close() swallows it).
+            docEmbedRouter.close();
             ds.close();
         }));
 
