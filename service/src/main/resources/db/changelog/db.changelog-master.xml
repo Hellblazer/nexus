@@ -123,10 +123,6 @@
          they read (catalog-001, taxonomy-001) and before grants-nexus-svc. -->
     <include file="db/changelog/catalog-009-read-shape-views.xml"/>
 
-    <!-- RDR-154 P2 (bead nexus-2zv75, folds nexus-8luh): append stale_source_ratio
-         to collection_health_meta (source_mtime vs indexed_at). After catalog-009. -->
-    <include file="db/changelog/catalog-010-collection-health-stale-source.xml"/>
-
     <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
          taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB
          collection into Postgres so service-mode taxonomy compute is chroma-free.

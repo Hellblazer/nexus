@@ -31,6 +31,11 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <!-- ── Changeset 1: updated_at columns ───────────────────────────────────── -->
+    <!-- BACKFILL SEMANTIC: NOT NULL DEFAULT now() stamps every pre-existing row
+         with the migration timestamp, NOT its true last-mutation time (the
+         standard updated_at idiom). The first consumer that ORDER BYs updated_at
+         must account for the pre-migration corpus bunching at the migration time;
+         until a real mutation UPDATEs a row, its updated_at is the migration time. -->
     <changeSet id="updated-at-001-1" author="nexus-2zv75">
         <comment>Add updated_at TIMESTAMPTZ to document_aspects and topics (DEFAULT now())</comment>
         <sql splitStatements="true" stripComments="false">

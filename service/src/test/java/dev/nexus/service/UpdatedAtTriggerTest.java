@@ -64,12 +64,20 @@ class UpdatedAtTriggerTest {
     }
 
     @Test
-    void appendOnlyLogs_haveNoUpdatedAtColumn() throws Exception {
+    void updatedAt_absentFromEveryOtherTable() throws Exception {
+        // The boundary is "EXACTLY document_aspects + topics" (Decision 2). Assert
+        // updated_at is absent BOTH from the append-only logs (must not imply
+        // mutability) AND from the mutable tenant tables that already carry a
+        // purpose-built timestamp (a future author must not reflexively add it).
         try (Connection c = pg.createConnection("")) {
-            for (String log : List.of("chash_index", "nx_answer_runs",
-                                      "hook_failures", "aspect_promotion_log")) {
-                assertThat(hasColumn(c, log, "updated_at"))
-                    .as("append-only log nexus.%s must NOT have updated_at", log)
+            for (String t : List.of(
+                    // append-only logs
+                    "chash_index", "nx_answer_runs", "hook_failures", "aspect_promotion_log",
+                    // mutable tables deliberately excluded (have fit-for-purpose stamps)
+                    "catalog_documents", "catalog_collections", "catalog_links",
+                    "memory", "plans", "taxonomy_meta", "topic_links")) {
+                assertThat(hasColumn(c, t, "updated_at"))
+                    .as("nexus.%s must NOT have updated_at (only document_aspects + topics do)", t)
                     .isFalse();
             }
         }

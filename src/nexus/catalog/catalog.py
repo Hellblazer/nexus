@@ -1152,26 +1152,9 @@ class Catalog:
         ).fetchone()
         orphan_count: int = int(orphan_row[0] or 0)
 
-        # RDR-154 P2 (nexus-2zv75, folds nexus-8luh): stale_source_ratio =
-        # fraction of documents whose source file was modified after indexing
-        # (source_mtime epoch > indexed_at epoch). DB-only; no filesystem access.
-        # None when no document in the collection carries a source_mtime.
-        stale_row = self._db.execute(
-            "SELECT "
-            "  COUNT(*) FILTER (WHERE source_mtime > 0) AS with_mtime, "
-            "  COUNT(*) FILTER (WHERE source_mtime > 0 "
-            "      AND source_mtime > CAST(strftime('%s', indexed_at) AS REAL)) AS stale "
-            "FROM documents WHERE physical_collection = ?",
-            (collection,),
-        ).fetchone()
-        with_mtime = int(stale_row[0] or 0) if stale_row else 0
-        stale = int(stale_row[1] or 0) if stale_row else 0
-        stale_source_ratio: float | None = (stale / with_mtime) if with_mtime else None
-
         return {
             "last_indexed": last_indexed,
             "orphan_count": orphan_count,
-            "stale_source_ratio": stale_source_ratio,
         }
 
     def ensure_owner_for_repo(

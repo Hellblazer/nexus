@@ -135,32 +135,6 @@ class ReadShapeViewsTest {
             + "VALUES ('" + tenant + "', '" + tumbler + "', 'T', '" + ctype + "', '" + coll + "', '2026-01-01T00:00:00Z')");
     }
 
-    private static void seedDocMtime(Connection su, String tenant, String tumbler, String coll,
-                                     String indexedAt, double sourceMtime) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection, indexed_at, source_mtime) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', 'T', '" + coll + "', '" + indexedAt + "', " + sourceMtime + ")");
-    }
-
-    @Test @Order(40)
-    void collectionHealthMeta_staleSourceRatio_fromSourceMtime() throws Exception {
-        // RDR-154 P2 (nexus-2zv75): stale = source_mtime epoch > indexed_at epoch.
-        // indexed_at '2026-01-01T00:00:00Z' ≈ 1767225600.
-        final String col = "c_stale";
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            seedDocMtime(su, TENANT_A, "s.1", col, "2026-01-01T00:00:00Z", 1_900_000_000d); // stale
-            seedDocMtime(su, TENANT_A, "s.2", col, "2026-01-01T00:00:00Z", 1_000_000_000d); // fresh
-            seedDocMtime(su, TENANT_A, "s.3", col, "2026-01-01T00:00:00Z", 0d);             // no mtime
-            // with_mtime = {s.1, s.2} = 2; stale = {s.1} = 1 → ratio 0.5.
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT stale_source_ratio FROM nexus.collection_health_meta "
-                + "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + col + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getDouble("stale_source_ratio"))
-                .as("stale_source_ratio = 1 stale / 2 with-mtime").isEqualTo(0.5d);
-        }
-    }
 
     private static void seedTopic(Connection su, String tenant, String label, String coll) throws Exception {
         su.createStatement().execute(
