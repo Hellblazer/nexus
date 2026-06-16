@@ -464,6 +464,12 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # cloud_mode fixture.
     "test_pregate.py",
     "test_quiesce.py",
+    # RDR-001 managed-endpoint probe: voyage tokens appear only as
+    # embedding_models inside a FAKE /version response body (injected
+    # http_get) — the managed service's reported models, not cloud-mode
+    # behavior. The test touches no credentials and pins nothing on
+    # is_local_mode; the probe targets the unauthenticated /version handshake.
+    "test_managed_endpoint.py",
     "test_catalog_path.py",
     "test_chroma_retry.py",
     "test_collection_cmd.py",
