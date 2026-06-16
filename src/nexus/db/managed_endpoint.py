@@ -25,12 +25,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
+import httpx
 import structlog
-
-if TYPE_CHECKING:
-    import httpx
 
 _log = structlog.get_logger(__name__)
 
@@ -43,14 +41,27 @@ DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
 #: Minimum managed-service ``app_version`` this client speaks. The ``/version``
 #: handshake is the cross-repo contract surface (conexus RDR-001); bump this floor
 #: when the client starts to depend on a newer managed-service capability. Parsed
-#: leniently (Maven ``-SNAPSHOT`` / qualifier suffixes are stripped).
+#: leniently (a leading ``v`` and Maven ``-SNAPSHOT`` / qualifier suffixes are
+#: stripped).
+#:
+#: NOTE (reviewed 2026-06-15): ``(1, 0, 0)`` is the intent floor, not a known-bad
+#: boundary — the local service reports ``1.0-SNAPSHOT`` which already clears it,
+#: so the check is presently a no-op against a current build. Bump it the moment
+#: the client starts to require a managed-service capability introduced after a
+#: specific release, and name that capability here when you do.
+#:
+#: CROSS-REPO CONTRACT (conexus RDR-001): the managed multitenant service MUST
+#: expose ``GET /version`` UNAUTHENTICATED with at least an ``app_version`` field.
+#: The local single-tenant Java ``VersionHandler`` is unauthenticated only because
+#: it is loopback-only; the managed service serves ``/version`` over the public
+#: internet, so this must be an explicit term of its API contract, not inherited.
 MIN_MANAGED_APP_VERSION: tuple[int, int, int] = (1, 0, 0)
 
 #: Probe timeout — short, so an unreachable managed service fails fast and loud
 #: rather than hanging a CLI command.
 _PROBE_TIMEOUT_S = 5.0
 
-_HttpGet = Callable[[str, float], "httpx.Response"]
+_HttpGet = Callable[[str, float], httpx.Response]
 
 
 class ManagedServiceError(RuntimeError):
@@ -107,7 +118,7 @@ def _parse_version(raw: str) -> tuple[int, int, int] | None:
     Returns ``None`` when no leading numeric version is present (e.g. ``"unknown"``).
     """
     digits: list[str] = []
-    for ch in raw.strip():
+    for ch in raw.strip().lstrip("vV"):
         if ch.isdigit() or ch == ".":
             digits.append(ch)
         else:
@@ -152,24 +163,20 @@ def probe_managed_service(
     url = f"{base_url}/version"
 
     if http_get is None:
-        import httpx
-
-        def http_get(u: str, t: float) -> "httpx.Response":  # noqa: ANN202
+        def http_get(u: str, t: float) -> httpx.Response:
             return httpx.get(u, timeout=t)
 
     try:
         resp = http_get(url, timeout)
-    except Exception as exc:  # httpx.ConnectError / TimeoutException / TransportError
-        import httpx
-
-        if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
-            _log.debug("managed_service_unreachable", url=url, error=str(exc))
-            raise ManagedServiceUnreachable(
-                f"managed nexus service at {base_url} is unreachable "
-                f"({type(exc).__name__}: {exc}). Check connectivity, or set "
-                "NX_SERVICE_URL to point at a reachable managed endpoint."
-            ) from exc
-        raise
+    except (httpx.TransportError, httpx.TimeoutException) as exc:
+        # Reachability failure: connect / TLS / DNS / read / timeout. Any other
+        # exception (a programming error, a bad injected callable) propagates.
+        _log.debug("managed_service_unreachable", url=url, error=str(exc))
+        raise ManagedServiceUnreachable(
+            f"managed nexus service at {base_url} is unreachable "
+            f"({type(exc).__name__}: {exc}). Check connectivity, or set "
+            "NX_SERVICE_URL to point at a reachable managed endpoint."
+        ) from exc
 
     if resp.status_code != 200:
         raise ManagedServiceIncompatible(
@@ -207,13 +214,15 @@ def probe_managed_service(
     models_raw = body.get("embedding_models") or []
     models = [str(m) for m in models_raw] if isinstance(models_raw, list) else []
     sc_count = body.get("schema_changeset_count")
+    # bool is an int subclass in Python — reject a stray `true` from the server.
+    sc_count_ok = isinstance(sc_count, int) and not isinstance(sc_count, bool)
     caps = ManagedCapabilities(
         base_url=base_url,
         app_version=app_version,
         embedding_mode=str(body.get("embedding_mode") or "unknown"),
         embedding_models=models,
         schema_latest_id=(str(body["schema_latest_id"]) if body.get("schema_latest_id") else None),
-        schema_changeset_count=(int(sc_count) if isinstance(sc_count, int) else None),
+        schema_changeset_count=(int(sc_count) if sc_count_ok else None),
     )
     _log.debug(
         "managed_service_probe_ok",

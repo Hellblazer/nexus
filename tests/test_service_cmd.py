@@ -113,3 +113,39 @@ def test_list_empty() -> None:
     result = _run(["token", "list"])
     assert result.exit_code == 0
     assert "No tokens." in result.output
+
+
+# ── nx service probe (nexus-vwvv5.12) ─────────────────────────────────────────
+
+
+def test_probe_success_prints_capabilities(monkeypatch) -> None:
+    from nexus.db import managed_endpoint as me
+
+    caps = me.ManagedCapabilities(
+        base_url="https://api.conexus-nexus.com",
+        app_version="1.0-SNAPSHOT",
+        embedding_mode="voyage",
+        embedding_models=["voyage-context-3"],
+        schema_latest_id="vectors-002",
+        schema_changeset_count=64,
+    )
+    monkeypatch.setattr(me, "probe_managed_service", lambda **kw: caps)
+
+    result = _run(["probe", "--url", "https://api.conexus-nexus.com"])
+    assert result.exit_code == 0, result.output
+    assert "reachable" in result.output
+    assert "1.0-SNAPSHOT" in result.output
+    assert "voyage" in result.output
+
+
+def test_probe_failure_fails_loud(monkeypatch) -> None:
+    from nexus.db import managed_endpoint as me
+
+    def _boom(**kw):
+        raise me.ManagedServiceUnreachable("unreachable — set NX_SERVICE_URL")
+
+    monkeypatch.setattr(me, "probe_managed_service", _boom)
+
+    result = _run(["probe", "--url", "https://x"])
+    assert result.exit_code != 0
+    assert "NX_SERVICE_URL" in result.output

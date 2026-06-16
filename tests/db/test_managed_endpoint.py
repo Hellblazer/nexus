@@ -106,8 +106,23 @@ def test_probe_unreachable_timeout_fails_loud():
     def fake_get(url: str, timeout: float) -> httpx.Response:
         raise httpx.TimeoutException("timed out")
 
-    with pytest.raises(ManagedServiceUnreachable):
+    with pytest.raises(ManagedServiceUnreachable) as exc:
         probe_managed_service(base_url="https://api.conexus-nexus.com", http_get=fake_get)
+    msg = str(exc.value)
+    assert "api.conexus-nexus.com" in msg
+    assert "NX_SERVICE_URL" in msg  # remedy present, not just the type
+
+
+def test_probe_non_json_body_is_incompatible():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.json.side_effect = ValueError("not JSON")
+        resp.text = "<html>502 Bad Gateway</html>"
+        return resp
+
+    with pytest.raises(ManagedServiceIncompatible):
+        probe_managed_service(base_url="https://x", http_get=fake_get)
 
 
 # ── probe: incompatible ──────────────────────────────────────────────────────
@@ -176,6 +191,16 @@ def test_probe_snapshot_version_meets_floor():
 
     caps = probe_managed_service(base_url="https://x", http_get=fake_get)
     assert caps.app_version == "1.2.0-SNAPSHOT"
+
+
+def test_probe_v_prefixed_version_parses(monkeypatch):
+    # A self-hosted managed service tagging "v1.4.0" must not be misread as
+    # below-floor (lenient parse strips the leading v).
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(app_version="v1.4.0"))
+
+    caps = probe_managed_service(base_url="https://x", http_get=fake_get)
+    assert caps.app_version == "v1.4.0"
 
 
 def test_probe_defaults_base_url_to_managed(monkeypatch):
