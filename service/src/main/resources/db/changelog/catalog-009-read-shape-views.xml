@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-154 P1 bead nexus-h9qyp — security_invoker read-shape views.
+
+    Decision 3: replace hand-assembled read-shapes (duplicated across the Java
+    service and the Python local path, plus a Java N+1) with plain views, each
+    WITH (security_invoker = true) so the CALLER's RLS on the underlying tenant
+    tables provides isolation (RDR-154 standing rule; enforced by the
+    test_view_security_invoker_guard changelog-grep guard).
+
+    SEMANTICS PRESERVED (not changed): these mirror the existing repository
+    methods exactly, including that they count RAW catalog_documents /
+    catalog_links (the current stats()/coverage/collectionDocCounts methods do
+    NOT filter deleted_at). Tombstone-aware counts are a separate decision and
+    are deliberately out of P1 scope. (Contrast catalog-005 collection_vector_stats,
+    which deliberately reads live_chunks — that was RDR-156's explicit choice.)
+
+    Views:
+      - catalog_stats           — 5 scalar counts in one row (replaces the 5
+        selectCount calls in CatalogRepository.stats() + the Python dual-source
+        assembly in catalog.py). Per-subquery RLS scopes each count to the GUC tenant.
+      - collection_doc_counts   — (physical_collection, doc_count) GROUP BY.
+      - coverage_by_content_type — (content_type, total, linked) GROUP BY with
+        count(*) FILTER, replacing the 1+2N N+1 loop (global / no-prefix case;
+        the prefix-scoped path is a single GROUP BY query in Java — RDR-154 P1.2).
+      - collection_health_meta  — (collection, last_indexed, orphan_count) GROUP BY;
+        callers filter WHERE collection = ? on the view (predicate pushdown).
+      - topics_with_counts      — curated passthrough over nexus.topics exposing
+        the now-trigger-maintained doc_count (P0); the Python read-then-dedup
+        band-aid was already removed in P0.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: catalog_stats (5 scalar counts, one row) ─────────────── -->
+    <changeSet id="catalog-009-1" author="nexus-h9qyp">
+        <comment>nexus.catalog_stats — SECURITY INVOKER scalar-count view (per-subquery RLS scopes to caller tenant)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.catalog_stats
+    WITH (security_invoker = true)
+AS
+SELECT (SELECT count(*) FROM nexus.catalog_documents)        AS doc_count,
+       (SELECT count(*) FROM nexus.catalog_links)            AS link_count,
+       (SELECT count(*) FROM nexus.catalog_owners)           AS owner_count,
+       (SELECT count(*) FROM nexus.catalog_collections)      AS collection_count,
+       (SELECT count(*) FROM nexus.catalog_document_chunks)  AS chunk_count
+        </sql>
+        <rollback>DROP VIEW IF EXISTS nexus.catalog_stats</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: collection_doc_counts ────────────────────────────────── -->
+    <changeSet id="catalog-009-2" author="nexus-h9qyp">
+        <comment>nexus.collection_doc_counts — SECURITY INVOKER (physical_collection, doc_count)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_doc_counts
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection,
+       count(*) AS doc_count
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+   AND d.physical_collection &lt;&gt; ''
+ GROUP BY d.tenant_id, d.physical_collection
+        </sql>
+        <rollback>DROP VIEW IF EXISTS nexus.collection_doc_counts</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: coverage_by_content_type (replaces the 1+2N N+1) ─────── -->
+    <changeSet id="catalog-009-3" author="nexus-h9qyp">
+        <comment>nexus.coverage_by_content_type — SECURITY INVOKER (content_type, total, linked) via count FILTER</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.coverage_by_content_type
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       COALESCE(d.content_type, '') AS content_type,
+       count(*) AS total,
+       count(*) FILTER (
+           WHERE EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.from_tumbler = d.tumbler
+                   OR l.to_tumbler   = d.tumbler
+           )
+       ) AS linked
+  FROM nexus.catalog_documents d
+ GROUP BY d.tenant_id, COALESCE(d.content_type, '')
+        </sql>
+        <rollback>DROP VIEW IF EXISTS nexus.coverage_by_content_type</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: collection_health_meta ───────────────────────────────── -->
+    <changeSet id="catalog-009-4" author="nexus-h9qyp">
+        <comment>nexus.collection_health_meta — SECURITY INVOKER (collection, last_indexed, orphan_count); caller filters WHERE collection=?</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_health_meta
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection AS collection,
+       max(d.indexed_at) AS last_indexed,
+       count(*) FILTER (
+           WHERE NOT EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.to_tumbler = d.tumbler
+           )
+       ) AS orphan_count
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+ GROUP BY d.tenant_id, d.physical_collection
+        </sql>
+        <rollback>DROP VIEW IF EXISTS nexus.collection_health_meta</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4b: links_by_type_counts (the 2nd of the "5+2" stats queries) ── -->
+    <changeSet id="catalog-009-4b" author="nexus-h9qyp">
+        <comment>nexus.links_by_type_counts — SECURITY INVOKER (link_type, link_count) GROUP BY; the links_by_type half of stats() (by_content_type reuses coverage_by_content_type.total)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.links_by_type_counts
+    WITH (security_invoker = true)
+AS
+SELECT l.tenant_id,
+       l.link_type,
+       count(*) AS link_count
+  FROM nexus.catalog_links l
+ GROUP BY l.tenant_id, l.link_type
+        </sql>
+        <rollback>DROP VIEW IF EXISTS nexus.links_by_type_counts</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: topics_with_counts ───────────────────────────────────── -->
+    <changeSet id="catalog-009-5" author="nexus-h9qyp">
+        <comment>nexus.topics_with_counts — SECURITY INVOKER passthrough exposing trigger-maintained doc_count (P0)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.topics_with_counts
+    WITH (security_invoker = true)
+AS
+SELECT t.tenant_id,
+       t.id,
+       t.label,
+       t.parent_id,
+       t.collection,
+       t.centroid_hash,
+       t.doc_count,
+       t.created_at,
+       t.review_status,
+       t.terms
+  FROM nexus.topics t
+        </sql>
+        <rollback>DROP VIEW IF EXISTS nexus.topics_with_counts</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 6: GRANT SELECT to PUBLIC (live_chunks / catalog-005 pattern) ── -->
+    <changeSet id="catalog-009-6" author="nexus-h9qyp">
+        <comment>GRANT SELECT to PUBLIC — security_invoker makes caller RLS the boundary (catalog-005-2 rationale)</comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT SELECT ON nexus.catalog_stats            TO PUBLIC;
+GRANT SELECT ON nexus.collection_doc_counts    TO PUBLIC;
+GRANT SELECT ON nexus.coverage_by_content_type TO PUBLIC;
+GRANT SELECT ON nexus.collection_health_meta   TO PUBLIC;
+GRANT SELECT ON nexus.topics_with_counts       TO PUBLIC;
+GRANT SELECT ON nexus.links_by_type_counts     TO PUBLIC;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                REVOKE SELECT ON nexus.links_by_type_counts     FROM PUBLIC;
+                REVOKE SELECT ON nexus.topics_with_counts       FROM PUBLIC;
+                REVOKE SELECT ON nexus.collection_health_meta   FROM PUBLIC;
+                REVOKE SELECT ON nexus.coverage_by_content_type FROM PUBLIC;
+                REVOKE SELECT ON nexus.collection_doc_counts    FROM PUBLIC;
+                REVOKE SELECT ON nexus.catalog_stats            FROM PUBLIC;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

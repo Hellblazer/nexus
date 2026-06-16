@@ -1249,23 +1249,35 @@ public final class CatalogRepository {
 
     public Map<String, Object> stats(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            long docCount  = ctx.selectCount().from(T_DOCS).fetchOne(0, Long.class);
-            long lnkCount  = ctx.selectCount().from(T_LINKS).fetchOne(0, Long.class);
-            long ownCount  = ctx.selectCount().from(T_OWNERS).fetchOne(0, Long.class);
-            long collCount = ctx.selectCount().from(T_COLLS).fetchOne(0, Long.class);
-            long chkCount  = ctx.selectCount().from(T_CHUNKS).fetchOne(0, Long.class);
-            var ltypes = ctx.select(F_LNK_TYPE, DSL.count()).from(T_LINKS).groupBy(F_LNK_TYPE).fetch();
+            // RDR-154 P1.2 (nexus-h9qyp): the five scalar counts come from the
+            // catalog_stats security_invoker view (per-subquery RLS scopes each to
+            // the GUC tenant), replacing five separate selectCount calls and the
+            // Java-side hand-assembly that the Python path duplicated.
+            var s = ctx.fetchOne(
+                "SELECT doc_count, link_count, owner_count, collection_count, chunk_count "
+                + "FROM nexus.catalog_stats");
+            long docCount  = s.get("doc_count", Long.class);
+            long lnkCount  = s.get("link_count", Long.class);
+            long ownCount  = s.get("owner_count", Long.class);
+            long collCount = s.get("collection_count", Long.class);
+            long chkCount  = s.get("chunk_count", Long.class);
+            // RDR-154 P1.2: the two GROUP-BY breakdowns also read views (completing
+            // the "5+2" collapse, Gap 3). links_by_type ← links_by_type_counts;
+            // by_content_type reuses coverage_by_content_type.total (same per-type
+            // document count — eliminates the duplicate aggregate the critic flagged).
+            var ltypes = ctx.fetch(
+                "SELECT link_type, link_count FROM nexus.links_by_type_counts");
             Map<String, Long> byType = new LinkedHashMap<>();
-            for (var r : ltypes) byType.put(r.value1(), (long) r.value2());
-            // nexus-xnz0o: add by_content_type for stats_cmd in catalog.py.
-            // Include the empty/null bucket (operators use it to detect un-typed docs).
-            // Key is "" for null/empty content_type rows, matching SQLite Catalog.stats().
-            var ctypes = ctx.select(F_DOC_CTYPE, DSL.count()).from(T_DOCS)
-                            .groupBy(F_DOC_CTYPE).fetch();
+            for (var r : ltypes) byType.put(r.get("link_type", String.class),
+                                            r.get("link_count", Long.class));
+            // by_content_type: key is "" for null/empty content_type (the view already
+            // COALESCEs to ''), matching SQLite Catalog.stats().
+            var ctypes = ctx.fetch(
+                "SELECT content_type, total FROM nexus.coverage_by_content_type");
             Map<String, Long> byContentType = new LinkedHashMap<>();
             for (var r : ctypes) {
-                String key = (r.value1() == null) ? "" : r.value1();
-                byContentType.put(key, (long) r.value2());
+                byContentType.put(r.get("content_type", String.class),
+                                  r.get("total", Long.class));
             }
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("doc_count", docCount);
@@ -1291,25 +1303,18 @@ public final class CatalogRepository {
      */
     public Map<String, Object> collectionHealthMeta(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // MAX(indexed_at) for documents in the collection.
-            String lastIndexed = ctx
-                .select(DSL.max(F_DOC_IDXAT))
-                .from(T_DOCS)
-                .where(F_DOC_PCOLL.eq(collection))
-                .fetchOne(0, String.class);
-
-            // orphan_count: documents with no incoming link (to_tumbler).
-            long orphanCount = ctx
-                .selectCount()
-                .from(T_DOCS)
-                .leftJoin(T_LINKS).on(F_DOC_TUMBLER.eq(F_LNK_TO))
-                .where(F_DOC_PCOLL.eq(collection))
-                .and(F_LNK_ID.isNull())
-                .fetchOne(0, Long.class);
+            // RDR-154 P1.2 (nexus-h9qyp): read the collection_health_meta
+            // security_invoker view, filtered by collection (predicate pushdown).
+            // The view GROUP BYs collection, so it emits NO row for a collection
+            // with zero documents — default to {last_indexed:null, orphan_count:0}
+            // to preserve the prior contract.
+            var r = ctx.fetchOne(
+                "SELECT last_indexed, orphan_count FROM nexus.collection_health_meta "
+                + "WHERE collection = ?", collection);
 
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("last_indexed", lastIndexed);
-            result.put("orphan_count", orphanCount);
+            result.put("last_indexed", r == null ? null : r.get("last_indexed", String.class));
+            result.put("orphan_count", r == null ? 0L : r.get("orphan_count", Long.class));
             return result;
         });
     }
@@ -1441,14 +1446,14 @@ public final class CatalogRepository {
     /** Return {physical_collection -> doc_count} for all non-empty collections (nexus-xnz0o). */
     public Map<String, Long> collectionDocCounts(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(F_DOC_PCOLL, DSL.count().cast(Long.class))
-                          .from(T_DOCS)
-                          .where(F_DOC_PCOLL.ne("").and(F_DOC_PCOLL.isNotNull()))
-                          .groupBy(F_DOC_PCOLL)
-                          .fetch();
+            // RDR-154 P1.2 (nexus-h9qyp): read the collection_doc_counts
+            // security_invoker view (replaces the hand-written GROUP BY).
+            var rows = ctx.fetch(
+                "SELECT physical_collection, doc_count FROM nexus.collection_doc_counts");
             Map<String, Long> result = new LinkedHashMap<>();
             for (var r : rows) {
-                result.put(r.value1(), r.value2());
+                result.put(r.get("physical_collection", String.class),
+                           r.get("doc_count", Long.class));
             }
             return result;
         });
@@ -1479,47 +1484,37 @@ public final class CatalogRepository {
      */
     public List<Map<String, Object>> coverageByContentType(String tenant, String ownerPrefix) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // Build owner-prefix condition (empty = no filter)
-            Condition prefixCond = DSL.trueCondition();
-            if (ownerPrefix != null && !ownerPrefix.isBlank()) {
+            // RDR-154 P1.2 (nexus-h9qyp): replaces the 1+2N N+1 (one selectDistinct
+            // + two selectCount per content_type) with a single GROUP BY +
+            // count(*) FILTER. The unscoped case reads the coverage_by_content_type
+            // security_invoker view; the owner-prefix case runs the same aggregation
+            // with the prefix applied BEFORE the GROUP BY (a view cannot be
+            // parameterized, but the N+1 is eliminated either way).
+            org.jooq.Result<?> rows;
+            if (ownerPrefix == null || ownerPrefix.isBlank()) {
+                rows = ctx.fetch(
+                    "SELECT content_type, total, linked FROM nexus.coverage_by_content_type");
+            } else {
                 String likePat = ownerPrefix.replaceAll("\\.$", "") + ".%";
-                prefixCond = F_DOC_TUMBLER.like(likePat).or(F_DOC_TUMBLER.eq(ownerPrefix));
+                rows = ctx.fetch(
+                    "SELECT COALESCE(d.content_type, '') AS content_type, "
+                    + "count(*) AS total, "
+                    + "count(*) FILTER (WHERE EXISTS ("
+                    + "  SELECT 1 FROM nexus.catalog_links l "
+                    + "   WHERE l.from_tumbler = d.tumbler OR l.to_tumbler = d.tumbler"
+                    + ")) AS linked "
+                    + "FROM nexus.catalog_documents d "
+                    + "WHERE d.tumbler LIKE ? OR d.tumbler = ? "
+                    + "GROUP BY COALESCE(d.content_type, '')",
+                    likePat, ownerPrefix);
             }
 
-            // Distinct content types in scope
-            var typeRows = ctx.selectDistinct(F_DOC_CTYPE)
-                              .from(T_DOCS)
-                              .where(prefixCond)
-                              .fetch(F_DOC_CTYPE);
-
             List<Map<String, Object>> result = new ArrayList<>();
-            for (String ct : typeRows) {
-                String ctKey = ct == null ? "" : ct;
-                Condition typeCond = (ct == null)
-                    ? prefixCond.and(F_DOC_CTYPE.isNull())
-                    : prefixCond.and(F_DOC_CTYPE.eq(ct));
-
-                // Total count for this content_type + scope
-                long total = ctx.selectCount().from(T_DOCS).where(typeCond)
-                                .fetchOne(0, Long.class);
-
-                // Linked: documents that have at least one link in either direction.
-                // Use EXISTS subqueries for correct RLS scoping (mirrors SQLite JOIN ON
-                // d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler).
-                var hasLink = DSL.exists(
-                    ctx.selectOne().from(T_LINKS)
-                       .where(F_LNK_FROM.eq(F_DOC_TUMBLER)
-                              .or(F_LNK_TO.eq(F_DOC_TUMBLER)))
-                );
-                long linked = ctx.selectCount()
-                                 .from(T_DOCS)
-                                 .where(typeCond.and(hasLink))
-                                 .fetchOne(0, Long.class);
-
+            for (var r : rows) {
                 Map<String, Object> row = new LinkedHashMap<>();
-                row.put("content_type", ctKey);
-                row.put("total",        total);
-                row.put("linked",       linked);
+                row.put("content_type", r.get("content_type", String.class));
+                row.put("total",        r.get("total", Long.class));
+                row.put("linked",       r.get("linked", Long.class));
                 result.add(row);
             }
             return result;

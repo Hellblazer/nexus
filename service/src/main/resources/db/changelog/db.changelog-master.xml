@@ -116,6 +116,13 @@
          catalog-006. -->
     <include file="db/changelog/catalog-008-combined-query-extensions.xml"/>
 
+    <!-- RDR-154 P1 (bead nexus-h9qyp): security_invoker read-shape views
+         (catalog_stats, collection_doc_counts, coverage_by_content_type,
+         collection_health_meta, topics_with_counts) replacing hand-assembled
+         Java/Python read paths + the coverage N+1. Must come after the tables
+         they read (catalog-001, taxonomy-001) and before grants-nexus-svc. -->
+    <include file="db/changelog/catalog-009-read-shape-views.xml"/>
+
     <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
          taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB
          collection into Postgres so service-mode taxonomy compute is chroma-free.
