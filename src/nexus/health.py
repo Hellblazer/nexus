@@ -452,12 +452,71 @@ def _check_vector_service() -> HealthResult:
         )
 
 
+def _check_managed_service_probe() -> list[HealthResult]:
+    """RDR-001 (nexus-o6fch): version-compatibility probe of a MANAGED endpoint.
+
+    Runs ONLY when ``NX_SERVICE_URL`` is explicitly set — the unambiguous "I have
+    pointed the client at a specific managed endpoint" signal. It deliberately
+    NEVER defaults to ``https://api.conexus-nexus.com``: a local-service-in-cloud-
+    mode user (``NX_SERVICE_URL`` unset, endpoint lease-discovered on localhost)
+    must not be probed against the public managed endpoint.
+
+    Complements :func:`_check_vector_service` (which probes
+    ``/v1/vectors/collections`` for reachability + auth): this adds the
+    unauthenticated ``/version`` handshake → app_version COMPATIBILITY, which
+    reachability alone misses (a reachable-but-incompatible managed service). SOFT
+    warn only — reachability fatals are ``_check_vector_service``'s domain, so this
+    surfaces the version/remedy signal without a duplicate fatal on a down service.
+    """
+    import os
+
+    base = os.environ.get("NX_SERVICE_URL", "").strip()
+    if not base:
+        return []  # no explicit managed endpoint — never default-probe the public one
+
+    from nexus.db.managed_endpoint import (
+        ManagedServiceError,
+        ManagedServiceIncompatible,
+        probe_managed_service,
+    )
+
+    try:
+        caps = probe_managed_service(base_url=base)
+    except ManagedServiceIncompatible as exc:
+        return [HealthResult(
+            label="Managed/remote service (version)",
+            ok=False,
+            warn=True,
+            detail=str(exc),
+            fix_suggestions=[
+                "Align the managed-service and nx-client versions, or correct "
+                "NX_SERVICE_URL.",
+            ],
+        )]
+    except ManagedServiceError as exc:
+        # Unreachable — _check_vector_service owns the fatal reachability signal;
+        # stay soft here to avoid a double-report on a down endpoint.
+        return [HealthResult(
+            label="Managed/remote service (version)",
+            ok=False,
+            warn=True,
+            detail=str(exc),
+            fix_suggestions=["Confirm NX_SERVICE_URL is reachable (see the vector-service check)."],
+        )]
+    return [HealthResult(
+        label="Managed/remote service (version)",
+        ok=True,
+        detail=f"{caps.base_url} — app_version {caps.app_version} (mode {caps.embedding_mode})",
+    )]
+
+
 def _check_t3_cloud() -> list[HealthResult]:
     from nexus.config import get_credential
 
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="cloud"))
     results.append(_check_vector_service())
+    results.extend(_check_managed_service_probe())
 
     # CHROMA_API_KEY
     chroma_key = get_credential("chroma_api_key")
