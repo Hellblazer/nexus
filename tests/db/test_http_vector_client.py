@@ -936,3 +936,85 @@ class TestServiceModeDefault:
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
         assert is_vector_service_mode() is False
+
+
+# ── RDR-001 nexus-kf679: managed-endpoint failure reframing ───────────────────
+
+
+class TestManagedFailureReframe:
+    """First-use failures against an EXPLICIT managed endpoint (NX_SERVICE_URL set)
+    are reframed with an actionable remedy; the local/lease topology is unchanged."""
+
+    def _http_error(self, code: int, body: bytes = b'{"error":"x"}'):
+        import io
+        import urllib.error
+        return urllib.error.HTTPError(
+            url="http://svc/v1/x", code=code, msg="err", hdrs={},
+            fp=io.BytesIO(body),
+        )
+
+    def test_post_401_managed_appends_remedy(self, monkeypatch):
+        import nexus.db.http_vector_client as hv
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
+        monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(self._http_error(401)))
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/search", {})
+        assert exc.value.code == 401
+        assert "NX_SERVICE_TOKEN" in str(exc.value)
+        assert "api.conexus-nexus.com" in str(exc.value)
+
+    def test_post_500_managed_no_remedy(self, monkeypatch):
+        import nexus.db.http_vector_client as hv
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
+        monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(self._http_error(500)))
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/search", {})
+        assert exc.value.code == 500
+        assert "NX_SERVICE_TOKEN" not in str(exc.value)  # remedy only for auth failures
+
+    def test_get_connection_error_managed_reframed(self, monkeypatch):
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
+        monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("refused")))
+        with pytest.raises(VectorServiceError) as exc:
+            hv._get("/v1/vectors/collections")
+        assert "api.conexus-nexus.com" in str(exc.value)
+        assert "nx service probe" in str(exc.value)
+
+    def test_post_403_managed_appends_remedy(self, monkeypatch):
+        import nexus.db.http_vector_client as hv
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
+        monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(self._http_error(403)))
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/search", {})
+        assert exc.value.code == 403
+        assert "NX_SERVICE_TOKEN" in str(exc.value)
+
+    def test_post_401_local_no_remedy(self, monkeypatch):
+        # NX_SERVICE_URL unset: 401 still raises VectorServiceError(code=401) but
+        # WITHOUT a managed remedy (a local user isn't told to check a managed URL).
+        import nexus.db.http_vector_client as hv
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(self._http_error(401)))
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/search", {})
+        assert exc.value.code == 401
+        assert "NX_SERVICE_TOKEN" not in str(exc.value)
+
+    @pytest.mark.parametrize("err", ["urlerror", "connection", "timeout"])
+    def test_connection_error_local_unchanged(self, monkeypatch, err):
+        # NX_SERVICE_URL unset → local/lease topology → original error propagates
+        # unchanged (NOT reframed as a managed VectorServiceError), for every
+        # connection-level family the managed path would otherwise wrap.
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        exc_obj = {
+            "urlerror": urllib.error.URLError("refused"),
+            "connection": ConnectionError("refused"),
+            "timeout": TimeoutError("timed out"),
+        }[err]
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(exc_obj))
+        with pytest.raises(type(exc_obj)):
+            hv._get("/v1/vectors/collections")
