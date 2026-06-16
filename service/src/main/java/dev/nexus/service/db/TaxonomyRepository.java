@@ -1136,6 +1136,11 @@ public final class TaxonomyRepository {
                 batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
             }
 
+            // Manual transfers are intentionally NOT batched (nexus-eh89h): they
+            // use ON CONFLICT DO UPDATE (distinct from the helper's DO NOTHING) and
+            // are sparse (curated reassignments, expected well under ~100 per
+            // rebuild), so the per-row trigger cost is immaterial. If a bulk
+            // manual-transfer path ever emerges, batch it with a DO UPDATE variant.
             for (var e : transfers.entrySet()) {
                 int specIndex = ((Number) e.getValue()).intValue();
                 if (specIndex >= 0 && specIndex < topicIds.size()) {
@@ -1220,7 +1225,10 @@ public final class TaxonomyRepository {
                                                long topicId, List<String> docIds,
                                                String assignedBy) {
         if (docIds == null || docIds.isEmpty()) return;
-        // 4 bind params per row → 5000 rows = 20000 params, well under PG's 65535.
+        // 4 bind params per row → 5000 rows = 20000 params, under PG's Int16
+        // Bind-message parameter-count limit of 32767. (A topic with >5000 docs
+        // fires the trigger ceil(N/5000) times — still vastly better than per-row;
+        // realistic topics are hundreds to low-thousands.)
         final int MAX_ROWS = 5000;
         for (int start = 0; start < docIds.size(); start += MAX_ROWS) {
             List<String> batch = docIds.subList(start, Math.min(start + MAX_ROWS, docIds.size()));
