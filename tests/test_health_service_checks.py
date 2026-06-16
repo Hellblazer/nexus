@@ -781,13 +781,15 @@ class TestServiceBgeModelCheck:
         assert res[0].ok is True
         assert "present" in res[0].detail
 
-    def test_service_with_model_missing_is_fatal_with_remedy(self, tmp_path, monkeypatch):
+    def test_service_with_model_missing_is_soft_warn_with_remedy(self, tmp_path, monkeypatch):
+        # SOFT warn (not fatal): surfaces the gap without red-X-ing doctor for a
+        # mid-setup user; the Bge768Embedder boot preflight is the hard gate.
         from nexus.health import _check_service_bge_model
         self._setup(tmp_path, monkeypatch, creds=True, model=False)
         res = _check_service_bge_model()
         assert len(res) == 1
-        assert res[0].ok is False and res[0].fatal is True
-        assert "will fail to boot" in res[0].detail
+        assert res[0].ok is False and res[0].warn is True and res[0].fatal is False
+        assert "will not boot" in res[0].detail
         assert any("nx init --service" in s for s in res[0].fix_suggestions)
 
     def test_service_with_truncated_model_is_flagged(self, tmp_path, monkeypatch):
@@ -795,4 +797,10 @@ class TestServiceBgeModelCheck:
         from nexus.health import _check_service_bge_model
         self._setup(tmp_path, monkeypatch, creds=True, model=True, truncated=True)
         res = _check_service_bge_model()
-        assert len(res) == 1 and res[0].ok is False and res[0].fatal is True
+        assert len(res) == 1 and res[0].ok is False and res[0].warn is True
+
+    def test_present_model_is_not_fatal_or_warn(self, tmp_path, monkeypatch):
+        from nexus.health import _check_service_bge_model
+        self._setup(tmp_path, monkeypatch, creds=True, model=True)
+        res = _check_service_bge_model()
+        assert res[0].ok is True and res[0].fatal is False and res[0].warn is False

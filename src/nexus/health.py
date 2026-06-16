@@ -382,10 +382,17 @@ def _check_service_bge_model() -> list[HealthResult]:
     return [HealthResult(
         label="Service embedder (bge-768)",
         ok=False,
-        fatal=True,
+        # SOFT warn, not fatal: this is the "surface it earlier" advisory. The
+        # HARD gate is the Bge768Embedder boot preflight. A fatal here would
+        # (a) red-X doctor for a mid-setup user who has pg_credentials but has
+        # not provisioned/started the service yet, and (b) stack a third fatal
+        # on top of _check_vector_service / _check_storage_service_health when the
+        # service is simply down — noise, not signal.
+        warn=True,
         detail=(
             f"the local Java service embeds with bge-768 but its ONNX is missing "
-            f"or incomplete at {model_dir} — the service will fail to boot"
+            f"or incomplete at {model_dir} — the service will not boot until it is "
+            f"provisioned"
         ),
         fix_suggestions=[
             "Provision it: nx init --service",
