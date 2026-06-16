@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-154 P2 bead nexus-2zv75 (folds nexus-8luh) — wire source_mtime into
+    collection_health_meta.stale_source_ratio.
+
+    CREATE OR REPLACE the catalog-009 collection_health_meta view, appending a
+    stale_source_ratio column (CREATE OR REPLACE allows adding trailing columns
+    while preserving the existing column set, grants, and security_invoker
+    reloption). stale_source_ratio = fraction of the collection's documents whose
+    source file was modified after indexing (source_mtime epoch > indexed_at
+    epoch); NULL when no document carries a source_mtime. DB-only — no filesystem
+    access. The indexed_at TEXT column is regex-guarded before ::timestamptz so a
+    malformed/empty value yields no stale match instead of raising.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-010-1" author="nexus-2zv75">
+        <comment>Append stale_source_ratio to collection_health_meta (source_mtime vs indexed_at)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_health_meta
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection AS collection,
+       max(d.indexed_at) AS last_indexed,
+       count(*) FILTER (
+           WHERE NOT EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.to_tumbler = d.tumbler
+           )
+       ) AS orphan_count,
+       (count(*) FILTER (
+           WHERE d.source_mtime > 0
+             AND d.indexed_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+             AND d.source_mtime > extract(epoch FROM d.indexed_at::timestamptz)
+        ))::double precision
+        / NULLIF(count(*) FILTER (WHERE d.source_mtime > 0), 0) AS stale_source_ratio
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+ GROUP BY d.tenant_id, d.physical_collection
+        </sql>
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

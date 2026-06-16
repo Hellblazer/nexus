@@ -1309,12 +1309,16 @@ public final class CatalogRepository {
             // with zero documents — default to {last_indexed:null, orphan_count:0}
             // to preserve the prior contract.
             var r = ctx.fetchOne(
-                "SELECT last_indexed, orphan_count FROM nexus.collection_health_meta "
-                + "WHERE collection = ?", collection);
+                "SELECT last_indexed, orphan_count, stale_source_ratio "
+                + "FROM nexus.collection_health_meta WHERE collection = ?", collection);
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("last_indexed", r == null ? null : r.get("last_indexed", String.class));
             result.put("orphan_count", r == null ? 0L : r.get("orphan_count", Long.class));
+            // RDR-154 P2 (nexus-2zv75, folds nexus-8luh): null when the collection
+            // has no document carrying a source_mtime.
+            result.put("stale_source_ratio",
+                       r == null ? null : r.get("stale_source_ratio", Double.class));
             return result;
         });
     }

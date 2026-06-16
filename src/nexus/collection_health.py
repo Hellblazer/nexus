@@ -9,9 +9,10 @@ and topic-assignment signals into a single per-collection view:
     median_query_distance_30d, cross_projection_rank,
     orphan_catalog_rows, stale_source_ratio, hub_domination_score
 
-``stale_source_ratio`` is currently a placeholder (``"—"``) because
-the catalog doesn't store ``source_mtime`` yet (tracked in bead
-``nexus-8luh``).
+``stale_source_ratio`` is computed from ``catalog_documents.source_mtime``
+vs ``indexed_at`` (RDR-154 P2, folds bead ``nexus-8luh``): the fraction of a
+collection's documents whose source file was modified after it was indexed.
+``None`` (rendered ``"—"``) when no document carries a ``source_mtime``.
 
 Every data source is dependency-injected via module-level callables
 so tests can monkeypatch without standing up live T2/T3/catalog.
@@ -48,7 +49,11 @@ class CollectionHealthRow:
     cross_projection_rank: int | None
     orphan_catalog_rows: int | None
     hub_domination_score: float | None = None
-    stale_source_ratio: str = _STALE_PLACEHOLDER  # deferred: nexus-8luh
+    # RDR-154 P2 (nexus-2zv75, folds nexus-8luh): fraction of the collection's
+    # documents whose source file was modified after indexing (source_mtime >
+    # indexed_at). None when no document carries a source_mtime. Renders via the
+    # generic None→"—" cell formatter.
+    stale_source_ratio: float | None = None
     # RDR-087 Phase 4.6 (nexus-c2op): ratio of chash_index rows for this
     # collection to its T3 chunk_count. 1.0 → fully backfilled; < 1.0 →
     # nx collection backfill-hash has work to do. None when either the
@@ -334,6 +339,7 @@ def compute_collection_health(
                 orphan_catalog_rows=int(catalog.get("orphan_count", 0))
                     if catalog.get("orphan_count") is not None else None,
                 hub_domination_score=hub_score_fn(col),
+                stale_source_ratio=catalog.get("stale_source_ratio"),
                 chash_indexed_ratio=(
                     chash_coverage_fn(col) if chash_coverage_fn is not None else None
                 ),
@@ -390,7 +396,7 @@ def format_health_table(
             _fmt_cell(r.median_query_distance_30d),
             _fmt_cell(r.cross_projection_rank),
             _fmt_cell(r.orphan_catalog_rows),
-            r.stale_source_ratio,
+            _fmt_cell(r.stale_source_ratio),
             _fmt_cell(r.hub_domination_score),
             _fmt_cell(r.chash_indexed_ratio),
         ]
