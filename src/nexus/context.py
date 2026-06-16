@@ -131,9 +131,13 @@ def generate_context_l1(
         return None
 
     # RDR-154 P0 (nexus-i7ivk): the nexus-9iw41 (collection, label, doc_count)
-    # dedup band-aid is retired. doc_count is now trigger-maintained (the sole
-    # writer is the topic_assignments statement-level trigger), so the read-side
-    # masking that papered over the drifting hand-maintained counter is removed.
+    # read-side dedup band-aid is retired now that doc_count is trigger-maintained.
+    # CAVEAT: that band-aid actually masked a CLUSTERING-DUPLICATION state
+    # (multiple distinct topic rows sharing one label+count), which the doc_count
+    # trigger does NOT merge — so removing it can re-expose duplicate Knowledge
+    # Map entries for any DB still carrying that state. The underlying clustering
+    # duplication is tracked separately (nexus-slcn7); read-side re-masking is the
+    # wrong layer to fix it.
     # Group by collection prefix, filtered by repo if specified.
     prefixes: dict[str, list[tuple[str, int]]] = {}
     for collection, label, doc_count in rows:

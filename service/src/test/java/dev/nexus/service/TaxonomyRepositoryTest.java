@@ -744,9 +744,17 @@ class TaxonomyRepositoryTest {
 
     @Test @Order(42)
     void docCountTrigger_crossTenantIsolation() {
-        // SECURITY INVOKER + FORCE RLS: an assignment INSERT in tenant A that
-        // references a topic OWNED BY tenant B (the FK check bypasses RLS, so the
-        // row can be inserted) MUST NOT mutate tenant B's topics.doc_count.
+        // An assignment INSERT in tenant A that references a topic OWNED BY
+        // tenant B (the FK check bypasses RLS, so the row can be inserted) MUST
+        // NOT mutate tenant B's topics.doc_count.
+        //
+        // NOTE on what this proves: topics PK is `id` alone (globally unique), so
+        // a same-id topic cannot exist under two tenants — meaning INVOKER vs
+        // DEFINER is NOT behaviorally distinguishable here. The isolation this
+        // test exercises is the trigger's explicit `t.tenant_id = a.tenant_id`
+        // predicate (defense-in-depth), not RLS. The enforceable guard for the
+        // SECURITY INVOKER property itself is the prosecdef=false assertion in
+        // TaxonomySchemaLiquibaseTest.docCountTrigger_functionsTriggersAndComment.
         final long bTopicId = 9900500L;
         final String col = "knowledge__dctrg_xtenant";
         repo.importTopic(TENANT_B, bTopicId, "b-topic", null, col,
@@ -762,6 +770,24 @@ class TaxonomyRepositoryTest {
             .isEqualTo(7);
         // And tenant A owns no such topic id.
         assertThat(repo.getTopicById(TENANT_A, bTopicId)).isEmpty();
+    }
+
+    @Test @Order(43)
+    void docCountTrigger_discoveryAssignmentInsertOverridesSeed() {
+        // persistDiscoveredTopics seeds a per-spec doc_count then inserts the
+        // assignments. The AFTER INSERT trigger must recompute doc_count from the
+        // actual doc_ids, overriding any (here deliberately wrong) seed.
+        final String col = "knowledge__dctrg_disc";
+        var specs = List.of(
+            m("label", "disc-recount", "doc_count", 999, "terms", "[\"p\"]",
+              "assigned_by", "hdbscan",
+              "doc_ids", List.of("dr-doc-1", "dr-doc-2", "dr-doc-3")));
+        List<Long> ids = repo.persistDiscoveredTopics(TENANT_A, col, specs);
+        assertThat(ids).hasSize(1);
+
+        // Trigger recomputed the live count (3), not the bogus 999 seed.
+        assertThat(((Number) repo.getTopicById(TENANT_A, ids.get(0)).get().get("doc_count")).intValue())
+            .isEqualTo(3);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

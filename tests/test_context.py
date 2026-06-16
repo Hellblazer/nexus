@@ -131,6 +131,9 @@ class TestGenerateContextL1:
         content = out.read_text()
 
         # No read-side collapse: identical rows appear up to the per-prefix cap.
+        # (Assumes _TOPICS_PER_PREFIX >= 5 so all 5 inserted rows are emitted;
+        # if the cap dropped below 5 this would silently under-count.)
+        assert _TOPICS_PER_PREFIX >= 5
         assert content.count("Phantom Duplicate") == _TOPICS_PER_PREFIX
 
     def test_dedups_preserves_same_label_distinct_count(

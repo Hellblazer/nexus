@@ -248,7 +248,11 @@ public final class TaxonomyRepository {
     // statement-level triggers; an app-side resync would re-introduce the
     // split-maintenance drift the trigger exists to eliminate.
 
-    /** Count assignments for a topic (used for doc_count resync). */
+    /**
+     * Pure read: count assignments for a topic. RDR-154 P0 (nexus-i7ivk):
+     * doc_count is now trigger-maintained — do NOT feed this value into any
+     * topics.doc_count write; the topic_assignments triggers are the sole writer.
+     */
     public int countAssignments(String tenant, long topicId) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.fetchOne("SELECT COUNT(*) AS c FROM nexus.topic_assignments WHERE topic_id = ?", topicId)
