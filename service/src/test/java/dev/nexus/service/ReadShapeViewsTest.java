@@ -41,12 +41,12 @@ class ReadShapeViewsTest {
 
     private static final List<String> VIEWS = List.of(
         "catalog_stats", "collection_doc_counts", "coverage_by_content_type",
-        "collection_health_meta", "topics_with_counts");
+        "collection_health_meta", "topics_with_counts", "links_by_type_counts");
 
-    // The four views that carry a tenant_id column (catalog_stats is scalar).
+    // The views that carry a tenant_id column (catalog_stats is scalar).
     private static final List<String> GROUPED_VIEWS = List.of(
         "collection_doc_counts", "coverage_by_content_type",
-        "collection_health_meta", "topics_with_counts");
+        "collection_health_meta", "topics_with_counts", "links_by_type_counts");
 
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource svcDs;
@@ -75,24 +75,42 @@ class ReadShapeViewsTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (String tbl : List.of("catalog_documents", "catalog_links", "topics")) {
+            for (String tbl : List.of("catalog_documents", "catalog_links", "topics",
+                                       "catalog_owners", "catalog_collections",
+                                       "catalog_document_chunks")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
 
-            // Fixtures: TENANT_A has 2 docs (one linked) + 1 topic in collection c_a;
-            // TENANT_B has 1 doc + 1 topic in collection c_b.
+            // Fixtures chosen so EVERY catalog_stats scalar differs A vs B (non-vacuous
+            // per-subquery RLS scoping) AND every grouped view has rows for both
+            // tenants. TENANT_A: 2 docs, 1 link, 2 owners, 2 collections, 2 chunks,
+            // 1 topic. TENANT_B: 1 doc, 2 links (dangling tumblers, links are not
+            // FK-enforced), 1 owner, 1 collection, 1 chunk, 1 topic.
             seedDoc(su, TENANT_A, "a.1", "paper", "c_a");
             seedDoc(su, TENANT_A, "a.2", "code",  "c_a");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
                 + "VALUES ('" + TENANT_A + "', 'a.1', 'a.2', 'cites', 'test')");
             seedTopic(su, TENANT_A, "topic-a", "c_a");
+            seedOwner(su, TENANT_A, "a-own-1");
+            seedOwner(su, TENANT_A, "a-own-2");
+            seedColl(su, TENANT_A, "c_a");
+            seedColl(su, TENANT_A, "c_a2");
+            seedChunk(su, TENANT_A, "a.1", 0, "chash-a-0");
+            seedChunk(su, TENANT_A, "a.1", 1, "chash-a-1");
 
             seedDoc(su, TENANT_B, "b.1", "paper", "c_b");
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
+                + "VALUES ('" + TENANT_B + "', 'b.1', 'b.x1', 'cites', 'test'), "
+                + "       ('" + TENANT_B + "', 'b.1', 'b.x2', 'cites', 'test')");
             seedTopic(su, TENANT_B, "topic-b", "c_b");
+            seedOwner(su, TENANT_B, "b-own-1");
+            seedColl(su, TENANT_B, "c_b");
+            seedChunk(su, TENANT_B, "b.1", 0, "chash-b-0");
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -121,6 +139,26 @@ class ReadShapeViewsTest {
         su.createStatement().execute(
             "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) "
             + "VALUES ('" + tenant + "', '" + label + "', '" + coll + "', 0, now(), 'pending')");
+    }
+
+    private static void seedOwner(Connection su, String tenant, String prefix) throws Exception {
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type) "
+            + "VALUES ('" + tenant + "', '" + prefix + "', '" + prefix + "', 'repo')");
+    }
+
+    private static void seedColl(Connection su, String tenant, String name) throws Exception {
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+            + tenant + "', '" + name + "')");
+    }
+
+    private static void seedChunk(Connection su, String tenant, String docId, int pos, String chash) throws Exception {
+        // chash must be exactly 32 chars (catalog_document_chunks_chash_len_check).
+        String c = (chash + "00000000000000000000000000000000").substring(0, 32);
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
+            + "VALUES ('" + tenant + "', '" + docId + "', " + pos + ", '" + c + "')");
     }
 
     // ── reloption physically set on every view ──────────────────────────────────
@@ -183,17 +221,25 @@ class ReadShapeViewsTest {
         try (Connection svc = svcDs.getConnection()) {
             svc.createStatement().execute("SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
             ResultSet a = svc.createStatement().executeQuery(
-                "SELECT doc_count, link_count FROM nexus.catalog_stats");
+                "SELECT doc_count, link_count, owner_count, collection_count, chunk_count "
+                + "FROM nexus.catalog_stats");
             a.next();
-            assertThat(a.getLong("doc_count")).as("GUC=A doc_count is exactly A's 2 docs").isEqualTo(2L);
-            assertThat(a.getLong("link_count")).as("GUC=A link_count is exactly A's 1 link").isEqualTo(1L);
+            assertThat(a.getLong("doc_count")).as("GUC=A doc_count").isEqualTo(2L);
+            assertThat(a.getLong("link_count")).as("GUC=A link_count").isEqualTo(1L);
+            assertThat(a.getLong("owner_count")).as("GUC=A owner_count").isEqualTo(2L);
+            assertThat(a.getLong("collection_count")).as("GUC=A collection_count").isEqualTo(2L);
+            assertThat(a.getLong("chunk_count")).as("GUC=A chunk_count").isEqualTo(2L);
 
             svc.createStatement().execute("SELECT set_config('nexus.tenant', '" + TENANT_B + "', false)");
             ResultSet b = svc.createStatement().executeQuery(
-                "SELECT doc_count, link_count FROM nexus.catalog_stats");
+                "SELECT doc_count, link_count, owner_count, collection_count, chunk_count "
+                + "FROM nexus.catalog_stats");
             b.next();
-            assertThat(b.getLong("doc_count")).as("GUC=B doc_count is exactly B's 1 doc").isEqualTo(1L);
-            assertThat(b.getLong("link_count")).as("GUC=B link_count is exactly B's 0 links").isEqualTo(0L);
+            assertThat(b.getLong("doc_count")).as("GUC=B doc_count").isEqualTo(1L);
+            assertThat(b.getLong("link_count")).as("GUC=B link_count").isEqualTo(2L);
+            assertThat(b.getLong("owner_count")).as("GUC=B owner_count").isEqualTo(1L);
+            assertThat(b.getLong("collection_count")).as("GUC=B collection_count").isEqualTo(1L);
+            assertThat(b.getLong("chunk_count")).as("GUC=B chunk_count").isEqualTo(1L);
         }
     }
 }

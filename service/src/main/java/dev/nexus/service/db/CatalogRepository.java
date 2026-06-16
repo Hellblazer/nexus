@@ -1261,18 +1261,23 @@ public final class CatalogRepository {
             long ownCount  = s.get("owner_count", Long.class);
             long collCount = s.get("collection_count", Long.class);
             long chkCount  = s.get("chunk_count", Long.class);
-            var ltypes = ctx.select(F_LNK_TYPE, DSL.count()).from(T_LINKS).groupBy(F_LNK_TYPE).fetch();
+            // RDR-154 P1.2: the two GROUP-BY breakdowns also read views (completing
+            // the "5+2" collapse, Gap 3). links_by_type ← links_by_type_counts;
+            // by_content_type reuses coverage_by_content_type.total (same per-type
+            // document count — eliminates the duplicate aggregate the critic flagged).
+            var ltypes = ctx.fetch(
+                "SELECT link_type, link_count FROM nexus.links_by_type_counts");
             Map<String, Long> byType = new LinkedHashMap<>();
-            for (var r : ltypes) byType.put(r.value1(), (long) r.value2());
-            // nexus-xnz0o: add by_content_type for stats_cmd in catalog.py.
-            // Include the empty/null bucket (operators use it to detect un-typed docs).
-            // Key is "" for null/empty content_type rows, matching SQLite Catalog.stats().
-            var ctypes = ctx.select(F_DOC_CTYPE, DSL.count()).from(T_DOCS)
-                            .groupBy(F_DOC_CTYPE).fetch();
+            for (var r : ltypes) byType.put(r.get("link_type", String.class),
+                                            r.get("link_count", Long.class));
+            // by_content_type: key is "" for null/empty content_type (the view already
+            // COALESCEs to ''), matching SQLite Catalog.stats().
+            var ctypes = ctx.fetch(
+                "SELECT content_type, total FROM nexus.coverage_by_content_type");
             Map<String, Long> byContentType = new LinkedHashMap<>();
             for (var r : ctypes) {
-                String key = (r.value1() == null) ? "" : r.value1();
-                byContentType.put(key, (long) r.value2());
+                byContentType.put(r.get("content_type", String.class),
+                                  r.get("total", Long.class));
             }
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("doc_count", docCount);

@@ -109,9 +109,26 @@ SELECT d.tenant_id,
            )
        ) AS orphan_count
   FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
  GROUP BY d.tenant_id, d.physical_collection
         </sql>
         <rollback>DROP VIEW IF EXISTS nexus.collection_health_meta</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4b: links_by_type_counts (the 2nd of the "5+2" stats queries) ── -->
+    <changeSet id="catalog-009-4b" author="nexus-h9qyp">
+        <comment>nexus.links_by_type_counts — SECURITY INVOKER (link_type, link_count) GROUP BY; the links_by_type half of stats() (by_content_type reuses coverage_by_content_type.total)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.links_by_type_counts
+    WITH (security_invoker = true)
+AS
+SELECT l.tenant_id,
+       l.link_type,
+       count(*) AS link_count
+  FROM nexus.catalog_links l
+ GROUP BY l.tenant_id, l.link_type
+        </sql>
+        <rollback>DROP VIEW IF EXISTS nexus.links_by_type_counts</rollback>
     </changeSet>
 
     <!-- ── Changeset 5: topics_with_counts ───────────────────────────────────── -->
@@ -145,9 +162,11 @@ GRANT SELECT ON nexus.collection_doc_counts    TO PUBLIC;
 GRANT SELECT ON nexus.coverage_by_content_type TO PUBLIC;
 GRANT SELECT ON nexus.collection_health_meta   TO PUBLIC;
 GRANT SELECT ON nexus.topics_with_counts       TO PUBLIC;
+GRANT SELECT ON nexus.links_by_type_counts     TO PUBLIC;
         </sql>
         <rollback>
             <sql splitStatements="true">
+                REVOKE SELECT ON nexus.links_by_type_counts     FROM PUBLIC;
                 REVOKE SELECT ON nexus.topics_with_counts       FROM PUBLIC;
                 REVOKE SELECT ON nexus.collection_health_meta   FROM PUBLIC;
                 REVOKE SELECT ON nexus.coverage_by_content_type FROM PUBLIC;
