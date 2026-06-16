@@ -389,7 +389,8 @@ class StorageServiceSupervisor:
         env["NX_SERVICE_TOKEN"] = self._service_token
 
         # nexus-pebfx.2: the JAR only reads NX_VOYAGE_API_KEY; without it the
-        # service embeds ONNX-384 and refuses every voyage-* collection. Resolve
+        # service embeds local ONNX (RDR-160: bge-768) and refuses every
+        # voyage-* collection. Resolve
         # through the nexus credential chain (VOYAGE_API_KEY env > config.yml
         # credentials) so `nx daemon service start` works without manual env
         # plumbing. An explicit NX_VOYAGE_API_KEY in the caller's env wins.

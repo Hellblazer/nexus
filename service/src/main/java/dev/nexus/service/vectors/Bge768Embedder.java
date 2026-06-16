@@ -89,6 +89,22 @@ public final class Bge768Embedder implements Embedder {
      * @param tokenizerPath path to {@code tokenizer.json}
      */
     public Bge768Embedder(String modelPath, String tokenizerPath) {
+        // Fail loud with a remedy BEFORE the opaque onnxruntime error: in local
+        // mode this is the service's only embedder, and the ~416MB model is
+        // provisioned separately by `nx init --service` (RDR-160 P3). A missing
+        // file must name the path and the fix, not crash with an ORT stack trace.
+        for (String[] req : new String[][]{
+                {modelPath, "bge ONNX model"}, {tokenizerPath, "bge tokenizer"}}) {
+            if (!java.nio.file.Files.isRegularFile(java.nio.file.Path.of(req[0]))) {
+                throw new IllegalStateException(
+                    "Bge768Embedder: " + req[1] + " not found at " + req[0]
+                    + ". The local-mode service embeds with bge-base-en-v1.5 (768d); "
+                    + "provision the STANDARD fp32 ONNX + tokenizer via `nx init --service` "
+                    + "(RDR-160 P3), or point -Dnexus.bge.modelPath / -Dnexus.bge.tokenizerPath "
+                    + "at an existing standard export (NOT fastembed's model_optimized.onnx).");
+            }
+        }
+
         this.ortEnv = OrtEnvironment.getEnvironment();
 
         OrtSession          sess = null;

@@ -158,6 +158,9 @@ class EmbeddingModeFailLoudTest {
 
     @Test
     void modeNameAndAvailableModels_reflectConstruction() {
+        // MiniLM-wired router → availableModels reports its token. Production
+        // local mode wires bge-768 (modeName stays "onnx-local"; availableModels
+        // = ["bge-base-en-v15-768"]) per RDR-160 — see EmbedderRouterBge768Test.
         EmbedderRouter local = new EmbedderRouter(onnx, "document");
         assertThat(local.modeName()).isEqualTo("onnx-local");
         assertThat(local.availableModels()).containsExactly("minilm-l6-v2-384");

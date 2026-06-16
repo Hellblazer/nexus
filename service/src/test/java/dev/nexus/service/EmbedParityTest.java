@@ -142,6 +142,9 @@ class EmbedParityTest {
 
     @Test
     void embedderRouter_localMode_alwaysOnnx() {
+        // Legacy/mechanism shape: a router injected with an OnnxEmbedder routes
+        // local collections to it. Production local mode wires bge-768 per
+        // RDR-160 — see EmbedderRouterBge768Test for that path.
         EmbedderRouter router = new EmbedderRouter(onnxEmbedder, "document");
 
         // All prefixes should resolve to ONNX in local mode

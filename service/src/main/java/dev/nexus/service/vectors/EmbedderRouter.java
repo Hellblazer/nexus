@@ -109,7 +109,13 @@ public final class EmbedderRouter implements Embedder {
                 voyage3.modelToken(),            voyage3);
     }
 
-    /** Embedding mode for banners and refusal messages. */
+    /**
+     * Embedding mode for banners and refusal messages. {@code "onnx-local"} is a
+     * cross-language SENTINEL parsed by {@code doctor.py} and
+     * {@code storage_service_daemon.py} — do not change the literal. It names the
+     * RUNTIME (local ONNX), not the model; the model token is in
+     * {@link #availableModels()} (RDR-160 swapped MiniLM-384 → bge-768 there).
+     */
     public String modeName() {
         return voyageCodeEmbedder == null ? "onnx-local" : "voyage";
     }
@@ -261,7 +267,8 @@ public final class EmbedderRouter implements Embedder {
      *
      * <p>Returns the CCE embedder for CCE prefix collections (in cloud mode),
      * the standard Voyage embedder for {@code code__} (in cloud mode), or the
-     * ONNX embedder for everything else / local mode.
+     * injected local embedder (RDR-160: bge-768; the MiniLM ONNX fallback in
+     * cloud mode) for everything else / local mode.
      *
      * <p>Legacy fallback for non-conformant names only — production embed
      * paths go through {@link #resolveEmbedderStrict} (model segment is the
