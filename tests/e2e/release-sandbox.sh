@@ -61,6 +61,12 @@ _print_help() {
         "             Useful for end-to-end exercises against MCP / plugin / hooks." \
         "             Requires tests/e2e/.claude-auth/.credentials.json (run" \
         "             tests/e2e/auth-login.sh first)." \
+        "  service    RDR-157 P4.2 fresh-machine LOCAL-mode E2E: position the service" \
+        "             artifact (native binary via NEXUS_SERVICE_BIN, else the repo JAR)," \
+        "             then prove ONE command (nx init --service) goes fresh-install ->" \
+        "             serving with zero manual steps, idempotent on re-run, then stop." \
+        "             Requires a local PG with pgvector (host or NEXUS_PG_BUNDLE) and the" \
+        "             bge-768 ONNX (auto-fetched by init; ~416 MB on a cold cache)." \
         "  reset      Remove ~/nexus-sandbox. Does NOT reinstall." \
         "  help       Print this message." \
         "" \
@@ -119,7 +125,8 @@ if [[ "$MODE" == "reset" ]]; then
     exit 0
 fi
 
-if [[ "$MODE" != "smoke" && "$MODE" != "shakedown" && "$MODE" != "shell" && "$MODE" != "tmux" ]]; then
+if [[ "$MODE" != "smoke" && "$MODE" != "shakedown" && "$MODE" != "shell" \
+      && "$MODE" != "tmux" && "$MODE" != "service" ]]; then
     _die "unknown mode: $MODE (use $0 help)"
 fi
 
@@ -375,6 +382,84 @@ case "$MODE" in
 
         echo
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
+        ;;
+
+    service)
+        # RDR-157 P4.2 (bead nexus-vwvv5.18): fresh-machine -> serving with ZERO
+        # manual steps, LOCAL mode. The sandbox HOME is the "fresh machine"; we
+        # position the distribution artifact (what the release archive/launcher
+        # ships), then prove a single `nx init --service` collapses
+        # provision-PG -> fetch-bge-768 -> start-service -> /health green, is
+        # idempotent on re-run, and tears down cleanly.
+        export NX_LOCAL=1
+        export NX_STORAGE_BACKEND=service
+        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
+        echo "[3/3] Service E2E (LOCAL mode, fresh sandbox HOME=$SANDBOX):"
+        cd /tmp
+
+        # ── Artifact positioning (the launcher's job; P4.1 made the supervisor
+        #    able to launch whatever is positioned here). Native binary wins. ──
+        SVC_WELL_KNOWN="$HOME/.config/nexus/service/nexus-service"
+        if [[ -n "${NEXUS_SERVICE_BIN:-}" && -x "${NEXUS_SERVICE_BIN}" ]]; then
+            echo "  artifact: native binary (NEXUS_SERVICE_BIN=$NEXUS_SERVICE_BIN)"
+        elif [[ -x "$SVC_WELL_KNOWN" ]]; then
+            echo "  artifact: native binary (well-known $SVC_WELL_KNOWN)"
+        else
+            # Fall back to the repo-built JAR. P4.1 supports both; the native
+            # binary is exercised on CI/release where it is built.
+            JAR=""
+            for cand in "$REPO_ROOT"/service/target/nexus-service-*.jar; do
+                [[ -f "$cand" ]] || continue           # glob did not match
+                [[ "$cand" == *-sources.jar ]] && continue
+                JAR="$cand"
+            done
+            [[ -n "$JAR" ]] || _die "no service artifact: set NEXUS_SERVICE_BIN to a native binary, or build the JAR (cd service && mvn package -DskipTests -Pprebuilt-jooq -q)"
+            echo "  artifact: JAR (dev fallback) $JAR"
+            nx daemon service install-jar "$JAR" 2>&1 | tail -2 | sed 's/^/    /' \
+                || _die "install-jar failed"
+        fi
+
+        # ── PG source (host PG on PATH, or a ship-alongside bundle). The bundle
+        #    extract/initdb/provision is what nx init --service drives. ──
+        if [[ -n "${NEXUS_PG_BUNDLE:-}" ]]; then
+            echo "  pg source: ship-alongside bundle (NEXUS_PG_BUNDLE=$NEXUS_PG_BUNDLE)"
+        elif command -v initdb >/dev/null 2>&1; then
+            echo "  pg source: host PostgreSQL ($(command -v initdb))"
+        else
+            _die "no PostgreSQL: put initdb/pg_ctl on PATH (with pgvector) or set NEXUS_PG_BUNDLE to a ship-alongside bundle"
+        fi
+
+        # ── The one command: fresh-install -> serving, zero manual steps. ──
+        echo
+        echo "  ── nx init --service (the one-command collapse) ──"
+        if ! nx init --service 2>&1 | sed 's/^/    /'; then
+            _die "nx init --service did not reach serving (see remedy above)"
+        fi
+
+        # ── status green: a published lease the client can discover. ──
+        echo
+        echo "  ── nx daemon service status (must be green) ──"
+        if ! nx daemon service status 2>&1 | sed 's/^/    /'; then
+            _die "service status not green after init --service"
+        fi
+
+        # ── idempotency: re-run must be safe (live lease short-circuits). ──
+        echo
+        echo "  ── nx init --service AGAIN (idempotent re-run) ──"
+        if ! nx init --service 2>&1 | sed 's/^/    /'; then
+            _die "re-run of nx init --service failed (not idempotent)"
+        fi
+
+        # ── teardown: stop the service AND the PG cluster it provisioned
+        #    (--with-pg; PG is otherwise left running by design). The sandbox
+        #    HOME is removed by `reset`, but a live PG process must be stopped. ──
+        echo
+        echo "  ── teardown (nx daemon service stop --with-pg) ──"
+        nx daemon service stop --with-pg 2>&1 | tail -3 | sed 's/^/    /' || true
+
+        echo
+        echo "[done] Service E2E green: fresh sandbox -> serving in one command -> stopped."
+        echo "       Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
         ;;
 
     shell)
