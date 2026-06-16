@@ -197,6 +197,9 @@ def _request(
     # participate in retry classification. RuntimeError from an unresolvable
     # endpoint propagates untouched — fail-loud must never become a retry.
     except (urllib.error.URLError, ConnectionRefusedError, ConnectionResetError) as exc:
+        # TimeoutError is intentionally NOT in this retry classifier (it is not an
+        # auto-restart signature); it propagates straight to the _get/_post handler,
+        # which reframes it for managed endpoints (nexus-kf679).
         if not _is_retryable_endpoint_error(exc):
             raise
         _log.info(
@@ -217,6 +220,17 @@ def _managed_remedy() -> str | None:
     actionable remedy. Returns ``None`` for the local/lease topology
     (``NX_SERVICE_URL`` unset) so a local user's transient errors are NEVER
     reframed as a managed-service problem — and their error type/flow is unchanged.
+
+    Note: a managed-cloud user with ``NX_SERVICE_URL`` UNSET is not a silent dead
+    zone — there is no local supervisor lease to discover, so
+    :func:`_resolve_endpoint` fails loud first ("export NX_SERVICE_URL / TOKEN")
+    before any request reaches here. This reframing covers the set-but-wrong case.
+
+    Exception-type note: for an explicit managed endpoint, connection-level errors
+    (URLError/ConnectionError/TimeoutError) are surfaced by :func:`_get`/:func:`_post`
+    as :class:`VectorServiceError` (``code=None``) rather than the raw urllib/OSError
+    — callers that classify transient failures by raw type should catch
+    ``VectorServiceError`` for the managed path. Local callers are unaffected.
     """
     base = os.environ.get("NX_SERVICE_URL", "").strip()
     if not base:
