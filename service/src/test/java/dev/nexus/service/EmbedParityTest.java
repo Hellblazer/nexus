@@ -18,14 +18,25 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * RDR-152 bead nexus-gmiaf.21 — Embedding parity: Java embedders must produce
- * bit-exact output on repeated calls (ONNX) and numerically match the Python SDK
- * (Voyage standard + CCE), proved by the Python harness {@code test_embed_parity.py}.
+ * RDR-152 bead nexus-gmiaf.21 — Embedding parity for the MiniLM {@link OnnxEmbedder}
+ * and the Voyage/CCE embedders: Java embedders must produce bit-exact output on
+ * repeated calls (ONNX) and numerically match the Python SDK (Voyage standard +
+ * CCE), proved by the Python harness {@code test_embed_parity.py}.
+ *
+ * <p><b>RDR-160 disposition (bead nexus-emilw).</b> bge-768 is now the local-mode
+ * service embedder; the MiniLM {@link OnnxEmbedder} this suite exercises is no
+ * longer the local default. It is RE-SCOPED, not retired: {@link OnnxEmbedder}
+ * remains a live class — the cloud-mode non-conformant-prefix fallback and the
+ * mirror of the T1 Python chromadb MiniLM — so these assertions (384-dim, L2-norm,
+ * bit-exact determinism) stay non-vacuous against a class still in the codebase.
+ * The local-default parity gate (bge-768 vs fastembed, cosine ≥ 0.9999) lives in
+ * {@code Bge768ParityTest}; this suite does NOT cover the local default any more.
  *
  * <p>This Java test covers:
  * <ol>
- *   <li>ONNX determinism: same text → bit-identical float[] twice.</li>
- *   <li>EmbedderRouter local-mode routing: knowledge/docs/rdr/code all → ONNX.</li>
+ *   <li>ONNX (MiniLM) determinism: same text → bit-identical float[] twice.</li>
+ *   <li>EmbedderRouter routing MECHANISM with an injected OnnxEmbedder (legacy
+ *       shape — production local mode wires bge, see EmbedderRouterBge768Test).</li>
  *   <li>EmbedderRouter cloud-mode routing: correct embedder class selected per prefix.</li>
  *   <li>CCE embedder: basic shape + non-zero output (requires {@code VOYAGE_API_KEY}).
  *       Marked {@code @Tag("integration")}.</li>
