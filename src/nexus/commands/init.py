@@ -337,6 +337,40 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+def _start_service_step() -> None:
+    """Start the local storage service and confirm it is serving (status green).
+
+    RDR-157 P4.1: the final step of the ``nx init --service`` one-command
+    collapse. ``start_storage_service`` is idempotent — it short-circuits on a
+    live lease, ensures Postgres is up, waits for ``/health`` 200, and only then
+    publishes the discovery lease — so re-running ``nx init --service`` is safe.
+    Any failure surfaces as an actionable error with a remedy, never a traceback.
+    """
+    from nexus.daemon.storage_service_daemon import (
+        StorageServiceStartError,
+        start_storage_service,
+    )
+
+    click.echo("\nStarting the storage service …")
+    try:
+        endpoint = start_storage_service()
+    except StorageServiceStartError as exc:
+        # StorageServiceStartError messages already carry a remedy (build/install
+        # the artifact, re-run init, etc.); relay verbatim, fail fatal.
+        click.echo(f"\nStorage service failed to start: {exc}", err=True)
+        raise SystemExit(1)
+    except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
+        _log.error("service_start_failed", error=str(exc))
+        click.echo(f"\nStorage service failed to start: {exc}", err=True)
+        raise SystemExit(1)
+
+    click.echo(
+        f"  Service running on {endpoint.get('host')}:{endpoint.get('port')} "
+        f"(pid {endpoint.get('pid')}, generation {endpoint.get('generation')})."
+    )
+    click.echo("  nx init --service complete — the service backend is serving.")
+
+
 # ── P5 (A) Postgres provisioning ──────────────────────────────────────────────
 
 
@@ -476,9 +510,14 @@ def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) ->
             return
         # Local service backend (RDR-160): the Java service embeds every
         # collection with bge-768. Lock the embedder + provision the standard
-        # ONNX it reads, then return — the interactive local-embedder prompt
-        # below is for the non-service Python (fastembed) path only.
+        # ONNX it reads.
         _provision_service_embedder_step(embedder)
+        # RDR-157 P4.1: collapse fresh-install -> serving. Start the service and
+        # confirm status green before returning, so one command leaves the user
+        # with a running backend (idempotent; safe to re-run). The interactive
+        # local-embedder prompt below is for the non-service Python (fastembed)
+        # path only.
+        _start_service_step()
         return
 
     # Import-site call so tests can patch ``nexus.config.is_local_mode``

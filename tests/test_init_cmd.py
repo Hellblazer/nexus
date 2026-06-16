@@ -726,6 +726,10 @@ class TestServiceLocalEmbedder:
         # No real Postgres, local mode, and a recording stub for the bge fetch.
         monkeypatch.setattr("nexus.commands.init._provision_postgres_step", lambda: None)
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        # RDR-157 P4.1: init --service now also starts the service. Stub it here
+        # so the embedder-focused tests stay hermetic (start coverage is in
+        # TestServiceStartStep below).
+        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
         calls: list[str] = []
         monkeypatch.setattr(
             "nexus.db.service_bge_model.fetch_service_bge_onnx",
@@ -772,3 +776,64 @@ class TestServiceLocalEmbedder:
         result = CliRunner().invoke(init_cmd, ["--service"])
         assert result.exit_code != 0  # fail-loud + fatal
         assert "will not boot" in result.output
+
+
+class TestServiceStartStep:
+    """RDR-157 P4.1 (nexus-vwvv5.17): nx init --service collapses through to a
+    started, status-green service. _start_service_step calls the idempotent
+    start_storage_service and fails loud (never a traceback) on any error."""
+
+    def test_start_step_reports_running_endpoint(self, monkeypatch) -> None:
+        import nexus.commands.init as init_mod
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon.start_storage_service",
+            lambda: {"host": "127.0.0.1", "port": 18099, "pid": 4242, "generation": 3},
+        )
+        runner_out: list[str] = []
+        monkeypatch.setattr(init_mod.click, "echo", lambda *a, **k: runner_out.append(a[0] if a else ""))
+
+        init_mod._start_service_step()
+
+        joined = "\n".join(runner_out)
+        assert "127.0.0.1:18099" in joined
+        assert "serving" in joined.lower()
+
+    def test_start_step_fails_loud_on_start_error(self, monkeypatch) -> None:
+        import nexus.commands.init as init_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        def _boom():
+            raise StorageServiceStartError(
+                "No nexus-service JAR found. Install one: nx daemon service install-jar <path>"
+            )
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon.start_storage_service", _boom
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            init_mod._start_service_step()
+        assert exc.value.code == 1
+
+    def test_init_service_local_wires_start_after_embedder(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The collapse order is provision -> embedder -> start, and start runs."""
+        order: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: order.append("pg"),
+        )
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.db.service_bge_model.fetch_service_bge_onnx",
+            lambda **kw: (order.append("embed"), Path("/fake/onnx"))[1],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._start_service_step",
+            lambda: order.append("start"),
+        )
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output
+        assert order == ["pg", "embed", "start"]
