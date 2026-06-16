@@ -484,7 +484,7 @@ def _check_managed_service_probe() -> list[HealthResult]:
         caps = probe_managed_service(base_url=base)
     except ManagedServiceIncompatible as exc:
         return [HealthResult(
-            label="Managed service (version)",
+            label="Managed/remote service (version)",
             ok=False,
             warn=True,
             detail=str(exc),
@@ -497,14 +497,14 @@ def _check_managed_service_probe() -> list[HealthResult]:
         # Unreachable — _check_vector_service owns the fatal reachability signal;
         # stay soft here to avoid a double-report on a down endpoint.
         return [HealthResult(
-            label="Managed service (version)",
+            label="Managed/remote service (version)",
             ok=False,
             warn=True,
             detail=str(exc),
             fix_suggestions=["Confirm NX_SERVICE_URL is reachable (see the vector-service check)."],
         )]
     return [HealthResult(
-        label="Managed service (version)",
+        label="Managed/remote service (version)",
         ok=True,
         detail=f"{caps.base_url} — app_version {caps.app_version} (mode {caps.embedding_mode})",
     )]

@@ -350,6 +350,32 @@ class TestManagedServiceProbeCheck:
         from nexus.health import _check_managed_service_probe
         assert _check_managed_service_probe() == []
 
+    def test_whitespace_service_url_does_not_probe(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_URL", "   ")
+        from nexus.health import _check_managed_service_probe
+        assert _check_managed_service_probe() == []
+
+    def test_probes_explicit_url_never_the_public_default(self, monkeypatch):
+        # SAFETY INVARIANT: the probe receives the EXPLICIT NX_SERVICE_URL, never
+        # base_url=None (which would default to https://api.conexus-nexus.com).
+        monkeypatch.setenv("NX_SERVICE_URL", "https://staging.example.com")
+        from nexus.db import managed_endpoint as me
+
+        seen = {}
+        caps = me.ManagedCapabilities(
+            base_url="https://staging.example.com", app_version="1.0",
+            embedding_mode="voyage", embedding_models=[],
+            schema_latest_id=None, schema_changeset_count=None,
+        )
+
+        def _capture(**kw):
+            seen.update(kw)
+            return caps
+        monkeypatch.setattr(me, "probe_managed_service", _capture)
+        from nexus.health import _check_managed_service_probe
+        _check_managed_service_probe()
+        assert seen.get("base_url") == "https://staging.example.com"
+
     def test_compatible_is_ok(self, monkeypatch):
         monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
         from nexus.db import managed_endpoint as me
