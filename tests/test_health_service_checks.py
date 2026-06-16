@@ -742,3 +742,57 @@ class TestRlsTableCompleteness:
         assert "nexus.memory" in missing, (
             "Expected cross-walk to detect nexus.memory as missing from impl"
         )
+
+
+# ── RDR-160 nexus-gzqvg: service bge-768 model doctor check ────────────────────
+
+
+class TestServiceBgeModelCheck:
+    """`_check_service_bge_model` — fires ONLY for a local service install."""
+
+    def _setup(self, tmp_path, monkeypatch, *, creds: bool, model: bool, truncated: bool = False):
+        from nexus.db import service_bge_model as sbm
+
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        if creds:
+            (cfg / "pg_credentials").write_text("PG_PORT=15432\n")
+
+        bge = tmp_path / "bge"
+        monkeypatch.setenv("NX_SERVICE_BGE_DIR", str(bge))
+        monkeypatch.setattr(sbm, "_MIN_MODEL_BYTES", 4)
+        monkeypatch.setattr(sbm, "_MIN_TOKENIZER_BYTES", 1)
+        if model:
+            bge.mkdir(parents=True)
+            (bge / "model.onnx").write_bytes(b"x" if truncated else b"MODEL")
+            (bge / "tokenizer.json").write_bytes(b"T")
+
+    def test_not_service_install_returns_nothing(self, tmp_path, monkeypatch):
+        from nexus.health import _check_service_bge_model
+        self._setup(tmp_path, monkeypatch, creds=False, model=False)
+        assert _check_service_bge_model() == []
+
+    def test_service_with_model_present_ok(self, tmp_path, monkeypatch):
+        from nexus.health import _check_service_bge_model
+        self._setup(tmp_path, monkeypatch, creds=True, model=True)
+        res = _check_service_bge_model()
+        assert len(res) == 1
+        assert res[0].ok is True
+        assert "present" in res[0].detail
+
+    def test_service_with_model_missing_is_fatal_with_remedy(self, tmp_path, monkeypatch):
+        from nexus.health import _check_service_bge_model
+        self._setup(tmp_path, monkeypatch, creds=True, model=False)
+        res = _check_service_bge_model()
+        assert len(res) == 1
+        assert res[0].ok is False and res[0].fatal is True
+        assert "will fail to boot" in res[0].detail
+        assert any("nx init --service" in s for s in res[0].fix_suggestions)
+
+    def test_service_with_truncated_model_is_flagged(self, tmp_path, monkeypatch):
+        # below the size floor → "incomplete", treated as not-present
+        from nexus.health import _check_service_bge_model
+        self._setup(tmp_path, monkeypatch, creds=True, model=True, truncated=True)
+        res = _check_service_bge_model()
+        assert len(res) == 1 and res[0].ok is False and res[0].fatal is True
