@@ -282,23 +282,42 @@ def _check_t3_local() -> list[HealthResult]:
             detail=f"{local_path} (will be created on first index)",
         ))
 
+    # Service mode (pg_credentials present) reshapes the Python local-embedder
+    # surface below (nexus-ybw87): a --service install embeds T3 server-side in
+    # the Java service (bge-768, reported authoritatively by
+    # _check_service_bge_model). The Python LocalEmbeddingFunction here only
+    # serves T1/local-Python paths, NOT T3 — so we qualify its label and suppress
+    # the T3-framed upgrade advisory, which would otherwise contradict the
+    # service-embedder result on the very next line.
+    from nexus.config import local_embed_model_choice, nexus_config_dir
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME
+
+    _service_mode = (nexus_config_dir() / CREDENTIALS_FILENAME).exists()
+
     # Embedding model
     from nexus.db.local_ef import LocalEmbeddingFunction
     ef = LocalEmbeddingFunction()
-    results.append(
-        HealthResult(
-            label="Embedding model", ok=True, detail=f"{ef.model_name} ({ef.dimensions}d)"
-        )
-    )
+    if _service_mode:
+        results.append(HealthResult(
+            label="Embedding model (local Python / T1)", ok=True,
+            detail=f"{ef.model_name} ({ef.dimensions}d) — T3 embeds server-side "
+                   f"via the bge-768 service",
+        ))
+    else:
+        results.append(HealthResult(
+            label="Embedding model", ok=True,
+            detail=f"{ef.model_name} ({ef.dimensions}d)",
+        ))
 
     # RDR-144 P5a: config-aware upgrade / degradation advisory. Replaces the
     # old unconditional minilm nudge (which pestered users who explicitly
     # chose 384 and never caught the chose-bge-but-extra-missing degrade).
-    from nexus.config import local_embed_model_choice
-
-    advisory = local_embedder_advisory(local_embed_model_choice(), ef.model_name)
-    if advisory is not None:
-        results.append(advisory)
+    # Suppressed in service mode (see above): the advisory is about the Python
+    # local embedder, which does not serve a service user's T3.
+    if not _service_mode:
+        advisory = local_embedder_advisory(local_embed_model_choice(), ef.model_name)
+        if advisory is not None:
+            results.append(advisory)
 
     # Collection count + legacy-store disk usage.
     #
