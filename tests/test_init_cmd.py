@@ -674,3 +674,56 @@ def test_provision_step_aborts_loud_on_broken_bundle(tmp_path, monkeypatch) -> N
         init_mod._provision_postgres_step()
     assert exc.value.code == 1
     assert called["provision"] is False
+
+
+class TestServiceLocalEmbedder:
+    """RDR-160 P3.1/P3.2: a local --service install locks bge-768 and fetches
+    the STANDARD ONNX the Java service reads. minilm-384 is non-operative here."""
+
+    def _patch_common(self, monkeypatch):
+        # No real Postgres, local mode, and a recording stub for the bge fetch.
+        monkeypatch.setattr("nexus.commands.init._provision_postgres_step", lambda: None)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.db.service_bge_model.fetch_service_bge_onnx",
+            lambda **kw: (calls.append("fetch"), Path("/fake/onnx"))[1],
+        )
+        return calls
+
+    def test_service_local_locks_bge_and_fetches(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._patch_common(monkeypatch)
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output
+        assert calls == ["fetch"], "standard bge ONNX must be fetched for --service"
+        assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
+        assert "bge-768 only" in result.output
+        # the interactive non-service prompt must NOT run
+        assert "choose your on-device" not in result.output.lower()
+
+    def test_service_local_minilm_gets_advisory_and_locks_bge(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._patch_common(monkeypatch)
+        result = CliRunner().invoke(init_cmd, ["--service", "--embedder", "minilm-384"])
+        assert result.exit_code == 0, result.output
+        assert "non-operative" in result.output
+        # locked to bge despite the minilm-384 request (no silent ignore)
+        assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
+        assert calls == ["fetch"]
+
+    def test_service_local_fetch_offline_is_loud_not_fatal(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("nexus.commands.init._provision_postgres_step", lambda: None)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+
+        def _boom(**kw):
+            raise RuntimeError("offline — the service will not boot without /x/model.onnx")
+
+        monkeypatch.setattr("nexus.db.service_bge_model.fetch_service_bge_onnx", _boom)
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output  # loud, not fatal
+        assert "will not boot" in result.output

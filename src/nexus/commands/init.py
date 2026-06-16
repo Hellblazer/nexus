@@ -282,6 +282,55 @@ def _warmup_bge() -> None:
         )
 
 
+# ── P3 service-embedder provisioning (RDR-160 P3.1 / P3.2) ────────────────────
+
+
+def _provision_service_embedder_step(embedder: str | None) -> None:
+    """Lock the service embedder to bge-768 and fetch the standard ONNX it reads.
+
+    RDR-160: a ``--service`` install routes EVERY collection through the Java
+    service's bge-768 embedder (768-dim). Two things follow:
+
+    * **P3.2 (RDR-144 reverse-gap):** ``minilm-384`` is non-operative on the
+      service T3 path, so an explicit ``--embedder minilm-384`` gets an ADVISORY
+      rather than being silently ignored. (minilm-384 stays valid for a
+      non-service local install.)
+    * **P3.1:** the CLI fetches the STANDARD un-fused bge ONNX (NOT fastembed's
+      optimized cache, which onnxruntime-java cannot load) to the stable
+      Java-read path; the service only reads the file. Offline failure is loud
+      (no silent fallback), mirroring :func:`_warmup_bge`.
+    """
+    from nexus.db.service_bge_model import (
+        SERVICE_BGE_DOWNLOAD_HINT,
+        fetch_service_bge_onnx,
+    )
+
+    if embedder == "minilm-384":
+        click.echo(
+            "\nNote: a --service install embeds every collection with bge-768 "
+            "(768-dim) in the Java service. The minilm-384 choice is non-operative "
+            "for the service T3 path; provisioning bge-768 instead. (minilm-384 "
+            "remains valid for a non-service local install.)",
+            err=True,
+        )
+
+    # Record bge-768 as the active local model so the rest of nx (catalog model
+    # segment, doctor advisory) agrees with what the service actually runs.
+    set_config_value(_EMBED_MODEL_KEY, _TIER1_MODEL)
+    click.echo(f"\nSaved: {_EMBED_MODEL_KEY} = {_TIER1_MODEL} (service: bge-768 only)")
+
+    click.echo(
+        f"\nProvisioning the standard bge-768 ONNX the service reads "
+        f"({SERVICE_BGE_DOWNLOAD_HINT}) — one-time download …"
+    )
+    try:
+        dest = fetch_service_bge_onnx()
+        click.echo(f"Done — service bge-768 model ready at {dest}.")
+    except Exception as exc:  # noqa: BLE001 — must stay actionable, mirrors _warmup_bge
+        _log.warning("service_bge_provision_failed", error=str(exc))
+        click.echo(str(exc), err=True)
+
+
 # ── P5 (A) Postgres provisioning ──────────────────────────────────────────────
 
 
@@ -417,8 +466,14 @@ def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) ->
     if provision_service or _auto_service:
         _provision_postgres_step()
         if not _config.is_local_mode():
-            # Cloud mode + service backend: nothing more to do for embedding.
+            # Cloud mode + service backend: embeddings run server-side via Voyage.
             return
+        # Local service backend (RDR-160): the Java service embeds every
+        # collection with bge-768. Lock the embedder + provision the standard
+        # ONNX it reads, then return — the interactive local-embedder prompt
+        # below is for the non-service Python (fastembed) path only.
+        _provision_service_embedder_step(embedder)
+        return
 
     # Import-site call so tests can patch ``nexus.config.is_local_mode``
     # (mem:feedback_pin_local_mode_in_cloud_tests).
