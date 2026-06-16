@@ -39,9 +39,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * suite pins the piece visible to Python clients: an unservable model segment
  * surfaces as <strong>HTTP 422</strong> (well-formed request, unservable in
  * this embedding mode), DISTINGUISHABLE from a malformed request's 400. The
- * service here is wired exactly like a key-less production start: onnx-local
- * {@link EmbedderRouter}s through the ROUTER constructor of
- * {@link PgVectorRepository}.
+ * service here is wired with the MiniLM {@link OnnxEmbedder} to pin the
+ * 422-refusal + {@code /version} handshake MECHANISM, which is model-agnostic.
+ * NOTE: production local mode now wires bge-768 (still {@code modeName
+ * "onnx-local"}, but {@code availableModels ["bge-base-en-v15-768"]}) per
+ * RDR-160 — that production shape is asserted in {@code EmbedderRouterBge768Test};
+ * this harness stays MiniLM-wired only to avoid loading the 416MB bge ONNX in
+ * the PG container.
  *
  * <p>Hermetic: Testcontainers PG (auth needs the token table; the refusal
  * itself throws before any SQL), real ONNX embedder, port 0, PER_CLASS.
@@ -105,8 +109,9 @@ class VectorHandlerEmbeddingModeTest {
         cfg.setAutoCommit(true);
         svcDs = new HikariDataSource(cfg);
 
-        // Production-shaped key-less wiring: onnx-local routers through the
-        // ROUTER constructor (Main.java's no-NX_VOYAGE_API_KEY branch).
+        // MiniLM-wired harness (mechanism only; production local mode wires
+        // bge-768 per RDR-160 — see EmbedderRouterBge768Test). The 422-refusal
+        // and /version handshake under test are model-agnostic.
         onnx = new OnnxEmbedder();
         var docRouter = new EmbedderRouter(onnx, "document");
         var qryRouter = new EmbedderRouter(onnx, "query");
@@ -195,7 +200,9 @@ class VectorHandlerEmbeddingModeTest {
         Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
         assertThat((String) body.get("app_version")).isNotBlank();
         // nexus-pebfx.5: the embedding-mode handshake — this harness is wired
-        // key-less, so the mode must read onnx-local with exactly the ONNX model.
+        // key-less with MiniLM, so the mode reads onnx-local with the MiniLM
+        // model. (Production local mode reports the same mode but bge-768 in
+        // availableModels per RDR-160; asserted in EmbedderRouterBge768Test.)
         assertThat(body.get("embedding_mode")).isEqualTo("onnx-local");
         assertThat((List<String>) body.get("embedding_models"))
             .containsExactly("minilm-l6-v2-384");

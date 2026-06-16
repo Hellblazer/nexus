@@ -19,12 +19,15 @@ import java.util.Map;
  *       {@code voyageai.Client.contextualized_embed} (model {@code voyage-context-3})</li>
  *   <li>{@code code__} → standard embed via {@code voyageai.Client.embed}
  *       (model {@code voyage-code-3})</li>
- *   <li>local mode / fallback → ONNX (all-MiniLM-L6-v2, 384d)</li>
+ *   <li>local mode → the local ONNX-runtime embedder (RDR-160: bge-base-en-v1.5,
+ *       768d); cloud-mode non-conformant prefix fallback → the same injected
+ *       local embedder</li>
  * </ul>
  *
  * <p>The Java service is always in one of two modes:
  * <ul>
- *   <li><strong>Local mode</strong> ({@code voyageApiKey == null}): all collections → ONNX.</li>
+ *   <li><strong>Local mode</strong> ({@code voyageApiKey == null}): all collections
+ *       → the injected local embedder (RDR-160 wires bge-768).</li>
  *   <li><strong>Cloud mode</strong> ({@code voyageApiKey != null}): prefix-based routing above.</li>
  * </ul>
  *
@@ -41,7 +44,14 @@ public final class EmbedderRouter implements Embedder {
     /** Collection prefix that uses standard Voyage embedding (voyage-code-3). */
     private static final String CODE_PREFIX = "code__";
 
-    private final OnnxEmbedder   onnxEmbedder;
+    /**
+     * Local-mode embedder (RDR-160: a {@link Bge768Embedder}); also the
+     * cloud-mode fallback for non-conformant prefixes. Typed to the
+     * {@link Embedder} interface so the local model can change (MiniLM → bge-768)
+     * without a signature churn — the MiniLM {@link OnnxEmbedder} stays a valid
+     * argument, it is simply no longer what production local mode passes.
+     */
+    private final Embedder       localEmbedder;
     private final VoyageEmbedder voyageCodeEmbedder;    // voyage-code-3, null in local mode
     private final CceEmbedder    cceEmbedder;           // voyage-context-3, null in local mode
     private final String         inputType;             // "document" or "query"
@@ -57,17 +67,20 @@ public final class EmbedderRouter implements Embedder {
     private final Map<String, Embedder> modelEmbedders;
 
     /**
-     * Local-mode constructor: all collections embedded via ONNX.
+     * Local-mode constructor: all collections embedded via the injected local
+     * embedder. RDR-160 wires a {@link Bge768Embedder} here; the dispatch table
+     * is self-keyed by {@link Embedder#modelToken()}, so a collection whose model
+     * segment is not this embedder's token is REFUSED (no silent fallback).
      *
-     * @param onnxEmbedder the ONNX embedder instance
-     * @param inputType    {@code "document"} for indexing, {@code "query"} for search
+     * @param localEmbedder the local ONNX-runtime embedder (production: bge-768)
+     * @param inputType     {@code "document"} for indexing, {@code "query"} for search
      */
-    public EmbedderRouter(OnnxEmbedder onnxEmbedder, String inputType) {
-        this.onnxEmbedder        = onnxEmbedder;
+    public EmbedderRouter(Embedder localEmbedder, String inputType) {
+        this.localEmbedder       = localEmbedder;
         this.voyageCodeEmbedder  = null;
         this.cceEmbedder         = null;
         this.inputType           = inputType;
-        this.modelEmbedders      = Map.of(onnxEmbedder.modelToken(), onnxEmbedder);
+        this.modelEmbedders      = Map.of(localEmbedder.modelToken(), localEmbedder);
     }
 
     /**
@@ -79,7 +92,7 @@ public final class EmbedderRouter implements Embedder {
      * @param inputType     {@code "document"} or {@code "query"}
      */
     public EmbedderRouter(OnnxEmbedder onnxEmbedder, String voyageApiKey, String inputType) {
-        this.onnxEmbedder       = onnxEmbedder;
+        this.localEmbedder      = onnxEmbedder;
         this.voyageCodeEmbedder = new VoyageEmbedder(voyageApiKey, "voyage-code-3", inputType);
         this.cceEmbedder        = new CceEmbedder(voyageApiKey, inputType);
         this.inputType          = inputType;
@@ -96,7 +109,13 @@ public final class EmbedderRouter implements Embedder {
                 voyage3.modelToken(),            voyage3);
     }
 
-    /** Embedding mode for banners and refusal messages. */
+    /**
+     * Embedding mode for banners and refusal messages. {@code "onnx-local"} is a
+     * cross-language SENTINEL parsed by {@code doctor.py} and
+     * {@code storage_service_daemon.py} — do not change the literal. It names the
+     * RUNTIME (local ONNX), not the model; the model token is in
+     * {@link #availableModels()} (RDR-160 swapped MiniLM-384 → bge-768 there).
+     */
     public String modeName() {
         return voyageCodeEmbedder == null ? "onnx-local" : "voyage";
     }
@@ -126,7 +145,7 @@ public final class EmbedderRouter implements Embedder {
      */
     @Override
     public List<float[]> embed(List<String> texts) {
-        return onnxEmbedder.embed(texts);
+        return localEmbedder.embed(texts);
     }
 
     /**
@@ -207,8 +226,9 @@ public final class EmbedderRouter implements Embedder {
      * (no-silent-fallbacks-for-correctness):
      * <ul>
      *   <li>onnx-local mode + {@code voyage-*} segment → refuse (no credentials)
-     *   <li>any mode + unknown segment (e.g. {@code bge-base-en-v15-768} with
-     *       no wired embedder) → refuse
+     *   <li>any mode + a segment with no embedder wired in this mode → refuse
+     *       (e.g. {@code minilm-l6-v2-384} on the RDR-160 bge-768 local service,
+     *       or {@code bge-base-en-v15-768} in a MiniLM-wired test router)
      *   <li>cloud mode + {@code minilm-l6-v2-384} segment → ONNX (the segment
      *       is the authority; prefix routing wrongly sent these to CCE)
      * </ul>
@@ -247,7 +267,8 @@ public final class EmbedderRouter implements Embedder {
      *
      * <p>Returns the CCE embedder for CCE prefix collections (in cloud mode),
      * the standard Voyage embedder for {@code code__} (in cloud mode), or the
-     * ONNX embedder for everything else / local mode.
+     * injected local embedder (RDR-160: bge-768; the MiniLM ONNX fallback in
+     * cloud mode) for everything else / local mode.
      *
      * <p>Legacy fallback for non-conformant names only — production embed
      * paths go through {@link #resolveEmbedderStrict} (model segment is the
@@ -255,8 +276,8 @@ public final class EmbedderRouter implements Embedder {
      */
     public Embedder resolveEmbedder(String collection) {
         if (voyageCodeEmbedder == null) {
-            // Local mode: always ONNX
-            return onnxEmbedder;
+            // Local mode: the single injected local embedder (RDR-160: bge-768)
+            return localEmbedder;
         }
         // Cloud mode: route by prefix
         if (collection != null) {
@@ -269,14 +290,14 @@ public final class EmbedderRouter implements Embedder {
                 return voyageCodeEmbedder;
             }
         }
-        // Unrecognised prefix — fall back to ONNX (safe, logged)
-        log.warn("event=embed_router_fallback collection={} fallback=onnx", collection);
-        return onnxEmbedder;
+        // Unrecognised prefix — fall back to the local embedder (safe, logged)
+        log.warn("event=embed_router_fallback collection={} fallback=local", collection);
+        return localEmbedder;
     }
 
     @Override
     public void close() {
-        try { onnxEmbedder.close();       } catch (Exception ignored) {}
+        try { localEmbedder.close();      } catch (Exception ignored) {}
         // VoyageEmbedder and CceEmbedder are stateless HTTP clients; no close needed
     }
 }

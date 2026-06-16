@@ -833,6 +833,9 @@ class TestEmbedderModeParityJava:
         for java_name, expected in (
             ("OnnxEmbedder.java", "minilm-l6-v2-384"),
             ("CceEmbedder.java", "voyage-context-3"),
+            # RDR-160: bge-768 is the local-mode service embedder; its token must
+            # stay a known Python _MODEL_DIMS entry (768d) or local serving drifts.
+            ("Bge768Embedder.java", "bge-base-en-v15-768"),
         ):
             src = (self._ROUTER_JAVA.parent / java_name).read_text()
             m = re.search(
