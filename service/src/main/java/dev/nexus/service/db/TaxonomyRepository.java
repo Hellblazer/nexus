@@ -243,13 +243,10 @@ public final class TaxonomyRepository {
         });
     }
 
-    /** Update doc_count for a topic (denormalized cache resync). */
-    public void updateDocCount(String tenant, long topicId, int docCount) {
-        tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("UPDATE nexus.topics SET doc_count = ? WHERE id = ?", docCount, topicId);
-            return null;
-        });
-    }
+    // RDR-154 P0 (nexus-i7ivk): updateDocCount() removed. doc_count is now
+    // maintained solely by the trg_topic_assignments_doc_count_{ins,del}
+    // statement-level triggers; an app-side resync would re-introduce the
+    // split-maintenance drift the trigger exists to eliminate.
 
     /** Count assignments for a topic (used for doc_count resync). */
     public int countAssignments(String tenant, long topicId) {
@@ -308,10 +305,10 @@ public final class TaxonomyRepository {
 
             ctx.execute("DELETE FROM nexus.topic_assignments WHERE topic_id = ?", sourceId);
 
-            int newCount = ctx.fetchOne(
-                "SELECT COUNT(*) AS c FROM nexus.topic_assignments WHERE topic_id = ?", targetId)
-               .get("c", Integer.class);
-            ctx.execute("UPDATE nexus.topics SET doc_count = ? WHERE id = ?", newCount, targetId);
+            // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. The assignment
+            // move (INSERT) and source purge (DELETE) above each fire the
+            // statement-level triggers, which recompute target.doc_count from the
+            // live assignment rows; the trigger is the sole writer.
             ctx.execute("DELETE FROM nexus.topics WHERE id = ?", sourceId);
 
             return Optional.of(collection);
@@ -362,11 +359,11 @@ public final class TaxonomyRepository {
                     ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
                     """, tenant, docId, topicId, assignedBy);
             }
-            // Resync doc_count (mirrors nexus-n41p)
-            int cnt = ctx.fetchOne(
-                "SELECT COUNT(*) AS c FROM nexus.topic_assignments WHERE topic_id = ?", topicId)
-               .get("c", Integer.class);
-            ctx.execute("UPDATE nexus.topics SET doc_count = ? WHERE id = ?", cnt, topicId);
+            // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. A fresh
+            // assignment INSERT fires the AFTER INSERT statement-level trigger,
+            // which recomputes topics.doc_count from the live rows. (An ON CONFLICT
+            // DO NOTHING / DO UPDATE that changes no assignment count leaves
+            // doc_count correctly unchanged.) The trigger is the sole writer.
             return null;
         });
     }
@@ -650,7 +647,10 @@ public final class TaxonomyRepository {
                      doc_count, created_at, review_status, terms)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?, ?)
                 ON CONFLICT (id) DO UPDATE SET
-                    doc_count     = GREATEST(nexus.topics.doc_count, EXCLUDED.doc_count),
+                    -- RDR-154 P0 (nexus-i7ivk): doc_count is trigger-maintained and
+                    -- is NOT an ETL merge participant. The INSERT branch seeds it for
+                    -- a brand-new topic; on conflict the live (trigger-computed) value
+                    -- is left untouched so a lossy snapshot can never clobber it.
                     review_status = EXCLUDED.review_status,
                     centroid_hash = EXCLUDED.centroid_hash,
                     terms         = EXCLUDED.terms
@@ -1037,9 +1037,10 @@ public final class TaxonomyRepository {
                 }
             }
 
-            // Zero out parent doc_count
-            ctx.execute("UPDATE nexus.topics SET doc_count = 0 WHERE tenant_id = ? AND id = ?",
-                        tenant, topicId);
+            // RDR-154 P0 (nexus-i7ivk): no manual parent zero-out. The parent's
+            // assignments were DELETEd above, firing the AFTER DELETE trigger which
+            // recomputes the parent's doc_count to its live value (0). The trigger
+            // is the sole writer.
 
             log.info("persist_split topic_id={} children={}", topicId, childIds.size());
             return childIds;

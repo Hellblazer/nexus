@@ -435,28 +435,31 @@ class TaxonomyRepositoryTest {
     // ── ETL import ─────────────────────────────────────────────────────────────
 
     @Test @Order(21)
-    void importTopic_preservesIdAndGreatestDocCount() {
+    void importTopic_preservesId_docCountNotEtlMerged() {
+        // RDR-154 P0 (nexus-i7ivk): doc_count is trigger-maintained and is no
+        // longer an ETL ON CONFLICT merge participant. The INSERT branch seeds
+        // the column; re-imports MUST NOT touch it (neither GREATEST nor verbatim).
         long srcId = repo.importTopic(TENANT_A, 9900001L, "imported-topic", null, COL_A,
                                       "centroid-hash-1", 10, PAST_TS, "pending", null);
         assertThat(srcId).isEqualTo(9900001L);
         Optional<Map<String, Object>> row = repo.getTopicById(TENANT_A, 9900001L);
         assertThat(row).isPresent();
         assertThat(row.get().get("label")).isEqualTo("imported-topic");
-        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(10);
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(10); // seed
 
-        // Re-import with lower doc_count — GREATEST preserves higher value
+        // Re-import with LOWER doc_count — ETL no longer writes doc_count; seed preserved.
         repo.importTopic(TENANT_A, 9900001L, "imported-topic", null, COL_A,
                          "centroid-hash-1", 5, PAST_TS, "accepted", null);
         row = repo.getTopicById(TENANT_A, 9900001L);
-        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(10); // GREATEST preserved
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(10);
 
-        // Re-import with HIGHER doc_count — must win
+        // Re-import with HIGHER doc_count — still NOT written by the ETL upsert.
         repo.importTopic(TENANT_A, 9900001L, "imported-topic", null, COL_A,
                          "centroid-hash-1", 99, PAST_TS, "pending", null);
         row = repo.getTopicById(TENANT_A, 9900001L);
-        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(99);
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(10);
 
-        // review_status uses EXCLUDED (verbatim): last import wins
+        // review_status STILL uses EXCLUDED (verbatim): last import wins.
         assertThat(row.get().get("review_status")).isEqualTo("pending");
     }
 
@@ -694,6 +697,71 @@ class TaxonomyRepositoryTest {
         assertThat(ids).isEmpty();
         // Guard fired: still exactly the 3 pre-existing rows, none inserted.
         assertThat(repo.getAllTopics(TENANT_A, COL_DISC)).hasSize(3);
+    }
+
+    // ── RDR-154 P0 (nexus-i7ivk): doc_count trigger as SOLE writer ──────────────
+
+    @Test @Order(40)
+    void docCountTrigger_purgeDeleteLeavesCountCorrect() {
+        // The cascade/purge-delete hole the trigger closes: deleting some of a
+        // topic's assignments must recompute doc_count on the surviving row.
+        final String col = "knowledge__dctrg_purge";
+        long t = repo.insertTopic(TENANT_A, "purge-recount", null, col, 0, PAST_TS, null);
+        repo.assignTopic(TENANT_A, "pd-doc-1", t, "manual", null, col, null);
+        repo.assignTopic(TENANT_A, "pd-doc-2", t, "manual", null, col, null);
+        // AFTER INSERT trigger set the live count.
+        assertThat(((Number) repo.getTopicById(TENANT_A, t).get().get("doc_count")).intValue())
+            .isEqualTo(2);
+
+        // Purge one doc's assignment; topic survives (still has pd-doc-2).
+        repo.purgeAssignmentsForDoc(TENANT_A, col, "pd-doc-1");
+
+        // AFTER DELETE trigger recomputed: exactly 1 remains.
+        assertThat(((Number) repo.getTopicById(TENANT_A, t).get().get("doc_count")).intValue())
+            .isEqualTo(1);
+    }
+
+    @Test @Order(41)
+    void docCountTrigger_etlUpsertDoesNotStompTriggerValue() {
+        // After the trigger has computed a live count, an ETL importTopic upsert
+        // on the same row MUST NOT overwrite doc_count (RDR-154 Decision 1).
+        final String col = "knowledge__dctrg_etl";
+        long t = repo.insertTopic(TENANT_A, "etl-nostomp", null, col, 0, PAST_TS, null);
+        repo.assignTopic(TENANT_A, "es-doc-1", t, "manual", null, col, null);
+        repo.assignTopic(TENANT_A, "es-doc-2", t, "manual", null, col, null);
+        repo.assignTopic(TENANT_A, "es-doc-3", t, "manual", null, col, null);
+        assertThat(((Number) repo.getTopicById(TENANT_A, t).get().get("doc_count")).intValue())
+            .isEqualTo(3);
+
+        // ETL re-import the same id with a wildly different doc_count seed.
+        repo.importTopic(TENANT_A, t, "etl-nostomp", null, col,
+                         null, 99, PAST_TS, "accepted", null);
+
+        // Trigger value survives; the 99 was dropped from the ON CONFLICT merge.
+        assertThat(((Number) repo.getTopicById(TENANT_A, t).get().get("doc_count")).intValue())
+            .isEqualTo(3);
+    }
+
+    @Test @Order(42)
+    void docCountTrigger_crossTenantIsolation() {
+        // SECURITY INVOKER + FORCE RLS: an assignment INSERT in tenant A that
+        // references a topic OWNED BY tenant B (the FK check bypasses RLS, so the
+        // row can be inserted) MUST NOT mutate tenant B's topics.doc_count.
+        final long bTopicId = 9900500L;
+        final String col = "knowledge__dctrg_xtenant";
+        repo.importTopic(TENANT_B, bTopicId, "b-topic", null, col,
+                         null, 7, PAST_TS, "pending", null);
+        assertThat(((Number) repo.getTopicById(TENANT_B, bTopicId).get().get("doc_count")).intValue())
+            .isEqualTo(7);
+
+        // Tenant A inserts an assignment pointing at tenant B's topic id.
+        repo.assignTopic(TENANT_A, "xt-doc-a", bTopicId, "manual", null, col, null);
+
+        // Tenant B's row is untouched (trigger scoped to the session tenant).
+        assertThat(((Number) repo.getTopicById(TENANT_B, bTopicId).get().get("doc_count")).intValue())
+            .isEqualTo(7);
+        // And tenant A owns no such topic id.
+        assertThat(repo.getTopicById(TENANT_A, bTopicId)).isEmpty();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

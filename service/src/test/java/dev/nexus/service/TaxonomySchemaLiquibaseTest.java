@@ -101,6 +101,79 @@ class TaxonomySchemaLiquibaseTest {
         }
     }
 
+    /**
+     * RDR-154 P0 (bead nexus-i7ivk): taxonomy-003 doc_count trigger changeset.
+     * Asserts the two recompute functions exist and are SECURITY INVOKER
+     * (prosecdef=false), both statement-level triggers exist on
+     * topic_assignments, and the trigger-maintained COMMENT is recorded on
+     * topics.doc_count.
+     */
+    @Test
+    void docCountTrigger_functionsTriggersAndComment() throws Exception {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.start()) {
+
+            try (Connection su = pg.createConnection("")) {
+                su.createStatement().execute(
+                    "DO $$ BEGIN " +
+                    "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
+                    "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
+                    "  END IF; " +
+                    "END $$");
+
+                Database db = DatabaseFactory.getInstance()
+                    .findCorrectDatabaseImplementation(new JdbcConnection(su));
+                Liquibase lb = new Liquibase(
+                    "db/changelog/db.changelog-master.xml",
+                    new ClassLoaderResourceAccessor(), db);
+                lb.update(new Contexts());
+            }
+
+            try (Connection c = pg.createConnection("")) {
+                // Both recompute functions exist and are SECURITY INVOKER (prosecdef=false).
+                ResultSet fns = c.createStatement().executeQuery(
+                    "SELECT p.proname, p.prosecdef FROM pg_proc p " +
+                    "JOIN pg_namespace n ON n.oid = p.pronamespace " +
+                    "WHERE n.nspname = 'nexus' AND p.proname IN " +
+                    "('topics_doc_count_recount_ins','topics_doc_count_recount_del') " +
+                    "ORDER BY p.proname");
+                List<String> invokerFns = new ArrayList<>();
+                while (fns.next()) {
+                    assertThat(fns.getBoolean("prosecdef"))
+                        .as("function %s MUST be SECURITY INVOKER (prosecdef=false)",
+                            fns.getString("proname"))
+                        .isFalse();
+                    invokerFns.add(fns.getString("proname"));
+                }
+                assertThat(invokerFns).containsExactly(
+                    "topics_doc_count_recount_del", "topics_doc_count_recount_ins");
+
+                // Both statement-level triggers exist on nexus.topic_assignments.
+                ResultSet trg = c.createStatement().executeQuery(
+                    "SELECT t.tgname FROM pg_trigger t " +
+                    "JOIN pg_class cl ON cl.oid = t.tgrelid " +
+                    "JOIN pg_namespace n ON n.oid = cl.relnamespace " +
+                    "WHERE n.nspname = 'nexus' AND cl.relname = 'topic_assignments' " +
+                    "AND NOT t.tgisinternal ORDER BY t.tgname");
+                List<String> triggers = new ArrayList<>();
+                while (trg.next()) triggers.add(trg.getString("tgname"));
+                assertThat(triggers).contains(
+                    "trg_topic_assignments_doc_count_del",
+                    "trg_topic_assignments_doc_count_ins");
+
+                // Trigger-maintained COMMENT recorded on topics.doc_count.
+                ResultSet cmt = c.createStatement().executeQuery(
+                    "SELECT pgd.description FROM pg_description pgd " +
+                    "JOIN pg_class cl ON cl.oid = pgd.objoid " +
+                    "JOIN pg_namespace n ON n.oid = cl.relnamespace " +
+                    "JOIN pg_attribute a ON a.attrelid = cl.oid AND a.attnum = pgd.objsubid " +
+                    "WHERE n.nspname = 'nexus' AND cl.relname = 'topics' " +
+                    "AND a.attname = 'doc_count'");
+                assertThat(cmt.next()).as("doc_count must carry a COMMENT").isTrue();
+                assertThat(cmt.getString("description")).contains("Trigger-maintained");
+            }
+        }
+    }
+
     private static List<String> columnNames(Connection c, String schema, String table) throws Exception {
         ResultSet rs = c.createStatement().executeQuery(
             "SELECT column_name FROM information_schema.columns " +
