@@ -74,6 +74,80 @@ def _parse_version(ver: str) -> tuple[int, ...]:
 # ── Dataclass ───────────────────────────────────────────────────────────────
 
 
+def migrate_dedup_root_topics(conn: sqlite3.Connection) -> None:
+    """nexus-slcn7: collapse duplicate root topics, then enforce uniqueness.
+
+    The c-TF-IDF labeler could assign the same label to distinct HDBSCAN clusters,
+    and discovery was additive, so a ``(collection, label)`` could end up with
+    several root-topic (``parent_id IS NULL``) rows — surfacing as duplicate
+    Knowledge Map entries once the RDR-154 read-side dedup band-aid was removed
+    (the root-cause prevention is the spec dedup in ``taxonomy_compute``). This
+    migration repairs existing data and installs a partial unique index so the
+    state cannot recur. Idempotent: re-running is a no-op once deduped.
+
+    For each duplicated ``(collection, label)`` group of root topics it keeps the
+    lowest id, moves that group's assignments / child topics / links onto the
+    kept id, deletes the redundant rows, and recomputes the kept topic's
+    ``doc_count`` from its live assignments.
+    """
+    has_topics = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='topics'"
+    ).fetchone()
+    if has_topics is None:
+        return
+
+    groups = conn.execute(
+        """
+        SELECT collection, label, MIN(id) AS keep_id, GROUP_CONCAT(id) AS ids
+        FROM topics
+        WHERE parent_id IS NULL
+        GROUP BY collection, label
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+
+    for collection, label, keep_id, ids in groups:
+        dup_ids = [int(i) for i in str(ids).split(",") if int(i) != keep_id]
+        for dup_id in dup_ids:
+            # Move assignments onto the kept topic (PK (doc_id, topic_id) — a doc
+            # already on keep_id is skipped), then drop the redundant rows.
+            conn.execute(
+                "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id, assigned_by) "
+                "SELECT doc_id, ?, assigned_by FROM topic_assignments WHERE topic_id = ?",
+                (keep_id, dup_id),
+            )
+            conn.execute("DELETE FROM topic_assignments WHERE topic_id = ?", (dup_id,))
+            # Re-parent any children of the dup onto the kept topic.
+            conn.execute("UPDATE topics SET parent_id = ? WHERE parent_id = ?", (keep_id, dup_id))
+            # Repoint links; UPDATE OR IGNORE drops rows that would collide on the
+            # (from, to) PK, then delete any self-links / leftovers on the dup.
+            conn.execute(
+                "UPDATE OR IGNORE topic_links SET from_topic_id = ? WHERE from_topic_id = ?",
+                (keep_id, dup_id),
+            )
+            conn.execute(
+                "UPDATE OR IGNORE topic_links SET to_topic_id = ? WHERE to_topic_id = ?",
+                (keep_id, dup_id),
+            )
+            conn.execute(
+                "DELETE FROM topic_links WHERE from_topic_id = ? OR to_topic_id = ? "
+                "OR from_topic_id = to_topic_id",
+                (dup_id, dup_id),
+            )
+            conn.execute("DELETE FROM topics WHERE id = ?", (dup_id,))
+        conn.execute(
+            "UPDATE topics SET doc_count = "
+            "(SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?) WHERE id = ?",
+            (keep_id, keep_id),
+        )
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_root_collection_label "
+        "ON topics(collection, label) WHERE parent_id IS NULL"
+    )
+    conn.commit()
+
+
 @dataclass(frozen=True)
 class Migration:
     """A single T2 schema migration, tagged with the version that introduced it.
@@ -2117,6 +2191,11 @@ MIGRATIONS: list[Migration] = [
         "5.5.0",
         "RDR-139 Layer E: add document_highlights table",
         migrate_document_highlights_table,
+    ),
+    Migration(
+        "5.10.7",
+        "nexus-slcn7: merge duplicate root topics + unique (collection,label) index",
+        migrate_dedup_root_topics,
     ),
 ]
 

@@ -136,6 +136,11 @@
          grants-nexus-svc. -->
     <include file="db/changelog/taxonomy-003-doc-count-trigger.xml"/>
 
+    <!-- nexus-slcn7 (RDR-154 follow-on): merge duplicate root topics + partial
+         unique (tenant_id, collection, label) index. After taxonomy-003 (the
+         doc_count trigger recomputes during the assignment moves). -->
+    <include file="db/changelog/taxonomy-004-dedup-root-topics.xml"/>
+
     <!-- RDR-154 P2 (bead nexus-2zv75): DB-enforced updated_at on document_aspects
          and topics ONLY, via a shared BEFORE UPDATE trigger (SECURITY INVOKER).
          Must come after those tables exist (aspects-001, taxonomy-001) and

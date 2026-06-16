@@ -2577,3 +2577,95 @@ class TestBackfillBuiltinBindings:
         assert matches[0][0] >= "4.10.2", (
             f"must be introduced at >= 4.10.2, got {matches[0][0]!r}"
         )
+
+
+class TestDedupRootTopics:
+    """nexus-slcn7: migrate_dedup_root_topics merges duplicate root topics and
+    installs the partial unique index."""
+
+    @staticmethod
+    def _schema(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE topics (
+                id INTEGER PRIMARY KEY, label TEXT NOT NULL,
+                parent_id INTEGER REFERENCES topics(id), collection TEXT NOT NULL,
+                doc_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE topic_assignments (
+                doc_id TEXT NOT NULL, topic_id INTEGER NOT NULL,
+                assigned_by TEXT NOT NULL DEFAULT 'hdbscan',
+                PRIMARY KEY (doc_id, topic_id)
+            );
+            CREATE TABLE topic_links (
+                from_topic_id INTEGER NOT NULL, to_topic_id INTEGER NOT NULL,
+                link_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (from_topic_id, to_topic_id)
+            );
+            """
+        )
+
+    def test_merges_duplicates_and_enforces_uniqueness(self) -> None:
+        from nexus.db.migrations import migrate_dedup_root_topics
+
+        conn = sqlite3.connect(":memory:")
+        self._schema(conn)
+        # Three root topics share (col, label); ids 1,2,3. doc1 on all three,
+        # doc2 only on id 2, doc3 only on id 3.
+        for tid in (1, 2, 3):
+            conn.execute(
+                "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+                "VALUES (?, 'dup', 'docs__c', 99, '')",
+                (tid,),
+            )
+        # A legitimately-distinct root topic (different label) must survive untouched.
+        conn.execute(
+            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+            "VALUES (4, 'unique', 'docs__c', 7, '')"
+        )
+        conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+            [("doc1", 1), ("doc1", 2), ("doc1", 3), ("doc2", 2), ("doc3", 3)],
+        )
+        conn.commit()
+
+        migrate_dedup_root_topics(conn)
+
+        # Exactly one 'dup' root topic remains (the lowest id, 1) + the distinct one.
+        rows = conn.execute(
+            "SELECT id FROM topics WHERE collection='docs__c' AND label='dup'"
+        ).fetchall()
+        assert [r[0] for r in rows] == [1]
+        assert conn.execute(
+            "SELECT id FROM topics WHERE label='unique'"
+        ).fetchone()[0] == 4
+
+        # All three docs are now on the kept topic; doc_count recomputed to 3.
+        kept = conn.execute(
+            "SELECT doc_id FROM topic_assignments WHERE topic_id=1 ORDER BY doc_id"
+        ).fetchall()
+        assert [r[0] for r in kept] == ["doc1", "doc2", "doc3"]
+        assert conn.execute(
+            "SELECT doc_count FROM topics WHERE id=1"
+        ).fetchone()[0] == 3
+
+        # The partial unique index now forbids a new duplicate root topic.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+                "VALUES (9, 'dup', 'docs__c', 0, '')"
+            )
+
+    def test_idempotent_rerun_is_noop(self) -> None:
+        from nexus.db.migrations import migrate_dedup_root_topics
+
+        conn = sqlite3.connect(":memory:")
+        self._schema(conn)
+        conn.execute(
+            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+            "VALUES (1, 'solo', 'docs__c', 1, '')"
+        )
+        conn.commit()
+        migrate_dedup_root_topics(conn)
+        migrate_dedup_root_topics(conn)  # second run must not raise or change rows
+        assert conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0] == 1

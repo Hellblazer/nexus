@@ -361,7 +361,37 @@ def compute_discovered_topics(
             "centroid": [float(x) for x in centroids[cid].tolist()],
             "assigned_by": "hdbscan",
         })
-    return specs
+    return _dedup_specs_by_label(specs)
+
+
+def _dedup_specs_by_label(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse discovered specs that share an identical label (nexus-slcn7).
+
+    The c-TF-IDF top-3 labeler can assign the SAME label string to two distinct
+    HDBSCAN clusters (their top-3 terms collide). Persisted as-is, each becomes a
+    separate root topic with an identical ``(collection, label)``, which surfaces
+    as duplicate Knowledge Map rows once the RDR-154 read-side dedup band-aid is
+    removed. Merge same-label specs at the source instead: union their ``doc_ids``,
+    recompute ``doc_count``, keep the first cluster's centroid/terms (order
+    preserved). One root topic per label is then the invariant both T2 backends
+    persist, and the partial unique index is its structural backstop.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for spec in specs:
+        label = spec["label"]
+        existing = merged.get(label)
+        if existing is None:
+            merged[label] = {**spec, "doc_ids": list(spec["doc_ids"])}
+            order.append(label)
+            continue
+        seen = set(existing["doc_ids"])
+        for did in spec["doc_ids"]:
+            if did not in seen:
+                existing["doc_ids"].append(did)
+                seen.add(did)
+        existing["doc_count"] = len(existing["doc_ids"])
+    return [merged[label] for label in order]
 
 
 def compute_rebuild_plan(
