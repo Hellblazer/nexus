@@ -343,6 +343,65 @@ def _check_t3_local() -> list[HealthResult]:
     return results
 
 
+def _check_service_bge_model() -> list[HealthResult]:
+    """RDR-160 (nexus-gzqvg): surface a missing/incomplete bge-768 service model.
+
+    In local mode the Java service embeds every collection with bge-768 and reads
+    the STANDARD fp32 ONNX from a fixed path; without it the service fail-loud-
+    crashes at boot (the {@code Bge768Embedder} preflight), which is opaque if you
+    have not seen it before. ``nx doctor`` surfaces the gap earlier.
+
+    Gated on SERVICE mode (``pg_credentials`` present) because only the Java
+    service reads this file: a pure-Python local install uses the fastembed cache,
+    and cloud mode embeds server-side via Voyage. Called from the local-mode
+    branch of :func:`run_health_checks`, so cloud mode never reaches it. Returns
+    ``[]`` (no output) when this is not a service install.
+
+    ``service_bge_model_present()`` applies the same size floors as provisioning,
+    so a truncated download or a quantized/fused substitute reads as "incomplete"
+    and is flagged, not silently accepted.
+    """
+    from nexus.config import nexus_config_dir
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME
+
+    if not (nexus_config_dir() / CREDENTIALS_FILENAME).exists():
+        return []  # not a service install — the Java service is what reads this model
+
+    from nexus.db.service_bge_model import (
+        service_bge_model_dir,
+        service_bge_model_present,
+    )
+
+    model_dir = service_bge_model_dir()
+    if service_bge_model_present():
+        return [HealthResult(
+            label="Service embedder (bge-768)",
+            ok=True,
+            detail=f"standard ONNX present at {model_dir}",
+        )]
+    return [HealthResult(
+        label="Service embedder (bge-768)",
+        ok=False,
+        # SOFT warn, not fatal: this is the "surface it earlier" advisory. The
+        # HARD gate is the Bge768Embedder boot preflight. A fatal here would
+        # (a) red-X doctor for a mid-setup user who has pg_credentials but has
+        # not provisioned/started the service yet, and (b) stack a third fatal
+        # on top of _check_vector_service / _check_storage_service_health when the
+        # service is simply down — noise, not signal.
+        warn=True,
+        detail=(
+            f"the local Java service embeds with bge-768 but its ONNX is missing "
+            f"or incomplete at {model_dir} — the service will not boot until it is "
+            f"provisioned"
+        ),
+        fix_suggestions=[
+            "Provision it: nx init --service",
+            "Or stage the STANDARD fp32 export (Xenova/bge-base-en-v1.5 model.onnx "
+            "+ tokenizer.json — NOT fastembed's model_optimized.onnx) at that path.",
+        ],
+    )]
+
+
 def _check_vector_service() -> HealthResult:
     """Reachability probe for the pgvector-backed vector serving surface.
 
@@ -2038,6 +2097,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     _local = is_local_mode()
     if _local:
         results.extend(_check_t3_local())
+        results.extend(_check_service_bge_model())
         results.extend(_check_t3_daemon_version())
     else:
         results.extend(_check_t3_cloud())
