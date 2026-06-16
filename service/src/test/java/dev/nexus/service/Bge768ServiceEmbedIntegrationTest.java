@@ -151,6 +151,9 @@ class Bge768ServiceEmbedIntegrationTest {
     }
 
     private void loadFixture() throws Exception {
+        // The fixture intentionally includes an empty string (bge embeds [CLS][SEP]
+        // → a non-zero, normalized vector, so its cosine is well-defined) plus a
+        // >512-token entry exercising truncation. Do not prune these as "odd inputs".
         try (InputStream in = getClass().getResourceAsStream("/bge768/parity_reference.json")) {
             assertThat(in).as("committed parity fixture on classpath").isNotNull();
             JsonNode root = MAPPER.readTree(in);
