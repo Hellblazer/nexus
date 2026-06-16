@@ -23,8 +23,21 @@ the consumer.**
 - **Contract:** download the target's binary, verify against the sha256 manifest,
   mark executable. The binary is self-contained (no JVM/JRE). Windows is a
   separate release-N+1 follow-on; `mac-x64` is out of scope (owner call).
+- **Provenance (cosign/Sigstore, `nexus-1odsm`):** each asset additionally
+  carries a keyless cosign signature bundle `<asset>.cosign.bundle`. The
+  publisher (`engine-service-release.yml`) signs and self-verifies before
+  upload. **Consumers MUST verify before use:**
+  ```
+  cosign verify-blob <asset> --bundle <asset>.cosign.bundle \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-identity-regexp \
+      'https://github.com/<owner>/nexus/.github/workflows/engine-service-release.yml@refs/tags/engine-service-v.*'
+  ```
+  conexus deploy/engine must run this check before `docker run` (track in
+  conexus `ECR_PUSH.md`, which already verifies the pushed image's signature).
 - **Consumer use:** upgrade-orchestration fetches the binary for the host
-  platform during an install/upgrade and positions it (see primitive 4).
+  platform during an install/upgrade, verifies the cosign bundle + sha256, and
+  positions it (see primitive 4).
 
 ### 2. Relocatable PG17 + pgvector bundle (P3.1, ship-alongside)
 

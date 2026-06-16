@@ -41,6 +41,7 @@ on:
 
 permissions:
   contents: write  # create the GitHub Release + upload assets on tag push
+  id-token: write  # nexus-1odsm: keyless cosign signing of release assets (OIDC)
 
 concurrency:
   group: engine-service-release-${{ github.ref }}
@@ -248,6 +249,34 @@ jobs:
               ;;
           esac
 
+      - name: Install cosign (release tag only)
+        # nexus-1odsm: keyless Sigstore signing. Only needed on the publish path.
+        # sigstore-official installer; version-tag pinned like the actions/* above
+        # (dorny/paths-filter is the one SHA-pinned third-party action).
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign release asset (cosign keyless, release tag only)
+        # nexus-1odsm: the native binary runs with DB credentials in the conexus
+        # cloud and is opaque to static inspection, so a detached Sigstore
+        # signature matters more than for a JAR. Keyless: the GitHub Actions OIDC
+        # identity is bound into the Fulcio cert; the Rekor transparency log entry
+        # is embedded in the bundle. Verify with the identity + issuer below
+        # (see the release notes / conexus deploy ECR_PUSH.md).
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          cosign sign-blob "dist/$ASSET" --bundle "dist/$ASSET.cosign.bundle"
+          # Self-verify before publishing so a malformed bundle fails the build,
+          # not the consumer. Identity = this workflow at this tag ref.
+          cosign verify-blob "dist/$ASSET" \
+            --bundle "dist/$ASSET.cosign.bundle" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          echo "cosign signature verified for $ASSET"
+
       - name: Upload Actions artifact (always — dev smoke / non-tag path)
         uses: actions/upload-artifact@v4
         with:
@@ -288,7 +317,13 @@ jobs:
             "  curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx -o \$MODEL_DIR/model.onnx" \
             "  curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json -o \$MODEL_DIR/tokenizer.json" \
             "" \
-            "Provenance: sha256 only for now; cosign/Sigstore signing tracked for N+1." \
+            "Provenance: each asset carries a sha256 AND a keyless cosign/Sigstore" \
+            "signature bundle (<asset>.cosign.bundle). Verify before use with" \
+            "'cosign verify-blob <asset> --bundle <asset>.cosign.bundle', passing" \
+            "--certificate-oidc-issuer https://token.actions.githubusercontent.com and" \
+            "--certificate-identity-regexp matching this workflow at an" \
+            "engine-service-v* tag ref. conexus deploy verifies this bundle before" \
+            "docker run (see ECR_PUSH.md)." \
             > notes.md
           # Matrix-safe: create the release once (whichever arch job wins), then
           # each job uploads its OWN arch assets (--clobber for re-runs). Use
@@ -305,4 +340,5 @@ jobs:
                 || { echo "release create failed:" >&2; cat create_err.txt >&2; exit 1; }
             fi
           fi
-          gh release upload "$tag" --clobber "dist/$ASSET" "dist/$ASSET.sha256"
+          gh release upload "$tag" --clobber \
+            "dist/$ASSET" "dist/$ASSET.sha256" "dist/$ASSET.cosign.bundle"
