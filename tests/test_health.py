@@ -238,6 +238,46 @@ def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> N
     assert "bge-768" in joined and "384" in joined
 
 
+def test_check_t3_local_suppresses_advisory_in_service_mode(tmp_path, monkeypatch) -> None:
+    """nexus-ybw87: a --service install (pg_credentials present) embeds T3
+    server-side in the Java service, so the PYTHON local-embedder advisory is
+    suppressed even when it would otherwise fire (State-2 degraded-bge here) —
+    it reflects fastembed, which does not serve a service user's T3.
+    """
+    from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
+    from nexus.health import _check_t3_local
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+    (cfg / "pg_credentials").write_text("PG_PORT=15432\n")  # service mode configured
+
+    monkeypatch.setattr(
+        "nexus.config._default_local_path", lambda: tmp_path / "does_not_exist"
+    )
+    # Would normally trigger the State-2 degraded-bge advisory:
+    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL)
+
+    class _FakeEF:
+        model_name = _TIER0_MODEL
+        dimensions = 384
+
+    monkeypatch.setattr(
+        "nexus.db.local_ef.LocalEmbeddingFunction", lambda *a, **k: _FakeEF()
+    )
+
+    results = _check_t3_local()
+    assert not any(r.label == "Local embedder" for r in results), (
+        "Python local-embedder advisory must be suppressed for a service install"
+    )
+    # The Python EF line is relabeled so it does not read as the T3 embedder
+    # (which is the bge-768 service, reported by _check_service_bge_model).
+    assert not any(r.label == "Embedding model" for r in results)
+    ef_line = next((r for r in results if r.label.startswith("Embedding model")), None)
+    assert ef_line is not None and "T1" in ef_line.label
+    assert "server-side" in ef_line.detail
+
+
 # ── _check_t3_daemon_version (RDR-149 nexus-ymn76) ───────────────────────────
 
 
