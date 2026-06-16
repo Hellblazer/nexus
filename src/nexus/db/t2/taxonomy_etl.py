@@ -9,7 +9,11 @@ The SQLite source is NEVER modified (opened ``?mode=ro``).
 
 IDEMPOTENT: relies on the upsert conflict strategies the Java service enforces:
 - ``topics``:           ON CONFLICT (tenant_id, id) DO UPDATE
-    - ``doc_count``       = GREATEST(excluded.doc_count, topics.doc_count)
+    - ``doc_count``       — NOT an ON CONFLICT merge participant. RDR-154 P0
+      (nexus-i7ivk) made doc_count trigger-maintained (the topic_assignments
+      statement-level trigger is the SOLE writer); the INSERT branch seeds it
+      for a brand-new topic and the conflict branch leaves the live value
+      untouched. Do NOT re-add doc_count to the DO UPDATE clause.
     - ``review_status``   = EXCLUDED.review_status  (mutable annotation)
     - ``centroid_hash``   = EXCLUDED.centroid_hash  (mutable annotation)
     - ``terms``           = EXCLUDED.terms          (mutable annotation)
@@ -26,8 +30,9 @@ IDEMPOTENT: relies on the upsert conflict strategies the Java service enforces:
     - ``last_discover_at``        = EXCLUDED.* (more recent is better)
 
 FIDELITY-PRESERVING:
-- Monotonic counters (doc_count, link_count, last_discover_doc_count) use
-  GREATEST so re-runs preserve the high-water mark.
+- Monotonic counters (link_count, last_discover_doc_count) use GREATEST so
+  re-runs preserve the high-water mark. (doc_count is excluded — it is
+  trigger-maintained, not ETL-merged; see the topics note above.)
 - Timestamps and labels are NOT overwritten on conflict — original creation
   state survives re-runs.
 - review_status, centroid_hash, terms ARE overwritten on conflict so

@@ -40,7 +40,6 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/topics/update_label update label
  *   POST  /v1/taxonomy/topics/rename       rename + mark accepted
  *   POST  /v1/taxonomy/topics/mark_reviewed update review_status
- *   POST  /v1/taxonomy/topics/update_doc_count update doc_count
  *   GET   /v1/taxonomy/topics/count_assignments count assignments for topic_id=
  *   POST  /v1/taxonomy/topics/delete       delete topic (returns collection)
  *   POST  /v1/taxonomy/topics/merge        merge source→target
@@ -127,7 +126,6 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/topics/update_label"       -> handleUpdateLabel(exchange, tenant, method);
                 case "/topics/rename"             -> handleRenameTopic(exchange, tenant, method);
                 case "/topics/mark_reviewed"      -> handleMarkReviewed(exchange, tenant, method);
-                case "/topics/update_doc_count"   -> handleUpdateDocCount(exchange, tenant, method);
                 case "/topics/count_assignments"  -> handleCountAssignments(exchange, tenant, method);
                 case "/topics/delete"             -> handleDeleteTopic(exchange, tenant, method);
                 case "/topics/merge"              -> handleMergeTopics(exchange, tenant, method);
@@ -283,14 +281,9 @@ public final class TaxonomyHandler implements HttpHandler {
         HttpUtil.send(ex, 200, "{\"ok\":true}");
     }
 
-    private void handleUpdateDocCount(HttpExchange ex, String tenant, String method) throws IOException {
-        requireMethod(ex, method, "POST");
-        Map<String, Object> body = readBody(ex);
-        long topicId  = requireLong(body, "topic_id");
-        int  docCount = requireInt(body, "doc_count");
-        repo.updateDocCount(tenant, topicId, docCount);
-        HttpUtil.send(ex, 200, "{\"ok\":true}");
-    }
+    // RDR-154 P0 (nexus-i7ivk): handleUpdateDocCount / POST /topics/update_doc_count
+    // removed. topics.doc_count is maintained solely by the statement-level
+    // topic_assignments triggers; there is no app-side write path to expose.
 
     private void handleCountAssignments(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
