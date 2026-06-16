@@ -790,6 +790,28 @@ class TaxonomyRepositoryTest {
             .isEqualTo(3);
     }
 
+    @Test @Order(44)
+    void batchedAssignmentInsert_largeTopic_exactCountAndAllDocs() {
+        // nexus-eh89h: the per-topic assignments are now inserted in one multi-row
+        // statement. Exercise a large doc set to guard the VALUES builder and
+        // confirm the doc_count trigger computes the exact live count.
+        final String col = "knowledge__batch_large";
+        List<String> docIds = new java.util.ArrayList<>();
+        for (int i = 0; i < 50; i++) docIds.add("bl-doc-" + i);
+        var specs = List.of(
+            m("label", "batch-large", "doc_count", 0, "terms", "[\"p\"]",
+              "assigned_by", "hdbscan", "doc_ids", docIds));
+        List<Long> ids = repo.persistDiscoveredTopics(TENANT_A, col, specs);
+        assertThat(ids).hasSize(1);
+
+        assertThat(((Number) repo.getTopicById(TENANT_A, ids.get(0)).get().get("doc_count")).intValue())
+            .as("trigger computes exact count over the batched multi-row insert")
+            .isEqualTo(50);
+        assertThat(repo.getTopicDocIds(TENANT_A, ids.get(0), 0))
+            .as("all 50 assignments present")
+            .hasSize(50);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     /** Build a {@code Map<String,Object>} from alternating key/value varargs (mixed value types). */
