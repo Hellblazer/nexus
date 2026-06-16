@@ -265,6 +265,19 @@ class TestPgvectorInjected:
             f"{_VECTOR_LIB} not injected into {pkglibdir}"
         )
 
+    def test_pg_trgm_present(self, bins):
+        """pg_trgm (contrib, required by the RDR-155 schema) must be in the
+        bundle the CA-3 gate validates — not only in the relocation smoke. The
+        build (build_pg_bundle.sh) installs it; a regression dropping it would
+        otherwise pass this canonical gate green. Mirrors
+        test_pg_bundle_relocation.py::test_pg_trgm_present_under_root."""
+        sharedir = Path(_pg_config(bins, "--sharedir"))
+        control = sharedir / "extension" / "pg_trgm.control"
+        assert control.is_file(), (
+            f"pg_trgm.control not present at {control} — contrib extension "
+            "missing from the bundle (RDR-155 schema requires it)"
+        )
+
     def test_preflight_passes(self, bins):
         """check_pgvector_available must NOT raise once the control file is in place."""
         try:

@@ -249,6 +249,16 @@ jobs:
           # -C parent + basename preserves the relative bin/ lib/ share/ layout
           # that relocation depends on.
           tar -cJf "$txz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
+          # CA-2 ship-alongside regression tripwire (nexus-vwvv5.11): the verdict
+          # rests on a small bundle (~5.74 MB compressed). A configure-flag change
+          # or new contrib module that doubled it would invalidate the rationale
+          # silently. Ceiling is generous head-room, not a tight bound.
+          sz=$(wc -c < "$txz")
+          echo "bundle .txz size: $sz bytes"
+          if [ "$sz" -gt $((10 * 1024 * 1024)) ]; then
+            echo "::error::nexus-pg bundle .txz is $sz bytes (> 10 MiB) — CA-2 ship-alongside size assumption breached"
+            exit 1
+          fi
           reloc="$RUNNER_TEMP/relocated"
           mkdir -p "$reloc"
           tar -xJf "$txz" -C "$reloc"
@@ -378,6 +388,15 @@ jobs:
           bundle="$GITHUB_WORKSPACE/bundle"
           txz="$RUNNER_TEMP/nexus-pg-mac-arm64.txz"
           tar -cJf "$txz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
+          # CA-2 ship-alongside regression tripwire (nexus-vwvv5.11): see the
+          # linux job for rationale. Generous 10 MiB ceiling over the ~5.74 MB
+          # current bundle.
+          sz=$(wc -c < "$txz")
+          echo "bundle .txz size: $sz bytes"
+          if [ "$sz" -gt $((10 * 1024 * 1024)) ]; then
+            echo "::error::nexus-pg bundle .txz is $sz bytes (> 10 MiB) — CA-2 ship-alongside size assumption breached"
+            exit 1
+          fi
           reloc="$RUNNER_TEMP/relocated"
           mkdir -p "$reloc"
           tar -xJf "$txz" -C "$reloc"
