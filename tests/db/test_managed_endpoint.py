@@ -1,0 +1,190 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""Cloud-mode managed-service endpoint config + capability probe (nexus-vwvv5.12).
+
+RDR-001 consumer requirement. In cloud mode there is NO local Java service and NO
+local Postgres: the nx client talks HTTPS to the managed nexus service, which owns
+its cloud PG + pgvector entirely server-side. This client deliverable is exactly
+two things:
+
+  1. resolve the managed endpoint (default ``https://api.conexus-nexus.com``,
+     ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` env override);
+  2. an HTTP reachability + capability/version-compatibility probe of the
+     unauthenticated ``/version`` handshake that FAILS LOUD with a remedy on
+     unreachable / incompatible.
+
+No pg_provision, no Postgres connection, no Liquibase on the client.
+"""
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import httpx
+import pytest
+
+from nexus.db.managed_endpoint import (
+    DEFAULT_MANAGED_SERVICE_URL,
+    ManagedCapabilities,
+    ManagedServiceIncompatible,
+    ManagedServiceUnreachable,
+    probe_managed_service,
+    resolve_managed_endpoint,
+)
+
+_ENV_VARS = ("NX_SERVICE_URL", "NX_SERVICE_TOKEN")
+
+
+@pytest.fixture(autouse=True)
+def _clear_env(monkeypatch):
+    for v in _ENV_VARS:
+        monkeypatch.delenv(v, raising=False)
+
+
+def _resp(status_code: int, body: dict) -> httpx.Response:
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status_code
+    resp.json.return_value = body
+    resp.text = str(body)
+    return resp
+
+
+def _version_body(app_version: str = "1.0-SNAPSHOT", mode: str = "voyage") -> dict:
+    return {
+        "app_version": app_version,
+        "embedding_mode": mode,
+        "embedding_models": ["voyage-context-3", "voyage-code-3"],
+        "schema_latest_id": "vectors-002",
+        "schema_changeset_count": 64,
+    }
+
+
+# ── endpoint resolution ──────────────────────────────────────────────────────
+
+
+def test_resolve_defaults_to_managed_url(monkeypatch):
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+    base, token = resolve_managed_endpoint()
+    assert base == DEFAULT_MANAGED_SERVICE_URL
+    assert token == "tok"
+
+
+def test_resolve_env_override_strips_trailing_slash(monkeypatch):
+    monkeypatch.setenv("NX_SERVICE_URL", "https://staging.example.com/")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+    base, token = resolve_managed_endpoint()
+    assert base == "https://staging.example.com"
+    assert token == "tok"
+
+
+def test_resolve_missing_token_fails_loud(monkeypatch):
+    with pytest.raises(ManagedServiceIncompatible) as exc:
+        resolve_managed_endpoint()
+    assert "NX_SERVICE_TOKEN" in str(exc.value)
+
+
+def test_resolve_token_optional_when_not_required(monkeypatch):
+    base, token = resolve_managed_endpoint(require_token=False)
+    assert base == DEFAULT_MANAGED_SERVICE_URL
+    assert token is None
+
+
+# ── probe: unreachable ───────────────────────────────────────────────────────
+
+
+def test_probe_unreachable_connect_error_fails_loud():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(ManagedServiceUnreachable) as exc:
+        probe_managed_service(base_url="https://api.conexus-nexus.com", http_get=fake_get)
+    msg = str(exc.value)
+    assert "api.conexus-nexus.com" in msg
+    assert "NX_SERVICE_URL" in msg  # remedy names the override
+
+
+def test_probe_unreachable_timeout_fails_loud():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        raise httpx.TimeoutException("timed out")
+
+    with pytest.raises(ManagedServiceUnreachable):
+        probe_managed_service(base_url="https://api.conexus-nexus.com", http_get=fake_get)
+
+
+# ── probe: incompatible ──────────────────────────────────────────────────────
+
+
+def test_probe_non_200_is_incompatible():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(503, {"error": "unavailable"})
+
+    with pytest.raises(ManagedServiceIncompatible) as exc:
+        probe_managed_service(base_url="https://x", http_get=fake_get)
+    assert "503" in str(exc.value)
+
+
+def test_probe_missing_app_version_is_incompatible():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, {"embedding_mode": "voyage"})  # no app_version
+
+    with pytest.raises(ManagedServiceIncompatible):
+        probe_managed_service(base_url="https://x", http_get=fake_get)
+
+
+def test_probe_unknown_app_version_is_incompatible():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(app_version="unknown"))
+
+    with pytest.raises(ManagedServiceIncompatible):
+        probe_managed_service(base_url="https://x", http_get=fake_get)
+
+
+def test_probe_below_version_floor_is_incompatible():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(app_version="0.9.3"))
+
+    with pytest.raises(ManagedServiceIncompatible) as exc:
+        probe_managed_service(base_url="https://x", http_get=fake_get)
+    # remedy points at upgrading the client/service, names the offending version
+    assert "0.9.3" in str(exc.value)
+
+
+# ── probe: compatible ────────────────────────────────────────────────────────
+
+
+def test_probe_compatible_returns_capabilities():
+    seen = {}
+
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        seen["url"] = url
+        return _resp(200, _version_body())
+
+    caps = probe_managed_service(base_url="https://api.conexus-nexus.com", http_get=fake_get)
+    assert isinstance(caps, ManagedCapabilities)
+    # probes the unauthenticated /version handshake
+    assert seen["url"] == "https://api.conexus-nexus.com/version"
+    assert caps.app_version == "1.0-SNAPSHOT"
+    assert caps.embedding_mode == "voyage"
+    assert caps.embedding_models == ["voyage-context-3", "voyage-code-3"]
+    assert caps.schema_latest_id == "vectors-002"
+    assert caps.schema_changeset_count == 64
+    assert caps.base_url == "https://api.conexus-nexus.com"
+
+
+def test_probe_snapshot_version_meets_floor():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(app_version="1.2.0-SNAPSHOT"))
+
+    caps = probe_managed_service(base_url="https://x", http_get=fake_get)
+    assert caps.app_version == "1.2.0-SNAPSHOT"
+
+
+def test_probe_defaults_base_url_to_managed(monkeypatch):
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+    seen = {}
+
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        seen["url"] = url
+        return _resp(200, _version_body())
+
+    probe_managed_service(http_get=fake_get)
+    assert seen["url"] == f"{DEFAULT_MANAGED_SERVICE_URL}/version"

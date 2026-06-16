@@ -22,6 +22,46 @@ def service() -> None:
     """Administer the storage service."""
 
 
+@service.command("probe")
+@click.option(
+    "--url",
+    "url",
+    default=None,
+    help="Managed service base URL. Defaults to NX_SERVICE_URL or "
+    "https://api.conexus-nexus.com.",
+)
+def probe(url: str | None) -> None:
+    """Probe a managed nexus service for reachability + version compatibility.
+
+    Cloud-mode capability check (RDR-001): GETs the unauthenticated ``/version``
+    handshake and FAILS LOUD with a remedy when the service is unreachable or
+    incompatible. Performs no Postgres connection — this is the HTTPS client
+    contract only.
+    """
+    from nexus.db.managed_endpoint import (
+        ManagedServiceError,
+        probe_managed_service,
+        resolve_managed_endpoint,
+    )
+
+    base = url or resolve_managed_endpoint(require_token=False)[0]
+    try:
+        caps = probe_managed_service(base_url=base)
+    except ManagedServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"✓ managed nexus service reachable: {caps.base_url}")
+    click.echo(f"  app_version:    {caps.app_version}")
+    click.echo(f"  embedding_mode: {caps.embedding_mode}")
+    if caps.embedding_models:
+        click.echo(f"  models:         {', '.join(caps.embedding_models)}")
+    if caps.schema_latest_id:
+        click.echo(
+            f"  schema:         {caps.schema_latest_id} "
+            f"({caps.schema_changeset_count} changesets)"
+        )
+
+
 @service.group("token")
 def token_group() -> None:
     """Manage service bearer tokens (issue / rotate / revoke / list)."""
