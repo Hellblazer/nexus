@@ -676,6 +676,48 @@ def test_provision_step_aborts_loud_on_broken_bundle(tmp_path, monkeypatch) -> N
     assert called["provision"] is False
 
 
+def test_provision_step_idempotent_on_rerun(tmp_path, monkeypatch, make_pg_bundle_txz) -> None:
+    """Composed re-run idempotency (RDR-157 §Approach P3 charge #1): running
+    _provision_postgres_step twice extracts the ship-alongside bundle EXACTLY
+    once (marker honored) and provisions each time, reporting already-provisioned
+    on the rerun. The components are individually idempotent; this locks the
+    composition (NEXUS_PG_BIN set on the first call must not force a re-extract)."""
+    from types import SimpleNamespace
+
+    import nexus.commands.init as init_mod
+    from nexus.db import pg_bundle
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    archive = make_pg_bundle_txz(tmp_path, "nexus-pg-rerun.txz")
+    monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(archive))
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: config_dir)
+
+    extractions = {"n": 0}
+    real_extract = pg_bundle.extract_bundle
+
+    def _counting_extract(*a, **k):
+        extractions["n"] += 1
+        return real_extract(*a, **k)
+
+    monkeypatch.setattr(pg_bundle, "extract_bundle", _counting_extract)
+
+    provisions = {"n": 0}
+
+    def _fake_provision(_cfg):
+        provisions["n"] += 1
+        return SimpleNamespace(already_provisioned=True, port=15432)
+
+    monkeypatch.setattr("nexus.db.pg_provision.provision", _fake_provision)
+
+    init_mod._provision_postgres_step()
+    init_mod._provision_postgres_step()
+
+    assert extractions["n"] == 1, "bundle re-extracted on rerun (marker not honored)"
+    assert provisions["n"] == 2, "provision must run on each invocation"
+
+
 class TestServiceLocalEmbedder:
     """RDR-160 P3.1/P3.2: a local --service install locks bge-768 and fetches
     the STANDARD ONNX the Java service reads. minilm-384 is non-operative here."""

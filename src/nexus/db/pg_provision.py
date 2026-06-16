@@ -117,6 +117,19 @@ class PgBinaries:
             p.is_file() for p in [self.initdb, self.pg_ctl, self.psql, self.createdb]
         )
 
+    def missing_names(self) -> list[str]:
+        """Names of the required binaries that are not present on disk."""
+        return [
+            name
+            for name, p in (
+                ("initdb", self.initdb),
+                ("pg_ctl", self.pg_ctl),
+                ("psql", self.psql),
+                ("createdb", self.createdb),
+            )
+            if not p.is_file()
+        ]
+
 
 def _install_hint() -> str:
     """Return a platform-appropriate install hint."""
@@ -195,6 +208,16 @@ def discover_pg_binaries() -> PgBinaries:
         if bins.all_present():
             _log.debug("pg_binaries_from_bundle", bin_dir=str(bundle_bin))
             return bins
+        # The bundle cache directory exists with a valid completion marker but
+        # its binaries are gone (manually deleted / partial corruption). Falling
+        # through to host PG silently would pick the WRONG PostgreSQL on a
+        # local-distribution machine and fail late at CREATE EXTENSION vector.
+        # Warn loud about why the bundle was not used (no silent downgrade).
+        _log.warning(
+            "pg_bundle_incomplete_cache",
+            bin_dir=str(bundle_bin),
+            missing=bins.missing_names(),
+        )
 
     # 2. Fixed candidate directories.
     for d in _CANDIDATE_DIRS:
@@ -281,10 +304,13 @@ def check_pgvector_available(bins: PgBinaries) -> None:
     candidates = _candidate_sharedirs(pg_config, bins.bin_dir, sharedir)
     if any((c / "extension" / "vector.control").is_file() for c in candidates):
         return
-    control = candidates[0] / "extension" / "vector.control"
+    # Report EVERY probed location, not just candidates[0] — for a relocated
+    # bundle candidates[0] is pg_config's build-time absolute sharedir, a path
+    # that does not exist on the target machine and so misleads the user.
+    probed = ", ".join(str(c / "extension" / "vector.control") for c in candidates)
     raise PgVectorNotInstalledError(
         f"The pgvector extension is not installed for the PostgreSQL at "
-        f"{bins.bin_dir} (no {control}).\n"
+        f"{bins.bin_dir} (no vector.control under any of: {probed}).\n"
         "The Homebrew 'pgvector' formula targets the default postgresql "
         "major — for a versioned install (e.g. postgresql@17) build from "
         "source against THIS pg_config:\n"
