@@ -135,6 +135,7 @@ class ReadShapeViewsTest {
             + "VALUES ('" + tenant + "', '" + tumbler + "', 'T', '" + ctype + "', '" + coll + "', '2026-01-01T00:00:00Z')");
     }
 
+
     private static void seedTopic(Connection su, String tenant, String label, String coll) throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) "
