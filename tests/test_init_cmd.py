@@ -529,6 +529,9 @@ class TestServiceProvisioningFlag:
             lambda: called.append("called"),
         )
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        # Defensive: cloud mode returns before the start step, but stub it so a
+        # future local-mode flip can't reach the real service starter.
+        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
 
         result = CliRunner().invoke(init_cmd, ["--service"])
 
@@ -559,6 +562,7 @@ class TestServiceProvisioningFlag:
         """When ``NX_STORAGE_BACKEND=service`` is set, provisioning auto-triggers."""
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
         called: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.init._provision_postgres_step",
@@ -835,5 +839,28 @@ class TestServiceStartStep:
             lambda: order.append("start"),
         )
         result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output
+        assert order == ["pg", "embed", "start"]
+
+    def test_auto_service_local_wires_start(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NX_STORAGE_BACKEND=service auto-trigger in LOCAL mode runs the full
+        collapse (pg -> embed -> start), not just provisioning. This is the
+        re-run path an operator hits after a first `nx init --service`."""
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        order: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step", lambda: order.append("pg")
+        )
+        monkeypatch.setattr(
+            "nexus.db.service_bge_model.fetch_service_bge_onnx",
+            lambda **kw: (order.append("embed"), Path("/fake/onnx"))[1],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._start_service_step", lambda: order.append("start")
+        )
+        result = CliRunner().invoke(init_cmd, [])
         assert result.exit_code == 0, result.output
         assert order == ["pg", "embed", "start"]

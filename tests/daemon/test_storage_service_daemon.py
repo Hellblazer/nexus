@@ -1265,6 +1265,7 @@ class _ScriptedSupervisor:
         self._stop = stop_requested
         self._ensure_pg_raises = ensure_pg_raises
         self._respawn_raises = respawn_raises
+        self._launch_mode = "jar"  # mirrors the real supervisor's attribute
         self.calls: list[str] = []
 
     def start(self) -> None:

@@ -70,6 +70,17 @@ def test_find_binary_absent_returns_none(tmp_path, monkeypatch):
     assert _find_service_binary(tmp_path / "cfg") is None
 
 
+def test_find_binary_not_executable_fails_loud(tmp_path, monkeypatch):
+    # Present but non-executable -> a chmod remedy, not a bare PermissionError
+    # later from Popen.
+    binary = tmp_path / "nexus-service"
+    binary.write_text("not executable")
+    binary.chmod(0o644)
+    monkeypatch.setenv("NEXUS_SERVICE_BIN", str(binary))
+    with pytest.raises(StorageServiceStartError, match="not executable"):
+        _find_service_binary(tmp_path / "cfg")
+
+
 # ── supervisor construction guard ───────────────────────────────────────────
 
 
