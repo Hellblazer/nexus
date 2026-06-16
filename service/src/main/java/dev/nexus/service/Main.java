@@ -147,6 +147,10 @@ public final class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");
             service.stop();
+            // Close the embedder's native ONNX session + tokenizer once. doc and
+            // qry routers share the SAME embedder instance, so closing one is
+            // sufficient (a second close is harmless — close() swallows it).
+            docEmbedRouter.close();
             ds.close();
         }));
 

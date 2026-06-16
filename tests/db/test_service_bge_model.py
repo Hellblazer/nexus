@@ -139,3 +139,14 @@ def test_python_path_matches_java_default(monkeypatch):
     java_full = Path.home() / java_rel
     py_model = sbm.service_bge_model_dir() / sbm.MODEL_FILENAME
     assert py_model == java_full
+
+    # tokenizer path too — declared as a separate Java constant, so guard it
+    # independently against divergence.
+    mt = re.search(
+        r'DEFAULT_TOKENIZER_PATH\s*=\s*\n?\s*System\.getProperty\("user\.home"\)\s*\+\s*"([^"]+)"',
+        src,
+    )
+    assert mt is not None, "Java DEFAULT_TOKENIZER_PATH literal not found"
+    java_tok = Path.home() / mt.group(1).lstrip("/")
+    py_tok = sbm.service_bge_model_dir() / sbm.TOKENIZER_FILENAME
+    assert py_tok == java_tok

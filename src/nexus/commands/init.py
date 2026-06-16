@@ -326,9 +326,15 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
     try:
         dest = fetch_service_bge_onnx()
         click.echo(f"Done — service bge-768 model ready at {dest}.")
-    except Exception as exc:  # noqa: BLE001 — must stay actionable, mirrors _warmup_bge
+    except Exception as exc:  # noqa: BLE001 — must stay actionable
+        # Fail loud AND fatal: unlike the Python fastembed path (_warmup_bge),
+        # which auto-fetches on first use, the Java service has NO retry — it
+        # fail-loud-crashes at boot without this file. So a swallowed failure
+        # would make `nx init --service` look successful while leaving an
+        # un-bootable service. Surface it as a hard error; re-run when online
+        # (idempotent — PG provisioning is skipped on the retry).
         _log.warning("service_bge_provision_failed", error=str(exc))
-        click.echo(str(exc), err=True)
+        raise click.ClickException(str(exc)) from exc
 
 
 # ── P5 (A) Postgres provisioning ──────────────────────────────────────────────

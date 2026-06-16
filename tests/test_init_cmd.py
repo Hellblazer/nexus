@@ -714,9 +714,12 @@ class TestServiceLocalEmbedder:
         assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
         assert calls == ["fetch"]
 
-    def test_service_local_fetch_offline_is_loud_not_fatal(
+    def test_service_local_fetch_offline_is_loud_and_fatal(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The Java service cannot boot without the model, so a fetch failure must
+        # be FATAL (nonzero exit) — not a swallowed warning that makes the install
+        # look successful. Re-run when online (idempotent).
         monkeypatch.setattr("nexus.commands.init._provision_postgres_step", lambda: None)
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
 
@@ -725,5 +728,5 @@ class TestServiceLocalEmbedder:
 
         monkeypatch.setattr("nexus.db.service_bge_model.fetch_service_bge_onnx", _boom)
         result = CliRunner().invoke(init_cmd, ["--service"])
-        assert result.exit_code == 0, result.output  # loud, not fatal
+        assert result.exit_code != 0  # fail-loud + fatal
         assert "will not boot" in result.output

@@ -71,6 +71,13 @@ public final class Bge768Embedder implements Embedder {
     /** bge-base-en-v1.5 supports 512-token context (MiniLM used 256). */
     private static final int MAX_SEQ_LEN = 512;
 
+    /**
+     * Sanity floor for "this is the standard fp32 export, not a truncated download
+     * or the ~140MB quantized/fused substitute". Mirrors the CLI's
+     * {@code _MIN_MODEL_BYTES} (service_bge_model.py). The fp32 model is ~416MB.
+     */
+    private static final long MIN_MODEL_BYTES = 200_000_000L;
+
     private final OrtEnvironment      ortEnv;
     private final OrtSession          session;
     private final HuggingFaceTokenizer tokenizer;
@@ -103,6 +110,23 @@ public final class Bge768Embedder implements Embedder {
                     + "(RDR-160 P3), or point -Dnexus.bge.modelPath / -Dnexus.bge.tokenizerPath "
                     + "at an existing standard export (NOT fastembed's model_optimized.onnx).");
             }
+        }
+        // Size floor mirrors the CLI's _MIN_MODEL_BYTES (service_bge_model.py): the
+        // standard fp32 export is ~416MB, so a model well under that is a truncated
+        // download or the ~140MB quantized/fused substitute (CA-3 rejected). Catch
+        // it here with a remedy rather than letting ORT fail opaquely at load.
+        try {
+            long bytes = java.nio.file.Files.size(java.nio.file.Path.of(modelPath));
+            if (bytes < MIN_MODEL_BYTES) {
+                throw new IllegalStateException(
+                    "Bge768Embedder: model at " + modelPath + " is " + bytes
+                    + " bytes — far below the standard fp32 bge export (~416MB). It looks "
+                    + "truncated or a quantized/fused substitute (parity would silently "
+                    + "degrade). Re-provision via `nx init --service` (RDR-160 P3).");
+            }
+        } catch (java.io.IOException e) {
+            // Can't stat — don't block on a transient FS error; ORT load will surface it.
+            log.warn("event=bge_model_size_check_failed path={} error={}", modelPath, e.getMessage());
         }
 
         this.ortEnv = OrtEnvironment.getEnvironment();
