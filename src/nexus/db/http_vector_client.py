@@ -208,6 +208,26 @@ def _request(
         return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
 
 
+def _managed_remedy() -> str | None:
+    """Remedy text when the client is pointed at an EXPLICIT managed endpoint.
+
+    RDR-001 (nexus-kf679): a misconfigured managed-cloud endpoint otherwise fails
+    at the first /v1 call with a bare connection error / HTTP 401 and no guidance.
+    When ``NX_SERVICE_URL`` is explicitly set we reframe that failure with an
+    actionable remedy. Returns ``None`` for the local/lease topology
+    (``NX_SERVICE_URL`` unset) so a local user's transient errors are NEVER
+    reframed as a managed-service problem — and their error type/flow is unchanged.
+    """
+    base = os.environ.get("NX_SERVICE_URL", "").strip()
+    if not base:
+        return None
+    return (
+        f"the managed nexus service at {base} could not be reached/authenticated "
+        "— check NX_SERVICE_URL is reachable and NX_SERVICE_TOKEN is valid "
+        "(verify with `nx service probe` or `nx doctor`)."
+    )
+
+
 def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
     """POST JSON to the service endpoint, return parsed response body.
 
@@ -229,9 +249,19 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
             err = json.loads(body_bytes)
         except Exception:
             err = {"error": body_bytes.decode(errors="replace")}
-        raise VectorServiceError(
-            f"POST {path} → HTTP {e.code}: {err.get('error', err)}", code=e.code
-        ) from e
+        msg = f"POST {path} → HTTP {e.code}: {err.get('error', err)}"
+        remedy = _managed_remedy() if e.code in (401, 403) else None
+        if remedy:
+            msg += f"\n{remedy}"
+        raise VectorServiceError(msg, code=e.code) from e
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+        # Connection-level failure (bad/unreachable endpoint). Reframe with a
+        # remedy ONLY for an explicit managed endpoint; local/lease users keep
+        # the original error and flow unchanged.
+        remedy = _managed_remedy()
+        if remedy is None:
+            raise
+        raise VectorServiceError(f"POST {path} failed: {e}\n{remedy}") from e
 
 
 def _get(path: str, *, tenant: str = "default") -> Any:
@@ -246,9 +276,16 @@ def _get(path: str, *, tenant: str = "default") -> Any:
             err = json.loads(body_bytes)
         except Exception:
             err = {"error": body_bytes.decode(errors="replace")}
-        raise VectorServiceError(
-            f"GET {path} → HTTP {e.code}: {err.get('error', err)}", code=e.code
-        ) from e
+        msg = f"GET {path} → HTTP {e.code}: {err.get('error', err)}"
+        remedy = _managed_remedy() if e.code in (401, 403) else None
+        if remedy:
+            msg += f"\n{remedy}"
+        raise VectorServiceError(msg, code=e.code) from e
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+        remedy = _managed_remedy()
+        if remedy is None:
+            raise
+        raise VectorServiceError(f"GET {path} failed: {e}\n{remedy}") from e
 
 
 class VectorServiceError(RuntimeError):
