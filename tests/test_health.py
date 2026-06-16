@@ -336,3 +336,82 @@ def test_check_t3_daemon_version_mismatch_warns(monkeypatch) -> None:
     assert r.ok is False and r.warn is True and r.fatal is False
     assert "0.0.1-stale" in r.detail
     assert any("daemon t3" in s for s in r.fix_suggestions)
+
+
+# ── _check_managed_service_probe (RDR-001 nexus-o6fch) ───────────────────────
+
+
+class TestManagedServiceProbeCheck:
+    """Doctor cloud-branch probe of a MANAGED endpoint — only when NX_SERVICE_URL
+    is explicitly set (never default-probes the public api.conexus-nexus.com)."""
+
+    def test_no_service_url_does_not_probe(self, monkeypatch):
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        from nexus.health import _check_managed_service_probe
+        assert _check_managed_service_probe() == []
+
+    def test_whitespace_service_url_does_not_probe(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_URL", "   ")
+        from nexus.health import _check_managed_service_probe
+        assert _check_managed_service_probe() == []
+
+    def test_probes_explicit_url_never_the_public_default(self, monkeypatch):
+        # SAFETY INVARIANT: the probe receives the EXPLICIT NX_SERVICE_URL, never
+        # base_url=None (which would default to https://api.conexus-nexus.com).
+        monkeypatch.setenv("NX_SERVICE_URL", "https://staging.example.com")
+        from nexus.db import managed_endpoint as me
+
+        seen = {}
+        caps = me.ManagedCapabilities(
+            base_url="https://staging.example.com", app_version="1.0",
+            embedding_mode="voyage", embedding_models=[],
+            schema_latest_id=None, schema_changeset_count=None,
+        )
+
+        def _capture(**kw):
+            seen.update(kw)
+            return caps
+        monkeypatch.setattr(me, "probe_managed_service", _capture)
+        from nexus.health import _check_managed_service_probe
+        _check_managed_service_probe()
+        assert seen.get("base_url") == "https://staging.example.com"
+
+    def test_compatible_is_ok(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
+        from nexus.db import managed_endpoint as me
+
+        caps = me.ManagedCapabilities(
+            base_url="https://api.conexus-nexus.com", app_version="1.0-SNAPSHOT",
+            embedding_mode="voyage", embedding_models=[],
+            schema_latest_id="vectors-002", schema_changeset_count=64,
+        )
+        monkeypatch.setattr(me, "probe_managed_service", lambda **kw: caps)
+        from nexus.health import _check_managed_service_probe
+        res = _check_managed_service_probe()
+        assert len(res) == 1 and res[0].ok is True
+        assert "1.0-SNAPSHOT" in res[0].detail
+
+    def test_incompatible_is_soft_warn(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_URL", "https://x")
+        from nexus.db import managed_endpoint as me
+
+        def _boom(**kw):
+            raise me.ManagedServiceIncompatible("app_version 0.9.0 below minimum 1.0.0")
+        monkeypatch.setattr(me, "probe_managed_service", _boom)
+        from nexus.health import _check_managed_service_probe
+        res = _check_managed_service_probe()
+        assert len(res) == 1
+        assert res[0].ok is False and res[0].warn is True and res[0].fatal is False
+        assert "0.9.0" in res[0].detail
+
+    def test_unreachable_is_soft_warn_not_double_fatal(self, monkeypatch):
+        # reachability fatal is _check_vector_service's domain — stay soft here
+        monkeypatch.setenv("NX_SERVICE_URL", "https://x")
+        from nexus.db import managed_endpoint as me
+
+        def _boom(**kw):
+            raise me.ManagedServiceUnreachable("unreachable")
+        monkeypatch.setattr(me, "probe_managed_service", _boom)
+        from nexus.health import _check_managed_service_probe
+        res = _check_managed_service_probe()
+        assert len(res) == 1 and res[0].ok is False and res[0].warn is True and res[0].fatal is False
