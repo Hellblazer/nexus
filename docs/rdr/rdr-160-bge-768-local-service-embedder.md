@@ -2,8 +2,9 @@
 title: "bge-768 as the Local-Mode T3 Embedder in the Java Service: Replace MiniLM-384 ONNX, Parity-Gated Against fastembed"
 id: RDR-160
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-06-15
+closed_date: 2026-06-15
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
