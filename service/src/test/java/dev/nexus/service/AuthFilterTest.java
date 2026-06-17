@@ -100,10 +100,20 @@ class AuthFilterTest {
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
         }
 
+        // nexus-5j7pb: back the code-under-test with nexus_svc (NOSUPERUSER NOBYPASSRLS),
+        // the SAME credential as production, rather than the Postgres superuser (BYPASSRLS).
+        // Scope honesty: these auth-resolution tests touch ONLY the credential tables
+        // (service_tokens/session_tokens), which are RLS-off by design, so this does NOT
+        // itself exercise an RLS boundary. Its value is harness honesty — the auth layer
+        // runs under the production role and its real grants (grants-nexus-svc.xml,
+        // runAlways/LAST), so an RLS policy ever added to a credential table would surface
+        // as a fail-closed break here instead of being masked by BYPASSRLS. Production-role
+        // convention consistent with TokenBoundaryAdversarialTest (which is where actual
+        // cross-tenant RLS enforcement on domain tables is asserted).
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
-        cfg.setUsername(PgContainerHelper.USERNAME);
-        cfg.setPassword(PgContainerHelper.PASSWORD);
+        cfg.setUsername(PgContainerHelper.SVC_USERNAME);
+        cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         cfg.setConnectionInitSql("SET search_path TO nexus, t1, public");

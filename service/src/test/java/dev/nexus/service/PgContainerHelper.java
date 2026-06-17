@@ -34,6 +34,16 @@ public final class PgContainerHelper {
     /** Superuser password. */
     public static final String PASSWORD = "postgres";
 
+    /**
+     * Production service role (NOSUPERUSER NOBYPASSRLS) — the credential the app layer
+     * should run under in tests so it is subject to the same RLS as production, rather
+     * than the BYPASSRLS superuser (nexus-5j7pb). The role is created by each test's
+     * startAll() and granted DML by the grants-nexus-svc.xml changeset.
+     */
+    public static final String SVC_USERNAME = "nexus_svc";
+    /** Password for {@link #SVC_USERNAME}. */
+    public static final String SVC_PASSWORD = "nexus_svc_pass";
+
     private PgContainerHelper() {}
 
     /**
