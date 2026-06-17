@@ -574,6 +574,7 @@ def catalog_stats() -> dict:
             "documents":    s.get("doc_count",        s.get("documents", 0)),
             "links":        s.get("link_count",       s.get("links",     0)),
             "collections":  s.get("collection_count", s.get("collections", 0)),
+            "chunks":       s.get("chunk_count",      s.get("chunks",    0)),  # nexus-aeceu
             "by_link_type": s.get("links_by_type",    s.get("by_link_type", {})),
         }
     except Exception as e:
