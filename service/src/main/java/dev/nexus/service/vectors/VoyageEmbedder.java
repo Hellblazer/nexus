@@ -74,9 +74,14 @@ public final class VoyageEmbedder implements Embedder {
         // inputType deliberately NOT stored: production VoyageAIEmbeddingFunction
         // always passes input_type=None (field omitted from request), matching what
         // the Voyage API uses as its "unspecified" default.
-        this.http = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        // nexus-... egress proxy: java.net.http.HttpClient ignores https.proxyHost
+        // system properties unless a proxy is set explicitly on the client. The cloud
+        // deploy routes api.voyageai.com through squid (private subnet has no NAT), so
+        // set the proxy from env (HTTPS_PROXY / NX_HTTPS_PROXY); absent = direct.
+        var builder = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10));
+        EgressProxy.selector().ifPresent(builder::proxy);
+        this.http = builder.build();
         this.mapper = new ObjectMapper();
     }
 
