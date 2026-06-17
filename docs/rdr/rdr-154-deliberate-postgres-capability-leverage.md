@@ -2,12 +2,13 @@
 title: "RDR-154: Deliberate Postgres-Capability Leverage for the RDR-152 Schema — Computed Views, Trigger-Maintained Invariants, security_invoker Discipline, and Counter-Drift Elimination"
 id: RDR-154
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-08
 accepted_date: 2026-06-08
+closed_date: 2026-06-16
 related_issues: [nexus-gmiaf, nexus-0jq9u, nexus-8luh]
 related_tests: []
 related: [RDR-152, RDR-153, RDR-149]
