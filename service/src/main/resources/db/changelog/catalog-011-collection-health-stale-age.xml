@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-agsq7 — add an index-age stale_source_ratio to collection_health_meta.
+
+    stale_source_ratio = fraction of a collection's documents last indexed more
+    than 30 days ago. A true "source modified since indexing" signal is
+    structurally impossible from stored columns (RDR-154 P2); this is an
+    index-age proxy computed DB-only from indexed_at.
+
+    indexed_at is a TEXT ISO-8601 column ('YYYY-MM-DDThh:mm:ssZ'), which sorts
+    lexicographically in chronological order, so the staleness test is a pure
+    string comparison against a same-format threshold — no ::timestamptz cast,
+    hence no parse-throw on a malformed value. The denominator counts documents
+    whose indexed_at at least starts with a 4-digit year; everything else is
+    excluded from both numerator and denominator (NULL ratio when none qualify).
+
+    CAVEAT (cross-backend): this lexicographic compare is correct only for the
+    UTC-suffixed format the indexers always write. A hand-inserted non-UTC-offset
+    value (e.g. '...-05:00') would be compared by its wall-clock prefix, not its
+    UTC instant, so it can be classified differently from the SQLite path
+    (catalog.py collection_health_meta), which normalises via strftime epoch.
+    Acceptable: the write path is always UTC and this is a coarse 30-day heuristic.
+
+    The 30-day horizon mirrors catalog._STALE_SOURCE_AGE_DAYS (Python) — keep both
+    in sync if the horizon changes.
+
+    CREATE OR REPLACE appends stale_source_ratio as a trailing column, preserving
+    the catalog-009 column set, the security_invoker reloption, and the grants.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-011-1" author="nexus-agsq7">
+        <comment>Append index-age stale_source_ratio to collection_health_meta</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_health_meta
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection AS collection,
+       max(d.indexed_at) AS last_indexed,
+       count(*) FILTER (
+           WHERE NOT EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.to_tumbler = d.tumbler
+           )
+       ) AS orphan_count,
+       (count(*) FILTER (
+           WHERE d.indexed_at ~ '^[0-9]{4}-'
+             AND d.indexed_at &lt; to_char(
+                     (now() - interval '30 days') AT TIME ZONE 'UTC',
+                     'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        ))::double precision
+        / NULLIF(count(*) FILTER (WHERE d.indexed_at ~ '^[0-9]{4}-'), 0)
+        AS stale_source_ratio
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+ GROUP BY d.tenant_id, d.physical_collection
+        </sql>
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

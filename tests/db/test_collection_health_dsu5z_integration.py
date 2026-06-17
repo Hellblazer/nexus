@@ -303,6 +303,7 @@ class TestCollectionHealthMetaLiveService:
         result = cat.collection_health_meta(_COLL)
         assert "last_indexed" in result
         assert "orphan_count" in result
+        assert "stale_source_ratio" in result  # nexus-agsq7
 
     def test_unknown_collection_returns_safe_defaults(self, cat, seeded_catalog) -> None:
         """B) Unknown collection -> last_indexed=None, orphan_count=0."""

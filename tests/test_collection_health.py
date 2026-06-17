@@ -116,7 +116,8 @@ class TestTelemetryQueryCollectionStats:
 
 def _fake_catalog_stats(col: str) -> dict:
     data = {
-        "code__alpha":  {"chunk_count": 120, "last_indexed": "2026-04-15", "orphan_count": 2},
+        "code__alpha":  {"chunk_count": 120, "last_indexed": "2026-04-15",
+                         "orphan_count": 2, "stale_source_ratio": 0.4},
         "docs__beta":   {"chunk_count": 30,  "last_indexed": "2026-04-10", "orphan_count": 0},
         "docs__stale":  {"chunk_count": 0,   "last_indexed": None,          "orphan_count": 0},
     }
@@ -179,9 +180,10 @@ class TestComputeCollectionHealth:
         assert by_name["code__alpha"].cross_projection_rank == 1
         assert by_name["code__alpha"].orphan_catalog_rows == 2
         assert by_name["code__alpha"].hub_domination_score == pytest.approx(0.05)
-        # stale_source_ratio remains the deferred placeholder (nexus-8luh):
-        # RDR-154 P2 found a DB-only computation structurally impossible.
-        assert by_name["code__alpha"].stale_source_ratio == "—"
+        # nexus-agsq7: stale_source_ratio (index-age proxy) is wired from the
+        # catalog; None when the catalog provides none.
+        assert by_name["code__alpha"].stale_source_ratio == pytest.approx(0.4)
+        assert by_name["docs__beta"].stale_source_ratio is None
 
     def test_empty_telemetry_sets_placeholders(self) -> None:
         from nexus.collection_health import compute_collection_health

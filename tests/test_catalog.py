@@ -1455,3 +1455,41 @@ class TestBySourceUri:
     def test_empty_uri_returns_none(self, cat_with_owner):
         cat, _owner = cat_with_owner
         assert cat.by_source_uri("") is None
+
+
+class TestStaleSourceRatioAgeBased:
+    """nexus-agsq7: collection_health_meta.stale_source_ratio is the fraction of
+    a collection's docs last indexed more than 30 days ago (index-age proxy)."""
+
+    @staticmethod
+    def _insert_doc(cat, tumbler: str, coll: str, indexed_at: str) -> None:
+        cat._db.execute(  # epsilon-allow: nexus-agsq7 seeds documents with controlled indexed_at to exercise the index-age stale ratio (no public API sets indexed_at directly)
+            "INSERT INTO documents "
+            "(tumbler, title, author, year, content_type, file_path, corpus, "
+            " physical_collection, chunk_count, head_hash, indexed_at, metadata, "
+            " source_mtime, source_uri) "
+            "VALUES (?, '', '', 0, '', '', '', ?, 0, '', ?, '{}', 0, '')",
+            (tumbler, coll, indexed_at),
+        )
+        cat._db.commit()
+
+    def test_ratio_counts_docs_older_than_30_days(self, tmp_path) -> None:
+        from datetime import UTC, datetime
+
+        cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+        coll = "docs__age"
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._insert_doc(cat, "a.1", coll, "2020-01-01T00:00:00Z")  # stale
+        self._insert_doc(cat, "a.2", coll, "2020-06-01T00:00:00Z")  # stale
+        self._insert_doc(cat, "a.3", coll, now)                      # fresh
+
+        meta = cat.collection_health_meta(coll)
+        # 2 of 3 dated docs are > 30 days old.
+        assert meta["stale_source_ratio"] == pytest.approx(2 / 3)
+
+    def test_ratio_none_when_no_dated_docs(self, tmp_path) -> None:
+        cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+        coll = "docs__nodate"
+        # Empty / unparseable indexed_at → excluded from the denominator → None.
+        self._insert_doc(cat, "n.1", coll, "")
+        assert cat.collection_health_meta(coll)["stale_source_ratio"] is None

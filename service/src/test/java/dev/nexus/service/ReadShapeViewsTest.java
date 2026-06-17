@@ -142,6 +142,31 @@ class ReadShapeViewsTest {
             + "VALUES ('" + tenant + "', '" + label + "', '" + coll + "', 0, now(), 'pending')");
     }
 
+    private static void seedDocIndexed(Connection su, String tenant, String tumbler,
+                                       String coll, String indexedAt) throws Exception {
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection, indexed_at) "
+            + "VALUES ('" + tenant + "', '" + tumbler + "', 'T', '" + coll + "', '" + indexedAt + "')");
+    }
+
+    @Test @Order(40)
+    void collectionHealthMeta_staleSourceRatio_indexAge() throws Exception {
+        // nexus-agsq7: stale = indexed_at more than 30 days ago. 2020 is always
+        // stale, 2099 is always fresh (future) — deterministic regardless of now().
+        final String col = "c_stale_age";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            seedDocIndexed(su, TENANT_A, "sa.1", col, "2020-01-01T00:00:00Z"); // stale
+            seedDocIndexed(su, TENANT_A, "sa.2", col, "2099-01-01T00:00:00Z"); // fresh
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT stale_source_ratio FROM nexus.collection_health_meta "
+                + "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + col + "'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getDouble("stale_source_ratio"))
+                .as("1 of 2 dated docs is > 30 days old").isEqualTo(0.5d);
+        }
+    }
+
     private static void seedOwner(Connection su, String tenant, String prefix) throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type) "
