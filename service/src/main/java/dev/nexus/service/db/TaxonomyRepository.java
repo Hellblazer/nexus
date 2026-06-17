@@ -1032,13 +1032,7 @@ public final class TaxonomyRepository {
                 long childId = row == null ? -1 : ((Number) row.get("id")).longValue();
                 childIds.add(childId);
 
-                for (String docId : docIds) {
-                    ctx.execute("""
-                        INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by)
-                        VALUES (?, ?, ?, 'split')
-                        ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
-                        """, tenant, docId, childId);
-                }
+                batchInsertAssignments(ctx, tenant, childId, docIds, "split");
             }
 
             // RDR-154 P0 (nexus-i7ivk): no manual parent zero-out. The parent's
@@ -1139,15 +1133,14 @@ public final class TaxonomyRepository {
                 long topicId = row == null ? -1 : ((Number) row.get("id")).longValue();
                 topicIds.add(topicId);
 
-                for (String did : docIds) {
-                    ctx.execute("""
-                        INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
-                        """, tenant, did, topicId, assignedBy);
-                }
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
             }
 
+            // Manual transfers are intentionally NOT batched (nexus-eh89h): they
+            // use ON CONFLICT DO UPDATE (distinct from the helper's DO NOTHING) and
+            // are sparse (curated reassignments, expected well under ~100 per
+            // rebuild), so the per-row trigger cost is immaterial. If a bulk
+            // manual-transfer path ever emerges, batch it with a DO UPDATE variant.
             for (var e : transfers.entrySet()) {
                 int specIndex = ((Number) e.getValue()).intValue();
                 if (specIndex >= 0 && specIndex < topicIds.size()) {
@@ -1206,16 +1199,51 @@ public final class TaxonomyRepository {
                 long topicId = row == null ? -1 : ((Number) row.get("id")).longValue();
                 topicIds.add(topicId);
 
-                for (String did : docIds) {
-                    ctx.execute("""
-                        INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
-                        """, tenant, did, topicId, assignedBy);
-                }
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
             }
             log.info("persist_discovered collection={} topics={}", collection, topicIds.size());
             return topicIds;
         });
+    }
+
+    /**
+     * Insert a topic's assignments in a single multi-row statement (chunked under
+     * the PostgreSQL parameter limit) instead of one INSERT per doc_id.
+     *
+     * <p>RDR-154 P0 follow-on (nexus-eh89h): the {@code doc_count} trigger is
+     * statement-level and recomputes a full {@code COUNT(*)} for the affected
+     * topic on every firing. A per-row insert loop therefore fired the trigger
+     * once per doc_id, each scanning the topic's growing assignment set — O(N^2)
+     * per topic on the bulk rebuild / discovery / split paths. Batching collapses
+     * that to one trigger firing per chunk (one per topic for any realistic size).
+     *
+     * <p>{@code ON CONFLICT DO NOTHING} preserves the prior idempotency, including
+     * for duplicate doc_ids within a single batch (a self-conflict is skipped, not
+     * an error — DO NOTHING, not DO UPDATE).
+     */
+    private static void batchInsertAssignments(org.jooq.DSLContext ctx, String tenant,
+                                               long topicId, List<String> docIds,
+                                               String assignedBy) {
+        if (docIds == null || docIds.isEmpty()) return;
+        // 4 bind params per row → 5000 rows = 20000 params, under PG's Int16
+        // Bind-message parameter-count limit of 32767. (A topic with >5000 docs
+        // fires the trigger ceil(N/5000) times — still vastly better than per-row;
+        // realistic topics are hundreds to low-thousands.)
+        final int MAX_ROWS = 5000;
+        for (int start = 0; start < docIds.size(); start += MAX_ROWS) {
+            List<String> batch = docIds.subList(start, Math.min(start + MAX_ROWS, docIds.size()));
+            StringBuilder sql = new StringBuilder(
+                "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) VALUES ");
+            List<Object> params = new ArrayList<>(batch.size() * 4);
+            for (int i = 0; i < batch.size(); i++) {
+                sql.append(i == 0 ? "(?, ?, ?, ?)" : ", (?, ?, ?, ?)");
+                params.add(tenant);
+                params.add(batch.get(i));
+                params.add(topicId);
+                params.add(assignedBy);
+            }
+            sql.append(" ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
+            ctx.execute(sql.toString(), params.toArray());
+        }
     }
 }
