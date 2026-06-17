@@ -76,10 +76,18 @@ class TokenAdminHandlerTest {
                 ps.executeUpdate();
             }
         }
+        // nexus-5j7pb: back the service under test with nexus_svc (NOSUPERUSER NOBYPASSRLS),
+        // the SAME credential as production, rather than the Postgres superuser (BYPASSRLS).
+        // Scope honesty: the admin handler / AuthFilter touch ONLY the credential tables
+        // (service_tokens/session_tokens), which are RLS-off by design, so this does NOT
+        // itself exercise an RLS boundary. Its value is harness honesty — the service runs
+        // under the production role and its real grants (grants-nexus-svc.xml), so a future
+        // RLS policy on a credential table would fail-closed here instead of being masked
+        // by BYPASSRLS. Production-role convention consistent with TokenBoundaryAdversarialTest.
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
-        cfg.setUsername(PgContainerHelper.USERNAME);
-        cfg.setPassword(PgContainerHelper.PASSWORD);
+        cfg.setUsername(PgContainerHelper.SVC_USERNAME);
+        cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         cfg.setConnectionInitSql("SET search_path TO nexus, t1, public");
@@ -242,11 +250,23 @@ class TokenAdminHandlerTest {
     void list_excludesRootToken_andRejectsWildcardFilter() throws Exception {
         // Unfiltered list never surfaces the root token row (excluded by ROOT_TOKEN_LABEL).
         String bootHash = TokenHashing.sha256Hex(BOOT);
+        // Seed a known non-root token so the list is provably non-empty: otherwise (if this
+        // test ran first, with only the excluded root row present) the exclusion loop would
+        // execute zero times and pass vacuously, masking a zero-rows regression.
+        String mineHash = postJson("/v1/service-tokens/issue", "{\"tenant\":\"list-excl-probe\"}")
+            .get("token_hash").asText();
+        boolean sawMine = false;
         for (JsonNode row : postJson("/v1/service-tokens/list", "{}").get("tokens")) {
             assertThat(row.get("tenant").asText()).isNotEqualTo("*");
             assertThat(row.get("token_hash").asText())
                 .as("root token must not be enumerable").isNotEqualTo(bootHash);
+            if (mineHash.equals(row.get("token_hash").asText())) {
+                sawMine = true;
+            }
         }
+        assertThat(sawMine)
+            .as("the unfiltered list must include the seeded non-root token (non-vacuity)")
+            .isTrue();
         // Explicit '*' filter is still rejected as a reserved sentinel name.
         assertThat(status("/v1/service-tokens/list", "{\"tenant\":\"*\"}")).isEqualTo(400);
     }
