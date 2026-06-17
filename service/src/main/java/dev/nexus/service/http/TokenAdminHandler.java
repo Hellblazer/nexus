@@ -43,9 +43,20 @@ import java.util.Map;
  * cache-TTL window rather than leaving it unbounded. Rotate is atomic (one transaction), so a
  * crash cannot strand a tenant with zero live tokens.
  *
- * <p>AUTHORIZATION NOTE (deferred): any authenticated caller may administer any named tenant
- * (provisioning rides the bootstrap token until per-tenant principals exist). Per-caller
- * admin scoping is out of scope for Phase C; the bootstrap token is the admin credential.
+ * <p>AUTHORIZATION (nexus-e4130): the root token (the operator credential, resolved
+ * server-side via {@code ROOT_TOKEN_LABEL} and surfaced as {@link RequestContext#isOperator()})
+ * may administer any tenant. Every ordinary tenant token is confined to its OWN tenant:
+ * <ul>
+ *   <li>{@code /v1/tenants/create} — OPERATOR ONLY (creating a new tenant is inherently
+ *       cross-tenant; a tenant-bound token cannot provision a different tenant).</li>
+ *   <li>{@code issue} / {@code rotate} — the body {@code tenant} must equal the caller's
+ *       bound tenant (else 403), unless the caller is the operator.</li>
+ *   <li>{@code list} — a non-operator is force-scoped to its own tenant (any body
+ *       {@code tenant} is ignored), so it cannot enumerate another tenant's tokens.</li>
+ *   <li>{@code revoke} — a non-operator's selector is resolved only within its own tenant
+ *       (a selector matching only another tenant's token reads as "not found"), so it can
+ *       neither revoke nor probe for another tenant's tokens.</li>
+ * </ul>
  */
 public final class TokenAdminHandler implements HttpHandler {
 
@@ -101,6 +112,11 @@ public final class TokenAdminHandler implements HttpHandler {
     }
 
     private void handleTenantCreate(HttpExchange ex) throws IOException {
+        // nexus-e4130: provisioning a NEW tenant is inherently cross-tenant — only the
+        // operator (root) token may do it; a tenant-bound token cannot.
+        if (!requireOperator(ex)) {
+            return;
+        }
         Map<String, Object> body = readBody(ex);
         String name = requireString(body, "name");
         TokenStore.IssuedToken issued = store.issueToken(name, "tenant-create-initial", null);
@@ -111,6 +127,9 @@ public final class TokenAdminHandler implements HttpHandler {
     private void handleIssue(HttpExchange ex) throws IOException {
         Map<String, Object> body = readBody(ex);
         String tenant = requireString(body, "tenant");
+        if (!authorizedForTenant(ex, tenant)) {  // nexus-e4130: self-scope non-operators
+            return;
+        }
         String label = optString(body, "label");
         Long ttl = optLong(body, "ttl_seconds");
         TokenStore.IssuedToken issued = store.issueToken(tenant, label, ttl);
@@ -121,6 +140,9 @@ public final class TokenAdminHandler implements HttpHandler {
     private void handleRotate(HttpExchange ex) throws IOException {
         Map<String, Object> body = readBody(ex);
         String tenant = requireString(body, "tenant");
+        if (!authorizedForTenant(ex, tenant)) {  // nexus-e4130: self-scope non-operators
+            return;
+        }
         Long grace = optLong(body, "grace_seconds");
         TokenStore.RotationResult result =
             store.rotateTokens(tenant, grace == null ? DEFAULT_GRACE_SECONDS : grace);
@@ -135,7 +157,11 @@ public final class TokenAdminHandler implements HttpHandler {
     private void handleRevoke(HttpExchange ex) throws IOException {
         Map<String, Object> body = readBody(ex);
         String selector = requireString(body, "selector");
-        var revokedHash = store.revokeToken(selector);
+        // nexus-e4130: a non-operator may only revoke within its own tenant. Passing the
+        // tenant scope into selector resolution means another tenant's prefix reads as
+        // "not found" — no cross-tenant revoke AND no existence probe.
+        String scope = RequestContext.isOperator() ? null : RequestContext.tenant();
+        var revokedHash = store.revokeToken(selector, scope);
         revokedHash.ifPresent(cache::invalidate);  // immediate effect on the live cache
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("revoked", revokedHash.isPresent());
@@ -146,6 +172,11 @@ public final class TokenAdminHandler implements HttpHandler {
     private void handleList(HttpExchange ex) throws IOException {
         Map<String, Object> body = readBody(ex);
         String tenant = optString(body, "tenant");
+        // nexus-e4130: a non-operator is force-scoped to its own tenant; any body 'tenant'
+        // is ignored so it cannot enumerate another tenant's tokens (or probe existence).
+        if (!RequestContext.isOperator()) {
+            tenant = RequestContext.tenant();
+        }
         var now = clock.instant();
         List<Map<String, Object>> rows = new ArrayList<>();
         for (TokenStore.TokenInfo t : store.listTokens(tenant)) {
@@ -160,6 +191,40 @@ public final class TokenAdminHandler implements HttpHandler {
             rows.add(row);
         }
         HttpUtil.send(ex, 200, json(Map.of("tokens", rows)));
+    }
+
+    // ── Authorization (nexus-e4130) ──────────────────────────────────────────────
+
+    /**
+     * Allow only the operator (root) token. Sends 403 and returns false otherwise.
+     * Used by routes that are inherently cross-tenant (tenant create).
+     */
+    private boolean requireOperator(HttpExchange ex) throws IOException {
+        if (RequestContext.isOperator()) {
+            return true;
+        }
+        log.debug("event=token_admin_denied reason=operator_required tenant={}",
+                  RequestContext.tenant());
+        HttpUtil.send(ex, 403, json(Map.of(
+            "error", "operator privilege required: this operation needs the root token")));
+        return false;
+    }
+
+    /**
+     * Allow the operator, or a tenant token acting on its OWN tenant. Sends 403 and
+     * returns false when a non-operator targets a different tenant.
+     */
+    private boolean authorizedForTenant(HttpExchange ex, String tenant) throws IOException {
+        String caller = RequestContext.tenant();
+        if (RequestContext.isOperator() || tenant.equals(caller)) {
+            return true;
+        }
+        log.debug("event=token_admin_denied reason=cross_tenant caller={} requested={}",
+                  caller, tenant);
+        HttpUtil.send(ex, 403, json(Map.of(
+            "error", "forbidden: token bound to tenant '" + caller
+                + "' may not administer tenant '" + tenant + "'")));
+        return false;
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

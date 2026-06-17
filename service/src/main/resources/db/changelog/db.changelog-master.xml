@@ -51,6 +51,8 @@
          session_tokens credential-resolution tables. NO RLS (read before tenant
          context exists; the token resolves the tenant). nexus schema. -->
     <include file="db/changelog/service-tokens-001-baseline.xml"/>
+    <!-- nexus-e4130: at-most-one-root-token partial unique index (operator invariant). -->
+    <include file="db/changelog/service-tokens-002-single-root-index.xml"/>
 
     <!-- Store 10: pgvector chunks tables + manifest collection column (bead nexus-mf447) -->
     <include file="db/changelog/vectors-001-baseline.xml"/>

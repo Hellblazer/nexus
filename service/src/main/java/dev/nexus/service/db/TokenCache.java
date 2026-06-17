@@ -46,7 +46,19 @@ public final class TokenCache {
     /** Default flood backstop. */
     public static final int DEFAULT_MAX_ENTRIES = 10_000;
 
-    private record Entry(String tenantId, Instant expiresAt, Instant cachedAt) {
+    // nexus-e4130: isRoot is cached alongside the tenant. It is safe to cache because a
+    // row's label is immutable for a given token_hash — no API updates the label
+    // (issueToken/rotateTokens never touch it; ensureBootstrapToken is ON CONFLICT DO
+    // NOTHING on the hash). If a future API ever mutates a live row's label it MUST call
+    // invalidate(hash) so the operator bit is re-read.
+    private record Entry(String tenantId, boolean isRoot, Instant expiresAt, Instant cachedAt) {
+    }
+
+    /**
+     * Resolved bearer principal: its tenant and whether it is the root/operator token
+     * (nexus-e4130). The {@code isRoot} bit carries the cross-tenant admin privilege.
+     */
+    public record Resolved(String tenantId, boolean isRoot) {
     }
 
     private final TokenStore store;
@@ -73,6 +85,19 @@ public final class TokenCache {
      * @return the tenant, or empty if missing/revoked/expired
      */
     public Optional<String> resolveTenant(String tokenHash) {
+        return resolve(tokenHash).map(Resolved::tenantId);
+    }
+
+    /**
+     * Resolve a bearer token hash to its {@link Resolved} principal (tenant + root flag),
+     * via cache then store. Same expiry/revocation semantics as {@link #resolveTenant};
+     * the root flag rides along so a single resolution carries the operator privilege
+     * (nexus-e4130) without a second lookup.
+     *
+     * @param tokenHash {@code sha256Hex} of the presented bearer
+     * @return the resolved principal, or empty if missing/revoked/expired
+     */
+    public Optional<Resolved> resolve(String tokenHash) {
         if (tokenHash == null || tokenHash.isBlank()) {
             return Optional.empty();
         }
@@ -85,7 +110,7 @@ public final class TokenCache {
                     map.remove(tokenHash, cached);
                     return Optional.empty();
                 }
-                return Optional.of(cached.tenantId());
+                return Optional.of(new Resolved(cached.tenantId(), cached.isRoot()));
             }
             // Stale by TTL — drop and re-resolve from the store (revocation backstop).
             map.remove(tokenHash, cached);
@@ -103,8 +128,8 @@ public final class TokenCache {
             log.warn("event=token_cache_overflow max={} action=clear", maxEntries);
             map.clear();
         }
-        map.put(tokenHash, new Entry(st.tenantId(), st.expiresAt(), now));
-        return Optional.of(st.tenantId());
+        map.put(tokenHash, new Entry(st.tenantId(), st.isRoot(), st.expiresAt(), now));
+        return Optional.of(new Resolved(st.tenantId(), st.isRoot()));
     }
 
     /** Remove a token from the cache (called on revoke/rotate for immediate effect). */

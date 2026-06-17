@@ -27,8 +27,14 @@ public final class RequestContext {
      *                      handlers MUST use {@code session} and reject any client-supplied
      *                      session id that differs (Decision 2 cross-session denial). When
      *                      false the session is a transitional bootstrap bare id.
+     * @param isOperator    true iff the bearer is the persistent root token (nexus-e4130).
+     *                      The root token is the cross-tenant admin credential; every other
+     *                      token is confined to its own tenant on the admin surface
+     *                      ({@code TokenAdminHandler}). Resolved server-side from
+     *                      {@code ROOT_TOKEN_LABEL}; never client-asserted.
      */
-    public record Principal(String tenant, String session, boolean mintedSession) {
+    public record Principal(String tenant, String session, boolean mintedSession,
+                            boolean isOperator) {
     }
 
     private static final ThreadLocal<Principal> CURRENT = new ThreadLocal<>();
@@ -65,5 +71,14 @@ public final class RequestContext {
     public static boolean isMintedSession() {
         Principal p = CURRENT.get();
         return p != null && p.mintedSession();
+    }
+
+    /**
+     * @return true iff the current request's bearer is the root/operator token
+     *         (nexus-e4130). False for every ordinary tenant token and outside a request.
+     */
+    public static boolean isOperator() {
+        Principal p = CURRENT.get();
+        return p != null && p.isOperator();
     }
 }

@@ -46,8 +46,14 @@ public final class TokenStore {
         this.clock = clock;
     }
 
-    /** A live (non-revoked) service token: its tenant and optional expiry instant. */
-    public record ServiceToken(String tenantId, Instant expiresAt) {
+    /**
+     * A live (non-revoked) service token: its tenant, optional expiry instant, and
+     * whether it is the persistent root token (the operator/admin credential, marked by
+     * {@link #ROOT_TOKEN_LABEL}). {@code isRoot} carries the operator privilege up to the
+     * {@link dev.nexus.service.http.AuthFilter} so the admin surface (nexus-e4130) can
+     * scope cross-tenant operations to the root token alone.
+     */
+    public record ServiceToken(String tenantId, Instant expiresAt, boolean isRoot) {
     }
 
     private DSLContext dsl() {
@@ -67,7 +73,7 @@ public final class TokenStore {
             return Optional.empty();
         }
         var rec = dsl()
-            .select(SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.EXPIRES_AT)
+            .select(SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.LABEL)
             .from(SERVICE_TOKENS)
             .where(SERVICE_TOKENS.TOKEN_HASH.eq(tokenHash))
             .and(SERVICE_TOKENS.REVOKED_AT.isNull())
@@ -76,9 +82,11 @@ public final class TokenStore {
             return Optional.empty();
         }
         OffsetDateTime exp = rec.get(SERVICE_TOKENS.EXPIRES_AT);
+        boolean isRoot = ROOT_TOKEN_LABEL.equals(rec.get(SERVICE_TOKENS.LABEL));
         return Optional.of(new ServiceToken(
             rec.get(SERVICE_TOKENS.TENANT_ID),
-            exp == null ? null : exp.toInstant()));
+            exp == null ? null : exp.toInstant(),
+            isRoot));
     }
 
     /**
@@ -295,6 +303,24 @@ public final class TokenStore {
      *         the cache for the returned hash)
      */
     public Optional<String> revokeToken(String selector) {
+        return revokeToken(selector, null);
+    }
+
+    /**
+     * Revoke a token by full hash or unique prefix, optionally scoped to a single tenant.
+     *
+     * <p>nexus-e4130: when {@code tenantScope} is non-null the selector must resolve to a
+     * token whose {@code tenant_id} equals it; a selector matching only another tenant's
+     * token returns empty (no cross-tenant revoke). A null scope is the operator path
+     * (root token) and matches across all tenants. The tenant predicate is applied in the
+     * selector resolution so a non-operator cannot even learn that another tenant's prefix
+     * exists.
+     *
+     * @param selector    full token_hash or a unique prefix
+     * @param tenantScope restrict the match to this tenant, or null for any (operator)
+     * @return the full token_hash revoked, or empty if no unique in-scope match
+     */
+    public Optional<String> revokeToken(String selector, String tenantScope) {
         if (selector == null || selector.isBlank()) {
             return Optional.empty();
         }
@@ -303,14 +329,18 @@ public final class TokenStore {
         // re-revoke and prefix-shadowing by a stale revoked token; excluding the root
         // token (by ROOT_TOKEN_LABEL — re-keyed off the retired wildcard sentinel in
         // Phase E) prevents an authenticated caller from revoking the supervisor
-        // credential into a total lockout (review P5.3-C).
-        List<String> matches = dsl()
+        // credential into a total lockout (review P5.3-C). nexus-e4130: a non-null
+        // tenantScope confines the match to the caller's own tenant.
+        var sel = dsl()
             .select(SERVICE_TOKENS.TOKEN_HASH)
             .from(SERVICE_TOKENS)
             .where(SERVICE_TOKENS.TOKEN_HASH.eq(selector)
                 .or(SERVICE_TOKENS.TOKEN_HASH.startsWith(selector)))
             .and(SERVICE_TOKENS.REVOKED_AT.isNull())
-            .and(SERVICE_TOKENS.LABEL.isDistinctFrom(ROOT_TOKEN_LABEL))
+            .and(SERVICE_TOKENS.LABEL.isDistinctFrom(ROOT_TOKEN_LABEL));
+        List<String> matches = (tenantScope == null
+                ? sel
+                : sel.and(SERVICE_TOKENS.TENANT_ID.eq(tenantScope)))
             .fetch(SERVICE_TOKENS.TOKEN_HASH);
         String hash;
         if (matches.contains(selector)) {

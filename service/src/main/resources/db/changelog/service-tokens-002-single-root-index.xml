@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-e4130 — enforce the single-root-token invariant at the DB layer.
+
+    The operator (cross-tenant admin) privilege is keyed entirely on the
+    ROOT_TOKEN_LABEL ('bootstrap-legacy-token') marker: AuthFilter resolves
+    isOperator from it, and TokenAdminHandler grants cross-tenant powers to it.
+    That model assumes EXACTLY ONE root row. ensureBootstrapToken is idempotent
+    on token_hash (ON CONFLICT DO NOTHING on the PK), so a second seed with a
+    ROTATED NX_SERVICE_TOKEN would leave the old hash AND insert a new one — two
+    rows carrying the root label, hence two operator credentials, silently.
+
+    This partial unique index makes "at most one root token" a DB-enforced
+    invariant: a second root-labelled insert fails loud rather than minting a
+    second invisible operator. Partial (WHERE label = ...) so it constrains only
+    the root label and leaves ordinary labels unconstrained (they are free-form).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="service-tokens-002-1" author="nexus-e4130">
+        <comment>
+            Partial unique index pinning at most one ROOT_TOKEN_LABEL row, so the
+            "operator = the single root token" model cannot be silently violated by
+            a second root-labelled insert (e.g. a rotated NX_SERVICE_TOKEN re-seed).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE UNIQUE INDEX idx_service_tokens_single_root
+    ON nexus.service_tokens (label)
+    WHERE label = 'bootstrap-legacy-token';
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_service_tokens_single_root</rollback>
+    </changeSet>
+
+</databaseChangeLog>
