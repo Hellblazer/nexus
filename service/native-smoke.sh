@@ -73,4 +73,52 @@ if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerExcep
   echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log | head; fail=1
 fi
 
+# ── Voyage-mode boot + egress-proxy wiring (nexus-myg2d) ──────────────────────
+# The local-mode boot above never exercises the CLOUD (voyage) config path — the
+# exact coverage gap that let two native-image-vs-JVM regressions ship to conexus
+# deploys: nexus-0n7uc (voyage-branch OnnxEmbedder boot segfault) and nexus-f1syh
+# (Voyage HttpClient ignored the egress proxy). Boot the SAME binary in voyage mode
+# with a proxy and assert it (1) boots clean (segfault guard), (2) selected voyage
+# mode, (3) wired the proxy onto the client from HTTPS_PROXY. The proxy points at a
+# closed local port: construction must succeed (no network call at build time);
+# real Voyage routing-through-proxy is covered by EgressProxyTest + the cloud STEP-6.
+echo "voyage-mode boot + egress proxy:"
+kill "$SVCPID" 2>/dev/null; wait "$SVCPID" 2>/dev/null
+# The engine migrates on boot (Main: SchemaMigrator before the HTTP bind), so a second
+# boot must target a CLEAN database — re-running Liquibase over the local-mode DB hits
+# "relation already exists". With our own PG, create a fresh DB in the same container;
+# with an external NX_DB_URL we can't safely reset it, so skip this phase there.
+if [ "$OWN_PG" != "1" ]; then
+  echo "  skip   voyage-mode phase (external NX_DB_URL — needs a clean DB)"
+else
+  docker exec lp2qo-smoke-pg psql -U nexus -d nexus -c 'CREATE DATABASE voyagesmoke;' >/dev/null 2>&1 || true
+  DEADPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
+  NX_DB_URL="jdbc:postgresql://localhost:${PGPORT}/voyagesmoke" \
+    NX_VOYAGE_API_KEY=dummy-smoke-key HTTPS_PROXY="http://127.0.0.1:${DEADPORT}" \
+    "$BIN" > /tmp/native-smoke-voyage.log 2>&1 &
+SVCPID=$!
+VUP=0
+for i in $(seq 1 60); do
+  kill -0 $SVCPID 2>/dev/null || { echo "FAIL: voyage-mode service exited during startup (segfault?)"; tail -40 /tmp/native-smoke-voyage.log; exit 1; }
+  curl -fsS "$U/health" >/dev/null 2>&1 && { VUP=1; break; }
+  sleep 1
+done
+[ "$VUP" = "1" ] || { echo "FAIL: voyage-mode service never became healthy"; tail -40 /tmp/native-smoke-voyage.log; exit 1; }
+# (2) took the cloud (voyage) embedding branch, not local bge/onnx
+if grep -qE 'event=embedding_mode_banner mode=voyage' /tmp/native-smoke-voyage.log; then
+  echo "  ok   voyage-mode boot (no segfault)"
+else
+  echo "  FAIL voyage mode not selected:"; grep embedding_mode_banner /tmp/native-smoke-voyage.log | head; fail=1
+fi
+# (3) EgressProxy parsed HTTPS_PROXY and set the proxy on the Voyage client
+if grep -qE "event=egress_proxy_configured.*port=${DEADPORT}" /tmp/native-smoke-voyage.log; then
+  echo "  ok   egress proxy wired from HTTPS_PROXY -> 127.0.0.1:${DEADPORT}"
+else
+  echo "  FAIL egress proxy not configured from HTTPS_PROXY:"; grep egress_proxy /tmp/native-smoke-voyage.log | head; fail=1
+fi
+if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-voyage.log; then
+  echo "FAIL: native runtime error in voyage-mode service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-voyage.log | head; fail=1
+fi
+fi  # end voyage-mode phase (OWN_PG)
+
 if [ "$fail" = "0" ]; then echo "NATIVE SMOKE PASS"; exit 0; else echo "NATIVE SMOKE FAIL"; exit 1; fi
