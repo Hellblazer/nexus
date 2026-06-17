@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-slcn7 (RDR-154 follow-on) — merge duplicate root topics, then enforce
+    uniqueness of (tenant_id, collection, label) among root topics.
+
+    The c-TF-IDF labeler could assign the same label to distinct HDBSCAN clusters
+    and discovery was additive, so a (tenant_id, collection, label) could carry
+    several root-topic (parent_id IS NULL) rows — duplicate Knowledge Map entries
+    once the RDR-154 read-side band-aid was removed. The root-cause prevention is
+    the spec dedup in taxonomy_compute (Python feeds both backends). This changeset
+    repairs any pre-existing PG data (carried over by the SQLite→PG ETL) and
+    installs the partial unique index as the structural backstop.
+
+    Must run after taxonomy-001 (tables) and taxonomy-003 (doc_count trigger): the
+    assignment moves below fire that trigger, which recomputes the kept topic's
+    doc_count automatically. Links touching a dup are deleted (topic_links are
+    recomputable co-occurrence edges) rather than carefully repointed.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: merge duplicate root topics ──────────────────────────── -->
+    <changeSet id="taxonomy-004-1" author="nexus-slcn7">
+        <comment>Merge duplicate (tenant_id, collection, label) root topics onto the lowest id</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    CREATE TEMP TABLE _slcn7_dup_map ON COMMIT DROP AS
+    SELECT t.tenant_id, t.id AS dup_id, m.keep_id
+      FROM nexus.topics t
+      JOIN (
+            SELECT tenant_id, collection, label, MIN(id) AS keep_id
+              FROM nexus.topics
+             WHERE parent_id IS NULL
+             GROUP BY tenant_id, collection, label
+            HAVING COUNT(*) > 1
+           ) m
+        ON m.tenant_id = t.tenant_id
+       AND m.collection = t.collection
+       AND m.label = t.label
+     WHERE t.parent_id IS NULL
+       AND t.id &lt;&gt; m.keep_id;
+
+    -- Move assignments onto the kept topic (skip docs already there), then drop
+    -- the redundant rows. Both statements fire the doc_count trigger.
+    INSERT INTO nexus.topic_assignments
+        (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+    SELECT ta.tenant_id, ta.doc_id, dm.keep_id, ta.assigned_by,
+           ta.similarity, ta.assigned_at, ta.source_collection
+      FROM nexus.topic_assignments ta
+      JOIN _slcn7_dup_map dm
+        ON dm.dup_id = ta.topic_id AND dm.tenant_id = ta.tenant_id
+    ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING;
+
+    DELETE FROM nexus.topic_assignments ta
+     USING _slcn7_dup_map dm
+     WHERE dm.dup_id = ta.topic_id AND dm.tenant_id = ta.tenant_id;
+
+    -- Re-parent any children of a dup onto the kept topic.
+    UPDATE nexus.topics t
+       SET parent_id = dm.keep_id
+      FROM _slcn7_dup_map dm
+     WHERE t.parent_id = dm.dup_id AND t.tenant_id = dm.tenant_id;
+
+    -- Drop links touching a dup (recomputable co-occurrence edges).
+    DELETE FROM nexus.topic_links tl
+     USING _slcn7_dup_map dm
+     WHERE (tl.from_topic_id = dm.dup_id OR tl.to_topic_id = dm.dup_id)
+       AND tl.tenant_id = dm.tenant_id;
+
+    -- Finally drop the redundant root topics.
+    DELETE FROM nexus.topics t
+     USING _slcn7_dup_map dm
+     WHERE t.id = dm.dup_id AND t.tenant_id = dm.tenant_id;
+END $$;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <!-- ── Changeset 2: partial unique index (structural backstop) ────────────── -->
+    <changeSet id="taxonomy-004-2" author="nexus-slcn7">
+        <comment>Unique (tenant_id, collection, label) among root topics</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_root_tenant_collection_label
+    ON nexus.topics (tenant_id, collection, label)
+ WHERE parent_id IS NULL;
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_topics_root_tenant_collection_label</rollback>
+    </changeSet>
+
+</databaseChangeLog>

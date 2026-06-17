@@ -812,6 +812,29 @@ class TaxonomyRepositoryTest {
             .hasSize(50);
     }
 
+    @Test @Order(45)
+    void rootTopicUniqueness_dupRejected_childAndOtherTenantAllowed() {
+        // nexus-slcn7: partial unique index on (tenant_id, collection, label)
+        // WHERE parent_id IS NULL forbids duplicate ROOT topics, while children
+        // and other tenants may reuse the label.
+        final String col = "knowledge__uniq";
+        long root = repo.insertTopic(TENANT_A, "uniq-label", null, col, 0, PAST_TS, null);
+        assertThat(root).isPositive();
+
+        // Duplicate ROOT (same tenant, collection, label) → unique-index violation.
+        assertThatThrownBy(() ->
+            repo.insertTopic(TENANT_A, "uniq-label", null, col, 0, PAST_TS, null))
+            .isInstanceOf(org.jooq.exception.DataAccessException.class);
+
+        // A CHILD topic (parent_id set) with the same label is allowed.
+        long child = repo.insertTopic(TENANT_A, "uniq-label", root, col, 0, PAST_TS, null);
+        assertThat(child).isPositive();
+
+        // A different tenant may reuse the label.
+        long bRoot = repo.insertTopic(TENANT_B, "uniq-label", null, col, 0, PAST_TS, null);
+        assertThat(bRoot).isPositive();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     /** Build a {@code Map<String,Object>} from alternating key/value varargs (mixed value types). */

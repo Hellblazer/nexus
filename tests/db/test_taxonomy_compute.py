@@ -311,3 +311,40 @@ def test_catalog_taxonomy_reexports_same_objects() -> None:
     assert CatalogTaxonomy.compute_rebuild_plan is tc.compute_rebuild_plan
     assert CatalogTaxonomy._merge_labels is tc._merge_labels
     assert CatalogTaxonomy._cluster is tc._cluster
+
+
+class TestDedupSpecsByLabel:
+    """nexus-slcn7: same-label discovered specs are merged at the source."""
+
+    def test_merges_same_label_unions_docs(self) -> None:
+        specs = [
+            {"label": "a b c", "terms": "[]", "doc_count": 2,
+             "doc_ids": ["d1", "d2"], "centroid": [0.1], "assigned_by": "hdbscan"},
+            {"label": "x y z", "terms": "[]", "doc_count": 1,
+             "doc_ids": ["d3"], "centroid": [0.2], "assigned_by": "hdbscan"},
+            {"label": "a b c", "terms": "[]", "doc_count": 2,
+             "doc_ids": ["d2", "d4"], "centroid": [0.9], "assigned_by": "hdbscan"},
+        ]
+        out, index_map = tc._dedup_specs_by_label(specs)
+        # Two unique labels, original order preserved.
+        assert [s["label"] for s in out] == ["a b c", "x y z"]
+        merged = out[0]
+        # Union of doc_ids (d2 not double-counted); doc_count recomputed.
+        assert merged["doc_ids"] == ["d1", "d2", "d4"]
+        assert merged["doc_count"] == 3
+        # First cluster's centroid/terms kept.
+        assert merged["centroid"] == [0.1]
+        # index_map: original idx 0 and 2 collapse to new idx 0; idx 1 → 1.
+        assert index_map == {0: 0, 1: 1, 2: 0}
+
+    def test_no_duplicates_is_identity(self) -> None:
+        specs = [
+            {"label": "p", "terms": "[]", "doc_count": 1, "doc_ids": ["d1"],
+             "centroid": [0.0], "assigned_by": "hdbscan"},
+            {"label": "q", "terms": "[]", "doc_count": 1, "doc_ids": ["d2"],
+             "centroid": [0.0], "assigned_by": "hdbscan"},
+        ]
+        out, index_map = tc._dedup_specs_by_label(specs)
+        assert [s["label"] for s in out] == ["p", "q"]
+        assert out[0]["doc_ids"] == ["d1"]
+        assert index_map == {0: 0, 1: 1}

@@ -361,7 +361,49 @@ def compute_discovered_topics(
             "centroid": [float(x) for x in centroids[cid].tolist()],
             "assigned_by": "hdbscan",
         })
+    specs, _ = _dedup_specs_by_label(specs)
     return specs
+
+
+def _dedup_specs_by_label(
+    specs: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[int, int]]:
+    """Collapse discovered specs that share an identical label (nexus-slcn7).
+
+    The c-TF-IDF top-3 labeler can assign the SAME label string to two distinct
+    HDBSCAN clusters (their top-3 terms collide). Persisted as-is, each becomes a
+    separate root topic with an identical ``(collection, label)``, which surfaces
+    as duplicate Knowledge Map rows once the RDR-154 read-side dedup band-aid is
+    removed. Merge same-label specs at the source instead: union their ``doc_ids``,
+    recompute ``doc_count``, keep the first cluster's centroid/terms/review_status
+    and (for the rebuild path) its ``assigned_by`` — order preserved. One root
+    topic per label is then the invariant both T2 backends persist, and the
+    partial unique index is its structural backstop.
+
+    Returns ``(deduped_specs, index_map)`` where ``index_map`` maps each ORIGINAL
+    spec index to its index in ``deduped_specs`` — callers that key data on spec
+    position (the rebuild path's ``manual_transfers``) must remap through it.
+    """
+    label_to_new_idx: dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    index_map: dict[int, int] = {}
+    for old_idx, spec in enumerate(specs):
+        label = spec["label"]
+        new_idx = label_to_new_idx.get(label)
+        if new_idx is None:
+            new_idx = len(out)
+            label_to_new_idx[label] = new_idx
+            out.append({**spec, "doc_ids": list(spec["doc_ids"])})
+        else:
+            merged = out[new_idx]
+            seen = set(merged["doc_ids"])
+            for did in spec["doc_ids"]:
+                if did not in seen:
+                    merged["doc_ids"].append(did)
+                    seen.add(did)
+            merged["doc_count"] = len(merged["doc_ids"])
+        index_map[old_idx] = new_idx
+    return out, index_map
 
 
 def compute_rebuild_plan(
@@ -467,5 +509,14 @@ def compute_rebuild_plan(
                 old_topic_id=old_topic_id,
                 collection=collection_name,
             )
+
+    # nexus-slcn7: dedup same-label specs here too — persist_rebuild_topics
+    # inserts root topics with a plain INSERT, so a label collision would hit the
+    # partial unique index. Remap manual_transfers (keyed on spec position)
+    # through the dedup index map so transfers still point at the right topic.
+    specs, index_map = _dedup_specs_by_label(specs)
+    manual_transfers = {
+        doc: index_map[old_idx] for doc, old_idx in manual_transfers.items()
+    }
 
     return {"specs": specs, "manual_transfers": manual_transfers}
