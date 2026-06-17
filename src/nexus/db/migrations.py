@@ -119,19 +119,11 @@ def migrate_dedup_root_topics(conn: sqlite3.Connection) -> None:
             conn.execute("DELETE FROM topic_assignments WHERE topic_id = ?", (dup_id,))
             # Re-parent any children of the dup onto the kept topic.
             conn.execute("UPDATE topics SET parent_id = ? WHERE parent_id = ?", (keep_id, dup_id))
-            # Repoint links; UPDATE OR IGNORE drops rows that would collide on the
-            # (from, to) PK, then delete any self-links / leftovers on the dup.
+            # Drop links touching the dup (recomputable co-occurrence edges) — same
+            # strategy as the PG taxonomy-004 changeset, keeping the two backends
+            # consistent and avoiding a (from, to) PK-collision repoint.
             conn.execute(
-                "UPDATE OR IGNORE topic_links SET from_topic_id = ? WHERE from_topic_id = ?",
-                (keep_id, dup_id),
-            )
-            conn.execute(
-                "UPDATE OR IGNORE topic_links SET to_topic_id = ? WHERE to_topic_id = ?",
-                (keep_id, dup_id),
-            )
-            conn.execute(
-                "DELETE FROM topic_links WHERE from_topic_id = ? OR to_topic_id = ? "
-                "OR from_topic_id = to_topic_id",
+                "DELETE FROM topic_links WHERE from_topic_id = ? OR to_topic_id = ?",
                 (dup_id, dup_id),
             )
             conn.execute("DELETE FROM topics WHERE id = ?", (dup_id,))

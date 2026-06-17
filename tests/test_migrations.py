@@ -2627,9 +2627,22 @@ class TestDedupRootTopics:
             "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
             [("doc1", 1), ("doc1", 2), ("doc1", 3), ("doc2", 2), ("doc3", 3)],
         )
+        # A child of dup id 3 must be re-parented onto the kept id 1.
+        conn.execute(
+            "INSERT INTO topics (id, label, parent_id, collection, doc_count, created_at) "
+            "VALUES (5, 'child', 3, 'docs__c', 0, '')"
+        )
+        # A link touching dup id 2 must be removed (recomputable edge).
+        conn.execute(
+            "INSERT INTO topic_links (from_topic_id, to_topic_id) VALUES (2, 4)"
+        )
         conn.commit()
 
         migrate_dedup_root_topics(conn)
+
+        # Child re-parented onto the kept topic; link touching a dup removed.
+        assert conn.execute("SELECT parent_id FROM topics WHERE id=5").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM topic_links").fetchone()[0] == 0
 
         # Exactly one 'dup' root topic remains (the lowest id, 1) + the distinct one.
         rows = conn.execute(

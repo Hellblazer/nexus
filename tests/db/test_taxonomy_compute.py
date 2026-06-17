@@ -325,7 +325,7 @@ class TestDedupSpecsByLabel:
             {"label": "a b c", "terms": "[]", "doc_count": 2,
              "doc_ids": ["d2", "d4"], "centroid": [0.9], "assigned_by": "hdbscan"},
         ]
-        out = tc._dedup_specs_by_label(specs)
+        out, index_map = tc._dedup_specs_by_label(specs)
         # Two unique labels, original order preserved.
         assert [s["label"] for s in out] == ["a b c", "x y z"]
         merged = out[0]
@@ -334,6 +334,8 @@ class TestDedupSpecsByLabel:
         assert merged["doc_count"] == 3
         # First cluster's centroid/terms kept.
         assert merged["centroid"] == [0.1]
+        # index_map: original idx 0 and 2 collapse to new idx 0; idx 1 → 1.
+        assert index_map == {0: 0, 1: 1, 2: 0}
 
     def test_no_duplicates_is_identity(self) -> None:
         specs = [
@@ -342,6 +344,7 @@ class TestDedupSpecsByLabel:
             {"label": "q", "terms": "[]", "doc_count": 1, "doc_ids": ["d2"],
              "centroid": [0.0], "assigned_by": "hdbscan"},
         ]
-        out = tc._dedup_specs_by_label(specs)
+        out, index_map = tc._dedup_specs_by_label(specs)
         assert [s["label"] for s in out] == ["p", "q"]
         assert out[0]["doc_ids"] == ["d1"]
+        assert index_map == {0: 0, 1: 1}
