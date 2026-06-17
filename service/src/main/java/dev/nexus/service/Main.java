@@ -6,7 +6,6 @@ import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.Bge768Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
-import dev.nexus.service.vectors.OnnxEmbedder;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -116,11 +115,14 @@ public final class Main {
         // mode was invisible; onnx-local now logs at WARN and names the refusal
         // behaviour so a missing key is unmissable in the service log.
         if (voyageKey != null && !voyageKey.isBlank()) {
-            // Cloud mode: Voyage routing. The MiniLM ONNX embedder is retained
-            // ONLY as the non-conformant-prefix fallback (legacy names).
-            OnnxEmbedder onnx = new OnnxEmbedder();
-            docEmbedRouter = new EmbedderRouter(onnx, voyageKey, "document");
-            qryEmbedRouter = new EmbedderRouter(onnx, voyageKey, "query");
+            // Cloud mode: PURE Voyage routing — NO local ONNX embedder (nexus-0n7uc).
+            // The cloud container has no MiniLM model on disk; constructing
+            // OnnxEmbedder would call onnxruntime createSession() on a missing file,
+            // which SEGFAULTS (not throws) and crashed the engine at boot (conexus
+            // STEP-5, conexus-qcn). A voyage-1024 cloud corpus has no use for a local
+            // 384-dim fallback; non-conformant collections are REFUSED (422).
+            docEmbedRouter = new EmbedderRouter(voyageKey, "document");
+            qryEmbedRouter = new EmbedderRouter(voyageKey, "query");
             log.info("event=embedding_mode_banner mode={} models={} backend=pgvector",
                     docEmbedRouter.modeName(), docEmbedRouter.availableModels());
         } else {
