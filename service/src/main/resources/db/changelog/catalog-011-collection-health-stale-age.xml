@@ -14,6 +14,16 @@
     whose indexed_at at least starts with a 4-digit year; everything else is
     excluded from both numerator and denominator (NULL ratio when none qualify).
 
+    CAVEAT (cross-backend): this lexicographic compare is correct only for the
+    UTC-suffixed format the indexers always write. A hand-inserted non-UTC-offset
+    value (e.g. '...-05:00') would be compared by its wall-clock prefix, not its
+    UTC instant, so it can be classified differently from the SQLite path
+    (catalog.py collection_health_meta), which normalises via strftime epoch.
+    Acceptable: the write path is always UTC and this is a coarse 30-day heuristic.
+
+    The 30-day horizon mirrors catalog._STALE_SOURCE_AGE_DAYS (Python) — keep both
+    in sync if the horizon changes.
+
     CREATE OR REPLACE appends stale_source_ratio as a trailing column, preserving
     the catalog-009 column set, the security_invoker reloption, and the grants.
 -->

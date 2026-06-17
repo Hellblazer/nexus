@@ -278,6 +278,11 @@ from nexus.catalog.events import (  # noqa: E402
 
 # Span format: "line_start-line_end" or "chunk_idx:char_start-char_end" or
 # "chash:<sha256hex>" or "".  Empty string means "the whole document".
+# nexus-agsq7: a document indexed more than this many days ago counts as stale
+# for collection_health_meta.stale_source_ratio. The PG view (catalog-011) and
+# the collection_health report docstring hardcode the same horizon — keep in sync.
+_STALE_SOURCE_AGE_DAYS = 30
+
 _SPAN_PATTERN = re.compile(
     r"^$"                              # empty — whole document
     r"|^\d+-\d+$"                      # line range: "42-57"
@@ -1153,19 +1158,24 @@ class Catalog:
         orphan_count: int = int(orphan_row[0] or 0)
 
         # nexus-agsq7: index-age staleness — fraction of docs (with a parseable
-        # indexed_at) last indexed more than 30 days ago. strftime('%s', ...)
-        # returns NULL for an unparseable value, excluding it from both counts.
+        # indexed_at) last indexed more than _STALE_SOURCE_AGE_DAYS ago.
+        # strftime('%s', ...) returns NULL for an unparseable value (excluded
+        # from both counts) AND normalises any timezone offset to epoch — so this
+        # SQLite path is robust to non-UTC indexed_at. The PG mirror (catalog-011)
+        # uses a lexicographic string compare that is correct only for the
+        # UTC-format indexed_at the indexers always write; the two can disagree
+        # on hand-inserted non-UTC-offset rows (RDR-158 retires this SQLite path).
         stale_row = self._db.execute(
             "SELECT "
             "  COUNT(strftime('%s', indexed_at)) AS dated, "
             "  COUNT(*) FILTER (WHERE strftime('%s', indexed_at) IS NOT NULL "
             "    AND CAST(strftime('%s', indexed_at) AS REAL) "
-            "        < CAST(strftime('%s', 'now', '-30 days') AS REAL)) AS stale "
+            f"        < CAST(strftime('%s', 'now', '-{_STALE_SOURCE_AGE_DAYS} days') AS REAL)) AS stale "
             "FROM documents WHERE physical_collection = ?",
             (collection,),
         ).fetchone()
-        dated = int(stale_row[0] or 0) if stale_row else 0
-        stale = int(stale_row[1] or 0) if stale_row else 0
+        # fetchone() on an aggregate query always returns a (dated, stale) row.
+        dated, stale = int(stale_row[0]), int(stale_row[1])
         stale_source_ratio: float | None = (stale / dated) if dated else None
 
         return {

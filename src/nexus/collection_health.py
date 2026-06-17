@@ -10,7 +10,7 @@ and topic-assignment signals into a single per-collection view:
     orphan_catalog_rows, stale_source_ratio, hub_domination_score
 
 ``stale_source_ratio`` is the fraction of a collection's documents last indexed
-more than ``_STALE_AGE_DAYS`` ago (nexus-agsq7) — an INDEX-AGE proxy for
+more than 30 days ago (``catalog._STALE_SOURCE_AGE_DAYS``; nexus-agsq7) — an INDEX-AGE proxy for
 staleness, computed DB-only from ``indexed_at``. A true "source modified since
 indexing" signal is structurally impossible from stored columns
 (``source_mtime`` is captured at index time, so it is always <= ``indexed_at``;
@@ -29,9 +29,6 @@ from typing import Any, Callable
 
 
 _STALE_PLACEHOLDER = "—"
-# nexus-agsq7: a document indexed more than this many days ago counts as stale
-# for the index-age staleness ratio.
-_STALE_AGE_DAYS = 30
 _SORT_COLUMNS = (
     "name",
     "chunk_count",
