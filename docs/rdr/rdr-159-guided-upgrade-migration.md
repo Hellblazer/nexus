@@ -24,6 +24,12 @@ related_external: [conexus:RDR-001, conexus:RDR-002]
 > `nexus-luxe6` blocker all live here); conexus adds only a thin `conexus upgrade`
 > UX veneer that calls this engine. The conexus draft is superseded by this RDR.
 
+> **2026-06-16 (nexus-41bso):** all "PG16" references below now read as **PG17**.
+> nexus was never pinned to 16; the migration target stack and `nx init --service`
+> provisioning are PG17 + pgvector (16/15 retained only as discovery fallbacks),
+> aligning the upgrade destination with the deployed conexus cloud stack. Original
+> wording preserved for the record.
+
 ## Problem Statement
 
 Since RDR-155 P4a (2026-06-10) T3 vector serving routes exclusively through the
