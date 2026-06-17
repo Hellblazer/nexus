@@ -62,6 +62,11 @@ jobs:
           # ships a new ONNX model invalidates the cache; pre-fix the
           # bare runner-OS key reused stale models across upgrades.
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          # nexus-c7gnx: fall back to the last ONNX cache for this OS so a
+          # routine uv.lock bump (which rarely changes the bundled ONNX model)
+          # re-seeds it instead of re-downloading from scratch every time.
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
 
       - name: Cache HuggingFace models (docling, cross-encoder, MinerU)
         uses: actions/cache@v4
@@ -92,13 +97,26 @@ jobs:
         # nexus-cxsbs: warm the docling models BEFORE pytest so the flaky
         # mid-test HF download becomes a deterministic up-front fetch that is
         # allowed to retry. No-op on a cache hit; on a cold cache it downloads
-        # once (then the post-job cache-save persists it). Both converter modes
-        # (plain + enriched) cover every model the integration tests exercise.
+        # once (then the post-job cache-save persists it).
+        #
+        # nexus-c7gnx: the probe now runs a REAL extraction (docling loads its
+        # models lazily at convert() time, so merely building the converter does
+        # NOT download them). And it HARD-FAILS after 3 attempts: a cold cache +
+        # transient HF outage then fails LOUDLY here ("docling models could not
+        # be fetched") instead of silently falling back to PyMuPDF mid-suite and
+        # producing ~21 baffling extraction_method=='docling' assertion failures.
+        # A real extraction must yield extraction_method=='docling' (a one-line
+        # python -c; no heredoc, so YAML indentation stays intact). Probe lives in
+        # scripts/ci_warm_docling.py for readability.
         run: |
+          set -euo pipefail
           for i in 1 2 3; do
-            uv run python -c "from nexus.pdf_extractor import PDFExtractor; e=PDFExtractor(); e._get_converter(enriched=False); e._get_converter(enriched=True); print('docling models warm')" && break
-            echo "docling pre-fetch attempt $i failed; retrying in 10s"; sleep 10
+            if uv run python scripts/ci_warm_docling.py; then echo "docling models warm"; exit 0; fi
+            echo "docling pre-fetch attempt $i did not yield docling extraction"
+            if [ "$i" -lt 3 ]; then echo "retrying in 10s"; sleep 10; fi
           done
+          echo "::error::docling models could not be fetched after 3 attempts (cold HF cache + HuggingFace unavailable). Failing the job here rather than letting the PDF integration tests fall back to PyMuPDF and fail with confusing assertions." >&2
+          exit 1
 
       - name: Run tests
         run: uv run pytest tests/ -q --durations=25
