@@ -4,14 +4,15 @@
 Resolves which storage backend is authoritative for reads/writes for a given
 T2/T1 domain store.  The two backends are:
 
-- ``sqlite``  — current SQLite + T2 daemon path (default everywhere)
-- ``service`` — new HTTP->Java->Postgres path (enabled per store as each bead
-                migrates the store; see the nexus-gmiaf.7+ beads)
+- ``service`` — HTTP->Java->Postgres path. **Hard default** (RDR-152 nexus-fjwxh):
+                the Java service is the storage substrate; ``=sqlite`` is the opt-out.
+- ``sqlite``  — legacy SQLite + T2 daemon path (explicit opt-out only).
 
 Resolution precedence (narrowest wins):
   1. Per-store env var  ``NX_STORAGE_BACKEND_<STORE>=service|sqlite``
   2. Global env var     ``NX_STORAGE_BACKEND=service|sqlite``
-  3. Hard default       ``'sqlite'``
+  3. Hard default       ``'service'`` (T1 scratch is the sole exception — it keeps
+                        its local backend default; see :func:`storage_backend_for`).
 
 A config-file layer is reserved for Phase 2+ when the service is in broader
 use; it is not wired in this bead (nexus-gmiaf.4) to keep the seam minimal.
