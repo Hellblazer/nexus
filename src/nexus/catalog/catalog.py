@@ -1105,13 +1105,18 @@ class Catalog:
         Java /stats response used by stats_cmd.
 
         Key parity with Java /stats response:
-          doc_count, link_count, owner_count, collection_count,
+          doc_count, link_count, owner_count, collection_count, chunk_count,
           by_content_type, links_by_type
         """
         doc_count        = self._db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         link_count       = self._db.execute("SELECT COUNT(*) FROM links").fetchone()[0]
         owner_count      = self._db.execute("SELECT COUNT(*) FROM owners").fetchone()[0]
         collection_count = self._db.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
+        # nexus-aeceu: chunk_count for Java/PG parity — count the document_chunks
+        # manifest rows, mirroring the catalog_stats view's
+        # count(catalog_document_chunks). (RDR-108 manifest; the same table the
+        # per-collection chunk drift is reconciled against.)
+        chunk_count      = self._db.execute("SELECT COUNT(*) FROM document_chunks").fetchone()[0]
         by_ctype_rows = self._db.execute(
             "SELECT content_type, COUNT(*) FROM documents GROUP BY content_type"
         ).fetchall()
@@ -1126,6 +1131,7 @@ class Catalog:
             "link_count":       link_count,
             "owner_count":      owner_count,
             "collection_count": collection_count,
+            "chunk_count":      chunk_count,
             "by_content_type":  {(r[0] or ""): r[1] for r in by_ctype_rows},
             "links_by_type":    {r[0]: r[1] for r in by_ltype_rows if r[0]},
         }

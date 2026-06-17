@@ -1814,6 +1814,7 @@ def stats_cmd(as_json: bool) -> None:
     owner_count = s.get("owner_count", 0)
     doc_count = s.get("doc_count", 0)
     link_count = s.get("link_count", 0)
+    chunk_count = s.get("chunk_count", 0)  # nexus-aeceu: now present on both backends
     # by_content_type is included in the stats() response (nexus-xnz0o).
     type_counts = s.get("by_content_type", {})
     link_type_counts = s.get("links_by_type", {})
@@ -1823,6 +1824,7 @@ def stats_cmd(as_json: bool) -> None:
             "owners": owner_count,
             "documents": doc_count,
             "links": link_count,
+            "chunks": chunk_count,
             "by_type": type_counts,
             "by_link_type": link_type_counts,
         }
@@ -1833,6 +1835,7 @@ def stats_cmd(as_json: bool) -> None:
         click.echo(f"Owners:    {owner_count}")
         click.echo(f"Documents: {doc_count}")
         click.echo(f"Links:     {link_count}")
+        click.echo(f"Chunks:    {chunk_count}")
         if type_counts:
             click.echo("By type:")
             for t, c in sorted(type_counts.items()):
