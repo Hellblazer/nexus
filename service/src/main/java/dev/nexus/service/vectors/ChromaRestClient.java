@@ -98,6 +98,12 @@ public final class ChromaRestClient {
         this.database = database;
         this.apiKey   = apiKey;
         this.isCloud  = isCloud;
+        // nexus-f1syh NOTE: this client does NOT route through the egress proxy. It is
+        // the Chroma migration-read path and is NOT wired into the cloud serving engine
+        // (Main constructs only PgVectorRepository; Chroma serving retired in RDR-155
+        // P4a). If a cloud/private-subnet path ever calls cloud() (api.trychroma.com is
+        // external), wire EgressProxy.selector() onto this builder as the embedders do —
+        // a bare HttpClient will direct-connect and time out behind squid.
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
