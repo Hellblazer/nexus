@@ -303,7 +303,131 @@ class TokenAdminHandlerTest {
         assertThat(http.send(req, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(405);
     }
 
+    // ── nexus-e4130: caller-scoped authorization ─────────────────────────────
+    // A tenant token (minted via /v1/tenants/create under the operator BOOT token) is a
+    // non-operator bearer bound to its own tenant. It must not administer other tenants.
+
+    @Test
+    void nonOperator_cannotCreateTenant() throws Exception {
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"e4130-create-a\"}").get("token").asText();
+        var resp = sendAs(tokA, "/v1/tenants/create", "{\"name\":\"e4130-create-sneaky\"}");
+        assertThat(resp.statusCode()).as("non-operator tenant-create must be 403: %s", resp.body()).isEqualTo(403);
+    }
+
+    @Test
+    void nonOperator_cannotIssueForAnotherTenant() throws Exception {
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"e4130-issue-a\"}").get("token").asText();
+        postJson("/v1/tenants/create", "{\"name\":\"e4130-issue-victim\"}");  // victim exists
+        var resp = sendAs(tokA, "/v1/service-tokens/issue", "{\"tenant\":\"e4130-issue-victim\"}");
+        assertThat(resp.statusCode()).as("cross-tenant issue must be 403: %s", resp.body()).isEqualTo(403);
+    }
+
+    @Test
+    void nonOperator_canIssueForOwnTenant() throws Exception {
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"e4130-own\"}").get("token").asText();
+        var resp = sendAs(tokA, "/v1/service-tokens/issue", "{\"tenant\":\"e4130-own\"}");
+        assertThat(resp.statusCode()).as("self-tenant issue must be 200: %s", resp.body()).isEqualTo(200);
+    }
+
+    @Test
+    void nonOperator_cannotRotateAnotherTenant() throws Exception {
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"e4130-rotate-a\"}").get("token").asText();
+        postJson("/v1/tenants/create", "{\"name\":\"e4130-rotate-victim\"}");
+        var resp = sendAs(tokA, "/v1/service-tokens/rotate", "{\"tenant\":\"e4130-rotate-victim\"}");
+        assertThat(resp.statusCode()).as("cross-tenant rotate must be 403: %s", resp.body()).isEqualTo(403);
+    }
+
+    @Test
+    void nonOperator_listIsForcedToOwnTenant() throws Exception {
+        postJson("/v1/tenants/create", "{\"name\":\"e4130-list-victim\"}");
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"e4130-list-a\"}").get("token").asText();
+        // A asks to list the victim's tokens; the request is force-scoped to A.
+        var resp = sendAs(tokA, "/v1/service-tokens/list", "{\"tenant\":\"e4130-list-victim\"}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        JsonNode rows = MAPPER.readTree(resp.body()).get("tokens");
+        // Non-vacuity precondition: A owns at least its create-initial token, so the
+        // for-loop below MUST execute — otherwise a scoping bug returning [] would pass
+        // this leak test vacuously.
+        assertThat(rows).as("A must see at least its own initial token").isNotEmpty();
+        for (JsonNode row : rows) {
+            assertThat(row.get("tenant").asText())
+                .as("non-operator list must never leak another tenant's rows")
+                .isEqualTo("e4130-list-a");
+        }
+    }
+
+    @Test
+    void nonOperator_prefixSelectorCannotRevokeAcrossTenants() throws Exception {
+        // S1: a prefix that could match tokens in BOTH tenants must, under a non-operator's
+        // scope, resolve only within the caller's own tenant. We use the empty-string-free
+        // shortest stable prefix of the victim's hash; the tenant predicate must exclude it.
+        var victim = postJson("/v1/tenants/create", "{\"name\":\"e4130-prefix-victim\"}");
+        String victimRaw = victim.get("token").asText();
+        String victimHash = victim.get("token_hash").asText();
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"e4130-prefix-a\"}").get("token").asText();
+        // Use a prefix of the victim's hash as the selector.
+        String prefix = victimHash.substring(0, 16);
+        var resp = sendAs(tokA, "/v1/service-tokens/revoke", "{\"selector\":\"" + prefix + "\"}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(MAPPER.readTree(resp.body()).get("revoked").asBoolean())
+            .as("a non-operator prefix selector must not resolve another tenant's token")
+            .isFalse();
+        assertThat(whoami(victimRaw, null)).as("victim token must survive prefix probe").isEqualTo(200);
+    }
+
+    @Test
+    void operator_canRevokeAnyTenantToken() throws Exception {
+        // S2: complete the operator contract — the operator (tenantScope=null) CAN revoke
+        // a foreign tenant's token. Issue a revocable token under a foreign tenant, then
+        // revoke it as BOOT (operator) and confirm it stops authenticating.
+        postJson("/v1/tenants/create", "{\"name\":\"e4130-oprev-target\"}");
+        var issued = postJson("/v1/service-tokens/issue", "{\"tenant\":\"e4130-oprev-target\"}");
+        String hash = issued.get("token_hash").asText();
+        String raw = issued.get("token").asText();
+        assertThat(whoami(raw, null)).isEqualTo(200);  // live before revoke
+        var resp = http.send(req("/v1/service-tokens/revoke", "{\"selector\":\"" + hash + "\"}"),
+            HttpResponse.BodyHandlers.ofString());
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(MAPPER.readTree(resp.body()).get("revoked").asBoolean())
+            .as("operator must revoke a foreign tenant's token").isTrue();
+    }
+
+    @Test
+    void nonOperator_cannotRevokeOrProbeAnotherTenantToken() throws Exception {
+        var victim = postJson("/v1/tenants/create", "{\"name\":\"e4130-revoke-victim\"}");
+        String victimRaw = victim.get("token").asText();
+        String victimHash = victim.get("token_hash").asText();
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"e4130-revoke-a\"}").get("token").asText();
+        // A tries to revoke the victim's token by exact hash. Scoped to A -> not found.
+        var resp = sendAs(tokA, "/v1/service-tokens/revoke", "{\"selector\":\"" + victimHash + "\"}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(MAPPER.readTree(resp.body()).get("revoked").asBoolean())
+            .as("cross-tenant revoke must report not-found (no revoke, no existence probe)")
+            .isFalse();
+        // The victim's token still authenticates — it was NOT revoked.
+        assertThat(whoami(victimRaw, null)).as("victim token must survive").isEqualTo(200);
+    }
+
+    @Test
+    void operator_canAdministerAnyTenant() throws Exception {
+        postJson("/v1/tenants/create", "{\"name\":\"e4130-op-target\"}");
+        // BOOT is the operator (ROOT_TOKEN_LABEL): issue/list/rotate for ANY tenant -> 200.
+        assertThat(status("/v1/service-tokens/issue", "{\"tenant\":\"e4130-op-target\"}")).isEqualTo(200);
+        assertThat(status("/v1/service-tokens/list", "{\"tenant\":\"e4130-op-target\"}")).isEqualTo(200);
+        assertThat(status("/v1/service-tokens/rotate", "{\"tenant\":\"e4130-op-target\"}")).isEqualTo(200);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /** POST as an arbitrary bearer (no X-Nexus-Tenant: the token's bound tenant is authoritative). */
+    private HttpResponse<String> sendAs(String bearer, String path, String body) throws Exception {
+        var req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+            .header("Authorization", "Bearer " + bearer)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
 
     private JsonNode postJson(String path, String body) throws Exception {
         var resp = http.send(req(path, body), HttpResponse.BodyHandlers.ofString());

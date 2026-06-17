@@ -238,6 +238,38 @@ class ServiceTokenSchemaLiquibaseTest {
             .anyMatch(d -> d.contains("(expires_at)"));
     }
 
+    // ── Test 9: single-root partial unique index (nexus-e4130) ───────────────
+
+    @Test
+    void serviceTokens_atMostOneRootToken() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("TRUNCATE nexus.service_tokens");
+            // First root-labelled row inserts fine.
+            su.createStatement().execute(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) "
+                + "VALUES ('root-hash-1', 'default', 'bootstrap-legacy-token')");
+            // A SECOND root-labelled row (e.g. a rotated NX_SERVICE_TOKEN re-seed) must be
+            // rejected by the partial unique index — otherwise two operator credentials.
+            boolean rejected = false;
+            try {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) "
+                    + "VALUES ('root-hash-2', 'default', 'bootstrap-legacy-token')");
+            } catch (java.sql.SQLException expected) {
+                rejected = true;
+            }
+            assertThat(rejected)
+                .as("a second 'bootstrap-legacy-token' row must violate the single-root "
+                    + "unique index (the operator invariant)")
+                .isTrue();
+            // Ordinary (non-root) labels remain unconstrained — many rows may share one.
+            su.createStatement().execute(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES "
+                + "('ord-1', 'tenant-a', 'worker'), ('ord-2', 'tenant-a', 'worker')");
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private Set<String> columnsOf(String schema, String table) throws Exception {

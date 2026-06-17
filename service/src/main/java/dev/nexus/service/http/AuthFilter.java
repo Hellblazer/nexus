@@ -96,13 +96,17 @@ public final class AuthFilter extends Filter {
             return;
         }
 
-        // 2. Resolve the token's tenant_id SERVER-SIDE (Decision 1).
-        Optional<String> resolved = tokenCache.resolveTenant(TokenHashing.sha256Hex(rawToken));
+        // 2. Resolve the token's tenant_id SERVER-SIDE (Decision 1). The resolution also
+        // carries the root/operator flag (nexus-e4130) so the admin surface can scope
+        // cross-tenant operations to the root token without a second lookup.
+        Optional<dev.nexus.service.db.TokenCache.Resolved> resolved =
+            tokenCache.resolve(TokenHashing.sha256Hex(rawToken));
         if (resolved.isEmpty()) {
             reject(exchange, "unresolved_token");  // missing / revoked / expired
             return;
         }
-        String tokenTenant = resolved.get();
+        String tokenTenant = resolved.get().tenantId();
+        boolean isOperator = resolved.get().isRoot();
 
         // nexus-45ykb (defense in depth): deny any token that resolves to the wildcard
         // sentinel tenant. '*' is a reserved name that token minting, `nx tenant create`,
@@ -156,7 +160,7 @@ public final class AuthFilter extends Filter {
         }
 
         // 4. Publish the principal thread-confined; clear after dispatch.
-        RequestContext.set(new RequestContext.Principal(tenant, sessionId, mintedSession));
+        RequestContext.set(new RequestContext.Principal(tenant, sessionId, mintedSession, isOperator));
         try {
             chain.doFilter(exchange);
         } finally {
