@@ -1152,9 +1152,26 @@ class Catalog:
         ).fetchone()
         orphan_count: int = int(orphan_row[0] or 0)
 
+        # nexus-agsq7: index-age staleness — fraction of docs (with a parseable
+        # indexed_at) last indexed more than 30 days ago. strftime('%s', ...)
+        # returns NULL for an unparseable value, excluding it from both counts.
+        stale_row = self._db.execute(
+            "SELECT "
+            "  COUNT(strftime('%s', indexed_at)) AS dated, "
+            "  COUNT(*) FILTER (WHERE strftime('%s', indexed_at) IS NOT NULL "
+            "    AND CAST(strftime('%s', indexed_at) AS REAL) "
+            "        < CAST(strftime('%s', 'now', '-30 days') AS REAL)) AS stale "
+            "FROM documents WHERE physical_collection = ?",
+            (collection,),
+        ).fetchone()
+        dated = int(stale_row[0] or 0) if stale_row else 0
+        stale = int(stale_row[1] or 0) if stale_row else 0
+        stale_source_ratio: float | None = (stale / dated) if dated else None
+
         return {
             "last_indexed": last_indexed,
             "orphan_count": orphan_count,
+            "stale_source_ratio": stale_source_ratio,
         }
 
     def ensure_owner_for_repo(
