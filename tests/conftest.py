@@ -833,3 +833,70 @@ def make_pg_bundle_txz():
         return archive
 
     return _factory
+
+
+# ── docling model availability (nexus-c7gnx) ─────────────────────────────────
+#
+# The docling PDF extractor loads its layout + TableFormer models from the
+# HuggingFace cache; when they are absent (offline, cold cache) docling raises
+# LocalEntryNotFoundError and the extractor SILENTLY falls back to PyMuPDF
+# (extraction_method='pymupdf_normalized'). Tests that assert
+# extraction_method=='docling' then fail with a confusing assertion rather than
+# a clear "models unavailable" signal. CI pre-fetches the models and HARD-FAILS
+# if it cannot (see .github/workflows/ci.yml), so in CI the models are always
+# present and these guards never skip. The skip only fires on a local run with a
+# cold HF cache — turning a baffling fallback-assertion failure into a clean skip.
+
+
+@pytest.fixture(scope="session")
+def docling_available(tmp_path_factory: pytest.TempPathFactory) -> bool:
+    """True iff docling actually performs the extraction (models present).
+
+    Faithful probe: docling loads models lazily at convert() time, so we run a
+    real extraction on a tiny generated PDF and check the SAME signal the tests
+    assert (extraction_method == 'docling'). A cold/offline model cache makes the
+    extractor fall back to PyMuPDF, which this detects as unavailable.
+
+    Known limitation: the probe CANNOT distinguish "models unavailable"
+    (environmental, skipping is correct) from "docling regressed in CODE so the
+    extractor fell back" (a real bug) — both surface as extraction_method !=
+    'docling'. This is acceptable because CI does NOT rely on the skip: the
+    pre-fetch step (scripts/ci_warm_docling.py) runs this same probe and
+    HARD-FAILS the job, so a docling code regression goes CI-red at pre-fetch.
+    The skip is a local-developer convenience only; see require_docling.
+    """
+    try:
+        import pymupdf
+
+        probe = tmp_path_factory.mktemp("docling-probe") / "probe.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "docling availability probe")
+        doc.save(str(probe))
+        doc.close()
+
+        from nexus.pdf_extractor import PDFExtractor
+
+        result = PDFExtractor().extract(probe)
+        return result.metadata.get("extraction_method") == "docling"
+    except Exception:
+        return False
+
+
+@pytest.fixture
+def require_docling(docling_available: bool) -> None:
+    """Skip the requesting test when docling did not perform the extraction.
+
+    Composes with the CI pre-fetch hard-fail: in CI the models are guaranteed
+    present so this never skips; locally it skips cleanly instead of failing on
+    the silent PyMuPDF fallback.
+    """
+    if not docling_available:
+        pytest.skip(
+            "docling did not perform the extraction. Locally this almost always "
+            "means a cold/offline HuggingFace model cache; it can ALSO indicate a "
+            "docling regression. CI does not rely on this skip — its pre-fetch step "
+            "runs the same probe and HARD-FAILS (red), which is what distinguishes a "
+            "genuine regression from a missing local cache. This skip only fires on "
+            "a local run."
+        )

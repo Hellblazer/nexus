@@ -311,6 +311,12 @@ class TestDoclingRegressionGuard:
     (no pdfplumber rescue tier, no Type3 detection, no 3-tier routing).
     """
 
+    @pytest.fixture(autouse=True)
+    def _require_docling(self, require_docling: None) -> None:
+        """nexus-c7gnx: these assert extraction_method=='docling'; skip cleanly
+        when the models are unavailable (local cold HF cache) instead of failing
+        on the silent PyMuPDF fallback. No-op in CI (models pre-fetched)."""
+
     def test_ruled_table_pdf_uses_docling(self, ruled_table_pdf: Path) -> None:
         """Ruled-table PDF (formerly pdfplumber rescue path) now uses Docling."""
         result = PDFExtractor().extract(ruled_table_pdf)
