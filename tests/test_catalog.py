@@ -1463,7 +1463,7 @@ class TestStaleSourceRatioAgeBased:
 
     @staticmethod
     def _insert_doc(cat, tumbler: str, coll: str, indexed_at: str) -> None:
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: nexus-agsq7 seeds documents with controlled indexed_at to exercise the index-age stale ratio (no public API sets indexed_at directly)
             "INSERT INTO documents "
             "(tumbler, title, author, year, content_type, file_path, corpus, "
             " physical_collection, chunk_count, head_hash, indexed_at, metadata, "
