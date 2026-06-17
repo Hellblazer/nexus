@@ -1455,3 +1455,37 @@ class TestBySourceUri:
     def test_empty_uri_returns_none(self, cat_with_owner):
         cat, _owner = cat_with_owner
         assert cat.by_source_uri("") is None
+
+
+class TestStatsChunkCount:
+    """nexus-aeceu: Catalog.stats() reports chunk_count (document_chunks manifest
+    rows) for parity with the Java /stats catalog_stats view."""
+
+    def test_stats_includes_chunk_count(self, tmp_path) -> None:
+        cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+        # Parent documents (document_chunks.doc_id references documents.tumbler).
+        for tumbler in ("a.1", "a.2"):
+            cat._db.execute(
+                "INSERT INTO documents (tumbler, title, author, year, content_type, "
+                " file_path, corpus, physical_collection, chunk_count, head_hash, "
+                " indexed_at, metadata, source_mtime, source_uri) "
+                "VALUES (?, '', '', 0, '', '', '', '', 0, '', '', '{}', 0, '')",
+                (tumbler,),
+            )
+        # Three manifest rows across two docs.
+        for doc_id, pos in [("a.1", 0), ("a.1", 1), ("a.2", 0)]:
+            cat._db.execute(
+                "INSERT INTO document_chunks "
+                "(doc_id, position, chash, chunk_index, line_start, line_end, "
+                " char_start, char_end) VALUES (?, ?, ?, ?, 0, 0, 0, 0)",
+                (doc_id, pos, f"{doc_id}-{pos}".ljust(32, "0"), pos),
+            )
+        cat._db.commit()
+
+        s = cat.stats()
+        assert "chunk_count" in s  # the parity key that was missing
+        assert s["chunk_count"] == 3
+
+    def test_stats_chunk_count_zero_when_empty(self, tmp_path) -> None:
+        cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+        assert cat.stats()["chunk_count"] == 0
