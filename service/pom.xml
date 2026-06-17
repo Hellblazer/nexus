@@ -472,6 +472,20 @@
         <!-- -Pnative: opt-in native-image build (S0.4 C2 — CI must add Linux job) -->
         <profile>
             <id>native</id>
+            <properties>
+                <!-- nexus-9yrus (2) optimization level. Default -O2 = full optimization
+                     for RELEASE artifacts. PR-trip-wire + smoke builds override with
+                     -Dnative.image.opt=-Ob (GraalVM quick-build): skips the heavy
+                     optimization passes for ~half the build time and lower peak memory.
+                     Never use -Ob for a published engine-service-v* binary. -->
+                <native.image.opt>-O2</native.image.opt>
+                <!-- nexus-9yrus (3) builder max heap: a deliberate explicit cap (~78% of
+                     the 7GB ubuntu-latest) — single tunable knob, replacing native-image's
+                     implicit auto-size. RAISE to match a larger runner when CI moves off
+                     the 7GB box (-Dnative.image.maxheap=24g): that box over-commits (peak
+                     RSS ~7.86GB > 7GB) and GC-thrashes; more RAM is the real fix. -->
+                <native.image.maxheap>5632m</native.image.maxheap>
+            </properties>
             <build>
                 <plugins>
                     <plugin>
@@ -530,6 +544,16 @@
                                         <buildArg>-H:ExcludeResources=.*\.dSYM/.*</buildArg>
                                         <!-- Portability: compatibility march for CI/prod (not native) -->
                                         <buildArg>-march=compatibility</buildArg>
+                                        <!-- nexus-9yrus (3) builder JVM: explicit, runner-tunable heap +
+                                             parallel GC. The 7GB ubuntu-latest over-commits (peak RSS
+                                             ~7.86GB) and GC-thrashes (40.9s/3054 GCs observed); ParallelGC
+                                             collects across all builder cores so GC wall-time drops, and the
+                                             heap is now a single knob to raise on a larger runner. -->
+                                        <buildArg>-J-Xmx${native.image.maxheap}</buildArg>
+                                        <buildArg>-J-XX:+UseParallelGC</buildArg>
+                                        <!-- nexus-9yrus (2) optimization level (see profile properties):
+                                             -O2 for release, -Ob (quick-build) for PR/smoke. -->
+                                        <buildArg>${native.image.opt}</buildArg>
                                     </buildArgs>
                                     <metadataRepository>
                                         <enabled>true</enabled>

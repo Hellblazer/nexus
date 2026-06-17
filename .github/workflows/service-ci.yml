@@ -162,7 +162,13 @@ jobs:
         # The committed traced reachability-metadata.json + community metadata repo
         # supply the reflection/resource set. This is the authoritative LINUX gate
         # for the native path (the spike verified macOS/arm64; this proves amd64).
-        run: ./mvnw -q -Pnative -DskipTests package
+        #
+        # nexus-9yrus: -Dnative.image.opt=-Ob (quick-build) — this is a per-PR
+        # correctness gate (build reachability + the smoke below: migration + jOOQ
+        # CRUD return 200), not a release artifact. Quick-build keeps full reachability
+        # analysis and a functional binary (slower runtime, irrelevant to the smoke)
+        # while ~halving the build and cutting peak memory. Release stays -O2.
+        run: ./mvnw -q -Pnative -DskipTests -Dnative.image.opt=-Ob package
 
       - name: Native smoke test
         working-directory: service
