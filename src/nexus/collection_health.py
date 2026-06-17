@@ -9,9 +9,16 @@ and topic-assignment signals into a single per-collection view:
     median_query_distance_30d, cross_projection_rank,
     orphan_catalog_rows, stale_source_ratio, hub_domination_score
 
-``stale_source_ratio`` is currently a placeholder (``"—"``) because
-the catalog doesn't store ``source_mtime`` yet (tracked in bead
-``nexus-8luh``).
+``stale_source_ratio`` remains a placeholder (``"—"``), deferred under bead
+``nexus-8luh``. RDR-154 P2 investigated a DB-only computation and found it
+STRUCTURALLY IMPOSSIBLE: ``catalog_documents.source_mtime`` is the file mtime
+captured *at index time* (before ``indexed_at = now()`` is written), so
+``source_mtime <= indexed_at`` always holds and a "modified since indexing"
+ratio computed from stored columns alone is identically zero. Detecting a real
+stale source requires comparing the stored ``indexed_at`` against the *live*
+file mtime (a filesystem stat at report time, local-mode only) or an explicit
+file-watcher event that refreshes ``source_mtime`` while leaving ``indexed_at``
+frozen. Neither exists yet; see ``nexus-8luh`` for the design options.
 
 Every data source is dependency-injected via module-level callables
 so tests can monkeypatch without standing up live T2/T3/catalog.
@@ -48,7 +55,7 @@ class CollectionHealthRow:
     cross_projection_rank: int | None
     orphan_catalog_rows: int | None
     hub_domination_score: float | None = None
-    stale_source_ratio: str = _STALE_PLACEHOLDER  # deferred: nexus-8luh
+    stale_source_ratio: str = _STALE_PLACEHOLDER  # deferred: nexus-8luh (see module docstring)
     # RDR-087 Phase 4.6 (nexus-c2op): ratio of chash_index rows for this
     # collection to its T3 chunk_count. 1.0 → fully backfilled; < 1.0 →
     # nx collection backfill-hash has work to do. None when either the

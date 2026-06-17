@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-154 P2 bead nexus-2zv75 — DB-enforced updated_at on EXACTLY the two
+    tables that need it (Decision 2).
+
+    document_aspects and topics are the only mutable tables with multiple
+    writers and NO purpose-built mutation timestamp (document_aspects has
+    extracted_at = extraction time, which a partial UPDATE to
+    salient_sentences/collection bypasses; topics has created_at only, with
+    relabel / recount / ETL writers). A shared BEFORE UPDATE FOR EACH ROW
+    trigger stamps updated_at = now().
+
+    DELIBERATELY NOT added elsewhere (Decision 2 + Alternatives):
+      - tables already carrying a fit-for-purpose mutation timestamp
+        (last_used, indexed_at, last_attempt_at, ingested_at, last_hit_at,
+        assigned_at) — a blanket updated_at would be goldplate;
+      - the append-only logs (chash_index, nx_answer_runs, hook_failures,
+        aspect_promotion_log) — they must not imply a mutability they lack.
+    An inverse test (UpdatedAtTriggerTest) asserts those four logs have NO
+    updated_at column.
+
+    The trigger function is SECURITY INVOKER (same discipline as the P0
+    doc_count trigger); a BEFORE trigger that only sets NEW.updated_at performs
+    no cross-table access, but INVOKER is the standing default and is explicit
+    here.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: updated_at columns ───────────────────────────────────── -->
+    <!-- BACKFILL SEMANTIC: NOT NULL DEFAULT now() stamps every pre-existing row
+         with the migration timestamp, NOT its true last-mutation time (the
+         standard updated_at idiom). The first consumer that ORDER BYs updated_at
+         must account for the pre-migration corpus bunching at the migration time;
+         until a real mutation UPDATEs a row, its updated_at is the migration time. -->
+    <changeSet id="updated-at-001-1" author="nexus-2zv75">
+        <comment>Add updated_at TIMESTAMPTZ to document_aspects and topics (DEFAULT now())</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_aspects ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE nexus.topics           ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.topics           DROP COLUMN IF EXISTS updated_at;
+            ALTER TABLE nexus.document_aspects DROP COLUMN IF EXISTS updated_at;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: shared stamp function (SECURITY INVOKER) ──────────────── -->
+    <changeSet id="updated-at-001-2" author="nexus-2zv75">
+        <comment>Shared BEFORE UPDATE stamp function (SECURITY INVOKER)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.stamp_updated_at()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+BEGIN
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.stamp_updated_at()</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: BEFORE UPDATE triggers on the two tables ──────────────── -->
+    <changeSet id="updated-at-001-3" author="nexus-2zv75">
+        <comment>BEFORE UPDATE FOR EACH ROW triggers stamping updated_at</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TRIGGER trg_document_aspects_updated_at
+    BEFORE UPDATE ON nexus.document_aspects
+    FOR EACH ROW
+    EXECUTE FUNCTION nexus.stamp_updated_at();
+
+CREATE TRIGGER trg_topics_updated_at
+    BEFORE UPDATE ON nexus.topics
+    FOR EACH ROW
+    EXECUTE FUNCTION nexus.stamp_updated_at();
+        </sql>
+        <rollback>
+            DROP TRIGGER IF EXISTS trg_topics_updated_at ON nexus.topics;
+            DROP TRIGGER IF EXISTS trg_document_aspects_updated_at ON nexus.document_aspects;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

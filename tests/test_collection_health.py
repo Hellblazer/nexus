@@ -179,7 +179,8 @@ class TestComputeCollectionHealth:
         assert by_name["code__alpha"].cross_projection_rank == 1
         assert by_name["code__alpha"].orphan_catalog_rows == 2
         assert by_name["code__alpha"].hub_domination_score == pytest.approx(0.05)
-        # stale_source_ratio is the deferred column (nexus-8luh); placeholder.
+        # stale_source_ratio remains the deferred placeholder (nexus-8luh):
+        # RDR-154 P2 found a DB-only computation structurally impossible.
         assert by_name["code__alpha"].stale_source_ratio == "—"
 
     def test_empty_telemetry_sets_placeholders(self) -> None:

@@ -113,6 +113,31 @@ if orphan incidents recur post-RDR-153.** (Other rejected anchors: a single part
 `chunks` table — impossible, `vector(n)` is fixed-dimension per column; `manifest.chash →
 chash_index` — wrong lifecycle.)
 
+### RDR-154 entries (the ladder's origin)
+
+The ladder above was first recorded by RDR-154 (Decision 4). RDR-154's own per-decision
+choices against it:
+
+| RDR-154 decision | Mechanism chosen | Why not heavier / lighter |
+|---|---|---|
+| `topics.doc_count` (denormalized count, hot `ORDER BY doc_count DESC`) | **trigger** — statement-level `AFTER INSERT OR DELETE ON topic_assignments`, sole writer, `SECURITY INVOKER` | The cascade-delete hole is genuinely **app-unfixable**: the `topics` row survives when a `catalog_documents` delete cascades away its `topic_assignments`, so the counter strands stale-high and no application write path can see it. A plain computed view was considered and rejected — `ORDER BY doc_count DESC` over a `LEFT JOIN … COUNT` loses the `idx_topics_tenant_collection_count` index on a hot read path. (Contrast `chunk_count`: it lives on `catalog_documents`, which is deleted *with* its counter, so it cannot strand — **no trigger**, HTTP resync suffices.) |
+| read-shapes (`catalog_stats`, `collection_doc_counts`, `coverage_by_content_type`, `collection_health_meta`, `topics_with_counts`; plus `links_by_type_counts` added in P1.2 as the `links_by_type` half of the "5+2" `stats()` collapse — §Approach P1 names the first five, Gap 3 names the two group-bys) | **`security_invoker` views** | Derived read-only shapes; a view under the caller's RLS is exactly right and kills the Java↔Python hand-assembly + an N+1. Every view over a tenant (RLS) table MUST be `WITH (security_invoker = true)` — a default `security_definer` view silently bypasses `FORCE ROW LEVEL SECURITY`. Enforced by `tests/db/test_view_security_invoker_guard.py`. |
+| `updated_at` on `document_aspects` + `topics` | **trigger** — shared `BEFORE UPDATE FOR EACH ROW` `stamp_updated_at()` (`SECURITY INVOKER`) | Multiple writers and no purpose-built mutation timestamp; a DB-enforced stamp is the only way to guarantee it moves on every partial UPDATE. Added to **exactly these two tables** — NEVER to tables with a fit-for-purpose timestamp, NEVER to the append-only logs. |
+
+**NOT-worth-it list (RDR-154 Alternatives considered) — do not reach for a trigger here:**
+
+- **Dangler-logging triggers** — `allow_dangling` is intentional; danglers belong in RDR-153's batch report, not a write-path trigger.
+- **Queue state-machine guards** — already enforced by `WHERE`-guarded `UPDATE`s + `FOR UPDATE SKIP LOCKED`.
+- **Register-as-function** — catalog register is already one atomic `FOR UPDATE` transaction.
+- **ETL upserts** — single-statement `ON CONFLICT`; no trigger needed. (A column a trigger/generated mechanism maintains must NOT be an ETL `ON CONFLICT` merge participant — see `doc_count`, dropped from the taxonomy ETL.)
+
+**Matview deferral (RDR-154 Decision 3):** `top_topics`/ICF projection aggregates and
+`telemetry_collection_stats` are deferred — plain `security_invoker` views suffice today.
+Promote to a materialized view ONLY when a read-hot signal (measurable latency on that read
+path) justifies the refresh machinery. A matview over a tenant table MUST carry `tenant_id`
+and be fronted by a thin `security_invoker` wrapper view re-applying the tenant filter;
+consumers query the wrapper, never the matview.
+
 ## Hot rules
 
 - **No ORM.** SQLAlchemy etc. is banned. Direct `sqlite3` only.
