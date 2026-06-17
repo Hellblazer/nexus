@@ -484,4 +484,10 @@ jobs:
         # jOOQ-apply and GraalVM-reachability regressions on the PR instead of at
         # tag-cut. Do NOT `clean`: generate-sources just populated
         # target/generated-sources/jooq, and -Pprebuilt-jooq compiles it in place.
-        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests package
+        #
+        # nexus-9yrus: -Dnative.image.opt=-Ob (quick-build) on the PR path. Quick-build
+        # still runs FULL reachability analysis (the regression class this trip-wire
+        # guards) — it only skips the optimization passes — so it cuts the build ~half
+        # and lowers peak memory while preserving the gate's purpose. The RELEASE build
+        # (engine-service-release.yml) keeps the default -O2 full optimization.
+        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob package
