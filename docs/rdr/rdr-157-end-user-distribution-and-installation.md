@@ -18,6 +18,13 @@ related: [RDR-144, RDR-152, RDR-155, RDR-076]
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 
+> **2026-06-16 (nexus-41bso):** all "PG16" references below now read as **PG17**.
+> nexus was never pinned to 16 (the only hard floor is pgvector >= 0.8, on both
+> majors); 16 was incidental. The shipped local distribution bundles a relocatable
+> **PG17 + pgvector** (the P3 bundle build landed on PG17.5), and `nx init --service`
+> discovers `postgresql@17` first (16/15 retained as fallbacks). This aligns local
+> and cloud (Crunchy Bridge) on one major. Original wording preserved for the record.
+
 ## Problem Statement
 
 Since RDR-155 P4a, T3 serving routes exclusively through the PG16 + pgvector + Java

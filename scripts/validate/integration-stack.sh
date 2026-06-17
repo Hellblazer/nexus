@@ -9,7 +9,7 @@
 #   catalog  documents / links / manifest / FTS / RLS             (Python ↔ service)
 #   T3  pgvector serving + collection_vector_stats                (Java contract tests)
 #
-# Each Python suite spins up its own throwaway PG16 + a fresh service JAR
+# Each Python suite spins up its own throwaway PG17 + a fresh service JAR
 # subprocess with an isolated bearer, applies the schema clean, runs, and tears
 # down. The whole thing is hermetic and idempotent.
 #
@@ -27,7 +27,8 @@
 #   --java-only    T3 Java serving contract tests only
 #
 # Prerequisites (darwin/aarch64 dev box): JDK/GraalVM on PATH or JAVA_HOME set,
-# and pg16 binaries at /opt/homebrew/opt/postgresql@16/bin. Suites self-skip
+# and pg17 binaries at /opt/homebrew/opt/postgresql@17/bin (16/15 also work as
+# discover_pg_binaries fallbacks). Suites self-skip
 # (not fail) when prerequisites are absent.
 
 set -euo pipefail
@@ -90,7 +91,7 @@ rc=0
 
 if [[ "$RUN_PYTHON" == "1" ]]; then
     echo "▸ T1/T2/catalog Python integration suites (ephemeral PG + service)…"
-    # Capture so an all-SKIP run (missing pg16/jar → module skipif) is reported
+    # Capture so an all-SKIP run (missing pg/jar → module skipif) is reported
     # as INCONCLUSIVE, not green. Skipped tests exit pytest 0; a gate that prints
     # "green" having run zero assertions is the exact false-confidence a gate
     # must not have.
