@@ -1465,7 +1465,7 @@ class TestStatsChunkCount:
         cat = Catalog(tmp_path, tmp_path / ".catalog.db")
         # Parent documents (document_chunks.doc_id references documents.tumbler).
         for tumbler in ("a.1", "a.2"):
-            cat._db.execute(
+            cat._db.execute(  # epsilon-allow: nexus-aeceu seeds FK-parent documents rows so document_chunks manifest inserts satisfy the FK; verifying stats() chunk_count
                 "INSERT INTO documents (tumbler, title, author, year, content_type, "
                 " file_path, corpus, physical_collection, chunk_count, head_hash, "
                 " indexed_at, metadata, source_mtime, source_uri) "
@@ -1474,7 +1474,7 @@ class TestStatsChunkCount:
             )
         # Three manifest rows across two docs.
         for doc_id, pos in [("a.1", 0), ("a.1", 1), ("a.2", 0)]:
-            cat._db.execute(
+            cat._db.execute(  # epsilon-allow: nexus-aeceu seeds document_chunks manifest rows directly to verify stats() chunk_count (no public API writes raw manifest rows)
                 "INSERT INTO document_chunks "
                 "(doc_id, position, chash, chunk_index, line_start, line_end, "
                 " char_start, char_end) VALUES (?, ?, ?, ?, 0, 0, 0, 0)",
