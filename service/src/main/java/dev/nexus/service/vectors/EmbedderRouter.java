@@ -19,16 +19,24 @@ import java.util.Map;
  *       {@code voyageai.Client.contextualized_embed} (model {@code voyage-context-3})</li>
  *   <li>{@code code__} → standard embed via {@code voyageai.Client.embed}
  *       (model {@code voyage-code-3})</li>
- *   <li>local mode → the local ONNX-runtime embedder (RDR-160: bge-base-en-v1.5,
- *       768d); cloud-mode non-conformant prefix fallback → the same injected
- *       local embedder</li>
+ *   <li>local mode → the local ONNX-runtime embedder (RDR-160: bge-base-en-v1.5, 768d)</li>
  * </ul>
  *
- * <p>The Java service is always in one of two modes:
+ * <p>The Java service runs in one of three modes (by constructor):
  * <ul>
- *   <li><strong>Local mode</strong> ({@code voyageApiKey == null}): all collections
- *       → the injected local embedder (RDR-160 wires bge-768).</li>
- *   <li><strong>Cloud mode</strong> ({@code voyageApiKey != null}): prefix-based routing above.</li>
+ *   <li><strong>Local mode</strong> ({@link #EmbedderRouter(Embedder, String)}): all
+ *       collections → the injected local embedder (RDR-160 wires bge-768); voyage
+ *       collections REFUSED (422).</li>
+ *   <li><strong>Pure-voyage cloud mode</strong> ({@link #EmbedderRouter(String, String)} —
+ *       PRODUCTION cloud, nexus-0n7uc): {@code localEmbedder == null}, NO local ONNX;
+ *       prefix/segment routing to Voyage embedders; a non-conformant or
+ *       {@code minilm-l6-v2-384} collection is REFUSED (422), symmetric with local
+ *       mode refusing voyage. This is what Main boots when {@code NX_VOYAGE_API_KEY}
+ *       is set.</li>
+ *   <li><strong>Onnx-cloud mode</strong> ({@link #EmbedderRouter(OnnxEmbedder, String,
+ *       String)} — TESTS / parity-gate only, NOT production): voyage routing plus a
+ *       local ONNX fallback for non-conformant names. Retained because those callers
+ *       run where the MiniLM model exists on disk.</li>
  * </ul>
  *
  * <p>Thread-safe: all embedder instances are stateless per-call.
@@ -110,6 +118,38 @@ public final class EmbedderRouter implements Embedder {
     }
 
     /**
+     * Cloud-mode, VOYAGE-ONLY constructor (nexus-0n7uc): NO local ONNX embedder.
+     *
+     * <p>The production cloud service embeds exclusively via Voyage; it must not
+     * construct any local ONNX embedder. The cloud container has no MiniLM model
+     * on disk, and {@code OnnxEmbedder} loads it via {@code OrtEnvironment.
+     * createSession(path)} — which onnxruntime SEGFAULTS (does not throw) on a
+     * missing file, crashing the engine at boot (conexus STEP-5, conexus-qcn).
+     * A voyage-1024 cloud corpus has no legitimate use for a local 384-dim
+     * fallback anyway. A non-conformant or {@code minilm-l6-v2-384}-segment
+     * collection is REFUSED ({@link EmbeddingModelUnavailableException} → 422),
+     * symmetric with how local mode refuses voyage collections.
+     *
+     * <p>The {@link #EmbedderRouter(OnnxEmbedder, String, String) onnx cloud
+     * constructor} is retained for tests / the parity-gate, which run where the
+     * MiniLM model exists; production boot (Main) uses THIS constructor.
+     *
+     * @param voyageApiKey Voyage AI API key
+     * @param inputType    {@code "document"} or {@code "query"}
+     */
+    public EmbedderRouter(String voyageApiKey, String inputType) {
+        this.localEmbedder      = null;   // pure-voyage cloud: no local fallback
+        this.voyageCodeEmbedder = new VoyageEmbedder(voyageApiKey, "voyage-code-3", inputType);
+        this.cceEmbedder        = new CceEmbedder(voyageApiKey, inputType);
+        this.inputType          = inputType;
+        VoyageEmbedder voyage3 = new VoyageEmbedder(voyageApiKey, "voyage-3", inputType);
+        this.modelEmbedders     = Map.of(
+                voyageCodeEmbedder.modelToken(), voyageCodeEmbedder,
+                cceEmbedder.modelToken(),        cceEmbedder,
+                voyage3.modelToken(),            voyage3);
+    }
+
+    /**
      * Embedding mode for banners and refusal messages. {@code "onnx-local"} is a
      * cross-language SENTINEL parsed by {@code doctor.py} and
      * {@code storage_service_daemon.py} — do not change the literal. It names the
@@ -145,6 +185,15 @@ public final class EmbedderRouter implements Embedder {
      */
     @Override
     public List<float[]> embed(List<String> texts) {
+        if (localEmbedder == null) {
+            // pure-voyage cloud (nexus-0n7uc): no local default embedder. Callers
+            // must route by collection name (embedForCollection) so the model is
+            // resolved per RDR-103, never embedded with an unintended model.
+            throw new EmbeddingModelUnavailableException(
+                "voyage-only cloud service has no local default embedder; embed via "
+                + "a collection (embedForCollection) so the model is routed by name. "
+                + "Available models: " + availableModels());
+        }
         return localEmbedder.embed(texts);
     }
 
@@ -229,8 +278,11 @@ public final class EmbedderRouter implements Embedder {
      *   <li>any mode + a segment with no embedder wired in this mode → refuse
      *       (e.g. {@code minilm-l6-v2-384} on the RDR-160 bge-768 local service,
      *       or {@code bge-base-en-v15-768} in a MiniLM-wired test router)
-     *   <li>cloud mode + {@code minilm-l6-v2-384} segment → ONNX (the segment
-     *       is the authority; prefix routing wrongly sent these to CCE)
+     *   <li>pure-voyage cloud (PRODUCTION) + {@code minilm-l6-v2-384} segment →
+     *       refuse (422): no ONNX in cloud (nexus-0n7uc)
+     *   <li>onnx-cloud (TESTS / parity-gate only) + {@code minilm-l6-v2-384} segment
+     *       → ONNX (the segment is the authority; prefix routing wrongly sent these
+     *       to CCE)
      * </ul>
      *
      * <p>Non-conformant names keep legacy {@link #resolveEmbedder prefix
@@ -265,10 +317,12 @@ public final class EmbedderRouter implements Embedder {
     /**
      * Resolve the appropriate embedder for a collection name by PREFIX.
      *
-     * <p>Returns the CCE embedder for CCE prefix collections (in cloud mode),
-     * the standard Voyage embedder for {@code code__} (in cloud mode), or the
-     * injected local embedder (RDR-160: bge-768; the MiniLM ONNX fallback in
-     * cloud mode) for everything else / local mode.
+     * <p>Returns the CCE embedder for CCE prefix collections (cloud), the standard
+     * Voyage embedder for {@code code__} (cloud), or the injected local embedder
+     * (local mode: bge-768; onnx-cloud test/parity mode: the MiniLM fallback) for
+     * everything else. In PURE-VOYAGE cloud mode ({@code localEmbedder == null},
+     * production — nexus-0n7uc) there is NO local fallback: an unrecognised-prefix
+     * name is REFUSED ({@link EmbeddingModelUnavailableException} → 422).
      *
      * <p>Legacy fallback for non-conformant names only — production embed
      * paths go through {@link #resolveEmbedderStrict} (model segment is the
@@ -290,14 +344,26 @@ public final class EmbedderRouter implements Embedder {
                 return voyageCodeEmbedder;
             }
         }
-        // Unrecognised prefix — fall back to the local embedder (safe, logged)
+        // Unrecognised prefix.
+        if (localEmbedder == null) {
+            // pure-voyage cloud (nexus-0n7uc): no local fallback — REFUSE, symmetric
+            // with local mode refusing voyage collections. Never silently embed a
+            // non-conformant collection with an unintended model.
+            throw new EmbeddingModelUnavailableException(
+                "voyage-only cloud service has no embedder for non-conformant "
+                + "collection '" + collection + "'. Available models: " + availableModels());
+        }
+        // Cloud-with-local-fallback (tests / parity-gate): fall back, logged.
         log.warn("event=embed_router_fallback collection={} fallback=local", collection);
         return localEmbedder;
     }
 
     @Override
     public void close() {
-        try { localEmbedder.close();      } catch (Exception ignored) {}
+        // localEmbedder is null in pure-voyage cloud mode (nexus-0n7uc).
+        if (localEmbedder != null) {
+            try { localEmbedder.close(); } catch (Exception ignored) {}
+        }
         // VoyageEmbedder and CceEmbedder are stateless HTTP clients; no close needed
     }
 }
