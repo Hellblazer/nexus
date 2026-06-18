@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-157 P4.1 (bead nexus-vwvv5.17): native-image binary launch.
+"""RDR-157 P4.1 + RDR-161 P3: native-image binary launch (native-only).
 
-The storage-service supervisor must exec the RDR-157 native binary when one is
-present, falling back to ``java -jar`` only when it is not. Config reaches the
-service entirely via the environment, so the two launch modes differ only in
-argv. These unit tests pin: binary discovery (env override + well-known +
-absent), the argv branch in ``_spawn_service``, the JAR-only schema-skew gate,
-and ``start_storage_service`` preferring the binary.
+The storage-service supervisor execs the native nexus-service binary. RDR-161
+made it the SOLE launch artifact — the legacy ``java -jar`` path is expunged.
+Config reaches the service entirely via the environment. These unit tests pin:
+binary discovery (env override + well-known + absent), the native argv in
+``_spawn_service``, the absence of any schema-skew gate on the native path, and
+``start_storage_service`` resolving the binary (failing loud when none exists).
 """
 from __future__ import annotations
 
@@ -84,10 +84,13 @@ def test_find_binary_not_executable_fails_loud(tmp_path, monkeypatch):
 # ── supervisor construction guard ───────────────────────────────────────────
 
 
-def test_supervisor_requires_an_artifact(tmp_path):
-    with pytest.raises(StorageServiceStartError, match="native binary or a JAR"):
+def test_supervisor_requires_a_binary(tmp_path):
+    # RDR-161: the native binary is the sole launch artifact; constructing
+    # without one fails loud (no JVM fallback).
+    with pytest.raises(StorageServiceStartError, match="native binary"):
         StorageServiceSupervisor(
             config_dir=tmp_path,
+            binary_path=None,
             pg_port=15432,
             service_port=0,
             creds=_CREDS,
@@ -126,27 +129,20 @@ def test_spawn_native_uses_binary_argv(tmp_path):
     assert argv == [str(binary)], "native launch must exec the binary directly"
 
 
-def test_spawn_jar_uses_java_argv(tmp_path):
-    jar = tmp_path / "nexus-service.jar"
-    jar.write_text("fake jar")
+# ── RDR-161: no schema-skew gate on the native path ──────────────────────────
+
+
+def test_native_start_skips_schema_skew_gate(tmp_path):
+    """The JVM-only schema-skew gate is expunged with the legacy launch path;
+    a native start never invokes check_schema_skew."""
+    binary = _make_native_binary(tmp_path)
     sup = StorageServiceSupervisor(
         config_dir=tmp_path,
-        jar_path=jar,
+        binary_path=binary,
         pg_port=15432,
         service_port=0,
         creds=_CREDS,
     )
-    with patch.object(sup, "_find_java", return_value="/usr/bin/java"):
-        argv = _spawn_and_capture_argv(sup)
-    assert argv == ["/usr/bin/java", "-jar", str(jar)]
-
-
-# ── schema-skew gate is JAR-only ─────────────────────────────────────────────
-
-
-def _drive_start_locked(sup):
-    """Run _start_locked with PG/spawn/health/publish stubbed so only the
-    schema-skew decision is exercised."""
     fake_proc = MagicMock()
     fake_proc.pid = 4242
     with patch(
@@ -163,52 +159,21 @@ def _drive_start_locked(sup):
         "nexus.daemon.jar_lifecycle.check_schema_skew"
     ) as skew:
         Reg.return_value.discover.return_value = None
-        # _publish sets up the supervisor record the payload reads; stubbing it
-        # leaves _supervisor None, so short-circuit the payload assembly by
-        # making _publish populate a minimal record.
         sup._supervisor = MagicMock()
         sup._supervisor.record.generation = 1
         sup._start_locked()
-    return skew
-
-
-def test_schema_skew_checked_for_jar(tmp_path):
-    jar = tmp_path / "nexus-service.jar"
-    jar.write_text("fake jar")
-    sup = StorageServiceSupervisor(
-        config_dir=tmp_path, jar_path=jar, pg_port=15432, service_port=0, creds=_CREDS
-    )
-    skew = _drive_start_locked(sup)
-    skew.assert_called_once()
-
-
-def test_schema_skew_skipped_for_native(tmp_path):
-    binary = _make_native_binary(tmp_path)
-    sup = StorageServiceSupervisor(
-        config_dir=tmp_path,
-        binary_path=binary,
-        pg_port=15432,
-        service_port=0,
-        creds=_CREDS,
-    )
-    skew = _drive_start_locked(sup)
     skew.assert_not_called()
 
 
-# ── start_storage_service prefers the binary ─────────────────────────────────
+# ── start_storage_service resolves the native binary ─────────────────────────
 
 
-def test_start_storage_service_prefers_binary(tmp_path, monkeypatch):
+def test_start_storage_service_uses_binary(tmp_path, monkeypatch):
     from nexus.daemon import storage_service_daemon as mod
 
     binary = _make_native_binary(tmp_path)
     monkeypatch.setattr(mod, "_load_credentials", lambda cfg: _CREDS)
     monkeypatch.setattr(mod, "_find_service_binary", lambda cfg: binary)
-
-    def _no_jar():
-        raise AssertionError("_find_service_jar must not be called when a binary exists")
-
-    monkeypatch.setattr(mod, "_find_service_jar", _no_jar)
     captured = {}
 
     class _SpySup:
@@ -221,4 +186,15 @@ def test_start_storage_service_prefers_binary(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "StorageServiceSupervisor", _SpySup)
     mod.start_storage_service(config_dir=tmp_path)
     assert captured["binary_path"] == binary
-    assert captured["jar_path"] is None
+    assert "jar_path" not in captured
+
+
+def test_start_storage_service_no_binary_fails_loud(tmp_path, monkeypatch):
+    """RDR-161: absent a native binary, start_storage_service raises loudly —
+    there is no JVM fallback path."""
+    from nexus.daemon import storage_service_daemon as mod
+
+    monkeypatch.setattr(mod, "_load_credentials", lambda cfg: _CREDS)
+    monkeypatch.setattr(mod, "_find_service_binary", lambda cfg: None)
+    with pytest.raises(StorageServiceStartError, match="(?i)binary|install-binary"):
+        mod.start_storage_service(config_dir=tmp_path)

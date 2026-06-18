@@ -1489,7 +1489,7 @@ def t2_uninstall_cmd(autostart: bool) -> None:
 
 @daemon_group.group("service")
 def service_group() -> None:
-    """Storage-service daemon: managed Java service JAR + local Postgres."""
+    """Storage-service daemon: managed native service binary + local Postgres."""
 
 
 @service_group.command("start")
@@ -1498,15 +1498,6 @@ def service_group() -> None:
     "config_dir_str",
     default=None,
     help="Config directory override (default: ~/.config/nexus/).",
-)
-@click.option(
-    "--jar",
-    "jar_path_str",
-    default=None,
-    help=(
-        "Path to nexus-service-*.jar. Default: auto-discovered from "
-        "service/target/ relative to the repository root."
-    ),
 )
 @click.option(
     "--foreground",
@@ -1526,17 +1517,17 @@ def service_group() -> None:
 )
 def service_start_cmd(
     config_dir_str: str | None,
-    jar_path_str: str | None,
     foreground: bool,
     announce_stdout: bool,
 ) -> None:
-    """Start the Java storage-service + Postgres supervisor (RDR-152 P5.1).
+    """Start the native storage-service + Postgres supervisor (RDR-152 P5.1).
 
     Reads pg_credentials from the config directory (written by 'nx init
     --service'), starts the nx-managed Postgres cluster if it is not
-    running, spawns the Java JAR, waits for /health to return 200, then
-    publishes the service endpoint to the ServiceRegistry under the
-    'storage_service' scope key.
+    running, spawns the native nexus-service binary (RDR-161: the sole launch
+    artifact; acquire it via 'nx daemon service install-binary'), waits for
+    /health to return 200, then publishes the service endpoint to the
+    ServiceRegistry under the 'storage_service' scope key.
 
     Without ``--foreground`` the command ensures the supervisor is running
     (spawning one in the background if needed) and exits. With
@@ -1553,11 +1544,10 @@ def service_start_cmd(
     from nexus.daemon.service_registry import ServiceRegistry
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-    jar_path = Path(jar_path_str) if jar_path_str else None
 
     if foreground:
         try:
-            code = run_storage_supervisor(config_dir=config_dir, jar_path=jar_path)
+            code = run_storage_supervisor(config_dir=config_dir)
         except StorageServiceStartError as exc:
             click.echo(f"Error: {exc}", err=True)
             sys.exit(2)
@@ -1573,8 +1563,6 @@ def service_start_cmd(
             *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
             "--config-dir", str(config_dir),
         ]
-        if jar_path is not None:
-            argv += ["--jar", str(jar_path)]
         # nexus-ovbr7: route the child's streams to a crash-channel file so a
         # failure BEFORE run_storage_supervisor's configure_logging runs
         # (import error, bad argv) and interpreter-fatal tracebacks are
@@ -2051,7 +2039,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # stack writes a log file; an operator triaging a death should not have
     # to know the layout by heart.
     data["supervisor_log"] = str(config_dir / "logs" / "storage_service.log")
-    data["jar_log"] = str(config_dir / "logs" / "storage_service_jar.log")
+    data["service_log"] = str(config_dir / "logs" / "storage_service_native.log")
     data["crash_log"] = str(config_dir / "logs" / "storage_service.crash.log")
     if pg_info.get("pg_data"):
         data["pg_log"] = str(Path(pg_info["pg_data"]) / "pg.log")

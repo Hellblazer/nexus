@@ -11,10 +11,10 @@ class-wide fix, mirroring the nexus-n8sbw t2_daemon precedent:
 1. ``run_storage_supervisor`` / ``run_t3_supervisor`` route structlog to
    ``<config_dir>/logs/storage_service.log`` / ``t3_daemon.log`` and
    leave start/exit breadcrumbs plus a crash backstop.
-2. Child processes (jar, chroma) get their stdout/stderr redirected to
-   ``<config_dir>/logs/storage_service_jar.log`` / ``t3_chroma.log``
+2. Child processes (native service, chroma) get their stdout/stderr redirected
+   to ``<config_dir>/logs/storage_service_native.log`` / ``t3_chroma.log``
    via ``nexus.logging_setup.open_child_log`` — never DEVNULL.
-3. A jar/chroma exit is logged WITH its returncode.
+3. A service/chroma exit is logged WITH its returncode.
 4. The detached ``nx daemon service start`` spawn routes the child's
    stdout/stderr to the supervisor log so a crash BEFORE
    ``configure_logging`` runs (import error, bad argv) is captured.
@@ -124,7 +124,7 @@ class _FakeProc:
 # ---------------------------------------------------------------------------
 
 
-class TestJarChildLogging:
+class TestServiceChildLogging:
     def _spawn_with_captured_popen(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> dict[str, Any]:
@@ -136,15 +136,12 @@ class TestJarChildLogging:
             return _FakeProc()
 
         monkeypatch.setattr(ssd.subprocess, "Popen", _fake_popen)
-        monkeypatch.setattr(
-            ssd.StorageServiceSupervisor, "_find_java", lambda self: "/usr/bin/true",
-        )
         # Skip the credential-chain lookup for the voyage key.
         monkeypatch.setenv("NX_VOYAGE_API_KEY", "test-key")
 
         sup = ssd.StorageServiceSupervisor(
             config_dir=config_dir,
-            jar_path=Path("/fake/nexus-service.jar"),
+            binary_path=Path("/fake/nexus-service"),
             pg_port=15432,
             service_port=18080,
             creds={
@@ -158,43 +155,43 @@ class TestJarChildLogging:
         sup._spawn_service()
         return captured
 
-    def test_jar_stdout_routed_to_log_file_not_devnull(
+    def test_service_stdout_routed_to_log_file_not_devnull(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         captured = self._spawn_with_captured_popen(config_dir, monkeypatch)
         assert captured["stdout"] is not subprocess.DEVNULL, (
-            "jar stdout is still DEVNULL — the silent-death class survives"
+            "service stdout is still DEVNULL — the silent-death class survives"
         )
         assert captured["stderr"] is not subprocess.DEVNULL
-        # Both streams land in the SAME file so interleaved JVM banners,
-        # logback output, and stack traces keep their relative order.
+        # Both streams land in the SAME file so interleaved banners and stack
+        # traces keep their relative order.
         name = getattr(captured["stdout"], "name", "")
-        assert str(name).endswith("logs/storage_service_jar.log"), name
+        assert str(name).endswith("logs/storage_service_native.log"), name
         assert captured["stderr"] is captured["stdout"]
 
-    def test_jar_log_lives_under_config_dir(
+    def test_service_log_lives_under_config_dir(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         captured = self._spawn_with_captured_popen(config_dir, monkeypatch)
         name = Path(getattr(captured["stdout"], "name"))
-        assert name == config_dir / "logs" / "storage_service_jar.log"
+        assert name == config_dir / "logs" / "storage_service_native.log"
         assert name.parent.is_dir()
 
 
 # ---------------------------------------------------------------------------
-# 3: jar exit is logged with its returncode
+# 3: service exit is logged with its returncode
 # ---------------------------------------------------------------------------
 
 
-class TestJarExitCodeLogged:
-    def test_heartbeat_logs_jar_exit_with_returncode(
+class TestServiceExitCodeLogged:
+    def test_heartbeat_logs_service_exit_with_returncode(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         rec = _RecordingLog()
         monkeypatch.setattr(ssd, "_log", rec)
         sup = ssd.StorageServiceSupervisor(
             config_dir=config_dir,
-            jar_path=Path("/fake/nexus-service.jar"),
+            binary_path=Path("/fake/nexus-service"),
             pg_port=15432,
             service_port=18080,
             creds={"NX_SERVICE_TOKEN": "tok-deadbeef", "PG_PORT": "15432"},
@@ -202,9 +199,9 @@ class TestJarExitCodeLogged:
         sup._proc = _FakeProc(pid=777, returncode=137)
         sup._supervisor = object()  # truthy; heartbeat returns before using it
 
-        jar_running, _pg = sup.heartbeat_once()
-        assert jar_running is False
-        kw = rec.kwargs_for("storage_service_jar_exit_detected")
+        service_running, _pg = sup.heartbeat_once()
+        assert service_running is False
+        kw = rec.kwargs_for("storage_service_exit_detected")
         assert kw.get("returncode") == 137
         assert kw.get("pid") == 777
 
@@ -293,6 +290,9 @@ def fake_storage_sup(monkeypatch: pytest.MonkeyPatch) -> type[_FakeStorageSuperv
     _FakeStorageSupervisor.start_raises = None
     monkeypatch.setattr(ssd, "StorageServiceSupervisor", _FakeStorageSupervisor)
     monkeypatch.setattr(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.01)
+    # RDR-161: run_storage_supervisor resolves a native binary before building
+    # the supervisor; provide a fake so the breadcrumb path runs.
+    monkeypatch.setattr(ssd, "_find_service_binary", lambda cfg: Path("/fake/nexus-service"))
     return _FakeStorageSupervisor
 
 
@@ -309,9 +309,7 @@ class TestSupervisorLifecycleLog:
         _write_creds(config_dir)
         timer = _sigterm_after(0.15)
         try:
-            code = ssd.run_storage_supervisor(
-                config_dir=config_dir, jar_path=Path("/fake/nexus-service.jar"),
-            )
+            code = ssd.run_storage_supervisor(config_dir=config_dir)
         finally:
             timer.cancel()
         assert code == 0
@@ -346,9 +344,7 @@ class TestSupervisorLifecycleLog:
 
         monkeypatch.setattr(_FakeStorageSupervisor, "heartbeat_once", _killed)
         with pytest.raises(KeyboardInterrupt):
-            ssd.run_storage_supervisor(
-                config_dir=config_dir, jar_path=Path("/fake/nexus-service.jar"),
-            )
+            ssd.run_storage_supervisor(config_dir=config_dir)
         text = (config_dir / "logs" / "storage_service.log").read_text()
         assert "storage_service_supervisor_started" in text
         assert "storage_service_supervisor_exit" not in text
@@ -359,9 +355,7 @@ class TestSupervisorLifecycleLog:
         _write_creds(config_dir)
         fake_storage_sup.start_raises = RuntimeError("boom at startup")
         with pytest.raises(RuntimeError, match="boom at startup"):
-            ssd.run_storage_supervisor(
-                config_dir=config_dir, jar_path=Path("/fake/nexus-service.jar"),
-            )
+            ssd.run_storage_supervisor(config_dir=config_dir)
         text = (config_dir / "logs" / "storage_service.log").read_text()
         assert "storage_service_supervisor_crashed" in text
         assert "boom at startup" in text
@@ -499,7 +493,7 @@ class TestStatusLogPaths:
         assert result.exit_code == 0, result.output
         out = result.output
         assert str(config_dir / "logs" / "storage_service.log") in out
-        assert str(config_dir / "logs" / "storage_service_jar.log") in out
+        assert str(config_dir / "logs" / "storage_service_native.log") in out
         assert str(config_dir / "logs" / "storage_service.crash.log") in out
         # pg_log derives from the probed pg_data.
         assert "/tmp/testpgdata/pg.log" in out

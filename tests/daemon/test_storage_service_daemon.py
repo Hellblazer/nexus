@@ -112,13 +112,13 @@ def _make_supervisor(
     *,
     pg_port: int = 15432,
     service_port: int = 18080,
-    jar_path: Path | None = None,
+    binary_path: Path | None = None,
     supervised: bool = False,
     creds: dict[str, str] | None = None,
 ) -> StorageServiceSupervisor:
-    """Build a supervisor with injected clock and no real pg/jar."""
-    if jar_path is None:
-        jar_path = Path("/fake/nexus-service.jar")
+    """Build a supervisor with injected clock and no real pg/service spawn."""
+    if binary_path is None:
+        binary_path = Path("/fake/nexus-service")
     if creds is None:
         creds = {
             "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
@@ -130,7 +130,7 @@ def _make_supervisor(
         }
     return StorageServiceSupervisor(
         config_dir=config_dir,
-        jar_path=jar_path,
+        binary_path=binary_path,
         pg_port=pg_port,
         service_port=service_port,
         creds=creds,
@@ -1095,15 +1095,14 @@ class TestRunStorageSupervisorFunction:
         with pytest.raises((StorageServiceStartError, FileNotFoundError, RuntimeError)):
             start_storage_service(config_dir=config_dir)
 
-    def test_jar_not_found_raises_loudly(
-        self, config_dir: Path, creds_path: Path
+    def test_binary_not_found_raises_loudly(
+        self, config_dir: Path, creds_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """If no JAR can be located, start raises StorageServiceStartError."""
-        with pytest.raises(StorageServiceStartError, match="(?i)jar|found|nexus-service"):
-            start_storage_service(
-                config_dir=config_dir,
-                jar_path=Path("/nonexistent/nexus-service.jar"),
-            )
+        """RDR-161: with no native binary present, start raises loudly —
+        there is no JVM fallback to defer to."""
+        monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
+        with pytest.raises(StorageServiceStartError, match="(?i)binary|install-binary"):
+            start_storage_service(config_dir=config_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1172,8 +1171,7 @@ class TestSpawnServiceVoyageKeyPlumbing:
         monkeypatch.setattr(
             "nexus.daemon.storage_service_daemon.subprocess.Popen", _fake_popen,
         )
-        with patch.object(sup, "_find_java", return_value="/usr/bin/java"):
-            sup._spawn_service()
+        sup._spawn_service()
         return captured
 
     def test_explicit_nx_voyage_api_key_passes_through(
@@ -1207,29 +1205,12 @@ class TestSpawnServiceVoyageKeyPlumbing:
         assert "NX_VOYAGE_API_KEY" not in env
 
 
-class TestSchemaSkewGateWiring:
-    """nexus-pebfx.4: _start_locked runs the schema-skew gate after PG is up
-    and BEFORE spawning the JAR — a skewed JAR must never reach Popen."""
+class TestNativeStartHasNoSchemaSkewGate:
+    """RDR-161: the JVM-only schema-skew gate (nexus-pebfx.4) is expunged with
+    the legacy launch path. A native start goes PG -> spawn with no skew probe;
+    the gate helper must not be invoked."""
 
-    def test_skew_refusal_blocks_spawn(
-        self, config_dir: Path, clock: _FakeClock,
-    ) -> None:
-        sup = _make_supervisor(config_dir, clock)
-        spawned: list[bool] = []
-        with patch.object(sup, "_ensure_pg_running"), \
-             patch(
-                 "nexus.daemon.jar_lifecycle.check_schema_skew",
-                 side_effect=StorageServiceStartError("JAR is OLDER"),
-             ), \
-             patch.object(
-                 sup, "_spawn_service",
-                 side_effect=lambda: spawned.append(True) or (MagicMock(), 1),
-             ):
-            with pytest.raises(StorageServiceStartError, match="OLDER"):
-                sup.start()
-        assert spawned == [], "skewed JAR must not be spawned"
-
-    def test_clean_gate_proceeds_to_spawn(
+    def test_native_start_skips_skew_gate(
         self, config_dir: Path, clock: _FakeClock,
     ) -> None:
         sup = _make_supervisor(config_dir, clock)
@@ -1239,19 +1220,19 @@ class TestSchemaSkewGateWiring:
              patch.object(sup, "_spawn_service", return_value=(proc, 19500)), \
              patch.object(sup, "_wait_for_service_ready"):
             payload = sup.start()
-        gate.assert_called_once()
+        gate.assert_not_called()
         assert payload["port"] == 19500
 
 
 # ---------------------------------------------------------------------------
-# nexus-14k0m: simultaneous JAR+PG death must attempt PG recovery
+# nexus-14k0m: simultaneous service+PG death must attempt PG recovery
 # ---------------------------------------------------------------------------
 
 
 class _ScriptedSupervisor:
     """run-loop double for ``_supervise_until_stopped``: heartbeat_once pops
-    scripted (jar_running, pg_ok) tuples; every lifecycle call is recorded in
-    ``calls`` so ordering assertions are exact."""
+    scripted (service_running, pg_ok) tuples; every lifecycle call is recorded
+    in ``calls`` so ordering assertions are exact."""
 
     def __init__(
         self,
@@ -1265,7 +1246,6 @@ class _ScriptedSupervisor:
         self._stop = stop_requested
         self._ensure_pg_raises = ensure_pg_raises
         self._respawn_raises = respawn_raises
-        self._launch_mode = "jar"  # mirrors the real supervisor's attribute
         self.calls: list[str] = []
 
     def start(self) -> None:

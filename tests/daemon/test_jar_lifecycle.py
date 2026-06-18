@@ -28,7 +28,6 @@ from nexus.daemon.jar_lifecycle import (
 )
 from nexus.daemon.storage_service_daemon import (
     StorageServiceStartError,
-    _find_service_jar,
 )
 
 _CHANGELOG_A = """<?xml version="1.0" encoding="UTF-8"?>
@@ -160,40 +159,6 @@ class TestInstallJar:
 
     def test_read_provenance_none_when_absent(self, tmp_path: Path) -> None:
         assert read_installed_provenance(tmp_path / "cfg") is None
-
-
-class TestDiscoveryOrder:
-    """--jar (caller) > NEXUS_SERVICE_JAR env > well-known > repo-relative."""
-
-    def test_well_known_wins_when_present(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        config_dir = tmp_path / "cfg"
-        jar = _make_fake_jar(tmp_path / "svc.jar")
-        install_jar(jar, config_dir)
-        monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
-        assert _find_service_jar() == well_known_jar_path(config_dir)
-
-    def test_env_override_beats_well_known(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        config_dir = tmp_path / "cfg"
-        install_jar(_make_fake_jar(tmp_path / "wk.jar"), config_dir)
-        explicit = _make_fake_jar(tmp_path / "explicit.jar")
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
-        monkeypatch.setenv("NEXUS_SERVICE_JAR", str(explicit))
-        assert _find_service_jar() == explicit
-
-    def test_fail_message_names_install_jar(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "empty-cfg"))
-        with patch(
-            "nexus.daemon.storage_service_daemon.glob.glob", return_value=[],
-        ), pytest.raises(StorageServiceStartError, match="install-jar"):
-            _find_service_jar()
 
 
 class TestSchemaSkewGate:
