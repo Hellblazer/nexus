@@ -464,8 +464,16 @@ def _select_bundled_pg(
     """
     if os.environ.get("NEXUS_PG_BIN", "").strip():
         return None
+    from nexus.daemon.jar_lifecycle import well_known_binary_path
     from nexus.db.pg_bundle import ensure_pg_bundle
 
+    if search_dirs is None:
+        # RF-161-3: default to <config_dir>/service/ — where the P2 acquire seam
+        # (install-binary / install-pg-bundle) places nexus-pg-<tag>.txz — not the
+        # venv bin/ that ensure_pg_bundle/locate_bundle_archive would otherwise
+        # use. The NEXUS_PG_BUNDLE env override still wins (checked first inside
+        # locate_bundle_archive) and an explicitly injected search_dirs is honoured.
+        search_dirs = [well_known_binary_path(config_dir).parent]
     bin_dir = ensure_pg_bundle(config_dir, search_dirs=search_dirs)
     if bin_dir is not None:
         os.environ["NEXUS_PG_BIN"] = str(bin_dir)

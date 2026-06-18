@@ -53,6 +53,9 @@ __all__ = [
     "compute_sha256",
     "identity_matches",
     "install_binary",
+    "install_pg_bundle",
+    "pg_bundle_asset_name",
+    "pg_bundle_dest",
     "release_asset_url",
     "resolve_service_tag",
     "verify_sha256",
@@ -93,6 +96,7 @@ SERVICE_TAG_ENV = "NEXUS_SERVICE_TAG"
 _REPO = "Hellblazer/nexus"
 _RELEASE_DOWNLOAD_BASE = f"https://github.com/{_REPO}/releases/download"
 _BINARY_SIDECAR_NAME = "nexus-service.meta.json"
+_PG_SIDECAR_NAME = "nexus-pg.meta.json"
 _DOWNLOAD_TIMEOUT_S = 120.0
 _HASH_BLOCK = 1 << 20
 
@@ -386,34 +390,11 @@ def install_binary(
         verify_signature(asset, bundle, checker=checker)
 
         dest = well_known_binary_path(config_dir)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".binary_install_")
-        try:
-            with os.fdopen(tmp_fd, "wb") as out, asset.open("rb") as src:
-                for block in iter(lambda: src.read(_HASH_BLOCK), b""):
-                    out.write(block)
-            os.chmod(tmp_name, 0o755)
-            os.replace(tmp_name, dest)
-        except Exception:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
+        _atomic_copy(asset, dest, executable=True)
 
-    provenance = {
-        # _validate_tag guarantees the prefix; strip it to the bare version
-        # (engine-service-v0.1.3 -> 0.1.3).
-        "version": tag[len(TAG_NAMESPACE_PREFIX) :],
-        "tag": tag,
-        "asset": name,
-        "sha256": digest,
-        "source_url": asset_url,
-        "installed_at": datetime.now(UTC).isoformat(),
-        "installed_by": installed_by,
-    }
+    provenance = _provenance(tag, name, digest, asset_url, installed_by)
     try:
-        _write_sidecar(config_dir, provenance)
+        _atomic_write_json(binary_sidecar_path(config_dir), provenance)
     except OSError as exc:
         # The binary is already verified AND atomically in place; the sidecar is
         # informational provenance, not a gate. Don't turn a disk-full/perms
@@ -430,12 +411,34 @@ def install_binary(
     return dest, provenance
 
 
-def _write_sidecar(config_dir: Path, provenance: dict) -> None:
-    dest = binary_sidecar_path(config_dir)
-    tmp_fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".binary_meta_")
+def _provenance(
+    tag: str, asset: str, digest: str, source_url: str, installed_by: str
+) -> dict:
+    """Provenance sidecar payload (mirrors install_jar's fields)."""
+    return {
+        # _validate_tag guarantees the prefix; strip it to the bare version
+        # (engine-service-v0.1.3 -> 0.1.3).
+        "version": tag[len(TAG_NAMESPACE_PREFIX) :],
+        "tag": tag,
+        "asset": asset,
+        "sha256": digest,
+        "source_url": source_url,
+        "installed_at": datetime.now(UTC).isoformat(),
+        "installed_by": installed_by,
+    }
+
+
+def _atomic_copy(src: Path, dest: Path, *, executable: bool) -> None:
+    """Copy *src* to *dest* atomically (tmp + os.replace), so a crash never
+    leaves a half-written file where a consumer would find it."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".nx_place_")
     try:
-        with os.fdopen(tmp_fd, "w") as out:
-            json.dump(provenance, out, indent=2)
+        with os.fdopen(tmp_fd, "wb") as out, src.open("rb") as fh:
+            for block in iter(lambda: fh.read(_HASH_BLOCK), b""):
+                out.write(block)
+        if executable:
+            os.chmod(tmp_name, 0o755)
         os.replace(tmp_name, dest)
     except Exception:
         try:
@@ -443,3 +446,92 @@ def _write_sidecar(config_dir: Path, provenance: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def _atomic_write_json(dest: Path, data: dict) -> None:
+    """Write *data* as pretty JSON to *dest* atomically."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".nx_meta_")
+    try:
+        with os.fdopen(tmp_fd, "w") as out:
+            json.dump(data, out, indent=2)
+        os.replace(tmp_name, dest)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+# ── PG bundle acquisition (RDR-161 P2, same verified seam) ──────────────────
+
+
+def pg_bundle_asset_name() -> str:
+    """PG-bundle asset name for this host (``nexus-pg-<platform>.txz``).
+
+    Same ``<target>`` tokens as the binary, and the SAME name
+    :func:`nexus.db.pg_bundle.locate_bundle_archive` /
+    ``_select_bundled_pg`` look for under ``<config_dir>/service/``.
+    """
+    return f"nexus-pg-{current_platform_tag()}.txz"
+
+
+def pg_bundle_dest(config_dir: Path) -> Path:
+    """Where the acquired PG bundle is placed — next to the binary, where the
+    (RF-161-3-fixed) ``_select_bundled_pg`` default search dir looks."""
+    return config_dir / "service" / pg_bundle_asset_name()
+
+
+def install_pg_bundle(
+    tag: str,
+    config_dir: Path,
+    *,
+    installed_by: str = "",
+    checker: _SignatureChecker | None = None,
+    download_dir: Path | None = None,
+) -> tuple[Path, dict]:
+    """Download, verify, and atomically place the PG bundle for *tag*.
+
+    Same two fail-closed gates and sigstore pin as :func:`install_binary`
+    (one verified seam, RDR-161 Open Question 2). Places
+    ``nexus-pg-<platform>.txz`` at ``<config_dir>/service/`` with a provenance
+    sidecar. Returns ``(installed_path, provenance)``.
+    """
+    _validate_tag(tag)
+    name = pg_bundle_asset_name()
+    asset_url = release_asset_url(tag, name)
+
+    with tempfile.TemporaryDirectory(
+        dir=str(download_dir) if download_dir else None, prefix="nx_install_pgbundle_"
+    ) as td:
+        tmp = Path(td)
+        asset = tmp / name
+        sha_sidecar = tmp / f"{name}.sha256"
+        bundle = tmp / f"{name}.sigstore.json"
+
+        _download(asset_url, asset)
+        _download(f"{asset_url}.sha256", sha_sidecar)
+        _download(f"{asset_url}.sigstore.json", bundle)
+
+        digest = verify_sha256(asset, sha_sidecar)
+        verify_signature(asset, bundle, checker=checker)
+
+        dest = pg_bundle_dest(config_dir)
+        _atomic_copy(asset, dest, executable=False)  # a tarball, not an executable
+
+    provenance = _provenance(tag, name, digest, asset_url, installed_by)
+    try:
+        _atomic_write_json(config_dir / "service" / _PG_SIDECAR_NAME, provenance)
+    except OSError as exc:
+        # The bundle is verified + atomically placed; the sidecar is informational.
+        _log.warning("service_pg_bundle_sidecar_write_failed", error=str(exc))
+
+    _log.info(
+        "service_pg_bundle_installed",
+        dest=str(dest),
+        tag=tag,
+        asset=name,
+        sha256=digest[:12],
+    )
+    return dest, provenance

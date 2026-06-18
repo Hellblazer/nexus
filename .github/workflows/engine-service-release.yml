@@ -364,3 +364,125 @@ jobs:
           gh release upload "$tag" --clobber \
             "dist/$ASSET" "dist/$ASSET.sha256" \
             "dist/$ASSET.cosign.bundle" "dist/$ASSET.sigstore.json"
+
+  # RDR-161 P2 (nexus-9yt2p): publish the relocatable PostgreSQL+pgvector bundle
+  # as a release asset so `nx daemon service install-binary` / `nx init --service`
+  # can acquire+verify it (RF-161-3). Until now scripts/build_pg_bundle.sh was
+  # exercised only by ci.yml as a 7-day Actions artifact — nothing uploaded it to
+  # a release. Lives in THIS workflow so the cosign cert identity is
+  # `engine-service-release.yml@<tag>` — the SAME pin the consumer already
+  # verifies for the native binary, so one identity-regexp covers both artifacts.
+  build-publish-pg-bundle:
+    name: Build + sign + publish PG bundle (${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.runner }}
+    # The native-binary job creates the GitHub Release (with the rich notes);
+    # this job uploads the PG-bundle assets onto it. `needs` orders us AFTER it
+    # (release exists, no create-race on notes). `if: !cancelled()` decouples us
+    # from build-publish SUCCESS: build-publish is a 3-arch matrix, and a `needs`
+    # alone would skip ALL PG-bundle publishes if any single arch (e.g. the
+    # unsmoked mac-arm64) failed — leaving the surviving arches with a binary on
+    # the release but no PG bundle (install-binary then 404s on the bundle, a
+    # worse state than a clean failure). With !cancelled() the surviving arches
+    # still get their PG bundle; a TOTAL binary failure means no release exists
+    # and the upload below fails loud, which is correct (substantive-critic S2).
+    needs: build-publish
+    if: ${{ !cancelled() }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { arch: linux-amd64, runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64" }
+          # linux-arm64: built + published; full relocation proof is deferred to
+          # nexus-xqk5r (the ci.yml relocation smoke runs on amd64). The bundle
+          # itself builds identically via the aarch64 manylinux image.
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64" }
+          - { arch: mac-arm64,   runner: macos-14,         image: "" }
+    env:
+      # Pinned identically to ci.yml's CA-3 job (single source of truth is the
+      # build script; these select versions). PG17 aligns with the deployed stack.
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.2"
+      ASSET: nexus-pg-${{ matrix.target.arch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build PG + pgvector bundle and package .txz
+        env:
+          MANYLINUX_IMAGE: ${{ matrix.target.image }}
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/bundle"
+          mkdir -p "$bundle" dist
+          if [ -n "$MANYLINUX_IMAGE" ]; then
+            # linux: build inside manylinux_2_28 so the binaries' glibc floor is
+            # 2.28 (broad compatibility), exactly as ci.yml's CA-3 gate builds them.
+            docker run --rm \
+              -e PG_VERSION -e PGVECTOR_VERSION -e BUNDLE_PREFIX="$bundle" \
+              -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+              "$MANYLINUX_IMAGE" /bin/bash -c '
+                set -eux
+                bash "'"$GITHUB_WORKSPACE"'/scripts/build_pg_bundle.sh"
+              '
+          else
+            # mac-arm64: native build (the script brew-installs flex/bison and
+            # applies MACOSX_DEPLOYMENT_TARGET). GH macOS runners have no Docker.
+            BUNDLE_PREFIX="$bundle" bash scripts/build_pg_bundle.sh
+          fi
+          # -C parent + basename preserves the relative bin/ lib/ share/ layout
+          # relocation depends on (identical to ci.yml packaging).
+          tar -cJf "dist/$ASSET.txz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
+          sz=$(wc -c < "dist/$ASSET.txz")
+          echo "bundle .txz size: $sz bytes"
+          # CA-2 ship-alongside size tripwire (mirrors ci.yml): the verdict rests
+          # on a small (~5.7 MB) bundle; a configure-flag or contrib change that
+          # doubled it would invalidate the rationale — fail loud, don't ship it.
+          if [ "$sz" -gt $((10 * 1024 * 1024)) ]; then
+            echo "::error::nexus-pg bundle .txz is $sz bytes (> 10 MiB) — CA-2 ship-alongside size assumption breached"
+            exit 1
+          fi
+          ( cd dist && { sha256sum "$ASSET.txz" 2>/dev/null || shasum -a 256 "$ASSET.txz"; } > "$ASSET.txz.sha256" )
+
+      - name: Install cosign (release tag only)
+        # SHA-pinned (not @v3.7.0): same supply-chain reasoning as the native-binary
+        # job above — the signing primitive must not float.
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409  # v3.7.0
+
+      - name: Sign PG bundle (cosign keyless, release tag only)
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          # Protobuf bundle ONLY (.sigstore.json): the PG bundle is a NEW artifact
+          # with no legacy .cosign.bundle consumer, so it ships the single format
+          # the install seam's sigstore-python path verifies. Self-verify before
+          # publishing so a malformed bundle fails the build, not the consumer.
+          cosign sign-blob "dist/$ASSET.txz" --new-bundle-format --bundle "dist/$ASSET.txz.sigstore.json"
+          cosign verify-blob "dist/$ASSET.txz" \
+            --new-bundle-format \
+            --bundle "dist/$ASSET.txz.sigstore.json" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          echo "cosign signature verified for $ASSET.txz (.sigstore.json)"
+
+      - name: Upload Actions artifact (always — dev smoke / non-tag path)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish PG bundle to GitHub Release (engine-service-v* tag only)
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # The release already exists (this job `needs` build-publish). Attach the
+          # PG-bundle assets; --clobber makes re-runs idempotent.
+          gh release upload "$tag" --clobber \
+            "dist/$ASSET.txz" "dist/$ASSET.txz.sha256" "dist/$ASSET.txz.sigstore.json"
