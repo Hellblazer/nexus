@@ -1627,19 +1627,21 @@ under launchd / systemd supervision; templates ship as
 
 ### nx daemon service start / stop / status
 
-The storage-service supervisor (RDR-152 P5.1): managed Java service JAR +
-nx-managed Postgres. `start` ensures PG is running, runs the schema-skew
-gate, spawns the JAR (resolving `NX_VOYAGE_API_KEY` through the credential
+The storage-service supervisor (RDR-152 P5.1): the managed native
+nexus-service binary + nx-managed Postgres. `start` ensures PG is running,
+spawns the native binary (resolving `NX_VOYAGE_API_KEY` through the credential
 chain), waits for `/health`, and publishes the endpoint lease that clients
-auto-discover.
+auto-discover. The native binary is the sole launch artifact (RDR-161: the
+`java -jar` path is expunged); acquire it with `install-binary` (below) or
+`nx init --service`, which places and verifies it.
 
 `status` is the single is-the-stack-healthy surface: the lease (host, port,
-JAR pid, generation), supervisor pid, addr-file path, live `/health` probe,
+service pid, generation), supervisor pid, addr-file path, live `/health` probe,
 the PG cluster (port, data dir, up/down, installed pgvector version,
 pg_credentials path), the log-file paths (below), and the running service's
 `/version` handshake (`app_version`, `embedding_mode` voyage|onnx-local with
 the dispatchable models, `schema_latest_id`, `schema_changeset_count`). It
-warns when the running JAR differs from the installed one.
+warns when the running binary differs from the installed one.
 
 **Observability.** Every component of the stack writes a persistent log
 (none of them is ever DEVNULL'd); when the stack dies, the evidence lives
@@ -1647,46 +1649,48 @@ in (all under `~/.config/nexus/` unless noted):
 
 | File | Contents |
 |------|----------|
-| `logs/storage_service.log` | Supervisor lifecycle (rotating): start/exit breadcrumbs, jar exit codes, restart attempts, PG recoveries, crash backstop. |
-| `logs/storage_service_jar.log` | The Java service's stdout/stderr (logback console output, JVM banners, fatal errors). Size-rotated at respawn. |
+| `logs/storage_service.log` | Supervisor lifecycle (rotating): start/exit breadcrumbs, service exit codes, restart attempts, PG recoveries, crash backstop. |
+| `logs/storage_service_native.log` | The native service's stdout/stderr (banners, fatal errors). Size-rotated at respawn. |
 | `logs/storage_service.crash.log` | Pre-startup failures of the detached supervisor (import errors, bad argv) and interpreter-fatal tracebacks. Quiet in healthy operation. |
 | `<pg_data>/pg.log` | The nx-managed Postgres cluster log (`pg_ctl`). |
 
 A supervisor death without a `storage_service_supervisor_exit` breadcrumb
 in `storage_service.log` means it was killed, not that it chose to exit —
-check the jar log tail and `pg.log` next.
+check the service log tail and `pg.log` next.
 
-`stop` stops the supervisor + JAR but **leaves Postgres running by
+`stop` stops the supervisor + service but **leaves Postgres running by
 design** (it is independently managed and may serve other clients) — the
 command says so; pass `--with-pg` to stop the cluster too (`pg_ctl -m
 fast`).
 
 | Flag | Description |
 |------|-------------|
-| `--jar PATH` | Explicit JAR (otherwise: `NEXUS_SERVICE_JAR` env > well-known location > repo `service/target/`). |
 | `--foreground` | Block until SIGTERM (for launchd/systemd supervision). |
 | `--config-dir` | Config directory override. |
 | `--json` | (`status`) Raw JSON output. |
 | `--with-pg` | (`stop`) Also stop the nx-managed Postgres cluster. |
 
-### nx daemon service install-jar
+### nx daemon service install-binary
 
 ```
-nx daemon service install-jar <path-to-jar>
-nx daemon service install-jar --from-repo
+nx daemon service install-binary <engine-service-vX.Y.Z>
+nx daemon service install-binary <engine-service-vX.Y.Z> --no-pg-bundle
 ```
 
-Install a nexus-service fat JAR to the well-known location
-(`~/.config/nexus/service/nexus-service.jar`) with a provenance sidecar
-(version, sha256, build date, bundled Liquibase changesets). Supervisor
-discovery prefers this location, so pip/uv-installed users never need
-`--jar` or a repo checkout. `--from-repo` installs the freshest build from
-the current checkout's `service/target/` (dev convenience).
+Download, verify, and install the signed native nexus-service binary (and,
+by default, the relocatable PostgreSQL bundle) from a GitHub release to the
+well-known location (`~/.config/nexus/service/`) with a provenance sidecar
+(version, tag, sha256, install metadata). Supervisor discovery and
+`nx init --service` use this location.
 
-The recorded changesets feed the **schema-skew gate**: at start, the
-supervisor refuses to spawn a JAR that is older than the database schema
-(Liquibase silently ignores applied changesets it does not know, so the
-old JAR would boot cleanly and fail undiagnosably at runtime).
+TAG is an EXPLICIT `engine-service-v*` release tag (e.g.
+`engine-service-v0.1.3`); there is no "latest" resolution. Each per-platform
+asset, its `.sha256`, and its `.sigstore.json` bundle are fetched and verified
+(sha256 + keyless Sigstore signature, pinned to the engine-service release
+workflow identity), then placed atomically. Verification **fails closed**:
+nothing is installed unless BOTH gates pass. One verified seam covers the
+binary and the PG bundle (RDR-161). `--no-pg-bundle` installs only the
+service binary (e.g. a cloud habitat with a managed Postgres).
 
 ---
 

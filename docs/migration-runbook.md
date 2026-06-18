@@ -164,10 +164,11 @@ Check, in order:
   supervisor logs a WARN naming the consequence; fix with
   `nx config set voyage_api_key` (chain: explicit env > `VOYAGE_API_KEY` >
   `config.yml` credentials).
-- No stale-JAR warning (running JAR differs from the installed sidecar).
-  Install the intended JAR first via `nx daemon service install-jar`; the
-  schema-skew gate refuses a JAR older than the database schema at spawn
-  (nexus-pebfx.4).
+- No stale-binary warning (running binary differs from the installed
+  provenance sidecar). Install the intended binary first via
+  `nx daemon service install-binary <engine-service-vX.Y.Z>` (RDR-161: the
+  native binary is the sole launch artifact; the legacy `java -jar` path and
+  its schema-skew gate are expunged).
 
 The T2 ladder commands read the service endpoint from the environment
 (`NX_SERVICE_PORT` + `NX_SERVICE_TOKEN` are required; the per-store
