@@ -146,13 +146,20 @@ def cross_model_remappable(c: "CollectionClassification") -> bool:
       is the credential case (gate C3: "add NX_VOYAGE_API_KEY"), NOT a model
       switch; re-embedding voyage text into bge would silently change recall, so
       it stays blocked;
-    * it is currently ``unsupported`` — the legacy-onnx "wired by no service
-      embedder, re-index required" case (e.g. minilm-384 after RDR-160).
+    * it is currently ``unsupported`` — wired by no service embedder.
 
-    A supported collection (already bge-768 or a wired voyage model) migrates
-    byte-for-byte and is never remapped. The decision is policy: the orchestrator
-    builds the ``target_names`` map from this predicate and the pre-gate exempts
-    exactly these collections.
+    The non-voyage unsupported case is INTENTIONALLY a catch-all, not a
+    minilm-384 allow-list: the cross-model migrate re-embeds the STORED chunk
+    text, which is model-agnostic, so ANY such collection (minilm-384, or any
+    third-party local embedder the service does not wire) can be re-embedded into
+    bge-768. This is the truthful upgrade path — re-embed whatever the service
+    cannot serve, rather than emit a dead-end re-index diagnostic. Voyage
+    collections are the deliberate exception (credential case, not a model
+    switch); a supported collection (already bge-768 or a wired voyage model)
+    migrates byte-for-byte and is never remapped.
+
+    The decision is policy: the orchestrator builds the ``target_names`` map from
+    this predicate and the pre-gate exempts exactly these collections.
     """
     if not c.has_data or c.model is None:
         return False

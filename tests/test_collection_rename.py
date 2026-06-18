@@ -1304,6 +1304,62 @@ class TestRemapCollectionReferences:
             ).fetchone()[0]
         assert (old_rows, new_rows) == (0, 2)
 
+    def test_repoints_all_t2_cascade_tables(
+        self, tmp_path: Path, env_creds,
+    ) -> None:
+        """S2 (RDR-162 P2 review): the real cascade re-points EVERY T2 table that
+        names a collection (not just chash) — chash, document_aspects, and the
+        aspect queue — via the production ``rename_collection_cascade``."""
+        from nexus.collection_rename import remap_collection_references
+        from nexus.db.t2 import T2Database
+
+        db_path = tmp_path / "memory.db"
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        src = "knowledge__c__minilm-l6-v2-384__v1"
+        tgt = "knowledge__c__bge-base-en-v15-768__v1"
+
+        with T2Database(db_path) as t2db:
+            t2db.chash_index.upsert(chash="aa", collection=src)
+            t2db.document_aspects.conn.execute(
+                "INSERT INTO document_aspects "
+                "(collection, source_path, problem_formulation, proposed_method, "
+                " experimental_datasets, experimental_baselines, "
+                " experimental_results, extras, confidence, extracted_at, "
+                " model_version, extractor_name) "
+                "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
+                "        '2026-06-18T00:00:00Z', 'v1', 'test')",
+                (src, "a.py"),
+            )
+            t2db.document_aspects.conn.commit()
+            t2db.aspect_queue.enqueue(src, "b.py", doc_id="d2")
+
+        with patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
+             patch("nexus.config.catalog_path", return_value=cat_dir):
+            counts = remap_collection_references(src, tgt)
+
+        # The return dict carries the full cascade surface, incl. highlights.
+        assert "highlights" in counts
+        assert counts["chash"] == 1
+        with T2Database(db_path) as verify:
+            da_new = verify.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?", (tgt,),
+            ).fetchone()[0]
+            da_old = verify.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?", (src,),
+            ).fetchone()[0]
+            aq_new = verify.aspect_queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+                (tgt,),
+            ).fetchone()[0]
+            aq_old = verify.aspect_queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+                (src,),
+            ).fetchone()[0]
+        assert (da_new, da_old) == (1, 0)
+        assert (aq_new, aq_old) == (1, 0)
+
     def test_t2_cascade_failure_raises(self, tmp_path: Path, env_creds) -> None:
         import click
 

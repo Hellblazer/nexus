@@ -419,6 +419,48 @@ class TestHermeticOracle:
         # the key + re-running (idempotent), never a cleared sentinel.
         assert current_phase() == MIGRATED_FAILED
 
+    def test_scenario3c_mixed_legacy_and_onnx_in_one_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RDR-162 P2: a realistic partially-upgraded store — one bge-768 (already
+        servable) AND one minilm-384 (legacy) collection in the SAME run. The bge
+        migrates byte-for-byte (no remap), the minilm is cross-model remapped to
+        bge-768; only the legacy one triggers a reference re-point."""
+        store = tmp_path / "chroma"
+        onnx = _coll("oracle-mix-onnx", model=_MODEL_ONNX)
+        legacy_src = _coll("oracle-mix-legacy", model=_MODEL_LEGACY)
+        legacy_tgt = _coll("oracle-mix-legacy", model=_MODEL_ONNX)
+        ids = _seed_local_store(store, {onnx: 3, legacy_src: 5})
+        t2 = _make_t2(tmp_path / "t2.db")
+        vc = FakeVectorClient()
+        cc = _FakeCatalogClient(doc_count=1, orphans_by_dim={768: 0})
+
+        remap_calls: list[tuple[str, str]] = []
+
+        result = _drive(
+            monkeypatch,
+            local_path=store,
+            vector_client=vc,
+            catalog_client=cc,
+            t2_path=t2,
+            voyage_key_present=False,
+            remap_refs=lambda s, t: remap_calls.append((s, t)),
+        )
+
+        assert result.ok is True
+        assert result.validation is not None and result.validation.unlocked is True
+        # bge landed under its own name (byte-for-byte); legacy under the target.
+        assert vc.count(onnx) == 3
+        assert set(vc.store[onnx].keys()) == set(ids[onnx])
+        assert vc.count(legacy_tgt) == 5
+        assert set(vc.store[legacy_tgt].keys()) == set(ids[legacy_src])
+        assert vc.store.get(legacy_src) is None
+        # ONLY the legacy collection triggered a reference re-point.
+        assert remap_calls == [(legacy_src, legacy_tgt)]
+        # Validation scanned both dims (768 only — both targets are bge-768).
+        assert cc.orphan_dim_queries == [768]
+        assert read_state() is None
+
     def test_scenario1_cloud_voyage_unlocks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

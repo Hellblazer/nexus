@@ -179,6 +179,7 @@ def remap_collection_references(
         "chash": 0,
         "aspects": 0,
         "aspect_queue": 0,
+        "highlights": 0,
         "search_telemetry": 0,
         "hook_failures": 0,
         "catalog_docs": 0,
@@ -193,7 +194,8 @@ def remap_collection_references(
         )
         for key in (
             "tax_topics", "tax_assignments", "tax_meta", "chash",
-            "aspects", "aspect_queue", "search_telemetry", "hook_failures",
+            "aspects", "aspect_queue", "highlights", "search_telemetry",
+            "hook_failures",
         ):
             counts[key] = cascade.get(key, 0)
     except Exception as exc:
