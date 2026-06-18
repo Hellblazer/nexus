@@ -76,6 +76,7 @@ from nexus.migration.chroma_read import iter_collection_chunks
 from nexus.migration.vector_etl import (
     CollectionResult,
     MigrationReport,
+    cross_model_target_name,
     manifest_backfill_sql,
     manifest_orphan_sql,
     migrate_cloud,
@@ -1497,3 +1498,75 @@ class TestEphemeralExclusion:
         )
         assert report.results[0].status == "skipped"
         assert report.ok is False
+
+
+# ── RDR-162: cross-model migrate (stored-text re-embed + target model remap) ──
+
+
+class TestCrossModelTargetName:
+    def test_swaps_only_the_model_segment(self) -> None:
+        assert (
+            cross_model_target_name(
+                "knowledge__acme__minilm-l6-v2-384__v1", "bge-base-en-v15-768"
+            )
+            == "knowledge__acme__bge-base-en-v15-768__v1"
+        )
+
+    def test_non_conformant_source_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-conformant"):
+            cross_model_target_name("legacy_two_segment", "bge-base-en-v15-768")
+
+
+class TestCrossModelMigrate:
+    """A legacy minilm-384 source re-embeds into a bge-768 TARGET: read from the
+    source, upsert + verify on the target, dim dispatched from the target. No
+    source file is touched (stored chunk text is what the service re-embeds)."""
+
+    def test_reembeds_into_remapped_target(self, source_client) -> None:
+        src = _coll("xmodel1", model=_MODEL_384)  # minilm-384 source
+        tgt = _coll("xmodel1", model=_MODEL_768)  # bge-768 target
+        ids = _seed_source(source_client, src, 6)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(
+            source_client, fake, leg="local", target_names={src: tgt}
+        )
+
+        (r,) = report.results
+        assert r.status == "migrated"
+        assert r.collection == src           # reported under the SOURCE name
+        assert r.target_collection == tgt    # ...re-embedded into the bge target
+        assert r.source_count == 6 and r.written_count == 6
+        assert report.ok is True
+        # The upsert landed in the TARGET (bge-768), NOT the source name.
+        assert set(fake.store[tgt].keys()) == set(ids)
+        assert src not in fake.store
+        # Verbatim text round-trips (chash = sha256(text)); no source vectors.
+        for i, cid in enumerate(ids):
+            assert fake.store[tgt][cid][0] == f"chunk text {i:04d}"
+        # Every upsert call addressed the target.
+        assert all(coll == tgt for coll, _ in fake.upsert_calls)
+
+    def test_idempotent_rerun_on_target(self, source_client) -> None:
+        src = _coll("xmodel2", model=_MODEL_384)
+        tgt = _coll("xmodel2", model=_MODEL_768)
+        _seed_source(source_client, src, 4)
+        fake = FakeVectorClient()
+        migrate_collections(source_client, fake, leg="local", target_names={src: tgt})
+        # Re-run: server-side upsert keys on (target, chash) — count stays exact.
+        report = migrate_collections(
+            source_client, fake, leg="local", target_names={src: tgt}
+        )
+        assert report.results[0].status == "migrated"
+        assert fake.count(tgt) == 4
+
+    def test_same_model_default_keeps_source_name(self, source_client) -> None:
+        # No target_names entry -> same-model path: name preserved byte-for-byte,
+        # target_collection is None (the ref-remap is not triggered).
+        src = _coll("xmodel3", model=_MODEL_768)
+        _seed_source(source_client, src, 3)
+        fake = FakeVectorClient()
+        report = migrate_collections(source_client, fake, leg="local")
+        r = report.results[0]
+        assert r.target_collection is None
+        assert set(fake.store[src].keys())  # landed under the source name
