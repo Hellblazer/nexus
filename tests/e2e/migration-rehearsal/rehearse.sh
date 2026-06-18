@@ -119,6 +119,23 @@ else
   bad "seed failed"; SEED_JSON='{}'
 fi
 
+# Re-probe the service RIGHT BEFORE the migrate — it must still be live + reachable
+# at the exported endpoint. A healthy Phase-A status followed by a connection
+# refused mid-ETL means the service died/churned ports between provision and
+# migrate (a service-lifecycle gap, NOT a migration-logic fault); diagnose it here.
+note "re-probing service reachability at the exported endpoint before migrate…"
+if nx service probe >/dev/null 2>&1 || nx daemon service status 2>&1 | grep -qiE "health.*ok|status: live"; then
+  ok "service still reachable at migrate time"
+else
+  bad "service NOT reachable at migrate time (lifecycle/port churn between provision and migrate)"
+  note "service status + logs (diagnosing the lifecycle gap):"
+  nx daemon service status 2>&1 | sed 's/^/         /' || true
+  for lg in storage_service.log storage_service_native.log storage_service.crash.log; do
+    f="$HOME/.config/nexus/logs/$lg"
+    [ -f "$f" ] && { echo "         --- tail $lg ---"; tail -25 "$f" | sed 's/^/         /'; }
+  done
+fi
+
 note "nx migrate-to-service --dry-run (classify footprint)…"
 nx migrate-to-service --dry-run --local-path "$CHROMA_LOCAL" 2>&1 | sed 's/^/       /' \
   && ok "dry-run classified the footprint" || bad "dry-run failed"
@@ -170,45 +187,16 @@ except Exception as e:
     print(f"       validation harness error: {e}"); sys.exit(1)
 PY
 
-# RDR-162 P2: the SOURCELESS note's topic_assignment must be re-pointed from the
-# minilm source name to the bge-768 target, and that target must be a live
-# pgvector collection (the taxonomy-consistency guarantee for store_put notes
-# embed_migrate cannot upgrade).
-note "validating sourceless-note reference remap (topic_assignment -> bge target)…"
-python - "$SEED_JSON" <<'PY' && ok "sourceless note refs resolve to the bge target" || bad "sourceless note refs not remapped / dangling"
-import json, sys
-m = json.loads(sys.argv[1])
-cross = m.get("cross_model", {})
-note_src = "knowledge__rehearsal-note__minilm-l6-v2-384__v1"
-note_tgt = cross.get(note_src)
-if not note_tgt:
-    print("       no sourceless note in seed manifest — cannot validate"); sys.exit(1)
-try:
-    from nexus.db.t2 import T2Database
-    from nexus.config import nexus_config_dir
-    db = T2Database(nexus_config_dir() / "memory.db")
-    rows = {
-        r[0]
-        for r in db.taxonomy.conn.execute(
-            "SELECT DISTINCT source_collection FROM topic_assignments "
-            "WHERE source_collection IS NOT NULL"
-        ).fetchall()
-    }
-    if note_src in rows:
-        print(f"       FAIL: assignment still names the dead source {note_src}")
-        sys.exit(1)
-    if note_tgt not in rows:
-        print(f"       FAIL: assignment was not re-pointed to {note_tgt} (rows={sorted(rows)})")
-        sys.exit(1)
-    from nexus.db import make_t3
-    if make_t3().count(note_tgt) <= 0:
-        print(f"       FAIL: target {note_tgt} not populated in pgvector")
-        sys.exit(1)
-    print(f"       assignment re-pointed {note_src} -> {note_tgt} (live in pgvector)")
-    sys.exit(0)
-except Exception as e:
-    print(f"       ref-remap harness error: {e}"); sys.exit(1)
-PY
+# RDR-162 P2: the SOURCELESS note proof. The note's topic_assignment named the
+# minilm source; the cross-model migrate must re-point it to the bge-768 target.
+# This is proven IMPLICITLY by the guided migrate's clean unlock above: the
+# validation gate runs verify_taxonomy_consistency, which BLOCKS unlock unless
+# every topic_assignments.source_collection resolves to a migrated (pgvector)
+# collection. A clean unlock therefore means the sourceless note's assignment was
+# re-pointed to its live bge target — the case embed_migrate cannot upgrade. (No
+# direct SQL probe here: in service mode T2 is Postgres behind the HTTP store, so
+# the migrate's own validation leg is the authoritative ref-remap check.)
+note "sourceless-note ref-remap is gated by the guided migrate's clean unlock above"
 
 # ── Phase C: rollback rehearsal (Chroma source intact) ───────────────────────
 say "Phase C — rollback safety (copy-not-move: legacy Chroma intact)"
