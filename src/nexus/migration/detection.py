@@ -17,12 +17,14 @@ cannot reach a running ``EmbedderRouter``. The wired-embedder set is
 deterministic and mirrors
 ``service/.../vectors/EmbedderRouter.java``:
 
-* ONNX (``minilm-l6-v2-384``) is wired in EVERY mode;
+* ONNX (``bge-base-en-v15-768``) is wired in EVERY mode (RDR-160 swapped the
+  service's local ONNX embedder MiniLM-384 → bge-768; this classifier mirrors
+  the service, not the CLI's selectable local embedder);
 * the voyage models (``voyage-code-3`` / ``voyage-context-3`` / ``voyage-3``)
   are wired iff ``NX_VOYAGE_API_KEY`` is present (cloud mode);
-* anything else — e.g. ``bge-base-en-v15-768``, a KNOWN dim in
-  ``vector_etl._MODEL_DIMS`` but wired by NO embedder — is UNSUPPORTED. A
-  known dim is NOT a license to migrate: the service would 422-reject its
+* anything else — e.g. a legacy ``minilm-l6-v2-384`` collection, a KNOWN dim in
+  ``vector_etl._MODEL_DIMS`` but wired by NO service embedder — is UNSUPPORTED.
+  A known dim is NOT a license to migrate: the service would 422-reject its
   upserts, so it must be flagged for re-index pre-migration (gate S1).
 
 The live-``EmbedderRouter`` check at the P1 pre-gate (service up) is a
@@ -49,9 +51,12 @@ from nexus.migration.vector_etl import _dim_for_collection
 
 _log = structlog.get_logger(__name__)
 
-#: The ONNX model token wired in every deployment mode (EmbedderRouter local
-#: + cloud). Mirrors ``OnnxEmbedder.modelToken()``.
-_ONNX_MODEL: str = "minilm-l6-v2-384"
+#: The ONNX model token the SERVICE wires in every deployment mode (local +
+#: cloud). RDR-160 swapped this MiniLM-384 → bge-768; it mirrors the service's
+#: ``Bge768Embedder.modelToken()`` / ``EmbedderRouter`` local key, NOT the CLI's
+#: selectable local embedder (a user may still index minilm-384 locally, but the
+#: service cannot serve it — such collections are UNSUPPORTED until re-indexed).
+_ONNX_MODEL: str = "bge-base-en-v15-768"
 
 #: The voyage models wired only in cloud mode (``NX_VOYAGE_API_KEY`` present).
 #: Mirrors ``EmbedderRouter``'s cloud-mode ``modelEmbedders`` keys.
@@ -60,7 +65,7 @@ _VOYAGE_MODELS: frozenset[str] = frozenset(
 )
 
 Leg = Literal["local", "cloud"]
-Support = Literal["supported-onnx-384", "supported-voyage-1024", "unsupported"]
+Support = Literal["supported-onnx", "supported-voyage-1024", "unsupported"]
 
 
 def wired_models(*, voyage_key_present: bool) -> frozenset[str]:
@@ -89,8 +94,9 @@ def classify_model_support(
     diagnostic for unsupported ones:
 
     * voyage model + no key → point at the cheap fix (add ``NX_VOYAGE_API_KEY``);
-    * a model wired by no embedder in any mode (e.g. bge-768) → point at the
-      expensive fix (re-index), distinct from the credential diagnostic.
+    * a model wired by no embedder in any mode (e.g. a legacy minilm-384
+      collection) → point at the expensive fix (re-index), distinct from the
+      credential diagnostic.
 
     ``wired`` overrides the wired-model set used for the membership decision.
     P0 (detection) leaves it ``None`` and uses the pure deployment-mode
@@ -108,7 +114,7 @@ def classify_model_support(
     if wired is None:
         wired = wired_models(voyage_key_present=voyage_key_present)
     if model == _ONNX_MODEL:
-        return "supported-onnx-384", ""
+        return "supported-onnx", ""
     if model in wired:
         # The only non-ONNX wired models are the 1024-dim voyage family.
         return "supported-voyage-1024", ""
@@ -133,8 +139,8 @@ class CollectionClassification:
 
     ``model`` / ``dim`` are ``None`` for a non-conformant name. ``dim`` is the
     pgvector table dimension from ``_MODEL_DIMS`` when the model segment is a
-    KNOWN dim — informational only; a known dim is NOT support (bge-768 has
-    ``dim == 768`` yet ``support == "unsupported"``).
+    KNOWN dim — informational only; a known dim is NOT support (a legacy
+    minilm-384 collection has ``dim == 384`` yet ``support == "unsupported"``).
     """
 
     collection: str

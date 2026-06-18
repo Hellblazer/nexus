@@ -38,7 +38,7 @@ from nexus.migration.state import current_phase, read_state
 from nexus.migration.vector_etl import CollectionResult, MigrationReport
 
 _FIXED_STARTED_AT = "2026-06-13T00:00:00+00:00"
-_ONNX = "minilm-l6-v2-384"
+_ONNX = "bge-base-en-v15-768"
 
 
 @pytest.fixture(autouse=True)
@@ -52,8 +52,8 @@ def _cls(collection: str, leg: str, *, has_data: bool = True) -> CollectionClass
         collection=collection,
         leg=leg,  # type: ignore[arg-type]
         model=_ONNX,
-        dim=384,
-        support="supported-onnx-384",
+        dim=768,
+        support="supported-onnx",
         source_count=10 if has_data else 0,
         has_data=has_data,
         reason="",
@@ -98,7 +98,7 @@ def _noop_model_gate(classifications, *, voyage_key_present) -> None:  # type: i
 
 
 def test_dirty_t2_blocks_t3_etl_never_starts() -> None:
-    det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
+    det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
     leg_calls: list[str] = []
 
     outcome = run_sequenced_migration(
@@ -128,14 +128,14 @@ def test_dirty_t2_blocks_t3_etl_never_starts() -> None:
 
 def test_partial_leg_success_is_refused_when_multiple_legs_detected() -> None:
     det = _detection(
-        _cls("code__a__minilm-l6-v2-384__v1", "local"),
-        _cls("knowledge__b__minilm-l6-v2-384__v1", "cloud"),
+        _cls("code__a__bge-base-en-v15-768__v1", "local"),
+        _cls("knowledge__b__bge-base-en-v15-768__v1", "cloud"),
     )
 
     def _run_leg(leg: str) -> MigrationReport:
         if leg == "local":
-            return _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"])
-        return _failed_leg("cloud", "knowledge__b__minilm-l6-v2-384__v1")
+            return _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"])
+        return _failed_leg("cloud", "knowledge__b__bge-base-en-v15-768__v1")
 
     outcome = run_sequenced_migration(
         det,
@@ -156,14 +156,14 @@ def test_partial_leg_success_is_refused_when_multiple_legs_detected() -> None:
 
 def test_all_legs_ok_is_full_success() -> None:
     det = _detection(
-        _cls("code__a__minilm-l6-v2-384__v1", "local"),
-        _cls("knowledge__b__minilm-l6-v2-384__v1", "cloud"),
+        _cls("code__a__bge-base-en-v15-768__v1", "local"),
+        _cls("knowledge__b__bge-base-en-v15-768__v1", "cloud"),
     )
 
     def _run_leg(leg: str) -> MigrationReport:
         if leg == "local":
-            return _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"])
-        return _ok_leg("cloud", ["knowledge__b__minilm-l6-v2-384__v1"])
+            return _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"])
+        return _ok_leg("cloud", ["knowledge__b__bge-base-en-v15-768__v1"])
 
     outcome = run_sequenced_migration(
         det,
@@ -184,12 +184,12 @@ def test_all_legs_ok_is_full_success() -> None:
 
 
 def test_single_leg_success_ok_when_only_one_leg_detected() -> None:
-    det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
+    det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
     outcome = run_sequenced_migration(
         det,
         sources=None,
         run_t2=lambda _s: _CLEAN_T2,
-        run_leg=lambda leg: _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"]),
+        run_leg=lambda leg: _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"]),
         voyage_key_present=False,
         quiesce_check=_noop_quiesce,
         model_gate=_noop_model_gate,
@@ -206,18 +206,18 @@ def test_single_leg_success_ok_when_only_one_leg_detected() -> None:
 
 def test_progress_updates_monotonically_to_total() -> None:
     det = _detection(
-        _cls("code__a__minilm-l6-v2-384__v1", "local"),
-        _cls("code__b__minilm-l6-v2-384__v1", "local"),
-        _cls("knowledge__c__minilm-l6-v2-384__v1", "cloud"),
+        _cls("code__a__bge-base-en-v15-768__v1", "local"),
+        _cls("code__b__bge-base-en-v15-768__v1", "local"),
+        _cls("knowledge__c__bge-base-en-v15-768__v1", "cloud"),
     )
 
     def _run_leg(leg: str) -> MigrationReport:
         if leg == "local":
             return _ok_leg(
                 "local",
-                ["code__a__minilm-l6-v2-384__v1", "code__b__minilm-l6-v2-384__v1"],
+                ["code__a__bge-base-en-v15-768__v1", "code__b__bge-base-en-v15-768__v1"],
             )
-        return _ok_leg("cloud", ["knowledge__c__minilm-l6-v2-384__v1"])
+        return _ok_leg("cloud", ["knowledge__c__bge-base-en-v15-768__v1"])
 
     progress: list[tuple[int, int]] = []
 
@@ -243,7 +243,7 @@ def test_progress_updates_monotonically_to_total() -> None:
 
 
 def test_phase_is_migrating_when_t2_and_legs_run() -> None:
-    det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
+    det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
     seen_phase: dict[str, str] = {}
 
     def _run_t2(_s):  # type: ignore[no-untyped-def]
@@ -252,7 +252,7 @@ def test_phase_is_migrating_when_t2_and_legs_run() -> None:
 
     def _run_leg(leg: str) -> MigrationReport:
         seen_phase["leg"] = current_phase()
-        return _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"])
+        return _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"])
 
     run_sequenced_migration(
         det,
@@ -270,14 +270,14 @@ def test_phase_is_migrating_when_t2_and_legs_run() -> None:
 
 
 def test_pregates_run_before_t2_in_order() -> None:
-    det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
+    det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
     order: list[str] = []
 
     run_sequenced_migration(
         det,
         sources=None,
         run_t2=lambda _s: order.append("t2") or _CLEAN_T2,  # type: ignore[func-returns-value]
-        run_leg=lambda leg: order.append("leg") or _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"]),  # type: ignore[func-returns-value]
+        run_leg=lambda leg: order.append("leg") or _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"]),  # type: ignore[func-returns-value]
         voyage_key_present=False,
         quiesce_check=lambda: order.append("quiesce"),
         model_gate=lambda c, *, voyage_key_present: order.append("models"),
@@ -289,17 +289,17 @@ def test_pregates_run_before_t2_in_order() -> None:
 def test_model_gate_block_stops_before_t2() -> None:
     from nexus.migration.pregate import ModelPreGateBlocked
 
-    det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
+    det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
     t2_calls: list[int] = []
 
     def _model_gate(classifications, *, voyage_key_present) -> None:  # type: ignore[no-untyped-def]
-        raise ModelPreGateBlocked([("code__a__minilm-l6-v2-384__v1", "unservable")])
+        raise ModelPreGateBlocked([("code__a__bge-base-en-v15-768__v1", "unservable")])
 
     outcome = run_sequenced_migration(
         det,
         sources=None,
         run_t2=lambda _s: t2_calls.append(1) or _CLEAN_T2,  # type: ignore[func-returns-value]
-        run_leg=lambda leg: _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"]),
+        run_leg=lambda leg: _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"]),
         voyage_key_present=False,
         quiesce_check=_noop_quiesce,
         model_gate=_model_gate,
@@ -314,7 +314,7 @@ def test_model_gate_block_stops_before_t2() -> None:
 def test_t2_raise_transitions_to_failed_not_stuck_migrating() -> None:
     # An in-process T2 raise must end at migrated-failed, never a false
     # 'migrating' (CRITICAL-1): the read surfaces would otherwise lie forever.
-    det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
+    det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
     leg_calls: list[str] = []
 
     def _run_t2(_s):  # type: ignore[no-untyped-def]
@@ -340,14 +340,14 @@ def test_leg_raise_is_treated_as_failed_leg() -> None:
     # A leg raising is a failed leg: remaining legs still run, refuse-partial
     # fires, and the sentinel ends migrated-failed (never stuck migrating).
     det = _detection(
-        _cls("code__a__minilm-l6-v2-384__v1", "local"),
-        _cls("knowledge__b__minilm-l6-v2-384__v1", "cloud"),
+        _cls("code__a__bge-base-en-v15-768__v1", "local"),
+        _cls("knowledge__b__bge-base-en-v15-768__v1", "cloud"),
     )
 
     def _run_leg(leg: str) -> MigrationReport:
         if leg == "cloud":
             raise RuntimeError("cloud leg upsert exploded")
-        return _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"])
+        return _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"])
 
     outcome = run_sequenced_migration(
         det,
@@ -366,7 +366,7 @@ def test_leg_raise_is_treated_as_failed_leg() -> None:
 
 
 def test_quiesce_block_stops_before_t2() -> None:
-    det = _detection(_cls("code__a__minilm-l6-v2-384__v1", "local"))
+    det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
     t2_calls: list[int] = []
 
     def _quiesce() -> None:
@@ -376,7 +376,7 @@ def test_quiesce_block_stops_before_t2() -> None:
         det,
         sources=None,
         run_t2=lambda _s: t2_calls.append(1) or _CLEAN_T2,  # type: ignore[func-returns-value]
-        run_leg=lambda leg: _ok_leg("local", ["code__a__minilm-l6-v2-384__v1"]),
+        run_leg=lambda leg: _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"]),
         voyage_key_present=False,
         quiesce_check=_quiesce,
         model_gate=_noop_model_gate,

@@ -72,8 +72,8 @@ from tests.migration.test_vector_etl import (  # noqa: PLC2701 — shared test f
     _seed_source,
 )
 
-_MODEL_384 = "minilm-l6-v2-384"
-_MODEL_768 = "bge-base-en-v15-768"  # unsupported: 768-dim, not a wired model
+_MODEL_ONNX = "bge-base-en-v15-768"  # the service's wired ONNX model (RDR-160), dim 768
+_MODEL_LEGACY = "minilm-l6-v2-384"  # unsupported: legacy 384-dim, retired from the service (RDR-160)
 _MODEL_VOYAGE = "voyage-context-3"  # 1024-dim cloud model
 
 
@@ -283,17 +283,17 @@ class TestHermeticOracle:
     def test_scenario2_local_only_onnx_unlocks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """LOCAL-ONLY/ONNX: NO key, minilm-384 collection, one command runs
+        """LOCAL-ONLY/ONNX: NO key, bge-768 collection, one command runs
         detect→migrate→verify→unlock; exact counts, sentinel cleared."""
         store = tmp_path / "chroma"
-        name = _coll("oracle-local", model=_MODEL_384)
+        name = _coll("oracle-local", model=_MODEL_ONNX)
         ids = _seed_local_store(store, {name: 5})
         # Seed a taxonomy assignment that resolves to the migrated collection, so
         # the taxonomy floor runs NON-vacuously (referenced != {} AND maps to a
         # migrated collection -> clean, not clean-because-empty).
         t2 = _make_t2(tmp_path / "t2.db", assignments=(name,))
         vc = FakeVectorClient()
-        cc = _FakeCatalogClient(doc_count=1, orphans_by_dim={384: 0})
+        cc = _FakeCatalogClient(doc_count=1, orphans_by_dim={768: 0})
 
         result = _drive(
             monkeypatch,
@@ -312,17 +312,17 @@ class TestHermeticOracle:
         assert set(vc.store[name].keys()) == set(ids[name])
         # The migrated catalog was backfilled before the orphan scan, dim-scoped.
         assert cc.backfill_calls == 1
-        assert cc.orphan_dim_queries == [384]
+        assert cc.orphan_dim_queries == [768]
         # Sentinel cleared on a clean unlock (serving normal again).
         assert read_state() is None
 
     def test_scenario3_unsupported_model_blocks_pre_migration(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """UNSUPPORTED bge-768: detected and BLOCKED by the real model gate
+        """UNSUPPORTED minilm-384: detected and BLOCKED by the real model gate
         BEFORE any ETL; NO data written, no validation, no clean ok."""
         store = tmp_path / "chroma"
-        name = _coll("oracle-bge", model=_MODEL_768)
+        name = _coll("oracle-bge", model=_MODEL_LEGACY)
         _seed_local_store(store, {name: 4})
         t2 = _make_t2(tmp_path / "t2.db")
         vc = FakeVectorClient()
@@ -388,11 +388,11 @@ class TestHermeticOracle:
         and is returned to a fully-working pre-upgrade state — pgvector emptied,
         the Chroma source intact (copy-not-move)."""
         store = tmp_path / "chroma"
-        name = _coll("oracle-rb", model=_MODEL_384)
+        name = _coll("oracle-rb", model=_MODEL_ONNX)
         ids = _seed_local_store(store, {name: 7})
         t2 = _make_t2(tmp_path / "t2.db")
         vc = FakeVectorClient()
-        cc = _FakeCatalogClient(doc_count=1, orphans_by_dim={384: 2})
+        cc = _FakeCatalogClient(doc_count=1, orphans_by_dim={768: 2})
 
         result = _drive(
             monkeypatch,
@@ -425,20 +425,20 @@ class TestHermeticOracle:
     def test_scenario5_two_leg_simultaneous_unlocks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """TWO-LEG SIMULTANEOUS (review SIG-3): local minilm-384 AND cloud
+        """TWO-LEG SIMULTANEOUS (review SIG-3): local bge-768 AND cloud
         voyage-1024 in ONE run; both legs migrate, validation counts both via
         the composite read client routing each collection to its source leg,
         and the run unlocks clean. Closes the only known multi-leg integration
         gap (unit-covered by test_driver.test_two_leg_composes...)."""
         local = tmp_path / "chroma-local"
-        lname = _coll("oracle-2leg-local", model=_MODEL_384)
+        lname = _coll("oracle-2leg-local", model=_MODEL_ONNX)
         lids = _seed_local_store(local, {lname: 3})
         cloud = _FakeReadStore()
         cname = _coll("oracle-2leg-cloud", model=_MODEL_VOYAGE)
         cids = cloud.seed(cname, 4)
         t2 = _make_t2(tmp_path / "t2.db")
         vc = FakeVectorClient()
-        cc = _FakeCatalogClient(doc_count=2, orphans_by_dim={384: 0, 1024: 0})
+        cc = _FakeCatalogClient(doc_count=2, orphans_by_dim={768: 0, 1024: 0})
 
         result = _drive(
             monkeypatch,
@@ -458,19 +458,19 @@ class TestHermeticOracle:
         assert set(vc.store[lname].keys()) == set(lids[lname])
         assert set(vc.store[cname].keys()) == set(cids)
         # Both dims validated for manifest orphans.
-        assert sorted(cc.orphan_dim_queries) == [384, 1024]
+        assert sorted(cc.orphan_dim_queries) == [768, 1024]
         assert read_state() is None
 
     def test_scenario_c_mixed_models_blocks_on_voyage_subset(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """MIXED-MODELS (RDR §Test Plan (c)): ONE local store with both an
-        onnx-384 AND a voyage-1024 collection, NO key. The pre-gate is
+        onnx bge-768 AND a voyage-1024 collection, NO key. The pre-gate is
         all-or-nothing, so the whole run BLOCKS pre-migration (no data moved),
         and the diagnostic names ONLY the voyage subset as the blocker — the
         onnx collection is not at fault."""
         store = tmp_path / "chroma"
-        onnx_name = _coll("oracle-mixed-onnx", model=_MODEL_384)
+        onnx_name = _coll("oracle-mixed-onnx", model=_MODEL_ONNX)
         voyage_name = _coll("oracle-mixed-voyage", model=_MODEL_VOYAGE)
         _seed_local_store(store, {onnx_name: 3, voyage_name: 2})
         t2 = _make_t2(tmp_path / "t2.db")
@@ -539,7 +539,7 @@ class TestServedOnPgvectorMVV:
             pytest.skip(f"nexus-service endpoint unresolved: {exc}")
 
         store = tmp_path / "chroma"
-        name = _coll("oracle-integration", model=_MODEL_384)
+        name = _coll("oracle-integration", model=_MODEL_ONNX)
         ids = _seed_local_store(store, {name: 5})
         t2 = _make_t2(tmp_path / "t2.db", assignments=(name,))
 

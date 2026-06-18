@@ -12,13 +12,15 @@ unreachable, never to something weaker.
 
 Gate behaviours (locked):
 
-* (a) unsupported model (bge-768) → BLOCK with a re-index diagnostic listing the
-  affected collections, BEFORE any ETL call;
+* (a) unsupported model (legacy minilm-384, retired from the service by RDR-160)
+  → BLOCK with a re-index diagnostic listing the affected collections, BEFORE
+  any ETL call;
 * (b) voyage-model collection while the service has no voyage embedder wired →
   HARD-FAIL before any ETL (credential diagnostic);
-* (c) onnx-384 + no voyage key → PROCEEDS (onnx is wired in every mode);
-* (d) MIXED store → the gate fires only on the voyage subset; onnx collections
-  pass.
+* (c) onnx (bge-768) + no voyage key → PROCEEDS (the service's ONNX model is
+  wired in every mode);
+* (d) MIXED store → the gate fires on the unsupported subset (voyage-without-key
+  + legacy minilm-384); the bge-768 collection passes.
 
 Plus: idempotent service-stack provisioning (no-op when already up); a fresh
 user with no Chroma footprint → whole flow is a no-op success.
@@ -41,9 +43,11 @@ from nexus.migration.pregate import (
     resolve_wired_models,
 )
 
-_ONNX = "minilm-l6-v2-384"
+# RDR-160: the service's wired ONNX model is bge-768; minilm-384 is a legacy
+# model the service no longer wires (unsupported, needs re-index).
+_ONNX = "bge-base-en-v15-768"
 _VOYAGE = "voyage-context-3"
-_BGE = "bge-base-en-v15-768"
+_LEGACY_384 = "minilm-l6-v2-384"
 
 _WIRED_ONNX_ONLY = frozenset({_ONNX})
 _WIRED_WITH_VOYAGE = frozenset({_ONNX, _VOYAGE, "voyage-code-3", "voyage-3"})
@@ -140,8 +144,8 @@ def test_b_voyage_collection_blocks_when_service_has_no_voyage() -> None:
 
 
 def test_c_onnx_collection_proceeds_without_key() -> None:
-    classifications = [_cls("code__nexus__minilm-l6-v2-384__v1", _ONNX)]
-    # Must NOT raise — onnx is wired in every mode.
+    classifications = [_cls("code__nexus__bge-base-en-v15-768__v1", _ONNX)]
+    # Must NOT raise — the service's ONNX model (bge-768) is wired in every mode.
     assert_models_supported(
         classifications,
         voyage_key_present=False,
@@ -149,24 +153,26 @@ def test_c_onnx_collection_proceeds_without_key() -> None:
     )
 
 
-def test_a_unsupported_bge_blocks_with_reindex_diagnostic() -> None:
-    classifications = [_cls("docs__legacy__bge-base-en-v15-768__v1", _BGE)]
+def test_a_unsupported_minilm_blocks_with_reindex_diagnostic() -> None:
+    # RDR-160 retired minilm-384 from the service: a legacy minilm collection is
+    # unsupported and must be re-indexed to bge-768 before migration.
+    classifications = [_cls("docs__legacy__minilm-l6-v2-384__v1", _LEGACY_384)]
     with pytest.raises(ModelPreGateBlocked) as exc:
         assert_models_supported(
             classifications,
             voyage_key_present=True,
             source=_FixedSource(_WIRED_WITH_VOYAGE),
         )
-    assert exc.value.collections == ["docs__legacy__bge-base-en-v15-768__v1"]
+    assert exc.value.collections == ["docs__legacy__minilm-l6-v2-384__v1"]
     assert "re-index" in str(exc.value).lower()
     assert "NX_VOYAGE_API_KEY" not in str(exc.value)  # not a credential issue
 
 
-def test_d_mixed_store_blocks_only_voyage_subset() -> None:
+def test_d_mixed_store_blocks_unsupported_subset() -> None:
     classifications = [
-        _cls("code__nexus__minilm-l6-v2-384__v1", _ONNX),  # supported
-        _cls("knowledge__art__voyage-context-3__v1", _VOYAGE),  # unsupported here
-        _cls("docs__x__bge-base-en-v15-768__v1", _BGE),  # unsupported (re-index)
+        _cls("code__nexus__bge-base-en-v15-768__v1", _ONNX),  # supported (bge)
+        _cls("knowledge__art__voyage-context-3__v1", _VOYAGE),  # unsupported (no key)
+        _cls("docs__x__minilm-l6-v2-384__v1", _LEGACY_384),  # unsupported (re-index)
     ]
     with pytest.raises(ModelPreGateBlocked) as exc:
         assert_models_supported(
@@ -175,9 +181,9 @@ def test_d_mixed_store_blocks_only_voyage_subset() -> None:
             source=_FixedSource(_WIRED_ONNX_ONLY),
         )
     blocked = exc.value.collections
-    assert "code__nexus__minilm-l6-v2-384__v1" not in blocked  # onnx proceeds
+    assert "code__nexus__bge-base-en-v15-768__v1" not in blocked  # bge proceeds
     assert "knowledge__art__voyage-context-3__v1" in blocked
-    assert "docs__x__bge-base-en-v15-768__v1" in blocked
+    assert "docs__x__minilm-l6-v2-384__v1" in blocked
     assert len(blocked) == 2
 
 
@@ -195,7 +201,7 @@ def test_empty_collections_are_not_gated() -> None:
 
 def test_all_supported_mixed_proceeds() -> None:
     classifications = [
-        _cls("code__nexus__minilm-l6-v2-384__v1", _ONNX),
+        _cls("code__nexus__bge-base-en-v15-768__v1", _ONNX),
         _cls("knowledge__art__voyage-context-3__v1", _VOYAGE),
     ]
     # Service HAS voyage wired → both supported → no raise.
@@ -270,7 +276,7 @@ def test_is_fresh_user_true_when_no_data() -> None:
 
     empty = DetectionReport(classifications=())
     only_empty = DetectionReport(
-        classifications=(_cls("code__x__minilm-l6-v2-384__v1", _ONNX, has_data=False),)
+        classifications=(_cls("code__x__bge-base-en-v15-768__v1", _ONNX, has_data=False),)
     )
     assert is_fresh_user(empty) is True
     assert is_fresh_user(only_empty) is True  # no data-bearing legs
@@ -280,7 +286,7 @@ def test_is_fresh_user_false_when_data_present() -> None:
     from nexus.migration.detection import DetectionReport
 
     report = DetectionReport(
-        classifications=(_cls("code__x__minilm-l6-v2-384__v1", _ONNX),)
+        classifications=(_cls("code__x__bge-base-en-v15-768__v1", _ONNX),)
     )
     assert is_fresh_user(report) is False
 

@@ -12,12 +12,14 @@ data moves:
 The support resolution is a PURE function of deployment mode (plan-audit
 condition, 2026-06-13): P0 runs PRE-provisioning, so it cannot query a live
 ``EmbedderRouter``. It mirrors ``EmbedderRouter``'s wiring
-(``service/.../vectors/EmbedderRouter.java``): ONNX (``minilm-l6-v2-384``) is
-wired in EVERY mode; the voyage models (``voyage-code-3`` / ``voyage-context-3``
-/ ``voyage-3``) are wired iff ``NX_VOYAGE_API_KEY`` is present; anything else
-(e.g. ``bge-base-en-v15-768`` — a KNOWN dim in ``vector_etl._MODEL_DIMS`` but
-wired by NO embedder) is UNSUPPORTED and must be detected + flagged, never
-silently treated as migratable just because its dim is known.
+(``service/.../vectors/EmbedderRouter.java``): the service's ONNX model
+(``bge-base-en-v15-768`` since RDR-160) is wired in EVERY mode; the voyage
+models (``voyage-code-3`` / ``voyage-context-3`` / ``voyage-3``) are wired iff
+``NX_VOYAGE_API_KEY`` is present; anything else (e.g. a legacy
+``minilm-l6-v2-384`` collection — a KNOWN dim in ``vector_etl._MODEL_DIMS`` but
+wired by NO service embedder post-RDR-160) is UNSUPPORTED and must be detected +
+flagged with the re-index diagnostic, never silently treated as migratable just
+because its dim is known.
 
 These tests are the contract for the classifier implemented in P0.I
 (nexus-ue6g7.2). They use a small in-memory client double rather than a real
@@ -116,22 +118,24 @@ def _by_name(report: DetectionReport) -> dict[str, CollectionClassification]:
 class TestWiredModels:
     def test_local_mode_wires_only_onnx(self) -> None:
         assert wired_models(voyage_key_present=False) == frozenset(
-            {"minilm-l6-v2-384"}
+            {"bge-base-en-v15-768"}
         )
 
     def test_cloud_mode_wires_onnx_and_all_voyage(self) -> None:
         assert wired_models(voyage_key_present=True) == frozenset(
             {
-                "minilm-l6-v2-384",
+                "bge-base-en-v15-768",
                 "voyage-code-3",
                 "voyage-context-3",
                 "voyage-3",
             }
         )
 
-    def test_bge_is_wired_in_no_mode(self) -> None:
-        assert "bge-base-en-v15-768" not in wired_models(voyage_key_present=True)
-        assert "bge-base-en-v15-768" not in wired_models(voyage_key_present=False)
+    def test_minilm_is_wired_in_no_mode(self) -> None:
+        # RDR-160 retired MiniLM-384 from the service; it is wired by no embedder
+        # in any mode now (bge-768 is the service's ONNX model).
+        assert "minilm-l6-v2-384" not in wired_models(voyage_key_present=True)
+        assert "minilm-l6-v2-384" not in wired_models(voyage_key_present=False)
 
 
 # ---------------------------------------------------------------------------
@@ -141,9 +145,9 @@ class TestClassifyModelSupport:
     def test_onnx_supported_regardless_of_key(self) -> None:
         for key in (True, False):
             support, reason = classify_model_support(
-                "minilm-l6-v2-384", voyage_key_present=key
+                "bge-base-en-v15-768", voyage_key_present=key
             )
-            assert support == "supported-onnx-384"
+            assert support == "supported-onnx"
             assert reason == ""
 
     @pytest.mark.parametrize(
@@ -167,13 +171,13 @@ class TestClassifyModelSupport:
         assert "NX_VOYAGE_API_KEY" in reason
 
     @pytest.mark.parametrize("key", [True, False])
-    def test_bge_is_unsupported_with_reindex_diagnostic(self, key: bool) -> None:
+    def test_minilm_is_unsupported_with_reindex_diagnostic(self, key: bool) -> None:
         support, reason = classify_model_support(
-            "bge-base-en-v15-768", voyage_key_present=key
+            "minilm-l6-v2-384", voyage_key_present=key
         )
         assert support == "unsupported"
-        # Distinct from the voyage-key case: bge has no wired embedder in any
-        # mode, so the fix is a re-index, NOT a credential.
+        # Distinct from the voyage-key case: post-RDR-160 minilm-384 has no wired
+        # service embedder in any mode, so the fix is a re-index, NOT a credential.
         assert "NX_VOYAGE_API_KEY" not in reason
         assert "re-index" in reason.lower()
 
@@ -204,16 +208,16 @@ class TestClassifyCollectionsMatrix:
         assert report.unsupported == ()
 
     def test_reports_both_axes_per_collection(self) -> None:
-        local = _FakeChromaClient({ONNX_384: 7})
+        local = _FakeChromaClient({BGE_768: 7})
         report = classify_collections(
             local_client=local, cloud_client=None, voyage_key_present=True
         )
         (c,) = report.classifications
         # BOTH axes present: source leg AND embedding model.
         assert c.leg == "local"
-        assert c.model == "minilm-l6-v2-384"
-        assert c.dim == 384
-        assert c.support == "supported-onnx-384"
+        assert c.model == "bge-base-en-v15-768"
+        assert c.dim == 768
+        assert c.support == "supported-onnx"
         assert c.source_count == 7
         assert c.has_data is True
 
@@ -257,15 +261,16 @@ class TestClassifyCollectionsMatrix:
         assert all(c.has_data is False for c in report.classifications)
         assert report.legs_with_data == frozenset()
 
-    def test_bge_flagged_unsupported_not_silently_known_dim(self) -> None:
-        local = _FakeChromaClient({BGE_768: 9})
+    def test_minilm_flagged_unsupported_not_silently_known_dim(self) -> None:
+        local = _FakeChromaClient({ONNX_384: 9})
         report = classify_collections(
             local_client=local, cloud_client=None, voyage_key_present=True
         )
         (c,) = report.classifications
         assert c.support == "unsupported"
-        # The dim IS known (768 in _MODEL_DIMS) — but known-dim != supported.
-        assert c.dim == 768
+        # The dim IS known (384 in _MODEL_DIMS) — but known-dim != supported;
+        # post-RDR-160 the service has no minilm-384 embedder.
+        assert c.dim == 384
         assert "re-index" in c.reason.lower()
         assert report.unsupported == (c,)
 
@@ -281,19 +286,19 @@ class TestClassifyCollectionsMatrix:
         assert report.unsupported == (c,)
 
     def test_full_mixed_footprint(self) -> None:
-        # Local leg: onnx (data) + bge (data, unsupported); cloud leg: voyage
-        # ctx (data) + voyage code (empty). Voyage key present.
-        local = _FakeChromaClient({ONNX_384: 12, BGE_768: 3})
+        # Local leg: bge (data, supported) + minilm (data, unsupported legacy);
+        # cloud leg: voyage ctx (data) + voyage code (empty). Voyage key present.
+        local = _FakeChromaClient({BGE_768: 12, ONNX_384: 3})
         cloud = _FakeChromaClient({VOYAGE_CTX_1024: 20, VOYAGE_CODE_1024: 0})
         report = classify_collections(
             local_client=local, cloud_client=cloud, voyage_key_present=True
         )
         by = _by_name(report)
         assert len(report.classifications) == 4
-        assert by[ONNX_384].support == "supported-onnx-384"
-        assert by[ONNX_384].source_count == 12
-        assert by[BGE_768].support == "unsupported"
-        assert by[BGE_768].source_count == 3
+        assert by[BGE_768].support == "supported-onnx"
+        assert by[BGE_768].source_count == 12
+        assert by[ONNX_384].support == "unsupported"
+        assert by[ONNX_384].source_count == 3
         assert by[VOYAGE_CTX_1024].support == "supported-voyage-1024"
         assert by[VOYAGE_CTX_1024].source_count == 20
         assert by[VOYAGE_CODE_1024].support == "supported-voyage-1024"
@@ -302,7 +307,7 @@ class TestClassifyCollectionsMatrix:
         # Both legs hold data; the empty cloud code collection does not negate
         # the data-bearing ctx collection on the same leg.
         assert report.legs_with_data == frozenset({"local", "cloud"})
-        assert report.unsupported == (by[BGE_768],)
+        assert report.unsupported == (by[ONNX_384],)
 
     def test_non_conformant_name_is_unsupported(self) -> None:
         local = _FakeChromaClient({NON_CONFORMANT: 2})
@@ -382,15 +387,15 @@ class TestDryRunPreview:
         assert "nothing to migrate" in text.lower()
 
     def test_supported_group_estimates_tokens_and_time(self) -> None:
-        local = _FakeChromaClient({ONNX_384: 100})
+        local = _FakeChromaClient({BGE_768: 100})
         report = classify_collections(
             local_client=local, cloud_client=None, voyage_key_present=True
         )
         preview = build_dry_run_preview(report)
         (g,) = preview.groups
         assert g.leg == "local"
-        assert g.model == "minilm-l6-v2-384"
-        assert g.support == "supported-onnx-384"
+        assert g.model == "bge-base-en-v15-768"
+        assert g.support == "supported-onnx"
         assert g.collection_count == 1
         assert g.chunk_count == 100
         # 100 chunks x 512 tokens/chunk (exact constant)
@@ -413,27 +418,28 @@ class TestDryRunPreview:
         assert g.est_tokens == 400 * 512
 
     def test_unsupported_excluded_from_migratable_totals(self) -> None:
-        local = _FakeChromaClient({ONNX_384: 10, BGE_768: 99})
+        local = _FakeChromaClient({BGE_768: 10, ONNX_384: 99})
         report = classify_collections(
             local_client=local, cloud_client=None, voyage_key_present=True
         )
         preview = build_dry_run_preview(report)
-        # bge contributes NOTHING to migratable totals — it would be blocked.
+        # the legacy minilm-384 collection contributes NOTHING to migratable
+        # totals — it would be blocked (needs re-index to bge-768 first).
         assert preview.migratable_chunks == 10
         assert preview.total_est_tokens == 10 * 512
         assert len(preview.unsupported) == 1
-        assert preview.unsupported[0].collection == BGE_768
+        assert preview.unsupported[0].collection == ONNX_384
         text = render_dry_run_preview(preview)
         assert "BLOCKED" in text
-        assert BGE_768 in text
+        assert ONNX_384 in text
         assert "re-index" in text.lower()
-        # The bge chunk count is NOT in the migratable line.
+        # The minilm chunk count is NOT in the migratable line.
         assert "DRY RUN" in text
 
     def test_all_unsupported_render_has_no_dangling_migrate_section(self) -> None:
         # Every collection blocked → the "Would migrate (per leg / model):"
         # header must NOT appear with an empty body beneath it.
-        local = _FakeChromaClient({BGE_768: 4})
+        local = _FakeChromaClient({ONNX_384: 4})
         report = classify_collections(
             local_client=local, cloud_client=None, voyage_key_present=True
         )
@@ -477,14 +483,14 @@ class TestMigrateToServiceCli:
         assert "nothing to migrate" in result.output.lower()
 
     def test_dry_run_previews_supported(self, monkeypatch) -> None:
-        local = _FakeChromaClient({ONNX_384: 8})
+        local = _FakeChromaClient({BGE_768: 8})
         result = self._run(monkeypatch, ["--dry-run"], local=local)
         assert result.exit_code == 0
         assert "[local]" in result.output
-        assert "minilm-l6-v2-384" in result.output
+        assert "bge-base-en-v15-768" in result.output
 
     def test_dry_run_with_unsupported_exits_nonzero(self, monkeypatch) -> None:
-        local = _FakeChromaClient({BGE_768: 2})
+        local = _FakeChromaClient({ONNX_384: 2})
         result = self._run(monkeypatch, ["--dry-run"], local=local)
         # Unsupported collections would block a real run — dry-run gates non-zero.
         assert result.exit_code == 1
@@ -536,11 +542,11 @@ class TestMigrateToServiceRun:
         from nexus.migration.sequencer import SequenceOutcome
 
         cls = CollectionClassification(
-            collection="code__o__minilm-l6-v2-384__v1",
+            collection="code__o__bge-base-en-v15-768__v1",
             leg="local",
-            model=ONNX_384,
-            dim=384,
-            support="supported-onnx-384",
+            model="bge-base-en-v15-768",
+            dim=768,
+            support="supported-onnx",
             source_count=10,
             has_data=True,
         )
@@ -570,7 +576,7 @@ class TestMigrateToServiceRun:
             verdict="verified" if unlocked else "blocked",
             blocking_reasons=() if unlocked else ("counts: 1 collection mismatch",),
             taxonomy_orphans=(),
-            count_mismatches=() if unlocked else ("code__o__minilm-l6-v2-384__v1",),
+            count_mismatches=() if unlocked else ("code__o__bge-base-en-v15-768__v1",),
             count_indeterminate=False,
             manifest_orphan_count=0,
             manifest_vacuous=False,
