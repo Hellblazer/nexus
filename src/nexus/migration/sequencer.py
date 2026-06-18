@@ -212,12 +212,18 @@ def run_sequenced_migration(
             _log.error("sequencer_leg_raised", leg=leg, error=str(exc))
             continue
         # RDR-162 P2: re-point references for every cross-model collection that
-        # VERIFIED populated (status == "migrated"). Ordered strictly after the
-        # verified report so a mid-migrate failure never leaves dangling refs;
-        # the source Chroma collection is untouched (copy-not-move), so the leg
-        # stays re-runnable. A remap failure DEMOTES the leg (drops it from
-        # legs_ok) so refuse-partial marks the run failed — never a silent
-        # half-remap, never a sentinel stuck `migrating`.
+        # VERIFIED populated (status == "migrated"). Each collection's remap is
+        # ordered strictly after ITS OWN verified populate (_migrate_one only
+        # returns "migrated" past the post-write count check), so a reference is
+        # never repointed at an unpopulated target. The remap is per-collection-
+        # opportunistic, NOT leg-atomic: if collection B fails after A succeeded,
+        # A's refs are already repointed while the leg is demoted. That is safe,
+        # not a dangling ref — A's target IS populated, so A names a live
+        # collection; copy-not-move keeps the source intact and the cascade
+        # UPDATE is idempotent, so the demoted leg re-runs cleanly (A re-remaps to
+        # the same target, B retries). A remap failure DEMOTES the leg (drops it
+        # from legs_ok) so refuse-partial marks the run failed — never a sentinel
+        # stuck `migrating`.
         remap_ok = True
         for r in report.results:
             if r.status == "migrated" and r.target_collection:

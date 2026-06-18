@@ -35,6 +35,7 @@ from typing import Any, Callable
 import structlog
 
 from nexus.migration.detection import (
+    _ONNX_MODEL,
     DetectionReport,
     classify_collections,
     cross_model_remappable,
@@ -56,7 +57,6 @@ from nexus.migration.vector_etl import (
     migrate_cloud,
     migrate_local,
 )
-from nexus.migration.detection import _ONNX_MODEL
 
 _log = structlog.get_logger(__name__)
 
