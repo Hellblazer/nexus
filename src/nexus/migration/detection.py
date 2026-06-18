@@ -364,10 +364,15 @@ class ModelGroup:
     support: Support
     collection_count: int
     chunk_count: int
-    #: Token volume / time are estimated ONLY for migratable (supported)
-    #: groups; unsupported groups are blocked and contribute zero.
+    #: Token volume / time are estimated ONLY for migratable groups (supported
+    #: OR cross-model re-embed); genuinely-blocked groups contribute zero.
     est_tokens: int
     est_seconds: float
+    #: RDR-162 P2: True when this is an ``unsupported`` group the migrate will
+    #: CROSS-MODEL re-embed into bge-768 (legacy minilm, etc.) rather than block.
+    #: It counts toward the migratable totals; ``support`` stays ``unsupported``
+    #: (its current name is unservable) but it is NOT in ``DryRunPreview.unsupported``.
+    cross_model: bool = False
 
 
 @dataclass(frozen=True)
@@ -400,22 +405,36 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     for c in report.classifications:
         buckets.setdefault((c.leg, c.model, c.support), []).append(c)
 
+    # RDR-162 P2: a cross-model-remappable collection is migratable (re-embed to
+    # bge-768), not blocked. Decide per classification so a bucket is consistent.
+    remappable = {
+        id(c) for c in report.classifications if cross_model_remappable(c)
+    }
+
     groups: list[ModelGroup] = []
     migratable_chunks = 0
     total_est_tokens = 0
     est_seconds = 0.0
     for (leg, model, support), members in buckets.items():
         chunk_count = sum(m.source_count for m in members)
-        if support == "unsupported":
+        is_cross_model = support == "unsupported" and all(
+            id(m) in remappable for m in members
+        )
+        if support == "unsupported" and not is_cross_model:
+            # Genuinely blocked (voyage-no-key, non-conformant) — zero estimate.
             groups.append(
                 ModelGroup(leg, model, support, len(members), chunk_count, 0, 0.0)
             )
             continue
+        # Supported byte-for-byte OR cross-model re-embed: both migratable. The
+        # cross-model re-embed runs through the local ONNX (bge-768) path.
         tokens = chunk_count * _EST_TOKENS_PER_CHUNK
-        seconds = chunk_count / _throughput_for_support(support)
+        rate = _EST_ONNX_CHUNKS_PER_SEC if is_cross_model else _throughput_for_support(support)
+        seconds = chunk_count / rate
         groups.append(
             ModelGroup(
-                leg, model, support, len(members), chunk_count, tokens, seconds
+                leg, model, support, len(members), chunk_count, tokens, seconds,
+                cross_model=is_cross_model,
             )
         )
         migratable_chunks += chunk_count
@@ -424,9 +443,14 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
 
     # Stable order: leg, then support, then model — deterministic preview text.
     groups.sort(key=lambda g: (g.leg, g.support, g.model or ""))
+    # Only GENUINELY-blocked collections remain in unsupported — cross-model
+    # collections are migratable and must not gate the dry-run exit.
+    blocked = tuple(
+        c for c in report.unsupported if not cross_model_remappable(c)
+    )
     return DryRunPreview(
         groups=tuple(groups),
-        unsupported=report.unsupported,
+        unsupported=blocked,
         legs_with_data=report.legs_with_data,
         migratable_chunks=migratable_chunks,
         total_est_tokens=total_est_tokens,
@@ -450,12 +474,19 @@ def render_dry_run_preview(preview: DryRunPreview) -> str:
         )
         return "\n".join(lines)
 
-    migratable = [g for g in preview.groups if g.support != "unsupported"]
+    migratable = [
+        g for g in preview.groups if g.support != "unsupported" or g.cross_model
+    ]
     if migratable:
         lines.append("Would migrate (per leg / model):")
         for g in migratable:
+            kind = (
+                f"{g.model} -> bge-768 cross-model re-embed"
+                if g.cross_model
+                else f"{g.model} ({g.support})"
+            )
             lines.append(
-                f"  [{g.leg}] {g.model} ({g.support}): "
+                f"  [{g.leg}] {kind}: "
                 f"{g.collection_count} collection(s), {g.chunk_count} chunk(s), "
                 f"~{g.est_tokens:,} tokens, ~{g.est_seconds:.1f}s"
             )
