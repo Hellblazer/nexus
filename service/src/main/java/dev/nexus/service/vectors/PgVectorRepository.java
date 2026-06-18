@@ -486,17 +486,20 @@ public final class PgVectorRepository {
      *       union, metadata {@code where} equality predicates ANDed with the text gate,
      *       {@code nResults} cap, flat row shape ({@code id}, {@code content},
      *       {@code distance}, {@code collection}, metadata flattened in).
-     *   <li><strong>Selectivity-aware dispatch (nexus-lcogi).</strong> A cheap COUNT over
-     *       the text gate picks the plan. For a SELECTIVE gate ({@code count <=}
-     *       {@link #SELECTIVE_GATE_MAX}) the gate is materialized FIRST via a
-     *       {@code MATERIALIZED} CTE (GIN bitmap on {@code chunk_tsv} + {@code gin_trgm_ops})
-     *       and the small gated set is ranked by EXACT cosine distance — the lcogi fix:
-     *       the prior HNSW-first plan ({@code ORDER BY embedding}, gate as scan filter)
-     *       collapsed here because a few matches in a large corpus rank past
-     *       {@code hnsw.max_scan_tuples} (lcogi: 6/116k → 0). For a NON-SELECTIVE gate the
-     *       HNSW-first plan is kept (a dense gate is found within the scan budget, and
-     *       materializing a huge gated set would spill {@code work_mem} and risk the same
-     *       timeout). Superseded by RDR-156 P5.2 server-side RRF fusion (unified
+     *   <li><strong>Selectivity-aware dispatch (nexus-lcogi; single-gate-eval nexus-x7z7l).</strong>
+     *       ONE bounded fetch of the gate's chashes ({@code LIMIT} {@link #SELECTIVE_GATE_MAX}
+     *       {@code + 1}) both picks the plan and, for a SELECTIVE gate ({@code matches <=}
+     *       {@link #SELECTIVE_GATE_MAX}), IS the gate evaluation: the complete gate comes back
+     *       and is ranked by EXACT cosine distance via a {@code chash IN (...)} PK filter, so
+     *       the expensive {@code <%} trigram heap-recheck runs ONCE, not twice (the prior
+     *       design ran a standalone {@code COUNT(*)} probe AND re-ran the gate in the ranked
+     *       query, two {@code <%} rechecks per call on a large code corpus; conexus-qsa).
+     *       This preserves the lcogi fix: the rank never routes through the HNSW index, so a
+     *       selective gate cannot be starved past {@code hnsw.max_scan_tuples} (lcogi: the
+     *       retired HNSW-first plan returned 6/116k to 0). For a NON-SELECTIVE gate the bounded
+     *       fetch hits the {@code LIMIT}, is discarded, and the HNSW-first plan is kept (a
+     *       dense gate is found within the scan budget; materializing a huge gated set would
+     *       spill {@code work_mem}). Superseded by RDR-156 P5.2 server-side RRF fusion (unified
      *       selectivity-aware); its P5.G gate verifies the selective case at production
      *       scale rather than re-fixing it.
      *   <li><strong>Trigram gate calibration anchor.</strong> The contract fixture
@@ -617,78 +620,108 @@ public final class PgVectorRepository {
         if (tokensOut != null) tokensOut[0] = hybridEmbed.tokens();
         float[] queryVec = hybridEmbed.embeddings().get(0);
 
-        // Text gate fragment, shared by the COUNT probe and the ranked query. FTS lexeme
-        // match OR word-trigram similarity: the <% operator form (word_similarity >=
-        // pg_trgm.word_similarity_threshold) is gin_trgm_ops-indexable (vectors-002) where
-        // the function-call form is not; word_similarity (vs plain similarity) does not
-        // dilute with chunk_text length. The threshold GUC is pinned per-transaction below.
-        StringBuilder gate = new StringBuilder()
-            .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")")
+        // Non-text scope (collection IN + metadata where). Shared by the selective
+        // rank-by-chash query (nexus-x7z7l): that query re-applies these cheap predicates
+        // but NOT the text gate - the gate's matching chashes already satisfy it, so the
+        // expensive <% trigram heap-recheck runs ONCE (in the bounded fetch below), not
+        // again at rank time. (The metadata->>? predicate is kept on the rank query, not
+        // dropped: two same-text rows in different collections share a chash, so chash
+        // alone would not re-impose a per-row metadata filter.)
+        StringBuilder scope = new StringBuilder()
+            .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")");
+        List<Object> scopeBinds = new ArrayList<>(collectionNames);
+        // Full gate = scope AND a text signal. FTS lexeme match OR word-trigram similarity:
+        // the <% operator form (word_similarity >= pg_trgm.word_similarity_threshold) is
+        // gin_trgm_ops-indexable (vectors-002) where the function-call form is not;
+        // word_similarity (vs plain similarity) does not dilute with chunk_text length.
+        // The threshold GUC is pinned per-transaction below.
+        StringBuilder gate = new StringBuilder(scope)
             .append(" AND (chunk_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)");
-        List<Object> gateBinds = new ArrayList<>();
-        gateBinds.addAll(collectionNames);
+        List<Object> gateBinds = new ArrayList<>(scopeBinds);
         gateBinds.add(queryText);
         gateBinds.add(queryText);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
                 gate.append(" AND metadata->>? = ?");
+                scope.append(" AND metadata->>? = ?");
                 gateBinds.add(e.getKey());
                 gateBinds.add(String.valueOf(e.getValue()));
+                scopeBinds.add(e.getKey());
+                scopeBinds.add(String.valueOf(e.getValue()));
             }
         }
         final String table = chunksTable(dim);
         final String gateSql = gate.toString();
+        final String scopeSql = scope.toString();
         final String vecLit = vectorLiteral(queryVec);
 
-        // SELECTIVITY-AWARE DISPATCH (nexus-lcogi). A cheap COUNT over the text gate (GIN
-        // bitmap, no embedding fetch) picks the plan that serves the gate's match count:
+        // SELECTIVITY-AWARE DISPATCH (nexus-lcogi; single-gate-eval, nexus-x7z7l). ONE
+        // bounded fetch of the gate's chashes (LIMIT SELECTIVE_GATE_MAX+1) both picks the
+        // plan AND, for the selective case, IS the gate evaluation - the ranked query then
+        // filters by chash (PK lookup), so the expensive <% trigram heap-recheck runs once,
+        // not twice. The prior design ran a standalone COUNT(*) probe AND re-ran the gate in
+        // the ranked query: on a large code corpus that was two ~650ms <% heap-rechecks per
+        // call (conexus-qsa EXPLAIN: count probe 700ms + materialized-CTE rank 654ms, both
+        // dominated by the lossy gin_trgm_ops recheck over ~1900 candidate rows).
         //
-        //   * SELECTIVE gate (count <= SELECTIVE_GATE_MAX): a MATERIALIZED CTE evaluates the
-        //     gate FIRST via the GIN indexes (optimization fence), then ranks the small
-        //     gated set by EXACT cosine distance. This is the lcogi fix — the prior
-        //     single-query HNSW-first plan (ORDER BY embedding, gate as scan filter)
-        //     collapsed here: a handful of matches in a large corpus rank past
-        //     hnsw.max_scan_tuples from the query vector, so the scan stops before reaching
-        //     them and the endpoint returns 0 rows (6 / 116k -> 0; full recall ~95s past
-        //     every HTTP timeout). Materializing the gate first is instant and exact, with
-        //     NO dependence on hnsw.max_scan_tuples / iterative_scan.
+        //   * SELECTIVE gate (matches <= SELECTIVE_GATE_MAX): the bounded fetch returns the
+        //     COMPLETE gate (all matches, since it did not hit the LIMIT). Rank those exact
+        //     chashes by cosine distance via a chash IN (...) filter + the cheap non-text
+        //     scope (collection/metadata). No HNSW, no re-gate: ranks the small gated set
+        //     exactly, with NO dependence on hnsw.max_scan_tuples (the lcogi collapse fix is
+        //     preserved - the prior HNSW-first single-query plan starved selective gates).
         //
-        //   * NON-SELECTIVE gate (count > SELECTIVE_GATE_MAX): keep the HNSW-first plan
-        //     (gate as filter, iterative_scan). A dense gate is USUALLY found within the
-        //     scan budget at corpus-average embedding distributions, so it does not
-        //     collapse — and materializing a huge gated set (embeddings are ~4 KB/row: 80k
-        //     matches ≈ 320 MB) would spill work_mem and risk the very timeout lcogi is
-        //     about. NOTE this is a heuristic, not a guarantee: a SEMI-selective gate
-        //     (count in (SELECTIVE_GATE_MAX, hnsw.max_scan_tuples] whose matches all cluster
-        //     FAR from the query vector) can still under-return on this branch — the same
-        //     geometry as the original bug, in a narrower window. P5.2's RRF fusion closes
-        //     that window; the conexus xr7.8.9 gate should verify the non-selective path too
-        //     (latency + recall), not only the 6/116k selective case.
+        //   * NON-SELECTIVE gate (matches > SELECTIVE_GATE_MAX): the bounded fetch hit the
+        //     LIMIT (returned SELECTIVE_GATE_MAX+1 chashes) and is discarded - keep the
+        //     HNSW-first plan (gate as scan filter, iterative_scan). A dense gate is usually
+        //     found within the scan budget; materializing a huge gated set (~4 KB/row
+        //     embeddings) would spill work_mem. The bounded fetch caps this probe's cost
+        //     (the prior unbounded COUNT scanned the full dense gate). Same SEMI-selective
+        //     caveat as before applies; P5.2's RRF fusion closes that window.
         //
-        // COST: the non-selective path evaluates the gate TWICE (the COUNT probe + the scan
-        // filter), an accepted overhead of the targeted dispatch that P5.2 eliminates.
-        //
-        // count == 0 falls into the selective branch and returns an empty gated set — no
-        // special case.
+        // matches == 0 -> empty gate -> selective branch returns an empty result (no silent
+        // vector fallback), handled explicitly (chash IN () is not valid SQL).
+        List<Object> probeBinds = new ArrayList<>(gateBinds);
+        probeBinds.add(selectiveGateMax + 1);
         Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
             // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
             // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
             // do not. Pinned per-transaction so the gate is independent of cluster config.
             ctx.execute("SET LOCAL pg_trgm.word_similarity_threshold = 0.6");
 
-            long matchCount = ctx.fetchOne(
-                "SELECT count(*) FROM " + table + gateSql, gateBinds.toArray())
-                .get(0, Long.class);
+            List<String> gateChashes = ctx.fetch(
+                "SELECT chash FROM " + table + gateSql + " LIMIT ?", probeBinds.toArray())
+                .map(r -> r.get("chash", String.class));
 
-            if (matchCount <= selectiveGateMax) {
-                // Text-first: gate materialized via GIN, ranked by exact distance.
-                String sql = "WITH gated AS MATERIALIZED ("
-                    + "SELECT chash, chunk_text, collection, metadata, embedding FROM " + table + gateSql + ")"
-                    + " SELECT chash, chunk_text, collection, metadata::text AS metadata_json,"
-                    + " (embedding <=> ?::vector) AS distance"
-                    + " FROM gated ORDER BY distance ASC, chash ASC LIMIT ?";
-                List<Object> b = new ArrayList<>(gateBinds);
+            if (gateChashes.size() <= selectiveGateMax) {
+                // Selective: the bounded fetch returned the COMPLETE gate (the LIMIT did NOT
+                // fire - fewer than selectiveGateMax+1 matches exist, so it scanned the full
+                // GIN candidate set, same work the old COUNT(*) did). The win is not a
+                // cheaper probe: this single gate scan REPLACES both the old COUNT(*) probe
+                // AND the MATERIALIZED-CTE gate re-evaluation - the rank below filters by
+                // chash with NO text gate, so the <% heap-recheck happens once, not twice.
+                if (gateChashes.isEmpty()) {
+                    // Empty gate: typed-empty result (chash IN () is invalid SQL).
+                    return ctx.fetch(
+                        "SELECT NULL::text AS chash, NULL::text AS chunk_text,"
+                        + " NULL::text AS collection, NULL::text AS metadata_json,"
+                        + " NULL::float8 AS distance WHERE false");
+                }
+                // chash is NOT unique across collections (the table key is
+                // (tenant_id, collection, chash)): a multi-collection gate can return the
+                // same chash from N collections. Dedup the IN list - the collection scope in
+                // scopeSql still yields one ranked row per (collection, chash). Dedup runs
+                // AFTER the size-based dispatch so the selective/non-selective boundary stays
+                // identical to the old per-row COUNT(*).
+                List<String> inChashes = gateChashes.stream().distinct().toList();
+                String sql = "SELECT chash, chunk_text, collection, metadata::text AS metadata_json,"
+                    + " (embedding <=> ?::vector) AS distance FROM " + table + scopeSql
+                    + " AND chash IN (" + placeholders(inChashes.size()) + ")"
+                    + " ORDER BY distance ASC, chash ASC LIMIT ?";
+                List<Object> b = new ArrayList<>();
                 b.add(vecLit);
+                b.addAll(scopeBinds);
+                b.addAll(inChashes);
                 b.add(nResults);
                 return ctx.fetch(sql, b.toArray());
             }
