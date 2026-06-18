@@ -353,8 +353,9 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
 
     Returns ``True`` when a native binary is ready to exec, ``False`` when none
     is available and none could be acquired (no tag configured). The caller
-    MUST NOT start the service on ``False`` — otherwise it falls through to the
-    legacy ``java -jar`` path, defeating the native-only intent (CRE C1).
+    MUST NOT start the service on ``False`` — since RDR-161 P3 expunged the
+    legacy JVM launch path, starting without a binary now fails loud rather than
+    silently degrading, but skipping the start keeps the UX clean (CRE C1).
     Hard failures (broken ``NEXUS_SERVICE_BIN`` override, a configured tag that
     fails verification) raise ``SystemExit``.
     """
@@ -464,7 +465,7 @@ def _select_bundled_pg(
     """
     if os.environ.get("NEXUS_PG_BIN", "").strip():
         return None
-    from nexus.daemon.jar_lifecycle import well_known_binary_path
+    from nexus.daemon.binary_lifecycle import well_known_binary_path
     from nexus.db.pg_bundle import ensure_pg_bundle
 
     if search_dirs is None:
@@ -596,9 +597,9 @@ def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) ->
         # RDR-161 P1: acquire the verified native binary before starting (no-op
         # when one is already installed). Between PG provisioning and start so
         # _start_service_step has a binary to exec. When no binary is available
-        # and none can be acquired (no tag configured), do NOT start: starting
-        # would fall through to the legacy `java -jar` path and defeat the
-        # native-only intent (CRE C1). PG is provisioned and the step printed an
+        # and none can be acquired (no tag configured), do NOT start: with the
+        # legacy JVM launch path expunged (RDR-161 P3), starting without a binary
+        # now fails loud rather than degrading (CRE C1). PG is provisioned and the step printed an
         # actionable install instruction; exit non-zero so the incomplete setup
         # is not mistaken for a serving backend.
         if not _ensure_service_binary_step(_config.nexus_config_dir()):

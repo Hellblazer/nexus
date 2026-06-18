@@ -38,7 +38,7 @@ from typing import Protocol
 
 import structlog
 
-from nexus.daemon.jar_lifecycle import well_known_binary_path
+from nexus.daemon.binary_lifecycle import well_known_binary_path
 from nexus.db.pg_bundle import current_platform_tag
 
 _log = structlog.get_logger(__name__)
@@ -414,7 +414,7 @@ def install_binary(
 def _provenance(
     tag: str, asset: str, digest: str, source_url: str, installed_by: str
 ) -> dict:
-    """Provenance sidecar payload (mirrors install_jar's fields)."""
+    """Provenance sidecar payload for an installed native binary."""
     return {
         # _validate_tag guarantees the prefix; strip it to the bare version
         # (engine-service-v0.1.3 -> 0.1.3).

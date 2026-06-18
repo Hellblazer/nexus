@@ -1489,7 +1489,7 @@ def t2_uninstall_cmd(autostart: bool) -> None:
 
 @daemon_group.group("service")
 def service_group() -> None:
-    """Storage-service daemon: managed Java service JAR + local Postgres."""
+    """Storage-service daemon: managed native service binary + local Postgres."""
 
 
 @service_group.command("start")
@@ -1498,15 +1498,6 @@ def service_group() -> None:
     "config_dir_str",
     default=None,
     help="Config directory override (default: ~/.config/nexus/).",
-)
-@click.option(
-    "--jar",
-    "jar_path_str",
-    default=None,
-    help=(
-        "Path to nexus-service-*.jar. Default: auto-discovered from "
-        "service/target/ relative to the repository root."
-    ),
 )
 @click.option(
     "--foreground",
@@ -1526,17 +1517,17 @@ def service_group() -> None:
 )
 def service_start_cmd(
     config_dir_str: str | None,
-    jar_path_str: str | None,
     foreground: bool,
     announce_stdout: bool,
 ) -> None:
-    """Start the Java storage-service + Postgres supervisor (RDR-152 P5.1).
+    """Start the native storage-service + Postgres supervisor (RDR-152 P5.1).
 
     Reads pg_credentials from the config directory (written by 'nx init
     --service'), starts the nx-managed Postgres cluster if it is not
-    running, spawns the Java JAR, waits for /health to return 200, then
-    publishes the service endpoint to the ServiceRegistry under the
-    'storage_service' scope key.
+    running, spawns the native nexus-service binary (RDR-161: the sole launch
+    artifact; acquire it via 'nx daemon service install-binary'), waits for
+    /health to return 200, then publishes the service endpoint to the
+    ServiceRegistry under the 'storage_service' scope key.
 
     Without ``--foreground`` the command ensures the supervisor is running
     (spawning one in the background if needed) and exits. With
@@ -1553,11 +1544,10 @@ def service_start_cmd(
     from nexus.daemon.service_registry import ServiceRegistry
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-    jar_path = Path(jar_path_str) if jar_path_str else None
 
     if foreground:
         try:
-            code = run_storage_supervisor(config_dir=config_dir, jar_path=jar_path)
+            code = run_storage_supervisor(config_dir=config_dir)
         except StorageServiceStartError as exc:
             click.echo(f"Error: {exc}", err=True)
             sys.exit(2)
@@ -1573,8 +1563,6 @@ def service_start_cmd(
             *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
             "--config-dir", str(config_dir),
         ]
-        if jar_path is not None:
-            argv += ["--jar", str(jar_path)]
         # nexus-ovbr7: route the child's streams to a crash-channel file so a
         # failure BEFORE run_storage_supervisor's configure_logging runs
         # (import error, bad argv) and interpreter-fatal tracebacks are
@@ -1622,83 +1610,6 @@ def service_start_cmd(
             f"Storage service running on {ep.get('host')}:{ep.get('port')} "
             f"(pid={ep.get('pid')}, generation={existing.generation})."
         )
-
-
-@service_group.command("install-jar")
-@click.argument("jar_path", required=False, default=None)
-@click.option(
-    "--from-repo",
-    "from_repo",
-    is_flag=True,
-    default=False,
-    help="Install the freshest nexus-service-*.jar from this repo checkout's "
-         "service/target/ (dev convenience).",
-)
-@click.option(
-    "--config-dir",
-    "config_dir_str",
-    default=None,
-    help="Config directory override.",
-)
-def service_install_jar_cmd(
-    jar_path: str | None, from_repo: bool, config_dir_str: str | None,
-) -> None:
-    """Install a nexus-service JAR to the well-known location (nexus-pebfx.4).
-
-    Copies the JAR to <config-dir>/service/nexus-service.jar and records
-    provenance (version, sha256, build date, bundled Liquibase changesets)
-    in a sidecar. Supervisor discovery prefers this location, so installed
-    (pip/uv) users never need --jar or a repo checkout.
-    """
-    import glob as _glob
-    from importlib.metadata import PackageNotFoundError, version as _pkg_version
-
-    from nexus.daemon.jar_lifecycle import install_jar
-    from nexus.daemon.storage_service_daemon import StorageServiceStartError
-
-    try:
-        _nx_version = _pkg_version("conexus")
-    except PackageNotFoundError:
-        _nx_version = "unknown"
-
-    if bool(jar_path) == from_repo:
-        raise click.UsageError("pass exactly one of JAR_PATH or --from-repo")
-
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-
-    if from_repo:
-        repo_root = Path(__file__).parent.parent.parent.parent
-        pattern = str(repo_root / "service" / "target" / "nexus-service-*.jar")
-        matches = [
-            m for m in sorted(_glob.glob(pattern))
-            if not m.endswith("-sources.jar")
-        ]
-        if not matches:
-            click.echo(
-                f"Error: no JAR matches {pattern}. Build it first: "
-                "cd service && mvn package -DskipTests -q",
-                err=True,
-            )
-            sys.exit(2)
-        source = Path(matches[-1])
-    else:
-        source = Path(jar_path)  # type: ignore[arg-type]
-
-    try:
-        dest, prov = install_jar(
-            source, config_dir, installed_by=f"conexus {_nx_version}",
-        )
-    except StorageServiceStartError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(2)
-
-    click.echo(f"Installed {source}")
-    click.echo(f"  -> {dest}")
-    click.echo(f"  version:    {prov['version']}")
-    click.echo(f"  sha256:     {prov['sha256'][:16]}…")
-    click.echo(f"  changesets: {len(prov['changesets'])} (Liquibase)")
-    click.echo("Restart the service to pick it up: nx daemon service stop && "
-               "nx daemon service start")
 
 
 @service_group.command("install-binary")
@@ -1929,7 +1840,7 @@ def _pgvector_version(creds: dict) -> str | None:
     """Installed pgvector extension version via psql (admin creds)."""
     import subprocess
 
-    from nexus.daemon.jar_lifecycle import _db_name_from_creds, _psql_bin
+    from nexus.daemon.binary_lifecycle import _db_name_from_creds, _psql_bin
 
     psql = _psql_bin()
     if psql is None:
@@ -1965,7 +1876,7 @@ def _pgvector_version(creds: dict) -> str | None:
 
 
 def _nx_major_gap_note(installed_by: str) -> str | None:
-    """Note when the well-known JAR was installed by an older nx MAJOR.
+    """Note when the well-known binary was installed by an older nx MAJOR.
 
     ``installed_by`` is the sidecar's ``"conexus X.Y.Z"`` stamp. Returns
     ``None`` when versions are unparseable or majors match.
@@ -1983,9 +1894,9 @@ def _nx_major_gap_note(installed_by: str) -> str | None:
         return None
     if installed_major < current_major:
         return (
-            f"installed JAR was installed by {installed_by} but this nx is "
-            f"major version {current_major} — reinstall it from a current "
-            "build: nx daemon service install-jar <path>"
+            f"installed service binary was installed by {installed_by} but this "
+            f"nx is major version {current_major} — reinstall it from a current "
+            "build: nx daemon service install-binary <tag>"
         )
     return None
 
@@ -2031,7 +1942,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     }
 
     # nexus-pebfx.5: one surface answering "is the stack healthy and how is
-    # it configured" — supervisor, JAR (/health + /version), PG cluster,
+    # it configured" — supervisor, native service (/health + /version), PG cluster,
     # embedding mode, pgvector version, and the paths an operator would
     # otherwise assemble from ps aux + psql + curl + the addr file by hand.
     import os as _os
@@ -2051,15 +1962,15 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # stack writes a log file; an operator triaging a death should not have
     # to know the layout by heart.
     data["supervisor_log"] = str(config_dir / "logs" / "storage_service.log")
-    data["jar_log"] = str(config_dir / "logs" / "storage_service_jar.log")
+    data["service_log"] = str(config_dir / "logs" / "storage_service_native.log")
     data["crash_log"] = str(config_dir / "logs" / "storage_service.crash.log")
     if pg_info.get("pg_data"):
         data["pg_log"] = str(Path(pg_info["pg_data"]) / "pg.log")
 
     # nexus-pebfx.4 version handshake: report the RUNNING service's app +
-    # schema versions, and warn when they drift from the JAR installed at
+    # schema versions, and warn when they drift from the binary installed at
     # the well-known location (a stale service that needs a restart).
-    from nexus.daemon.jar_lifecycle import (
+    from nexus.daemon.binary_lifecycle import (
         fetch_service_version,
         read_installed_provenance,
     )
@@ -2091,14 +2002,14 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         ):
             stale_warning = (
                 f"running service is app_version={svc_version['app_version']} "
-                f"but the installed JAR is {installed['version']} — restart to "
+                f"but the installed binary is {installed['version']} — restart to "
                 "pick it up: nx daemon service stop && nx daemon service start"
             )
             data["stale"] = True
-        # Bead pebfx.4(b): warn when the installed JAR predates the current
-        # nx by a major version — the proactive "this JAR was installed by a
-        # much older nx" signal (JAR and nx version schemes are otherwise
-        # incomparable; the schema-skew gate catches actual drift at start).
+        # Bead pebfx.4(b): warn when the installed binary predates the current
+        # nx by a major version — the proactive "this binary was installed by a
+        # much older nx" signal (binary and nx version schemes are otherwise
+        # incomparable).
         if installed is not None and not stale_warning:
             note = _nx_major_gap_note(installed.get("installed_by", ""))
             if note:

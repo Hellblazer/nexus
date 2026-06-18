@@ -840,7 +840,8 @@ class TestServiceStartStep:
 
         def _boom():
             raise StorageServiceStartError(
-                "No nexus-service JAR found. Install one: nx daemon service install-jar <path>"
+                "No nexus-service native binary found. Acquire one: "
+                "nx daemon service install-binary <tag>"
             )
 
         monkeypatch.setattr(
