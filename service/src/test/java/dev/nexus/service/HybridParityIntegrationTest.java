@@ -43,12 +43,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-155 P3.1 (bead nexus-sbvg0): hybrid-parity seam — engine pgvector hybrid vs the
  * legacy FTS5 + Chroma two-path fusion, fixture scale.
  *
- * <p><strong>TDD-RED:</strong> the parity tests call
- * {@link PgVectorRepository#hybridSearch} and fail with
- * {@link UnsupportedOperationException} until bead nexus-eap5l (P3.2) implements it.
- * The fixture guards (corpus seeding, legacy-leg candidate sets, tie margins) are
- * green now — they verify the COMPARAND is correctly constructed before the engine
- * side exists, exactly like the conexus xr7.8.7 fixture guards.
+ * <p><strong>Now fully green:</strong> {@link PgVectorRepository#hybridSearch} is
+ * implemented (bead nexus-eap5l, P3.2), so both the fixture guards (corpus seeding,
+ * legacy-leg candidate sets, tie margins) AND the parity seam tests pass. The guards
+ * verify the COMPARAND is correctly constructed; the seam tests verify the engine
+ * hybrid matches the legacy fusion within the exactly-pinned tokenizer deltas below.
+ * (Originally authored TDD-RED against an {@code UnsupportedOperationException} stub,
+ * exactly like the conexus xr7.8.7 fixture guards.)
  *
  * <p><strong>The comparand is the real legacy engines, not a reimplementation:</strong>
  * <ul>
@@ -311,7 +312,7 @@ class HybridParityIntegrationTest {
                 .toList();
     }
 
-    /** Engine hybrid top-k IDs (RED until P3.2 implements hybridSearch). */
+    /** Engine hybrid top-k IDs (P3.2 / nexus-eap5l implements hybridSearch). */
     private List<String> engineHybridTopK(String query, int k) {
         return pgRepo.hybridSearch(TENANT, query, List.of(PG_COL), k, null).stream()
                 .map(r -> (String) r.get("id"))
@@ -328,7 +329,7 @@ class HybridParityIntegrationTest {
     }
 
     // ---------------------------------------------------------------------------
-    // Fixture guards (GREEN before P3.2 — they verify the comparand, not the engine)
+    // Fixture guards (verify the comparand, not the engine)
     // ---------------------------------------------------------------------------
 
     @Test
@@ -395,7 +396,7 @@ class HybridParityIntegrationTest {
     }
 
     // ---------------------------------------------------------------------------
-    // Parity seam (RED until P3.2)
+    // Parity seam (engine hybrid vs legacy fusion)
     // ---------------------------------------------------------------------------
 
     @Test
