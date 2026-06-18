@@ -397,26 +397,19 @@ case "$MODE" in
         echo "[3/3] Service E2E (LOCAL mode, fresh sandbox HOME=$SANDBOX):"
         cd /tmp
 
-        # ── Artifact positioning (the launcher's job; P4.1 made the supervisor
-        #    able to launch whatever is positioned here). Native binary wins. ──
+        # ── Artifact positioning. RDR-161: the native binary is the SOLE launch
+        #    artifact — the java -jar fallback is expunged, so there is no
+        #    repo-JAR dev fallback any more. Provide a native binary via
+        #    NEXUS_SERVICE_BIN, the well-known location (e.g. from
+        #    `nx daemon service install-binary <engine-service-v* tag>`), or
+        #    `nx init --service` (which acquires + verifies it). ──
         SVC_WELL_KNOWN="$HOME/.config/nexus/service/nexus-service"
         if [[ -n "${NEXUS_SERVICE_BIN:-}" && -x "${NEXUS_SERVICE_BIN}" ]]; then
             echo "  artifact: native binary (NEXUS_SERVICE_BIN=$NEXUS_SERVICE_BIN)"
         elif [[ -x "$SVC_WELL_KNOWN" ]]; then
             echo "  artifact: native binary (well-known $SVC_WELL_KNOWN)"
         else
-            # Fall back to the repo-built JAR. P4.1 supports both; the native
-            # binary is exercised on CI/release where it is built.
-            JAR=""
-            for cand in "$REPO_ROOT"/service/target/nexus-service-*.jar; do
-                [[ -f "$cand" ]] || continue           # glob did not match
-                [[ "$cand" == *-sources.jar ]] && continue
-                JAR="$cand"
-            done
-            [[ -n "$JAR" ]] || _die "no service artifact: set NEXUS_SERVICE_BIN to a native binary, or build the JAR (cd service && mvn package -DskipTests -Pprebuilt-jooq -q)"
-            echo "  artifact: JAR (dev fallback) $JAR"
-            nx daemon service install-jar "$JAR" 2>&1 | tail -2 | sed 's/^/    /' \
-                || _die "install-jar failed"
+            _die "no native service binary: set NEXUS_SERVICE_BIN to a native nexus-service binary, or install one with 'nx daemon service install-binary <engine-service-v* tag>' (RDR-161: the java -jar path is expunged; there is no repo-JAR fallback)"
         fi
 
         # ── PG source (host PG on PATH, or a ship-alongside bundle). The bundle
