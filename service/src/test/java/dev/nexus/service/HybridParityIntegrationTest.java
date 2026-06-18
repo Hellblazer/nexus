@@ -118,34 +118,56 @@ class HybridParityIntegrationTest {
     // indexing rows (QB), and fillers share no stem-colliding words.
     // ---------------------------------------------------------------------------
 
+    // Row ids are 32-char chashes (chunks_384_chash_len_check, RDR-156-era). The readable
+    // labels below are padded to 32 chars by {@link #chash}, so failure output stays legible
+    // ('par-t1' → 'par-t10000…') while the ids satisfy the length constraint the pgvector leg
+    // enforces. The SAME id is seeded into all three stores, so cross-store parity by id holds.
+
+    /** 32-char chunk id: readable label zero-padded to satisfy chunks_&lt;dim&gt;_chash_len_check. */
+    private static String chash(String label) {
+        if (label.length() > 32) throw new IllegalArgumentException("label too long: " + label);
+        return label + "0".repeat(32 - label.length());
+    }
+
+    private static final String T1 = chash("par-t1");
+    private static final String T2 = chash("par-t2");
+    private static final String T3 = chash("par-t3");
+    private static final String U1 = chash("par-u1");
+    private static final String U2 = chash("par-u2");
+    private static final String U3 = chash("par-u3");
+    private static final String F1 = chash("par-f1");
+    private static final String F2 = chash("par-f2");
+    private static final String F3 = chash("par-f3");
+    private static final String F4 = chash("par-f4");
+
     private static final Map<String, String> CORPUS = new LinkedHashMap<>();
     static {
         // QA domain — exact word forms 'postgres' + 'transaction' (no variants anywhere
         // else in the corpus): english and unicode61 derive the SAME candidate set.
-        CORPUS.put("par-t1", "postgres transaction semantics with mvcc");
-        CORPUS.put("par-t2", "a postgres transaction can roll back");
-        CORPUS.put("par-t3", "postgres transaction isolation levels explained");
+        CORPUS.put(T1, "postgres transaction semantics with mvcc");
+        CORPUS.put(T2, "a postgres transaction can roll back");
+        CORPUS.put(T3, "postgres transaction isolation levels explained");
         // QB domain — morphological variants: 'indexing strategies' / 'index strategy' /
         // 'indexed strategies'. The english stemmer maps all three to 'index' &
         // 'strategi'; unicode61 FTS5 matches only the exact tokens.
-        CORPUS.put("par-u1", "indexing strategies for large corpora");
-        CORPUS.put("par-u2", "an index strategy for btree lookups");
-        CORPUS.put("par-u3", "indexed strategies guide for analytics");
+        CORPUS.put(U1, "indexing strategies for large corpora");
+        CORPUS.put(U2, "an index strategy for btree lookups");
+        CORPUS.put(U3, "indexed strategies guide for analytics");
         // Fillers — distinct vocabulary, never text-match any probe query.
-        CORPUS.put("par-f1", "chroma etl pipeline with rollback flag");
-        CORPUS.put("par-f2", "tokenizer divergence between engines");
-        CORPUS.put("par-f3", "hybrid retrieval fusion ranking");
-        CORPUS.put("par-f4", "cosine similarity in embedding spaces");
+        CORPUS.put(F1, "chroma etl pipeline with rollback flag");
+        CORPUS.put(F2, "tokenizer divergence between engines");
+        CORPUS.put(F3, "hybrid retrieval fusion ranking");
+        CORPUS.put(F4, "cosine similarity in embedding spaces");
     }
 
     /** QA — aligned: both tokenizers match exactly {t1, t2, t3}. */
     private static final String QA = "postgres transaction";
-    private static final Set<String> QA_LEGACY_CANDIDATES = Set.of("par-t1", "par-t2", "par-t3");
+    private static final Set<String> QA_LEGACY_CANDIDATES = Set.of(T1, T2, T3);
 
     /** QB — stemmer-divergent: english matches {u1, u2, u3}, unicode61 only {u1}. */
     private static final String QB = "indexing strategies";
-    private static final Set<String> QB_LEGACY_CANDIDATES = Set.of("par-u1");
-    private static final Set<String> QB_ENGINE_CANDIDATES = Set.of("par-u1", "par-u2", "par-u3");
+    private static final Set<String> QB_LEGACY_CANDIDATES = Set.of(U1);
+    private static final Set<String> QB_ENGINE_CANDIDATES = Set.of(U1, U2, U3);
 
     /** QC — typo ('transacton'): no FTS lexeme either side; only pg_trgm can rescue. */
     private static final String QC = "transacton isolation";
@@ -191,6 +213,8 @@ class HybridParityIntegrationTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_384 TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -400,7 +424,7 @@ class HybridParityIntegrationTest {
 
         assertThat(legacy)
             .as("legacy fused list is exactly the single exact-token row")
-            .containsExactly("par-u1");
+            .containsExactly(U1);
         assertThat(Set.copyOf(engine))
             .as("engine candidate set is exactly the three stemmed-variant rows")
             .isEqualTo(QB_ENGINE_CANDIDATES);
@@ -438,7 +462,7 @@ class HybridParityIntegrationTest {
             .isNotEmpty()
             .as("the row containing both corrected words ('transaction isolation') has "
                 + "the highest text similarity under any sane gate and must be present")
-            .contains("par-t3");
+            .contains(T3);
     }
 
     @Test
