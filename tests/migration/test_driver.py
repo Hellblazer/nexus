@@ -27,7 +27,7 @@ from nexus.migration.orchestrator import EtlSources
 from nexus.migration.sequencer import SequenceOutcome
 from nexus.migration.validation import ValidationChecks, ValidationOutcome
 
-_ONNX = "minilm-l6-v2-384"
+_ONNX = "bge-base-en-v15-768"
 _VOYAGE = "voyage-context-3"
 
 
@@ -48,7 +48,7 @@ def _cls(
         leg=leg,  # type: ignore[arg-type]
         model=model,
         dim=dim,
-        support="supported-onnx-384" if model == _ONNX else "supported-voyage-1024",
+        support="supported-onnx" if model == _ONNX else "supported-voyage-1024",
         source_count=10 if has_data else 0,
         has_data=has_data,
         reason="",
@@ -270,7 +270,7 @@ def test_two_leg_composes_collections_and_dims(monkeypatch, _sources):
     closables: list[str] = []
     capture: dict = {}
     detection = _detection(
-        _cls("code__o__minilm-l6-v2-384__v1", "local", model=_ONNX, dim=384),
+        _cls("code__o__bge-base-en-v15-768__v1", "local", model=_ONNX, dim=768),
         _cls("docs__o__voyage-context-3__v1", "cloud", model=_VOYAGE, dim=1024),
     )
     _patch_engine(
@@ -298,13 +298,13 @@ def test_two_leg_composes_collections_and_dims(monkeypatch, _sources):
     )
     assert result.ok is True
     assert set(capture["collections"]) == {
-        "code__o__minilm-l6-v2-384__v1",
+        "code__o__bge-base-en-v15-768__v1",
         "docs__o__voyage-context-3__v1",
     }
-    assert capture["dims"] == (384, 1024)
+    assert capture["dims"] == (768, 1024)
     # The composite read client routes each collection to its source leg.
     composite = capture["read_client"]
-    assert composite._by_collection["code__o__minilm-l6-v2-384__v1"] is legs_clients["local"]
+    assert composite._by_collection["code__o__bge-base-en-v15-768__v1"] is legs_clients["local"]
     assert composite._by_collection["docs__o__voyage-context-3__v1"] is legs_clients["cloud"]
     # Both reopened legs closed.
     assert {"reopen-local", "reopen-cloud"} <= set(closables)
