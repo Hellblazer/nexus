@@ -3,10 +3,10 @@
 """Native service binary lifecycle for installed users.
 
 pip/uv-installed users have no ``service/target`` directory. RDR-161 made the
-signed native nexus-service binary the SOLE launch artifact (the ``java -jar``
-path is expunged); ``nx daemon service install-binary`` acquires and verifies
-it (see :mod:`nexus.daemon.binary_install`). This module provides the read-side
-helpers the supervisor and the ``service status`` command share:
+signed native nexus-service binary the SOLE launch artifact (the legacy JVM
+launch path is expunged); ``nx daemon service install-binary`` acquires and
+verifies it (see :mod:`nexus.daemon.binary_install`). This module provides the
+read-side helpers the supervisor and the ``service status`` command share:
 
 - the **well-known binary location** ``<config_dir>/service/nexus-service``
   that supervisor discovery execs directly;
@@ -15,9 +15,9 @@ helpers the supervisor and the ``service status`` command share:
 - the running service's ``/version`` **handshake**;
 - psql discovery helpers used by the ``status`` Postgres probe.
 
-(Renamed from ``jar_lifecycle.py`` in RDR-161 P3; the JAR install path,
-fat-JAR provenance extraction, and the schema-skew gate were removed with the
-``java -jar`` launch path.)
+(Renamed from the former JVM-lifecycle module in RDR-161 P3; the legacy install
+path, fat-binary provenance extraction, and the schema-skew gate were removed
+with the legacy JVM launch path.)
 """
 from __future__ import annotations
 

@@ -2002,14 +2002,14 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         ):
             stale_warning = (
                 f"running service is app_version={svc_version['app_version']} "
-                f"but the installed JAR is {installed['version']} — restart to "
+                f"but the installed binary is {installed['version']} — restart to "
                 "pick it up: nx daemon service stop && nx daemon service start"
             )
             data["stale"] = True
-        # Bead pebfx.4(b): warn when the installed JAR predates the current
-        # nx by a major version — the proactive "this JAR was installed by a
-        # much older nx" signal (JAR and nx version schemes are otherwise
-        # incomparable; the schema-skew gate catches actual drift at start).
+        # Bead pebfx.4(b): warn when the installed binary predates the current
+        # nx by a major version — the proactive "this binary was installed by a
+        # much older nx" signal (binary and nx version schemes are otherwise
+        # incomparable).
         if installed is not None and not stale_warning:
             note = _nx_major_gap_note(installed.get("installed_by", ""))
             if note:
