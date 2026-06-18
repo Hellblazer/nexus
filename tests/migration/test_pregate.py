@@ -201,7 +201,7 @@ def test_empty_collections_are_not_gated() -> None:
 
 def test_all_supported_mixed_proceeds() -> None:
     classifications = [
-        _cls("code__nexus__minilm-l6-v2-384__v1", _ONNX),
+        _cls("code__nexus__bge-base-en-v15-768__v1", _ONNX),
         _cls("knowledge__art__voyage-context-3__v1", _VOYAGE),
     ]
     # Service HAS voyage wired → both supported → no raise.
@@ -276,7 +276,7 @@ def test_is_fresh_user_true_when_no_data() -> None:
 
     empty = DetectionReport(classifications=())
     only_empty = DetectionReport(
-        classifications=(_cls("code__x__minilm-l6-v2-384__v1", _ONNX, has_data=False),)
+        classifications=(_cls("code__x__bge-base-en-v15-768__v1", _ONNX, has_data=False),)
     )
     assert is_fresh_user(empty) is True
     assert is_fresh_user(only_empty) is True  # no data-bearing legs
@@ -286,7 +286,7 @@ def test_is_fresh_user_false_when_data_present() -> None:
     from nexus.migration.detection import DetectionReport
 
     report = DetectionReport(
-        classifications=(_cls("code__x__minilm-l6-v2-384__v1", _ONNX),)
+        classifications=(_cls("code__x__bge-base-en-v15-768__v1", _ONNX),)
     )
     assert is_fresh_user(report) is False
 

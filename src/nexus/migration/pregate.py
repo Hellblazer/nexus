@@ -18,7 +18,8 @@ Gate decisions (per data-bearing collection, RF-2 / gates S1 + C3):
 * model wired by the live service → PROCEED (onnx is wired in every mode);
 * voyage model not wired (service has no voyage embedder) → BLOCK with the
   credential diagnostic (add ``NX_VOYAGE_API_KEY`` to the service) — gate C3;
-* a model wired by no embedder (e.g. bge-768) → BLOCK with the re-index
+* a model wired by no service embedder (e.g. a legacy minilm-384 collection,
+  retired from the service by RDR-160) → BLOCK with the re-index
   diagnostic — gate S1.
 
 A mixed store fires the gate only on its unsupported subset. Empty collections

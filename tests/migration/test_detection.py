@@ -576,7 +576,7 @@ class TestMigrateToServiceRun:
             verdict="verified" if unlocked else "blocked",
             blocking_reasons=() if unlocked else ("counts: 1 collection mismatch",),
             taxonomy_orphans=(),
-            count_mismatches=() if unlocked else ("code__o__minilm-l6-v2-384__v1",),
+            count_mismatches=() if unlocked else ("code__o__bge-base-en-v15-768__v1",),
             count_indeterminate=False,
             manifest_orphan_count=0,
             manifest_vacuous=False,
