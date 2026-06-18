@@ -41,20 +41,19 @@ either way.
 
 A legacy user's local Chroma is minilm-384 (the pre-RDR-160 default). The
 bge-768 service cannot serve 384-dim vectors, and `migrate-to-service` is
-same-model by contract (`vector_etl` sends chunk text, preserves the source
-collection name byte-for-byte, and the service re-embeds with the embedder
-matching the name's model segment — RDR-109 cross-model-contamination guard).
-So the only correct legacy path is a **two-stage chain**: `embed_migrate`
-(RDR-144, local 384→768 re-index, which remaps the collection's model segment)
-**then** `migrate-to-service` (now same-model bge-768 → service). Today nothing
-composes these two primitives, and the rehearsal does not exercise the chain —
-it feeds a raw minilm-384 source straight to the service.
+same-model by contract: `vector_etl` re-embeds the stored chunk text but
+preserves the source collection name byte-for-byte, so the service refuses a
+`minilm-l6-v2-384` name (RDR-109 cross-model-contamination guard). Today there
+is **no cross-model migration path** — nothing remaps the target to the
+service's model — and the rehearsal does not exercise one; it feeds a raw
+minilm-384 source straight to the service and hits the 422. (The §Decision
+resolves this with a single-stage stored-text re-embed + target-model remap,
+which needs no source files; see §Decision 2.)
 
 The user-facing single-command orchestration (`nx upgrade` detect→guide) is
 **conexus RDR-001**, which already exists as the consumer. This RDR is the
-**nexus-side** half: make the classifier truthful and make the
-re-index→migrate chain a composable, rehearsal-proven primitive set that
-conexus RDR-001 drives.
+**nexus-side** half: make the classifier truthful and make the cross-model
+migrate a composable, rehearsal-proven primitive that conexus RDR-001 drives.
 
 ## Decision
 
@@ -66,14 +65,23 @@ conexus RDR-001 drives.
    answer that points the user at the local re-index step instead of marching
    them into a 422.
 
-2. **Make the legacy 384→768 re-index→migrate chain a composable, proven
-   primitive set.** The rehearsal drives `embed_migrate` (384→768) then
-   `migrate-to-service` (768→service) and asserts the chain lands the data in
-   pgvector; it also asserts a bare minilm-384 source is correctly *blocked*
-   (not silently half-migrated). The chaining ORDER, idempotency, and
-   partial-failure/rollback semantics across the two stages are the nexus
-   contract conexus RDR-001 consumes; no new user-facing command is added here
-   (that is RDR-001's surface).
+2. **Re-embed the STORED CHUNK TEXT into a model-remapped target — no source
+   files, single stage.** The chunk text is already in the source collection
+   (`documents`), and `vector_etl` already re-embeds *that* server-side
+   (`iter_collection_chunks` reads the stored text; source vectors are never
+   read). The ONLY thing blocking cross-model migration is that `vector_etl`
+   preserves the source collection name byte-for-byte, so the bge-768 service
+   rejects a `minilm-l6-v2-384` name. The fix is a **cross-model mode on
+   `migrate-to-service`**: remap the target collection's model segment to the
+   service's model (bge-768), re-embed the stored text under the new name, and
+   update the catalog/topic `source_collection` references that the byte-for-byte
+   preservation existed to keep valid. This is strictly better than a two-stage
+   `embed_migrate` → `migrate-to-service` chain: it needs **no source files**, so
+   it also migrates `sourceless` collections (manual `store_put` notes) that
+   `embed_migrate` explicitly cannot re-index. `embed_migrate` (RDR-144) remains
+   the LOCAL-only 384→768 upgrade path (user staying on Chroma); it is not the
+   service-migration path. No new user-facing command is added here (that is
+   conexus RDR-001's surface).
 
 3. **Do not weaken the service's model-identity guard.** The bge-768 service
    correctly refuses to embed a minilm-384-named collection (RDR-109 /
@@ -87,9 +95,11 @@ conexus RDR-001 drives.
    invert that: post-RDR-162, **bge-768 is `supported-onnx`** (the service's
    wired model) and **minilm-384 is `unsupported`** with the re-index-required
    diagnostic. The RDR-159 test-plan item (d) is replaced by the P2 rehearsal
-   assertions (bge-768 migrates clean; minilm-384 is blocked, then chained via
-   `embed_migrate`). This is correct supersession, not scope reduction; the
-   RDR-159 tests encoding the old model are deleted and replaced, not edited.
+   assertions (a bge-768 collection migrates clean; a legacy minilm-384
+   collection is migrated cross-model via the single-stage stored-text re-embed
+   into a bge-768-remapped target). This is correct supersession, not scope
+   reduction; the RDR-159 tests encoding the old model are deleted and replaced,
+   not edited.
 
 ## Approach (phased)
 
@@ -109,23 +119,31 @@ conexus RDR-001 drives.
   literal (it may only branch on `== "unsupported"` / `== "supported-voyage-1024"`,
   both unchanged) before touching it. Assertions stay exact, never inequalities.
 
-**Phase 2: Rehearsal proves both paths**
+**Phase 2: Cross-model migrate (stored-text re-embed + model remap)**
 
-- `tests/e2e/migration-rehearsal`: seed BOTH a bge-768 collection (migrates
-  clean) AND a legacy minilm-384 collection; assert the minilm-384 one is
-  classified `unsupported` / blocked with the re-index diagnostic, then drive
-  `embed_migrate` (384→768) and re-run `migrate-to-service` to prove the chained
-  legacy path lands in pgvector. Phase A (native serve) and Phase C (rollback
-  safety) already pass.
+- Add a cross-model mode to `migrate-to-service` / `vector_etl`: when a source
+  collection's model segment is unsupported by the service but its chunk text is
+  present, re-embed the stored text into a target collection whose model segment
+  is the service's model (bge-768), and update the catalog/topic
+  `source_collection` references to the remapped name (the references the
+  byte-for-byte preservation protected). Idempotent on `(tenant, target_collection,
+  chash)`. Covers `sourceless` collections (manual notes) that `embed_migrate`
+  cannot.
+- Rehearsal proves it: `tests/e2e/migration-rehearsal` seeds a legacy minilm-384
+  collection (incl. a sourceless `store_put`-style note) and asserts it migrates
+  to a bge-768 target via the stored-text re-embed, lands in pgvector, and the
+  catalog references resolve to the new name. Phase A (native serve) + Phase C
+  (rollback safety) already pass.
 
-**Phase 3: Chain contract + conexus RDR-001 coordination**
+**Phase 3: Contract + conexus RDR-001 coordination**
 
-- Pin the composition contract (order, idempotency, partial-failure/rollback
-  per the §Open Questions disposition) across `nexus.db.embed_migrate` (the
-  RDR-144 re-index primitive; note it lives under `db/`, not `migration/`) →
-  `migrate-to-service` that the conexus RDR-001 orchestration consumes; update
-  the RDR-157 P5 handoff doc if the contract shifts. Relay the nexus-side
-  contract to the conexus RDR-001 instance.
+- Pin the composition contract the conexus RDR-001 orchestration consumes:
+  the cross-model `migrate-to-service` mode (target model = service model,
+  stored-text re-embed, reference remap), its idempotency/partial-failure
+  disposition (per §Open Questions), and the boundary with `embed_migrate`
+  (`nexus.db.embed_migrate`, under `db/`, is LOCAL-only upgrade — not the service
+  path). Update the RDR-157 P5 handoff doc if the contract shifts; relay to the
+  conexus RDR-001 instance.
 - Phase-review-gate cross-walk + stacked review (behavioral change in the
   migration layer).
 
@@ -156,14 +174,16 @@ conexus RDR-001 drives.
 - Does any consumer branch on the exact `supported-onnx-384` literal beyond the
   `== "unsupported"` / `== "supported-voyage-1024"` checks? **Resolved (CA-1):**
   no — production code is clean; only tests carry the literal.
-- **Rollback boundary — DISPOSITION (confirm at P3, not genuinely open):** when
-  `embed_migrate` succeeds and `migrate-to-service` fails, the user is in a
-  re-runnable **768-local** state; there is no unwind to 384 and none is needed.
-  `embed_migrate` is reindex-first/delete-after-verify (RDR-144) and
-  `migrate-to-service` is idempotent on `(tenant, collection, chash)` (RDR-155
-  RF-5), so re-running `migrate-to-service` from the 768-local Chroma is the
-  clean recovery path. P3 codifies this as the contract conexus RDR-001 consumes
-  and verifies it with the rehearsal's partial-failure assertion.
+- **Rollback boundary — DISPOSITION (confirm at P3, not genuinely open):** the
+  single-stage stored-text re-embed is copy-not-move — the source Chroma
+  collection is never mutated (RDR-155 RF-5), so a failed cross-model migrate is
+  cleanly re-runnable from the untouched 384 source. `migrate-to-service` is
+  idempotent on `(tenant, target_collection, chash)`, so a partial target is
+  resumed, not duplicated. The reference remap (catalog/topic
+  `source_collection`) is the one mutation that must be ordered AFTER the target
+  is verified-populated (mirror RDR-144's reindex-first/delete-after-verify
+  ordering) so a mid-migrate failure never leaves dangling references. P3
+  codifies this and the rehearsal asserts the partial-failure path.
 
 ## Research Findings
 
@@ -196,8 +216,18 @@ conexus RDR-001 drives.
   bge-768-named collection (768-dim vectors, reindex-first/delete-after-verify),
   which `migrate-to-service` then sees as a same-model bge-768 collection the
   service accepts — no cross-model upsert, no 422.
-- **CA-3 VERIFIED — the guard stays; re-index is the upstream fix.** The
+- **CA-3 VERIFIED — the guard stays; the target-name remap is the fix.** The
   service's `EmbedderRouter` model-identity guard (RDR-109 / nexus-pebfx.2)
   refuses to embed a collection with an embedder other than its name's model
-  segment, by design. `embed_migrate` IS that upstream re-index (it remaps the
-  segment to bge-768), so the correct path never weakens the guard.
+  segment, by design. The cross-model migrate satisfies it by remapping the
+  TARGET collection's model segment to bge-768 (so the name matches the service
+  embedder), never by relaxing the guard.
+- **DESIGN REFINEMENT (2026-06-18, Hal) — re-embed from stored chunk text, not
+  source files.** `vector_etl` already re-embeds the STORED chunk `documents`
+  (`iter_collection_chunks`), so the cross-model migrate needs **no original
+  file/web source** — only a target-name model remap + reference update. This is
+  strictly better than a two-stage `embed_migrate` → `migrate-to-service` chain:
+  `embed_migrate` re-indexes from `source_paths` and has a `sourceless` category
+  (manual `store_put` notes) it explicitly cannot re-index, whereas the
+  stored-text re-embed covers those too. `embed_migrate` stays the LOCAL-only
+  384→768 upgrade primitive; it is not the service-migration path.
