@@ -734,6 +734,12 @@ class TestServiceLocalEmbedder:
         # so the embedder-focused tests stay hermetic (start coverage is in
         # TestServiceStartStep below).
         monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
+        # RDR-161 P1: init now gates start on a resolvable native binary. These
+        # tests cover the embedder path, not binary acquisition (see
+        # tests/test_init_service_binary.py), so report the binary as ready.
+        monkeypatch.setattr(
+            "nexus.commands.init._ensure_service_binary_step", lambda cd: True
+        )
         calls: list[str] = []
         monkeypatch.setattr(
             "nexus.db.service_bge_model.fetch_service_bge_onnx",
@@ -835,12 +841,16 @@ class TestServiceStartStep:
             lambda **kw: (order.append("embed"), Path("/fake/onnx"))[1],
         )
         monkeypatch.setattr(
+            "nexus.commands.init._ensure_service_binary_step",
+            lambda cd: (order.append("binary"), True)[1],
+        )
+        monkeypatch.setattr(
             "nexus.commands.init._start_service_step",
             lambda: order.append("start"),
         )
         result = CliRunner().invoke(init_cmd, ["--service"])
         assert result.exit_code == 0, result.output
-        assert order == ["pg", "embed", "start"]
+        assert order == ["pg", "embed", "binary", "start"]
 
     def test_auto_service_local_wires_start(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -859,8 +869,12 @@ class TestServiceStartStep:
             lambda **kw: (order.append("embed"), Path("/fake/onnx"))[1],
         )
         monkeypatch.setattr(
+            "nexus.commands.init._ensure_service_binary_step",
+            lambda cd: (order.append("binary"), True)[1],
+        )
+        monkeypatch.setattr(
             "nexus.commands.init._start_service_step", lambda: order.append("start")
         )
         result = CliRunner().invoke(init_cmd, [])
         assert result.exit_code == 0, result.output
-        assert order == ["pg", "embed", "start"]
+        assert order == ["pg", "embed", "binary", "start"]

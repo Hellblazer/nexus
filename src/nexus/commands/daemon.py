@@ -1701,6 +1701,57 @@ def service_install_jar_cmd(
                "nx daemon service start")
 
 
+@service_group.command("install-binary")
+@click.argument("tag", required=True)
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+def service_install_binary_cmd(tag: str, config_dir_str: str | None) -> None:
+    """Download, verify, and install the signed native nexus-service binary.
+
+    TAG is an EXPLICIT engine-service-v* release tag (e.g. engine-service-v0.1.3);
+    there is no "latest" resolution. The per-platform asset, its .sha256, and its
+    .sigstore.json bundle are fetched from the GitHub release, verified
+    (sha256 + keyless Sigstore signature, pinned to this repo's release workflow
+    identity), then placed at <config-dir>/service/nexus-service. Verification
+    fails closed: nothing is installed unless BOTH gates pass.
+    """
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    from nexus.daemon.binary_install import (
+        BinaryVerificationError,
+        asset_name,
+        install_binary,
+    )
+
+    try:
+        _nx_version = _pkg_version("conexus")
+    except PackageNotFoundError:
+        _nx_version = "unknown"
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+
+    click.echo(f"Resolving {asset_name()} from release {tag}…")
+    try:
+        dest, prov = install_binary(
+            tag, config_dir, installed_by=f"conexus {_nx_version}",
+        )
+    except BinaryVerificationError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    click.echo(f"Installed {prov['asset']} ({tag})")
+    click.echo(f"  -> {dest}")
+    click.echo(f"  version: {prov['version']}")
+    click.echo(f"  sha256:  {prov['sha256'][:16]}…")
+    click.echo(f"  signature: verified (keyless Sigstore, {prov['source_url']})")
+    click.echo("Restart the service to pick it up: nx daemon service stop && "
+               "nx daemon service start")
+
+
 @service_group.command("stop")
 @click.option(
     "--config-dir",
