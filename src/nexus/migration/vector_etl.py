@@ -30,10 +30,22 @@ never modified — not by migration, not by rollback. The source is also the
 rollback manifest: :func:`rollback_collections` deletes from pgvector
 exactly the chashes present in the source collection.
 
-COLLECTION NAMES VERBATIM: no namespace normalization — the pgvector
-``collection`` column carries the source name byte-for-byte so
+COLLECTION NAMES VERBATIM (same-model default): no namespace normalization —
+the pgvector ``collection`` column carries the source name byte-for-byte so
 ``topic_assignments.source_collection`` references stay valid (the
 string-copy-orphan class RDR-108 fixed).
+
+CROSS-MODEL EXCEPTION (RDR-162): when a caller passes ``target_names`` (a source
+-> target map), a collection whose model the service cannot serve (e.g. a legacy
+``minilm-l6-v2-384`` source) is re-embedded into a model-remapped TARGET name
+(``...bge-base-en-v15-768...``) — read from the source, upsert + verify on the
+target, dim dispatched from the target segment. The stored chunk text (not the
+source vectors) is what the service re-embeds, so NO source file is required
+(this covers ``sourceless`` manual-note collections too). Because the target
+name differs from the source, the caller MUST remap the catalog/topic
+``source_collection`` references to the target AFTER post-write verification (the
+ref-remap is owned by the orchestrator, ordered after the verified-populated
+gate so a mid-migrate failure never leaves dangling references).
 
 POST-WRITE VERIFICATION: each migrated collection is verified with an
 exact target count; a mismatch is a FAILED migration, never a green one.
@@ -115,6 +127,12 @@ class CollectionResult:
     reason: str = ""
     #: Wall-clock seconds for this collection (nexus-pebfx.3 summary table).
     duration_s: float = 0.0
+    #: RDR-162 cross-model migrate: the pgvector target collection the source
+    #: was re-embedded into when its model segment was remapped (e.g. a legacy
+    #: minilm-384 source re-embedded into a bge-768 target). ``None`` for the
+    #: same-model path (target == source). The orchestrator keys the
+    #: catalog/topic ``source_collection`` ref-remap on (collection -> target).
+    target_collection: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +183,29 @@ def _dim_for_collection(name: str) -> tuple[int | None, str]:
     return dim, ""
 
 
+def cross_model_target_name(source: str, target_model: str) -> str:
+    """Remap a conformant collection name's model segment to *target_model*.
+
+    RDR-162 cross-model migrate: a legacy ``minilm-l6-v2-384`` source is
+    re-embedded into a ``bge-base-en-v15-768`` target — same content_type, owner,
+    and version segments, only the model segment swapped. The service then
+    re-embeds the (model-agnostic) stored chunk text with the target model and
+    accepts the upsert (its name now matches the wired embedder; RDR-109 /
+    nexus-pebfx.2 guard satisfied without weakening it).
+
+    Raises ``ValueError`` on a non-conformant source (the caller must only remap
+    four-segment names; a non-conformant source is ``skipped`` upstream).
+    """
+    segments = source.split("__")
+    if len(segments) != 4:
+        raise ValueError(
+            f"cannot remap non-conformant collection name '{source}' "
+            "(<content_type>__<owner>__<model>__v<n>)"
+        )
+    segments[2] = target_model
+    return "__".join(segments)
+
+
 def _iter_id_pages(
     read_client: Any, collection: str, page: int
 ) -> Iterator[list[dict[str, Any]]]:
@@ -186,8 +227,15 @@ def _migrate_one(
     *,
     dry_run: bool,
     page: int,
+    target_name: str | None = None,
 ) -> CollectionResult:
-    dim, reason = _dim_for_collection(name)
+    # RDR-162 cross-model migrate: when *target_name* differs from *name*, read
+    # the stored chunk text from the SOURCE (*name*) but upsert + verify against
+    # the TARGET (the model-remapped name). The service re-embeds the text with
+    # the target's model. The pgvector dim is dispatched from the TARGET segment.
+    target = target_name or name
+    is_cross_model = target != name
+    dim, reason = _dim_for_collection(target)
     if dim is None:
         # nexus-pebfx.3 disposition rule: probe the source count. Empty +
         # non-conformant cannot lose data — report "skipped-empty" (clean).
@@ -218,16 +266,26 @@ def _migrate_one(
 
     if dry_run:
         source_count = int(source_col.count())
-        _log.info("vector_etl_dry_run", collection=name, source_count=source_count)
-        return CollectionResult(name, source_count, 0, "dry-run")
+        _log.info(
+            "vector_etl_dry_run", collection=name, target=target,
+            source_count=source_count, cross_model=is_cross_model,
+        )
+        return CollectionResult(
+            name, source_count, 0, "dry-run",
+            target_collection=target if is_cross_model else None,
+        )
 
     source_count = 0
     written = 0
     try:
         for batch in _iter_id_pages(read_client, name, page):
             source_count += len(batch)
+            # Read from the SOURCE (*name*); upsert into the TARGET (model-remapped
+            # for cross-model). Server re-embeds the stored text with the target's
+            # model — chash (sha256(text)[:32]) is identical, so re-runs stay
+            # idempotent on (tenant, target, chash).
             vector_client.upsert_chunks(
-                name,
+                target,
                 [c["id"] for c in batch],
                 [c["document"] for c in batch],
                 [c["metadata"] for c in batch],
@@ -238,13 +296,17 @@ def _migrate_one(
         _log.error(
             "vector_etl_upsert_failed",
             collection=name,
+            target=target,
             written=written,
             error=str(exc),
         )
-        return CollectionResult(name, source_count, written, "failed", reason)
+        return CollectionResult(
+            name, source_count, written, "failed", reason,
+            target_collection=target if is_cross_model else None,
+        )
 
-    # Post-write verification: exact target count or it did not happen.
-    target_count = int(vector_client.count(name))
+    # Post-write verification: exact TARGET count or it did not happen.
+    target_count = int(vector_client.count(target))
     if target_count != source_count:
         reason = (
             f"post-write count mismatch: source={source_count} "
@@ -256,14 +318,22 @@ def _migrate_one(
             source=source_count,
             target=target_count,
         )
-        return CollectionResult(name, source_count, written, "failed", reason)
+        return CollectionResult(
+            name, source_count, written, "failed", reason,
+            target_collection=target if is_cross_model else None,
+        )
 
     _log.info(
         "vector_etl_collection_migrated",
         collection=name,
+        target=target,
         count=source_count,
+        cross_model=is_cross_model,
     )
-    return CollectionResult(name, source_count, written, "migrated")
+    return CollectionResult(
+        name, source_count, written, "migrated",
+        target_collection=target if is_cross_model else None,
+    )
 
 
 def migrate_collections(
@@ -275,6 +345,7 @@ def migrate_collections(
     dry_run: bool = False,
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
+    target_names: dict[str, str] | None = None,
 ) -> MigrationReport:
     """Copy every chunk of *collections* (default: ALL source collections)
     from the Chroma *read_client* into pgvector via *vector_client*.
@@ -319,6 +390,7 @@ def migrate_collections(
         t0 = time.monotonic()
         result = _migrate_one(
             read_client, vector_client, name, dry_run=dry_run, page=page,
+            target_name=(target_names or {}).get(name),
         )
         result = dataclasses.replace(
             result, duration_s=round(time.monotonic() - t0, 3),
