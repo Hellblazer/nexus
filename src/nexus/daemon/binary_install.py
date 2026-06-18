@@ -38,7 +38,7 @@ from typing import Protocol
 
 import structlog
 
-from nexus.daemon.jar_lifecycle import well_known_binary_path
+from nexus.daemon.binary_lifecycle import well_known_binary_path
 from nexus.db.pg_bundle import current_platform_tag
 
 _log = structlog.get_logger(__name__)

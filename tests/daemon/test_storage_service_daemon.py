@@ -1213,14 +1213,17 @@ class TestNativeStartHasNoSchemaSkewGate:
     def test_native_start_skips_skew_gate(
         self, config_dir: Path, clock: _FakeClock,
     ) -> None:
+        # The gate helper is expunged entirely; a native start reaches spawn.
+        import nexus.daemon.binary_lifecycle as bl
+        assert not hasattr(bl, "check_schema_skew")
+
         sup = _make_supervisor(config_dir, clock)
         proc = _FakeProc(pid=51000)
         with patch.object(sup, "_ensure_pg_running"), \
-             patch("nexus.daemon.jar_lifecycle.check_schema_skew") as gate, \
-             patch.object(sup, "_spawn_service", return_value=(proc, 19500)), \
+             patch.object(sup, "_spawn_service", return_value=(proc, 19500)) as spawn, \
              patch.object(sup, "_wait_for_service_ready"):
             payload = sup.start()
-        gate.assert_not_called()
+        spawn.assert_called_once()
         assert payload["port"] == 19500
 
 

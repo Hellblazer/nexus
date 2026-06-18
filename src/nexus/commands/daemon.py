@@ -1840,7 +1840,7 @@ def _pgvector_version(creds: dict) -> str | None:
     """Installed pgvector extension version via psql (admin creds)."""
     import subprocess
 
-    from nexus.daemon.jar_lifecycle import _db_name_from_creds, _psql_bin
+    from nexus.daemon.binary_lifecycle import _db_name_from_creds, _psql_bin
 
     psql = _psql_bin()
     if psql is None:
@@ -1970,7 +1970,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # nexus-pebfx.4 version handshake: report the RUNNING service's app +
     # schema versions, and warn when they drift from the JAR installed at
     # the well-known location (a stale service that needs a restart).
-    from nexus.daemon.jar_lifecycle import (
+    from nexus.daemon.binary_lifecycle import (
         fetch_service_version,
         read_installed_provenance,
     )

@@ -183,7 +183,7 @@ def _find_service_binary(config_dir: Path) -> Path | None:
             "to use the installed binary."
         )
 
-    from nexus.daemon.jar_lifecycle import well_known_binary_path
+    from nexus.daemon.binary_lifecycle import well_known_binary_path
     well_known = well_known_binary_path(config_dir)
     if well_known.is_file():
         return _require_executable(well_known, "nexus-service")

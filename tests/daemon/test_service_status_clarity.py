@@ -60,7 +60,7 @@ class TestStatusSurface:
         ), patch(
             "nexus.commands.daemon._pgvector_version", return_value="0.8.2",
         ), patch(
-            "nexus.daemon.jar_lifecycle.fetch_service_version",
+            "nexus.daemon.binary_lifecycle.fetch_service_version",
             return_value=svc_version,
         ):
             return CliRunner().invoke(main, [
@@ -253,7 +253,7 @@ class TestProbeImplementations:
 
         with patch("subprocess.run", side_effect=fake_run), \
              patch(
-                 "nexus.daemon.jar_lifecycle._psql_bin",
+                 "nexus.daemon.binary_lifecycle._psql_bin",
                  return_value="/fake/psql",
              ):
             version = _pgvector_version(creds)
@@ -278,7 +278,7 @@ class TestProbeImplementations:
 
         with patch("subprocess.run", side_effect=fake_run), \
              patch(
-                 "nexus.daemon.jar_lifecycle._psql_bin",
+                 "nexus.daemon.binary_lifecycle._psql_bin",
                  return_value="/fake/psql",
              ):
             _pgvector_version(creds)
@@ -304,7 +304,7 @@ class TestProbeImplementations:
         ), patch(
             "nexus.commands.daemon._pgvector_version", return_value="0.8.2",
         ), patch(
-            "nexus.daemon.jar_lifecycle.fetch_service_version", fetch,
+            "nexus.daemon.binary_lifecycle.fetch_service_version", fetch,
         ):
             result = CliRunner().invoke(main, [
                 "daemon", "service", "status", "--config-dir", str(config_dir),

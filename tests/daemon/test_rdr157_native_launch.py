@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus.daemon.jar_lifecycle import well_known_binary_path
+from nexus.daemon.binary_lifecycle import well_known_binary_path
 from nexus.daemon.storage_service_daemon import (
     StorageServiceStartError,
     StorageServiceSupervisor,
@@ -132,9 +132,16 @@ def test_spawn_native_uses_binary_argv(tmp_path):
 # ── RDR-161: no schema-skew gate on the native path ──────────────────────────
 
 
-def test_native_start_skips_schema_skew_gate(tmp_path):
-    """The JVM-only schema-skew gate is expunged with the legacy launch path;
-    a native start never invokes check_schema_skew."""
+def test_native_start_has_no_schema_skew_gate(tmp_path):
+    """The JVM-only schema-skew gate is expunged with the legacy launch path:
+    binary_lifecycle no longer defines check_schema_skew, and a native start
+    goes PG -> spawn -> publish with no skew probe in the path."""
+    import nexus.daemon.binary_lifecycle as bl
+
+    assert not hasattr(bl, "check_schema_skew"), (
+        "schema-skew gate must be expunged with the java -jar path"
+    )
+
     binary = _make_native_binary(tmp_path)
     sup = StorageServiceSupervisor(
         config_dir=tmp_path,
@@ -151,18 +158,16 @@ def test_native_start_skips_schema_skew_gate(tmp_path):
         sup, "_ensure_pg_running"
     ), patch.object(
         sup, "_spawn_service", return_value=(fake_proc, 18092)
-    ), patch.object(
+    ) as spawn, patch.object(
         sup, "_wait_for_service_ready"
     ), patch.object(
         sup, "_publish"
-    ), patch(
-        "nexus.daemon.jar_lifecycle.check_schema_skew"
-    ) as skew:
+    ):
         Reg.return_value.discover.return_value = None
         sup._supervisor = MagicMock()
         sup._supervisor.record.generation = 1
         sup._start_locked()
-    skew.assert_not_called()
+    spawn.assert_called_once()
 
 
 # ── start_storage_service resolves the native binary ─────────────────────────

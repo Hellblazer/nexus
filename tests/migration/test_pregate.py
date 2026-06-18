@@ -231,7 +231,7 @@ def test_live_source_parses_version_handshake(
         lambda: ("127.0.0.1", 9999, "tok"),
     )
     monkeypatch.setattr(
-        "nexus.daemon.jar_lifecycle.fetch_service_version",
+        "nexus.daemon.binary_lifecycle.fetch_service_version",
         lambda host, port: {"embedding_mode": "cloud", "embedding_models": [_ONNX, _VOYAGE]},
     )
     assert LiveServiceWiredModels().wired_models() == frozenset({_ONNX, _VOYAGE})

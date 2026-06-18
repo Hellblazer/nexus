@@ -75,7 +75,7 @@ class LiveServiceWiredModels:
 
     def wired_models(self) -> frozenset[str] | None:
         try:
-            from nexus.daemon.jar_lifecycle import fetch_service_version
+            from nexus.daemon.binary_lifecycle import fetch_service_version
             from nexus.db.service_endpoint import resolve_service_config
 
             host, port, _token = resolve_service_config()

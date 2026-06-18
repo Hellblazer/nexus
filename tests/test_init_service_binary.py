@@ -25,7 +25,7 @@ import pytest
 
 from nexus.commands import init as init_mod
 from nexus.daemon import binary_install
-from nexus.daemon.jar_lifecycle import well_known_binary_path
+from nexus.daemon.binary_lifecycle import well_known_binary_path
 
 
 @pytest.fixture(autouse=True)

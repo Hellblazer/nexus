@@ -465,7 +465,7 @@ def _select_bundled_pg(
     """
     if os.environ.get("NEXUS_PG_BIN", "").strip():
         return None
-    from nexus.daemon.jar_lifecycle import well_known_binary_path
+    from nexus.daemon.binary_lifecycle import well_known_binary_path
     from nexus.db.pg_bundle import ensure_pg_bundle
 
     if search_dirs is None:

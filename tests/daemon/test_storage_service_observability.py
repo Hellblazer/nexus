@@ -470,7 +470,7 @@ class TestStatusLogPaths:
     ) -> None:
         import nexus.commands.daemon as dm
         from nexus.daemon import service_registry as sr
-        from nexus.daemon import jar_lifecycle as jl
+        from nexus.daemon import binary_lifecycle as jl
 
         class _FakeRegistry:
             def __init__(self, **kwargs: Any) -> None:
