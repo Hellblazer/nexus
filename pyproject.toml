@@ -64,6 +64,11 @@ dependencies = [
     "python-pptx>=1.0.0",
     "opencv-python-headless>=4.0.0",
     "httpx>=0.27",
+    # RDR-161: pure-Python keyless-signature verification for
+    # `nx daemon service install-binary`. Replaces a ~130MB/platform cosign
+    # binary; verifies the new protobuf .sigstore.json bundle offline. 4.x and
+    # 3.x both expose Verifier.production(offline=...) + verify_artifact.
+    "sigstore>=3.0,<5",
     "mcp>=1.0",
     "fastapi>=0.115",
     "uvicorn[standard]",

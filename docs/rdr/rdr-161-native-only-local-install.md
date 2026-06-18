@@ -99,7 +99,7 @@ the UNSMOKED caveat). mac-amd64 (Intel) is out of scope.
 
 ## Approach (phased)
 
-### Phase 1 — Acquire the signed native binary (unblocks the install before removal)
+**Phase 1: Acquire the signed native binary (unblocks the install before removal)**
 
 - **Publisher sub-task (RF-161-1):** add `--new-bundle-format` to the `cosign sign-blob`
   step in `engine-service-release.yml` so each release also publishes a protobuf
@@ -122,7 +122,7 @@ the UNSMOKED caveat). mac-amd64 (Intel) is out of scope.
   install-binary if no binary is resolvable (idempotent; a present valid binary is a
   no-op).
 
-### Phase 2 — Publish + acquire the PG bundle
+**Phase 2: Publish + acquire the PG bundle**
 
 - Release job that runs `scripts/build_pg_bundle.sh` per target on its native runner,
   signs (`cosign sign-blob --new-bundle-format` → `.sigstore.json`, same format as the
@@ -143,7 +143,7 @@ the UNSMOKED caveat). mac-amd64 (Intel) is out of scope.
 - Add a **published-then-downloaded** bundle round-trip test (current relocation tests
   only exercise a locally-built bundle — RF-161-3 gap).
 
-### Phase 3 — Expunge the JAR launch + install path (native-only)
+**Phase 3: Expunge the JAR launch + install path (native-only)**
 
 - `storage_service_daemon.py`: delete `_find_service_jar` and the `java -jar` spawn arm;
   `StorageServiceSupervisor` requires `binary_path` (drop the `jar_path` param and the
@@ -157,7 +157,7 @@ the UNSMOKED caveat). mac-amd64 (Intel) is out of scope.
 - Inverse-grep gate: `jar` is absent from `src/nexus` non-test launch/install surface
   (mirrors the exhaustive-surface-audit discipline).
 
-### Phase 4 — Docs + deferred Windows bead
+**Phase 4: Docs + deferred Windows bead**
 
 - Update install/runbook docs to the native-only one-command story.
 - Windows-native is tracked by the existing `nexus-f9bgu` (RDR-157 release-N+1 follow-on:

@@ -337,6 +337,79 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+def _ensure_service_binary_step(config_dir: Path) -> bool:
+    """Acquire the signed native service binary if none is already installed.
+
+    RDR-161 P1: between PG provisioning and starting the service, place the
+    verified native binary so ``_start_service_step`` has something to exec.
+
+    Idempotent: a binary already resolvable at the well-known location (or via
+    ``NEXUS_SERVICE_BIN``) is a no-op — it is NOT re-downloaded. When no binary
+    is present, the explicit ``engine-service-v*`` tag comes from
+    ``resolve_service_tag`` (``NEXUS_SERVICE_TAG`` env, then the build-time
+    pin); there is no "latest" resolution (RF-161-2). When no tag is
+    configured, instruct the user to install one explicitly rather than
+    guessing a tag or downloading silently.
+
+    Returns ``True`` when a native binary is ready to exec, ``False`` when none
+    is available and none could be acquired (no tag configured). The caller
+    MUST NOT start the service on ``False`` — otherwise it falls through to the
+    legacy ``java -jar`` path, defeating the native-only intent (CRE C1).
+    Hard failures (broken ``NEXUS_SERVICE_BIN`` override, a configured tag that
+    fails verification) raise ``SystemExit``.
+    """
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    from nexus.daemon.binary_install import (
+        BinaryVerificationError,
+        install_binary,
+        resolve_service_tag,
+    )
+    from nexus.daemon.storage_service_daemon import (
+        StorageServiceStartError,
+        _find_service_binary,
+    )
+
+    try:
+        existing = _find_service_binary(config_dir)
+    except StorageServiceStartError as exc:
+        # e.g. NEXUS_SERVICE_BIN set-but-missing — surface, never auto-download
+        # over a deliberate (if broken) operator override.
+        click.echo(f"\nService binary check failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    if existing is not None:
+        click.echo(f"  Native service binary already installed: {existing} (no download).")
+        return True
+
+    tag = resolve_service_tag()
+    if not tag:
+        click.echo(
+            "\n  No native service binary is installed and no service tag is "
+            "pinned for this build.\n"
+            "  Install one explicitly, then re-run `nx init --service`:\n"
+            "    nx daemon service install-binary engine-service-vX.Y.Z\n"
+            "  (or set NEXUS_SERVICE_TAG=engine-service-vX.Y.Z)."
+        )
+        return False
+
+    try:
+        _nx_version = _pkg_version("conexus")
+    except PackageNotFoundError:
+        _nx_version = "unknown"
+
+    click.echo(f"\nInstalling the native service binary ({tag}) …")
+    try:
+        dest, prov = install_binary(
+            tag, config_dir, installed_by=f"conexus {_nx_version}",
+        )
+    except BinaryVerificationError as exc:
+        click.echo(f"\nService binary install failed: {exc}", err=True)
+        raise SystemExit(1)
+    click.echo(f"  Installed {prov['asset']} -> {dest} (sha256+signature verified).")
+    return True
+
+
 def _start_service_step() -> None:
     """Start the local storage service and confirm it is serving (status green).
 
@@ -512,6 +585,21 @@ def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) ->
         # collection with bge-768. Lock the embedder + provision the standard
         # ONNX it reads.
         _provision_service_embedder_step(embedder)
+        # RDR-161 P1: acquire the verified native binary before starting (no-op
+        # when one is already installed). Between PG provisioning and start so
+        # _start_service_step has a binary to exec. When no binary is available
+        # and none can be acquired (no tag configured), do NOT start: starting
+        # would fall through to the legacy `java -jar` path and defeat the
+        # native-only intent (CRE C1). PG is provisioned and the step printed an
+        # actionable install instruction; exit non-zero so the incomplete setup
+        # is not mistaken for a serving backend.
+        if not _ensure_service_binary_step(_config.nexus_config_dir()):
+            click.echo(
+                "\nService NOT started: no native binary available. Install one "
+                "(see above), then re-run `nx init --service` to finish.",
+                err=True,
+            )
+            raise SystemExit(1)
         # RDR-157 P4.1: collapse fresh-install -> serving. Start the service and
         # confirm status green before returning, so one command leaves the user
         # with a running backend (idempotent; safe to re-run). The interactive
