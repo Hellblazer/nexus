@@ -2,8 +2,9 @@
 # Soup-to-nuts migration dress rehearsal — runs INSIDE the container.
 #
 # Phase A  install + provision + serve   (the fragile legs: nx init --service
-#                                          provisions PG+pgvector; the JAR migrates
-#                                          64 changesets and serves /health)
+#                                          provisions PG+pgvector; the native
+#                                          nexus-service binary migrates 64
+#                                          changesets and serves /health)
 # Phase B  seed legacy Chroma + migrate  (nx migrate-to-service: detect → ETL →
 #                                          validate; parity assertion)
 # Phase C  rollback rehearsal            (Chroma source intact; degrade-loud, no
@@ -26,14 +27,25 @@ note() { printf '       %s\n' "$*"; }
 # ── Phase A: install + provision + serve ─────────────────────────────────────
 say "Phase A — install + provision + serve"
 
-nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || bad "nx --version failed"
-java -version >/dev/null 2>&1 && ok "JRE present ($(java -version 2>&1 | head -1))" || bad "no JRE"
-command -v initdb >/dev/null 2>&1 && ok "PG16 binaries on PATH ($(initdb --version))" || bad "initdb not found"
-test -f /opt/nexus-service.jar && ok "service JAR present ($(du -h /opt/nexus-service.jar | cut -f1))" || bad "JAR missing"
+# RDR-161: the native nexus-service binary is the SOLE launch artifact (no JRE,
+# no java -jar). The image ships it + its native-image .so siblings under
+# /opt/nexus-service-native/; position the whole set at the well-known location
+# (the launcher's job) so the binary resolves its dlopen'd JDK libs co-located.
+SVC_NATIVE_DIR="/opt/nexus-service-native"
+SVC_WELL_KNOWN_DIR="$HOME/.config/nexus/service"
 
-note "installing JAR to the well-known location (pebfx.4)…"
-nx daemon service install-jar /opt/nexus-service.jar 2>&1 | sed 's/^/       /' \
-  && ok "install-jar" || bad "install-jar failed"
+nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || bad "nx --version failed"
+command -v initdb >/dev/null 2>&1 && ok "PG16 binaries on PATH ($(initdb --version))" || bad "initdb not found"
+test -x "$SVC_NATIVE_DIR/nexus-service" && ok "native service binary present ($(du -h "$SVC_NATIVE_DIR/nexus-service" | cut -f1))" || bad "native binary missing at $SVC_NATIVE_DIR"
+
+note "positioning the native binary + libs at the well-known location…"
+if mkdir -p "$SVC_WELL_KNOWN_DIR" \
+   && cp "$SVC_NATIVE_DIR"/* "$SVC_WELL_KNOWN_DIR/" \
+   && chmod +x "$SVC_WELL_KNOWN_DIR/nexus-service"; then
+  ok "native binary positioned ($SVC_WELL_KNOWN_DIR/nexus-service)"
+else
+  bad "could not position native binary"
+fi
 
 note "nx init --service — provisioning PG16 + pgvector + nexus DB…"
 if nx init --service --embedder minilm-384 --yes 2>&1 | sed 's/^/       /'; then
@@ -67,7 +79,7 @@ then :; else
   bad "ONNX warmup failed (nexus-jrrve workaround) — service start will likely fail"
 fi
 
-note "nx daemon service start — spawn JAR, migrate changesets, await /health…"
+note "nx daemon service start — spawn native binary, migrate changesets, await /health…"
 nx daemon service start 2>&1 | sed 's/^/       /' || true
 # Poll the status surface (pebfx.5) for a healthy service.
 healthy=0
@@ -78,7 +90,7 @@ for i in $(seq 1 30); do
   sleep 2
 done
 nx daemon service status 2>&1 | sed 's/^/       /' || true
-[ "$healthy" = 1 ] && ok "service healthy (JAR serving, schema migrated)" || bad "service did not reach healthy"
+[ "$healthy" = 1 ] && ok "service healthy (native binary serving, schema migrated)" || bad "service did not reach healthy"
 
 if [ "$healthy" != 1 ]; then say "ABORT (service never came up — Phase A is the gate)"; exit 1; fi
 

@@ -1,8 +1,10 @@
+# syntax=docker/dockerfile:1
 # Soup-to-nuts migration dress-rehearsal box (nexus-* harness).
 #
 # A single ephemeral container that mirrors a fresh user's machine: PG16 +
-# pgvector + a JRE + the conexus wheel + the nexus-service JAR at the well-known
-# location. The driver (rehearse.sh) then runs the full operator path:
+# pgvector + the conexus wheel + the native nexus-service binary (RDR-161: the
+# sole launch artifact; no JRE). The driver (rehearse.sh) then runs the full
+# operator path:
 # init --service (provision PG) -> service start (migrate + serve) -> seed legacy
 # Chroma -> migrate-to-service -> validate parity -> rollback.
 #
@@ -14,9 +16,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     PYTHONUNBUFFERED=1
 
-# PG16 (PGDG — bookworm ships PG15) + pgvector for PG16, a headless JRE for the
-# service JAR, python + uv for the wheel, and the build basics chromadb's ONNX
-# runtime + tokenizers need at install time.
+# PG16 (PGDG — bookworm ships PG15) + pgvector for PG16, python + uv for the
+# wheel, and the build basics chromadb's ONNX runtime + tokenizers need at
+# install time. No JRE: the native nexus-service binary is self-contained
+# (RDR-161).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release \
         python3 python3-venv python3-pip \
@@ -27,16 +30,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
 http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
         > /etc/apt/sources.list.d/pgdg.list \
-    # Temurin 25 JRE — the service JAR is compiled for Java 25 (pom
-    # maven.compiler.release=25); bookworm ships no Java 25.
-    && curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
-        | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] \
-https://packages.adoptium.net/artifactory/deb bookworm main" \
-        > /etc/apt/sources.list.d/adoptium.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         postgresql-16 postgresql-16-pgvector \
-        temurin-25-jre \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user — initdb (run by `nx init --service`) refuses to run as root,
@@ -60,15 +55,26 @@ WORKDIR /home/nexus
 # Wheel keeps its real PEP 427 name (uv requires the version in the filename);
 # it's at the context root so the glob resolves without the repo .dockerignore.
 COPY conexus-*.whl /tmp/
-COPY nexus-service.jar /opt/nexus-service.jar
-
 # Install the wheel into a venv (the faithful pip-into-venv user path) so `nx`
 # AND a matching `python` (with chromadb for seed_legacy.py) share one env.
 # Debian bookworm ships Python 3.11; conexus needs 3.12+, so uv fetches a
 # managed standalone 3.12 for the venv.
-RUN uv venv --python 3.12 /home/nexus/nxenv \
+#
+# The BuildKit uv cache mount persists uv's download/build cache across builds:
+# the conexus wheel changes every run, but its heavy dependency closure
+# (chromadb, onnxruntime, tokenizers) is stable, so a fresh wheel reuses the
+# already-downloaded/compiled deps instead of a cold 10-20m install. The mount
+# is keyed by nexus's uid (1000) so the unprivileged install can write it.
+RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
+    uv venv --python 3.12 /home/nexus/nxenv \
     && uv pip install --python /home/nexus/nxenv /tmp/conexus-*.whl \
     && nx --version
+
+# The native binary + its native-image .so siblings, kept together so the
+# executable resolves its dlopen'd JDK libs from its own directory. rehearse.sh
+# positions them at the well-known service location. AFTER the wheel install so a
+# per-run binary change does not invalidate the cached dependency layer above.
+COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
 
 # Driver scripts last: editing them rebuilds only these trivial layers, not the
 # multi-minute wheel install above.

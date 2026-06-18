@@ -5,10 +5,15 @@
 #   tests/e2e/migration-rehearsal/run.sh --with-cloud # + Voyage leg (reads .env)
 #   tests/e2e/migration-rehearsal/run.sh --no-build   # reuse existing wheel/JAR
 #
-# Builds the wheel + service JAR on the host (fast, cached), bakes them into an
-# ephemeral image with PG16 + pgvector + a JRE, and runs the full operator path
-# (install → provision → serve → seed → migrate → validate → rollback) in one
-# throwaway container. NOT DinD: PG is provisioned inside the box by nx itself.
+# Builds the wheel on the host and the LINUX native nexus-service binary in a
+# GraalVM container (RDR-161: the native binary is the sole launch artifact; the
+# java -jar path is expunged). The native build runs IN a linux container so the
+# binary matches the rehearsal image's platform — a host build would produce the
+# wrong-OS binary. It uses Docker-out-of-Docker (mounted socket) because -Pnative
+# runs jOOQ codegen via a Testcontainers pgvector. Both go into an ephemeral image
+# with PG16 + pgvector (no JRE), running the full operator path (install → provision
+# → serve → seed → migrate → validate → rollback). NOT DinD: PG is provisioned
+# inside the box by nx itself.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -24,21 +29,34 @@ for a in "$@"; do
   esac
 done
 
+GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
 if [ "$DO_BUILD" = 1 ]; then
   echo "[1/3] Building the conexus wheel (host)…"
   uv build --wheel >/dev/null 2>&1
-  echo "[2/3] Building the nexus-service JAR (host)…"
-  if ! ls service/target/nexus-service-*.jar >/dev/null 2>&1; then
-    (cd service && mvn -o -q -DskipTests package)
+  echo "[2/3] Building the LINUX native nexus-service binary (GraalVM container, ~2-3m)…"
+  if [ ! -x service/target/nexus-service ]; then
+    # Native build in a linux GraalVM container. The mounted Docker socket lets
+    # -Pnative's Testcontainers jOOQ codegen reach the host daemon (DooD);
+    # TESTCONTAINERS_HOST_OVERRIDE + the host-gateway alias make the build
+    # container reach the sibling pgvector. -Ob = quick-build (correctness gate,
+    # not a perf binary). Output: service/target/nexus-service + its *.so siblings.
+    docker run --rm --entrypoint bash \
+      --add-host=host.docker.internal:host-gateway \
+      -v "$PWD":/src -w /src/service \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -e TESTCONTAINERS_RYUK_DISABLED=true \
+      -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+      "$GRAAL_IMAGE" \
+      -c './mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob package'
   else
-    echo "      (JAR already built — reusing $(ls service/target/nexus-service-*.jar | head -1))"
+    echo "      (native binary already built — reusing service/target/nexus-service)"
   fi
 else
-  echo "[1-2/3] --no-build: reusing existing wheel + JAR"
+  echo "[1-2/3] --no-build: reusing existing wheel + native binary"
 fi
 
 ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/ — drop --no-build" >&2; exit 1; }
-ls service/target/nexus-service-*.jar >/dev/null 2>&1 || { echo "no service JAR — drop --no-build" >&2; exit 1; }
+[ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
 
 echo "[3/3] Staging a minimal build context + building image (WITH_CLOUD=$WITH_CLOUD)…"
 # Flatten wheel + JAR + driver to fixed names in a tiny throwaway context. The
@@ -47,7 +65,12 @@ echo "[3/3] Staging a minimal build context + building image (WITH_CLOUD=$WITH_C
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
-cp "$(ls -t service/target/nexus-service-*.jar | head -1)" "$STAGE/nexus-service.jar"
+# The native binary + its native-image .so siblings (libjvm/libawt/liblcms/...)
+# must travel together: native-image resolves dlopen'd JDK libs from the
+# executable's own directory, so they are co-located in the image.
+mkdir -p "$STAGE/native"
+cp service/target/nexus-service "$STAGE/native/"
+cp service/target/*.so "$STAGE/native/"
 cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/seed_legacy.py" "$STAGE/"
 
 # Docker Desktop's credsStore=desktop helper can't reach a locked login keychain
