@@ -1876,7 +1876,7 @@ def _pgvector_version(creds: dict) -> str | None:
 
 
 def _nx_major_gap_note(installed_by: str) -> str | None:
-    """Note when the well-known JAR was installed by an older nx MAJOR.
+    """Note when the well-known binary was installed by an older nx MAJOR.
 
     ``installed_by`` is the sidecar's ``"conexus X.Y.Z"`` stamp. Returns
     ``None`` when versions are unparseable or majors match.
@@ -1942,7 +1942,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     }
 
     # nexus-pebfx.5: one surface answering "is the stack healthy and how is
-    # it configured" — supervisor, JAR (/health + /version), PG cluster,
+    # it configured" — supervisor, native service (/health + /version), PG cluster,
     # embedding mode, pgvector version, and the paths an operator would
     # otherwise assemble from ps aux + psql + curl + the addr file by hand.
     import os as _os
@@ -1968,7 +1968,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         data["pg_log"] = str(Path(pg_info["pg_data"]) / "pg.log")
 
     # nexus-pebfx.4 version handshake: report the RUNNING service's app +
-    # schema versions, and warn when they drift from the JAR installed at
+    # schema versions, and warn when they drift from the binary installed at
     # the well-known location (a stale service that needs a restart).
     from nexus.daemon.binary_lifecycle import (
         fetch_service_version,

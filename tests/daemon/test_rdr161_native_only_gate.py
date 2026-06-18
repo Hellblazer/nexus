@@ -16,6 +16,9 @@ from pathlib import Path
 # Identifiers that only exist if the legacy JVM launch/install path is present.
 _FORBIDDEN = [
     re.compile(r"java\s+-jar"),          # the actual subprocess launch
+    re.compile(r"-jar\b"),               # the `-jar` argv flag, incl. split argv
+                                         # (["java", "-jar", ...]); zero legit
+                                         # uses under src/nexus
     re.compile(r"_find_service_jar"),    # JAR discovery (deleted)
     re.compile(r"well_known_jar_path"),  # JAR well-known location (deleted)
     re.compile(r"\binstall_jar\b"),      # JAR install function (deleted)
