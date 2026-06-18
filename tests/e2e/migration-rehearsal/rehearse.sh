@@ -84,19 +84,13 @@ nx daemon service status 2>&1 | sed 's/^/       /' || true
 
 if [ "$healthy" != 1 ]; then say "ABORT (service never came up — Phase A is the gate)"; exit 1; fi
 
-# The guided migrate (and the parity/ref harnesses) resolve the service endpoint
-# via NX_SERVICE_URL + NX_SERVICE_TOKEN, else the supervisor lease. Export both
-# explicitly from authoritative sources so a separate subprocess does not depend
-# on lease-heartbeat timing: the URL from the live status port, the token from
-# the pg_credentials sourced above (`nx init --service` persists it there).
-SVC_PORT="$(nx daemon service status 2>/dev/null | awk -F': *' '/^[[:space:]]*port:/{print $2; exit}')"
-if [ -n "$SVC_PORT" ]; then
-  export NX_SERVICE_URL="http://127.0.0.1:${SVC_PORT}"
-  export NX_SERVICE_PORT="$SVC_PORT" NX_SERVICE_HOST="127.0.0.1"
-  ok "service endpoint exported (NX_SERVICE_URL=$NX_SERVICE_URL)"
-else
-  bad "could not parse service port from status — migrate will rely on lease discovery"
-fi
+# Clients resolve the endpoint via the supervisor LEASE (now maintained by the
+# persistent supervisor — nexus-qke1e). Do NOT pin NX_SERVICE_URL/PORT: the
+# supervisor re-allocates the port + republishes the lease on any service
+# respawn, and a pinned env port would defeat that recovery (the stale-env-port
+# trap in service_endpoint.py). The token is stable across restarts, so the
+# pg_credentials NX_SERVICE_TOKEN (sourced above) is safe to keep.
+unset NX_SERVICE_URL NX_SERVICE_PORT NX_SERVICE_HOST 2>/dev/null || true
 [ -n "${NX_SERVICE_TOKEN:-}" ] && ok "NX_SERVICE_TOKEN present (from pg_credentials)" \
   || bad "NX_SERVICE_TOKEN absent — guided migrate requires it (pg_credentials did not carry it)"
 
@@ -119,22 +113,24 @@ else
   bad "seed failed"; SEED_JSON='{}'
 fi
 
-# Re-probe the service RIGHT BEFORE the migrate — it must still be live + reachable
-# at the exported endpoint. A healthy Phase-A status followed by a connection
-# refused mid-ETL means the service died/churned ports between provision and
-# migrate (a service-lifecycle gap, NOT a migration-logic fault); diagnose it here.
-note "re-probing service reachability at the exported endpoint before migrate…"
-if nx service probe >/dev/null 2>&1 || nx daemon service status 2>&1 | grep -qiE "health.*ok|status: live"; then
-  ok "service still reachable at migrate time"
-else
-  bad "service NOT reachable at migrate time (lifecycle/port churn between provision and migrate)"
-  note "service status + logs (diagnosing the lifecycle gap):"
+# Diagnostic: dump service status + logs on demand (a connection-refused at
+# migrate time means the native service HTTP listener died after publishing a
+# healthy lease — a service-lifecycle/native-binary fault, not migration logic).
+_dump_service_diag() {
   nx daemon service status 2>&1 | sed 's/^/         /' || true
   for lg in storage_service.log storage_service_native.log storage_service.crash.log; do
     f="$HOME/.config/nexus/logs/$lg"
-    [ -f "$f" ] && { echo "         --- tail $lg ---"; tail -25 "$f" | sed 's/^/         /'; }
+    [ -f "$f" ] && { echo "         --- tail $lg ---"; tail -30 "$f" | sed 's/^/         /'; }
   done
-fi
+}
+
+# Informational pre-migrate status (NOT a gate): `nx service probe` can resolve a
+# configured MANAGED endpoint rather than the local lease, so it is a false
+# signal here — the authoritative reachability test is the migrate itself, whose
+# client resolves the local supervisor lease. The post-migrate log dump below is
+# the real diagnostic for a native-service death.
+note "pre-migrate service status (informational):"
+nx daemon service status 2>&1 | grep -iE "status:|health:|port:|pid:" | sed 's/^/       /' || true
 
 note "nx migrate-to-service --dry-run (classify footprint)…"
 nx migrate-to-service --dry-run --local-path "$CHROMA_LOCAL" 2>&1 | sed 's/^/       /' \
@@ -145,6 +141,7 @@ if nx migrate-to-service --local-path "$CHROMA_LOCAL" 2>&1 | sed 's/^/       /';
   ok "migrate-to-service completed"
 else
   bad "migrate-to-service failed"
+  note "service status + logs (post-migrate diagnosis):"; _dump_service_diag
 fi
 
 # Parity: each seeded collection should now be served from pgvector — but the
