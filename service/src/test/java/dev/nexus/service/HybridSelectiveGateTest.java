@@ -47,11 +47,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * at fixture scale:
  * <ul>
  *   <li>{@link #explain_textFirstPlan_gatesViaGin_neverRanksViaHnsw} — the SELECTIVE-gate
- *       plan shape: gate via the GIN indexes, rank as a Sort over the materialized set,
- *       the HNSW index ({@code idx_chunks_1024_embedding}) never touched. This is the
- *       scale-independent structural core of the fix (it is a transcription of the
- *       text-first SQL the dispatch builds for a selective gate — the behavioral tests
- *       below anchor that the production method actually produces these results).</li>
+ *       plan shape: gate the chashes via the GIN indexes (once), rank as a Sort over the
+ *       chash-filtered set, the HNSW index ({@code idx_chunks_1024_embedding}) never
+ *       touched. This is the scale-independent structural core of the fix (it is a
+ *       transcription of the two-query gate-then-rank SQL the dispatch builds for a
+ *       selective gate — the behavioral tests below anchor that the production method
+ *       actually produces these results).</li>
  *   <li>{@link #hybridSearch_textFirst_returnsAllSelectiveMatches} /
  *       {@link #hybridSearch_textFirst_excludesNonGatedFiller} — behavioral: the production
  *       {@code hybridSearch} returns the COMPLETE selective gate even when the matches are
@@ -183,32 +184,48 @@ class HybridSelectiveGateTest {
 
     @Test
     void explain_textFirstPlan_gatesViaGin_neverRanksViaHnsw() throws Exception {
-        // The exact shape PgVectorRepository.hybridSearch now builds.
-        String textFirst =
-            "WITH gated AS MATERIALIZED (" +
-            "  SELECT chash, chunk_text, collection, metadata, embedding FROM nexus.chunks_1024" +
-            "   WHERE collection = '" + COLL + "'" +
-            "     AND (chunk_tsv @@ plainto_tsquery('english', '" + TOKEN + "') OR '" + TOKEN + "' <% chunk_text))" +
-            " SELECT chash, (embedding <=> '" + vec(1.0, 0.0) + "'::vector) AS distance" +
-            " FROM gated ORDER BY distance ASC, chash ASC LIMIT 50";
-        String plan = explain(textFirst);
-        // The MATERIALIZED fence guarantees this REGARDLESS of scale or planner cost: the
-        // gate is its own CTE-scan node and the rank is a Sort over its output — the
-        // ORDER BY embedding can never be pushed into an HNSW index scan (which is what
-        // hnsw.max_scan_tuples starves). This is the scale-independent structural core of
-        // the fix; the production-scale recall collapse itself only manifests at >20k rows
-        // (the conexus xr7.8.9 gate owns that verification, per the bead).
-        assertThat(plan)
-            .as("text-first plan MUST NOT rank via the HNSW index — that is what made the "
-                + "retired plan starvable by hnsw.max_scan_tuples. Plan was:%n%s", plan)
-            .doesNotContain("idx_chunks_1024_embedding");
-        assertThat(plan)
-            .as("the gate MUST be evaluated via the GIN text indexes (tsv/trgm) first. "
-                + "Plan was:%n%s", plan)
+        // The two-query shape PgVectorRepository.hybridSearch now builds for a selective gate
+        // (single-gate-eval, nexus-x7z7l): (1) a bounded fetch of the gate's chashes via the
+        // GIN text indexes, then (2) a rank of those exact chashes by cosine distance via a
+        // chash IN (...) filter — the text gate (<% trigram recheck) is evaluated ONCE, in
+        // query 1, not re-run at rank time.
+        //
+        // MAINTENANCE: these two SQL strings are a hand TRANSCRIPTION of what hybridSearch()
+        // builds for the selective branch. They are not extracted from the production method,
+        // so if you change that SQL (column list, predicates, LIMIT) you MUST update these or
+        // the structural proof goes stale. The behavioral tests below anchor that production
+        // actually returns the right rows at fixture scale; production-scale recall is the
+        // conexus xr7.8.9 gate's.
+        String gateFetch =
+            "SELECT chash FROM nexus.chunks_1024" +
+            " WHERE collection = '" + COLL + "'" +
+            "   AND (chunk_tsv @@ plainto_tsquery('english', '" + TOKEN + "') OR '" + TOKEN + "' <% chunk_text)" +
+            " LIMIT " + (TARGETS + 1);
+        String gatePlan = explain(gateFetch);
+        assertThat(gatePlan)
+            .as("the gate MUST be evaluated via the GIN text indexes (tsv/trgm), once. "
+                + "Plan was:%n%s", gatePlan)
             .containsAnyOf("idx_chunks_1024_tsv", "idx_chunks_1024_trgm", "Bitmap Index Scan");
-        assertThat(plan)
-            .as("the rank MUST be a Sort over the materialized gated set (exact distance), "
-                + "not an index-ordered scan. Plan was:%n%s", plan)
+
+        String inList = targetChashes.stream().map(c -> "'" + c + "'")
+            .collect(java.util.stream.Collectors.joining(","));
+        String rank =
+            "SELECT chash, (embedding <=> '" + vec(1.0, 0.0) + "'::vector) AS distance" +
+            " FROM nexus.chunks_1024" +
+            " WHERE collection = '" + COLL + "' AND chash IN (" + inList + ")" +
+            " ORDER BY distance ASC, chash ASC LIMIT 50";
+        String rankPlan = explain(rank);
+        // The rank filters by chash (PK) and sorts by exact distance — the ORDER BY embedding
+        // can never be pushed into an HNSW index scan (which is what hnsw.max_scan_tuples
+        // starves). Scale-independent structural core of the lcogi fix; the production-scale
+        // recall collapse only manifests at >20k rows (the conexus xr7.8.9 gate owns that).
+        assertThat(rankPlan)
+            .as("rank MUST NOT route through the HNSW index — that is what made the retired "
+                + "plan starvable by hnsw.max_scan_tuples. Plan was:%n%s", rankPlan)
+            .doesNotContain("idx_chunks_1024_embedding");
+        assertThat(rankPlan)
+            .as("the rank MUST be a Sort over the chash-filtered set (exact distance), "
+                + "not an index-ordered scan. Plan was:%n%s", rankPlan)
             .contains("Sort");
     }
 
