@@ -88,7 +88,7 @@ def _noop_quiesce() -> None:
     return None
 
 
-def _noop_model_gate(classifications, *, voyage_key_present) -> None:  # type: ignore[no-untyped-def]
+def _noop_model_gate(classifications, *, voyage_key_present, exempt=frozenset()) -> None:  # type: ignore[no-untyped-def]
     return None
 
 
@@ -280,7 +280,7 @@ def test_pregates_run_before_t2_in_order() -> None:
         run_leg=lambda leg: order.append("leg") or _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"]),  # type: ignore[func-returns-value]
         voyage_key_present=False,
         quiesce_check=lambda: order.append("quiesce"),
-        model_gate=lambda c, *, voyage_key_present: order.append("models"),
+        model_gate=lambda c, *, voyage_key_present, exempt=frozenset(): order.append("models"),
         started_at=_FIXED_STARTED_AT,
     )
     assert order == ["quiesce", "models", "t2", "leg"]
@@ -292,7 +292,7 @@ def test_model_gate_block_stops_before_t2() -> None:
     det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
     t2_calls: list[int] = []
 
-    def _model_gate(classifications, *, voyage_key_present) -> None:  # type: ignore[no-untyped-def]
+    def _model_gate(classifications, *, voyage_key_present, exempt=frozenset()) -> None:  # type: ignore[no-untyped-def]
         raise ModelPreGateBlocked([("code__a__bge-base-en-v15-768__v1", "unservable")])
 
     outcome = run_sequenced_migration(

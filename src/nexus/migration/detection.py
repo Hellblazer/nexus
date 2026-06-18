@@ -133,6 +133,36 @@ def classify_model_support(
     )
 
 
+def cross_model_remappable(c: "CollectionClassification") -> bool:
+    """Whether *c* is a legacy collection the cross-model migrate can re-embed.
+
+    RDR-162 P2: a collection is auto-migratable via stored-text re-embed (rather
+    than blocked with the re-index diagnostic) iff ALL hold:
+
+    * it is data-bearing (an empty collection has nothing to migrate);
+    * its name is four-segment conformant (so the model segment can be remapped
+      by :func:`vector_etl.cross_model_target_name`);
+    * its model is NOT a voyage model — a voyage collection that is unsupported
+      is the credential case (gate C3: "add NX_VOYAGE_API_KEY"), NOT a model
+      switch; re-embedding voyage text into bge would silently change recall, so
+      it stays blocked;
+    * it is currently ``unsupported`` — the legacy-onnx "wired by no service
+      embedder, re-index required" case (e.g. minilm-384 after RDR-160).
+
+    A supported collection (already bge-768 or a wired voyage model) migrates
+    byte-for-byte and is never remapped. The decision is policy: the orchestrator
+    builds the ``target_names`` map from this predicate and the pre-gate exempts
+    exactly these collections.
+    """
+    if not c.has_data or c.model is None:
+        return False
+    if len(c.collection.split("__")) != 4:
+        return False
+    if c.model in _VOYAGE_MODELS:
+        return False
+    return c.support == "unsupported"
+
+
 @dataclass(frozen=True)
 class CollectionClassification:
     """Per-collection detection result along both axes (RF-2).

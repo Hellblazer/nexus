@@ -44,6 +44,7 @@ from nexus.migration.detection import (
     build_dry_run_preview,
     classify_collections,
     classify_model_support,
+    cross_model_remappable,
     render_dry_run_preview,
     voyage_key_available,
     wired_models,
@@ -662,3 +663,37 @@ class TestMigrateToServiceRun:
         assert "NX_SERVICE_TOKEN is required" in cli.output
         # The engine was never reached.
         assert captured == {}
+
+
+class TestCrossModelRemappable:
+    """RDR-162 P2: which unsupported collections the orchestrator auto-migrates
+    via stored-text re-embed (cross-model remap to bge-768) vs leaves blocked."""
+
+    def _cls(self, collection, model, *, support, has_data=True, dim=None):
+        return CollectionClassification(
+            collection=collection, leg="local", model=model, dim=dim,
+            support=support, source_count=1 if has_data else 0, has_data=has_data,
+        )
+
+    def test_legacy_minilm_is_remappable(self) -> None:
+        c = self._cls(ONNX_384, "minilm-l6-v2-384", support="unsupported", dim=384)
+        assert cross_model_remappable(c) is True
+
+    def test_supported_bge_is_not_remappable(self) -> None:
+        # Already servable — migrates byte-for-byte, never remapped.
+        c = self._cls(BGE_768, "bge-base-en-v15-768", support="supported-onnx", dim=768)
+        assert cross_model_remappable(c) is False
+
+    def test_voyage_unsupported_is_not_remappable(self) -> None:
+        # Credential case (add the key), not a model switch — stays blocked.
+        c = self._cls(VOYAGE_CTX_1024, "voyage-context-3", support="unsupported")
+        assert cross_model_remappable(c) is False
+
+    def test_non_conformant_name_is_not_remappable(self) -> None:
+        c = self._cls(NON_CONFORMANT, None, support="unsupported")
+        assert cross_model_remappable(c) is False
+
+    def test_empty_collection_is_not_remappable(self) -> None:
+        c = self._cls(ONNX_384, "minilm-l6-v2-384", support="unsupported",
+                      has_data=False)
+        assert cross_model_remappable(c) is False

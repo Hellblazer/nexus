@@ -418,6 +418,7 @@ def migrate_local(
     dry_run: bool = False,
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
+    target_names: dict[str, str] | None = None,
 ) -> MigrationReport:
     """LOCAL leg: open the on-disk store the retired daemon served and
     migrate it. The ETL must be the only opener (WAL single-process
@@ -431,6 +432,7 @@ def migrate_local(
         dry_run=dry_run,
         page_size=page_size,
         on_result=on_result,
+        target_names=target_names,
     )
 
 
@@ -444,6 +446,7 @@ def migrate_cloud(
     dry_run: bool = False,
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
+    target_names: dict[str, str] | None = None,
 ) -> MigrationReport:
     """CLOUD leg: read via the ChromaCloud REST/auth API (no direct
     psql/pg_restore path exists) and write through the same pgvector
@@ -459,6 +462,7 @@ def migrate_cloud(
         dry_run=dry_run,
         page_size=page_size,
         on_result=on_result,
+        target_names=target_names,
     )
 
 
@@ -529,12 +533,22 @@ def verify_counts(
     read_client: Any,
     vector_client: Any,
     collections: list[str],
+    target_names: dict[str, str] | None = None,
 ) -> dict[str, tuple[int, int]]:
-    """Exact ``(source, target)`` chunk counts per collection."""
+    """Exact ``(source, target)`` chunk counts per collection.
+
+    The SOURCE side reads the Chroma collection by its own name. The TARGET
+    (pgvector) side reads ``target_names[name]`` when present (RDR-162 P2
+    cross-model migrate: the re-embedded chunks land in a model-remapped target
+    whose name differs from the source) — else the same name (the byte-for-byte
+    same-model path). The counts are equal in both cases (the chunk set is
+    identical; only the embedder differs), so the exact-match gate holds.
+    """
+    tmap = target_names or {}
     return {
         name: (
             int(read_client.get_collection(name).count()),
-            int(vector_client.count(name)),
+            int(vector_client.count(tmap.get(name, name))),
         )
         for name in collections
     }

@@ -119,6 +119,8 @@ def test_sequencer_surface():
         "model_gate",
         "on_progress",
         "started_at",
+        "cross_model_targets",
+        "remap_refs",
     }
     assert _fields(SequenceOutcome) == {
         "ok",
@@ -151,6 +153,7 @@ def test_validation_surface():
         "catalog_client",
         "collections",
         "dims",
+        "target_names",
     }
     assert _params(validate_migration) == {
         "taxonomy_check",
@@ -193,6 +196,7 @@ def test_vector_etl_surface():
         "dry_run",
         "page_size",
         "on_result",
+        "target_names",
     }
     assert _params(v.migrate_cloud) == {
         "vector_client",
@@ -203,6 +207,7 @@ def test_vector_etl_surface():
         "dry_run",
         "page_size",
         "on_result",
+        "target_names",
     }
     assert _params(v.rollback_collections) == {
         "read_client",
@@ -210,7 +215,9 @@ def test_vector_etl_surface():
         "collections",
         "page_size",
     }
-    assert _params(v.verify_counts) == {"read_client", "vector_client", "collections"}
+    assert _params(v.verify_counts) == {
+        "read_client", "vector_client", "collections", "target_names",
+    }
     assert _params(v.verify_taxonomy_consistency) == {"t2_db_path", "vector_client"}
 
 

@@ -137,6 +137,7 @@ def assert_models_supported(
     *,
     voyage_key_present: bool,
     source: WiredModelSource | None = None,
+    exempt: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     """Pre-gate: BLOCK before any ETL if a data-bearing collection is unservable.
 
@@ -144,6 +145,12 @@ def assert_models_supported(
     set (falling back to the pure floor). Empty collections are skipped. Raises
     :class:`ModelPreGateBlocked` listing every affected collection; returns
     ``None`` when every data-bearing collection is servable.
+
+    ``exempt`` (RDR-162 P2) is the set of collection names the orchestrator will
+    cross-model migrate (stored-text re-embed into a model-remapped target).
+    They are unsupported under their CURRENT name but are NOT blocked — the ETL
+    re-embeds their text into a servable target. The gate still blocks every
+    other unsupported collection (voyage-no-key, non-conformant names).
     """
     src = source if source is not None else LiveServiceWiredModels()
     wired = resolve_wired_models(src, voyage_key_present=voyage_key_present)
@@ -151,6 +158,8 @@ def assert_models_supported(
     blocked: list[tuple[str, str]] = []
     for c in classifications:
         if not c.has_data:
+            continue
+        if c.collection in exempt:
             continue
         support, reason = classify_model_support(
             c.model, voyage_key_present=voyage_key_present, wired=wired
