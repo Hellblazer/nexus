@@ -353,8 +353,9 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
 
     Returns ``True`` when a native binary is ready to exec, ``False`` when none
     is available and none could be acquired (no tag configured). The caller
-    MUST NOT start the service on ``False`` — otherwise it falls through to the
-    legacy ``java -jar`` path, defeating the native-only intent (CRE C1).
+    MUST NOT start the service on ``False`` — since RDR-161 P3 expunged the
+    ``java -jar`` path, starting without a binary now fails loud rather than
+    silently degrading, but skipping the start keeps the UX clean (CRE C1).
     Hard failures (broken ``NEXUS_SERVICE_BIN`` override, a configured tag that
     fails verification) raise ``SystemExit``.
     """

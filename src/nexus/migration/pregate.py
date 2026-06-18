@@ -56,8 +56,8 @@ class WiredModelSource(Protocol):
     """Source of the set of embedding-model tokens the service has wired.
 
     Returns ``None`` when the live set cannot be obtained (service down / older
-    JAR without the ``/version`` handshake), signalling the caller to fall back
-    to the pure deployment-mode floor.
+    service without the ``/version`` handshake), signalling the caller to fall
+    back to the pure deployment-mode floor.
     """
 
     def wired_models(self) -> frozenset[str] | None: ...

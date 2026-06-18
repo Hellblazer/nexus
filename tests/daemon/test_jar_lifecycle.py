@@ -251,55 +251,6 @@ class TestSchemaSkewGate:
             assert applied_changesets_via_psql(self._CREDS) is None
 
 
-class TestInstallJarCli:
-    def test_install_and_discovery_roundtrip(self, tmp_path: Path) -> None:
-        from click.testing import CliRunner
-
-        from nexus.cli import main
-
-        config_dir = tmp_path / "cfg"
-        jar = _make_fake_jar(tmp_path / "svc.jar", version="3.1.4")
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "daemon", "service", "install-jar", str(jar),
-            "--config-dir", str(config_dir),
-        ])
-        assert result.exit_code == 0, result.output
-        assert "3.1.4" in result.output
-        assert well_known_jar_path(config_dir).is_file()
-        prov = read_installed_provenance(config_dir)
-        assert prov["version"] == "3.1.4"
-        assert prov["installed_by"].startswith("conexus ")
-
-    def test_requires_exactly_one_source(self, tmp_path: Path) -> None:
-        from click.testing import CliRunner
-
-        from nexus.cli import main
-
-        runner = CliRunner()
-        neither = runner.invoke(main, ["daemon", "service", "install-jar"])
-        assert neither.exit_code != 0
-        both = runner.invoke(main, [
-            "daemon", "service", "install-jar", "/x.jar", "--from-repo",
-        ])
-        assert both.exit_code != 0
-
-    def test_garbage_jar_fails_loud(self, tmp_path: Path) -> None:
-        from click.testing import CliRunner
-
-        from nexus.cli import main
-
-        bad = tmp_path / "bad.jar"
-        bad.write_text("nope")
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "daemon", "service", "install-jar", str(bad),
-            "--config-dir", str(tmp_path / "cfg"),
-        ])
-        assert result.exit_code == 2
-        assert "not a valid JAR" in result.output
-
-
 class TestStatusVersionHandshake:
     """`nx daemon service status` surfaces /version and warns on a stale
     running JAR (running app_version != installed sidecar version)."""
