@@ -815,15 +815,21 @@ class TestServiceLocalEmbedder:
 
 class TestServiceStartStep:
     """RDR-157 P4.1 (nexus-vwvv5.17): nx init --service collapses through to a
-    started, status-green service. _start_service_step calls the idempotent
-    start_storage_service and fails loud (never a traceback) on any error."""
+    started, status-green service. nexus-qke1e: _start_service_step now routes
+    through ensure_storage_supervisor (the PERSISTENT, heartbeated supervisor),
+    not the transient start_storage_service — and fails loud on any error."""
 
     def test_start_step_reports_running_endpoint(self, monkeypatch) -> None:
+        import types
+
         import nexus.commands.init as init_mod
 
+        lease = types.SimpleNamespace(
+            endpoint={"host": "127.0.0.1", "port": 18099, "pid": 4242},
+            generation=3,
+        )
         monkeypatch.setattr(
-            "nexus.daemon.storage_service_daemon.start_storage_service",
-            lambda: {"host": "127.0.0.1", "port": 18099, "pid": 4242, "generation": 3},
+            "nexus.commands.daemon.ensure_storage_supervisor", lambda _cfg: lease
         )
         runner_out: list[str] = []
         monkeypatch.setattr(init_mod.click, "echo", lambda *a, **k: runner_out.append(a[0] if a else ""))
@@ -838,14 +844,14 @@ class TestServiceStartStep:
         import nexus.commands.init as init_mod
         from nexus.daemon.storage_service_daemon import StorageServiceStartError
 
-        def _boom():
+        def _boom(_cfg):
             raise StorageServiceStartError(
                 "No nexus-service native binary found. Acquire one: "
                 "nx daemon service install-binary <tag>"
             )
 
         monkeypatch.setattr(
-            "nexus.daemon.storage_service_daemon.start_storage_service", _boom
+            "nexus.commands.daemon.ensure_storage_supervisor", _boom
         )
 
         with pytest.raises(SystemExit) as exc:

@@ -412,22 +412,26 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
 
 
 def _start_service_step() -> None:
-    """Start the local storage service and confirm it is serving (status green).
+    """Start the PERSISTENT storage-service supervisor and confirm it is serving.
 
     RDR-157 P4.1: the final step of the ``nx init --service`` one-command
-    collapse. ``start_storage_service`` is idempotent — it short-circuits on a
-    live lease, ensures Postgres is up, waits for ``/health`` 200, and only then
-    publishes the discovery lease — so re-running ``nx init --service`` is safe.
+    collapse. nexus-qke1e: routes through ``ensure_storage_supervisor`` (the
+    single persistent-start path shared with ``nx daemon service start``) rather
+    than the old transient ``start_storage_service``. The transient path
+    published a lease WITHOUT a heartbeating supervisor, so the service looked
+    'serving' at init time but the lease aged out by TTL before the next client
+    (e.g. ``nx migrate-to-service``) could discover it. The persistent supervisor
+    heartbeats the lease for the process lifetime, so 'serving' stays true.
+    Idempotent — a live lease short-circuits, so re-running ``nx init`` is safe.
     Any failure surfaces as an actionable error with a remedy, never a traceback.
     """
-    from nexus.daemon.storage_service_daemon import (
-        StorageServiceStartError,
-        start_storage_service,
-    )
+    from nexus.commands.daemon import ensure_storage_supervisor
+    from nexus.config import nexus_config_dir
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError
 
     click.echo("\nStarting the storage service …")
     try:
-        endpoint = start_storage_service()
+        lease = ensure_storage_supervisor(nexus_config_dir())
     except StorageServiceStartError as exc:
         # StorageServiceStartError messages already carry a remedy (build/install
         # the artifact, re-run init, etc.); relay verbatim, fail fatal.
@@ -438,9 +442,10 @@ def _start_service_step() -> None:
         click.echo(f"\nStorage service failed to start: {exc}", err=True)
         raise SystemExit(1)
 
+    ep = lease.endpoint
     click.echo(
-        f"  Service running on {endpoint.get('host')}:{endpoint.get('port')} "
-        f"(pid {endpoint.get('pid')}, generation {endpoint.get('generation')})."
+        f"  Service running on {ep.get('host')}:{ep.get('port')} "
+        f"(pid {ep.get('pid')}, generation {lease.generation})."
     )
     click.echo("  nx init --service complete — the service backend is serving.")
 
