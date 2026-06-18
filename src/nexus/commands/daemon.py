@@ -1709,15 +1709,27 @@ def service_install_jar_cmd(
     default=None,
     help="Config directory override.",
 )
-def service_install_binary_cmd(tag: str, config_dir_str: str | None) -> None:
-    """Download, verify, and install the signed native nexus-service binary.
+@click.option(
+    "--pg-bundle/--no-pg-bundle",
+    "want_pg_bundle",
+    default=True,
+    help="Also acquire+verify the relocatable PostgreSQL bundle from the same "
+         "release (default). --no-pg-bundle installs only the service binary "
+         "(e.g. cloud habitat with a managed Postgres).",
+)
+def service_install_binary_cmd(
+    tag: str, config_dir_str: str | None, want_pg_bundle: bool,
+) -> None:
+    """Download, verify, and install the signed native nexus-service binary
+    (and, by default, the PostgreSQL bundle) from a release.
 
     TAG is an EXPLICIT engine-service-v* release tag (e.g. engine-service-v0.1.3);
-    there is no "latest" resolution. The per-platform asset, its .sha256, and its
+    there is no "latest" resolution. Each per-platform asset, its .sha256, and its
     .sigstore.json bundle are fetched from the GitHub release, verified
     (sha256 + keyless Sigstore signature, pinned to this repo's release workflow
-    identity), then placed at <config-dir>/service/nexus-service. Verification
-    fails closed: nothing is installed unless BOTH gates pass.
+    identity), then placed under <config-dir>/service/. Verification fails closed:
+    nothing is installed unless BOTH gates pass. One verified seam covers the
+    binary and the PG bundle (RDR-161).
     """
     from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
@@ -1725,6 +1737,8 @@ def service_install_binary_cmd(tag: str, config_dir_str: str | None) -> None:
         BinaryVerificationError,
         asset_name,
         install_binary,
+        install_pg_bundle,
+        pg_bundle_asset_name,
     )
 
     try:
@@ -1733,12 +1747,11 @@ def service_install_binary_cmd(tag: str, config_dir_str: str | None) -> None:
         _nx_version = "unknown"
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    installed_by = f"conexus {_nx_version}"
 
     click.echo(f"Resolving {asset_name()} from release {tag}…")
     try:
-        dest, prov = install_binary(
-            tag, config_dir, installed_by=f"conexus {_nx_version}",
-        )
+        dest, prov = install_binary(tag, config_dir, installed_by=installed_by)
     except BinaryVerificationError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(2)
@@ -1748,7 +1761,32 @@ def service_install_binary_cmd(tag: str, config_dir_str: str | None) -> None:
     click.echo(f"  version: {prov['version']}")
     click.echo(f"  sha256:  {prov['sha256'][:16]}…")
     click.echo(f"  signature: verified (keyless Sigstore, {prov['source_url']})")
-    click.echo("Restart the service to pick it up: nx daemon service stop && "
+
+    if want_pg_bundle:
+        click.echo(f"\nResolving {pg_bundle_asset_name()} from release {tag}…")
+        try:
+            pg_dest, pg_prov = install_pg_bundle(
+                tag, config_dir, installed_by=installed_by,
+            )
+        except BinaryVerificationError as exc:
+            # The binary already installed and verified; only the PG bundle
+            # failed. Say so, and don't print the "restart the service" hint
+            # below (the service can't start without the bundle in local mode).
+            click.echo(
+                f"Error: the native binary installed OK, but the PostgreSQL "
+                f"bundle failed: {exc}\n"
+                "Re-run `nx daemon service install-binary <tag>` to retry the "
+                "bundle (the binary step is idempotent), or pass --no-pg-bundle "
+                "if you run against a managed Postgres.",
+                err=True,
+            )
+            sys.exit(2)
+        click.echo(f"Installed {pg_prov['asset']} ({tag})")
+        click.echo(f"  -> {pg_dest}")
+        click.echo(f"  sha256:  {pg_prov['sha256'][:16]}…")
+        click.echo("  signature: verified (keyless Sigstore)")
+
+    click.echo("\nRestart the service to pick it up: nx daemon service stop && "
                "nx daemon service start")
 
 

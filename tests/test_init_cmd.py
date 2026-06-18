@@ -642,6 +642,31 @@ def test_select_bundled_pg_none_without_bundle(tmp_path, monkeypatch) -> None:
     assert not os.environ.get("NEXUS_PG_BIN")
 
 
+def test_select_bundled_pg_defaults_to_service_dir(tmp_path, monkeypatch, make_pg_bundle_txz) -> None:
+    """RF-161-3 (nexus-06y9e): with no env override and no injected search_dirs,
+    the default search dir must be <config_dir>/service/ — where the P2 acquire
+    seam places the .txz — NOT the venv bin/. Before the fix _select_bundled_pg
+    passed search_dirs=None straight through, so ensure_pg_bundle defaulted to
+    [Path(sys.executable).parent] and a correctly-acquired bundle was never
+    found (silent host-PG fallback)."""
+    from nexus.commands.init import _select_bundled_pg
+    from nexus.db import pg_bundle
+    from nexus.db.pg_bundle import current_platform_tag
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    monkeypatch.delenv(pg_bundle.BUNDLE_ENV, raising=False)
+    config_dir = tmp_path / "cfg"
+    service_dir = config_dir / "service"
+    service_dir.mkdir(parents=True)
+    make_pg_bundle_txz(service_dir, f"nexus-pg-{current_platform_tag()}.txz")
+
+    # No search_dirs, no env: must still find the bundle under <config_dir>/service.
+    bin_dir = _select_bundled_pg(config_dir)
+    assert bin_dir is not None, "bundle in <config_dir>/service/ must be found"
+    assert os.environ["NEXUS_PG_BIN"] == str(bin_dir)
+    assert str(bin_dir).startswith(str(config_dir))
+
+
 def test_select_bundled_pg_respects_existing_env_override(tmp_path, monkeypatch, make_pg_bundle_txz) -> None:
     from nexus.commands.init import _select_bundled_pg
     from nexus.db import pg_bundle

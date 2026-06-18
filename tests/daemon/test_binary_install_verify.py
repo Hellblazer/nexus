@@ -303,9 +303,11 @@ def test_cli_install_binary_happy_path(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(binstall, "install_binary", _fake_install)
+    # --no-pg-bundle: this test is scoped to the binary path (the PG-bundle
+    # default is covered in tests/daemon/test_pg_bundle_install.py).
     result = CliRunner().invoke(
         service_install_binary_cmd,
-        ["engine-service-v0.1.3", "--config-dir", str(tmp_path)],
+        ["engine-service-v0.1.3", "--no-pg-bundle", "--config-dir", str(tmp_path)],
     )
     assert result.exit_code == 0, result.output
     assert "verified" in result.output.lower()
