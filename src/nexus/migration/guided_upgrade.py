@@ -120,6 +120,82 @@ def detect_pending_migration(
     return PreflightDetection(report=report, needs_migration=needs)
 
 
+# ── ez5.6: provision-and-serve sequence ────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ProvisionResult:
+    """The serving endpoint after the Stage-2 provision+serve sequence.
+
+    ``service_url`` is the UNVERIFIED endpoint (a lease exists, but the service
+    has not yet been version-pinned or health-gated). ez5.7 only emits it as a
+    VERIFIED url after the pin (ez5.4) and the health-gate (ez5.5) pass.
+    """
+
+    service_url: str
+    host: str
+    port: int
+    pid: int | None
+    generation: int | None
+
+
+def _default_provision_step() -> None:
+    from nexus.commands.init import _provision_postgres_step  # noqa: PLC0415
+
+    _provision_postgres_step()
+
+
+def _default_serve_step() -> Any:
+    from nexus.commands.init import _start_service_step  # noqa: PLC0415
+
+    return _start_service_step()
+
+
+def provision_and_serve(
+    *,
+    provision_step: Callable[[], None] | None = None,
+    serve_step: Callable[[], Any] | None = None,
+) -> ProvisionResult:
+    """Provision Postgres then start the storage service, returning its endpoint.
+
+    Reuses the EXACT two steps ``nx init --service`` runs (no fork): provision
+    the local PG cluster, then the single persistent-supervisor start path
+    (``ensure_storage_supervisor`` via ``_start_service_step``). Provision runs
+    first and a provision failure aborts before any service start. The returned
+    ``service_url`` is UNVERIFIED — the caller (ez5.7) must version-pin + health-
+    gate it before treating it as ready.
+
+    ``provision_step`` / ``serve_step`` are injection seams for tests.
+    """
+    _provision = provision_step if provision_step is not None else _default_provision_step
+    _serve = serve_step if serve_step is not None else _default_serve_step
+
+    _provision()
+    lease = _serve()
+
+    endpoint = getattr(lease, "endpoint", None) or {}
+    host = endpoint.get("host")
+    port = endpoint.get("port")
+    if not host or not port:
+        raise RuntimeError(
+            "storage service started but its lease endpoint is missing host/port "
+            f"(endpoint={endpoint!r}) — cannot derive a service_url"
+        )
+    result = ProvisionResult(
+        service_url=f"http://{host}:{port}",
+        host=str(host),
+        port=int(port),
+        pid=endpoint.get("pid"),
+        generation=getattr(lease, "generation", None),
+    )
+    _log.info(
+        "guided_upgrade_provisioned",
+        service_url=result.service_url,
+        generation=result.generation,
+    )
+    return result
+
+
 # ── ez5.5: bounded health-gate ─────────────────────────────────────────────
 
 

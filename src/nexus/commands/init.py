@@ -411,8 +411,12 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
     return True
 
 
-def _start_service_step() -> None:
+def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import cycle)
     """Start the PERSISTENT storage-service supervisor and confirm it is serving.
+
+    Returns the live ``LeaseRecord`` so a programmatic caller (RDR-002
+    ``nx guided-upgrade`` provision sequence) can read the serving endpoint;
+    ``init_cmd`` ignores the return and uses it purely for its side effect.
 
     RDR-157 P4.1: the final step of the ``nx init --service`` one-command
     collapse. nexus-qke1e: routes through ``ensure_storage_supervisor`` (the
@@ -448,6 +452,7 @@ def _start_service_step() -> None:
         f"(pid {ep.get('pid')}, generation {lease.generation})."
     )
     click.echo("  nx init --service complete — the service backend is serving.")
+    return lease
 
 
 # ── P5 (A) Postgres provisioning ──────────────────────────────────────────────
