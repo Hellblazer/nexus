@@ -141,6 +141,28 @@ def guided_upgrade_cmd(
         "(healthy + version-pinned)."
     )
 
+    # 2b. SELF-LOAD CREDENTIALS — the manual path sources pg_credentials between
+    #     `nx init --service` and `nx migrate-to-service`; this is ONE process, so
+    #     load the freshly-provisioned NX_SERVICE_TOKEN / NX_STORAGE_BACKEND into
+    #     the env before the handoff (else _run_migration sees no token). Skip on
+    #     the --service-url path: that targets an external service whose token the
+    #     user supplies via NX_SERVICE_TOKEN directly.
+    if not service_url:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415
+        from nexus.db.pg_provision import (  # noqa: PLC0415
+            load_service_credentials_into_env,
+        )
+
+        if not load_service_credentials_into_env(nexus_config_dir()):
+            click.echo("", err=True)
+            click.echo(
+                "Service provisioned but no NX_SERVICE_TOKEN is available "
+                "(neither in the environment nor pg_credentials) — cannot "
+                "authenticate the migration. Re-run after `nx init --service`.",
+                err=True,
+            )
+            raise SystemExit(1)
+
     # 3. HAND OFF — drive the existing migrate-to-service against the VERIFIED
     #    url. _run_migration renders the verdict and raises SystemExit(1) on any
     #    block (sentinel migrated-failed + rollback offer), exits 0 on success.

@@ -21,13 +21,39 @@ HERE="tests/e2e/migration-rehearsal"
 IMAGE="nexus-migration-rehearsal"
 WITH_CLOUD=0
 DO_BUILD=1
+GUIDED=0
+# RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
+# its /version reports >= v0.1.5 and the guided-upgrade version-pin PASSES.
+GUIDED_STAMP_VERSION="0.1.6"
+RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 for a in "$@"; do
   case "$a" in
     --with-cloud) WITH_CLOUD=1 ;;
     --no-build)   DO_BUILD=0 ;;
+    --guided)     GUIDED=1 ;;   # RDR-002 ez5.13: drive nx guided-upgrade
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
+
+# --guided: stamp release.properties so the native binary reports a release
+# version (an unstamped build -> release_version=null -> version-pin fail-closes,
+# which is not the success path this MVV exercises). Force a native rebuild so
+# the stamp is actually baked in, and restore the file on exit. The stamp must
+# happen BEFORE the native build below.
+if [ "$GUIDED" = 1 ]; then
+  echo "[guided] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
+  grep -v '^release_version=' "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp"
+  printf 'release_version=%s\n' "$GUIDED_STAMP_VERSION" >> "$RELEASE_PROPS.tmp"
+  mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
+  # Force a fresh native build so the stamp is baked in (don't reuse a stale,
+  # unstamped binary).
+  rm -f service/target/nexus-service
+fi
+
+# Single restore hook for the stamped release.properties (folded into every EXIT
+# trap below so a later `trap ... EXIT` does not clobber it).
+_guided_restore() { [ "$GUIDED" = 1 ] && git checkout -- "$RELEASE_PROPS" 2>/dev/null || true; }
+trap '_guided_restore' EXIT
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
 if [ "$DO_BUILD" = 1 ]; then
@@ -63,7 +89,7 @@ echo "[3/3] Staging a minimal build context + building image (WITH_CLOUD=$WITH_C
 # repo .dockerignore excludes dist/, and the inputs live in three different
 # trees — staging sidesteps both without touching the shared .dockerignore.
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+trap '_guided_restore; rm -rf "$STAGE"' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
 # The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
 # emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
@@ -75,7 +101,7 @@ cp service/target/nexus-service "$STAGE/native/"
 if compgen -G "service/target/*.so" > /dev/null; then
   cp service/target/*.so "$STAGE/native/"
 fi
-cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/seed_legacy.py" "$STAGE/"
+cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_guided.sh" "$HERE/seed_legacy.py" "$STAGE/"
 
 # Docker Desktop's credsStore=desktop helper can't reach a locked login keychain
 # in a non-interactive session, which fails even cached/anonymous image
@@ -85,7 +111,7 @@ DCFG="$HOME/.docker/config.json"
 if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   cp "$DCFG" "$STAGE/.docker-config.bak"
   python3 -c "import json,os;p=os.path.expanduser('~/.docker/config.json');d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)"
-  trap 'cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"' EXIT
+  trap '_guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"' EXIT
   echo "      (temporarily stripped credsStore from ~/.docker/config.json — restored on exit)"
 fi
 
@@ -103,8 +129,15 @@ if [ "$WITH_CLOUD" = 1 ]; then
 fi
 
 # NOT `exec` — exec replaces this shell and would suppress the EXIT trap that
-# restores ~/.docker/config.json and removes the staging dir. Run as a child and
-# propagate its exit code.
-docker run --rm "${run_env[@]}" "$IMAGE"
+# restores ~/.docker/config.json + release.properties and removes the staging
+# dir. Run as a child and propagate its exit code.
+if [ "$GUIDED" = 1 ]; then
+  # RDR-002 ez5.13: override the default entrypoint to drive the one-command
+  # guided-upgrade MVV instead of the full manual rehearsal.
+  docker run --rm "${run_env[@]}" --entrypoint /bin/bash "$IMAGE" \
+    /home/nexus/rehearse_guided.sh
+else
+  docker run --rm "${run_env[@]}" "$IMAGE"
+fi
 rc=$?
 exit "$rc"

@@ -75,6 +75,8 @@ class TestGuidedUpgradeCmd:
                    return_value=_preflight(True, 2)), \
              patch(f"{_MOD}.establish_verified_service",
                    return_value=_ready()) as est, \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
              patch("nexus.commands.migrate_cmd._run_migration") as mig:
             result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
         assert result.exit_code == 0, result.output
@@ -129,11 +131,28 @@ class TestGuidedUpgradeCmd:
         with patch(f"{_MOD}.detect_pending_migration",
                    return_value=_preflight(True, 1)), \
              patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
              patch("nexus.commands.migrate_cmd._run_migration", side_effect=_block):
             result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
         assert result.exit_code == 1
         assert "nx storage migrate vectors --rollback" in result.output
         assert "FAILED validation" in result.output
+
+    def test_missing_token_after_provision_fails_before_migrating(self) -> None:
+        # The one-command flow self-loads pg_credentials; if no token is available
+        # afterwards, hard-fail BEFORE handing off (the manual path's source step
+        # has no equivalent here).
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 1)), \
+             patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=False), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 1
+        assert "NX_SERVICE_TOKEN" in result.output
+        mig.assert_not_called()
 
     def test_bad_service_url_is_rejected_before_migrating(self) -> None:
         with patch(f"{_MOD}.detect_pending_migration",
