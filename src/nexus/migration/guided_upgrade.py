@@ -25,28 +25,12 @@ import structlog
 from nexus.migration.detection import (
     DetectionReport,
     classify_collections,
+    close_read_client,
     open_read_legs,
     voyage_key_available,
 )
 
 _log = structlog.get_logger(__name__)
-
-
-def _close_quietly(client: Any | None) -> None:
-    """Close a read client, swallowing absence/teardown errors.
-
-    Mirrors the driver's leg-teardown: a read leg that has no ``close`` (or
-    fails to close) must not mask the detection result.
-    """
-    if client is None:
-        return
-    close = getattr(client, "close", None)
-    if close is None:
-        return
-    try:
-        close()
-    except Exception as exc:  # noqa: BLE001 — teardown is best-effort
-        _log.debug("guided_upgrade_close_failed", error=str(exc))
 
 
 @dataclass(frozen=True)
@@ -68,11 +52,16 @@ class PreflightDetection:
         return sum(1 for c in self.report.classifications if c.has_data)
 
     @property
-    def unsupported_count(self) -> int:
-        """Number of collections the pre-gate classes ``unsupported`` (legacy
-        minilm-384, or voyage with no key) — informational for command
-        messaging; RDR-162 auto-remaps cross-model collections, it does not
-        block them."""
+    def classified_unsupported_count(self) -> int:
+        """Number of collections classified ``unsupported`` by detection.
+
+        This is the RAW classification count — it INCLUDES legacy minilm-384
+        collections that RDR-162 auto-remaps (re-embeds into a bge-768 target)
+        rather than blocks. It is therefore NOT the count of genuinely-blocked
+        collections; a consumer needing the blocked set must filter
+        ``report.unsupported`` by :func:`cross_model_remappable`. Kept as a
+        coarse informational signal only.
+        """
         return len(self.report.unsupported)
 
     @property
@@ -103,7 +92,7 @@ def detect_pending_migration(
         voyage_key_available() if voyage_key_present is None else voyage_key_present
     )
     _open = open_legs if open_legs is not None else open_read_legs
-    _close = close_leg if close_leg is not None else _close_quietly
+    _close = close_leg if close_leg is not None else close_read_client
 
     local, cloud = _open(local_path)
     try:
@@ -113,8 +102,12 @@ def detect_pending_migration(
             voyage_key_present=key_present,
         )
     finally:
+        # Close only the legs that were actually opened — an absent leg is
+        # never dispatched to ``_close`` (so injected close hooks need not
+        # tolerate ``None``).
         for client in (local, cloud):
-            _close(client)
+            if client is not None:
+                _close(client)
 
     needs = len(report.legs_with_data) > 0
     _log.info(

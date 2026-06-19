@@ -80,7 +80,9 @@ class TestDetectPendingMigration:
         )
         assert result.needs_migration is True
         assert result.data_bearing_count == 1
-        assert result.unsupported_count == 1  # minilm-384 is unsupported
+        # minilm-384 is classified unsupported; this is the RAW classification
+        # count (RDR-162 auto-remaps it — it is NOT the genuinely-blocked count).
+        assert result.classified_unsupported_count == 1
 
     def test_supported_data_still_needs_migration(self) -> None:
         # Even a fully-supported collection must move Chroma -> pgvector.
@@ -90,7 +92,7 @@ class TestDetectPendingMigration:
         )
         assert result.needs_migration is True
         assert result.data_bearing_count == 1
-        assert result.unsupported_count == 0
+        assert result.classified_unsupported_count == 0
 
     def test_both_legs_aggregated(self) -> None:
         local = _FakeChromaClient({ONNX_768: 3})
@@ -101,10 +103,14 @@ class TestDetectPendingMigration:
         assert result.needs_migration is True
         assert result.data_bearing_count == 2
         assert set(result.report.legs_with_data) == {"local", "cloud"}
+        # Pin count propagation: a degenerate impl that flags any non-None leg
+        # data-bearing without reading counts would not sum to 8.
+        assert sum(c.source_count for c in result.report.classifications) == 8
 
-    def test_legs_are_closed_after_detection(self) -> None:
+    def test_single_leg_close_does_not_dispatch_absent_leg(self) -> None:
         # WAL single-opener invariant: the local leg MUST be closed before the
-        # ETL/migration reopens it. The pre-flight owns its open->close window.
+        # ETL/migration reopens it. An ABSENT leg is never dispatched to the
+        # close hook (so injected hooks need not tolerate None).
         local = _FakeChromaClient({ONNX_768: 1})
         closed: list[object] = []
         detect_pending_migration(
@@ -112,14 +118,33 @@ class TestDetectPendingMigration:
             open_legs=_legs(local, None),
             close_leg=closed.append,
         )
-        assert local in closed
+        assert closed == [local]
 
-    def test_enumeration_failure_is_loud(self) -> None:
+    def test_both_legs_are_closed_after_detection(self) -> None:
+        # The two-leg close contract: BOTH opened legs are closed, not just
+        # the local one (a regression closing only local would strand cloud).
+        local = _FakeChromaClient({ONNX_768: 1})
+        cloud = _FakeChromaClient({VOYAGE_1024: 1})
+        closed: list[object] = []
+        detect_pending_migration(
+            voyage_key_present=True,
+            open_legs=_legs(local, cloud),
+            close_leg=closed.append,
+        )
+        assert set(map(id, closed)) == {id(local), id(cloud)}
+
+    def test_enumeration_failure_is_loud_and_still_closes(self) -> None:
         class _Boom:
             def list_collections(self):  # noqa: ANN202
                 raise RuntimeError("corrupt sqlite header: not a database")
 
+        boom = _Boom()
+        closed: list[object] = []
         with pytest.raises(RuntimeError, match="corrupt sqlite header"):
             detect_pending_migration(
-                voyage_key_present=False, open_legs=_legs(_Boom(), None)
+                voyage_key_present=False,
+                open_legs=_legs(boom, None),
+                close_leg=closed.append,
             )
+        # The close-in-finally fires even when classification raises.
+        assert closed == [boom]
