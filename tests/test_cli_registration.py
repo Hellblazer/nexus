@@ -34,6 +34,7 @@ def test_all_command_modules_registered():
     _MODULE_TO_CLI = {
         "command_context": "command-context",
         "config_cmd": "config",
+        "guided_upgrade_cmd": "guided-upgrade",
         "context_cmd": "context",
         "migrate_cmd": "migrate-to-service",
         "migration_cmd": "migration",
