@@ -2,8 +2,9 @@
 title: "Native-Only Local Install: Expunge the JAR Launch Path, Acquire the Signed Native Binary and PG Bundle"
 id: RDR-161
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-06-18
+closed_date: 2026-06-19
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
