@@ -684,6 +684,22 @@ class TestVerifyTaxonomyConsistencyUnit:
 
         assert verify_taxonomy_consistency(db, fake) == []
 
+    def test_cross_model_source_resolved_via_target_names(self, tmp_path) -> None:
+        """RDR-162 P2: a cross-model source collection's chunks migrated into a
+        bge-768 TARGET, so the SOURCE T2 still names the minilm collection while
+        pgvector has only the target. Without target_names it reads as an orphan;
+        WITH the map it resolves through source -> target."""
+        src = _coll("xm-note", model="minilm-l6-v2-384")
+        tgt = _coll("xm-note", model="bge-base-en-v15-768")
+        fake = FakeVectorClient()
+        fake.upsert_chunks(tgt, ["id1"], ["text"], [{}])  # only the TARGET migrated
+        db = _make_t2_with_assignments(tmp_path, [src])
+
+        # Without the map: false orphan (source name not in migrated set).
+        assert verify_taxonomy_consistency(db, fake) == [src]
+        # With the map: resolved (its bge target is migrated).
+        assert verify_taxonomy_consistency(db, fake, target_names={src: tgt}) == []
+
     def test_no_visible_collections_fails_loud(self, tmp_path) -> None:
         """P5.2 review fix (CRE M2, additive strengthening):
         ``list_collections()`` swallows service errors into ``[]`` — a down

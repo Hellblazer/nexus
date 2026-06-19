@@ -69,9 +69,12 @@ set -a; . /home/nexus/.config/nexus/pg_credentials; set +a
 # (the seeded legacy collections), so the rehearsal proves the cross-model
 # re-embed, not a minilm-served fallback.
 
-note "nx daemon service start — spawn native binary, migrate changesets, await /health…"
-nx daemon service start 2>&1 | sed 's/^/       /' || true
-# Poll the status surface (pebfx.5) for a healthy service.
+# nexus-qke1e: `nx init --service` ALREADY started the persistent, heartbeated
+# supervisor. Do NOT call `nx daemon service start` again — a second supervisor
+# races the first (short-circuits on the live lease, then its heartbeat loop
+# respawns the service), causing a mid-run port-churn + lease-fencing that breaks
+# the migrate. Just verify the init-started service is healthy.
+note "verifying the init-started service is healthy (no second supervisor)…"
 healthy=0
 for i in $(seq 1 30); do
   if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then

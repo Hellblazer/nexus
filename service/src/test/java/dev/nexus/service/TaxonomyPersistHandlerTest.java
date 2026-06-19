@@ -211,6 +211,49 @@ class TaxonomyPersistHandlerTest {
     }
 
     @Test
+    void renameCollection_acceptsOldNewFields_andRepoints() throws Exception {
+        // Contract guard (RDR-162 / nexus-pqatt): the rename_collection endpoint
+        // takes "old"/"new" — the convention every other rename_collection handler
+        // and every nexus HTTP client use. It was the lone "old_collection"/
+        // "new_collection" outlier, which 400'd the cross-model ref-remap (the
+        // first real caller). A test posting the wrong fields would 400; this one
+        // posts the right fields and asserts the rename took effect end-to-end.
+        String oldCol = "knowledge__rn-old";
+        String newCol = "knowledge__rn-new";
+        var spec = Map.of(
+            "label", "rn-topic", "doc_count", 1, "terms", "[\"x\"]",
+            "assigned_by", "hdbscan", "doc_ids", List.of("rn-1"));
+        assertThat(post("/v1/taxonomy/topics/persist_discovered",
+            mapper.writeValueAsString(Map.of("collection", oldCol, "specs", List.of(spec))))
+            .statusCode()).isEqualTo(200);
+
+        var resp = post("/v1/taxonomy/rename_collection",
+            mapper.writeValueAsString(Map.of("old", oldCol, "new", newCol)));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var counts = mapper.readValue(resp.body(), MAP_T);
+        // Repo returns topics/assignments/meta counts; the topic row moved.
+        assertThat(((Number) counts.get("topics")).intValue()).isEqualTo(1);
+
+        // The topic now resolves under the NEW collection, not the old.
+        var newState = mapper.convertValue(
+            mapper.readValue(get("/v1/taxonomy/rebuild/old_state?collection=" + newCol).body(),
+                MAP_T).get("old_topic_map"), LIST_T);
+        assertThat(newState).hasSize(1);
+        var oldState = mapper.convertValue(
+            mapper.readValue(get("/v1/taxonomy/rebuild/old_state?collection=" + oldCol).body(),
+                MAP_T).get("old_topic_map"), LIST_T);
+        assertThat(oldState).isEmpty();
+    }
+
+    @Test
+    void renameCollection_missingFields_returns400() throws Exception {
+        // The wrong field names (the old outlier contract) must be rejected loud.
+        assertThat(post("/v1/taxonomy/rename_collection",
+            mapper.writeValueAsString(Map.of("old_collection", "a", "new_collection", "b")))
+            .statusCode()).isEqualTo(400);
+    }
+
+    @Test
     void auth_401OnMissingToken() throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort()

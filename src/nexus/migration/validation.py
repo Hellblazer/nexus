@@ -91,7 +91,9 @@ def compose_validation_checks(
     )
 
     return ValidationChecks(
-        taxonomy_check=lambda: verify_taxonomy_consistency(t2_db_path, vector_client),
+        taxonomy_check=lambda: verify_taxonomy_consistency(
+            t2_db_path, vector_client, target_names=target_names
+        ),
         count_check=lambda: verify_counts(
             read_client, vector_client, collections, target_names=target_names
         ),

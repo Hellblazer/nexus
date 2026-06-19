@@ -218,7 +218,9 @@ def test_vector_etl_surface():
     assert _params(v.verify_counts) == {
         "read_client", "vector_client", "collections", "target_names",
     }
-    assert _params(v.verify_taxonomy_consistency) == {"t2_db_path", "vector_client"}
+    assert _params(v.verify_taxonomy_consistency) == {
+        "t2_db_path", "vector_client", "target_names",
+    }
 
 
 # ── Cross-process state sentinel (P1) ──────────────────────────────────────

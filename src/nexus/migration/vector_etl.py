@@ -557,6 +557,7 @@ def verify_counts(
 def verify_taxonomy_consistency(
     t2_db_path: str | Path,
     vector_client: Any,
+    target_names: dict[str, str] | None = None,
 ) -> list[str]:
     """T2 consistency check (bead clause (d)): every
     ``topic_assignments.source_collection`` value must resolve to a
@@ -568,7 +569,14 @@ def verify_taxonomy_consistency(
     Reads the SQLite T2 read-only; the pgvector side is consulted through
     the service (``list_collections``), so the check runs with no direct
     Postgres access.
+
+    ``target_names`` (RDR-162 P2): a cross-model source collection's chunks
+    migrated into a model-remapped target (minilm-384 -> bge-768), so the SOURCE
+    SQLite still names ``S`` while the migrated pgvector collection is its target
+    ``target_names[S]``. Each referenced source name is resolved THROUGH this map
+    before the membership check, so a cross-model source is not a false orphan.
     """
+    tmap = target_names or {}
     uri = f"file:{Path(t2_db_path)}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)  # epsilon-allow: RDR-155 P5 taxonomy-consistency check — read-only T2 source read (mode=ro URI), mirrors the db/t2 ETL readers; never a T2 writer
     try:
@@ -578,7 +586,9 @@ def verify_taxonomy_consistency(
         ).fetchall()
     finally:
         conn.close()
-    referenced = {r[0] for r in rows}
+    # Resolve each source name through the cross-model remap before comparison:
+    # a source whose bge-768 target is migrated is NOT an orphan.
+    referenced = {tmap.get(r[0], r[0]) for r in rows}
     migrated = {c.get("name") for c in vector_client.list_collections()}
     if referenced and not migrated:
         # list_collections() swallows service errors and returns [] — an
