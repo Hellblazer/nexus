@@ -1495,19 +1495,29 @@ def service_group() -> None:
 def ensure_storage_supervisor(config_dir: Path):
     """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
 
-    Returns the live :class:`LeaseRecord`. If a fresh lease already exists this
+    Returns the live :class:`LeaseRecord`. If a FRESH lease already exists this
     is a no-op (idempotent — re-running ``nx init --service`` / ``nx daemon
     service start`` is safe). Otherwise it detached-spawns the ``--foreground``
     supervisor (``start_new_session=True``) and waits up to 60s for it to publish
     a lease.
 
-    This is the SINGLE persistent-start path (nexus-qke1e): both ``nx init
-    --service`` and ``nx daemon service start`` route through it, so neither
-    leaves a transient unsupervised lease that ages out by TTL because nothing
-    heartbeats it. The bug it closes: ``start_storage_service`` (the old init
-    path) published a lease without a heartbeating supervisor, so the service
-    looked 'serving' at init time but the lease aged out before the next client
-    (e.g. ``nx migrate-to-service``) could discover it.
+    Liveness is TTL-FRESHNESS, not process-aliveness: the short-circuit returns
+    any lease whose heartbeat is within the ServiceRegistry TTL (a supervisor
+    that crashed within the last TTL window still passes the freshness check and
+    its lease expires shortly after). It also does not distinguish a supervised
+    lease (``payload.supervisor_pid`` set) from a legacy transient one. In the
+    current code paths this is sound because BOTH ``nx init --service`` and ``nx
+    daemon service start`` route through here and the old transient
+    ``start_storage_service`` init path is retired — so a fresh lease is a
+    supervised one. A caller needing process-level liveness should poll the
+    service ``/health`` endpoint directly (or ``nx service probe``).
+
+    This is the SINGLE persistent-start path (nexus-qke1e): routing both surfaces
+    through it means neither leaves a transient unsupervised lease that ages out
+    by TTL because nothing heartbeats it. The bug it closes: ``start_storage_service``
+    (the old init path) published a lease without a heartbeating supervisor, so
+    the service looked 'serving' at init time but the lease aged out before the
+    next client (e.g. ``nx migrate-to-service``) could discover it.
 
     Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
     """
@@ -1601,9 +1611,7 @@ def service_start_cmd(
     from nexus.daemon.storage_service_daemon import (
         StorageServiceStartError,
         run_storage_supervisor,
-        start_storage_service,
     )
-    from nexus.daemon.service_registry import ServiceRegistry
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
 
