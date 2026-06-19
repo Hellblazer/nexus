@@ -121,6 +121,65 @@ the consumer.**
   delivers the LOCAL native-binary + embedded-PG distribution; the cloud client
   path is RDR-001's.
 
+### 7. Cross-model migrate: legacy minilm-384 → service bge-768 (RDR-162)
+
+The upgrade case RDR-001 orchestrates for an existing user: a pre-RDR-160
+install holds `minilm-384` (384-dim) collections the bge-768 service cannot
+serve. RDR-162 makes migrating them a rehearsal-proven primitive.
+
+- **Entry point:** `nx migrate-to-service` (`src/nexus/commands/migrate_cmd.py`
+  → `nexus.migration.driver.run_guided_upgrade`). `--dry-run` previews the
+  footprint without moving data.
+- **Mode (the contract):** a collection whose embedding model the service does
+  not wire (e.g. `minilm-384`), with a conformant four-segment name and present
+  chunk text, is **cross-model migrated**: the ETL reads the SOURCE collection's
+  **stored chunk text** (model-agnostic) and upserts it into a TARGET collection
+  whose model segment is the service model (`bge-768`); the service re-embeds the
+  text with bge-768. The target name is the source name with only the model
+  segment swapped (`vector_etl.cross_model_target_name`). This is a **single
+  stage** — re-embed-on-migrate, NOT a two-stage chain. Voyage collections with
+  no key, and non-conformant names, are NOT remapped — they BLOCK with a
+  credential / re-index diagnostic.
+- **Reference remap:** after the target verifies populated, the catalog/topic
+  `source_collection` / `physical_collection` references are re-pointed
+  source → target (`collection_rename.remap_collection_references`: the T2
+  reference cascade raises on failure; the catalog cascade is fail-open).
+- **Idempotency:** the service upsert keys on `(tenant_id, target_collection,
+  chash)`; `chash = sha256(chunk_text)[:32]` is identical across the re-embed, so
+  a re-run resumes a partial target rather than duplicating.
+- **Partial-failure disposition (copy-not-move, RDR-155 RF-5):** the source
+  Chroma collection is **never mutated**, so any failed migrate is cleanly
+  re-runnable from the untouched source. The reference remap is the one mutation
+  and is ordered STRICTLY AFTER the target verifies populated (mirror RDR-144
+  reindex-first / delete-after-verify), so a mid-migrate failure never leaves
+  dangling references. A per-collection remap failure demotes that leg → the run
+  refuses partial success and leaves the `migrated-failed` sentinel (reads
+  degrade-loud); re-run to converge.
+- **BOUNDARY — not to be confused with `embed_migrate`:** `nexus.db.embed_migrate`
+  (under `db/`) is the LOCAL-only 384 → 768 re-embed for a user **staying on
+  Chroma** (no service). It re-reads SOURCE FILES and therefore CANNOT upgrade
+  `sourceless` collections (MCP `store_put` notes with no backing file). The
+  RDR-162 service-migration path re-embeds STORED TEXT and so DOES cover
+  sourceless notes. RDR-001 orchestration uses the service path
+  (`nx migrate-to-service`), never `embed_migrate`.
+- **Consumer use:** RDR-001 upgrade-orchestration invokes `nx migrate-to-service`
+  (after the service is provisioned + serving per primitives 3–5). A clean run
+  reports `Migration VERIFIED and unlocked`; a block leaves `migrated-failed`
+  with rollback offered (`nx storage migrate vectors --rollback`, source intact).
+- **Reference flow:** `tests/e2e/migration-rehearsal/run.sh` proves the whole
+  chain soup-to-nuts in a container (install → provision → serve → seed legacy
+  minilm-384 incl. a sourceless note → cross-model migrate → validate → rollback-
+  safe).
+- **Known residual (fail-open):** the cross-model catalog reference remap
+  (`/v1/catalog/collections/rename`) currently 500s server-side (the upsert
+  pre-registers the bge target, so the catalog rename's `collection_registry`
+  UPDATE collides under the RDR-156 `ON UPDATE CASCADE` FKs). It is fail-open —
+  the migration still verifies + unlocks; catalog `physical_collection` refs may
+  be stale until `nx catalog rebuild`. Tracked engine-side (handoff
+  `engine_service/HANDOFF-catalog-rename-500-cross-model-collision`); RDR-001
+  orchestration should run `nx catalog rebuild` after a cross-model migrate until
+  the engine fix lands.
+
 ## Fresh-machine E2E (P4.2)
 
 `tests/e2e/release-sandbox.sh service` proves a fresh machine reaches serving
