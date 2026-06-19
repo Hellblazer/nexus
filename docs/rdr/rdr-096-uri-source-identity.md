@@ -2,12 +2,13 @@
 title: "RDR-096: URI-Based Source Identity for Aspect Extraction"
 id: RDR-096
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-27
 accepted_date: 2026-04-27
+closed_date: 2026-06-19
 related_issues:
   - "#331 — nx enrich aspects writes null-field rows when extractor fails to read source"
   - "#332 — Source identity should be a URI, not a filesystem path"
