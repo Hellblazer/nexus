@@ -47,7 +47,13 @@ else
   bad "could not position native binary"
 fi
 
-note "nx init --service — provisioning PG16 + pgvector + nexus DB (bge-768 service embedder, RDR-160)…"
+# nexus-lz3f2: bound the native service's heap so the boot memory peak (bge-768
+# ONNX load + PG + the Python supervisor in this container's shared VM) does not
+# trip the cgroup OOM killer — which previously SIGKILLed the SUPERVISOR (not the
+# JVM), silently vanishing the lease and failing the migrate intermittently. The
+# supervisor inherits this env and passes -Xmx to the native binary.
+export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
+note "nx init --service — provisioning PG16 + pgvector + nexus DB (bge-768 service embedder, RDR-160; NX_SERVICE_MAX_HEAP=$NX_SERVICE_MAX_HEAP)…"
 if nx init --service --embedder bge-768 --yes 2>&1 | sed 's/^/       /'; then
   ok "nx init --service (provision)"
 else

@@ -59,6 +59,7 @@ import pytest
 from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
+    ttl_for_tier,
 )
 from nexus.daemon.t1_lease import T1LeasePublisher
 from nexus import session as _sess
@@ -284,9 +285,13 @@ class _LeaseHarness(RecordHarness):
 
     def __init__(self, config_dir: Path, alive: _AliveSet, clock: _FakeClock) -> None:
         super().__init__(config_dir, alive, clock)
+        # nexus-lz3f2: each tier rides its REAL per-tier TTL (storage_service=15s,
+        # t2/t3=3s default) so the conformance battery's reap/self-heal timing
+        # reflects production for every tier, not a hardcoded 3s.
+        self._tier_ttl = ttl_for_tier(self._REGISTRY_TIER)
         self._registry = ServiceRegistry(
             dir=config_dir, tier=self._REGISTRY_TIER, clock=clock,
-            ttl=3.0, heartbeat_interval=1.0,
+            ttl=self._tier_ttl, heartbeat_interval=1.0,
         )
         self._scope = str(os.getuid())
         # One ServiceSupervisor per owner, exactly as the migrated daemon
@@ -323,7 +328,7 @@ class _LeaseHarness(RecordHarness):
         self._supervisors.pop(owner, None)
 
     def advance_to_reap(self) -> None:
-        self._clock.advance(3.1)  # past TTL
+        self._clock.advance(self._tier_ttl + 0.1)  # past this tier's TTL
 
     def reap(self) -> None:
         self._registry.discover(self._scope)  # discovery reaps an expired lease
