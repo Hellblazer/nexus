@@ -464,6 +464,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # cloud_mode fixture.
     "test_pregate.py",
     "test_quiesce.py",
+    # nexus-8o9pm voyage-capability gate: voyage tokens are collection-NAME
+    # fixtures (footprint detection) and embedding_models inside a FAKE /version
+    # response body; the gate is a pure data/HTTP predicate that never embeds, so
+    # there is no ambient cloud_mode behavior to assert.
+    "test_guided_upgrade_voyage_capability.py",
     # RDR-001 managed-endpoint probe: voyage tokens appear only as
     # embedding_models inside a FAKE /version response body (injected
     # http_get) — the managed service's reported models, not cloud-mode

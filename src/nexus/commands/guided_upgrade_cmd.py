@@ -37,6 +37,8 @@ from nexus.migration.guided_upgrade import (
     ProvisionResult,
     detect_pending_migration,
     establish_verified_service,
+    footprint_has_voyage_collections,
+    verify_voyage_capability,
 )
 
 _log = structlog.get_logger(__name__)
@@ -152,6 +154,34 @@ def guided_upgrade_cmd(
         f"  Service verified at {readiness.service_url} "
         "(healthy + version-pinned)."
     )
+
+    # 2a. VOYAGE-CAPABILITY GATE (nexus-8o9pm) — if the footprint has voyage-model
+    #     collections, the target MUST be voyage-capable. Voyage collections are
+    #     NOT cross-model-remapped to bge (re-embedding voyage text into bge
+    #     changes recall), so a bge-only target would block them mid-migration.
+    #     Catch it HERE with a precise message, keyed on the service's ACTUAL
+    #     /version capability (the authoritative server-side signal), not the
+    #     client's voyage-key probe.
+    # NOTE (substantive-critic Sig-1): this gate reads /version at
+    # readiness.service_url; the migration's own pre-gate (RDR-159 P1) re-reads
+    # /version via resolve_service_config() (NX_SERVICE_URL env). They converge
+    # because _run_migration below sets NX_SERVICE_URL = readiness.service_url
+    # BEFORE the pre-gate runs, so both observe the same service. The coupling is
+    # implicit; making it explicit (thread the verified url to run_guided_upgrade)
+    # is tracked as a follow-up.
+    if footprint_has_voyage_collections(pre.report):
+        cap = verify_voyage_capability(readiness.service_url)
+        if not cap.ok:
+            click.echo("", err=True)
+            click.echo(
+                f"Your footprint includes voyage-model collection(s), but the "
+                f"target service cannot serve voyage: {cap.reason}. Configure "
+                "voyage on the service (NX_VOYAGE_API_KEY / nx config set "
+                "voyage_api_key) and restart it, then re-run — or migrate "
+                "elsewhere; these collections cannot be re-embedded into bge.",
+                err=True,
+            )
+            raise SystemExit(1)
 
     # 2b. SELF-LOAD CREDENTIALS — the manual path sources pg_credentials between
     #     `nx init --service` and `nx migrate-to-service`; this is ONE process, so

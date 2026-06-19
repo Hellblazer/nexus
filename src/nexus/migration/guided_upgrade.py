@@ -232,6 +232,91 @@ def verify_service_version(
     return VersionPinOutcome(ok=True, reason=None)
 
 
+# ── nexus-8o9pm: voyage-capability pre-flight ──────────────────────────────
+
+
+def footprint_has_voyage_collections(report: "DetectionReport") -> bool:
+    """True iff the footprint has a data-bearing voyage-model collection.
+
+    Voyage collections are NEVER cross-model-remapped to bge (RDR-162:
+    re-embedding voyage text into bge silently changes recall), so a voyage
+    collection can only migrate into a voyage-capable target — otherwise the
+    migration blocks it. Empty/non-conformant/bge/minilm collections do not
+    trigger the capability gate.
+
+    Keys on the canonical :data:`detection._VOYAGE_MODELS` set (the same
+    membership the classifier and ``cross_model_remappable`` use), NOT a
+    ``startswith('voyage')`` prefix: a non-canonical ``voyage-*`` name is an
+    unrecognized model (the classifier already gives it the re-index diagnostic),
+    not a voyage-capability problem, so it must not mis-fire this gate.
+    """
+    from nexus.migration.detection import _VOYAGE_MODELS  # noqa: PLC0415
+
+    return any(
+        c.has_data and c.model in _VOYAGE_MODELS for c in report.classifications
+    )
+
+
+@dataclass(frozen=True)
+class VoyageCapabilityOutcome:
+    """Whether the target service can serve voyage-model collections."""
+
+    ok: bool
+    reason: str | None
+
+
+def verify_voyage_capability(
+    service_url: str,
+    *,
+    http_get: Callable[[str, float], Any] | None = None,
+    timeout_s: float = 5.0,
+) -> VoyageCapabilityOutcome:
+    """Assert the target service embeds with a voyage model (its actual capability).
+
+    GETs ``{service_url}/version`` and checks ``embedding_models`` for any
+    ``voyage-*`` token — the AUTHORITATIVE server-side signal (not the client's
+    voyage-key probe, which is wrong in service mode). FAIL-CLOSED on transport
+    error, non-200, or a missing/empty/voyage-absent ``embedding_models``: if we
+    cannot confirm voyage capability, the voyage collections would block, so the
+    caller must surface that early.
+    """
+    if http_get is not None:
+        _get = http_get
+    else:
+
+        def _get(url: str, timeout: float) -> Any:
+            import httpx  # noqa: PLC0415
+
+            return httpx.get(url, timeout=timeout)
+
+    url = service_url.rstrip("/") + "/version"
+    try:
+        resp = _get(url, timeout_s)
+    except Exception as exc:  # noqa: BLE001 — any probe failure is fail-closed
+        return VoyageCapabilityOutcome(
+            ok=False, reason=f"could not reach {url} to check voyage capability: {exc}"
+        )
+    if getattr(resp, "status_code", None) != 200:
+        return VoyageCapabilityOutcome(
+            ok=False, reason=f"{url} returned HTTP {getattr(resp, 'status_code', '?')}"
+        )
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    models = body.get("embedding_models") or []
+    if any(isinstance(m, str) and m.startswith("voyage") for m in models):
+        return VoyageCapabilityOutcome(ok=True, reason=None)
+    return VoyageCapabilityOutcome(
+        ok=False,
+        reason=(
+            f"target service embeds with {list(models)} and cannot serve voyage "
+            "collections (voyage vectors are not re-embeddable into bge without "
+            "changing recall)"
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class ServiceReadiness:
     """Outcome of the Stage 2->3 readiness contract.
