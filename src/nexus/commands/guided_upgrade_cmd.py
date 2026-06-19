@@ -11,13 +11,23 @@ Stands up + verifies the bge-768 engine-service, then drives the EXISTING
 
 SERVICE path only (never embed_migrate). A fresh user with nothing to migrate
 no-ops WITHOUT provisioning. A not-ready / wrong-version service hard-fails
-with a remedy and NEVER migrates. Idempotent: re-running is safe (every reused
-step is idempotent). Named ``guided-upgrade`` to avoid colliding with the
-existing schema-migration ``nx upgrade``.
+with a remedy and NEVER migrates. Named ``guided-upgrade`` to avoid colliding
+with the existing schema-migration ``nx upgrade``.
+
+RE-RUN SEMANTICS (honest scope): re-running is SAFE — every reused step is
+idempotent (provision short-circuits on a live lease; the migrate ETL upserts;
+a blocked run leaves ``migrated-failed`` and is correctly retried). It is NOT a
+no-op after a SUCCESSFUL migration: copy-not-move leaves the Chroma source
+intact, the success path clears the migration-state sentinel, and there is no
+persistent "migrated" marker to short-circuit on — so a re-run re-detects the
+Chroma data and re-copies it (idempotent, but full-cost, with reads briefly
+degraded during the redo). Detecting an already-migrated state (e.g. via a
+pgvector count probe) is tracked separately, not part of this wiring.
 """
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlparse
 
 import click
@@ -45,6 +55,11 @@ def _provision_thunk_for_url(service_url: str):  # noqa: ANN202
     """
     url = service_url.rstrip("/")
     parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise click.BadParameter(
+            f"--service-url must be an http(s) URL with a host, got {service_url!r}",
+            param_hint="--service-url",
+        )
 
     def _thunk() -> ProvisionResult:
         return ProvisionResult(
@@ -131,11 +146,20 @@ def guided_upgrade_cmd(
     #    block (sentinel migrated-failed + rollback offer), exits 0 on success.
     from nexus.commands.migrate_cmd import _run_migration  # noqa: PLC0415
 
-    _run_migration(local_path, db_path, catalog_db_path, readiness.service_url)
+    # _run_migration sets os.environ["NX_SERVICE_URL"] as a process-level side
+    # effect (its own contract assumes subprocess-exit cleanup). We call it as a
+    # library function in-process, so save/restore to avoid leaking the url into
+    # anything that runs after this command in the same process (code-review M1).
+    _prev_url = os.environ.get("NX_SERVICE_URL")
+    try:
+        _run_migration(local_path, db_path, catalog_db_path, readiness.service_url)
+    finally:
+        if _prev_url is None:
+            os.environ.pop("NX_SERVICE_URL", None)
+        else:
+            os.environ["NX_SERVICE_URL"] = _prev_url
 
-    # 4. ADVISORY post-step — vectors now live in pgvector; refresh the catalog.
+    # 4. ADVISORY post-step — verify the migrated stack end-to-end.
     click.echo("")
-    click.echo(
-        "Advisory: refresh the catalog now that vectors serve from pgvector:"
-    )
-    click.echo("  nx catalog rebuild")
+    click.echo("Advisory: verify the migrated stack:")
+    click.echo("  nx doctor")

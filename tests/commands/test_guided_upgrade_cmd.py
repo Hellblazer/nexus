@@ -79,11 +79,12 @@ class TestGuidedUpgradeCmd:
             result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
         assert result.exit_code == 0, result.output
         assert "Service verified" in result.output
-        assert "nx catalog rebuild" in result.output  # advisory post-step
+        assert "nx doctor" in result.output  # advisory post-step (real command)
         # default provision path (no --service-url): no provision override passed
         _args, kwargs = est.call_args
         assert "provision" not in kwargs
-        mig.assert_called_once()
+        # wiring: the VERIFIED url + path overrides are handed to _run_migration.
+        mig.assert_called_once_with(None, None, None, "http://127.0.0.1:8099")
 
     def test_abort_at_confirm_does_not_provision(self) -> None:
         with patch(f"{_MOD}.detect_pending_migration",
@@ -114,11 +115,35 @@ class TestGuidedUpgradeCmd:
         assert captured["has_provision"] is True
         assert captured["url"] == "http://svc:9000"  # trailing slash stripped
 
-    def test_migration_block_propagates_nonzero(self) -> None:
+    def test_migration_block_relays_rollback_offer_and_nonzero(self) -> None:
+        # _run_migration emits the migrated-failed + rollback offer to stderr,
+        # then raises SystemExit(1). The command must let BOTH the output and the
+        # exit code through (not swallow the relay). Simulate that realistically.
+        import click as _click
+
+        def _block(*_a, **_k):  # noqa: ANN002, ANN003
+            _click.echo("Migration completed the copy but FAILED validation:", err=True)
+            _click.echo("    nx storage migrate vectors --rollback", err=True)
+            raise SystemExit(1)
+
         with patch(f"{_MOD}.detect_pending_migration",
                    return_value=_preflight(True, 1)), \
              patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
-             patch("nexus.commands.migrate_cmd._run_migration",
-                   side_effect=SystemExit(1)):
+             patch("nexus.commands.migrate_cmd._run_migration", side_effect=_block):
             result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
         assert result.exit_code == 1
+        assert "nx storage migrate vectors --rollback" in result.output
+        assert "FAILED validation" in result.output
+
+    def test_bad_service_url_is_rejected_before_migrating(self) -> None:
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 1)), \
+             patch(f"{_MOD}.establish_verified_service") as est, \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(
+                guided_upgrade_cmd, ["--yes", "--service-url", "svc:9000"]
+            )
+        assert result.exit_code != 0
+        assert "service-url" in result.output.lower()
+        est.assert_not_called()
+        mig.assert_not_called()
