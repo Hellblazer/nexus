@@ -1144,9 +1144,24 @@ public final class CatalogRepository {
     /** Rename a collection across documents + collections. */
     public int renameCollection(String tenant, String oldName, String newName) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-162: the cross-model migrate is COPY-not-move — the bge-768 target
+            // is ALREADY registered in catalog_collections by the vector upsert (its
+            // chunks' FK requires the registry row to exist). Renaming the SOURCE
+            // registry row into that name would collide on the (tenant_id, name) PK
+            // (the 500 the cross-model ref-remap hit). So branch on whether the target
+            // row already exists:
+            //   - cross-model copy (target exists): repoint catalog documents only;
+            //     leave the registry alone (renaming it would collide, and the target
+            //     row is already correct).
+            //   - canonical rename (target absent): also rename the registry row
+            //     (unchanged pre-RDR-162 behavior).
+            boolean targetExists = ctx.fetchExists(
+                ctx.selectOne().from(T_COLLS).where(F_COL_NAME.eq(newName)));
             int docs = ctx.update(T_DOCS).set(F_DOC_PCOLL, newName)
                           .where(F_DOC_PCOLL.eq(oldName)).execute();
-            ctx.update(T_COLLS).set(F_COL_NAME, newName).where(F_COL_NAME.eq(oldName)).execute();
+            if (!targetExists) {
+                ctx.update(T_COLLS).set(F_COL_NAME, newName).where(F_COL_NAME.eq(oldName)).execute();
+            }
             return docs;
         });
     }
