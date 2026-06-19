@@ -52,6 +52,7 @@ from nexus.commands.hooks import hooks
 from nexus.commands.index import index
 from nexus.commands.init import init_cmd
 from nexus.commands.memory import memory
+from nexus.commands.guided_upgrade_cmd import guided_upgrade_cmd
 from nexus.commands.migrate_cmd import migrate_to_service_cmd
 from nexus.commands.migration_cmd import migration_cmd
 from nexus.commands.mineru import mineru_group
@@ -107,6 +108,7 @@ hook_group.hidden = True
 main.add_command(hook_group, name="hook")
 main.add_command(hooks)
 main.add_command(index)
+main.add_command(guided_upgrade_cmd, name="guided-upgrade")
 main.add_command(init_cmd, name="init")
 main.add_command(memory)
 main.add_command(migrate_to_service_cmd, name="migrate-to-service")

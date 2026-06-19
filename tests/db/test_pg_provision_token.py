@@ -81,3 +81,52 @@ def test_persist_service_token_handles_missing_trailing_newline(tmp_path: Path) 
     creds = _read_credentials(creds_path)
     assert creds["PG_PORT"] == "15999"
     assert creds["NX_SERVICE_TOKEN"] == "tok2"
+
+
+def test_load_service_credentials_into_env(tmp_path: Path, monkeypatch) -> None:
+    # RDR-002 ez5.13: the one-command guided upgrade self-loads pg_credentials.
+    from nexus.db.pg_provision import (
+        _write_credentials,
+        load_service_credentials_into_env,
+    )
+
+    creds_path = tmp_path / "pg_credentials"
+    _write_credentials(creds_path, tmp_path / "postgres", 15999,
+                       "adminpw", "svcpw", "root-token-deadbeef")
+
+    for k in ("NX_SERVICE_TOKEN", "NX_STORAGE_BACKEND", "NX_DB_USER"):
+        monkeypatch.delenv(k, raising=False)
+
+    loaded = load_service_credentials_into_env(tmp_path)
+    assert loaded is True
+    import os
+    assert os.environ["NX_SERVICE_TOKEN"] == "root-token-deadbeef"
+    assert os.environ["NX_STORAGE_BACKEND"] == "service"
+
+
+def test_load_service_credentials_does_not_clobber_existing_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from nexus.db.pg_provision import (
+        _write_credentials,
+        load_service_credentials_into_env,
+    )
+
+    creds_path = tmp_path / "pg_credentials"
+    _write_credentials(creds_path, tmp_path / "postgres", 15999,
+                       "adminpw", "svcpw", "file-token")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "user-exported-token")
+
+    assert load_service_credentials_into_env(tmp_path) is True
+    import os
+    # setdefault: a user-exported token wins over the file's.
+    assert os.environ["NX_SERVICE_TOKEN"] == "user-exported-token"
+
+
+def test_load_service_credentials_no_file_reports_token_absence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from nexus.db.pg_provision import load_service_credentials_into_env
+
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    assert load_service_credentials_into_env(tmp_path) is False

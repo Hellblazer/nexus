@@ -2020,6 +2020,10 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     stale_warning: str | None = None
     if svc_version is not None:
         data["service_app_version"] = svc_version.get("app_version")
+        # RDR-002: release_version is the release identity (app_version is now the
+        # frozen dev coordinate 1.0-SNAPSHOT and can no longer be compared against
+        # the installed binary's tag-derived version).
+        data["service_release_version"] = svc_version.get("release_version")
         data["embedding_mode"] = svc_version.get("embedding_mode", "unknown")
         if svc_version.get("embedding_models"):
             # Kept as a list: --json consumers get the same array shape the
@@ -2028,14 +2032,20 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         data["schema_latest_id"] = svc_version.get("schema_latest_id")
         data["schema_changeset_count"] = svc_version.get("schema_changeset_count")
         installed = read_installed_provenance(config_dir)
+        # RDR-002: compare the installed binary's tag-derived version against the
+        # running service's release_version (both are the e.g. "0.1.6" release
+        # semver), NOT app_version (permanently "1.0-SNAPSHOT" by contract, which
+        # would false-positive stale on every call). A dev/unstamped service
+        # reports release_version=null → no comparison → no spurious warning.
+        svc_release = svc_version.get("release_version")
         if (
             installed is not None
             and installed.get("version")
-            and svc_version.get("app_version")
-            and installed["version"] != svc_version["app_version"]
+            and svc_release
+            and installed["version"] != svc_release
         ):
             stale_warning = (
-                f"running service is app_version={svc_version['app_version']} "
+                f"running service is release_version={svc_release} "
                 f"but the installed binary is {installed['version']} — restart to "
                 "pick it up: nx daemon service stop && nx daemon service start"
             )

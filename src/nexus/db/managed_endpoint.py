@@ -55,6 +55,18 @@ DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
 #: The local single-tenant Java ``VersionHandler`` is unauthenticated only because
 #: it is loopback-only; the managed service serves ``/version`` over the public
 #: internet, so this must be an explicit term of its API contract, not inherited.
+#:
+#: RDR-002 ASYMMETRY (deliberate, two gates for two topologies): THIS gate pins on
+#: ``app_version`` for the MANAGED cloud service; the local ``nx guided-upgrade``
+#: version-pin (``nexus.migration.guided_upgrade.verify_service_version``) pins on
+#: the dedicated ``release_version`` field of the NATIVE binary. They are distinct
+#: by design — the managed service has its own deployment versioning, the native
+#: binary's release identity lives in ``release_version`` (``app_version`` there is
+#: the frozen dev coordinate ``1.0-SNAPSHOT``). NOTE: because the local service
+#: also reports ``app_version=1.0-SNAPSHOT`` (parses to ``(1,0,0)``), this floor is
+#: presently a NO-OP — bump it (and name the required managed-service capability)
+#: the moment the client depends on one. Relayed to conexus RDR-001 (the managed
+#: service owner) that the managed floor provides no version assurance until bumped.
 MIN_MANAGED_APP_VERSION: tuple[int, int, int] = (1, 0, 0)
 
 #: Probe timeout — short, so an unreachable managed service fails fast and loud

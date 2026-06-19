@@ -774,6 +774,35 @@ def _read_credentials(creds_path: Path) -> dict[str, str]:
     return result
 
 
+def load_service_credentials_into_env(config_dir: Path | None = None) -> bool:
+    """Load ``pg_credentials`` into ``os.environ`` for an in-process service flow.
+
+    The manual upgrade path sources ``pg_credentials`` between ``nx init
+    --service`` and ``nx migrate-to-service`` so the latter sees
+    ``NX_SERVICE_TOKEN`` / ``NX_STORAGE_BACKEND``. ``nx guided-upgrade`` runs both
+    in ONE process, so it must self-load the freshly-provisioned credentials
+    before driving the migration — otherwise ``NX_SERVICE_TOKEN`` is absent and
+    the migration fails. Uses ``setdefault`` for credential keys (a value the
+    user already exported wins) and forces ``NX_STORAGE_BACKEND=service`` (the
+    guided upgrade IS the service path). Returns True iff a token is present in
+    the environment afterwards.
+
+    No-op on the credential keys when the file is absent — the returned bool lets
+    the caller decide whether a missing token is fatal.
+    """
+    if config_dir is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415
+
+        config_dir = nexus_config_dir()
+    creds_path = config_dir / CREDENTIALS_FILENAME
+    if creds_path.exists():
+        for key, value in _read_credentials(creds_path).items():
+            if key.startswith("NX_") or key.startswith("PG_"):
+                os.environ.setdefault(key, value)
+        os.environ["NX_STORAGE_BACKEND"] = "service"
+    return bool(os.environ.get("NX_SERVICE_TOKEN", "").strip())
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 

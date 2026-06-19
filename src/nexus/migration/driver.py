@@ -27,7 +27,6 @@ without a live service / Chroma (the existing nexus CLI-wiring test idiom).
 """
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -38,6 +37,7 @@ from nexus.migration.detection import (
     _ONNX_MODEL,
     DetectionReport,
     classify_collections,
+    close_read_client,
     cross_model_remappable,
     open_read_legs,
     voyage_key_available,
@@ -291,9 +291,7 @@ def run_guided_upgrade(
 
 
 def _close_quietly(client: Any | None) -> None:
-    if client is None:
-        return
-    close = getattr(client, "close", None)
-    if callable(close):
-        with contextlib.suppress(Exception):
-            close()
+    # Delegates to the canonical leg-teardown primitive (RDR-002 ez5.3:
+    # de-duplicated with the guided-upgrade pre-flight). Thin alias preserved
+    # for the existing call sites in this module.
+    close_read_client(client)

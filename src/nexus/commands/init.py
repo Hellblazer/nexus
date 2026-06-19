@@ -411,8 +411,12 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
     return True
 
 
-def _start_service_step() -> None:
+def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import cycle)
     """Start the PERSISTENT storage-service supervisor and confirm it is serving.
+
+    Returns the live ``LeaseRecord`` so a programmatic caller (RDR-002
+    ``nx guided-upgrade`` provision sequence) can read the serving endpoint;
+    ``init_cmd`` ignores the return and uses it purely for its side effect.
 
     RDR-157 P4.1: the final step of the ``nx init --service`` one-command
     collapse. nexus-qke1e: routes through ``ensure_storage_supervisor`` (the
@@ -448,6 +452,7 @@ def _start_service_step() -> None:
         f"(pid {ep.get('pid')}, generation {lease.generation})."
     )
     click.echo("  nx init --service complete — the service backend is serving.")
+    return lease
 
 
 # ── P5 (A) Postgres provisioning ──────────────────────────────────────────────
@@ -547,6 +552,41 @@ def _provision_postgres_step() -> None:
         click.echo(line)
 
 
+def provision_and_start_service(embedder: str | None = None):  # noqa: ANN201
+    """The full ``nx init --service`` service sequence — shared with guided-upgrade.
+
+    Provision PG, then (LOCAL mode only) lock the embedder + provision the bge-768
+    ONNX the service reads, acquire the native binary, and start the persistent
+    supervisor. Returns the live ``LeaseRecord`` on the local-serving path, or
+    ``None`` in cloud mode (embeddings run server-side via Voyage; there is no
+    local service to start).
+
+    RDR-002: ``nx guided-upgrade`` reuses THIS so its provisioning cannot diverge
+    from ``nx init --service`` — the guided path previously called only
+    ``_provision_postgres_step`` + ``_start_service_step`` and skipped the
+    embedder/model fetch, so the service crashed on a missing bge ONNX. Raises
+    :class:`StorageServiceStartError` when no native binary is available.
+    """
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+    _provision_postgres_step()
+    if not _config.is_local_mode():
+        return None
+    # Local service backend (RDR-160): the Java service embeds every collection
+    # with bge-768. Lock the embedder + provision the standard ONNX it reads.
+    _provision_service_embedder_step(embedder)
+    # RDR-161 P1: acquire the verified native binary before starting (no-op when
+    # one is already installed). With the legacy JVM launch path expunged
+    # (RDR-161 P3), starting without a binary fails loud rather than degrading.
+    if not _ensure_service_binary_step(_config.nexus_config_dir()):
+        raise StorageServiceStartError(
+            "no native nexus-service binary available and none could be acquired "
+            "— install one (`nx daemon service install-binary` or configure the "
+            "engine-service tag), then retry"
+        )
+    return _start_service_step()
+
+
 @click.command("init")
 @click.option(
     "--embedder",
@@ -591,35 +631,28 @@ def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) ->
         and "service" in os.environ.get("NX_STORAGE_BACKEND", "").lower()
     )
     if provision_service or _auto_service:
-        _provision_postgres_step()
-        if not _config.is_local_mode():
-            # Cloud mode + service backend: embeddings run server-side via Voyage.
-            return
-        # Local service backend (RDR-160): the Java service embeds every
-        # collection with bge-768. Lock the embedder + provision the standard
-        # ONNX it reads.
-        _provision_service_embedder_step(embedder)
-        # RDR-161 P1: acquire the verified native binary before starting (no-op
-        # when one is already installed). Between PG provisioning and start so
-        # _start_service_step has a binary to exec. When no binary is available
-        # and none can be acquired (no tag configured), do NOT start: with the
-        # legacy JVM launch path expunged (RDR-161 P3), starting without a binary
-        # now fails loud rather than degrading (CRE C1). PG is provisioned and the step printed an
-        # actionable install instruction; exit non-zero so the incomplete setup
-        # is not mistaken for a serving backend.
-        if not _ensure_service_binary_step(_config.nexus_config_dir()):
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+        try:
+            lease = provision_and_start_service(embedder)
+        except StorageServiceStartError:
+            # No native binary available and none acquirable. PG is provisioned
+            # and _ensure_service_binary_step already printed an actionable
+            # install instruction; do NOT start (the legacy JVM path is expunged,
+            # RDR-161 P3 — starting without a binary fails loud, CRE C1). Exit
+            # non-zero so the incomplete setup is not mistaken for serving.
             click.echo(
                 "\nService NOT started: no native binary available. Install one "
                 "(see above), then re-run `nx init --service` to finish.",
                 err=True,
             )
             raise SystemExit(1)
-        # RDR-157 P4.1: collapse fresh-install -> serving. Start the service and
-        # confirm status green before returning, so one command leaves the user
-        # with a running backend (idempotent; safe to re-run). The interactive
-        # local-embedder prompt below is for the non-service Python (fastembed)
-        # path only.
-        _start_service_step()
+        if lease is None:
+            # Cloud mode + service backend: embeddings run server-side via Voyage,
+            # no local service to start.
+            return
+        # RDR-157 P4.1: one command left the user with a running backend. The
+        # interactive local-embedder prompt below is for the non-service Python
+        # (fastembed) path only.
         return
 
     # Import-site call so tests can patch ``nexus.config.is_local_mode``

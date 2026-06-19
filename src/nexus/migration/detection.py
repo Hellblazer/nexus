@@ -336,6 +336,26 @@ def open_read_legs(
     return local, cloud
 
 
+def close_read_client(client: Any | None) -> None:
+    """Close a Chroma read leg, swallowing absence/teardown failures.
+
+    The canonical leg-teardown primitive shared by the detection consumers
+    (:func:`classify_collections` callers and the guided-upgrade pre-flight):
+    a ``None`` leg or a client that exposes no callable ``close`` is a no-op,
+    and a close that raises is logged at DEBUG, never propagated — teardown
+    must not mask the detection result it follows.
+    """
+    if client is None:
+        return
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:  # noqa: BLE001 — teardown is best-effort
+        _log.debug("migration_read_client_close_failed", error=str(exc))
+
+
 # ── Dry-run preview (RDR-159 §Approach P0) ─────────────────────────────────
 #
 # The estimate is TOKEN-VOLUME + TIME only (decision 2026-06-13): no dollar

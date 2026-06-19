@@ -3381,6 +3381,9 @@
       "glob": "META-INF/maven/dev.nexus/nexus-service/pom.properties"
     },
     {
+      "glob": "META-INF/nexus/release.properties"
+    },
+    {
       "glob": "META-INF/services/ch.qos.logback.classic.spi.Configurator"
     },
     {

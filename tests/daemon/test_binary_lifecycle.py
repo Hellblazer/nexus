@@ -118,12 +118,16 @@ class TestStatusVersionHandshake:
         config_dir = tmp_path / "cfg"
         config_dir.mkdir(parents=True, exist_ok=True)
         # Installed binary provenance says 2.0; the running service reports
-        # 1.0-SNAPSHOT — a stale running process that needs a restart.
+        # release_version 1.0 — a stale running process that needs a restart.
+        # RDR-002: staleness compares the installed tag version against the
+        # running service's release_version (app_version is the frozen dev
+        # coordinate 1.0-SNAPSHOT and is no longer the comparison field).
         sidecar = binary_sidecar_path(config_dir)
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(json.dumps({"version": "2.0", "tag": "engine-service-v2.0"}))
         result, _ = self._invoke_status(tmp_path, {
             "app_version": "1.0-SNAPSHOT",
+            "release_version": "1.0",
             "schema_latest_id": "x",
             "schema_changeset_count": 1,
         })
