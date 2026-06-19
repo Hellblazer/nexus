@@ -62,6 +62,12 @@ def rename_collection_data_plane(
     if on_warn is None:
         on_warn = lambda msg: click.echo(msg, err=True)  # noqa: E731
 
+    # Tombstone caveat (RDR-156 P3, Decision 6): on the service path
+    # collection_exists() reads the tombstone-filtered stats view, so a
+    # collection whose every chunk belongs to trashed documents reads as
+    # ABSENT here — "not found" may mean "trashed; restore it first".
+    # Distinguishing the two needs a raw existence probe (bead nexus-9n485;
+    # materializes only once trash verbs ship).
     if not t3_db.collection_exists(old):
         raise click.ClickException(f"collection not found: {old!r}")
     if t3_db.collection_exists(new):
@@ -123,5 +129,90 @@ def rename_collection_data_plane(
         counts["catalog_docs"] = catalog.rename_collection(old, new)
     except Exception as exc:
         on_warn(f"warn: T2+T3 rename succeeded but catalog cascade failed: {exc}")
+
+    return counts
+
+
+def remap_collection_references(
+    source: str,
+    target: str,
+    *,
+    catalog: Any | None = None,
+    on_warn: Callable[[str], None] | None = None,
+) -> dict[str, int]:
+    """Re-point every T2 + catalog collection reference ``source -> target``.
+
+    RDR-162 P2 cross-model migrate: after the stored-text re-embed has copied a
+    legacy collection's chunks into a model-remapped TARGET (e.g. a minilm-384
+    source re-embedded into its ``bge-base-en-v15-768`` target via
+    :func:`nexus.migration.vector_etl.cross_model_target_name`) AND the target is
+    verified-populated, the catalog/topic ``source_collection`` /
+    ``physical_collection`` references still name the dead source. This re-points
+    them to the live target.
+
+    Distinct from :func:`rename_collection_data_plane`: that is a MOVE (it also
+    renames the T3 collection and refuses a pre-existing target). The cross-model
+    migrate is COPY-not-move (RDR-155 RF-5): the source Chroma collection is
+    never mutated (so a failed migrate is re-runnable from the untouched source)
+    and the TARGET legitimately already exists (the ETL just populated it). So
+    this runs ONLY the two reference cascades — the T2 atomic cascade and the
+    fail-open catalog cascade — and never touches T3, and never guards on target
+    existence.
+
+    Ordering invariant (the CALLER must honour): this is the one mutation of the
+    cross-model migrate; invoke it only AFTER the target leg verifies populated
+    (mirror RDR-144 reindex-first / delete-after-verify), so a mid-migrate
+    failure never leaves dangling references.
+
+    T2 cascade failure raises ``ClickException`` (orphaned references are not
+    fail-open). Catalog cascade failure warns and continues (the catalog is a
+    derived view, repairable via ``nx catalog rebuild``). Returns a per-table
+    counts dict.
+    """
+    if on_warn is None:
+        on_warn = lambda msg: click.echo(msg, err=True)  # noqa: E731
+
+    counts = {
+        "tax_topics": 0,
+        "tax_assignments": 0,
+        "tax_meta": 0,
+        "chash": 0,
+        "aspects": 0,
+        "aspect_queue": 0,
+        "highlights": 0,
+        "search_telemetry": 0,
+        "hook_failures": 0,
+        "catalog_docs": 0,
+    }
+
+    # ── T2 reference cascade (raises on failure) ─────────────────────────────
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415
+
+    try:
+        cascade = t2_index_write(
+            lambda t2db: t2db.rename_collection_cascade(old=source, new=target)
+        )
+        for key in (
+            "tax_topics", "tax_assignments", "tax_meta", "chash",
+            "aspects", "aspect_queue", "highlights", "search_telemetry",
+            "hook_failures",
+        ):
+            counts[key] = cascade.get(key, 0)
+    except Exception as exc:
+        raise click.ClickException(
+            f"T2 reference cascade failed remapping {source!r} -> {target!r}; "
+            f"references are unchanged. Fix the error and retry:\n  {exc}"
+        ) from exc
+
+    # ── Catalog reference cascade (fail-open) ────────────────────────────────
+    try:
+        if catalog is None:
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415
+            catalog = make_catalog_writer()
+        counts["catalog_docs"] = catalog.rename_collection(source, target)
+    except Exception as exc:
+        on_warn(
+            f"warn: T2 reference remap succeeded but catalog cascade failed: {exc}"
+        )
 
     return counts

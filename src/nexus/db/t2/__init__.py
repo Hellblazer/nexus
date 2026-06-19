@@ -416,33 +416,88 @@ class T2Database:
         self.RENAME_LOCK: threading.RLock = threading.RLock()
 
         # ── Construct domain stores ───────────────────────────────────
-        self.memory: MemoryStore = MemoryStore(path)
-        self.plans: PlanLibrary = PlanLibrary(path)
+        # RDR-152 nexus-gmiaf.4: routing seam.  storage_backend_for("memory")
+        # returns StorageBackend.SQLITE by default (env NX_STORAGE_BACKEND_MEMORY
+        # or NX_STORAGE_BACKEND unset).  nexus-gmiaf.7 replaces the
+        # NotImplementedError branch with HttpMemoryStore(...).
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+        if storage_backend_for("memory") == StorageBackend.SERVICE:
+            # RDR-152 nexus-gmiaf.7: thin Python HTTP client over the Java service.
+            # Reads NX_SERVICE_HOST / NX_SERVICE_PORT / NX_SERVICE_TOKEN from env.
+            from nexus.db.t2.http_memory_store import HttpMemoryStore
+            self.memory: MemoryStore = HttpMemoryStore()  # type: ignore[assignment]
+        else:
+            self.memory: MemoryStore = MemoryStore(path)
+
+        # RDR-152 nexus-gmiaf.11: plans service seam.
+        # NX_STORAGE_BACKEND_PLANS=service routes to the Java HTTP plans endpoint.
+        if storage_backend_for("plans") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_plan_library import HttpPlanLibrary
+            self.plans: PlanLibrary = HttpPlanLibrary()  # type: ignore[assignment]
+        else:
+            self.plans: PlanLibrary = PlanLibrary(path)
+        # RDR-152 nexus-gmiaf.14: taxonomy service seam.
+        # NX_STORAGE_BACKEND_TAXONOMY=service routes to HttpTaxonomyStore.
         # CatalogTaxonomy takes a MemoryStore reference for the
         # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
-        self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
-        self.telemetry: Telemetry = Telemetry(path)
+        if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+            self.taxonomy: CatalogTaxonomy = HttpTaxonomyStore()  # type: ignore[assignment]
+        else:
+            self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
+
+        # RDR-152 nexus-gmiaf.12: telemetry service seam.
+        # NX_STORAGE_BACKEND_TELEMETRY=service routes to HttpTelemetryStore.
+        if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+            self.telemetry: Telemetry = HttpTelemetryStore()  # type: ignore[assignment]
+        else:
+            self.telemetry: Telemetry = Telemetry(path)
         # RDR-086 Phase 1: global chash → (collection, doc_id) lookup
         # populated by the six indexing write sites via best-effort
         # dual-write after each T3 upsert.
-        self.chash_index: ChashIndex = ChashIndex(path)
+        # RDR-152 nexus-gmiaf.16: chash_index service seam.
+        # NX_STORAGE_BACKEND_CHASH_INDEX=service routes to HttpChashIndex.
+        if storage_backend_for("chash_index") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_chash_index import HttpChashIndex
+            self.chash_index: ChashIndex = HttpChashIndex()  # type: ignore[assignment]
+        else:
+            self.chash_index: ChashIndex = ChashIndex(path)
         # RDR-089 Phase 1: per-document structured aspect table
         # populated by the document-grain hook chain at every CLI
         # ingest site (knowledge__* only in Phase 1).
-        self.document_aspects: DocumentAspects = DocumentAspects(path)
+        # RDR-152 nexus-gmiaf.15: document_aspects service seam.
+        if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
+            self.document_aspects: DocumentAspects = HttpDocumentAspectsStore()  # type: ignore[assignment]
+        else:
+            self.document_aspects: DocumentAspects = DocumentAspects(path)
         # RDR-089 follow-up (nexus-qeo8): durable queue feeding the
         # async aspect-extraction worker. The hook fires fast (just
         # an enqueue); the worker drains in a background thread.
         # RDR-138 T1.1: inject RENAME_LOCK so the queue shares the same
         # lock instance as the cascade. T1.2 will wrap mutator bodies.
-        self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(
-            path, rename_lock=self.RENAME_LOCK
-        )
+        # RDR-152 nexus-gmiaf.15: aspect_queue service seam.
+        if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+            self.aspect_queue: AspectExtractionQueue = HttpAspectQueue(  # type: ignore[assignment]
+                rename_lock=self.RENAME_LOCK
+            )
+        else:
+            self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(
+                path, rename_lock=self.RENAME_LOCK
+            )
         # RDR-139 Layer E: per-document DEVONthink highlight/mention notes,
         # keyed by tumbler. Dedicated table (NOT document_aspects) so
         # free-text highlights never contend with the aspect worker's
         # whole-row overwrite or its confidence gate.
-        self.document_highlights: DocumentHighlights = DocumentHighlights(path)
+        # RDR-152 nexus-gmiaf.15: document_highlights service seam.
+        if storage_backend_for("document_highlights") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore
+            self.document_highlights: DocumentHighlights = HttpDocumentHighlightsStore()  # type: ignore[assignment]
+        else:
+            self.document_highlights: DocumentHighlights = DocumentHighlights(path)
 
         # RDR-120 P5.A.1 (nexus-9zmpl): catalog is the eighth domain
         # store. Constructed lazily via the ``catalog`` property so
@@ -725,21 +780,30 @@ class T2Database:
         try:
             conn.execute("BEGIN")
 
-            # chash_index (with collision defense)
-            conn.execute(
-                "DELETE FROM chash_index "
-                "WHERE physical_collection = ? "
-                "  AND chash IN ("
-                "    SELECT chash FROM chash_index WHERE physical_collection = ?"
-                "  )",
-                (new, old),
-            )
-            cur = conn.execute(
-                "UPDATE chash_index SET physical_collection = ? "
-                "WHERE physical_collection = ?",
-                (new, old),
-            )
-            counts["chash"] = cur.rowcount
+            # chash_index (with collision defense).
+            # In service mode, self.chash_index is an HttpChashIndex whose
+            # rename_collection() calls the remote service endpoint. The raw
+            # SQL UPDATE on the shared SQLite file would diverge from the
+            # service's Postgres tables, so we route through the domain-store
+            # API when the seam is active (same pattern as taxonomy below).
+            from nexus.db.storage_mode import StorageBackend, storage_backend_for
+            if storage_backend_for("chash_index") == StorageBackend.SERVICE:
+                counts["chash"] = self.chash_index.rename_collection(old=old, new=new)
+            else:
+                conn.execute(
+                    "DELETE FROM chash_index "
+                    "WHERE physical_collection = ? "
+                    "  AND chash IN ("
+                    "    SELECT chash FROM chash_index WHERE physical_collection = ?"
+                    "  )",
+                    (new, old),
+                )
+                cur = conn.execute(
+                    "UPDATE chash_index SET physical_collection = ? "
+                    "WHERE physical_collection = ?",
+                    (new, old),
+                )
+                counts["chash"] = cur.rowcount
 
             # document_aspects (with collision defense). #1057: dedup on the
             # live PRIMARY KEY, which differs by migration state. RDR-108
@@ -751,20 +815,27 @@ class T2Database:
             # migrated DBs and blocked ALL renames; a hardcoded doc_id would
             # symmetrically break unmigrated DBs. Resolve the column from the
             # live schema so both shapes work and dedup matches the real PK.
-            aspects_key = _rename_dedup_col(conn, "document_aspects")
-            conn.execute(
-                f"DELETE FROM document_aspects "
-                f"WHERE collection = ? "
-                f"  AND {aspects_key} IN ("
-                f"    SELECT {aspects_key} FROM document_aspects WHERE collection = ?"
-                f"  )",
-                (new, old),
-            )
-            cur = conn.execute(
-                "UPDATE document_aspects SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["aspects"] = cur.rowcount
+            # RDR-152 nexus-gmiaf.16: in service mode, self.document_aspects is
+            # an HttpDocumentAspectsStore whose rename_collection() calls the
+            # remote service endpoint.  Route through domain-store API to avoid
+            # SQLite/Postgres divergence.
+            if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+                counts["aspects"] = self.document_aspects.rename_collection(old=old, new=new)
+            else:
+                aspects_key = _rename_dedup_col(conn, "document_aspects")
+                conn.execute(
+                    f"DELETE FROM document_aspects "
+                    f"WHERE collection = ? "
+                    f"  AND {aspects_key} IN ("
+                    f"    SELECT {aspects_key} FROM document_aspects WHERE collection = ?"
+                    f"  )",
+                    (new, old),
+                )
+                cur = conn.execute(
+                    "UPDATE document_aspects SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["aspects"] = cur.rowcount
 
             # aspect_extraction_queue (with collision defense). Same PK
             # migration (RDR-108 Phase 1c) applies; its source_path column is
@@ -772,68 +843,100 @@ class T2Database:
             # shared the latent bug of deduping on a non-PK column once the PK
             # moved to doc_id (a same-doc_id/different-source_path pair would
             # hit a PK collision on the UPDATE). Resolve the live PK column.
-            queue_key = _rename_dedup_col(conn, "aspect_extraction_queue")
-            conn.execute(
-                f"DELETE FROM aspect_extraction_queue "
-                f"WHERE collection = ? "
-                f"  AND {queue_key} IN ("
-                f"    SELECT {queue_key} FROM aspect_extraction_queue"
-                f"    WHERE collection = ?"
-                f"  )",
-                (new, old),
-            )
-            cur = conn.execute(
-                "UPDATE aspect_extraction_queue "
-                "SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["aspect_queue"] = cur.rowcount
+            # RDR-152 nexus-gmiaf.16: in service mode, route through
+            # self.aspect_queue.rename_collection() (HttpAspectQueue calls the
+            # remote /queue/rename_collection endpoint).
+            if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
+                counts["aspect_queue"] = self.aspect_queue.rename_collection(old=old, new=new)
+            else:
+                queue_key = _rename_dedup_col(conn, "aspect_extraction_queue")
+                conn.execute(
+                    f"DELETE FROM aspect_extraction_queue "
+                    f"WHERE collection = ? "
+                    f"  AND {queue_key} IN ("
+                    f"    SELECT {queue_key} FROM aspect_extraction_queue"
+                    f"    WHERE collection = ?"
+                    f"  )",
+                    (new, old),
+                )
+                cur = conn.execute(
+                    "UPDATE aspect_extraction_queue "
+                    "SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["aspect_queue"] = cur.rowcount
 
             # document_highlights (RDR-139 Layer E). PK is doc_id (tumbler),
             # so the denorm collection column cannot collide on rename — a
             # plain UPDATE suffices (no collision-defense DELETE needed).
-            cur = conn.execute(
-                "UPDATE document_highlights SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["highlights"] = cur.rowcount
-
-            # taxonomy (three sub-tables)
-            cur = conn.execute(
-                "UPDATE topics SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["tax_topics"] = cur.rowcount
-            cur = conn.execute(
-                "UPDATE topic_assignments SET source_collection = ? "
-                "WHERE source_collection = ?",
-                (new, old),
-            )
-            counts["tax_assignments"] = cur.rowcount
-            cur = conn.execute(
-                "UPDATE taxonomy_meta SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["tax_meta"] = cur.rowcount
-
-            # search_telemetry
-            cur = conn.execute(
-                "UPDATE search_telemetry SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["search_telemetry"] = cur.rowcount
-
-            # hook_failures (optional table -- created by migration)
-            table_exists = conn.execute(
-                "SELECT COUNT(*) FROM sqlite_master "
-                "WHERE type='table' AND name='hook_failures'"
-            ).fetchone()[0]
-            if table_exists:
+            # RDR-152 nexus-gmiaf.16: in service mode, route through
+            # self.document_highlights.rename_collection() (calls the remote
+            # /highlights/rename_collection endpoint).
+            if storage_backend_for("document_highlights") == StorageBackend.SERVICE:
+                counts["highlights"] = self.document_highlights.rename_collection(old=old, new=new)
+            else:
                 cur = conn.execute(
-                    "UPDATE hook_failures SET collection = ? WHERE collection = ?",
+                    "UPDATE document_highlights SET collection = ? WHERE collection = ?",
                     (new, old),
                 )
-                counts["hook_failures"] = cur.rowcount
+                counts["highlights"] = cur.rowcount
+
+            # taxonomy (three sub-tables)
+            # In service mode, self.taxonomy is an HttpTaxonomyStore whose
+            # rename_collection() calls the remote service endpoint.  The
+            # raw SQL UPDATE on the shared SQLite file would diverge from
+            # the service's Postgres tables, so we route through the
+            # domain-store API when the seam is active.
+            if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
+                tax_counts = self.taxonomy.rename_collection(old, new)
+                counts["tax_topics"] = tax_counts.get("topics", 0)
+                counts["tax_assignments"] = tax_counts.get("assignments", 0)
+                counts["tax_meta"] = tax_counts.get("meta", 0)
+            else:
+                cur = conn.execute(
+                    "UPDATE topics SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["tax_topics"] = cur.rowcount
+                cur = conn.execute(
+                    "UPDATE topic_assignments SET source_collection = ? "
+                    "WHERE source_collection = ?",
+                    (new, old),
+                )
+                counts["tax_assignments"] = cur.rowcount
+                cur = conn.execute(
+                    "UPDATE taxonomy_meta SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["tax_meta"] = cur.rowcount
+
+            # search_telemetry + hook_failures
+            # RDR-152 nexus-gmiaf.16: in service mode, self.telemetry is an
+            # HttpTelemetryStore whose rename_collection() calls the remote
+            # /v1/telemetry/rename_collection endpoint and returns
+            # {"search_telemetry": N, "hook_failures": N}.
+            if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+                tel_counts = self.telemetry.rename_collection(old=old, new=new)
+                counts["search_telemetry"] = tel_counts.get("search_telemetry", 0)
+                counts["hook_failures"] = tel_counts.get("hook_failures", 0)
+            else:
+                cur = conn.execute(
+                    "UPDATE search_telemetry SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["search_telemetry"] = cur.rowcount
+
+                # hook_failures (optional table -- created by migration)
+                table_exists = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type='table' AND name='hook_failures'"
+                ).fetchone()[0]
+                if table_exists:
+                    cur = conn.execute(
+                        "UPDATE hook_failures SET collection = ? WHERE collection = ?",
+                        (new, old),
+                    )
+                    counts["hook_failures"] = cur.rowcount
 
             conn.commit()
 

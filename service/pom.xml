@@ -1,0 +1,585 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>dev.nexus</groupId>
+    <artifactId>nexus-service</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <jooq.version>3.20.11</jooq.version>
+        <hikari.version>6.2.1</hikari.version>
+        <postgresql.version>42.7.4</postgresql.version>
+        <slf4j.version>2.0.16</slf4j.version>
+        <logback.version>1.5.18</logback.version>
+        <jackson.version>2.18.3</jackson.version>
+        <junit.version>5.11.4</junit.version>
+        <assertj.version>3.27.3</assertj.version>
+        <testcontainers.version>1.21.4</testcontainers.version>
+        <liquibase.version>4.29.0</liquibase.version>
+
+        <mainClass>dev.nexus.service.Main</mainClass>
+
+        <!-- jlink image output directory -->
+        <jlink.output>${project.build.directory}/jlink-image</jlink.output>
+
+        <!--
+            jOOQ generated sources (bead nexus-9qvam — supersedes the earlier
+            committed-sources "Option 3" design):
+
+            Generated at build time into target/generated-sources/jooq by the
+            testcontainers-jooq-codegen-maven-plugin (generate-sources phase): boots a
+            pgvector/pgvector:pg17 container, applies the master Liquibase changelog
+            (sole schema authority; the role-001-nexus-svc bootstrap changeset makes it
+            self-contained), runs jOOQ codegen (PostgresDatabase, nexus + t1 schemata).
+            build-helper registers the directory as a compile source root; mvn clean
+            removes it. Same pattern as the conexus control-plane.
+
+            History: committed sources + -Pcodegen + a CI drift guard were chosen when
+            the viable build-time mechanisms were GMaven Plus (broken on Java 25) and
+            hand-rolled exec classpaths (brittle). The dedicated Testcontainers codegen
+            plugin removes both objections; Postgres-only DDL still rules out H2/
+            LiquibaseDatabase codegen. Every build (and the IDE import) needs Docker,
+            which the test suite already required.
+        -->
+        <jooq.generated.dir>${project.build.directory}/generated-sources/jooq</jooq.generated.dir>
+        <jooq.generated.pkg>dev.nexus.service.jooq</jooq.generated.pkg>
+
+        <!-- Seam B — local ONNX embedding (S0.2 proven stack) -->
+        <onnxruntime.version>1.20.0</onnxruntime.version>
+        <djl.tokenizers.version>0.30.0</djl.tokenizers.version>
+
+        <!-- Per-platform native-lib dirs for the -Pnative image (nexus-lp2qo).
+             Default = linux amd64 (CI + the deployment target); the native-libs-*
+             OS profiles below override these on macOS / Windows / linux-aarch64
+             build hosts so each binary embeds only its own platform's embedding
+             libs. onnxruntime vs djl use different <os-arch> naming, hence two. -->
+        <onnx.native.dir>linux-x64</onnx.native.dir>
+        <djl.native.dir>linux-x86_64</djl.native.dir>
+
+        <!-- Surefire tag exclusion: skip @Tag("integration") by default -->
+        <!-- Override with: mvn test -Dtest.excluded.groups="" -Dgroups=integration -->
+        <test.excluded.groups>integration</test.excluded.groups>
+    </properties>
+
+    <dependencies>
+        <!-- PostgreSQL JDBC -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+        </dependency>
+
+        <!-- Connection pool -->
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>${hikari.version}</version>
+        </dependency>
+
+        <!-- jOOQ runtime -->
+        <dependency>
+            <groupId>org.jooq</groupId>
+            <artifactId>jooq</artifactId>
+            <version>${jooq.version}</version>
+        </dependency>
+
+        <!-- JSON -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+
+        <!-- Logging -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>${logback.version}</version>
+        </dependency>
+
+        <!-- Liquibase: programmatic changelog apply in tests and codegen bootstrap -->
+        <dependency>
+            <groupId>org.liquibase</groupId>
+            <artifactId>liquibase-core</artifactId>
+            <version>${liquibase.version}</version>
+        </dependency>
+        <!-- nexus-lp2qo spike: picocli is an OPTIONAL dep of liquibase-core (CLI only).
+             The native-image community metadata registers liquibase's commandline
+             classes for reflection; without picocli on the classpath
+             LiquibaseCommandLine fails to link ("Type not found during analysis").
+             The service uses liquibase via the Java API (SchemaMigrator), not the
+             CLI, but the metadata forces the class reachable — supply picocli so it
+             resolves. Harmless on the jlink/JVM path. -->
+        <dependency>
+            <groupId>info.picocli</groupId>
+            <artifactId>picocli</artifactId>
+            <version>4.7.7</version>
+        </dependency>
+
+        <!-- Seam B: local ONNX embedding (onnxruntime-java + DJL HF tokenizer) -->
+        <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <version>${onnxruntime.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ai.djl.huggingface</groupId>
+            <artifactId>tokenizers</artifactId>
+            <version>${djl.tokenizers.version}</version>
+        </dependency>
+
+        <!-- Test: JUnit 5 -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Test: Testcontainers pgvector/pgvector:pg17 (replaces io.zonky embedded-postgres) -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Test: SQLite FTS5 — the legacy FTS5 engine itself (unicode61 tokenizer), the
+             text leg of the RDR-155 Phase 3 hybrid-parity comparand. The Python T2 path
+             uses the same SQLite FTS5 C library; xerial bundles it. -->
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.47.1.0</version>
+            <scope>test</scope>
+        </dependency>
+
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Compiler: Java 25, enable-preview for pattern matching etc. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>25</release>
+                    <compilerArgs>
+                        <arg>--enable-preview</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+
+            <!-- Surefire: run JUnit 5, enable-preview, per-test JVM flags -->
+            <!-- integration tests (@Tag("integration")) are excluded by default -->
+            <!-- Run them with: mvn test -Dgroups=integration                    -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+                <configuration>
+                    <argLine>--enable-preview</argLine>
+                    <excludedGroups>${test.excluded.groups}</excludedGroups>
+                </configuration>
+            </plugin>
+
+            <!--
+                Testcontainers jOOQ codegen (generate-sources phase, bead nexus-9qvam).
+                Boots an ephemeral pgvector/pgvector:pg17 container (same image as the
+                test suite), applies the master Liquibase changelog, then runs jOOQ
+                codegen (PostgresDatabase) into target/generated-sources/jooq.
+                The plugin bundles an older jooq-codegen; override to ${jooq.version}
+                so codegen and runtime jOOQ stay aligned (conexus pattern).
+
+                Docker API pin: this plugin's container boot runs in the MAVEN JVM,
+                where docker-java's API-version negotiation fails against Docker
+                Desktop (Status 400 on /info). service/.mvn/jvm.config pins
+                -Dapi.version=1.47 for the Maven JVM (docker-java reads it as a
+                system property). Surefire-forked test JVMs negotiate on their own
+                and are unaffected. Same workaround as the conexus control-plane;
+                jvm.config cannot carry comments, so the rationale lives here.
+            -->
+            <plugin>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-jooq-codegen-maven-plugin</artifactId>
+                <version>0.0.4</version>
+                <dependencies>
+                    <dependency>
+                        <groupId>org.testcontainers</groupId>
+                        <artifactId>postgresql</artifactId>
+                        <version>${testcontainers.version}</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.postgresql</groupId>
+                        <artifactId>postgresql</artifactId>
+                        <version>${postgresql.version}</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.jooq</groupId>
+                        <artifactId>jooq-codegen</artifactId>
+                        <version>${jooq.version}</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.jooq</groupId>
+                        <artifactId>jooq-meta</artifactId>
+                        <version>${jooq.version}</version>
+                    </dependency>
+                </dependencies>
+                <executions>
+                    <execution>
+                        <id>generate-jooq-sources</id>
+                        <goals>
+                            <goal>generate</goal>
+                        </goals>
+                        <phase>generate-sources</phase>
+                        <configuration>
+                            <database>
+                                <type>POSTGRES</type>
+                                <containerImage>pgvector/pgvector:pg17</containerImage>
+                            </database>
+                            <liquibase>
+                                <changeLogDirectory>${project.basedir}/src/main/resources</changeLogDirectory>
+                                <changeLogPath>db/changelog/db.changelog-master.xml</changeLogPath>
+                            </liquibase>
+                            <!-- Mirrors the retired JooqCodegenBootstrap generator config
+                                 exactly: nexus + t1 schemata, pojos + fluent setters +
+                                 java.time types, no DAOs. -->
+                            <jooq>
+                                <generator>
+                                    <database>
+                                        <name>org.jooq.meta.postgres.PostgresDatabase</name>
+                                        <includes>.*</includes>
+                                        <excludes>databasechangelog|databasechangeloglock</excludes>
+                                        <schemata>
+                                            <schema>
+                                                <inputSchema>nexus</inputSchema>
+                                            </schema>
+                                            <schema>
+                                                <inputSchema>t1</inputSchema>
+                                            </schema>
+                                        </schemata>
+                                    </database>
+                                    <generate>
+                                        <pojos>true</pojos>
+                                        <daos>false</daos>
+                                        <fluentSetters>true</fluentSetters>
+                                        <javaTimeTypes>true</javaTimeTypes>
+                                    </generate>
+                                    <target>
+                                        <packageName>dev.nexus.service.jooq</packageName>
+                                        <directory>${jooq.generated.dir}</directory>
+                                    </target>
+                                </generator>
+                            </jooq>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+                Register target/generated-sources/jooq as a compile source root so javac
+                (and IDE imports) see the generated classes. Cleaned by mvn clean;
+                regenerated by the codegen plugin above on every build.
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-jooq-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${jooq.generated.dir}</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Fat/uber jar for standalone run and jlink input -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>${mainClass}</mainClass>
+                                </transformer>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+                jlink: trimmed JRE image (live fallback, S0.4 C1).
+                Produces ${jlink.output}/bin/java — run the fat jar via:
+                  ${jlink.output}/bin/java -jar nexus-service-*.jar
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>jlink-image</id>
+                        <phase>package</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <!-- Remove stale image so jlink won't refuse to overwrite -->
+                                <delete dir="${jlink.output}" quiet="true"/>
+                                <exec executable="${java.home}/bin/jlink"
+                                      failonerror="true">
+                                    <arg value="--output=${jlink.output}"/>
+                                    <arg value="--no-header-files"/>
+                                    <arg value="--no-man-pages"/>
+                                    <arg value="--compress=zip-6"/>
+                                    <arg value="--add-modules"/>
+                                    <arg value="java.base,java.sql,java.management,java.naming,java.logging,jdk.crypto.ec,jdk.net,jdk.httpserver"/>
+                                </exec>
+                                <!-- Launcher script: runs fat jar with jlinked JRE -->
+                                <echo file="${jlink.output}/bin/nexus-service"
+                                      message="#!/bin/sh&#xa;DIR=&quot;$(cd &quot;$(dirname &quot;$0&quot;)&quot; &amp;&amp; pwd)&quot;&#xa;JAR=&quot;$(ls &quot;$DIR/../../target/nexus-service-&quot;*.jar | head -1)&quot;&#xa;exec &quot;$DIR/java&quot; --enable-preview -jar &quot;$JAR&quot; &quot;$@&quot;&#xa;"/>
+                                <chmod file="${jlink.output}/bin/nexus-service" perm="755"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- -Pprebuilt-jooq: compile PRE-GENERATED jOOQ sources instead of running
+             the Docker-dependent testcontainers codegen (nexus-f6j31). The
+             engine-service-release.yml `jooq-codegen` job runs codegen once on a
+             Docker-capable linux runner and uploads ${jooq.generated.dir}; the
+             per-platform native build jobs download it here and build with this
+             profile, so they need no Docker — unblocking the mac-arm64 native
+             binary (GH macOS runners have no Docker). Unbinds the codegen
+             execution (phase=none); build-helper still registers the populated
+             dir as a source root. The sources must already be present in
+             ${jooq.generated.dir} (do NOT `mvn clean` after downloading them). -->
+        <profile>
+            <id>prebuilt-jooq</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.testcontainers</groupId>
+                        <artifactId>testcontainers-jooq-codegen-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>generate-jooq-sources</id>
+                                <phase>none</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Per-platform embedding-native-lib selection (nexus-lp2qo). These
+             auto-activate by build-host OS/arch (Maven built-in <os> activation,
+             no plugin needed) and override the linux-x64 defaults so -Pnative
+             embeds only the host's onnx/djl libs. Build a Windows .exe on Windows,
+             a Mac binary on a Mac — native-image does not cross-compile. -->
+        <profile>
+            <id>native-libs-mac</id>
+            <activation><os><family>mac</family></os></activation>
+            <properties>
+                <onnx.native.dir>osx-aarch64</onnx.native.dir>
+                <djl.native.dir>osx-aarch64</djl.native.dir>
+            </properties>
+        </profile>
+        <profile>
+            <id>native-libs-windows</id>
+            <activation><os><family>windows</family></os></activation>
+            <properties>
+                <onnx.native.dir>win-x64</onnx.native.dir>
+                <djl.native.dir>win-x86_64</djl.native.dir>
+            </properties>
+        </profile>
+        <profile>
+            <id>native-libs-linux-aarch64</id>
+            <activation><os><name>linux</name><arch>aarch64</arch></os></activation>
+            <properties>
+                <onnx.native.dir>linux-aarch64</onnx.native.dir>
+                <djl.native.dir>linux-aarch64</djl.native.dir>
+            </properties>
+        </profile>
+
+        <!-- -Pnative: opt-in native-image build (S0.4 C2 — CI must add Linux job) -->
+        <profile>
+            <id>native</id>
+            <properties>
+                <!-- nexus-9yrus (2) optimization level. Default -O2 = full optimization
+                     for RELEASE artifacts. PR-trip-wire + smoke builds override with
+                     -Dnative.image.opt=-Ob (GraalVM quick-build): skips the heavy
+                     optimization passes for ~half the build time and lower peak memory.
+                     Never use -Ob for a published engine-service-v* binary. -->
+                <native.image.opt>-O2</native.image.opt>
+                <!-- nexus-9yrus (3) builder max heap: a deliberate explicit cap (~78% of
+                     the 7GB ubuntu-latest) — single tunable knob, replacing native-image's
+                     implicit auto-size. RAISE to match a larger runner when CI moves off
+                     the 7GB box (-Dnative.image.maxheap=24g): that box over-commits (peak
+                     RSS ~7.86GB > 7GB) and GC-thrashes; more RAM is the real fix. -->
+                <native.image.maxheap>5632m</native.image.maxheap>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.graalvm.buildtools</groupId>
+                        <artifactId>native-maven-plugin</artifactId>
+                        <version>1.1.2</version>
+                        <extensions>true</extensions>
+                        <executions>
+                            <execution>
+                                <id>build-native</id>
+                                <goals><goal>compile-no-fork</goal></goals>
+                                <phase>package</phase>
+                                <configuration>
+                                    <imageName>nexus-service</imageName>
+                                    <mainClass>${mainClass}</mainClass>
+                                    <buildArgs>
+                                        <!-- no-fallback: fail at build instead of JVM fallback -->
+                                        <buildArg>--no-fallback</buildArg>
+                                        <buildArg>--enable-preview</buildArg>
+                                        <buildArg>--enable-native-access=ALL-UNNAMED</buildArg>
+                                        <buildArg>-H:+UnlockExperimentalVMOptions</buildArg>
+                                        <buildArg>-H:+AllowJRTFileSystem</buildArg>
+                                        <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+                                        <!-- HTTP server support -->
+                                        <buildArg>--enable-http</buildArg>
+                                        <buildArg>--enable-https</buildArg>
+                                        <!-- Logback/SLF4J: initialize at build time -->
+                                        <buildArg>--initialize-at-build-time=org.slf4j,ch.qos.logback</buildArg>
+                                        <!-- jOOQ 3.20.11 + GraalVM 25 native-image initialization.
+                                             nexus-lp2qo spike (2026-06-12): community metadata now
+                                             ships a jOOQ 3.20.0 entry (tested 3.20.0-3.21.5, covers
+                                             3.20.11) via native-build-tools 1.1.2 — the proper
+                                             reachability set for the 3.20.x line. We now CONSUME it
+                                             (un-excluded below) instead of the prior workaround
+                                             (exclude 3.18.2 metadata + a run-time-init flag for
+                                             org.jooq, nexus-gmiaf.9), whose typeReachable guards partially
+                                             analyzed DefaultDataType at build time and left
+                                             TYPES_BY_NAME null at runtime (NPE). -->
+                                        <!-- Hand-crafted reflect/resource config (app classes, logback,
+                                             postgres/hikari, liquibase changelog + XSD resources) AND the
+                                             agent-traced reachability-metadata.json (nexus-lp2qo: captured
+                                             from a live migrate+jOOQ-CRUD+embed run; supplies the liquibase
+                                             runtime-reflection the community metadata lacked). Both also
+                                             ride the jar classpath, but list them explicitly for clarity. -->
+                                        <buildArg>-H:ConfigurationFileDirectories=src/main/resources/META-INF/native-image,src/main/resources/META-INF/native-image/traced</buildArg>
+                                        <!-- Per-platform embedding native libs (nexus-lp2qo). onnxruntime
+                                             and djl-tokenizers bundle a .so/.dylib/.dll per <os-arch> in the
+                                             jar; native-image only embeds resources it is told to. Rather
+                                             than bundle ALL platforms into every binary (~120MB of foreign
+                                             libs), the ${onnx.native.dir} / ${djl.native.dir} properties are
+                                             set per build host by the native-libs-* OS profiles below, so the
+                                             binary carries ONLY its own platform's libs. ExcludeResources
+                                             drops the macOS .dSYM debug-symbol dirs. -->
+                                        <buildArg>-H:IncludeResources=ai/onnxruntime/native/${onnx.native.dir}/.*</buildArg>
+                                        <buildArg>-H:IncludeResources=native/lib/${djl.native.dir}/.*</buildArg>
+                                        <buildArg>-H:ExcludeResources=.*\.dSYM/.*</buildArg>
+                                        <!-- Portability: compatibility march for CI/prod (not native) -->
+                                        <buildArg>-march=compatibility</buildArg>
+                                        <!-- nexus-9yrus (3) builder JVM: explicit, runner-tunable heap +
+                                             parallel GC. The 7GB ubuntu-latest over-commits (peak RSS
+                                             ~7.86GB) and GC-thrashes (40.9s/3054 GCs observed); ParallelGC
+                                             collects across all builder cores so GC wall-time drops, and the
+                                             heap is now a single knob to raise on a larger runner. -->
+                                        <buildArg>-J-Xmx${native.image.maxheap}</buildArg>
+                                        <buildArg>-J-XX:+UseParallelGC</buildArg>
+                                        <!-- nexus-9yrus (2) optimization level (see profile properties):
+                                             -O2 for release, -Ob (quick-build) for PR/smoke. -->
+                                        <buildArg>${native.image.opt}</buildArg>
+                                    </buildArgs>
+                                    <metadataRepository>
+                                        <enabled>true</enabled>
+                                        <!-- nexus-lp2qo spike: jOOQ metadata NO LONGER excluded.
+                                             native-build-tools 1.1.2 bundles org.jooq/jooq/3.20.0
+                                             (reachability-metadata.json, tested 3.20.0-3.21.5) which
+                                             is the correct set for our 3.20.11 and supersedes the
+                                             3.18.2 entry that forced the gmiaf.9 exclusion. -->
+                                    </metadataRepository>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+            <dependencies>
+                <!-- Community reachability metadata for common libs -->
+                <dependency>
+                    <groupId>org.graalvm.buildtools</groupId>
+                    <artifactId>graalvm-reachability-metadata</artifactId>
+                    <version>1.1.2</version>
+                    <classifier>repository</classifier>
+                    <type>zip</type>
+                    <scope>provided</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
+</project>

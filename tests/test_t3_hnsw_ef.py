@@ -118,6 +118,15 @@ class TestApplyHnswEf:
         count = apply_hnsw_ef(db)
         assert count == 0
 
+    def test_apply_hnsw_ef_service_handle_no_op(self) -> None:
+        """RDR-155 P4a.2 (nexus-1k8s1, critique finding 1): the service-backed
+        handle has no ``_local_mode`` / raw client — apply_hnsw_ef must no-op
+        (return 0), not AttributeError. The chroma hnsw:search_ef knob retired
+        with the serving path; pgvector tunes HNSW server-side."""
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        assert apply_hnsw_ef(HttpVectorClient()) == 0
+
     def test_apply_hnsw_ef_empty_local_returns_zero(self) -> None:
         """apply_hnsw_ef() returns 0 when no collections exist in local mode."""
         db = _local_db()
@@ -237,10 +246,10 @@ class TestDoctorFixFlag:
         # The daemon-backed factory is what gets called, not a direct ctor.
         MockMakeT3.assert_called_once()
 
-    def test_doctor_fix_local_mode_daemon_unreachable_is_actionable(self) -> None:
-        """RDR-120 P4.B: when the T3 daemon is down, --fix must fail with an
-        actionable ClickException (start-the-daemon hint), not an opaque
-        connection traceback."""
+    def test_doctor_fix_handle_unavailable_is_actionable(self) -> None:
+        """When make_t3() itself fails, --fix must fail with an actionable
+        ClickException, not an opaque traceback. (The RDR-120 daemon-start
+        hint retired with the daemon leg — RDR-155 P4a.2.)"""
         from click.testing import CliRunner
         from nexus.commands.doctor import doctor_cmd
 
@@ -255,8 +264,23 @@ class TestDoctorFixFlag:
             result = runner.invoke(doctor_cmd, ["--fix"])
 
         assert result.exit_code != 0
-        assert "daemon" in result.output.lower()
-        assert "nx daemon t3 start" in result.output
+        assert "HNSW tuning" in result.output
+        assert "connection refused" in result.output
+
+    def test_doctor_fix_local_mode_service_handle_reports_zero(self) -> None:
+        """RDR-155 P4a.2 (critique finding 1): doctor --fix in local mode with
+        the REAL make_t3() result (service-backed HttpVectorClient) must exit
+        cleanly reporting 0 tuned collections — not AttributeError on
+        ``_local_mode``."""
+        from click.testing import CliRunner
+        from nexus.commands.doctor import doctor_cmd
+
+        runner = CliRunner()
+        with patch("nexus.config.is_local_mode", return_value=True):
+            result = runner.invoke(doctor_cmd, ["--fix"])
+
+        assert result.exit_code == 0, result.output
+        assert "0 collection(s)" in result.output
 
     def test_doctor_fix_cloud_mode_skips_hnsw(self) -> None:
         """doctor --fix in cloud mode prints skip message and returns."""

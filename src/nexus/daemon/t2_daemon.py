@@ -977,8 +977,13 @@ class T2Daemon:
         self._registry: ServiceRegistry | None = None
         self._supervisor: ServiceSupervisor | None = None
         self._lease_record: LeaseRecord | None = None
-        # RDR-140 P1.3: self-healing discovery re-assert (holder only).
-        self._reassert_task: asyncio.Task[None] | None = None
+        # nexus-6j39a: self-healing discovery re-assert runs on a dedicated
+        # thread so an event-loop stall longer than the lease TTL (e.g. heavy
+        # ETL writes) can no longer defer the heartbeat and false-stale a live
+        # daemon. threading.Event is used for the stop signal so stop() can set
+        # it from the async context and join(timeout) without blocking the loop.
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop: threading.Event | None = None
         # nexus-we61e: the daemon owns aspect-queue stale-row reclamation.
         # Reclaim was previously run from every per-process aspect worker,
         # so N workers RPC'd N redundant reclaim UPDATEs into this one
@@ -1093,12 +1098,20 @@ class T2Daemon:
         )
         self._lease_record = self._supervisor.publish_once()
 
-        # RDR-140 P1.3: start the self-healing re-assert task now that the
-        # discovery file is written. It re-creates the file if it ever goes
-        # missing while we (the spawn-lock holder) are alive. stop() cancels
-        # it BEFORE unlinking the discovery file so it cannot resurrect a
-        # mid-shutdown daemon's addr (RDR-129 early-unlink ordering).
-        self._reassert_task = asyncio.create_task(self._reassert_discovery_loop())
+        # nexus-6j39a: start the self-healing heartbeat on a dedicated thread.
+        # The thread is independent of the event loop so an event-loop stall
+        # longer than the lease TTL can no longer defer the heartbeat and
+        # false-stale a healthy daemon. stop() sets the Event + joins
+        # (bounded) BEFORE unlinking the discovery file so the thread can
+        # never resurrect a mid-shutdown daemon's addr (RDR-129 ordering).
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(self._heartbeat_stop,),
+            daemon=True,
+            name="t2-heartbeat",
+        )
+        self._heartbeat_thread.start()
 
         # nexus-we61e: the daemon owns aspect-queue stale-row reclaim.
         self._reclaim_task = asyncio.create_task(self._reclaim_stale_loop())
@@ -1112,19 +1125,30 @@ class T2Daemon:
             db_path=str(self._db_path),
         )
 
-    async def _reassert_discovery_loop(self) -> None:
+    def _heartbeat_loop(self, stop: threading.Event) -> None:
         """Periodically re-assert our own discovery file (holder self-heal).
 
-        RDR-140 P1.3 (nexus-h2oko): a transient loss of the t2_addr file while
-        the daemon is alive otherwise strands clients (the race-harness saw all
-        racers crash in the discovery-gap case). Every ``_REASSERT_INTERVAL``
-        we re-write the file iff it is missing or no longer names our pid;
-        when it is intact this is a cheap stat + read with no write. Cancelled
-        at the START of :meth:`stop` so it can never resurrect a file the
-        shutdown unlink just removed.
+        nexus-6j39a: runs on a dedicated thread, independent of the asyncio
+        event loop. An event-loop stall longer than the lease TTL (e.g. heavy
+        ETL T2 writes confirmed in production) can no longer defer the
+        heartbeat and false-stale a healthy daemon.
+
+        RDR-140 P1.3 (nexus-h2oko): every ``_REASSERT_INTERVAL`` the supervisor
+        tick re-stamps the lease, self-healing a transiently lost discovery
+        record and learning whether a newer owner fenced us (cannot happen while
+        we hold the spawn lock, but the loser-quiet-exit path is logged).
+
+        heartbeat_tick already takes a blocking ``fcntl.flock(LOCK_EX)``
+        (RDR-151 P1.4); running it on a dedicated thread rather than via
+        ``asyncio.to_thread`` is strictly less concurrent — no new locking
+        concerns. The stop signal (``threading.Event``) lets stop() fire and
+        join() without spinning; ``stop.wait(timeout=_REASSERT_INTERVAL)``
+        returns ``True`` (stop requested) or ``False`` (normal tick interval).
+        stop() sets the Event + joins (bounded) BEFORE unlinking the discovery
+        file so this loop can never resurrect a mid-shutdown daemon's addr
+        (RDR-129 early-unlink ordering).
         """
-        while True:
-            await asyncio.sleep(_REASSERT_INTERVAL)
+        while not stop.wait(timeout=_REASSERT_INTERVAL):
             supervisor = self._supervisor
             if supervisor is None:
                 continue
@@ -1134,15 +1158,7 @@ class T2Daemon:
                 # generation (the RDR-140 re-assert) and learns if a newer
                 # owner fenced us (cannot happen while we hold the spawn
                 # lock, but the loser-quiet-exit is logged if it ever does).
-                #
-                # RDR-151 P1.4 (nexus-tjgl2): offload to a thread. heartbeat_tick
-                # takes a blocking ``fcntl.flock(LOCK_EX)`` on the per-scope
-                # election lock (service_registry.py); running it inline on the
-                # event-loop thread stalls the whole loop for the duration of any
-                # lock contention (Gap 4). A stall that exceeds the lease TTL can
-                # even get a live primary falsely fenced (RF-2). to_thread keeps
-                # the loop serving while the blocking lock is acquired.
-                await asyncio.to_thread(supervisor.heartbeat_tick)
+                supervisor.heartbeat_tick()
                 if supervisor.fenced:
                     _log.warning(
                         "t2_daemon_discovery_fenced",
@@ -1151,8 +1167,6 @@ class T2Daemon:
                     )
                 else:
                     self._lease_record = supervisor.record
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:  # noqa: BLE001
                 # Self-heal is best-effort; never let it crash the daemon.
                 _log.warning("t2_daemon_discovery_reassert_failed", exc=str(exc))
@@ -1263,17 +1277,30 @@ class T2Daemon:
         never spawns into the lock-still-held window. ``_release_spawn_lock``
         remains callable for explicit teardown (tests simulate process exit).
         """
-        # RDR-140 P1.3 (nexus-h2oko): cancel the self-healing re-assert task
-        # FIRST — before the discovery-file unlink below — so it can never
-        # re-create the addr file for a daemon that is shutting down (the
-        # resurrection race against RDR-129 early-unlink-on-stop ordering).
-        if self._reassert_task is not None:
-            self._reassert_task.cancel()
-            try:
-                await self._reassert_task
-            except BaseException:  # noqa: BLE001
-                pass
-            self._reassert_task = None
+        # nexus-6j39a: stop the self-healing heartbeat thread FIRST — before the
+        # discovery-file unlink below — so it can never re-create the addr file
+        # for a daemon that is shutting down (the resurrection race against
+        # RDR-129 early-unlink-on-stop ordering). threading.Event + bounded
+        # join(timeout) so a wedged heartbeat thread (e.g. hung heartbeat_tick
+        # flock) cannot hang shutdown; the OS reaps daemon threads at process
+        # exit, so a join timeout is safe to log-and-proceed (audit advisory in
+        # nexus-6j39a bead comment).
+        if self._heartbeat_thread is not None:
+            if self._heartbeat_stop is not None:
+                self._heartbeat_stop.set()
+            self._heartbeat_thread.join(timeout=_GRACEFUL_STOP_TIMEOUT)
+            if self._heartbeat_thread.is_alive():
+                _log.warning(
+                    "t2_daemon_heartbeat_thread_join_timeout",
+                    timeout_s=_GRACEFUL_STOP_TIMEOUT,
+                )
+            self._heartbeat_thread = None
+            self._heartbeat_stop = None
+        # Snapshot the lease record once, post-join: if the join timed out
+        # the heartbeat thread may still be writing self._lease_record; the
+        # registry calls below must all observe ONE consistent record rather
+        # than re-reading the attribute mid-race (stacked-review MEDIUM-3).
+        lease_record = self._lease_record
 
         # RDR-151 P1.3 (nexus-yd6fy): publish the shutdown marker FIRST, before
         # the (potentially slow) server drain and DB close below, so discoverers
@@ -1281,16 +1308,16 @@ class T2Daemon:
         # whole teardown window. A clean shutdown thus hands off immediately
         # instead of leaving a healthy-looking record that resolves to a daemon
         # that is already draining (the TTL-expiry wait is for crashes only).
-        # The reassert task is cancelled above first; a heartbeat thread it had
-        # already dispatched to the pool (RDR-151 P1.4) may still complete after
+        # The heartbeat thread is stopped and joined above first (nexus-6j39a);
+        # a tick in flight at join time may still complete marginally after
         # this mark, but ServiceRegistry.heartbeat preserves a non-"live" status,
         # so a late tick cannot resurrect the record back to healthy.
         # mark_shutting_down lives in the shared registry primitive
         # (service_registry.py) per the RDR-149 lifecycle invariant; stop() only
         # orchestrates the call.
-        if self._registry is not None and self._lease_record is not None:
+        if self._registry is not None and lease_record is not None:
             with contextlib.suppress(Exception):
-                self._registry.mark_shutting_down(self._lease_record)
+                self._registry.mark_shutting_down(lease_record)
 
         # nexus-we61e: stop the daemon-owned reclaim loop. Order is not
         # load-bearing (it touches only the aspect queue, not discovery),
@@ -1330,12 +1357,12 @@ class T2Daemon:
                 )
         self._uds_server = None
         self._tcp_server = None
-        if self._registry is not None and self._lease_record is not None:
+        if self._registry is not None and lease_record is not None:
             # RDR-149 P2: relinquish is own-record-only, so a fenced
             # predecessor's delayed stop cannot unlink a successor's record
             # (CA-4) — the same invariant the early-unlink ordering above
             # protects (reassert cancelled BEFORE this).
-            self._registry.relinquish(self._lease_record)
+            self._registry.relinquish(lease_record)
             self._lease_record = None
             self._supervisor = None
             self._registry = None

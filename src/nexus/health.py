@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -253,6 +254,10 @@ def _check_t3_local() -> list[HealthResult]:
 
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="local (no API keys needed)"))
+    # RDR-155 P4a.2 (nexus-1k8s1): the nexus-service serves T3 in local mode
+    # too — probe it unconditionally (critique finding 2: a pgvector-only
+    # install with the service down must not doctor all-green).
+    results.append(_check_vector_service())
 
     local_path = _default_local_path()
     path_exists = local_path.exists()
@@ -277,112 +282,232 @@ def _check_t3_local() -> list[HealthResult]:
             detail=f"{local_path} (will be created on first index)",
         ))
 
+    # Service mode (pg_credentials present) reshapes the Python local-embedder
+    # surface below (nexus-ybw87): a --service install embeds T3 server-side in
+    # the Java service (bge-768, reported authoritatively by
+    # _check_service_bge_model). The Python LocalEmbeddingFunction here only
+    # serves T1/local-Python paths, NOT T3 — so we qualify its label and suppress
+    # the T3-framed upgrade advisory, which would otherwise contradict the
+    # service-embedder result on the very next line.
+    from nexus.config import local_embed_model_choice, nexus_config_dir
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME
+
+    _service_mode = (nexus_config_dir() / CREDENTIALS_FILENAME).exists()
+
     # Embedding model
     from nexus.db.local_ef import LocalEmbeddingFunction
     ef = LocalEmbeddingFunction()
-    results.append(
-        HealthResult(
-            label="Embedding model", ok=True, detail=f"{ef.model_name} ({ef.dimensions}d)"
-        )
-    )
+    if _service_mode:
+        results.append(HealthResult(
+            label="Embedding model (local Python / T1)", ok=True,
+            detail=f"{ef.model_name} ({ef.dimensions}d) — T3 embeds server-side "
+                   f"via the bge-768 service",
+        ))
+    else:
+        results.append(HealthResult(
+            label="Embedding model", ok=True,
+            detail=f"{ef.model_name} ({ef.dimensions}d)",
+        ))
 
     # RDR-144 P5a: config-aware upgrade / degradation advisory. Replaces the
     # old unconditional minilm nudge (which pestered users who explicitly
     # chose 384 and never caught the chose-bge-but-extra-missing degrade).
-    from nexus.config import local_embed_model_choice
+    # Suppressed in service mode (see above): the advisory is about the Python
+    # local embedder, which does not serve a service user's T3.
+    if not _service_mode:
+        advisory = local_embedder_advisory(local_embed_model_choice(), ef.model_name)
+        if advisory is not None:
+            results.append(advisory)
 
-    advisory = local_embedder_advisory(local_embed_model_choice(), ef.model_name)
-    if advisory is not None:
-        results.append(advisory)
+    # Collection count + legacy-store disk usage.
+    #
+    # RDR-155 P4a.2 (nexus-1k8s1): the T3-daemon probe is retired with the
+    # Chroma serving path — T3 serving routes through the pgvector-backed
+    # nexus-service, so the collection census queries it via ``make_t3()``.
+    # The on-disk Chroma directory is reported as the LEGACY store awaiting
+    # the Phase-5 ETL (its deletion is Phase 4b, gated on P5.G).
+    #
+    # The GH-1061 E1 dimension-mismatch probe retired with the serving path
+    # too: it dummy-queried raw Chroma collections to catch stored-vs-active
+    # embedder drift, but on the pgvector path embedding is server-side and
+    # the collection-name model segment dispatches the dimension fail-loud
+    # at write time (PgVectorRepository.dimForCollection) — the hazard class
+    # the probe existed for cannot occur silently anymore.
+    try:
+        from nexus.db import make_t3
 
-    # Collection count and disk usage. Empty collections are kept on purpose
-    # (they preserve embedding-model metadata so the next store_put doesn't
-    # need to re-derive it) — surface the count so users aren't surprised by
-    # a 0-chunk collection lingering after `nx store delete` of every entry.
-    if path_exists:
-        try:
-            # RDR-120 P6 (nexus-qg86h): direct mode decommissioned. The
-            # local-mode probe always routes through the T3 daemon's
-            # HttpClient; the legacy PersistentClient direct-open
-            # branch is deleted. (chromadb's WAL races between
-            # processes when two PersistentClients open the same store
-            # simultaneously, which is why the daemon path was added
-            # at P2 in the first place; P6 makes it the only path.)
-            from nexus.daemon.t3_client import make_t3_client
-
-            client = make_t3_client()._client
-            cols = client.list_collections()
-            col_count = len(cols)
-            empty_count = sum(1 for c in cols if c.count() == 0)
+        # Graceful-degrade contract (RDR-156 P3): list_collections() swallows
+        # transport errors and returns [] — a down service reads as "0
+        # collections" here, NOT as a failure. That is intentional: the fatal
+        # vector-service reachability probe (_check_vector_service) fires
+        # separately and is the failure surface; this check is informational.
+        cols = make_t3().list_collections()
+        col_count = len(cols)
+        detail = f"{col_count} collections (pgvector service)"
+        if path_exists:
             total_bytes = sum(f.stat().st_size for f in local_path.rglob("*") if f.is_file())
             if total_bytes < 1024 * 1024:
                 size_str = f"{total_bytes / 1024:.1f} KB"
             else:
                 size_str = f"{total_bytes / (1024 * 1024):.1f} MB"
-            empty_note = f" (including {empty_count} empty)" if empty_count else ""
-            results.append(HealthResult(
-                label="Local collections", ok=True,
-                detail=f"{col_count} collections{empty_note}, {size_str} on disk",
-            ))
-
-            # GH-1061 E1: dimension-mismatch detection.  Probe each non-empty
-            # collection with a dummy vector of the active ef's dimension.  If
-            # ChromaDB rejects it with "dimension" in the error, the collection
-            # was indexed with a different embedder.  A total mismatch (every
-            # queryable collection rejects the active dim) is a FAIL; a partial
-            # mismatch is a WARN.  Both surface remediation hints.
-            non_empty_cols = [c for c in cols if c.count() > 0]
-            if non_empty_cols:
-                dummy = [0.0] * ef.dimensions
-                mismatched: list[str] = []
-                for col in non_empty_cols:
-                    try:
-                        col.query(query_embeddings=[dummy], n_results=1)
-                    except Exception as probe_exc:
-                        if "dimension" in str(probe_exc).lower():
-                            mismatched.append(col.name)
-                        # Other errors (e.g. collection empty race) are benign.
-
-                if mismatched:
-                    total_queryable = len(non_empty_cols)
-                    mismatch_count = len(mismatched)
-                    is_total = mismatch_count == total_queryable
-                    detail_msg = (
-                        f"active embedder is {ef.dimensions}d ({ef.model_name}) "
-                        f"but {mismatch_count} of {total_queryable} collection(s) "
-                        f"use a different dimension — search returns nothing for those"
-                    )
-                    # L-1: wording must be unambiguous about which side is "wrong".
-                    # The stored vectors were indexed with a different embedder;
-                    # the user must either activate the matching embedder or reindex.
-                    fix_hints = []
-                    if ef.model_name == "all-MiniLM-L6-v2":
-                        fix_hints.append(
-                            "Your collections were indexed with a 768d embedder "
-                            "(bge-base-en-v1.5) but the active embedder is 384d "
-                            "(all-MiniLM-L6-v2 fallback).  "
-                            "Activate the matching embedder: "
-                            "pip install conexus[local]"
-                        )
-                    fix_hints.append(
-                        "Or reindex the mismatched collection(s) with the active "
-                        f"{ef.dimensions}d embedder: "
-                        "nx collection reindex <collection>"
-                    )
-                    results.append(HealthResult(
-                        label="Local collections dimension",
-                        ok=False,
-                        warn=not is_total,   # partial = soft warn; total = hard fail
-                        detail=detail_msg,
-                        fix_suggestions=fix_hints,
-                        fatal=is_total,
-                    ))
-
-        except Exception as exc:
-            _log.debug("doctor_local_collections_failed", error=str(exc))
-            results.append(HealthResult(label="Local collections", ok=True, detail="could not query"))
+            detail += f"; legacy Chroma store {size_str} on disk (awaiting P5 ETL)"
+        results.append(HealthResult(
+            label="T3 collections", ok=True,
+            detail=detail,
+        ))
+    except Exception as exc:
+        _log.debug("doctor_t3_collections_failed", error=str(exc))
+        results.append(HealthResult(label="T3 collections", ok=True, detail="could not query"))
 
     return results
+
+
+def _check_service_bge_model() -> list[HealthResult]:
+    """RDR-160 (nexus-gzqvg): surface a missing/incomplete bge-768 service model.
+
+    In local mode the Java service embeds every collection with bge-768 and reads
+    the STANDARD fp32 ONNX from a fixed path; without it the service fail-loud-
+    crashes at boot (the {@code Bge768Embedder} preflight), which is opaque if you
+    have not seen it before. ``nx doctor`` surfaces the gap earlier.
+
+    Gated on SERVICE mode (``pg_credentials`` present) because only the Java
+    service reads this file: a pure-Python local install uses the fastembed cache,
+    and cloud mode embeds server-side via Voyage. Called from the local-mode
+    branch of :func:`run_health_checks`, so cloud mode never reaches it. Returns
+    ``[]`` (no output) when this is not a service install.
+
+    ``service_bge_model_present()`` applies the same size floors as provisioning,
+    so a truncated download or a quantized/fused substitute reads as "incomplete"
+    and is flagged, not silently accepted.
+    """
+    from nexus.config import nexus_config_dir
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME
+
+    if not (nexus_config_dir() / CREDENTIALS_FILENAME).exists():
+        return []  # not a service install — the Java service is what reads this model
+
+    from nexus.db.service_bge_model import (
+        service_bge_model_dir,
+        service_bge_model_present,
+    )
+
+    model_dir = service_bge_model_dir()
+    if service_bge_model_present():
+        return [HealthResult(
+            label="Service embedder (bge-768)",
+            ok=True,
+            detail=f"standard ONNX present at {model_dir}",
+        )]
+    return [HealthResult(
+        label="Service embedder (bge-768)",
+        ok=False,
+        # SOFT warn, not fatal: this is the "surface it earlier" advisory. The
+        # HARD gate is the Bge768Embedder boot preflight. A fatal here would
+        # (a) red-X doctor for a mid-setup user who has pg_credentials but has
+        # not provisioned/started the service yet, and (b) stack a third fatal
+        # on top of _check_vector_service / _check_storage_service_health when the
+        # service is simply down — noise, not signal.
+        warn=True,
+        detail=(
+            f"the local Java service embeds with bge-768 but its ONNX is missing "
+            f"or incomplete at {model_dir} — the service will not boot until it is "
+            f"provisioned"
+        ),
+        fix_suggestions=[
+            "Provision it: nx init --service",
+            "Or stage the STANDARD fp32 export (Xenova/bge-base-en-v1.5 model.onnx "
+            "+ tokenizer.json — NOT fastembed's model_optimized.onnx) at that path.",
+        ],
+    )]
+
+
+def _check_vector_service() -> HealthResult:
+    """Reachability probe for the pgvector-backed vector serving surface.
+
+    RDR-155 P4a.2 (nexus-1k8s1): post-cutover the nexus-service IS the T3
+    serving path in BOTH modes, so this probe runs unconditionally — it must
+    not be gated on legacy ChromaCloud credential presence (a pgvector-only
+    install with the service down would otherwise doctor all-green;
+    P4a.2 critique finding 2).
+    """
+    try:
+        # Raw GET so failures surface (HttpVectorClient.list_collections
+        # deliberately swallows errors for its callers).
+        from nexus.db.http_vector_client import _get
+        _get("/v1/vectors/collections")
+        return HealthResult(
+            label="Vector service (/v1/vectors)", ok=True, detail="reachable",
+        )
+    except Exception as exc:
+        _log.debug("vector_service_not_reachable", error=str(exc))
+        return HealthResult(
+            label="Vector service (/v1/vectors)",
+            ok=False,
+            detail="not reachable",
+            fix_suggestions=[
+                "Start the nexus-service (pgvector backend) and export "
+                "NX_SERVICE_URL / NX_SERVICE_TOKEN.",
+            ],
+            fatal=True,
+        )
+
+
+def _check_managed_service_probe() -> list[HealthResult]:
+    """RDR-001 (nexus-o6fch): version-compatibility probe of a MANAGED endpoint.
+
+    Runs ONLY when ``NX_SERVICE_URL`` is explicitly set — the unambiguous "I have
+    pointed the client at a specific managed endpoint" signal. It deliberately
+    NEVER defaults to ``https://api.conexus-nexus.com``: a local-service-in-cloud-
+    mode user (``NX_SERVICE_URL`` unset, endpoint lease-discovered on localhost)
+    must not be probed against the public managed endpoint.
+
+    Complements :func:`_check_vector_service` (which probes
+    ``/v1/vectors/collections`` for reachability + auth): this adds the
+    unauthenticated ``/version`` handshake → app_version COMPATIBILITY, which
+    reachability alone misses (a reachable-but-incompatible managed service). SOFT
+    warn only — reachability fatals are ``_check_vector_service``'s domain, so this
+    surfaces the version/remedy signal without a duplicate fatal on a down service.
+    """
+    import os
+
+    base = os.environ.get("NX_SERVICE_URL", "").strip()
+    if not base:
+        return []  # no explicit managed endpoint — never default-probe the public one
+
+    from nexus.db.managed_endpoint import (
+        ManagedServiceError,
+        ManagedServiceIncompatible,
+        probe_managed_service,
+    )
+
+    try:
+        caps = probe_managed_service(base_url=base)
+    except ManagedServiceIncompatible as exc:
+        return [HealthResult(
+            label="Managed/remote service (version)",
+            ok=False,
+            warn=True,
+            detail=str(exc),
+            fix_suggestions=[
+                "Align the managed-service and nx-client versions, or correct "
+                "NX_SERVICE_URL.",
+            ],
+        )]
+    except ManagedServiceError as exc:
+        # Unreachable — _check_vector_service owns the fatal reachability signal;
+        # stay soft here to avoid a double-report on a down endpoint.
+        return [HealthResult(
+            label="Managed/remote service (version)",
+            ok=False,
+            warn=True,
+            detail=str(exc),
+            fix_suggestions=["Confirm NX_SERVICE_URL is reachable (see the vector-service check)."],
+        )]
+    return [HealthResult(
+        label="Managed/remote service (version)",
+        ok=True,
+        detail=f"{caps.base_url} — app_version {caps.app_version} (mode {caps.embedding_mode})",
+    )]
 
 
 def _check_t3_cloud() -> list[HealthResult]:
@@ -390,6 +515,8 @@ def _check_t3_cloud() -> list[HealthResult]:
 
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="cloud"))
+    results.append(_check_vector_service())
+    results.extend(_check_managed_service_probe())
 
     # CHROMA_API_KEY
     chroma_key = get_credential("chroma_api_key")
@@ -432,33 +559,12 @@ def _check_t3_cloud() -> list[HealthResult]:
         ]
     results.append(r)
 
-    # ChromaDB reachability
-    if chroma_key and chroma_database:
-        try:
-            # RDR-120 P2: route through make_t3 so the reachability
-            # probe exercises the same code path the indexer takes.
-            # Daemon mode is local-only; this branch only fires in
-            # cloud mode, so make_t3 dispatches to CloudClient.
-            from nexus.db import make_t3
-            make_t3()
-            results.append(HealthResult(
-                label=f"ChromaDB  ({chroma_database})", ok=True, detail="reachable",
-            ))
-        except Exception as exc:
-            _log.debug("db_not_reachable", db_name=chroma_database, error=str(exc))
-            results.append(HealthResult(
-                label=f"ChromaDB  ({chroma_database})",
-                ok=False,
-                detail="not reachable",
-                fix_suggestions=[
-                    "Run 'nx config init' to provision the database automatically.",
-                    f"Or create '{chroma_database}' manually in the ChromaDB Cloud dashboard.",
-                ],
-                fatal=True,
-            ))
-        # RDR-037 transitional probe for the legacy four-database
-        # layout was retired post-migration; the single-database
-        # architecture is the only supported shape.
+    # Vector-serving reachability is probed UNCONDITIONALLY at the top of
+    # this function via _check_vector_service() (RDR-155 P4a.2): the direct
+    # ChromaDB Cloud probe retired with the serving path, and the service
+    # probe must not be gated on legacy ChromaCloud credential presence.
+    # The ChromaCloud credentials above still matter: the Phase-5 ETL reads
+    # the legacy store through them.
 
     # VOYAGE_API_KEY
     voyage_key = get_credential("voyage_api_key")
@@ -480,14 +586,26 @@ def _check_t3_cloud() -> list[HealthResult]:
     if chroma_key and chroma_database and voyage_key:
         from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
 
+        # RDR-155 P4a.2 (nexus-1k8s1): the sweep reads Chroma COLLECTION
+        # metadata (the pipeline_version stamp), which has no pgvector
+        # equivalent — collection is a column, not an object with metadata.
+        # On the service-backed handle the sweep is retired, not "failed";
+        # pgvector-side staleness tracking is a P5 ETL concern.
+        from nexus.db import make_t3
+        from nexus.db.http_vector_client import is_service_backed
+
+        t3_handle = make_t3()
+        if is_service_backed(t3_handle):
+            results.append(HealthResult(
+                label="pipeline versions", ok=True,
+                detail="sweep retired with the Chroma serving path (RDR-155 P4a)",
+            ))
+            return results
+
         stale_count = 0
         pipeline_results: list[HealthResult] = []
         try:
-            # RDR-120 P2: route through make_t3 for the cloud-mode
-            # pipeline-version sweep. Cloud-only branch; daemon does
-            # not apply.
-            from nexus.db import make_t3
-            client = make_t3()._client
+            client = t3_handle._client
             cols = client.list_collections()
             for col in cols:
                 # taxonomy__* collections are BERTopic aggregates (RDR-070),
@@ -1213,8 +1331,11 @@ def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]
 def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult]:
     try:
         if cat is not None:
-            doc_count = cat._db.execute("SELECT count(*) FROM documents").fetchone()[0]
-            link_count = cat._db.execute("SELECT count(*) FROM links").fetchone()[0]
+            # nexus-qnp5s: use cat.stats() which works on both SQLite Catalog
+            # and HttpCatalogClient (GET /v1/catalog/stats).
+            s = cat.stats()
+            doc_count = s.get("doc_count", 0)
+            link_count = s.get("link_count", 0)
             return [HealthResult(
                 label="Catalog", ok=True,
                 detail=f"{doc_count} documents, {link_count} links at {cat_path}",
@@ -1358,6 +1479,685 @@ def _check_credential_persistence() -> list[HealthResult]:
     ]
 
 
+# ── RDR-152 / bead nexus-gmiaf.33: storage-service health checks ──────────────
+
+# Authoritative set of tenant tables that MUST have RLS enabled, forced, and at
+# least one policy.  Derived from every ``ALTER TABLE ... ENABLE ROW LEVEL
+# SECURITY`` statement across all Liquibase changelog baseline files under
+# service/src/main/resources/db/changelog/.
+#
+# STRUCTURAL GUARD: tests/test_health_service_checks.py::TestRlsTableCompleteness
+# cross-walks this tuple against the actual XMLs at test time and fails loudly
+# on any drift.  When adding a new changelog baseline, run that test to catch
+# any newly RLS-protected table that needs to be added here.
+_RLS_TENANT_TABLES: tuple[str, ...] = (
+    "nexus.aspect_extraction_queue",
+    "nexus.aspect_promotion_log",
+    "nexus.catalog_collections",
+    "nexus.catalog_document_chunks",
+    "nexus.catalog_documents",
+    "nexus.catalog_links",
+    "nexus.catalog_meta",
+    "nexus.catalog_owners",
+    "nexus.chash_index",
+    "nexus.document_aspects",
+    "nexus.document_highlights",
+    "nexus.frecency",
+    "nexus.hook_failures",
+    "nexus.memory",
+    "nexus.nx_answer_runs",
+    "nexus.plans",
+    "nexus.relevance_log",
+    "nexus.search_telemetry",
+    "nexus.taxonomy_meta",
+    "nexus.tier_writes",
+    "nexus.topic_assignments",
+    "nexus.topic_links",
+    "nexus.topics",
+    "t1.scratch",
+)
+
+# Scope key published by the Java service supervisor (bead nexus-gmiaf.30).
+# The supervisor writes a t2-tier lease record under this key; doctor reads it
+# to resolve host:port without hard-coding or requiring env vars.
+_STORAGE_SERVICE_SCOPE_KEY: str = "storage_service"
+
+# Sentinel for distinguishing "caller passed None" from "use auto-discovery".
+_ENDPOINT_AUTO: object = object()
+
+
+
+def _resolve_service_endpoint(
+    config_dir: Path,
+) -> tuple[str, int] | None:
+    """Return (host, port) for the Java storage service, or None.
+
+    Resolution order:
+    1. ServiceRegistry discover() — the supervisor (gmiaf.30) publishes a
+       lease record under tier="storage_service", scope=str(os.getuid()).
+       addr file = storage_service_addr.<uid>.  NOT the t2 tier.
+    2. NX_SERVICE_HOST / NX_SERVICE_PORT environment variables (fallback).
+    3. None — endpoint not discoverable (soft-warn, skip ping).
+    """
+    # 1. Registry discover.
+    # IMPORTANT: tier="storage_service", scope=str(os.getuid()) — this matches
+    # exactly what StorageServiceSupervisor._publish() writes (tier=_REGISTRY_TIER,
+    # scope=str(os.getuid())).  The stale comment "t2 tier" drove a bug where
+    # this used tier="t2" + scope_key="storage_service" (t2_addr.storage_service),
+    # which never matched the supervisor's storage_service_addr.<uid> file.
+    try:
+        from nexus.daemon.service_registry import ServiceRegistry
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+        scope = str(os.getuid())
+        lease = registry.discover(scope)
+        if lease is not None:
+            ep = lease.endpoint
+            host = str(ep.get("host", "127.0.0.1"))
+            port = int(ep.get("port", 0))
+            if port > 0:
+                _log.debug(
+                    "storage_service_endpoint_from_registry",
+                    host=host, port=port,
+                )
+                return host, port
+    except Exception as exc:
+        _log.debug("storage_service_registry_discover_failed", error=str(exc))
+
+    # 2. Env var fallback.
+    host = os.environ.get("NX_SERVICE_HOST", "127.0.0.1")
+    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+    if port_str:
+        try:
+            port = int(port_str)
+            if port > 0:
+                _log.debug(
+                    "storage_service_endpoint_from_env",
+                    host=host, port=port,
+                )
+                return host, port
+        except ValueError:
+            pass
+
+    return None
+
+
+def _check_storage_service_health(
+    creds_path: Path | None = None,
+    endpoint: object = _ENDPOINT_AUTO,  # tuple[str,int] | None | _ENDPOINT_AUTO
+    http_get=None,  # injectable for unit tests: (url, timeout) -> httpx.Response
+) -> list[HealthResult]:
+    """Ping the Java storage service /health endpoint.
+
+    Gated on pg_credentials being present (service mode configured).
+    Endpoint resolved via ServiceRegistry → NX_SERVICE_HOST/PORT env →
+    soft-warn-and-skip if neither resolves.
+
+    Down service -> fatal (no direct-mode fallback per RDR-152).
+    """
+    import httpx as _httpx
+
+    # Resolve creds_path default.
+    if creds_path is None:
+        from nexus.config import nexus_config_dir
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    # Gate: service/PG mode configured?
+    if not creds_path.exists():
+        return [HealthResult(
+            label="Storage service health",
+            ok=False,
+            detail="service mode not configured (pg_credentials absent); skipping",
+            warn=True,
+        )]
+
+    # Resolve endpoint.
+    # _ENDPOINT_AUTO -> auto-discover via registry / env.
+    # explicit tuple -> use directly (test injection or caller override).
+    # explicit None -> endpoint not available, soft-warn.
+    resolved_endpoint: tuple[str, int] | None
+    if endpoint is _ENDPOINT_AUTO:
+        from nexus.config import nexus_config_dir
+        resolved_endpoint = _resolve_service_endpoint(nexus_config_dir())
+    else:
+        resolved_endpoint = endpoint  # type: ignore[assignment]
+
+    if resolved_endpoint is None:
+        # Soft-warn (not fatal): the service supervisor (gmiaf.30) may not have
+        # published its lease yet, or the user simply has not configured service
+        # mode.  Either way there is no confirmed endpoint to blame — we cannot
+        # distinguish "service not started" from "bead .30 not landed yet".
+        # Once an endpoint IS known and the connection is refused, that changes
+        # to fatal (we pinged a confirmed address and got nothing back).
+        return [HealthResult(
+            label="Storage service health",
+            ok=False,
+            detail=(
+                "storage service endpoint not discoverable "
+                "(no registry lease and NX_SERVICE_HOST/PORT not set); skipping"
+            ),
+            warn=True,
+        )]
+
+    host, port = resolved_endpoint
+    url = f"http://{host}:{port}/health"
+
+    try:
+        if http_get is not None:
+            resp = http_get(url, timeout=5.0)
+        else:
+            resp = _httpx.get(url, timeout=5.0)
+    except (_httpx.ConnectError, _httpx.TimeoutException, OSError) as exc:
+        # Fatal: we have a confirmed endpoint and it is not responding.
+        # Unlike the undiscoverable case above, here we know the address and
+        # can definitively say the service is down.
+        return [HealthResult(
+            label="Storage service health",
+            ok=False,
+            detail=f"Storage service at {url} unreachable: {exc}",
+            fix_suggestions=[
+                "Start the service: nx service start",
+                f"Check that the service is listening on {host}:{port}",
+            ],
+            fatal=True,
+        )]
+    except Exception as exc:
+        return [HealthResult(
+            label="Storage service health",
+            ok=False,
+            detail=f"Storage service health check failed unexpectedly: {exc}",
+            fatal=True,
+        )]
+
+    try:
+        body = resp.json()
+    except Exception:
+        body = {}
+
+    db_field = body.get("db", "")
+    status_ok = resp.status_code == 200 and db_field == "up"
+
+    if status_ok:
+        return [HealthResult(
+            label="Storage service health",
+            ok=True,
+            detail=f"Storage service: up (HTTP {resp.status_code}, db={db_field!r})",
+        )]
+
+    detail = (
+        f"Storage service: DOWN "
+        f"(HTTP {resp.status_code}, status={body.get('status','?')!r}, "
+        f"db={db_field!r})"
+    )
+    if "detail" in body:
+        detail += f" — {body['detail']}"
+
+    return [HealthResult(
+        label="Storage service health",
+        ok=False,
+        detail=detail,
+        fix_suggestions=[
+            "Start the service: nx service start",
+            f"Check service logs; the DB probe at {host}:{port} is failing",
+        ],
+        fatal=True,
+    )]
+
+
+def _run_psql(
+    psql_bin: Path,
+    host: str,
+    port: int,
+    dbname: str,
+    user: str,
+    password: str,
+    sql: str,
+    *,
+    psql_runner=None,
+) -> subprocess.CompletedProcess:
+    """Run a single-statement psql query and return the CompletedProcess.
+
+    ``-t -A`` gives unaligned, tuple-only output suitable for line-by-line
+    parsing. ``-v ON_ERROR_STOP=1`` makes psql exit non-zero on SQL errors.
+    ``psql_runner`` is injectable for unit tests (avoids shelling out).
+    """
+    cmd = [
+        str(psql_bin),
+        "-h", host,
+        "-p", str(port),
+        "-U", user,
+        "-d", dbname,
+        "-v", "ON_ERROR_STOP=1",
+        "-t", "-A",
+        "-c", sql,
+    ]
+    if psql_runner is not None:
+        # Injected runner (unit tests) — does not accept env kwarg.
+        return psql_runner(cmd, capture_output=True, text=True, check=False)
+    env = {**os.environ, "PGPASSWORD": password}
+    return subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+
+
+def _check_migration_state(
+    creds_path: Path | None = None,
+    psql_bin: Path | None = None,
+    psql_runner=None,  # injectable for unit tests
+) -> list[HealthResult]:
+    """Verify Liquibase migration state on the nx-managed Postgres.
+
+    What this check verifies (client-side psql queries against databasechangelog):
+
+    1. The ``databasechangelog`` table exists and has at least one row.
+       A running service implies Liquibase applied all changesets bundled in
+       the JAR at startup (the JVM exits loudly on first-run migration failure),
+       so the completeness of applied changesets is guaranteed by the service
+       being up (/health).  This query confirms the table itself is reachable.
+
+    2. No row has ``exectype != 'EXECUTED'``.  Rows with FAILED or RERAN
+       exectype indicate a mid-run failure or a manually-rerun changeset that
+       left partial state; either can cause the service to refuse to start on
+       the next boot.
+
+    3. No EXECUTED row has a NULL md5sum.  Liquibase checksums every changeset
+       on re-run; a NULL checksum on an applied changeset causes Liquibase to
+       fail validation on next boot even though the row exists.
+
+    Gated on pg_credentials being present (service/PG mode configured).
+    """
+    # Resolve creds_path default.
+    if creds_path is None:
+        from nexus.config import nexus_config_dir
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    if not creds_path.exists():
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail="service mode not configured (pg_credentials absent); skipping",
+            warn=True,
+        )]
+
+    from nexus.db.pg_provision import (
+        _read_credentials,
+        discover_pg_binaries,
+        PgBinaryNotFoundError,
+    )
+
+    creds = _read_credentials(creds_path)
+    host = "127.0.0.1"
+    try:
+        port = int(creds.get("PG_PORT", 0))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail="pg_credentials missing PG_PORT; cannot connect",
+            fatal=True,
+        )]
+
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    # Extract database name from JDBC URL: jdbc:postgresql://host:port/dbname
+    dbname = "nexus"
+    if "/" in db_url:
+        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+
+    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+    password = creds.get("NX_DB_ADMIN_PASS", "")
+
+    # Resolve psql binary.
+    if psql_bin is None:
+        try:
+            psql_bin = discover_pg_binaries().psql
+        except PgBinaryNotFoundError as exc:
+            return [HealthResult(
+                label="Schema migrations",
+                ok=False,
+                detail=f"psql binary not found: {exc}",
+                fatal=True,
+            )]
+
+    # Query 1: total row count (also verifies the table exists).
+    total_sql = "SELECT COUNT(*) FROM databasechangelog;"
+    proc = _run_psql(
+        psql_bin, host, port, dbname, user, password, total_sql,
+        psql_runner=psql_runner,
+    )
+    if proc.returncode != 0:
+        stderr_snip = (proc.stderr or "").strip()[:200]
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Cannot query databasechangelog "
+                f"(psql exit {proc.returncode}): {stderr_snip}"
+            ),
+            fix_suggestions=[
+                "Run `nx init --service` to apply migrations",
+                "Check that the Postgres cluster is running: nx service status",
+            ],
+            fatal=True,
+        )]
+
+    try:
+        total = int(proc.stdout.strip())
+    except ValueError:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Unexpected output from databasechangelog total-count query: "
+                f"{proc.stdout!r}"
+            ),
+            fatal=True,
+        )]
+
+    if total == 0:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail="databasechangelog exists but has 0 rows — migrations never ran",
+            fix_suggestions=["Run `nx init --service` to apply Liquibase migrations"],
+            fatal=True,
+        )]
+
+    # Query 2: non-EXECUTED rows (FAILED or RERAN drift).
+    drift_sql = "SELECT COUNT(*) FROM databasechangelog WHERE exectype != 'EXECUTED';"
+    proc2 = _run_psql(
+        psql_bin, host, port, dbname, user, password, drift_sql,
+        psql_runner=psql_runner,
+    )
+    if proc2.returncode != 0:
+        stderr_snip = (proc2.stderr or "").strip()[:200]
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=f"Migration drift query failed (psql exit {proc2.returncode}): {stderr_snip}",
+            fatal=True,
+        )]
+
+    raw2 = proc2.stdout.strip()
+    try:
+        drift = int(raw2)
+    except ValueError:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Migration drift query returned unexpected output: {raw2!r}"
+            ),
+            fatal=True,
+        )]
+
+    if drift != 0:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Migration state mismatch: {drift} changeset(s) with "
+                "exectype != 'EXECUTED' (FAILED or RERAN drift)"
+            ),
+            fix_suggestions=[
+                "Inspect: psql -c \"SELECT id,exectype FROM databasechangelog "
+                "WHERE exectype != 'EXECUTED'\"",
+                "Re-run: nx init --service to recover",
+            ],
+            fatal=True,
+        )]
+
+    # Query 3: NULL md5sum on EXECUTED rows.
+    # A NULL checksum causes Liquibase validation to fail on next boot even
+    # though the changeset row is present.
+    null_md5_sql = (
+        "SELECT COUNT(*) FROM databasechangelog "
+        "WHERE exectype='EXECUTED' AND md5sum IS NULL;"
+    )
+    proc3 = _run_psql(
+        psql_bin, host, port, dbname, user, password, null_md5_sql,
+        psql_runner=psql_runner,
+    )
+    if proc3.returncode != 0:
+        stderr_snip = (proc3.stderr or "").strip()[:200]
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=f"Migration md5sum query failed (psql exit {proc3.returncode}): {stderr_snip}",
+            fatal=True,
+        )]
+
+    raw3 = proc3.stdout.strip()
+    try:
+        null_md5 = int(raw3)
+    except ValueError:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Migration md5sum query returned unexpected output: {raw3!r}"
+            ),
+            fatal=True,
+        )]
+
+    if null_md5 != 0:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Migration checksum gap: {null_md5} EXECUTED changeset(s) with "
+                "NULL md5sum — Liquibase will fail validation on next service boot"
+            ),
+            fix_suggestions=[
+                "Inspect: psql -c \"SELECT id,md5sum FROM databasechangelog "
+                "WHERE exectype='EXECUTED' AND md5sum IS NULL\"",
+                "Re-run: nx init --service to re-apply and restore checksums",
+            ],
+            fatal=True,
+        )]
+
+    return [HealthResult(
+        label="Schema migrations",
+        ok=True,
+        detail=f"Schema migrations: {total} applied (all EXECUTED, checksums present)",
+    )]
+
+
+def _check_rls_present(
+    creds_path: Path | None = None,
+    psql_bin: Path | None = None,
+    psql_runner=None,  # injectable for unit tests
+) -> list[HealthResult]:
+    """Structural RLS-presence check: verify every tenant table has RLS wired up.
+
+    For each table in ``_RLS_TENANT_TABLES`` this checks:
+    - ``pg_class.relrowsecurity = true`` (ENABLE ROW LEVEL SECURITY is set)
+    - ``pg_class.relforcerowsecurity = true`` (FORCE ROW LEVEL SECURITY is set)
+    - At least one row in ``pg_policies`` (a policy object exists)
+
+    This is a structural presence check, NOT a policy-predicate correctness
+    check — a policy of ``USING(true)`` would pass here.  Policy-predicate
+    correctness (cross-tenant isolation) is covered by the RLS negative /
+    cross-tenant integration tests in tests/db/test_http_*_integration.py.
+
+    ANY table missing any of these structural conditions is a fatal result:
+    the Liquibase changelogs must have failed to apply their RLS DDL, which
+    indicates a serious schema regression.
+
+    Gated on pg_credentials being present (service/PG mode configured).
+    """
+
+    # Resolve creds_path default.
+    if creds_path is None:
+        from nexus.config import nexus_config_dir
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    if not creds_path.exists():
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail="service mode not configured (pg_credentials absent); skipping",
+            warn=True,
+        )]
+
+    from nexus.db.pg_provision import (
+        _read_credentials,
+        discover_pg_binaries,
+        PgBinaryNotFoundError,
+    )
+
+    creds = _read_credentials(creds_path)
+    host = "127.0.0.1"
+    try:
+        port = int(creds.get("PG_PORT", 0))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail="pg_credentials missing PG_PORT; cannot connect",
+            fatal=True,
+        )]
+
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    dbname = "nexus"
+    if "/" in db_url:
+        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+
+    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+    password = creds.get("NX_DB_ADMIN_PASS", "")
+
+    # Resolve psql binary.
+    if psql_bin is None:
+        try:
+            psql_bin = discover_pg_binaries().psql
+        except PgBinaryNotFoundError as exc:
+            return [HealthResult(
+                label="RLS policies",
+                ok=False,
+                detail=f"psql binary not found: {exc}",
+                fatal=True,
+            )]
+
+    # Build a single query that returns one row per tenant table:
+    #   schema_name | table_name | relrowsecurity | relforcerowsecurity | policy_count
+    # Including schema_name + table_name in SELECT lets us match rows by identity
+    # rather than by position (ORDER BY is alphabetical, not VALUES-list order).
+    # Uses a VALUES list as the driving table so we get one output row per
+    # expected table even if the table doesn't exist in pg_class (NULL row).
+    table_values = ", ".join(
+        f"('{schema}', '{tname}')"
+        for schema, _, tname in (t.partition(".") for t in _RLS_TENANT_TABLES)
+    )
+    rls_sql = f"""
+SELECT
+    tbl.schema_name,
+    tbl.table_name,
+    c.relrowsecurity,
+    c.relforcerowsecurity,
+    COUNT(p.policyname) AS policy_count
+FROM (VALUES {table_values}) AS tbl(schema_name, table_name)
+LEFT JOIN pg_class c ON c.relname = tbl.table_name
+    AND c.relnamespace = (
+        SELECT oid FROM pg_namespace WHERE nspname = tbl.schema_name
+    )
+LEFT JOIN pg_policies p
+    ON p.schemaname = tbl.schema_name AND p.tablename = tbl.table_name
+GROUP BY tbl.schema_name, tbl.table_name, c.relrowsecurity, c.relforcerowsecurity
+ORDER BY tbl.schema_name, tbl.table_name;
+""".strip()
+
+    proc = _run_psql(
+        psql_bin, host, port, dbname, user, password, rls_sql,
+        psql_runner=psql_runner,
+    )
+    if proc.returncode != 0:
+        stderr_snip = (proc.stderr or "").strip()[:300]
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail=f"RLS introspection query failed (psql exit {proc.returncode}): {stderr_snip}",
+            fatal=True,
+        )]
+
+    # Parse output: one pipe-separated line per table.
+    # Format: schema_name|table_name|relrowsecurity|relforcerowsecurity|policy_count
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    if len(lines) != len(_RLS_TENANT_TABLES):
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail=(
+                f"RLS query returned {len(lines)} rows "
+                f"(expected {len(_RLS_TENANT_TABLES)}); schema mismatch"
+            ),
+            fatal=True,
+        )]
+
+    # Build a lookup dict keyed by "schema.table" for order-independent matching.
+    rls_by_table: dict[str, tuple[str, str, int]] = {}
+    for line in lines:
+        parts = line.split("|")
+        if len(parts) < 5:
+            # Malformed row — mark as unknown failure.
+            rls_by_table[line] = ("?", "?", 0)
+            continue
+        schema_name = parts[0].strip()
+        table_name = parts[1].strip()
+        key = f"{schema_name}.{table_name}"
+        rls_on = parts[2].strip().lower()
+        rls_force = parts[3].strip().lower()
+        try:
+            policy_count = int(parts[4].strip())
+        except ValueError:
+            policy_count = 0
+        rls_by_table[key] = (rls_on, rls_force, policy_count)
+
+    failed: list[str] = []
+    for table in _RLS_TENANT_TABLES:
+        if table not in rls_by_table:
+            failed.append(f"{table} (not in query output)")
+            continue
+        rls_on, rls_force, policy_count = rls_by_table[table]
+
+        if rls_on != "t" or rls_force != "t" or policy_count == 0:
+            reasons = []
+            if rls_on != "t":
+                reasons.append("RLS not enabled")
+            if rls_force != "t":
+                reasons.append("RLS not forced")
+            if policy_count == 0:
+                reasons.append("no policies")
+            failed.append(f"{table} ({', '.join(reasons)})")
+
+    if failed:
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail=(
+                f"RLS missing on {len(failed)}/{len(_RLS_TENANT_TABLES)} "
+                f"tenant table(s): {', '.join(failed)}"
+            ),
+            fix_suggestions=[
+                "Re-run migrations: nx init --service",
+                "Verify the Liquibase changeset applied RLS: "
+                "check service/src/main/resources/db/changelog/",
+            ],
+            fatal=True,
+        )]
+
+    return [HealthResult(
+        label="RLS policies",
+        ok=True,
+        detail=(
+            f"RLS policies: present on {len(_RLS_TENANT_TABLES)}/"
+            f"{len(_RLS_TENANT_TABLES)} tenant tables"
+        ),
+    )]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -1375,6 +2175,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     _local = is_local_mode()
     if _local:
         results.extend(_check_t3_local())
+        results.extend(_check_service_bge_model())
         results.extend(_check_t3_daemon_version())
     else:
         results.extend(_check_t3_cloud())
@@ -1417,5 +2218,13 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     _cat_path = catalog_path()
     _cat = make_catalog_reader()
     results.extend(_check_catalog(_cat, _cat_path))
+
+    # RDR-152 / bead nexus-gmiaf.33: storage-service checks.
+    # All three are gated internally on pg_credentials being present; they emit
+    # a single soft-warn-and-skip result when service/PG mode is not configured,
+    # so they are always safe to run.
+    results.extend(_check_storage_service_health())
+    results.extend(_check_migration_state())
+    results.extend(_check_rls_present())
 
     return results, _local

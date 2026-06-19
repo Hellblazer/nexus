@@ -83,14 +83,11 @@ def _lookup_existing_doc_id(
         # Curator-only lookup — see _register_or_lookup_doc_id for
         # rationale (repo and curator owners can share names; lookups
         # from the doc_indexer family must use the curator namespace).
-        row = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "AND owner_type = 'curator'",
-            (owner_name,),
-        ).fetchone()
-        if not row:
+        # nexus-qnp5s: curator_owner_tumbler_by_name() is implemented on
+        # both SQLite Catalog and HttpCatalogClient — no raw _db access.
+        owner = cat.curator_owner_tumbler_by_name(owner_name)
+        if owner is None:
             return ""
-        owner = Tumbler.parse(row[0])
         existing = cat.by_file_path(owner, file_path)
         if existing is None:
             return ""
@@ -214,13 +211,11 @@ def _register_or_lookup_doc_id(
         # owner_type='curator' keeps the namespaces separate; repo
         # owners are reachable only via owner_for_repo(repo_hash)
         # from the repo indexer, never via a corpus-name lookup here.
-        row = reader._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "AND owner_type = 'curator'",
-            (owner_name,),
-        ).fetchone()
-        if row:
-            owner = Tumbler.parse(row[0])
+        # nexus-qnp5s: curator_owner_tumbler_by_name() is implemented on
+        # both SQLite Catalog and HttpCatalogClient — no raw _db access.
+        owner_t = reader.curator_owner_tumbler_by_name(owner_name)
+        if owner_t is not None:
+            owner = owner_t
         else:
             owner = writer.register_owner(owner_name, "curator")
 
@@ -253,7 +248,7 @@ def _register_or_lookup_doc_id(
         if writer is not None:
             writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
 
 
 def _missing_credentials() -> list[str]:
@@ -422,7 +417,7 @@ def _embed_with_fallback(
             limit=_CCE_MAX_TOTAL_CHUNKS,
         )
     import voyageai
-    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)
+    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
     if model == "voyage-context-3":
         # CCE API accepts single-element inputs — use it for all chunk counts.
         # The old >=2 requirement was our incorrect assumption; removing it ensures
@@ -586,22 +581,40 @@ def _index_document(
     # the local ONNX/fastembed embedder rather than a hard fail. The
     # local model name overrides ``target_model`` so the staleness
     # check + chunk metadata are consistent.
+    #
+    # RDR-152 Seam B (nexus-gmiaf.22): service mode is checked FIRST —
+    # before is_local_mode() and before the credential guard — so that a
+    # production service-mode node with NO Voyage/Chroma creds (the
+    # correct configuration when the service embeds) can call
+    # ``nx index md/pdf`` without raising CredentialsMissingError.
+    # Checking is_local_mode() first was the original ordering bug: the
+    # integration test's NX_LOCAL=1 caused _make_local_embed_fn() to fire
+    # before the service-mode stub branch, making the "no Python embed"
+    # proof vacuous.
     local_target_model: str | None = None
     if embed_fn is None:
-        from nexus.config import is_local_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
 
-        if is_local_mode():
-            embed_fn, local_target_model = _make_local_embed_fn()
-        elif not _has_credentials():
-            from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+        if is_vector_service_mode():
+            # Service embeds server-side. embed_fn stays None here;
+            # the embed-stub branch at the upsert site (below) handles it.
+            # No Voyage/Chroma creds required; no local ONNX constructed.
+            pass
+        else:
+            from nexus.config import is_local_mode  # noqa: PLC0415
 
-            missing = _missing_credentials()
-            raise CredentialsMissingError(
-                f"cannot index in cloud mode without {', '.join(missing)}. "
-                f"Either set the missing key(s) via 'nx config set <key> "
-                f"<value>' (or env var), or unset NX_LOCAL to fall back "
-                f"to local-mode ingestion (no API keys needed)."
-            )
+            if is_local_mode():
+                embed_fn, local_target_model = _make_local_embed_fn()
+            elif not _has_credentials():
+                from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+
+                missing = _missing_credentials()
+                raise CredentialsMissingError(
+                    f"cannot index in cloud mode without {', '.join(missing)}. "
+                    f"Either set the missing key(s) via 'nx config set <key> "
+                    f"<value>' (or env var), or unset NX_LOCAL to fall back "
+                    f"to local-mode ingestion (no API keys needed)."
+                )
 
     # Normalize to absolute so staleness checks are path-form-independent.
     file_path = file_path.resolve()
@@ -627,7 +640,21 @@ def _index_document(
         collection_name = (
             f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
         )
-    db = t3 if t3 is not None else make_t3()
+    # RDR-152 Seam B: when t3 is None, route through get_t3() in service mode
+    # so HttpVectorClient is used instead of T3Database(daemon), preventing the
+    # split-brain where indexing writes to daemon-Chroma but search reads
+    # service-Chroma.  In non-service mode, preserve make_t3() to keep existing
+    # mocks working (tests patch 'nexus.doc_indexer.make_t3').
+    # Lazy import avoids a circular import cycle with mcp_infra.
+    if t3 is not None:
+        db = t3
+    else:
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            from nexus.mcp_infra import get_t3  # noqa: PLC0415
+            db = get_t3()
+        else:
+            db = make_t3()
     col = db.get_or_create_collection(collection_name)
 
     target_model = index_model_for_collection(collection_name)
@@ -666,12 +693,20 @@ def _index_document(
     if embed_fn is not None:
         embeddings, actual_model = embed_fn(documents, target_model)
     else:
-        from nexus.config import get_credential, load_config
-        voyage_key = get_credential("voyage_api_key")
-        if not voyage_key:
-            raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-        timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+            # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+            # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+            embeddings = [[]] * len(documents)
+            actual_model = target_model
+        else:
+            from nexus.config import get_credential, load_config
+            voyage_key = get_credential("voyage_api_key")
+            if not voyage_key:
+                raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+            embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
@@ -826,14 +861,22 @@ def _index_pdf_incremental(
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(batch_docs, target_model)
         else:
-            from nexus.config import get_credential, load_config
-            voyage_key = get_credential("voyage_api_key")
-            if not voyage_key:
-                raise RuntimeError("voyage_api_key required")
-            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-            embeddings, actual_model = _embed_with_fallback(
-                batch_docs, target_model, voyage_key, timeout=timeout,
-            )
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+            if is_vector_service_mode():
+                # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                embeddings = [[]] * len(batch_docs)
+                actual_model = target_model
+            else:
+                from nexus.config import get_credential, load_config
+                voyage_key = get_credential("voyage_api_key")
+                if not voyage_key:
+                    raise RuntimeError("voyage_api_key required")
+                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                embeddings, actual_model = _embed_with_fallback(
+                    batch_docs, target_model, voyage_key, timeout=timeout,
+                )
 
         if actual_model != target_model:
             for m in batch_metas:
@@ -1152,22 +1195,32 @@ def index_pdf(
 
     _empty_meta = {"chunks": 0, "pages": [], "title": "", "author": ""}
     # GH #336 mirror: same local-fallback semantics as ``_index_document``.
+    # RDR-152 Seam B (nexus-gmiaf.22): service mode checked FIRST (same
+    # ordering fix as _index_document — prevents CredentialsMissingError on
+    # a service-mode node with no Voyage/Chroma creds).
     local_target_model: str | None = None
     if embed_fn is None:
-        from nexus.config import is_local_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
 
-        if is_local_mode():
-            embed_fn, local_target_model = _make_local_embed_fn()
-        elif not _has_credentials():
-            from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+        if is_vector_service_mode():
+            # Service embeds server-side. embed_fn stays None; the upsert
+            # site's stub branch handles it. No creds / no local ONNX.
+            pass
+        else:
+            from nexus.config import is_local_mode  # noqa: PLC0415
 
-            missing = _missing_credentials()
-            raise CredentialsMissingError(
-                f"cannot index in cloud mode without {', '.join(missing)}. "
-                f"Either set the missing key(s) via 'nx config set <key> "
-                f"<value>' (or env var), or unset NX_LOCAL to fall back "
-                f"to local-mode ingestion (no API keys needed)."
-            )
+            if is_local_mode():
+                embed_fn, local_target_model = _make_local_embed_fn()
+            elif not _has_credentials():
+                from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+
+                missing = _missing_credentials()
+                raise CredentialsMissingError(
+                    f"cannot index in cloud mode without {', '.join(missing)}. "
+                    f"Either set the missing key(s) via 'nx config set <key> "
+                    f"<value>' (or env var), or unset NX_LOCAL to fall back "
+                    f"to local-mode ingestion (no API keys needed)."
+                )
 
     # Normalize to absolute so staleness checks are path-form-independent.
     pdf_path = pdf_path.resolve()
@@ -1185,7 +1238,18 @@ def index_pdf(
         col_name = (
             f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
         )
-    db = t3 if t3 is not None else make_t3()  # T3Database instance (not PipelineDB)
+    # RDR-152 Seam B: when t3 is None, route through get_t3() in service mode —
+    # see _index_document for full rationale.  In non-service mode, use make_t3()
+    # to preserve existing test mock contracts (patch 'nexus.doc_indexer.make_t3').
+    if t3 is not None:
+        db = t3
+    else:
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            from nexus.mcp_infra import get_t3  # noqa: PLC0415
+            db = get_t3()
+        else:
+            db = make_t3()
     col = db.get_or_create_collection(col_name)
     target_model = index_model_for_collection(col_name)
     if local_target_model is not None:
@@ -1344,12 +1408,20 @@ def index_pdf(
     if embed_fn is not None:
         embeddings, actual_model = embed_fn(documents, target_model)
     else:
-        from nexus.config import get_credential, load_config
-        voyage_key = get_credential("voyage_api_key")
-        if not voyage_key:
-            raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-        timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+            # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+            # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+            embeddings = [[]] * len(documents)
+            actual_model = target_model
+        else:
+            from nexus.config import get_credential, load_config
+            voyage_key = get_credential("voyage_api_key")
+            if not voyage_key:
+                raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+            embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
     if actual_model != target_model:
         for m in metadatas_list:
             m["embedding_model"] = actual_model
@@ -1471,15 +1543,11 @@ def _catalog_markdown_hook(
 
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
-        # rationale.
-        rows = reader._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "AND owner_type = 'curator'",
-            (owner_name,),
-        ).fetchone()
-        if rows:
-            from nexus.catalog.tumbler import Tumbler
-            owner = Tumbler.parse(rows[0])
+        # rationale. nexus-qnp5s: curator_owner_tumbler_by_name() is
+        # implemented on both SQLite Catalog and HttpCatalogClient.
+        owner_t = reader.curator_owner_tumbler_by_name(owner_name)
+        if owner_t is not None:
+            owner = owner_t
         else:
             owner = writer.register_owner(owner_name, "curator")
 
@@ -1528,7 +1596,7 @@ def _catalog_markdown_hook(
         if writer is not None:
             writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
 
 
 def index_markdown(

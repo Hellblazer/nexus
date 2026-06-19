@@ -1625,6 +1625,73 @@ Local-mode T3 wraps the upstream `chroma run` server lifecycle
 under launchd / systemd supervision; templates ship as
 `com.nexus.t3.plist` / `nexus-t3.service`.
 
+### nx daemon service start / stop / status
+
+The storage-service supervisor (RDR-152 P5.1): the managed native
+nexus-service binary + nx-managed Postgres. `start` ensures PG is running,
+spawns the native binary (resolving `NX_VOYAGE_API_KEY` through the credential
+chain), waits for `/health`, and publishes the endpoint lease that clients
+auto-discover. The native binary is the sole launch artifact (RDR-161: the
+`java -jar` path is expunged); acquire it with `install-binary` (below) or
+`nx init --service`, which places and verifies it.
+
+`status` is the single is-the-stack-healthy surface: the lease (host, port,
+service pid, generation), supervisor pid, addr-file path, live `/health` probe,
+the PG cluster (port, data dir, up/down, installed pgvector version,
+pg_credentials path), the log-file paths (below), and the running service's
+`/version` handshake (`app_version`, `embedding_mode` voyage|onnx-local with
+the dispatchable models, `schema_latest_id`, `schema_changeset_count`). It
+warns when the running binary differs from the installed one.
+
+**Observability.** Every component of the stack writes a persistent log
+(none of them is ever DEVNULL'd); when the stack dies, the evidence lives
+in (all under `~/.config/nexus/` unless noted):
+
+| File | Contents |
+|------|----------|
+| `logs/storage_service.log` | Supervisor lifecycle (rotating): start/exit breadcrumbs, service exit codes, restart attempts, PG recoveries, crash backstop. |
+| `logs/storage_service_native.log` | The native service's stdout/stderr (banners, fatal errors). Size-rotated at respawn. |
+| `logs/storage_service.crash.log` | Pre-startup failures of the detached supervisor (import errors, bad argv) and interpreter-fatal tracebacks. Quiet in healthy operation. |
+| `<pg_data>/pg.log` | The nx-managed Postgres cluster log (`pg_ctl`). |
+
+A supervisor death without a `storage_service_supervisor_exit` breadcrumb
+in `storage_service.log` means it was killed, not that it chose to exit —
+check the service log tail and `pg.log` next.
+
+`stop` stops the supervisor + service but **leaves Postgres running by
+design** (it is independently managed and may serve other clients) — the
+command says so; pass `--with-pg` to stop the cluster too (`pg_ctl -m
+fast`).
+
+| Flag | Description |
+|------|-------------|
+| `--foreground` | Block until SIGTERM (for launchd/systemd supervision). |
+| `--config-dir` | Config directory override. |
+| `--json` | (`status`) Raw JSON output. |
+| `--with-pg` | (`stop`) Also stop the nx-managed Postgres cluster. |
+
+### nx daemon service install-binary
+
+```
+nx daemon service install-binary <engine-service-vX.Y.Z>
+nx daemon service install-binary <engine-service-vX.Y.Z> --no-pg-bundle
+```
+
+Download, verify, and install the signed native nexus-service binary (and,
+by default, the relocatable PostgreSQL bundle) from a GitHub release to the
+well-known location (`~/.config/nexus/service/`) with a provenance sidecar
+(version, tag, sha256, install metadata). Supervisor discovery and
+`nx init --service` use this location.
+
+TAG is an EXPLICIT `engine-service-v*` release tag (e.g.
+`engine-service-v0.1.3`); there is no "latest" resolution. Each per-platform
+asset, its `.sha256`, and its `.sigstore.json` bundle are fetched and verified
+(sha256 + keyless Sigstore signature, pinned to the engine-service release
+workflow identity), then placed atomically. Verification **fails closed**:
+nothing is installed unless BOTH gates pass. One verified seam covers the
+binary and the PG bundle (RDR-161). `--no-pg-bundle` installs only the
+service binary (e.g. a cloud habitat with a managed Postgres).
+
 ---
 
 ## nx upgrade
@@ -1724,3 +1791,177 @@ nx mineru status
 ```
 
 Show server status: running/stopped, PID, port, active tasks, and completed tasks. Removes stale PID file if the server process is no longer running.
+
+## nx tenant
+
+Tenant provisioning for the RDR-152 storage service (bead nexus-gmiaf.32.3). Requires `NX_SERVICE_PORT` and `NX_SERVICE_TOKEN` (the bootstrap credential the storage-service supervisor publishes). All SQL runs in the Java service; the CLI is a thin client.
+
+### nx tenant create
+
+```
+nx tenant create NAME
+```
+
+Create tenant `NAME` and mint its first bound service token. The token is printed **once** (store it immediately); only its hash is kept server-side. The name `*` is reserved for the bootstrap token and is rejected.
+
+## nx service
+
+Storage-service administration.
+
+### nx service token issue
+
+```
+nx service token issue --tenant TENANT [--label LABEL] [--ttl SECONDS]
+```
+
+Issue a new bearer token bound to `TENANT`. Printed once; only the hash is stored. `--ttl` sets an optional lifetime in seconds (default: no expiry). A token bound to a tenant ignores the client `X-Nexus-Tenant` header; the tenant comes from the token.
+
+### nx service token rotate
+
+```
+nx service token rotate --tenant TENANT [--grace SECONDS]
+```
+
+Rotate `TENANT`'s tokens with zero downtime: issue a new token and set the previous live tokens to expire after the grace window (`--grace`, service default 300s), so both are valid during the overlap. Running clients pick up the new token by rediscovering the lease the storage-service supervisor publishes; no restart and no 401s during the window.
+
+### nx service token revoke
+
+```
+nx service token revoke SELECTOR
+```
+
+Revoke a token by full hash or a unique hash prefix. Revocation is immediate on the storage service that handles the request (its auth cache is invalidated in-process). For any other reader, revocation propagates within the AuthFilter token-cache TTL bound (default 30s). Exits non-zero if no unique token matches.
+
+### nx service token list
+
+```
+nx service token list [--tenant TENANT]
+```
+
+List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revoked`), label, expiry, and revocation time. Never prints the raw token. Use the id prefix with `nx service token revoke`.
+
+## nx migrate-to-service
+
+```
+nx migrate-to-service [--dry-run] [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL]
+```
+
+The single guided Chroma-to-service upgrade (RDR-159) — it wraps and sequences
+the proven `nx storage migrate` primitives into one survivable command so a
+user never hand-sequences the ~8-step gauntlet.
+
+- `--dry-run` ships the read-only front half: it classifies the Chroma
+  footprint per collection (source leg × embedding model, resolved against the
+  deployment's wired embedders) and previews what would migrate — per-leg /
+  per-model counts, a coarse token + time estimate, and unsupported collections
+  flagged for re-index. It touches no data, and exits non-zero when any
+  unsupported collection is present (a real run would block on it).
+- The bare invocation runs the full flow: **detect** → **sequence** (set the
+  cross-process migration sentinel, quiesce background indexing, per-collection
+  model pre-gate, T2 `migrate all` requiring `total_failed == 0`, then T3
+  vectors for every detected leg, refusing partial-leg success) → **validate**
+  (taxonomy floor + source==target counts + manifest-orphans, no short-circuit)
+  → **unlock** on a clean verdict (clear the sentinel; serve from pgvector).
+
+On any validation block the migrated copy is left in place, reads stay
+degraded-LOUD (the `migrated-failed` sentinel stands in for a bare empty index),
+and rollback is **offered, never auto-invoked** — the Chroma source is untouched
+(copy-not-move), so `nx storage migrate vectors --rollback [--cloud]` returns
+the user to a fully-working pre-upgrade state. A fresh user with no Chroma data
+is a clean no-op. Requires `NX_SERVICE_TOKEN` and a reachable nexus-service (the
+T2 catalog ETL + manifest validation call the service). The operational
+narrative lives in [`docs/migration-runbook.md`](migration-runbook.md).
+
+## nx migration
+
+```
+nx migration [--clear-state] [--force]
+```
+
+Inspect or recover the cross-process migration sentinel (RDR-159). Bare `nx
+migration` prints the current phase read-only (`not-migrating`, `migrating`,
+`migrated`, or `migrated-failed`) with progress and any failure message.
+
+- `--clear-state` removes a **stranded** sentinel — the named escape hatch for a
+  CLI crash between a clean T3 copy and the UNLOCK clear, which would otherwise
+  leave every read surface banner-wrapped (`migrating`/`migrated-failed`)
+  forever. Clearing is **safe**: a resumed `nx migrate-to-service` recomputes
+  done-vs-total from live source-vs-target counts (the ETL is idempotent on
+  `(tenant, collection, chash)`), so it never trusts the stale marker. A no-op
+  when no sentinel is present.
+- `--force` is required to clear a `migrating` sentinel, which may belong to a
+  live migration in another process (clearing it drops the read-surface banner
+  mid-migration). A `migrated-failed` sentinel clears without `--force` — its
+  writer is already dead.
+
+This is distinct from re-running the migration itself: `nx migrate-to-service`
+transitions a `migrated-failed` sentinel back to `migrating` (resume); `nx
+migration --clear-state` drops it straight to `not-migrating` (abandon /
+recover).
+
+## nx storage
+
+> Running a real migration window? The operational narrative (quiescence,
+> mid-run failure playbook, cutover validation, rollback) lives in
+> [`docs/migration-runbook.md`](migration-runbook.md); this section is the
+> flag reference.
+
+### nx storage migrate all
+
+```
+nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH]
+```
+
+Run ALL seven T2 store migrations in the RDR-152 ladder order (memory →
+plans → telemetry → taxonomy → aspects → chash → catalog last) with one
+shared issue collector, and emit ONE RDR-153 migration report (default:
+`~/.config/nexus/migration-reports/migration-<id>.json` — a run always
+produces an artifact). Exits non-zero when `summary.total_failed > 0`
+("migration is NOT clean") or when post-run count verification finds
+Postgres counts below the report's written totals. When psql/credentials
+cannot be resolved the verification is reported as **VERIFICATION
+INDETERMINATE** — a loud warning, never a silent skip (the RDR-152
+prod-copy.sh harness bug). The verdict is recorded in the report
+artifact (`"verification"`). Verification queries the LOCAL nx-managed
+Postgres (from `pg_credentials`) — when migrating against a remote
+service it reports on the local cluster only. Every per-store command
+also accepts `--report PATH` for a single-store report (a default-path
+artifact is written even when the flag is omitted, including on a
+mid-run crash — partial data beats no data). Note: `aspects` has no
+standalone command; it runs only via `migrate all`.
+
+### nx storage migration-report show
+
+```
+nx storage migration-report show <path>
+```
+
+Summarize an RDR-153 migration-report artifact: migration id and window,
+the recorded verification verdict (`(not recorded)` for artifacts that
+predate it), `max_severity` first, the by-action rollup
+(severity-descending), per-issue triage lines (severity-descending, with
+class/action/count/sample), and the gate verdict — **GATE: PASS** when
+`summary.total_failed == 0`, otherwise **GATE: FAIL** with a non-zero
+exit (scriptable; this is the RDR-152 Phase-4 SQLite-deletion gate
+predicate). The reader lives in `nexus.migration` and survives the
+`src/nexus/db/t2` deletion.
+
+Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-not-move (the source is never modified) and idempotent (server-side upsert; re-runs produce no duplicates). All require `NX_SERVICE_TOKEN`.
+
+### nx storage migrate
+
+```
+nx storage migrate memory|plans|telemetry|taxonomy|chash|catalog [--db PATH] [--service-url URL] [--dry-run]
+```
+
+Migrate a T2 SQLite store into the Postgres service tier through the validated HTTP seam.
+
+### nx storage migrate vectors
+
+```
+nx storage migrate vectors [--local-path PATH | --cloud] [--collections A,B] [--service-url URL] [--dry-run | --rollback]
+```
+
+Migrate Chroma vector collections into pgvector (RDR-155 Phase 5). Two legs, run separately: the default local leg reads the on-disk store the retired T3 daemon served (`--local-path`, default `~/.config/nexus/chroma`); `--cloud` reads via the ChromaCloud REST/auth API using the configured `chroma_*` credentials. Chunk text, chash, and metadata transfer verbatim and the service re-embeds server-side; collection names are preserved verbatim so `topic_assignments.source_collection` references stay valid. `--rollback` deletes from pgvector exactly the chashes present in the source collections, leaving the source untouched. Exits non-zero when any collection failed or was skipped (non-conformant name with data present). Non-conformant collections with **zero** chunks receive status `skipped-empty` and do not redden the run — nothing can be lost by definition, so empty legacy collections (e.g. `tuples__*`) no longer force `--collections` hand-pinning.
+
+Run the ETL with indexing paused (the post-write count verification assumes a quiescent window). Cutover validation sequence after both legs complete: run `manifest_backfill_sql()` then `manifest_orphan_sql(dim)` for each of 384/768/1024 (from `nexus.migration.vector_etl`) via psql as a superuser/admin role — zero orphan rows per dim is the pass condition. See the module docstring for the rationale (direct SQL, never the repository read API).

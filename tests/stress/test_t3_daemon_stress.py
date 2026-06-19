@@ -293,36 +293,6 @@ class TestDiscoveryFileCorruption:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 5: Concurrency storm — N parallel T3Client RPCs
-# ---------------------------------------------------------------------------
-
-
-class TestConcurrencyStorm:
-    """50 parallel make_t3_client() round-trips against the same daemon.
-    Verifies no chroma WAL race SIGBUS, no client deadlock, no
-    HttpClient connection-pool exhaustion."""
-
-    def test_50_parallel_round_trips(
-        self, live_daemon, config_dir: Path,
-    ) -> None:
-        from nexus.daemon.t3_client import make_t3_client
-
-        def _round_trip(i: int) -> int:
-            t3 = make_t3_client(config_dir=config_dir)
-            coll = t3._client.get_or_create_collection("stress__concurrency")
-            coll.upsert(documents=[f"doc {i}"], ids=[f"id-{i}"])
-            results = coll.query(query_texts=[f"doc {i}"], n_results=1)
-            return len(results["ids"][0])
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as pool:
-            futures = [pool.submit(_round_trip, i) for i in range(50)]
-            done = [f.result(timeout=60.0) for f in futures]
-        assert all(d == 1 for d in done), (
-            f"some parallel round-trips returned wrong cardinality: {done}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # Scenario 6: Connection churn — rapid open/close cycles
 # ---------------------------------------------------------------------------
 
@@ -390,39 +360,13 @@ class TestRepeatedStop:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 9: T3Client fail-loud after daemon dies
+# Scenarios 5 and 9 (T3Client concurrency storm, T3Client fail-loud after
+# daemon death) were RETIRED with the daemon client leg (RDR-155 P4a.2,
+# nexus-1k8s1): make_t3_client / nexus.daemon.t3_client no longer exist —
+# T3 serving routes through the pgvector-backed nexus-service. The daemon
+# lifecycle scenarios below still cover the surviving spawner machinery
+# (full deletion is Phase 4b, gated on P5.G).
 # ---------------------------------------------------------------------------
-
-
-class TestClientFailLoudAfterDaemonDeath:
-    """After SIGKILL, the next make_t3_client + RPC must surface a
-    visible error rather than hanging or silently using stale state."""
-
-    def test_kill_then_client_call_surfaces_error(
-        self, config_dir: Path, local_path: Path,
-    ) -> None:
-        from nexus.daemon.t3_client import make_t3_client
-        from nexus.daemon.t3_daemon import (
-            start_t3_daemon, stop_t3_daemon, t3_discovery_path,
-        )
-
-        payload = start_t3_daemon(config_dir=config_dir, local_path=local_path)
-        os.kill(payload["pid"], signal.SIGKILL)
-        assert _wait_until(
-            lambda: not _pid_alive(payload["pid"]), timeout=10.0,
-        )
-        # Discovery file still points at the dead daemon. The
-        # discovery resolver will unlink the stale-PID entry and
-        # then surface "no daemon" rather than silently reusing the
-        # dead address.
-        try:
-            t3 = make_t3_client(config_dir=config_dir)
-            with pytest.raises(Exception):  # noqa: BLE001
-                t3._client.heartbeat()
-        except Exception:
-            pass  # construction failed loud; either is acceptable
-        finally:
-            t3_discovery_path(config_dir).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

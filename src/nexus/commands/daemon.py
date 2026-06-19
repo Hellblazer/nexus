@@ -156,6 +156,90 @@ def _autostart_filename_t2() -> str:
     return _T2_PLIST_NAME if _autostart_platform() == "darwin" else _T2_SERVICE_NAME
 
 
+def _autostart_unit_installed() -> Path | None:
+    """Return the unit-file Path if the T2 autostart unit is installed, else None.
+
+    Reuses the existing _autostart_install_dir() / _autostart_filename_t2()
+    helpers as an indirection point so tests can stub them independently.
+    Platform-guarded: returns None on unsupported platforms without raising.
+    """
+    try:
+        unit_path = _autostart_install_dir() / _autostart_filename_t2()
+    except click.ClickException:
+        return None
+    return unit_path if unit_path.exists() else None
+
+
+#: Hard ceiling on each launchctl/systemctl invocation. A hung supervisor
+#: command would otherwise block ensure-running forever and the Popen
+#: fallback could never fire (RF-4: never trade a working spawn path for
+#: zero daemons). TimeoutExpired is caught by the except below → False →
+#: fallback.
+_SUPERVISOR_CMD_TIMEOUT: float = 10.0
+
+
+def _t2_supervisor_spawn(unit_path: Path) -> bool:
+    """Route a T2 cold-spawn through the OS supervisor.
+
+    darwin: try ``launchctl kickstart gui/<uid>/com.nexus.t2``; if it returns
+    non-zero (unit not loaded), run ``launchctl bootstrap gui/<uid> <plist>``
+    first, then kickstart again.  On any non-zero final exit, return False.
+    linux: run ``systemctl --user start nexus-t2.service``.  On non-zero, return False.
+
+    On ANY exception (binary absent, command timeout, permission error)
+    returns False. The caller logs a warning and falls back to
+    subprocess.Popen.
+    """
+    import os as _os
+
+    try:
+        platform = _autostart_platform()
+        if platform == "darwin":
+            uid = _os.getuid()
+            target = f"gui/{uid}/{_T2_LAUNCHD_LABEL}"
+            res = subprocess.run(
+                ["launchctl", "kickstart", target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_SUPERVISOR_CMD_TIMEOUT,
+            )
+            if res.returncode != 0:
+                # Unit may not be bootstrapped yet; bootstrap then retry.
+                br = subprocess.run(
+                    ["launchctl", "bootstrap", f"gui/{uid}", str(unit_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=_SUPERVISOR_CMD_TIMEOUT,
+                )
+                if br.returncode != 0:
+                    return False
+                res = subprocess.run(
+                    ["launchctl", "kickstart", target],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=_SUPERVISOR_CMD_TIMEOUT,
+                )
+                if res.returncode != 0:
+                    return False
+            return True
+        if platform.startswith("linux"):
+            res = subprocess.run(
+                ["systemctl", "--user", "start", _T2_SERVICE_NAME],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_SUPERVISOR_CMD_TIMEOUT,
+            )
+            return res.returncode == 0
+    except Exception as exc:
+        _log.warning(
+            "t2_supervisor_spawn_exception",
+            exc=str(exc),
+            exc_type=type(exc).__name__,
+        )
+        return False
+    return False
+
+
 # ---------------------------------------------------------------------------
 # t3 sub-group
 # ---------------------------------------------------------------------------
@@ -270,12 +354,21 @@ def t3_start_cmd(
             *_resolve_nx_bin(), "daemon", "t3", "start", "--foreground",
             "--config-dir", str(config_dir), "--local-path", str(local_path),
         ]
-        subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # nexus-ovbr7: crash-channel capture (see the storage-service spawn
+        # for the rationale).
+        from nexus.logging_setup import open_child_log_or_devnull
+
+        spawn_log = open_child_log_or_devnull("t3_daemon.crash", config_dir)
+        try:
+            subprocess.Popen(
+                argv,
+                stdout=spawn_log,
+                stderr=spawn_log,
+                start_new_session=True,
+            )
+        finally:
+            if not isinstance(spawn_log, int):
+                spawn_log.close()
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             existing = find_t3_daemon(config_dir)
@@ -1142,22 +1235,80 @@ def _t2_ensure_running_inner(
             return T2EnsureOutcome.CRASHLOOP_SUPPRESSED
         _record_restart(config_dir, now=_cl_now)
 
-        # Cold spawn. Use the same nx binary the operator invoked (preserves
-        # PATH/virtualenv assumptions). start_new_session detaches the child
-        # so this command can exit while the daemon keeps running.
-        nx_bin = _resolve_nx_bin()
-        argv = [*nx_bin, "daemon", "t2", "start"]
-        if config_dir_str is not None:
-            argv.extend(["--config-dir", config_dir_str])
-        if not quiet:
-            click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
+        # Cold spawn.
+        #
+        # nexus-uybp6: single-owner routing. When the OS autostart unit is
+        # installed, route the respawn through the supervisor (launchd/systemd)
+        # so the unit keeps exclusive ownership — an ad-hoc Popen spawn would
+        # race launchd's KeepAlive and make the unit dormant again. On ANY
+        # supervisor failure (non-zero exit, missing binary, exception) we log
+        # a warning and fall through to the existing Popen path: never trade a
+        # working spawn path for zero daemons (RF-4).
+        #
+        # If no unit is installed, skip directly to Popen (unchanged path).
+        #
+        # Supervisor routing is UNQUALIFIED-DEFAULT ONLY: the installed unit's
+        # daemon resolves its config dir in LAUNCHD'S/SYSTEMD'S environment
+        # (bare `nx daemon t2 start`, no --config-dir, no NEXUS_CONFIG_DIR),
+        # i.e. the hard default. Kicking it on behalf of a caller that
+        # overrode the config dir — via the flag OR the env var — would start
+        # a daemon against the wrong data directory and never satisfy this
+        # caller's reachability wait (and repeatedly kick the user's real
+        # daemon: the multistack race harness found exactly that). Any
+        # override therefore Popen-spawns with explicit isolation.
+        proc = None
+        _unit_path = (
+            _autostart_unit_installed()
+            if config_dir_str is None
+            and not os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+            else None
         )
+        if _unit_path is not None:
+            if not quiet:
+                click.echo(f"Respawning T2 daemon via OS supervisor: {_unit_path.name}")
+            if _t2_supervisor_spawn(_unit_path):
+                # Supervisor accepted the start command — no Popen proc to poll.
+                # The reachability wait below handles convergence; proc stays None.
+                pass
+            else:
+                _log.warning(
+                    "t2_supervisor_spawn_failed",
+                    unit=str(_unit_path),
+                    fallback="popen",
+                )
+                if not quiet:
+                    click.echo(
+                        "Warning: OS supervisor spawn failed; falling back to direct spawn.",
+                        err=True,
+                    )
+                _unit_path = None  # signal: use Popen path
+
+        if _unit_path is None:
+            # Popen path: use the same nx binary the operator invoked (preserves
+            # PATH/virtualenv assumptions). start_new_session detaches the child
+            # so this command can exit while the daemon keeps running.
+            nx_bin = _resolve_nx_bin()
+            argv = [*nx_bin, "daemon", "t2", "start"]
+            if config_dir_str is not None:
+                argv.extend(["--config-dir", config_dir_str])
+            if not quiet:
+                click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
+            # nexus-ovbr7: crash-channel capture (see the storage-service
+            # spawn for the rationale).
+            from nexus.logging_setup import open_child_log_or_devnull
+
+            spawn_log = open_child_log_or_devnull("t2_daemon.crash", config_dir)
+            try:
+                proc = subprocess.Popen(
+                    argv,
+                    stdout=spawn_log,
+                    stderr=spawn_log,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            finally:
+                if not isinstance(spawn_log, int):
+                    spawn_log.close()
 
         # nexus-u3mfr: migration-aware wait. A cold-start daemon runs its
         # one-time startup migration (multi-second, holds the write lock)
@@ -1169,6 +1320,8 @@ def _t2_ensure_running_inner(
         # without becoming reachable we fail fast with its exit code rather
         # than waiting out the whole budget on a corpse. The warning therefore
         # only fires on a genuinely slow/stuck migration, not a healthy boot.
+        # NOTE: the proc.poll() death-check only applies to the Popen path —
+        # on the supervisor path proc is None, so the check is skipped.
         deadline = _time.monotonic() + timeout
         while _time.monotonic() < deadline:
             if _daemon_is_alive():
@@ -1177,7 +1330,7 @@ def _t2_ensure_running_inner(
                 if not quiet:
                     click.echo("T2 daemon is reachable.")
                 return T2EnsureOutcome.REACHABLE
-            if proc.poll() is not None:
+            if proc is not None and proc.poll() is not None:
                 click.echo(
                     f"Error: T2 daemon process exited (code {proc.returncode}) "
                     "before becoming reachable. Check "
@@ -1327,3 +1480,576 @@ def t2_uninstall_cmd(autostart: bool) -> None:
     for warning in result.warnings:
         click.echo(f"Warning: {warning}", err=True)
     click.echo(f"Removed {result.dest}")
+
+
+# ---------------------------------------------------------------------------
+# service sub-group (RDR-152 P5.1, nexus-gmiaf.30)
+# ---------------------------------------------------------------------------
+
+
+@daemon_group.group("service")
+def service_group() -> None:
+    """Storage-service daemon: managed native service binary + local Postgres."""
+
+
+def ensure_storage_supervisor(config_dir: Path):
+    """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
+
+    Returns the live :class:`LeaseRecord`. If a fresh lease already exists this
+    is a no-op (idempotent — re-running ``nx init --service`` / ``nx daemon
+    service start`` is safe). Otherwise it detached-spawns the ``--foreground``
+    supervisor (``start_new_session=True``) and waits up to 60s for it to publish
+    a lease.
+
+    This is the SINGLE persistent-start path (nexus-qke1e): both ``nx init
+    --service`` and ``nx daemon service start`` route through it, so neither
+    leaves a transient unsupervised lease that ages out by TTL because nothing
+    heartbeats it. The bug it closes: ``start_storage_service`` (the old init
+    path) published a lease without a heartbeating supervisor, so the service
+    looked 'serving' at init time but the lease aged out before the next client
+    (e.g. ``nx migrate-to-service``) could discover it.
+
+    Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
+    """
+    from nexus.daemon.service_registry import ServiceRegistry
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    scope = str(os.getuid())
+    existing = registry.discover(scope)
+    if existing is not None:
+        return existing
+
+    argv = [
+        *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
+        "--config-dir", str(config_dir),
+    ]
+    # nexus-ovbr7: route the child's streams to a crash-channel file so a failure
+    # BEFORE run_storage_supervisor's configure_logging runs (import error, bad
+    # argv) and interpreter-fatal tracebacks are captured. Post-configure, the
+    # daemon drops its stderr handler (non-tty), so this file stays quiet healthy.
+    from nexus.logging_setup import open_child_log_or_devnull
+
+    spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
+    try:
+        subprocess.Popen(
+            argv,
+            stdout=spawn_log,
+            stderr=spawn_log,
+            start_new_session=True,
+        )
+    finally:
+        if not isinstance(spawn_log, int):
+            spawn_log.close()
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        existing = registry.discover(scope)
+        if existing is not None:
+            return existing
+        time.sleep(0.5)
+    raise StorageServiceStartError(
+        "Storage service supervisor did not become ready within 60s. "
+        f"Check {config_dir / 'logs' / 'storage_service.log'} "
+        "or run 'nx daemon service start --foreground' to see the error."
+    )
+
+
+@service_group.command("start")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override (default: ~/.config/nexus/).",
+)
+@click.option(
+    "--foreground",
+    is_flag=True,
+    default=False,
+    help=(
+        "Block until SIGTERM/SIGINT or the service exits. Required when "
+        "launched under a supervisor (launchd, systemd)."
+    ),
+)
+@click.option(
+    "--announce-stdout",
+    "announce_stdout",
+    is_flag=True,
+    default=False,
+    help="Emit the discovery JSON on stdout at startup.",
+)
+def service_start_cmd(
+    config_dir_str: str | None,
+    foreground: bool,
+    announce_stdout: bool,
+) -> None:
+    """Start the native storage-service + Postgres supervisor (RDR-152 P5.1).
+
+    Reads pg_credentials from the config directory (written by 'nx init
+    --service'), starts the nx-managed Postgres cluster if it is not
+    running, spawns the native nexus-service binary (RDR-161: the sole launch
+    artifact; acquire it via 'nx daemon service install-binary'), waits for
+    /health to return 200, then publishes the service endpoint to the
+    ServiceRegistry under the 'storage_service' scope key.
+
+    Without ``--foreground`` the command ensures the supervisor is running
+    (spawning one in the background if needed) and exits. With
+    ``--foreground`` the supervisor blocks until SIGTERM/SIGINT.
+
+    A service/PG outage is always fatal — there is no direct-mode
+    fallback (per RDR-152 §Approach).
+    """
+    from nexus.daemon.storage_service_daemon import (
+        StorageServiceStartError,
+        run_storage_supervisor,
+        start_storage_service,
+    )
+    from nexus.daemon.service_registry import ServiceRegistry
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+
+    if foreground:
+        try:
+            code = run_storage_supervisor(config_dir=config_dir)
+        except StorageServiceStartError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        sys.exit(code)
+
+    # Non-foreground: ensure a persistent (heartbeated) supervisor owns the lease.
+    try:
+        existing = ensure_storage_supervisor(config_dir)
+    except StorageServiceStartError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    ep = existing.endpoint
+    if announce_stdout:
+        import json as _json
+        click.echo(_json.dumps({
+            "host": ep.get("host"),
+            "port": ep.get("port"),
+            "pid": ep.get("pid"),
+            "generation": existing.generation,
+        }))
+    else:
+        click.echo(
+            f"Storage service running on {ep.get('host')}:{ep.get('port')} "
+            f"(pid={ep.get('pid')}, generation={existing.generation})."
+        )
+
+
+@service_group.command("install-binary")
+@click.argument("tag", required=True)
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+@click.option(
+    "--pg-bundle/--no-pg-bundle",
+    "want_pg_bundle",
+    default=True,
+    help="Also acquire+verify the relocatable PostgreSQL bundle from the same "
+         "release (default). --no-pg-bundle installs only the service binary "
+         "(e.g. cloud habitat with a managed Postgres).",
+)
+def service_install_binary_cmd(
+    tag: str, config_dir_str: str | None, want_pg_bundle: bool,
+) -> None:
+    """Download, verify, and install the signed native nexus-service binary
+    (and, by default, the PostgreSQL bundle) from a release.
+
+    TAG is an EXPLICIT engine-service-v* release tag (e.g. engine-service-v0.1.3);
+    there is no "latest" resolution. Each per-platform asset, its .sha256, and its
+    .sigstore.json bundle are fetched from the GitHub release, verified
+    (sha256 + keyless Sigstore signature, pinned to this repo's release workflow
+    identity), then placed under <config-dir>/service/. Verification fails closed:
+    nothing is installed unless BOTH gates pass. One verified seam covers the
+    binary and the PG bundle (RDR-161).
+    """
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    from nexus.daemon.binary_install import (
+        BinaryVerificationError,
+        asset_name,
+        install_binary,
+        install_pg_bundle,
+        pg_bundle_asset_name,
+    )
+
+    try:
+        _nx_version = _pkg_version("conexus")
+    except PackageNotFoundError:
+        _nx_version = "unknown"
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    installed_by = f"conexus {_nx_version}"
+
+    click.echo(f"Resolving {asset_name()} from release {tag}…")
+    try:
+        dest, prov = install_binary(tag, config_dir, installed_by=installed_by)
+    except BinaryVerificationError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    click.echo(f"Installed {prov['asset']} ({tag})")
+    click.echo(f"  -> {dest}")
+    click.echo(f"  version: {prov['version']}")
+    click.echo(f"  sha256:  {prov['sha256'][:16]}…")
+    click.echo(f"  signature: verified (keyless Sigstore, {prov['source_url']})")
+
+    if want_pg_bundle:
+        click.echo(f"\nResolving {pg_bundle_asset_name()} from release {tag}…")
+        try:
+            pg_dest, pg_prov = install_pg_bundle(
+                tag, config_dir, installed_by=installed_by,
+            )
+        except BinaryVerificationError as exc:
+            # The binary already installed and verified; only the PG bundle
+            # failed. Say so, and don't print the "restart the service" hint
+            # below (the service can't start without the bundle in local mode).
+            click.echo(
+                f"Error: the native binary installed OK, but the PostgreSQL "
+                f"bundle failed: {exc}\n"
+                "Re-run `nx daemon service install-binary <tag>` to retry the "
+                "bundle (the binary step is idempotent), or pass --no-pg-bundle "
+                "if you run against a managed Postgres.",
+                err=True,
+            )
+            sys.exit(2)
+        click.echo(f"Installed {pg_prov['asset']} ({tag})")
+        click.echo(f"  -> {pg_dest}")
+        click.echo(f"  sha256:  {pg_prov['sha256'][:16]}…")
+        click.echo("  signature: verified (keyless Sigstore)")
+
+    click.echo("\nRestart the service to pick it up: nx daemon service stop && "
+               "nx daemon service start")
+
+
+@service_group.command("stop")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+@click.option(
+    "--with-pg",
+    "with_pg",
+    is_flag=True,
+    default=False,
+    help="Also stop the nx-managed Postgres cluster via pg_ctl -m fast "
+         "(terminates open connections immediately; left running by default).",
+)
+def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
+    """Stop the running storage-service supervisor (SIGTERM -> SIGKILL).
+
+    Postgres is INTENTIONALLY left running (it is independently managed and
+    may serve other clients) — nexus-pebfx.5 makes that visible instead of
+    surprising: the command says so and offers --with-pg.
+    """
+    from nexus.daemon.storage_service_daemon import (
+        _port_accepting,
+        _read_pg_credentials,
+        stop_storage_service,
+    )
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    pid = stop_storage_service(config_dir=config_dir)
+    if pid is None:
+        click.echo("No storage service lease found — already stopped.")
+    else:
+        click.echo(f"Storage service stopped (pid={pid}).")
+
+    creds_path = config_dir / "pg_credentials"
+    if not creds_path.exists():
+        return
+    try:
+        creds = _read_pg_credentials(creds_path)
+    except OSError:
+        return
+    port_str = creds.get("PG_PORT", "")
+    if not port_str.isdigit() or not _port_accepting("127.0.0.1", int(port_str)):
+        return
+
+    if not with_pg:
+        if pid is None:
+            # Nothing was stopped — phrase as a state report, not an effect
+            # of this command (critic S4: the causal phrasing misled when
+            # the supervisor was already gone).
+            click.echo(
+                f"Postgres is still running on 127.0.0.1:{port_str} — use "
+                "'nx daemon service stop --with-pg' to stop it."
+            )
+        else:
+            click.echo(
+                f"Postgres left running on 127.0.0.1:{port_str} (by design — "
+                "it is independently managed; use 'nx daemon service stop "
+                "--with-pg' to stop it too)."
+            )
+        return
+
+    pg_data = creds.get("PG_DATA", "")
+    if not pg_data:
+        click.echo(
+            "--with-pg: PG_DATA missing from pg_credentials — cannot stop "
+            "Postgres. Stop it manually with pg_ctl.",
+            err=True,
+        )
+        sys.exit(2)
+    import subprocess
+
+    from nexus.db.pg_provision import discover_pg_binaries
+
+    try:
+        bins = discover_pg_binaries()
+        subprocess.run(
+            [str(bins.pg_ctl), "-D", pg_data, "-m", "fast", "stop"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+    except Exception as exc:
+        click.echo(f"--with-pg: failed to stop Postgres: {exc}", err=True)
+        sys.exit(2)
+    click.echo(f"Postgres stopped (port {port_str}).")
+
+
+def _probe_health(host: str, port: int, timeout: float = 3.0) -> str:
+    """GET /health → "ok" | "db-down" | "unreachable" (nexus-pebfx.5)."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/health", timeout=timeout,
+        ) as resp:
+            return "ok" if resp.status == 200 else f"http-{resp.status}"
+    except Exception as exc:
+        import urllib.error
+
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 503:
+            return "db-down"
+        return "unreachable"
+
+
+def _probe_pg(creds_path: Path) -> dict:
+    """PG cluster facts for the status surface (nexus-pebfx.5).
+
+    Best-effort: every field degrades to a readable placeholder rather than
+    failing the status command — status must work BEST when the stack is
+    broken.
+    """
+    out: dict = {}
+    if not creds_path.exists():
+        out["pg"] = "not provisioned (run: nx init --service)"
+        return out
+    from nexus.daemon.storage_service_daemon import (
+        _port_accepting,
+        _read_pg_credentials,
+    )
+
+    try:
+        creds = _read_pg_credentials(creds_path)
+    except OSError:
+        out["pg"] = f"credentials unreadable: {creds_path}"
+        return out
+    port_str = creds.get("PG_PORT", "")
+    out["pg_port"] = port_str or "(missing from pg_credentials)"
+    out["pg_data"] = creds.get("PG_DATA", "(missing from pg_credentials)")
+    pg_up = bool(port_str.isdigit()) and _port_accepting("127.0.0.1", int(port_str))
+    out["pg"] = "up" if pg_up else "DOWN"
+    if pg_up:
+        out["pgvector"] = _pgvector_version(creds) or "(query failed)"
+    return out
+
+
+def _pgvector_version(creds: dict) -> str | None:
+    """Installed pgvector extension version via psql (admin creds)."""
+    import subprocess
+
+    from nexus.daemon.binary_lifecycle import _db_name_from_creds, _psql_bin
+
+    psql = _psql_bin()
+    if psql is None:
+        return None
+    user = creds.get("NX_DB_ADMIN_USER", "") or creds.get("NX_DB_USER", "")
+    password = (
+        creds.get("NX_DB_ADMIN_PASS", "")
+        if creds.get("NX_DB_ADMIN_USER", "")
+        else creds.get("NX_DB_PASS", "")
+    )
+    if not user:
+        return None
+    import os as _os
+
+    env = dict(_os.environ)
+    env["PGPASSWORD"] = password
+    try:
+        result = subprocess.run(
+            [
+                psql, "-h", "127.0.0.1", "-p", str(creds.get("PG_PORT", "")),
+                "-U", user, "-d", _db_name_from_creds(creds),
+                "-t", "-A", "-X",
+                "-c", "SELECT extversion FROM pg_extension WHERE extname='vector'",
+            ],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    version = result.stdout.strip()
+    return version or "NOT INSTALLED"
+
+
+def _nx_major_gap_note(installed_by: str) -> str | None:
+    """Note when the well-known binary was installed by an older nx MAJOR.
+
+    ``installed_by`` is the sidecar's ``"conexus X.Y.Z"`` stamp. Returns
+    ``None`` when versions are unparseable or majors match.
+    """
+    import re as _re
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    m = _re.match(r"conexus (\d+)\.", installed_by or "")
+    if not m:
+        return None
+    installed_major = int(m.group(1))
+    try:
+        current_major = int(_pkg_version("conexus").split(".")[0])
+    except (PackageNotFoundError, ValueError):
+        return None
+    if installed_major < current_major:
+        return (
+            f"installed service binary was installed by {installed_by} but this "
+            f"nx is major version {current_major} — reinstall it from a current "
+            "build: nx daemon service install-binary <tag>"
+        )
+    return None
+
+
+@service_group.command("status")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output raw JSON.")
+def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
+    """Print the storage-service endpoint (host, port, pid, generation).
+
+    Exits non-zero when no live lease is found.
+    """
+    import json as _json
+    from nexus.daemon.service_registry import ServiceRegistry
+    import os as _os
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    scope = str(_os.getuid())
+    record = registry.discover(scope)
+
+    if record is None:
+        click.echo(
+            "No storage service lease found — is the service running?",
+            err=True,
+        )
+        sys.exit(1)
+
+    ep = record.endpoint
+    data = {
+        "host": ep.get("host"),
+        "port": ep.get("port"),
+        "pid": ep.get("pid"),
+        "generation": record.generation,
+        "version": record.version,
+        "heartbeat_epoch": record.heartbeat_epoch,
+        "status": record.status,
+    }
+
+    # nexus-pebfx.5: one surface answering "is the stack healthy and how is
+    # it configured" — supervisor, native service (/health + /version), PG cluster,
+    # embedding mode, pgvector version, and the paths an operator would
+    # otherwise assemble from ps aux + psql + curl + the addr file by hand.
+    import os as _os
+
+    data["supervisor_pid"] = record.payload.get("supervisor_pid")
+    data["addr_file"] = str(config_dir / f"storage_service_addr.{_os.getuid()}")
+    host = ep.get("host", "127.0.0.1")
+    port = int(ep.get("port") or 0)
+    data["health"] = _probe_health(host, port)
+
+    creds_path = config_dir / "pg_credentials"
+    data["pg_credentials"] = str(creds_path) if creds_path.exists() else "(absent)"
+    pg_info = _probe_pg(creds_path)
+    data.update(pg_info)
+
+    # nexus-ovbr7: surface where the evidence lives. Every component of the
+    # stack writes a log file; an operator triaging a death should not have
+    # to know the layout by heart.
+    data["supervisor_log"] = str(config_dir / "logs" / "storage_service.log")
+    data["service_log"] = str(config_dir / "logs" / "storage_service_native.log")
+    data["crash_log"] = str(config_dir / "logs" / "storage_service.crash.log")
+    if pg_info.get("pg_data"):
+        data["pg_log"] = str(Path(pg_info["pg_data"]) / "pg.log")
+
+    # nexus-pebfx.4 version handshake: report the RUNNING service's app +
+    # schema versions, and warn when they drift from the binary installed at
+    # the well-known location (a stale service that needs a restart).
+    from nexus.daemon.binary_lifecycle import (
+        fetch_service_version,
+        read_installed_provenance,
+    )
+    # Probe-latency guard (pebfx.5 critic S1): both HTTP probes hit the same
+    # host/port — when /health is unreachable, /version cannot succeed, and
+    # status is invoked MOST when the stack is broken. Skip the second 3s
+    # timeout.
+    svc_version = (
+        fetch_service_version(host, port)
+        if data["health"] != "unreachable"
+        else None
+    )
+    stale_warning: str | None = None
+    if svc_version is not None:
+        data["service_app_version"] = svc_version.get("app_version")
+        data["embedding_mode"] = svc_version.get("embedding_mode", "unknown")
+        if svc_version.get("embedding_models"):
+            # Kept as a list: --json consumers get the same array shape the
+            # /version endpoint emits (CRE round-trip-fidelity finding).
+            data["embedding_models"] = svc_version["embedding_models"]
+        data["schema_latest_id"] = svc_version.get("schema_latest_id")
+        data["schema_changeset_count"] = svc_version.get("schema_changeset_count")
+        installed = read_installed_provenance(config_dir)
+        if (
+            installed is not None
+            and installed.get("version")
+            and svc_version.get("app_version")
+            and installed["version"] != svc_version["app_version"]
+        ):
+            stale_warning = (
+                f"running service is app_version={svc_version['app_version']} "
+                f"but the installed binary is {installed['version']} — restart to "
+                "pick it up: nx daemon service stop && nx daemon service start"
+            )
+            data["stale"] = True
+        # Bead pebfx.4(b): warn when the installed binary predates the current
+        # nx by a major version — the proactive "this binary was installed by a
+        # much older nx" signal (binary and nx version schemes are otherwise
+        # incomparable).
+        if installed is not None and not stale_warning:
+            note = _nx_major_gap_note(installed.get("installed_by", ""))
+            if note:
+                stale_warning = note
+                data["installed_by_outdated"] = True
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.echo("Storage Service Status")
+    click.echo("-" * 40)
+    for key, value in data.items():
+        # Lists (embedding_models) stay arrays in --json; join for humans.
+        display = ", ".join(value) if isinstance(value, list) else value
+        click.echo(f"  {key}: {display}")
+    if stale_warning:
+        click.echo(f"warning: {stale_warning}", err=True)

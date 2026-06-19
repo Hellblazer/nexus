@@ -116,69 +116,91 @@ def test_format_no_detail():
 # ── Local collections empty-count surfacing (nexus-obp2) ──────────────────────
 
 
-def test_local_collections_reports_empty_count(tmp_path, monkeypatch) -> None:
-    """nx doctor surfaces the count of empty local collections so deletion of
-    every doc from a collection doesn't leave callers wondering why the
-    collection still appears in `nx collection list`. (Empty collections are
-    intentional — they preserve the embedding-model binding for fast next
-    store_put.)
-
-    RDR-120 P6 (nexus-qg86h): the probe now routes through the T3
-    daemon's HttpClient; stub ``make_t3_client`` to return a wrapper
-    over the test's PersistentClient so the test exercises the new
-    routing path without requiring a running daemon.
+def test_t3_collections_census_via_service(tmp_path, monkeypatch) -> None:
+    """RDR-155 P4a.2 (nexus-1k8s1): the collection census routes through the
+    pgvector service handle (``make_t3()``) — the chroma-daemon probe and its
+    empty-collection note retired with the Chroma serving path. The on-disk
+    Chroma directory is reported as the legacy store awaiting the P5 ETL.
     """
-    import chromadb
+    from nexus.health import _check_t3_local
+
+    legacy = tmp_path / "chroma"
+    legacy.mkdir()
+    (legacy / "blob.bin").write_bytes(b"x" * 2048)
+    monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(legacy))
+
+    class _StubServiceClient:
+        def list_collections(self):
+            return [{"name": "knowledge__a"}, {"name": "code__b"}, {"name": "rdr__c"}]
+
+    monkeypatch.setattr("nexus.db.make_t3", lambda **kw: _StubServiceClient())
+    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
+    results = _check_t3_local()
+    line = next((r for r in results if r.label == "T3 collections"), None)
+    assert line is not None
+    assert "3 collections (pgvector service)" in line.detail
+    assert "legacy Chroma store" in line.detail
+    assert "awaiting P5 ETL" in line.detail
+
+
+def test_t3_collections_census_degrades_when_service_unreachable(
+    tmp_path, monkeypatch
+) -> None:
+    """An unreachable service degrades to an informational could-not-query
+    line — doctor must not crash on a down service."""
     from nexus.health import _check_t3_local
 
     monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
-    # Create one populated, two empty collections.
-    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-    populated = client.get_or_create_collection("knowledge__has_data")
-    populated.add(ids=["a"], documents=["hello"], embeddings=[[0.1] * 384])
-    client.get_or_create_collection("knowledge__empty1")
-    client.get_or_create_collection("knowledge__empty2")
 
-    class _Stub:
-        _client = client
+    def _boom(**kw):
+        raise RuntimeError("service down")
 
-    monkeypatch.setattr(
-        "nexus.daemon.t3_client.make_t3_client", lambda: _Stub(),
-    )
+    monkeypatch.setattr("nexus.db.make_t3", _boom)
+    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
     results = _check_t3_local()
-    local_collections_line = next(
-        (r for r in results if r.label == "Local collections"), None
+    line = next((r for r in results if r.label == "T3 collections"), None)
+    assert line is not None
+    assert line.ok is True
+    assert "could not query" in line.detail
+
+
+def test_vector_service_probe_unconditional_and_fatal(monkeypatch, tmp_path) -> None:
+    """RDR-155 P4a.2 dual-review finding 2 (substantive-critic): the vector
+    service probe must fire in BOTH mode branches and without legacy Chroma
+    credentials — a pgvector-only install with the service down must not
+    doctor all-green. Service-down is a FATAL failure."""
+    from nexus.health import _check_t3_cloud, _check_t3_local
+
+    def _down(*a, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    # Local branch (census stubbed; the probe is what's under test).
+    monkeypatch.setattr("nexus.config._default_local_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr("nexus.db.make_t3", _down)
+    local_line = next(
+        (r for r in _check_t3_local() if r.label == "Vector service (/v1/vectors)"),
+        None,
     )
-    assert local_collections_line is not None
-    assert "3 collections" in local_collections_line.detail
-    assert "(including 2 empty)" in local_collections_line.detail
+    assert local_line is not None and local_line.ok is False and local_line.fatal
 
-
-def test_local_collections_omits_empty_note_when_none(tmp_path, monkeypatch) -> None:
-    """No `(including N empty)` note when every collection has data.
-
-    RDR-120 P6: same daemon-stub pattern as the preceding test.
-    """
-    import chromadb
-    from nexus.health import _check_t3_local
-
-    monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
-    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-    populated = client.get_or_create_collection("knowledge__has_data")
-    populated.add(ids=["a"], documents=["hello"], embeddings=[[0.1] * 384])
-
-    class _Stub:
-        _client = client
-
-    monkeypatch.setattr(
-        "nexus.daemon.t3_client.make_t3_client", lambda: _Stub(),
+    # Cloud branch with NO chroma credentials at all (the fresh-install shape).
+    monkeypatch.setattr("nexus.config.get_credential", lambda k: "")
+    cloud_line = next(
+        (r for r in _check_t3_cloud() if r.label == "Vector service (/v1/vectors)"),
+        None,
     )
-    results = _check_t3_local()
-    local_collections_line = next(
-        (r for r in results if r.label == "Local collections"), None
-    )
-    assert local_collections_line is not None
-    assert "(including" not in local_collections_line.detail
+    assert cloud_line is not None and cloud_line.ok is False and cloud_line.fatal
+
+
+def test_vector_service_probe_reachable(monkeypatch) -> None:
+    """Probe reports reachable when the service answers."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
+    line = _check_vector_service()
+    assert line.ok is True
+    assert "reachable" in line.detail
 
 
 def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> None:
@@ -214,6 +236,46 @@ def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> N
     assert advisory.warn is True and advisory.fatal is False
     joined = advisory.detail + " " + " ".join(advisory.fix_suggestions)
     assert "bge-768" in joined and "384" in joined
+
+
+def test_check_t3_local_suppresses_advisory_in_service_mode(tmp_path, monkeypatch) -> None:
+    """nexus-ybw87: a --service install (pg_credentials present) embeds T3
+    server-side in the Java service, so the PYTHON local-embedder advisory is
+    suppressed even when it would otherwise fire (State-2 degraded-bge here) —
+    it reflects fastembed, which does not serve a service user's T3.
+    """
+    from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
+    from nexus.health import _check_t3_local
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+    (cfg / "pg_credentials").write_text("PG_PORT=15432\n")  # service mode configured
+
+    monkeypatch.setattr(
+        "nexus.config._default_local_path", lambda: tmp_path / "does_not_exist"
+    )
+    # Would normally trigger the State-2 degraded-bge advisory:
+    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL)
+
+    class _FakeEF:
+        model_name = _TIER0_MODEL
+        dimensions = 384
+
+    monkeypatch.setattr(
+        "nexus.db.local_ef.LocalEmbeddingFunction", lambda *a, **k: _FakeEF()
+    )
+
+    results = _check_t3_local()
+    assert not any(r.label == "Local embedder" for r in results), (
+        "Python local-embedder advisory must be suppressed for a service install"
+    )
+    # The Python EF line is relabeled so it does not read as the T3 embedder
+    # (which is the bge-768 service, reported by _check_service_bge_model).
+    assert not any(r.label == "Embedding model" for r in results)
+    ef_line = next((r for r in results if r.label.startswith("Embedding model")), None)
+    assert ef_line is not None and "T1" in ef_line.label
+    assert "server-side" in ef_line.detail
 
 
 # ── _check_t3_daemon_version (RDR-149 nexus-ymn76) ───────────────────────────
@@ -274,3 +336,82 @@ def test_check_t3_daemon_version_mismatch_warns(monkeypatch) -> None:
     assert r.ok is False and r.warn is True and r.fatal is False
     assert "0.0.1-stale" in r.detail
     assert any("daemon t3" in s for s in r.fix_suggestions)
+
+
+# ── _check_managed_service_probe (RDR-001 nexus-o6fch) ───────────────────────
+
+
+class TestManagedServiceProbeCheck:
+    """Doctor cloud-branch probe of a MANAGED endpoint — only when NX_SERVICE_URL
+    is explicitly set (never default-probes the public api.conexus-nexus.com)."""
+
+    def test_no_service_url_does_not_probe(self, monkeypatch):
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        from nexus.health import _check_managed_service_probe
+        assert _check_managed_service_probe() == []
+
+    def test_whitespace_service_url_does_not_probe(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_URL", "   ")
+        from nexus.health import _check_managed_service_probe
+        assert _check_managed_service_probe() == []
+
+    def test_probes_explicit_url_never_the_public_default(self, monkeypatch):
+        # SAFETY INVARIANT: the probe receives the EXPLICIT NX_SERVICE_URL, never
+        # base_url=None (which would default to https://api.conexus-nexus.com).
+        monkeypatch.setenv("NX_SERVICE_URL", "https://staging.example.com")
+        from nexus.db import managed_endpoint as me
+
+        seen = {}
+        caps = me.ManagedCapabilities(
+            base_url="https://staging.example.com", app_version="1.0",
+            embedding_mode="voyage", embedding_models=[],
+            schema_latest_id=None, schema_changeset_count=None,
+        )
+
+        def _capture(**kw):
+            seen.update(kw)
+            return caps
+        monkeypatch.setattr(me, "probe_managed_service", _capture)
+        from nexus.health import _check_managed_service_probe
+        _check_managed_service_probe()
+        assert seen.get("base_url") == "https://staging.example.com"
+
+    def test_compatible_is_ok(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
+        from nexus.db import managed_endpoint as me
+
+        caps = me.ManagedCapabilities(
+            base_url="https://api.conexus-nexus.com", app_version="1.0-SNAPSHOT",
+            embedding_mode="voyage", embedding_models=[],
+            schema_latest_id="vectors-002", schema_changeset_count=64,
+        )
+        monkeypatch.setattr(me, "probe_managed_service", lambda **kw: caps)
+        from nexus.health import _check_managed_service_probe
+        res = _check_managed_service_probe()
+        assert len(res) == 1 and res[0].ok is True
+        assert "1.0-SNAPSHOT" in res[0].detail
+
+    def test_incompatible_is_soft_warn(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_URL", "https://x")
+        from nexus.db import managed_endpoint as me
+
+        def _boom(**kw):
+            raise me.ManagedServiceIncompatible("app_version 0.9.0 below minimum 1.0.0")
+        monkeypatch.setattr(me, "probe_managed_service", _boom)
+        from nexus.health import _check_managed_service_probe
+        res = _check_managed_service_probe()
+        assert len(res) == 1
+        assert res[0].ok is False and res[0].warn is True and res[0].fatal is False
+        assert "0.9.0" in res[0].detail
+
+    def test_unreachable_is_soft_warn_not_double_fatal(self, monkeypatch):
+        # reachability fatal is _check_vector_service's domain — stay soft here
+        monkeypatch.setenv("NX_SERVICE_URL", "https://x")
+        from nexus.db import managed_endpoint as me
+
+        def _boom(**kw):
+            raise me.ManagedServiceUnreachable("unreachable")
+        monkeypatch.setattr(me, "probe_managed_service", _boom)
+        from nexus.health import _check_managed_service_probe
+        res = _check_managed_service_probe()
+        assert len(res) == 1 and res[0].ok is False and res[0].warn is True and res[0].fatal is False

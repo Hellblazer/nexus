@@ -307,13 +307,24 @@ class T3Supervisor:
         self._local_path.mkdir(parents=True, exist_ok=True)
         chroma = _find_chroma()
         port = _allocate_free_port()
-        proc = subprocess.Popen(
-            [chroma, "run", "--host", _T3_HOST, "--port", str(port),
-             "--path", str(self._local_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # nexus-ovbr7: chroma's startup banner and crash tracebacks are the
+        # only record of WHY it died; DEVNULL discarded them (same silent-
+        # death class as the storage-service jar). O_APPEND: a respawn never
+        # truncates the previous incarnation's final output.
+        from nexus.logging_setup import open_child_log_or_devnull
+
+        chroma_log = open_child_log_or_devnull("t3_chroma", self._config_dir)
+        try:
+            proc = subprocess.Popen(
+                [chroma, "run", "--host", _T3_HOST, "--port", str(port),
+                 "--path", str(self._local_path)],
+                stdout=chroma_log,
+                stderr=chroma_log,
+                start_new_session=True,
+            )
+        finally:
+            if not isinstance(chroma_log, int):
+                chroma_log.close()
         try:
             _wait_for_ready(_T3_HOST, port, proc, _READY_TIMEOUT)
         except T3StartError:
@@ -418,7 +429,15 @@ class T3Supervisor:
         see 'down' until chroma serves again."""
         if self._proc is None or self._supervisor is None:
             return False
-        if self._proc.poll() is not None:
+        if (rc := self._proc.poll()) is not None:
+            # nexus-ovbr7: record the returncode — the cheapest diagnostic a
+            # dead chroma leaves — plus where its own output went.
+            _log.warning(
+                "t3_chroma_exit_detected",
+                pid=self._proc.pid,
+                returncode=rc,
+                chroma_log=str(self._config_dir / "logs" / "t3_chroma.log"),
+            )
             return False  # chroma exited; stop heartbeating so the lease ages out
         if not self._chroma_reachable():
             _log.warning("t3_daemon_chroma_unreachable", port=self._endpoint_port)
@@ -494,6 +513,14 @@ def run_t3_supervisor(*, config_dir: Path, local_path: Path) -> int:
     the process supervisor (launchd KeepAlive / systemd Restart) respawns.
     Returns the intended process exit code.
     """
+    # nexus-ovbr7: route structlog to <config_dir>/logs/t3_daemon.log
+    # (mirrors run_t2_daemon / nexus-n8sbw). The detached spawn DEVNULLs
+    # stderr, so without this sink the supervisor's lifecycle — including
+    # the chroma-exited path below — left no record.
+    from nexus.logging_setup import configure_logging, flush_logging
+
+    configure_logging("t3_daemon", config_dir=config_dir)
+
     # P3 review H-3: register signal handlers BEFORE start(), so a SIGTERM
     # arriving during chroma startup (up to _READY_TIMEOUT) is captured and
     # leads to a clean stop() rather than the default handler killing us and
@@ -506,20 +533,43 @@ def run_t3_supervisor(*, config_dir: Path, local_path: Path) -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
+    _log.info(
+        "t3_supervisor_started",
+        pid=os.getpid(),
+        local_path=str(local_path),
+        config_dir=str(config_dir),
+    )
+
     sup = T3Supervisor(
         config_dir=config_dir, local_path=local_path, supervised=True
     )
-    sup.start()
+    try:
+        sup.start()
 
-    exit_code = 0
-    # A signal during start() -> stop immediately (start already published;
-    # stop() relinquishes + tears down chroma).
-    while not stop_requested.is_set():
-        if not sup.heartbeat_once():
-            _log.warning("t3_supervisor_chroma_exited", msg="chroma child gone")
-            exit_code = 3
-            break
-        time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
+        exit_code = 0
+        # A signal during start() -> stop immediately (start already published;
+        # stop() relinquishes + tears down chroma).
+        while not stop_requested.is_set():
+            if not sup.heartbeat_once():
+                _log.warning("t3_supervisor_chroma_exited", msg="chroma child gone")
+                exit_code = 3
+                break
+            time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
+    except Exception:
+        # Last-resort backstop (t2_daemon precedent): an exception escaping
+        # the loop must hit the log file, not a DEVNULL'd stderr.
+        _log.exception("t3_supervisor_crashed")
+        flush_logging()
+        raise
+    # Exit breadcrumb BEFORE stop(): a death without this line means the
+    # supervisor was killed, not that it chose to exit. Flush immediately —
+    # stop() can stall, and the breadcrumb is the diagnostic (nexus-61539).
+    _log.info(
+        "t3_supervisor_exit",
+        exit_code=exit_code,
+        stop_requested=stop_requested.is_set(),
+    )
+    flush_logging()
     sup.stop()
     return exit_code
 

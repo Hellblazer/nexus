@@ -899,7 +899,7 @@ def _catalog_hook(
         if writer is not None:
             writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
     return file_to_doc_id
 
 
@@ -1155,6 +1155,18 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     """Update frecency_score metadata on all indexed chunks without re-embedding.
 
     Handles both code__ and docs__ collections.
+
+    Routing (nexus-enehl, RDR-152):
+    - Service mode (NX_STORAGE_BACKEND_VECTORS=service): obtains an
+      :class:`HttpVectorClient` and routes the metadata update through
+      the Java service's ``/v1/vectors/update-metadata`` endpoint so the
+      frecency_score lands in the service's Chroma — the one that
+      service-mode search reads.  No credential check is needed; the
+      service handles its own Chroma/Voyage.  This replaces the
+      nexus-67ljl early-return skip-guard that previously prevented
+      split-brain writes to daemon-Chroma.
+    - Local/cloud mode: checks credentials, then obtains a
+      :class:`T3Database` via ``make_t3()`` and updates directly.
     """
     from nexus.config import get_credential
     from nexus.frecency import batch_frecency
@@ -1170,16 +1182,30 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     code_collection = info.get("code_collection", info["collection"])
     docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
 
-    from nexus.config import is_local_mode
-    if not is_local_mode():
-        voyage_key = get_credential("voyage_api_key")
-        chroma_key = get_credential("chroma_api_key")
-        check_credentials(voyage_key, chroma_key)
+    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415
+    if _is_svc():
+        # nexus-enehl: service mode — route frecency metadata updates through
+        # the Java service's /v1/vectors/update-metadata endpoint.
+        # No credential check needed: the service handles its own Chroma/Voyage.
+        from nexus.db.http_vector_client import get_http_vector_client as _get_svc  # noqa: PLC0415
+        db = _get_svc()
+        _log.info(
+            "frecency_service_mode",
+            repo=str(repo),
+            reason="NX_STORAGE_BACKEND_VECTORS=service; routing frecency updates "
+                   "through Java service /v1/vectors/update-metadata endpoint.",
+        )
     else:
-        check_local_path_writable()
+        from nexus.config import is_local_mode
+        if not is_local_mode():
+            voyage_key = get_credential("voyage_api_key")
+            chroma_key = get_credential("chroma_api_key")
+            check_credentials(voyage_key, chroma_key)
+        else:
+            check_local_path_writable()
+        db = make_t3()
 
     frecency_map = batch_frecency(repo)
-    db = make_t3()
 
     # nexus-f4z9: pre-resolve doc_ids once for all files so the chunk
     # lookup can key on ``doc_id`` when the catalog has the entry.
@@ -2254,6 +2280,7 @@ def _run_index(
 
     _local_mode = _is_local()
     _embed_fn = None
+    _service_mode: bool = False  # resolved in the cloud/service branch below; False in local mode
 
     if _local_mode:
         check_local_path_writable()
@@ -2293,16 +2320,49 @@ def _run_index(
             )
     else:
         _embed_fn_doc = None
-        voyage_key = get_credential("voyage_api_key")
-        chroma_key = get_credential("chroma_api_key")
-        check_credentials(voyage_key, chroma_key)
-        import voyageai
-        code_model = index_model_for_collection(code_collection)
-        docs_model = index_model_for_collection(docs_collection)
-        voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        _service_mode = is_vector_service_mode()  # captured here; reused for T3 routing below
+        if _service_mode:
+            # RDR-152 Seam B (nexus-gmiaf.22): in service mode, embedding
+            # happens server-side in the JVM.  Python must NOT create a
+            # voyageai.Client — the embed + Chroma-write pipeline runs in
+            # the Java nexus-service.  Voyage credentials are only needed
+            # for the Python Voyage path (flag unset / Phase-4 legacy).
+            voyage_key = ""
+            voyage_client = None
+            code_model = index_model_for_collection(code_collection)
+            docs_model = index_model_for_collection(docs_collection)
+            # Service-mode embed_fn shape #1 (code / prose / PDF path):
+            # returns empty embeddings as a no-op.  HttpVectorClient.
+            # upsert_chunks_with_embeddings ignores them and embeds
+            # server-side (Seam B contract).
+            _embed_fn = lambda texts: [[]] * len(texts)  # noqa: E731
+            # Service-mode embed_fn shape #2 (doc_indexer / RDR path):
+            # returns empty embeddings + the target model.  The
+            # doc_indexer calls db.upsert_chunks_with_embeddings which
+            # routes to HttpVectorClient.upsert_chunks (server-side embed).
+            _embed_fn_doc = lambda texts, model="": (  # noqa: E731
+                [[]] * len(texts), model
+            )
+        else:
+            voyage_key = get_credential("voyage_api_key")
+            chroma_key = get_credential("chroma_api_key")
+            check_credentials(voyage_key, chroma_key)
+            import voyageai  # noqa: PLC0415
+            code_model = index_model_for_collection(code_collection)
+            docs_model = index_model_for_collection(docs_collection)
+            voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
 
     _log.debug("connecting to ChromaDB")
-    db = make_t3()
+    # RDR-152 Seam B (nexus-gmiaf.22): in service mode, route through
+    # mcp_infra.get_t3() which returns HttpVectorClient.  In legacy mode,
+    # use make_t3() to preserve the existing daemon-backed path.
+    # Reuse _service_mode computed above to avoid a second module-import round-trip.
+    if _service_mode:
+        from nexus.mcp_infra import get_t3 as _get_t3  # noqa: PLC0415
+        db = _get_t3()
+    else:
+        db = make_t3()
     _log.debug("ChromaDB connected")
     now_iso = _dt.now(UTC).isoformat()
 

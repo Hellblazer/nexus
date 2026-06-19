@@ -11,6 +11,7 @@ from typing import Any
 import structlog
 
 from nexus.config import get_telemetry_config, load_config
+from nexus.db.http_vector_client import VectorServiceError
 from nexus.types import SearchResult
 
 _log = structlog.get_logger(__name__)
@@ -43,6 +44,10 @@ class SearchDiagnostics:
     )
     total_dropped: int = 0
     total_raw: int = 0
+    # nexus-pebfx.8: collections the backend refused to serve (e.g. service-mode
+    # HTTP 400 on an embedding-space mismatch), name → error text. These are
+    # excluded from ``per_collection`` so threshold telemetry stays clean.
+    failed_collections: dict[str, str] = field(default_factory=dict)
 
     def collections_with_drops(self) -> int:
         return sum(
@@ -461,8 +466,14 @@ def search_cross_corpus(
     else:
         effective_where = where
 
+    # nexus-pebfx.8: dedupe — failed_collections is keyed by name, so a
+    # duplicated input name would break the all-failed equality check below
+    # (and duplicate searches buy nothing).
+    collections = list(dict.fromkeys(collections))
+
     all_results: list[SearchResult] = []
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
+    failed_collections: dict[str, str] = {}
     total_dropped = 0
     total_raw = 0
     # Per-collection raw min-distance accumulator for search_telemetry rows.
@@ -482,7 +493,19 @@ def search_cross_corpus(
             threshold = threshold_override
         else:
             threshold = _threshold_for_collection(col, cfg)
-        raw = t3.search(query, [col], n_results=per_k, where=effective_where)
+        try:
+            raw = t3.search(query, [col], n_results=per_k, where=effective_where)
+        except VectorServiceError as exc:
+            # nexus-pebfx.8: one unservable collection (embedding-space
+            # mismatch → service-side HTTP 400) must not sink the whole
+            # cross-corpus search. Skip it, keep the rest.
+            failed_collections[col] = str(exc)
+            _log.warning(
+                "collection_search_failed",
+                collection=col,
+                error=str(exc),
+            )
+            continue
         dropped = 0
         # Minimum distance among dropped items — best-of-dropped, used by
         # SearchDiagnostics.worst_offender() for the "threshold bump" hint.
@@ -521,11 +544,20 @@ def search_cross_corpus(
                 threshold=threshold,
             )
 
+    if failed_collections and len(failed_collections) == len(collections):
+        # Nothing was servable — surface the failure instead of silently
+        # returning zero results (a misconfigured service must fail loud).
+        raise VectorServiceError(
+            f"all {len(failed_collections)} collections failed: "
+            + "; ".join(f"{c}: {e}" for c, e in failed_collections.items()),
+        )
+
     if diagnostics_out is not None:
         diagnostics_out.append(SearchDiagnostics(
             per_collection=diag_per_collection,
             total_dropped=total_dropped,
             total_raw=total_raw,
+            failed_collections=failed_collections,
         ))
 
     # RDR-087 Phase 2.2: persist per-call threshold-filter telemetry.
@@ -728,9 +760,26 @@ def _fetch_embeddings_for_results(
     if emb_dim is None:
         return None, failed_indices
 
+    # nexus-pebfx.7 live-verify catch: cross-corpus results can mix embedding
+    # dims (e.g. 1024-dim voyage collections + a 384-dim minilm collection).
+    # One matrix can only hold one dim — and cross-dim cosine/Euclidean is
+    # meaningless anyway — so collections whose dim differs from the first
+    # successful fetch are marked failed (their results lose the
+    # contradiction/clustering features, same semantics as a fetch failure).
+    # Latent before this bead: the fetch always failed in service mode, so
+    # the mixed-dim assembly was unreachable.
     embeddings = np.zeros((len(results), emb_dim), dtype=np.float32)
     for col, col_emb in col_fetched.items():
         indices = col_groups[col]
+        if col_emb.shape[1] != emb_dim:
+            _log.warning(
+                "embedding_dim_mismatch_across_collections",
+                collection=col,
+                dim=col_emb.shape[1],
+                matrix_dim=emb_dim,
+            )
+            failed_indices.update(indices)
+            continue
         for local_idx, global_idx in enumerate(indices):
             embeddings[global_idx] = col_emb[local_idx]
 

@@ -3,10 +3,19 @@
 
 Public factory
 --------------
-``make_t3(**kwargs)`` — construct a :class:`~nexus.db.t3.T3Database` from
-the configured credentials.  Accepts the same ``_client`` and
-``_ef_override`` keyword injection arguments as ``T3Database.__init__`` so
-tests can pass a fake client without hitting ChromaDB Cloud.
+``make_t3(**kwargs)`` — return the T3 vector-store handle.
+
+RDR-155 P4a.2 (bead nexus-1k8s1, serving-path Chroma retire): with no
+injected ``_client``, T3 serving routes through the pgvector-backed
+nexus-service HTTP API in BOTH modes — the
+:class:`~nexus.db.http_vector_client.HttpVectorClient` singleton. The
+Chroma daemon leg (local mode) and the direct ``chromadb.CloudClient``
+leg (cloud mode) are retired; the ONLY surviving Chroma constructors are
+the Phase-5 ETL read legs in ``nexus.migration.chroma_read``.
+
+Tests keep the same ``_client`` / ``_ef_override`` injection points: an
+injected client short-circuits service dispatch and returns a
+:class:`~nexus.db.t3.T3Database` facade over it, exactly as before.
 """
 from __future__ import annotations
 
@@ -24,70 +33,50 @@ if TYPE_CHECKING:
     # `from nexus.db.t2 import _sanitize_fts5`. Lazy-loading the
     # T3Database import inside make_t3() removes torch from the cold-
     # start cost of `nx <subcommand>` invocations.
+    from nexus.db.http_vector_client import HttpVectorClient
     from nexus.db.t3 import T3Database
 
 
-def make_t3(*, _client=None, _ef_override=None) -> "T3Database":
-    """Return a :class:`T3Database` built from the current credentials.
+def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClient":
+    """Return the T3 vector-store handle for the current configuration.
 
-    Dispatch (RDR-120 P6 — direct mode decommissioned):
+    Dispatch (RDR-155 P4a.2 — serving-path Chroma retired):
 
-    - **Local mode + no injected** ``_client``: route via
-      ``nexus.daemon.t3_client.make_t3_client`` to the running T3
-      daemon (``chromadb.HttpClient`` against
-      ``~/.config/nexus/t3_addr.<uid>`` or ``NX_T3_ADDR``). The daemon
-      MUST be running; the client raises ``T3DaemonError`` naming
-      ``nx daemon t3 start`` on connection failure.
-    - **Cloud mode**: backed by ``chromadb.CloudClient`` with Voyage AI
-      embeddings. The daemon model does not apply in cloud mode;
-      CloudClient is already HTTP-served.
-    - **Injected** ``_client``: short-circuits daemon dispatch.
-      ``EphemeralClient`` is the canonical test substitute.
+    - **No injected** ``_client`` (production, both local and cloud
+      mode): return the process-local
+      :class:`~nexus.db.http_vector_client.HttpVectorClient`, which
+      routes every vector op through the nexus-service ``/v1/vectors``
+      HTTP API (pgvector storage, server-side embedding). Connection
+      details come from ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` at
+      request time — constructing the handle performs no I/O.
+    - **Injected** ``_client``: return a
+      :class:`~nexus.db.t3.T3Database` facade over it.
+      ``EphemeralClient`` is the canonical test substitute; the Phase-5
+      ETL wraps the ``nexus.migration.chroma_read`` read legs the same
+      way.
 
     Keyword-only injection points (for tests):
 
     * ``_client`` — substitute an ``EphemeralClient`` or ``MagicMock``
-      to avoid real CloudClient / HttpClient connections. Passing
-      ``_client`` short-circuits daemon dispatch (used by every unit
-      test that does not spin up its own daemon).
+      to avoid real network connections. Passing ``_client``
+      short-circuits service dispatch (used by every unit test that
+      exercises the T3Database facade).
     * ``_ef_override`` — override the embedding function (e.g.
       ``DefaultEmbeddingFunction()``) to avoid Voyage AI API calls.
+      Only meaningful together with ``_client``.
     """
-    from nexus.config import is_local_mode, load_config
+    if _client is None:
+        # RDR-155 P4a.2 (nexus-1k8s1): pgvector service serves T3 in both
+        # modes. The local chroma-daemon leg (RDR-120) and the cloud
+        # CloudClient leg are retired.
+        from nexus.db.http_vector_client import get_http_vector_client
+
+        return get_http_vector_client()
+
+    from nexus.config import load_config
     # Runtime import of T3Database (was moved out of module-scope to
     # break the eager torch-import chain during CLI startup).
     from nexus.db.t3 import T3Database
-
-    if is_local_mode() and _client is None:
-        # RDR-120 P6 (nexus-qg86h): direct mode decommissioned. Local
-        # mode always routes through the T3 daemon; the legacy
-        # ``PersistentClient`` + ``LocalEmbeddingFunction`` direct-open
-        # path is deleted. Tests that need a non-daemon local backend
-        # inject ``_client`` (typically ``EphemeralClient``).
-        from nexus.daemon.t3_client import make_t3_client, T3DaemonError
-        try:
-            return make_t3_client()
-        except T3DaemonError as exc:
-            # nexus-m7evs: when a GUI-spawned subprocess (Claude Desktop,
-            # Cowork SDK bridge) hits this path, the cause is almost
-            # always that the user's cloud credentials live in shell env
-            # exports but were never persisted via ``nx config set``,
-            # so the subprocess (launched without shell env inheritance)
-            # sees them as absent and falls through to local mode. The
-            # subprocess cannot inspect the parent shell, so the error
-            # must self-explain both alternatives.
-            raise T3DaemonError(
-                f"{exc}\n\n"
-                "If you intend cloud mode (Voyage AI + ChromaDB Cloud), "
-                "persist credentials so GUI-spawned subprocesses (Claude "
-                "Desktop, Cowork) can see them — shell env vars are not "
-                "inherited by launchd children:\n"
-                "    nx config set chroma_api_key \"$CHROMA_API_KEY\"\n"
-                "    nx config set voyage_api_key \"$VOYAGE_API_KEY\"\n"
-                "    nx config set chroma_tenant \"$CHROMA_TENANT\"\n"
-                "    nx config set chroma_database \"$CHROMA_DATABASE\"\n"
-                "Then quit and relaunch the host process."
-            ) from exc
 
     cfg = load_config()
     read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)

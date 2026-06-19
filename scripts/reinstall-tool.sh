@@ -8,13 +8,68 @@
 # every fresh install per README. mineru is now always present;
 # only genuinely-optional extras like [local] are receipt-driven.
 #
-# Usage: scripts/reinstall-tool.sh [source]
+# nexus-q3xrx: `uv tool install --reinstall` rebuilds the venv tree IN
+# PLACE. Every live process holding that venv (T2 daemon, storage-service
+# supervisor, nx-mcp servers in EVERY Claude session, in-flight `nx index`
+# runs) suffers delayed lazy-import failures after the swap: vanished
+# certifi cacert path, package metadata reading as version '0.0.0'
+# (T2 handshake skew), ModuleNotFoundError for modules that exist on
+# disk. Empirically diagnosed 2026-06-11 (95 cacert tracebacks + a
+# mid-run manifest-hook death in index.log; contributed to the daemon
+# silent-death cluster). So: refuse to swap under live processes.
+#
+# Usage: scripts/reinstall-tool.sh [source] [--cycle-daemons|--force]
 #   source: install source (default: "." for local dev, use "conexus" for PyPI)
+#   --cycle-daemons  stop nx-owned daemons first, reinstall, restart them
+#   --force          swap anyway (listed processes WILL break; restart them)
 
 set -euo pipefail
 
-SOURCE="${1:-.}"
-RECEIPT="$(uv tool dir)/conexus/uv-receipt.toml"
+SOURCE="."
+CYCLE_DAEMONS=0
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --cycle-daemons) CYCLE_DAEMONS=1 ;;
+        --force)         FORCE=1 ;;
+        *)               SOURCE="$arg" ;;
+    esac
+done
+
+VENV_DIR="$(uv tool dir)/conexus"
+RECEIPT="${VENV_DIR}/uv-receipt.toml"
+
+live_venv_processes() {
+    # Processes whose command line references the tool venv, excluding
+    # transient greps. Catches the daemons, MCP servers, and in-flight
+    # nx runs started from the installed tool.
+    ps ax -o pid=,command= | grep -F "$VENV_DIR" | grep -v grep || true
+}
+
+if [[ "$CYCLE_DAEMONS" == "1" ]]; then
+    echo "Stopping nx-owned daemons before the venv swap (--cycle-daemons)…"
+    nx daemon t2 stop 2>/dev/null || true
+    nx daemon service stop 2>/dev/null || true
+    sleep 1
+fi
+
+LIVE="$(live_venv_processes)"
+if [[ -n "$LIVE" && "$FORCE" != "1" ]]; then
+    echo "REFUSING to reinstall: live processes hold the conexus venv and a"
+    echo "swap underneath them causes delayed import/cacert/version-skew"
+    echo "failures (nexus-q3xrx). Holders:"
+    echo "$LIVE" | sed 's/^/  /'
+    echo ""
+    echo "Remedies:"
+    echo "  scripts/reinstall-tool.sh --cycle-daemons   # stop daemons, install, restart"
+    echo "  (close other Claude sessions' nx-mcp servers, or accept they break)"
+    echo "  scripts/reinstall-tool.sh --force           # swap anyway"
+    exit 3
+elif [[ -n "$LIVE" ]]; then
+    echo "WARNING (--force): swapping the venv under live processes — these"
+    echo "WILL fail on their next lazy import and must be restarted:"
+    echo "$LIVE" | sed 's/^/  /'
+fi
 
 EXTRAS=""
 if [[ -f "$RECEIPT" ]]; then
@@ -69,4 +124,11 @@ fi
 if command -v nx >/dev/null 2>&1; then
     nx daemon t2 ensure-running --quiet --timeout=10 2>/dev/null || \
         echo "(note: daemon cycle skipped/failed; run 'nx daemon t2 ensure-running' manually)"
+fi
+
+# nexus-q3xrx: restart the storage service when --cycle-daemons stopped it
+# (best-effort — boxes without an initialized service stack skip cleanly).
+if [[ "$CYCLE_DAEMONS" == "1" ]] && command -v nx >/dev/null 2>&1; then
+    nx daemon service start 2>/dev/null || \
+        echo "(note: storage service not restarted; run 'nx daemon service start' manually)"
 fi

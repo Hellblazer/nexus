@@ -322,7 +322,7 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
         if writer is not None:
             writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()
 
 
 @store.command("delete")

@@ -9,6 +9,9 @@ TOOL_NAME=$(echo "$INPUT" | python3 -c "import json,sys; print(json.loads(sys.st
 case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus__search|\
   mcp__plugin_conexus_nexus__query|\
+  mcp__plugin_conexus_nexus__search_metadata_scoped|\
+  mcp__plugin_conexus_nexus__search_topic_scoped|\
+  mcp__plugin_conexus_nexus__search_graph_hop|\
   mcp__plugin_conexus_nexus__store_put|\
   mcp__plugin_conexus_nexus__store_get|\
   mcp__plugin_conexus_nexus__store_get_many|\

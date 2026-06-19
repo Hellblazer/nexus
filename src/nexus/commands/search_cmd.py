@@ -19,6 +19,7 @@ from nexus.formatters import (
     format_vimgrep,
 )
 from nexus.scoring import RG_FLOOR_SCORE, apply_hybrid_scoring, rerank_results, round_robin_interleave
+from nexus.db.http_vector_client import VectorServiceError
 from nexus.search_engine import SearchDiagnostics, search_cross_corpus
 from nexus.types import SearchResult
 
@@ -66,6 +67,15 @@ def _maybe_emit_silent_zero_note(
     if not diagnostics_out:
         return
     diag = diagnostics_out[0]
+    if diag.failed_collections:
+        # nexus-pebfx.8: skipped-by-service-error collections were never
+        # searched — a zero-hit must say so or it reads as a genuine miss.
+        click.echo(
+            f"note: {len(diag.failed_collections)} collection(s) excluded by "
+            "service errors and NOT searched: "
+            + ", ".join(diag.failed_collections),
+            err=True,
+        )
     if diag.total_dropped < 1:
         return
     worst = diag.worst_offender()
@@ -226,6 +236,15 @@ def search_cmd(
     --corpus may be a prefix (code, docs, knowledge) or a fully-qualified
     collection name (code__myrepo).  Repeat --corpus to search multiple corpora.
     """
+    # RDR-159 P1b: degrade LOUD while a guided upgrade migration is in
+    # flight. The banner goes to stderr so it never corrupts --json/--vimgrep
+    # stdout, but is emitted FIRST so results are never mistaken for complete.
+    from nexus.migration.banner import migration_banner
+
+    _migration_banner = migration_banner()
+    if _migration_banner:
+        click.echo(_migration_banner, err=True)
+
     if threshold is not None and no_threshold:
         raise click.UsageError(
             "--threshold and --no-threshold are mutually exclusive"
@@ -326,7 +345,12 @@ def search_cmd(
                 raw.extend(_rg_hit_to_result(h) for h in rg_hits)
         return raw
 
-    results = _retrieve(query)
+    try:
+        results = _retrieve(query)
+    except VectorServiceError as exc:
+        # nexus-pebfx.8: every targeted collection was unservable — show the
+        # service's error body cleanly instead of a raw traceback.
+        raise click.ClickException(str(exc)) from exc
 
     if not results:
         _maybe_emit_silent_zero_note(

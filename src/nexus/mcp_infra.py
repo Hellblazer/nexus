@@ -167,14 +167,23 @@ def get_t1():
             if _t1_instance is None:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    from nexus.db.t1 import T1Database
-                    _t1_instance = T1Database()
+                    from nexus.db.t1 import get_t1_database
+                    _t1_instance = get_t1_database()
                     _t1_isolated = any("EphemeralClient" in str(w.message) for w in caught)
     return _t1_instance, _t1_isolated
 
 
 def get_t3():
-    """Return T3Database singleton — lazy init on first call."""
+    """Return the T3 handle singleton — lazy init on first call.
+
+    RDR-155 P4a.2 (bead nexus-1k8s1): ``make_t3()`` itself returns the
+    service-backed :class:`~nexus.db.http_vector_client.HttpVectorClient`
+    whenever no test client is injected (the Chroma serving paths are
+    retired), so the RDR-152 Seam B env-flag routing gate that used to live
+    here is gone — there is exactly one production path. Capability checks
+    on the returned handle use
+    :func:`nexus.db.http_vector_client.is_service_backed`.
+    """
     global _t3_instance
     if _t3_instance is None:
         with _t3_lock:
@@ -206,6 +215,17 @@ def t2_ctx():
     (``t2_daemon._t2_decode``), so the method would receive a dict and
     break on attribute access. The hot every-poll path routes via
     ``t2_index_write``; only the work-bounded persist falls back here.
+
+    Remaining routable writers in mcp/core.py that still use _t2_ctx
+    (not yet converted; see nexus-j5geq commit notes for audit):
+    - memory.put (line ~1850): scratch_put tool
+    - memory.delete (line ~1943): scratch_delete tool
+    - memory.merge_memories (line ~2069): memory_consolidate tool
+    - memory.flag_stale_memories (line ~2080): memory_consolidate tool
+    - plans.increment_run_outcome (line ~3617): _nx_answer_record_outcome
+    - plans.increment_run_started (line ~4012): nx_answer
+    - _nx_answer_record_run uses db.telemetry.conn (raw sqlite3 conn,
+      NOT routable via RPC until a dedicated daemon op is added)
     """
     from nexus.db.t2 import T2Database
     return T2Database(default_db_path())  # epsilon-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
@@ -318,6 +338,20 @@ def t2_index_write(write_fn):
     against exactly one writer, never re-run, so there is no double-write
     risk regardless of how it handles errors.
     """
+    # RDR-152 nexus-fjwxh: in SERVICE mode the Java service (PG) is the write
+    # arbiter — the SQLite single-writer daemon is not in the picture, so route
+    # straight to a direct service-backed T2Database. Short-circuit BEFORE the
+    # daemon probe so service mode does not emit the misleading "start the T2
+    # daemon" degraded-fallback warning on every write (the probe + warning
+    # below are the SQLite-mode arbiter path only).
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        from nexus.db.t2 import T2Database
+
+        with T2Database(default_db_path(), run_migrations=False) as db:  # epsilon-allow: service mode, PG is the arbiter
+            return write_fn(db)
+
     from nexus.daemon.t2_client import (
         T2DaemonNotReachableError,
         T2SchemaVersionMismatchError,
@@ -554,7 +588,7 @@ def catalog_auto_link(doc_id: str) -> int:
             return 0
     finally:
         try:
-            cat._db.close()
+            cat.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
         except Exception:  # noqa: BLE001
             pass
     from nexus.catalog.auto_linker import auto_link, read_link_contexts
@@ -637,6 +671,25 @@ def taxonomy_assign_batch_hook(
     if not doc_ids:
         return
 
+    # RDR-152 Seam B: taxonomy-via-Chroma-client is not supported on the
+    # service path.  HttpVectorClient has no ._client attribute; accessing it
+    # would raise AttributeError, swallowed by the bare except below, causing
+    # silent taxonomy loss.  Log once and return cleanly.  Taxonomy-on-service
+    # is a tracked follow-on (bead nexus-gmiaf.21+).
+    # RDR-155 P4a.2 (nexus-1k8s1): guard is INSTANCE-based — the env flag and
+    # the handle type diverge now that make_t3() returns the service client
+    # unconditionally while tests inject chroma-backed T3Database fixtures.
+    from nexus.db.http_vector_client import is_service_backed
+    if is_service_backed(get_t3()):
+        import structlog
+        structlog.get_logger().info(
+            "taxonomy_assign_skipped_service_mode",
+            collection=collection,
+            doc_count=len(doc_ids),
+            note="taxonomy-via-chroma not supported on service backend; tracked in nexus-gmiaf.21+",
+        )
+        return
+
     if is_local_mode():
         exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
         if any(fnmatch(collection, pat) for pat in exclude):
@@ -692,7 +745,16 @@ def _fetch_or_embed(
     if no embeddings can be produced (callers no-op in that case).
     Used by ``taxonomy_assign_batch_hook`` when called from MCP
     ``store_put`` with ``embeddings=None``.
+
+    Returns None immediately in service mode (HttpVectorClient has no
+    ._client; taxonomy-via-chroma is not supported on the service path).
     """
+    # RDR-152 Seam B guard — see taxonomy_assign_batch_hook for rationale.
+    # RDR-155 P4a.2: instance-based (env flag no longer tracks the handle type).
+    from nexus.db.http_vector_client import is_service_backed
+    if is_service_backed(get_t3()):
+        return None
+
     import numpy as np
 
     fetched: list[list[float] | None] = [None] * len(doc_ids)
@@ -1128,6 +1190,12 @@ def reset_singletons():
     _collections_cache = ([], 0.0)
     clear_search_traces()
     reset_plan_cache_for_tests()
+    # RDR-152 Seam B: also reset the http_vector_client singleton
+    try:
+        from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+        reset_http_vector_client_for_tests()
+    except ImportError:
+        pass
 
 
 def inject_t1(t1, *, isolated: bool = False):

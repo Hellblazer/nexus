@@ -226,10 +226,8 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     if (cat_dir / "documents.jsonl").exists():
         try:
             cat = make_catalog_reader()
-            owner_roots = dict(cat._db.execute(
-                "SELECT tumbler_prefix, repo_root FROM owners "
-                "WHERE repo_root != ''"
-            ))
+            # nexus-xnz0o: use owners_with_roots() (uniform API).
+            owner_roots = cat.owners_with_roots()
         except Exception as exc:
             click.echo(f"WARN: catalog not available for owner lookup: {exc}")
 
@@ -241,14 +239,12 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
             return Path(path_str)
         if not cat:
             return None
-        # Find any catalog document with this file_path; take its owner.
-        row = cat._db.execute(
-            "SELECT tumbler FROM documents WHERE file_path = ? LIMIT 1",
-            (path_str,),
-        ).fetchone()
-        if not row:
+        # nexus-xnz0o: use find_by_file_path() (uniform API).
+        entry = cat.find_by_file_path(path_str)
+        if not entry:
             return None
-        parts = row[0].split(".")
+        tumbler_str = str(entry.tumbler)
+        parts = tumbler_str.split(".")
         if len(parts) < 2:
             return None
         owner_id = ".".join(parts[:2])

@@ -525,18 +525,10 @@ def _catalog_pdf_hook(
         effective_title = title or pdf_path.stem
         owner_name = corpus if corpus else "standalone-pdfs"
 
-        # Get or create curator owner
-        owner = None
-        rows = reader._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "AND owner_type = 'curator'",
-            (owner_name,),
-        ).fetchone()
-        if rows:
-            from nexus.catalog.tumbler import Tumbler
-            owner = Tumbler.parse(rows[0])
-        else:
-            owner = writer.register_owner(owner_name, "curator")
+        # Get or create curator owner. nexus-qnp5s: curator_owner_tumbler_by_name()
+        # is implemented on both SQLite Catalog and HttpCatalogClient.
+        owner_t = reader.curator_owner_tumbler_by_name(owner_name)
+        owner = owner_t if owner_t is not None else writer.register_owner(owner_name, "curator")
 
         # Dedup by file_path (stable identifier for PDFs). Resolve to an
         # absolute path so downstream consumers (aspect_extractor's disk
@@ -582,7 +574,7 @@ def _catalog_pdf_hook(
         if writer is not None:
             writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
 
 
 def pipeline_index_pdf(

@@ -326,8 +326,12 @@ class ServiceRegistry:
 
         Returns ``None`` for a missing, expired (TTL), or shutdown-marked
         record. An expired record is best-effort reaped so the next
-        lookup is fast. No pid is consulted: liveness is purely lease
-        freshness.
+        lookup is fast. No pid is consulted at this level: liveness here is
+        purely lease freshness. The T2 client-side resolver (discovery.py
+        ``_resolve_lease_record``) adds process-liveness checks on top of the
+        heartbeat-age check for the T2 tier (nexus-md90p): a stale-but-answering
+        UDS rescue and a dead-pid fast-path. The invariant "liveness is purely
+        lease freshness" applies to this registry layer only.
         """
         record = self._read_record(scope_key)
         if record is None:

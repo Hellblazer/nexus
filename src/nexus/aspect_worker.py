@@ -259,7 +259,16 @@ class AspectExtractionWorker:
         """
         from nexus.db.t2.aspect_extraction_queue import QueueRow
         from nexus.mcp_infra import t2_index_write
+        from nexus.migration.state import is_migrating as _migration_in_progress
         while not self._stop_event.is_set():
+            # RDR-159 P1c (S2 quiesce): while a guided upgrade migration holds
+            # the migration.state sentinel, SUSPEND the claim/extract cycle.
+            # This is the cross-process suspend the process-local drain_worker
+            # cannot reach (workers resident in other nx-mcp processes). The
+            # worker resumes on its next cycle once the sentinel clears (UNLOCK).
+            if _migration_in_progress():
+                self._stop_event.wait(self._poll_interval)
+                continue
             try:
                 # RDR-128 P3 (nexus-sbxbe.3): route the claim through the
                 # T2 daemon so this worker — which runs inside every
@@ -687,47 +696,41 @@ def reset_worker_for_tests() -> None:
         _worker = None
 
 
-def _check_mcp_worker_lock(locks_dir: Path) -> None:
-    """Check for active MCP-process aspect workers via lock files.
+def live_foreign_worker_pids(locks_dir: Path) -> list[int]:
+    """Return the pids of live aspect workers in OTHER processes.
 
-    Scans ``locks_dir`` for ``aspect_worker.<pid>`` files.  For each:
-      - If the PID matches the current process: skip (drain can stop its
-        own worker directly; not a cross-process conflict).
-      - If the PID is alive in a different process: raises
-        ``DrainBlockedByActiveWorker``.
-      - If the PID is dead (stale lock): removes the lock file silently.
+    Scans ``locks_dir`` for ``aspect_worker.<pid>`` files. The current
+    process's own lock is skipped (not a cross-process conflict); a lock whose
+    pid is dead is swept (stale); a lock whose pid is alive in a different
+    process is collected. A pid we lack permission to signal is treated as
+    alive (conservative).
 
-    SIG-5 (nexus-1091): drain_worker is process-local.  An active MCP
-    server holds its own worker in a separate OS process.  Draining here
-    only stops the current process's worker; the MCP worker keeps running
-    and may continue to write queue rows that the PK migration would race
-    against.  The lock file check surfaces this cross-process conflict
-    before the migration begins rather than after.
-
-    Args:
-        locks_dir: Directory to scan for lock files.  If it does not
-            exist, the check is skipped (no MCP server ever registered).
+    The shared SIG-5 (nexus-1091) lock-scan behind both ``_check_mcp_worker_lock``
+    (the CLI drain pre-check, which blocks on the first offender) and the
+    RDR-159 migration quiesce pre-gate (which needs the FULL offending-pid set).
+    Returns an empty list when ``locks_dir`` does not exist.
     """
     import os
 
     if not locks_dir.exists():
-        return
+        return []
 
     own_pid = os.getpid()
+    pids: list[int] = []
 
-    for lock_file in locks_dir.glob("aspect_worker.*"):
+    for lock_file in sorted(locks_dir.glob("aspect_worker.*")):
         try:
             pid = int(lock_file.name.rsplit(".", 1)[-1])
         except ValueError:
             continue  # Not a PID-suffixed lock file — skip.
 
         if pid == own_pid:
-            # The current process wrote this lock; drain can stop its own
-            # worker directly.  Not a cross-process conflict.
+            # The current process wrote this lock; it can stop its own worker
+            # directly. Not a cross-process conflict.
             continue
 
-        # Probe whether the PID is alive.  os.kill(pid, 0) returns without
-        # error if the process exists and we have permission to signal it.
+        # Probe whether the PID is alive. os.kill(pid, 0) returns without error
+        # if the process exists and we have permission to signal it.
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -740,12 +743,39 @@ def _check_mcp_worker_lock(locks_dir: Path) -> None:
             lock_file.unlink(missing_ok=True)
             continue
         except PermissionError:
-            # PID exists but we cannot signal it (different user) — treat
-            # as alive and block the drain.
+            # PID exists but we cannot signal it (different user) — treat as
+            # alive and conservatively count it as a conflict.
             pass
 
-        # PID is alive in a different process — block the drain.
-        raise DrainBlockedByActiveWorker(blocking_pid=pid, lock_file=lock_file)
+        pids.append(pid)
+
+    return pids
+
+
+def _check_mcp_worker_lock(locks_dir: Path) -> None:
+    """Check for active MCP-process aspect workers via lock files.
+
+    Raises ``DrainBlockedByActiveWorker`` on the first live foreign worker;
+    sweeps stale locks; ignores the current process's own lock.
+
+    SIG-5 (nexus-1091): drain_worker is process-local.  An active MCP
+    server holds its own worker in a separate OS process.  Draining here
+    only stops the current process's worker; the MCP worker keeps running
+    and may continue to write queue rows that the PK migration would race
+    against.  The lock file check surfaces this cross-process conflict
+    before the migration begins rather than after.
+
+    Args:
+        locks_dir: Directory to scan for lock files.  If it does not
+            exist, the check is skipped (no MCP server ever registered).
+    """
+    pids = live_foreign_worker_pids(locks_dir)
+    if pids:
+        blocking_pid = pids[0]
+        raise DrainBlockedByActiveWorker(
+            blocking_pid=blocking_pid,
+            lock_file=locks_dir / f"aspect_worker.{blocking_pid}",
+        )
 
 
 def drain_worker(

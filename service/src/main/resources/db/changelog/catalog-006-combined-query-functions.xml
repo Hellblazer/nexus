@@ -1,0 +1,299 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 bead nexus-70r3c.15 — P4.2 combined-query functions (Decision 5).
+
+    The Phase-4 unification deliverable: the two highest-traffic cross-store stitches
+    (the `query` MCP tool's catalog-aware-routing dance and topic-scoped search) become
+    single planner-optimizable SQL functions. Each is per-dim (chunks_384/768/1024) so
+    the query vector is a typed, plan-time ARGUMENT — Research Finding 5a: HNSW only
+    engages when the probe vector is a constant/parameter (literal → 2ms Index Scan;
+    join-sourced → 340ms Seq Scan).
+
+    Capability-selection discipline (RDR-154 P3 / RDR-156 §Decision): these are
+    set-returning LANGUAGE sql functions, NOT views, because a view cannot take the
+    query vector as an argument. They are written to be INLINABLE (single SELECT,
+    STABLE, SECURITY INVOKER, not STRICT) so the planner folds them into the calling
+    query and the HNSW index scan survives the join — the P4.1 EXPLAIN test
+    (CombinedQueryParityTest GROUP 3) is the enforcement point.
+
+    SECURITY INVOKER (RDR-154 standing rule): the function runs with the CALLER's
+    privileges, so FORCE RLS on chunks_<dim> / catalog_documents / topic_assignments
+    provides tenant isolation. No SECURITY DEFINER (would also defeat inlining).
+
+    NULL-arg-means-skip: each metadata filter is `(p_x IS NULL OR col = p_x)`, so a
+    NULL argument disables that dimension. The function is deliberately NOT marked
+    STRICT (which would both return NULL on any NULL arg and prevent inlining).
+
+    Tombstone-filtered: every shape joins catalog_documents and requires
+    `deleted_at IS NULL` (Decision 6 single enforcement point). A document-backed chunk
+    whose doc is tombstoned drops out; manifest-less note chunks have no catalog row and
+    are therefore not metadata/topic-addressable by construction (they carry no metadata
+    and belong to no topic).
+
+    Result contract (CombinedQueryParityTest): RETURNS TABLE(id text, content text,
+    collection text, distance float8); id is the document tumbler (these shapes feed the
+    document-level `query` tool), content is the matched chunk text, distance is cosine
+    (<=>). Ordered by distance ascending, capped at p_n. Multi-chunk-per-document
+    de-duplication is a consumer/follow-on concern (aspect-filtered + graph-hop shapes,
+    explicitly deferred by the bead); fixtures are one-chunk-per-doc.
+
+    EXECUTE defaults to PUBLIC for functions; SECURITY INVOKER means the underlying
+    table grants (grants-nexus-svc.xml) are the real boundary, exactly like the
+    catalog-005 view.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ════════════════════════════════════════════════════════════════════════
+         metadata-scoped search — per dim (384 / 768 / 1024)
+         ════════════════════════════════════════════════════════════════════════ -->
+
+    <changeSet id="catalog-006-1" author="nexus-70r3c.15">
+        <comment>search_metadata_scoped_384: chunks_384 ⋈ manifest ⋈ catalog_documents, metadata-filtered, vector-ranked</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+    p_query        vector(384),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8
+      FROM nexus.chunks_384 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author       = p_author)
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_384(vector, text[], text, text, int, text, int)</rollback>
+    </changeSet>
+
+    <changeSet id="catalog-006-2" author="nexus-70r3c.15">
+        <comment>search_metadata_scoped_768</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+    p_query        vector(768),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8
+      FROM nexus.chunks_768 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author       = p_author)
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_768(vector, text[], text, text, int, text, int)</rollback>
+    </changeSet>
+
+    <changeSet id="catalog-006-3" author="nexus-70r3c.15">
+        <comment>search_metadata_scoped_1024</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+    p_query        vector(1024),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8
+      FROM nexus.chunks_1024 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author       = p_author)
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024(vector, text[], text, text, int, text, int)</rollback>
+    </changeSet>
+
+    <!-- ════════════════════════════════════════════════════════════════════════
+         topic-scoped search — per dim (384 / 768 / 1024)
+         ════════════════════════════════════════════════════════════════════════ -->
+
+    <!--
+        Topic membership is CHUNK-level: topic_assignments.doc_id is a chunk content-hash
+        (chash), NOT a document tumbler (nexus-sa14p — the HDBSCAN taxonomy clusters chunk
+        embeddings). The join is therefore chunks_<dim>.chash = topic_assignments.doc_id
+        directly, and the returned id is the chunk chash (chunk-level retrieval, matching
+        raw search()). Tombstone filtering uses the live_chunks predicate inline (a chunk
+        is live if it has no manifest rows — MCP note chunk — or at least one manifest row
+        to a live document); inlined rather than joined to the view so the HNSW index on
+        the raw chunks table still engages.
+    -->
+    <changeSet id="catalog-006-4" author="nexus-70r3c.15">
+        <comment>search_topic_scoped_384: chunks_384 ⋈ topic_assignments(chash) ⋈ topics; chunk-level, live-filtered</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
+    p_query       vector(384),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8
+      FROM nexus.chunks_384 c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.search_topic_scoped_384(vector, text, text, int)</rollback>
+    </changeSet>
+
+    <changeSet id="catalog-006-5" author="nexus-70r3c.15">
+        <comment>search_topic_scoped_768</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_768(
+    p_query       vector(768),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8
+      FROM nexus.chunks_768 c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.search_topic_scoped_768(vector, text, text, int)</rollback>
+    </changeSet>
+
+    <changeSet id="catalog-006-6" author="nexus-70r3c.15">
+        <comment>search_topic_scoped_1024</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_1024(
+    p_query       vector(1024),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8
+      FROM nexus.chunks_1024 c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.search_topic_scoped_1024(vector, text, text, int)</rollback>
+    </changeSet>
+
+</databaseChangeLog>

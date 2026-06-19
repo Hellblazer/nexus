@@ -9,9 +9,13 @@ and topic-assignment signals into a single per-collection view:
     median_query_distance_30d, cross_projection_rank,
     orphan_catalog_rows, stale_source_ratio, hub_domination_score
 
-``stale_source_ratio`` is currently a placeholder (``"—"``) because
-the catalog doesn't store ``source_mtime`` yet (tracked in bead
-``nexus-8luh``).
+``stale_source_ratio`` is the fraction of a collection's documents last indexed
+more than 30 days ago (``catalog._STALE_SOURCE_AGE_DAYS``; nexus-agsq7) — an INDEX-AGE proxy for
+staleness, computed DB-only from ``indexed_at``. A true "source modified since
+indexing" signal is structurally impossible from stored columns
+(``source_mtime`` is captured at index time, so it is always <= ``indexed_at``;
+RDR-154 P2 found this) and would need a live filesystem stat. ``None`` (rendered
+``"—"``) when no document in the collection carries a parseable ``indexed_at``.
 
 Every data source is dependency-injected via module-level callables
 so tests can monkeypatch without standing up live T2/T3/catalog.
@@ -33,6 +37,7 @@ _SORT_COLUMNS = (
     "median_query_distance_30d",
     "cross_projection_rank",
     "orphan_catalog_rows",
+    "stale_source_ratio",
     "hub_domination_score",
     "chash_indexed_ratio",
 )
@@ -48,7 +53,9 @@ class CollectionHealthRow:
     cross_projection_rank: int | None
     orphan_catalog_rows: int | None
     hub_domination_score: float | None = None
-    stale_source_ratio: str = _STALE_PLACEHOLDER  # deferred: nexus-8luh
+    # nexus-agsq7: fraction of docs indexed more than _STALE_AGE_DAYS ago
+    # (index-age staleness proxy); None when no doc has a parseable indexed_at.
+    stale_source_ratio: float | None = None
     # RDR-087 Phase 4.6 (nexus-c2op): ratio of chash_index rows for this
     # collection to its T3 chunk_count. 1.0 → fully backfilled; < 1.0 →
     # nx collection backfill-hash has work to do. None when either the
@@ -93,32 +100,16 @@ def _default_catalog_stats_fn(col: str) -> dict[str, Any]:
     Ground-truth chunk counts come from T3 via :func:`_default_chunk_count_fn`
     so ``nx collection health`` and ``nx collection list`` cannot
     disagree (nexus-39zi).
+
+    nexus-dsu5z: delegates to ``cat.collection_health_meta(col)`` which is
+    implemented on both Catalog (SQLite) and HttpCatalogClient (service mode).
+    The former ``hasattr(cat, '_db')`` guard and inline SQL are removed.
     """
     cat = _open_catalog()
     if cat is None:
         return {"last_indexed": None, "orphan_count": 0}
     try:
-        # Catalog's SQL cache lives behind private attributes; an
-        # explicit public accessor doesn't exist yet and isn't worth
-        # adding just for this read-only path.
-        conn = cat._db._conn  # noqa: SLF001
-        row = conn.execute(
-            "SELECT MAX(indexed_at) "
-            "FROM documents WHERE physical_collection = ?",
-            (col,),
-        ).fetchone()
-        last_indexed = row[0] if row and row[0] else None
-        orphan_row = conn.execute(
-            "SELECT COUNT(*) FROM documents d "
-            "LEFT JOIN links l ON d.tumbler = l.to_tumbler "
-            "WHERE d.physical_collection = ? AND l.id IS NULL",
-            (col,),
-        ).fetchone()
-        orphan_count = int(orphan_row[0] or 0)
-        return {
-            "last_indexed": last_indexed,
-            "orphan_count": orphan_count,
-        }
+        return cat.collection_health_meta(col)
     except Exception:
         return {"last_indexed": None, "orphan_count": 0}
 
@@ -349,6 +340,7 @@ def compute_collection_health(
                 cross_projection_rank=ranks.get(col),
                 orphan_catalog_rows=int(catalog.get("orphan_count", 0))
                     if catalog.get("orphan_count") is not None else None,
+                stale_source_ratio=catalog.get("stale_source_ratio"),
                 hub_domination_score=hub_score_fn(col),
                 chash_indexed_ratio=(
                     chash_coverage_fn(col) if chash_coverage_fn is not None else None
@@ -406,7 +398,7 @@ def format_health_table(
             _fmt_cell(r.median_query_distance_30d),
             _fmt_cell(r.cross_projection_rank),
             _fmt_cell(r.orphan_catalog_rows),
-            r.stale_source_ratio,
+            _fmt_cell(r.stale_source_ratio),
             _fmt_cell(r.hub_domination_score),
             _fmt_cell(r.chash_indexed_ratio),
         ]

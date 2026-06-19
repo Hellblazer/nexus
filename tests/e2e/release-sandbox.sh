@@ -61,6 +61,12 @@ _print_help() {
         "             Useful for end-to-end exercises against MCP / plugin / hooks." \
         "             Requires tests/e2e/.claude-auth/.credentials.json (run" \
         "             tests/e2e/auth-login.sh first)." \
+        "  service    RDR-157 P4.2 fresh-machine LOCAL-mode E2E: position the service" \
+        "             artifact (native binary via NEXUS_SERVICE_BIN, else the repo JAR)," \
+        "             then prove ONE command (nx init --service) goes fresh-install ->" \
+        "             serving with zero manual steps, idempotent on re-run, then stop." \
+        "             Requires a local PG with pgvector (host or NEXUS_PG_BUNDLE) and the" \
+        "             bge-768 ONNX (auto-fetched by init; ~416 MB on a cold cache)." \
         "  reset      Remove ~/nexus-sandbox. Does NOT reinstall." \
         "  help       Print this message." \
         "" \
@@ -119,7 +125,8 @@ if [[ "$MODE" == "reset" ]]; then
     exit 0
 fi
 
-if [[ "$MODE" != "smoke" && "$MODE" != "shakedown" && "$MODE" != "shell" && "$MODE" != "tmux" ]]; then
+if [[ "$MODE" != "smoke" && "$MODE" != "shakedown" && "$MODE" != "shell" \
+      && "$MODE" != "tmux" && "$MODE" != "service" ]]; then
     _die "unknown mode: $MODE (use $0 help)"
 fi
 
@@ -375,6 +382,111 @@ case "$MODE" in
 
         echo
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
+        ;;
+
+    service)
+        # RDR-157 P4.2 (bead nexus-vwvv5.18): fresh-machine -> serving with ZERO
+        # manual steps, LOCAL mode. The sandbox HOME is the "fresh machine"; we
+        # position the distribution artifact (what the release archive/launcher
+        # ships), then prove a single `nx init --service` collapses
+        # provision-PG -> fetch-bge-768 -> start-service -> /health green, is
+        # idempotent on re-run, and tears down cleanly.
+        export NX_LOCAL=1
+        export NX_STORAGE_BACKEND=service
+        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
+        echo "[3/3] Service E2E (LOCAL mode, fresh sandbox HOME=$SANDBOX):"
+        cd /tmp
+
+        # ── Artifact positioning. RDR-161: the native binary is the SOLE launch
+        #    artifact — the java -jar fallback is expunged, so there is no
+        #    repo-JAR dev fallback any more. Provide a native binary via
+        #    NEXUS_SERVICE_BIN, the well-known location (e.g. from
+        #    `nx daemon service install-binary <engine-service-v* tag>`), or
+        #    `nx init --service` (which acquires + verifies it). ──
+        SVC_WELL_KNOWN="$HOME/.config/nexus/service/nexus-service"
+        if [[ -n "${NEXUS_SERVICE_BIN:-}" && -x "${NEXUS_SERVICE_BIN}" ]]; then
+            echo "  artifact: native binary (NEXUS_SERVICE_BIN=$NEXUS_SERVICE_BIN)"
+        elif [[ -x "$SVC_WELL_KNOWN" ]]; then
+            echo "  artifact: native binary (well-known $SVC_WELL_KNOWN)"
+        else
+            _die "no native service binary: set NEXUS_SERVICE_BIN to a native nexus-service binary, or install one with 'nx daemon service install-binary <engine-service-v* tag>' (RDR-161: the java -jar path is expunged; there is no repo-JAR fallback)"
+        fi
+
+        # ── PG source (host PG on PATH, or a ship-alongside bundle). The bundle
+        #    extract/initdb/provision is what nx init --service drives. ──
+        if [[ -n "${NEXUS_PG_BUNDLE:-}" ]]; then
+            echo "  pg source: ship-alongside bundle (NEXUS_PG_BUNDLE=$NEXUS_PG_BUNDLE)"
+        elif command -v initdb >/dev/null 2>&1; then
+            echo "  pg source: host PostgreSQL ($(command -v initdb))"
+        else
+            _die "no PostgreSQL: put initdb/pg_ctl on PATH (with pgvector) or set NEXUS_PG_BUNDLE to a ship-alongside bundle"
+        fi
+
+        # A field extractor for `nx daemon service status --json`. Keeps the
+        # assertions below honest: we parse the actual health/port/pid, not just
+        # exit codes (a stale lease can outlive a dead JVM for up to the TTL,
+        # so "the command exited 0" is NOT proof of serving).
+        _svc_field() {  # $1 = json key
+            nx daemon service status --json 2>/dev/null \
+                | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" \
+                2>/dev/null || true
+        }
+
+        # ── Teardown trap: once the service is up, ANY exit (including _die /
+        #    SIGTERM) must stop the JVM + PG, never orphan them. ──
+        _svc_teardown() {
+            echo "  ── teardown (nx daemon service stop --with-pg) ──"
+            nx daemon service stop --with-pg 2>&1 | tail -3 | sed 's/^/    /' || true
+        }
+
+        # ── The one command: fresh-install -> serving, zero manual steps. ──
+        echo
+        echo "  ── nx init --service (the one-command collapse) ──"
+        if ! nx init --service 2>&1 | sed 's/^/    /'; then
+            _die "nx init --service did not reach serving (see remedy above)"
+        fi
+        trap _svc_teardown EXIT
+
+        # ── serving proof: /health == ok (NOT merely "a lease exists"). ──
+        echo
+        echo "  ── service health (must be ok) ──"
+        nx daemon service status 2>&1 | sed 's/^/    /' || true
+        HEALTH=$(_svc_field health)
+        PORT1=$(_svc_field port); PID1=$(_svc_field pid)
+        [[ "$HEALTH" == "ok" ]] || _die "service not serving: /health=$HEALTH (expected ok)"
+        [[ -n "$PORT1" && -n "$PID1" ]] || _die "no endpoint published (port=$PORT1 pid=$PID1)"
+        echo "    [ok] serving on port $PORT1 (pid $PID1), /health=ok"
+        # Visibility only: embedding_mode is voyage-vs-onnx-local (driven by
+        # whether a Voyage key is present), NOT a clean bge-768 signal, so we
+        # report it but do not assert on it. The bge-768 LOCAL ONNX is fetched +
+        # validated by `nx init --service` itself (fail-loud); the JAR-fallback
+        # path here does not re-prove the Java service's model load.
+        echo "    embedding_mode=$(_svc_field embedding_mode)"
+
+        # ── idempotency: re-run must hit the live-lease short-circuit and
+        #    return the SAME endpoint, not spawn a second service. ──
+        echo
+        echo "  ── nx init --service AGAIN (idempotent re-run) ──"
+        if ! nx init --service 2>&1 | sed 's/^/    /'; then
+            _die "re-run of nx init --service failed (not idempotent)"
+        fi
+        PORT2=$(_svc_field port); PID2=$(_svc_field pid)
+        [[ "$PORT2" == "$PORT1" && "$PID2" == "$PID1" ]] \
+            || _die "re-run was NOT idempotent: endpoint changed ($PORT1/$PID1 -> $PORT2/$PID2)"
+        echo "    [ok] idempotent: same endpoint $PORT2 (pid $PID2)"
+
+        # ── teardown via the trap; clear it so we report honestly below. ──
+        echo
+        trap - EXIT
+        _svc_teardown
+        # Re-confirm the lease is gone (teardown actually stopped the service).
+        if [[ "$(_svc_field health)" == "ok" ]]; then
+            _die "service still serving after stop --with-pg — teardown failed"
+        fi
+
+        echo
+        echo "[done] Service E2E green: fresh sandbox -> serving in one command -> stopped."
+        echo "       Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
         ;;
 
     shell)

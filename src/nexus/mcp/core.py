@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-14 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+16 registered tools + 3 demoted (plain functions, no @mcp.tool()).
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from nexus.corpus import (
     t3_collection_name,
 )
 from nexus.db.t3 import verify_collection_deep
+from nexus.migration.banner import degrade_loud_when_migrating
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_hooks as _install_default_hooks
@@ -33,6 +34,7 @@ from nexus.mcp_infra import (
     record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
     t2_ctx as _t2_ctx,
+    t2_index_write as _t2_index_write,
 )
 from nexus.ttl import parse_ttl
 
@@ -184,6 +186,91 @@ async def _t1_chroma_lifespan(_app: Any):
       install a SIGTERM handler).
     * :mod:`atexit` (belt-and-braces for clean SystemExit paths).
     """
+    # Branch 0 (RDR-152 bead nexus-gmiaf.13): Postgres service path.
+    # NX_STORAGE_BACKEND_T1=service (or global NX_STORAGE_BACKEND=service)
+    # routes T1 through HttpScratchStore. Chroma is NOT spawned; the session is
+    # closed on exit via HttpScratchStore.close_session() so the UNLOGGED table
+    # is reaped promptly rather than waiting for the 24-h TTL sweep backstop.
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("t1") == StorageBackend.SERVICE:
+        import structlog as _structlog
+        _svc_log = _structlog.get_logger(__name__)
+        _svc_log.info("t1_service_path_active", backend="service")
+
+        # Phase D (bead nexus-gmiaf.32.4): mint a per-session token at session start.
+        # Set NX_T1_SESSION to the minted secret (the X-Nexus-T1-Session header value) and
+        # NX_T1_SESSION_ID to the session id (body + flush-title). Sub-agents inherit both
+        # via os.environ.
+        #
+        # Phase E (bead nexus-gmiaf.32.5): the server now REQUIRES a minted session
+        # token (a present-but-non-live X-Nexus-T1-Session is a 401 — the transitional
+        # bootstrap session path is retired). So a mint failure can no longer degrade to
+        # a bare session id (it would 401 on every scratch op). With a resolvable session
+        # id, mint failure is FATAL: we fail loud rather than ship a broken or silently
+        # session-unscoped T1 (no silent fallback for a security-boundary input).
+        from nexus.session import resolve_active_session_id
+        _t1_session_id = (
+            resolve_active_session_id()
+            or _os.environ.get("NX_T1_SESSION_ID", "").strip()
+            or _os.environ.get("NX_T1_SESSION", "").strip()
+        )
+        if not _t1_session_id or _t1_session_id == "unknown":
+            # No resolvable session id — do NOT mint a shared "unknown" row (concurrent
+            # MCPs would collide on the (tenant, session_id) UPSERT, each invalidating
+            # the other's token). We leave NX_T1_SESSION untouched: a sub-agent that
+            # inherited a LIVE minted token from its parent keeps working (require-minted
+            # is satisfied by the inherited token). With no inherited token, T1 scratch is
+            # unavailable this process — HttpScratchStore raises on first use (fail-loud),
+            # and a stale inherited token gets a server-side 401. There is no degraded
+            # client-side-only isolation path anymore (Phase E retired it).
+            _t1_session_id = ""
+            _svc_log.warning(
+                "t1_session_unresolved", reason="no_resolvable_session",
+                msg="no session id to mint; T1 scratch uses an inherited token if live, "
+                "else is unavailable this process")
+        else:
+            try:
+                from nexus.db.t2.http_token_store import HttpTokenStore
+                with HttpTokenStore() as _ts:
+                    _minted = _ts.start_session(_t1_session_id)
+                _os.environ["NX_T1_SESSION"] = _minted["session_token"]
+                _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
+                _svc_log.info("t1_session_isolation_minted", session_id=_t1_session_id)
+            except Exception as _exc:
+                # Fail loud (Phase E require-minted): a bare-id fallback would 401 on
+                # every scratch op now that the bootstrap session path is retired, and
+                # silently dropping session scoping is forbidden for a security boundary.
+                _svc_log.error(
+                    "t1_session_mint_failed", session_id=_t1_session_id, error=str(_exc),
+                    msg="could not mint a T1 session token; refusing to start the MCP "
+                    "session without server-enforced session isolation")
+                raise RuntimeError(
+                    f"T1 session token mint failed for session {_t1_session_id!r}: {_exc}. "
+                    "The storage service must be reachable to mint a session token "
+                    "(Phase E require-minted)."
+                ) from _exc
+
+        yield
+        # Teardown: close the scratch rows AND delete the minted session token.
+        try:
+            from nexus.db.http_scratch_store import HttpScratchStore
+            _svc_log.info("t1_service_session_close_start")
+            store = HttpScratchStore()
+            deleted = store.close_session()
+            store.close()
+            _svc_log.info("t1_service_session_close_done", deleted=deleted)
+        except Exception as _exc:
+            _svc_log.warning("t1_service_session_close_failed", error=str(_exc))
+        if _t1_session_id:
+            try:
+                from nexus.db.t2.http_token_store import HttpTokenStore
+                with HttpTokenStore() as _ts:
+                    _ts.close_session(_t1_session_id)
+                _svc_log.info("t1_session_token_closed", session_id=_t1_session_id)
+            except Exception as _exc:
+                _svc_log.warning("t1_session_token_close_failed", error=str(_exc))
+        return
+
     if _os.environ.get("NX_T1_HOST", "").strip() and _os.environ.get("NX_T1_PORT", "").strip():
         # Branch 1: parent MCP owns chroma; subprocess inherits via env.
         yield
@@ -655,15 +742,26 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
     """
     if not diagnostics:
         return base
+    # nexus-pebfx.8: collections the backend refused to serve were skipped,
+    # not searched — a zero-hit must say so or it reads as a genuine miss.
+    failed = diagnostics[0].failed_collections
+    suffix = ""
+    if failed:
+        suffix = (
+            f" Note: {len(failed)} collection(s) were excluded by service "
+            "errors and NOT searched: "
+            + "; ".join(f"{c}: {e}" for c, e in failed.items())
+        )
     worst = diagnostics[0].worst_offender()
     if worst is None:
-        return base
+        return base + suffix
     name, threshold, top_distance = worst
     thr = f"{threshold:.4f}" if threshold is not None else "the per-corpus default"
     return (
         f"{base} Closest candidate was dropped at distance {top_distance:.4f} "
         f"(threshold {thr}, collection {name}). Re-run with "
         f"threshold={top_distance + 0.05:.2f} (or higher) to include it."
+        + suffix
     )
 
 
@@ -674,6 +772,7 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
     title="Semantic Search",
     annotations={"readOnlyHint": True},
 )
+@degrade_loud_when_migrating
 def search(
     query: str,
     corpus: str = "knowledge,code,docs",
@@ -873,6 +972,327 @@ def search(
         return f"Error: {e}"
 
 
+def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
+    """Resolve a comma-separated corpus/collection spec to collection names.
+
+    Mirrors the ``search`` tool's routing: ``all`` expands to every live
+    prefix; a ``__``-qualified part is a collection name; a bare part is a
+    corpus prefix resolved against the live collection list.
+    """
+    all_names = _get_collection_names()
+    if corpus == "all":
+        seen: list[str] = []
+        for n in all_names:
+            prefix = n.split("__", 1)[0]
+            if prefix and prefix not in seen:
+                seen.append(prefix)
+        corpus = ",".join(seen) if seen else "knowledge,code,docs,rdr"
+    target: list[str] = []
+    for part in corpus.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "__" in part:
+            target.append(t3_collection_name(part, t3=t3))
+        else:
+            target.extend(resolve_corpus(part, all_names))
+    return list(dict.fromkeys(target))
+
+
+@mcp.tool(
+    title="Metadata-Scoped Combined Search",
+    annotations={"readOnlyHint": True},
+)
+def search_metadata_scoped(
+    query: str,
+    corpus: str = "knowledge,code,docs",
+    limit: int = 10,
+    content_type: str = "",
+    author: str = "",
+    year: int = 0,
+    subtree: str = "",
+    where: str = "",
+    structured: bool = False,
+) -> "str | dict":
+    """Metadata-scoped combined search (RDR-156 P4, Decision 5; catalog-008).
+
+    The single-statement unification of the ``query`` tool's catalog-routing
+    dance: ``nexus.search_metadata_scoped_<dim>`` joins the chunk table to the
+    catalog manifest + documents and filters by catalog metadata in one query
+    (HNSW survives the join). Document-level results (``id`` is the tumbler),
+    deduped to one row per tumbler at the best (nearest) distance. Each row also
+    carries the matched chunk's ``chash`` (RDR-086 ``chunk_text_hash`` source).
+
+    Service-mode only — the combined-query functions live in the pgvector
+    Postgres; in local/Chroma mode this returns an error.
+
+    PLAN-RUNNER CAVEAT: the structured ``ids``/``tumblers`` are document tumblers,
+    NOT chunk chashes. The runner's auto-hydration (``store_get_many``) is
+    chash-keyed, so feeding ``$stepN.ids`` straight into an operator returns empty
+    content — use a tumbler-aware hydration path (tracked: nexus-zekpl). The
+    ``catalog_documents.corpus`` filter the SQL function supports is NOT exposed
+    here (``corpus`` is the collection-routing arg); add it explicitly if needed.
+
+    Args:
+        query: Search query string.
+        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
+        limit: Max rows.
+        content_type: Catalog content_type filter ("" = no filter).
+        author: Catalog author SUBSTRING filter, case-insensitive (ILIKE; "" = no filter).
+        year: Catalog year filter (0 = no filter).
+        subtree: Tumbler-prefix scope, e.g. "1.2" → the DESCENDANTS of 1.2 (root-exclusive,
+            matching the catalog's descendants()); alias rows excluded ("" = no filter).
+        where: Chunk-metadata equality filter, ``KEY=VALUE`` comma-separated, e.g.
+            "lang=java,kind=fn" ("" = no filter). Equality only (matches the service
+            ``where`` semantics); applied as JSONB containment on chunk metadata.
+        structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
+    """
+    try:
+        from nexus.db.http_vector_client import is_service_backed
+
+        t3 = _get_t3()
+        if not is_service_backed(t3):
+            return ("Error: search_metadata_scoped requires service mode "
+                    "(pgvector); not available in local/Chroma mode")
+        target = _resolve_corpus_target(corpus, t3)
+        if not target:
+            return f"No collections match corpus {corpus!r}"
+        # Parse the KEY=VALUE,... where string into a typed equality dict (applied as
+        # JSONB containment on chunk metadata). search_metadata_scoped is EQUALITY-ONLY
+        # (matches the service `where` semantics); reject comparison operators LOUDLY
+        # rather than silently mis-parsing them (a raw split would turn "bib_year>=2020"
+        # into the bogus key "bib_year>" and drop the filter — nexus-889ff review).
+        where_map: dict | None = None
+        if where.strip():
+            from nexus.filters import parse_where_str
+
+            parsed = parse_where_str(where)
+            if parsed and (
+                "$and" in parsed or "$or" in parsed
+                or any(isinstance(v, dict) for v in parsed.values())
+            ):
+                return ("Error: search_metadata_scoped `where` is equality-only "
+                        "(KEY=VALUE, comma-separated); comparison operators "
+                        "(>=, <=, >, <, !=) are not supported in service mode")
+            where_map = parsed or None
+        rows = t3.search_metadata_scoped(
+            query, target,
+            content_type=content_type or None,
+            author=author or None,
+            year=(year or None),
+            subtree=(subtree or None),
+            where=(where_map or None),
+            n_results=limit,
+        )
+        # Metadata-scoped is document-level: the function returns one row per
+        # matching CHUNK, so a multi-chunk document repeats its tumbler. Collapse
+        # to one row per id, keeping the best (nearest) distance. Rows arrive
+        # distance-ascending, so the FIRST occurrence of each id is its best.
+        seen_ids: set[str] = set()
+        deduped: list[dict] = []
+        for r in rows:
+            rid = r.get("id", "")
+            if rid in seen_ids:
+                continue
+            seen_ids.add(rid)
+            deduped.append(r)
+        rows = deduped
+        if structured:
+            # id IS the document tumbler for metadata-scoped (document-level).
+            ids = [r.get("id", "") for r in rows]
+            return {
+                "ids": ids,
+                "tumblers": ids,
+                "distances": [r.get("distance", 0.0) for r in rows],
+                "collections": [r.get("collection", "") for r in rows],
+                # contents inline so plan steps can summarize directly via
+                # $stepN.contents WITHOUT store_get_many hydration (which is
+                # chash-keyed and would miss these document tumblers).
+                "contents": [r.get("content", "") for r in rows],
+                # matched-chunk chash per row — the repoint wires this into the
+                # structured chunk_text_hash (RDR-086 chash-citations).
+                "chashes": [r.get("chash", "") for r in rows],
+            }
+        if not rows:
+            return "No documents found."
+        return "\n\n".join(
+            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
+            f"\n{r.get('content', '')}"
+            for r in rows
+        )
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool(
+    title="Topic-Scoped Combined Search",
+    annotations={"readOnlyHint": True},
+)
+def search_topic_scoped(
+    query: str,
+    topic: str,
+    corpus: str = "knowledge,code,docs",
+    limit: int = 10,
+    structured: bool = False,
+) -> "str | dict":
+    """Topic-scoped combined search (RDR-156 P4, Decision 5).
+
+    ``nexus.search_topic_scoped_<dim>`` joins the chunk table to
+    ``topic_assignments`` on chunk chash (topic membership is chunk-level,
+    nexus-sa14p) and ranks by vector distance. Chunk-level results (``id`` is
+    the chunk chash). Resolved across every collection in *corpus* (topics are
+    per-collection — a label belongs to one collection's taxonomy, so the
+    multi-collection loop is usually single-hit), merged by distance. NOTE: the
+    merge is per-collection-limit-then-merge-then-truncate, so for a label genuinely
+    present in multiple collections the global top-N can drop a collection's
+    (limit+1)th row that would have ranked; over-fetch per collection if that case
+    becomes real.
+
+    Service-mode only.
+
+    Args:
+        query: Search query string.
+        topic: Topic label (from ``nx taxonomy discover``).
+        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
+        limit: Max rows.
+        structured: Return ``{ids, tumblers, distances, collections}`` for the plan runner.
+    """
+    try:
+        from nexus.db.http_vector_client import is_service_backed
+
+        t3 = _get_t3()
+        if not is_service_backed(t3):
+            return ("Error: search_topic_scoped requires service mode "
+                    "(pgvector); not available in local/Chroma mode")
+        target = _resolve_corpus_target(corpus, t3)
+        if not target:
+            return f"No collections match corpus {corpus!r}"
+        merged: list[dict] = []
+        for col in target:
+            merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit))
+        merged.sort(key=lambda r: r.get("distance", 0.0))
+        merged = merged[:limit]
+        if structured:
+            # Chunk-level: ids are chunk chashes; no document tumbler.
+            return {
+                "ids": [r.get("id", "") for r in merged],
+                "tumblers": ["" for _ in merged],
+                "distances": [r.get("distance", 0.0) for r in merged],
+                "collections": [r.get("collection", "") for r in merged],
+                # contents inline so plan steps summarize via $stepN.contents
+                # without hydration (topic ids are chunk chashes).
+                "contents": [r.get("content", "") for r in merged],
+            }
+        if not merged:
+            return f"No chunks found for topic {topic!r}."
+        return "\n\n".join(
+            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
+            f"\n{r.get('content', '')}"
+            for r in merged
+        )
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool(
+    title="Graph-Hop Combined Search",
+    annotations={"readOnlyHint": True},
+)
+def search_graph_hop(
+    query: str,
+    seeds: list[str] | str,
+    corpus: str = "knowledge,code,docs",
+    limit: int = 10,
+    link_type: str = "",
+    depth: int = 1,
+    direction: str = "both",
+    structured: bool = False,
+) -> "str | dict":
+    """Graph-hop combined search (RDR-156 P4 follow-on, Decision 5, bead nexus-houg9).
+
+    The single-statement unification of the ``query`` tool's ``follow_links`` dance:
+    ``nexus.search_graph_hop_<dim>`` runs a ``WITH RECURSIVE`` BFS over
+    ``catalog_links`` from *seeds* to *depth* hops, collects the reachable document
+    set, joins ``chunks_<dim>`` and vector-ranks — replacing the app-side graphBFS +
+    per-collection search + re-join. Document-level results (``id`` is the tumbler),
+    deduped to one row per tumbler at the best (nearest) distance. Each row also carries
+    the MATCHED chunk's ``chash`` (so the query() repoint populates the RDR-086
+    ``chunk_text_hash`` from it, never a per-doc manifest guess).
+
+    Seeds are document tumblers; ``depth`` is clamped to [1,3] service-side; an empty
+    ``link_type`` follows all edge types; ``direction`` is ``"out"``/``"in"``/``"both"``
+    (default ``"both"``, matching ``Catalog.graph`` / the ``query`` tool's follow_links).
+
+    Service-mode only — the combined-query functions live in the pgvector Postgres; in
+    local/Chroma mode this returns an error.
+
+    Args:
+        query: Search query string.
+        seeds: Seed document tumbler(s) to traverse from (list, or a single string).
+        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
+        limit: Max rows.
+        link_type: Catalog link_type filter ("" = follow all edge types).
+        depth: BFS depth (clamped to [1,3]).
+        direction: "out" | "in" | "both".
+        structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
+    """
+    try:
+        from nexus.db.http_vector_client import is_service_backed
+
+        t3 = _get_t3()
+        if not is_service_backed(t3):
+            return ("Error: search_graph_hop requires service mode "
+                    "(pgvector); not available in local/Chroma mode")
+        seed_list = [seeds] if isinstance(seeds, str) else list(seeds)
+        seed_list = [s for s in seed_list if s]
+        if not seed_list:
+            return "No seeds provided."
+        target = _resolve_corpus_target(corpus, t3)
+        if not target:
+            return f"No collections match corpus {corpus!r}"
+        rows = t3.search_graph_hop(
+            query, seed_list, target,
+            link_type=(link_type or None),
+            depth=depth,
+            direction=direction,
+            n_results=limit,
+        )
+        # Document-level: collapse to one row per tumbler, keeping the best (nearest)
+        # distance. Rows arrive distance-ascending, so the FIRST occurrence is best.
+        seen_ids: set[str] = set()
+        deduped: list[dict] = []
+        for r in rows:
+            rid = r.get("id", "")
+            if rid in seen_ids:
+                continue
+            seen_ids.add(rid)
+            deduped.append(r)
+        rows = deduped
+        if structured:
+            ids = [r.get("id", "") for r in rows]
+            return {
+                "ids": ids,
+                "tumblers": ids,
+                "distances": [r.get("distance", 0.0) for r in rows],
+                "collections": [r.get("collection", "") for r in rows],
+                # contents inline so plan steps summarize via $stepN.contents WITHOUT
+                # store_get_many hydration (which is chash-keyed and would miss tumblers).
+                "contents": [r.get("content", "") for r in rows],
+                # the matched chunk's chash per row — rzqto wires this into the
+                # structured chunk_text_hash (RDR-086 chash-citations).
+                "chashes": [r.get("chash", "") for r in rows],
+            }
+        if not rows:
+            return "No documents found."
+        return "\n\n".join(
+            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
+            f"\n{r.get('content', '')}"
+            for r in rows
+        )
+    except Exception as e:
+        return f"Error: {e}"
+
+
 @mcp.tool(
     title="Catalog-Aware Document Query",
     annotations={"readOnlyHint": True},
@@ -946,13 +1366,208 @@ def query(
             if cat is None:
                 return "Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'"
 
-            # Resolve seed entries for catalog routing
-            seed_entries: list = []
+            # Guard: document-level subtree address (3+ segments) cannot have descendants
             if subtree:
-                # Depth check: document-level (3+ segments) has no descendants in the catalog
                 subtree_depth = len(subtree.split("."))
                 if subtree_depth >= 3:
                     return f"Error: subtree '{subtree}' is a document-level address — use an owner prefix (e.g., '{'.'.join(subtree.split('.')[:2])}') to search a subtree"
+
+            # ── SERVICE-MODE BRANCH (nexus-rzqto) ────────────────────────────
+            # When the T3 backend is the pgvector service, route through the
+            # combined-query SQL functions (search_metadata_scoped /
+            # search_graph_hop) instead of the app-side catalog dance +
+            # search_cross_corpus.  The SQL functions perform the catalog-
+            # metadata join server-side and return document-level rows
+            # (id=tumbler, content, distance, collection, chash).
+            #
+            # bib richness (nexus-rzqto): the combined functions return only
+            # (id=tumbler, content, distance, collection, chash), so the text
+            # form re-hydrates title/author/year AND bib_year/bib_authors/
+            # bib_venue/bib_citation_count per tumbler from CatalogEntry — the
+            # Java catalog already serializes the bib_* columns
+            # (CatalogRepository.docRowFromRecord), surfaced onto CatalogEntry.
+            from nexus.db.http_vector_client import is_service_backed
+            _where_dict = _parse_where_str(where)
+            # H2: follow_links + where — search_graph_hop has no `where` param.
+            # Fall back to the dance path so the caller's where filter is
+            # honored instead of being silently dropped.
+            _skip_service = follow_links and bool(_where_dict)
+            if is_service_backed(t3) and not _skip_service:
+                # Broad corpus target: the SQL functions filter by catalog
+                # metadata internally, so pass the full corpus set.
+                target = _resolve_corpus_target(corpus, t3)
+                if not target:
+                    return f"No collections match corpus {corpus!r}"
+
+                where_dict = _where_dict
+                fetch_n = limit * 10
+
+                _no_docs_msg = (
+                    f"No documents found matching catalog filters "
+                    f"(author={author!r}, content_type={content_type!r}, "
+                    f"subtree={subtree!r}, follow_links={follow_links!r})"
+                )
+
+                if follow_links:
+                    # Graph-hop path: seeds resolved app-side, BFS in SQL.
+                    seed_tumblers: list[str] = []
+                    if subtree:
+                        desc = cat.descendants(subtree)
+                        seed_tumblers = [d["tumbler"] for d in desc if d.get("tumbler")]
+                    elif author or content_type:
+                        if content_type and not author:
+                            seed_entries_svc = cat.by_content_type(content_type)
+                        else:
+                            seed_entries_svc = cat.find(author, content_type=content_type or None)
+                            seed_entries_svc = [
+                                r for r in seed_entries_svc
+                                if author.lower() in (r.author or "").lower()
+                            ]
+                        seed_tumblers = [str(r.tumbler) for r in seed_entries_svc if r.tumbler]
+                    else:
+                        # follow_links only: use question as catalog seed
+                        seed_results_svc = cat.find(question)
+                        seed_tumblers = [str(r.tumbler) for r in seed_results_svc[:5] if r.tumbler]
+
+                    if not seed_tumblers:
+                        # No graph seeds resolved — fall through to
+                        # search_metadata_scoped over the broad target
+                        # (mirrors the dance path's fallback to broad search
+                        # when catalog_collections stays None).
+                        rows = t3.search_metadata_scoped(
+                            question, target,
+                            content_type=content_type or None,
+                            author=author or None,
+                            subtree=(subtree or None),
+                            where=(where_dict or None),
+                            n_results=fetch_n,
+                        )
+                    else:
+                        rows = t3.search_graph_hop(
+                            question, seed_tumblers, target,
+                            link_type=(follow_links or None),
+                            depth=depth,
+                            n_results=fetch_n,
+                        )
+                else:
+                    # Metadata-scoped path: catalog filters pushed into SQL.
+                    rows = t3.search_metadata_scoped(
+                        question, target,
+                        content_type=content_type or None,
+                        author=author or None,
+                        subtree=(subtree or None),
+                        where=(where_dict or None),
+                        n_results=fetch_n,
+                    )
+
+                # Dedup: one row per tumbler, keeping best (lowest) distance.
+                # Rows arrive distance-ascending so first occurrence is best.
+                seen_svc: set[str] = set()
+                deduped_svc: list[dict] = []
+                for r in rows:
+                    rid = r.get("id", "")
+                    if rid in seen_svc:
+                        continue
+                    seen_svc.add(rid)
+                    deduped_svc.append(r)
+                rows = deduped_svc[:limit]
+
+                if not rows:
+                    if structured:
+                        return {
+                            "ids": [], "tumblers": [], "distances": [],
+                            "collections": [], "chunk_collections": [],
+                            "chunk_text_hash": [],
+                        }
+                    return _no_docs_msg
+
+                if structured:
+                    tumblers_svc = [r.get("id", "") for r in rows]
+                    return {
+                        "ids": tumblers_svc,
+                        "tumblers": tumblers_svc,
+                        "distances": [float(r.get("distance", 0.0)) for r in rows],
+                        # sorted distinct across rows (mirrors existing dance path)
+                        "collections": sorted({r.get("collection", "") for r in rows}),
+                        # per-row aligned (RDR-086 / review #7)
+                        "chunk_collections": [r.get("collection", "") for r in rows],
+                        # HIGH-1: chash per matched chunk row, not a manifest guess
+                        "chunk_text_hash": [r.get("chash", "") for r in rows],
+                    }
+
+                # Text form: re-hydrate per tumbler from the catalog to build
+                # the same format as the existing dance path.
+                parts_note = []
+                if author:
+                    parts_note.append(f"author={author!r}")
+                if content_type:
+                    parts_note.append(f"content_type={content_type!r}")
+                if subtree:
+                    parts_note.append(f"subtree={subtree!r}")
+                if follow_links:
+                    parts_note.append(f"follow_links={follow_links!r}")
+                routing_note_svc = (
+                    f"[Catalog routing: {', '.join(parts_note)} -> {len(target)} collections]"
+                )
+                header_svc = (
+                    f"Found {len(rows)} documents "
+                    f"(from {len(deduped_svc)} across {len(target)} collections)"
+                )
+                lines_svc: list[str] = [f"{routing_note_svc}\n{header_svc}"]
+                lines_svc.append("")
+                for i, row in enumerate(rows, 1):
+                    tumbler_str = row.get("id", "")
+                    dist = f"{row.get('distance', 0.0):.4f}"
+                    # Re-hydrate from catalog
+                    try:
+                        entry_svc = cat.resolve(Tumbler.parse(tumbler_str)) if tumbler_str else None
+                    except Exception:
+                        entry_svc = None
+                    title_svc = (entry_svc.title if entry_svc else tumbler_str or "")[:70]
+                    # Mirror the dance path's bib richness: prefer bib_* (RDR-101
+                    # enrichment), fall back to the plain author/year fields.
+                    bib_year_svc = (entry_svc.bib_year or entry_svc.year) if entry_svc else 0
+                    bib_authors_svc = (entry_svc.bib_authors or entry_svc.author) if entry_svc else ""
+                    bib_venue_svc = entry_svc.bib_venue if entry_svc else ""
+                    bib_citation_count_svc = entry_svc.bib_citation_count if entry_svc else 0
+                    try:
+                        chunk_count_svc = len(cat.get_manifest(tumbler_str)) if tumbler_str else 0
+                    except Exception:
+                        chunk_count_svc = 0
+                    snippet_svc = row.get("content", "")[:300].replace("\n", " ")
+                    collection_svc = row.get("collection", "")
+
+                    lines_svc.append(f"{i}. [{dist}] {title_svc}")
+                    bib_svc: list[str] = []
+                    if bib_year_svc:
+                        bib_svc.append(str(bib_year_svc))
+                    if bib_authors_svc:
+                        bib_svc.append(bib_authors_svc[:60])
+                    if bib_venue_svc:
+                        bib_svc.append(bib_venue_svc[:30])
+                    if bib_citation_count_svc:
+                        bib_svc.append(f"{bib_citation_count_svc} citations")
+                    if bib_svc:
+                        lines_svc.append(f"   {' · '.join(bib_svc)}")
+                    if chunk_count_svc:
+                        lines_svc.append(f"   [{chunk_count_svc} chunks]")
+                    lines_svc.append(f"   {collection_svc}")
+                    lines_svc.append(f"   {snippet_svc}")
+                    lines_svc.append("")
+
+                if len(deduped_svc) > limit:
+                    lines_svc.append(
+                        f"\n--- showing 1-{len(rows)} of {len(deduped_svc)} documents. "
+                        f"Results are capped at limit={limit}."
+                    )
+                return "\n".join(lines_svc)
+            # ── END SERVICE-MODE BRANCH ───────────────────────────────────────
+
+            # FALLBACK: local/Chroma mode — existing app-side catalog dance below.
+
+            # Resolve seed entries for catalog routing
+            seed_entries: list = []
+            if subtree:
                 # Use descendants() directly — NOT catalog_search(owner=) which has depth-equality bug
                 desc = cat.descendants(subtree)
                 catalog_collections = {d["physical_collection"] for d in desc if d.get("physical_collection")}
@@ -1063,7 +1678,9 @@ def query(
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
-                "collections": list({r.collection for r in page}),
+                # H1 (nexus-rzqto): sorted for deterministic ordering across
+                # local and service modes.
+                "collections": sorted({r.collection for r in page}),
                 # Review #7: per-result aligned list for consumers
                 # that need per-chunk origin (e.g. nx_answer envelope).
                 "chunk_collections": [r.collection for r in page],
@@ -1360,6 +1977,7 @@ def store_put(
     title="Retrieve Knowledge Document",
     annotations={"readOnlyHint": True},
 )
+@degrade_loud_when_migrating
 def store_get(doc_id: str, collection: str = "knowledge") -> str:
     """Retrieve the full content and metadata of a T3 knowledge entry by document ID or title.
 
@@ -1416,6 +2034,7 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
     title="Batch-Retrieve Documents",
     annotations={"readOnlyHint": True},
 )
+@degrade_loud_when_migrating
 def store_get_many(
     ids: str | list,
     collections: str | list = "knowledge",
@@ -2206,16 +2825,21 @@ def plan_save(
     try:
         if not query or not plan_json:
             return "Error: query and plan_json are required"
-        with _t2_ctx() as db:
-            row_id = db.save_plan(
+        # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
+        # _WRITE_OPS; the daemon serialises the write through its single WAL
+        # writer, eliminating the "database is locked" races seen 2026-06-11).
+        _sc_tags = scope_tags or None
+        row_id = _t2_index_write(
+            lambda db: db.plans.save_plan(
                 query=query,
                 plan_json=plan_json,
                 outcome=outcome,
                 tags=tags,
                 project=project,
                 ttl=ttl,
-                scope_tags=scope_tags or None,
+                scope_tags=_sc_tags,
             )
+        )
         _record_tier_write(
             tool="plan_save", tier="plan",
             project=project, target_title=query[:80],
@@ -3718,6 +4342,7 @@ def _load_ad_hoc_ttl() -> int:
     title="Multi-Step Knowledge Answer",
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
+@degrade_loud_when_migrating
 async def nx_answer(
     question: str,
     scope: str = "",
@@ -4212,16 +4837,20 @@ async def nx_answer(
                     "scope": "personal",
                     "strategy": grown_name,
                 })
-                with _t2_ctx() as _save_db:
-                    grown_id = _save_db.plans.save_plan(
+                # nexus-j5geq: route through daemon (eliminates second WAL writer).
+                _grow_scope_tags = scope or None
+                _grow_plan_json = best.plan_json
+                _grow_project = project_name
+                def _do_grow(db):
+                    gid = db.plans.save_plan(
                         query=question,
-                        plan_json=best.plan_json,
+                        plan_json=_grow_plan_json,
                         outcome="success",
                         tags="ad-hoc,grown",
-                        project=project_name,
+                        project=_grow_project,
                         ttl=ttl_days,
                         scope="personal",
-                        scope_tags=scope or None,
+                        scope_tags=_grow_scope_tags,
                         verb=grown_verb,
                         name=grown_name,
                         dimensions=grown_dimensions,
@@ -4231,11 +4860,13 @@ async def nx_answer(
                     try:
                         cache = get_t1_plan_cache()
                         if cache is not None:
-                            row = _save_db.plans.get_plan(grown_id)
+                            row = db.plans.get_plan(gid)
                             if row:
                                 cache.upsert(row)
                     except Exception:
                         _log.debug("plan_grow_cache_upsert_failed", exc_info=True)
+                    return gid
+                grown_id = _t2_index_write(_do_grow)
                 _log.info(
                     "plan_grow_saved",
                     plan_id=grown_id,

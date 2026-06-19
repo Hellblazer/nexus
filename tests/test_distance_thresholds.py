@@ -170,3 +170,45 @@ class TestNoResultsMessage:
             per_collection={"code__x": (0, 0, 0.45, None)},
         )
         assert _no_results_message([diag]) == "No results."
+
+
+class TestNoResultsMessageFailedCollections:
+    """nexus-pebfx.8: a zero-hit where collections were excluded by service
+    errors must say so — otherwise a partial outage reads as a genuine miss."""
+
+    def test_failed_collections_noted_when_nothing_dropped(self) -> None:
+        from nexus.mcp.core import _no_results_message
+        from nexus.search_engine import SearchDiagnostics
+
+        diag = SearchDiagnostics(
+            per_collection={"code__x": (0, 0, 0.45, None)},
+            failed_collections={
+                "knowledge__seam": "POST /v1/vectors/search → HTTP 400: dim mismatch",
+            },
+        )
+        msg = _no_results_message([diag])
+        assert msg.startswith("No results.")
+        assert "1 collection(s) were excluded" in msg
+        assert "knowledge__seam" in msg
+        assert "HTTP 400" in msg
+
+    def test_failed_collections_appended_to_threshold_note(self) -> None:
+        from nexus.mcp.core import _no_results_message
+        from nexus.search_engine import SearchDiagnostics
+
+        diag = SearchDiagnostics(
+            per_collection={"knowledge__papers": (3, 3, 0.65, 0.5515)},
+            total_dropped=3,
+            total_raw=3,
+            failed_collections={"knowledge__seam": "HTTP 400: dim mismatch"},
+        )
+        msg = _no_results_message([diag])
+        assert "0.5515" in msg
+        assert "knowledge__seam" in msg
+
+    def test_no_suffix_without_failures(self) -> None:
+        from nexus.mcp.core import _no_results_message
+        from nexus.search_engine import SearchDiagnostics
+
+        diag = SearchDiagnostics(per_collection={"code__x": (0, 0, 0.45, None)})
+        assert _no_results_message([diag]) == "No results."

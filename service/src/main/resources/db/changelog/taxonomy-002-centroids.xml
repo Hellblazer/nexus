@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 bead nexus-t1hnc.1 — pgvector taxonomy-centroid tables.
+
+    Moves the taxonomy__centroids ChromaDB collection into Postgres so service-mode
+    taxonomy compute (discover / assign / project) is chroma-free (RDR-155 retires
+    ChromaDB). Creates three PER-DIM tables mirroring the chunks_384/768/1024
+    convention (vectors-001-baseline.xml); the repository (bead nexus-t1hnc.2) routes
+    every op to the table matching the embedding dimension.
+
+    Schema contract (P1.1 test TaxonomyCentroidSchemaLiquibaseTest documents exactly these):
+      tenant_id  TEXT         NOT NULL
+      collection TEXT         NOT NULL
+      topic_id   BIGINT       NOT NULL
+      embedding  vector(<dim>) NOT NULL
+      label      TEXT
+      doc_count  INTEGER
+      created_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+      PK (tenant_id, collection, topic_id)
+      HNSW: USING hnsw (embedding vector_cosine_ops) WITH (m=16, ef_construction=64)
+      FORCE RLS: USING/WITH CHECK (tenant_id = current_setting('nexus.tenant', true))
+
+    The PK (tenant_id, collection, topic_id) doubles as the collection-prefix btree the
+    annQuery WHERE collection = ?/!= ? filter, count(collection), and getByCollection
+    paths use — no separate (tenant_id, collection) index needed.
+
+    NO FK to nexus.topics(id): the centroid store mirrors the old ChromaDB collection,
+    which had no relational constraint; delete/merge clean centroids explicitly via the
+    repository (parity with the chroma centroid_coll.delete path). NO tsvector/GIN
+    (centroids carry no chunk_text). NO triggers (RDR-156: declarative > function > view
+    > trigger-only-if-unfixable).
+
+    hnsw.iterative_scan='relaxed_order' is a runtime session setting (filtered ANN), NOT
+    schema DDL — it lands with the P1.2 repository, same split as vectors-001.
+
+    PREREQUISITE: the `vector` extension (CREATE EXTENSION vector) is provided by
+    vectors-001-baseline.xml (changeset vectors-001-1); this changelog is included after
+    it in db.changelog-master.xml. nexus_svc DML grants are schema-wide + runAlways in
+    grants-nexus-svc.xml — new nexus.* tables are provisioned automatically.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: nexus.taxonomy_centroids_384 ─────────────────────────── -->
+    <changeSet id="taxonomy-002-1" author="nexus-t1hnc.1">
+        <comment>taxonomy_centroids_384: tenant-isolated pgvector centroid table for 384-dim embeddings (MiniLM)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.taxonomy_centroids_384 (
+    tenant_id  TEXT        NOT NULL,
+    collection TEXT        NOT NULL,
+    topic_id   BIGINT      NOT NULL,
+    embedding  vector(384) NOT NULL,
+    label      TEXT,
+    doc_count  INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT taxonomy_centroids_384_pk PRIMARY KEY (tenant_id, collection, topic_id)
+);
+
+CREATE INDEX idx_taxonomy_centroids_384_embedding
+    ON nexus.taxonomy_centroids_384
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.taxonomy_centroids_384 CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: nexus.taxonomy_centroids_768 ─────────────────────────── -->
+    <changeSet id="taxonomy-002-2" author="nexus-t1hnc.1">
+        <comment>taxonomy_centroids_768: tenant-isolated pgvector centroid table for 768-dim embeddings</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.taxonomy_centroids_768 (
+    tenant_id  TEXT        NOT NULL,
+    collection TEXT        NOT NULL,
+    topic_id   BIGINT      NOT NULL,
+    embedding  vector(768) NOT NULL,
+    label      TEXT,
+    doc_count  INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT taxonomy_centroids_768_pk PRIMARY KEY (tenant_id, collection, topic_id)
+);
+
+CREATE INDEX idx_taxonomy_centroids_768_embedding
+    ON nexus.taxonomy_centroids_768
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.taxonomy_centroids_768 CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: nexus.taxonomy_centroids_1024 ────────────────────────── -->
+    <changeSet id="taxonomy-002-3" author="nexus-t1hnc.1">
+        <comment>taxonomy_centroids_1024: tenant-isolated pgvector centroid table for 1024-dim embeddings (Voyage AI)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.taxonomy_centroids_1024 (
+    tenant_id  TEXT         NOT NULL,
+    collection TEXT         NOT NULL,
+    topic_id   BIGINT       NOT NULL,
+    embedding  vector(1024) NOT NULL,
+    label      TEXT,
+    doc_count  INTEGER,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT taxonomy_centroids_1024_pk PRIMARY KEY (tenant_id, collection, topic_id)
+);
+
+CREATE INDEX idx_taxonomy_centroids_1024_embedding
+    ON nexus.taxonomy_centroids_1024
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.taxonomy_centroids_1024 CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: RLS on all three centroid tables ─────────────────────── -->
+    <changeSet id="taxonomy-002-4" author="nexus-t1hnc.1">
+        <comment>Enable and FORCE RLS; create tenant_isolation policy on the three taxonomy_centroids tables</comment>
+        <sql splitStatements="true" stripComments="false">
+-- taxonomy_centroids_384
+ALTER TABLE nexus.taxonomy_centroids_384 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_384 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_centroids_384
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- taxonomy_centroids_768
+ALTER TABLE nexus.taxonomy_centroids_768 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_768 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_centroids_768
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- taxonomy_centroids_1024
+ALTER TABLE nexus.taxonomy_centroids_1024 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_1024 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_centroids_1024
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.taxonomy_centroids_1024;
+            ALTER TABLE nexus.taxonomy_centroids_1024 NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.taxonomy_centroids_1024 DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.taxonomy_centroids_768;
+            ALTER TABLE nexus.taxonomy_centroids_768 NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.taxonomy_centroids_768 DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.taxonomy_centroids_384;
+            ALTER TABLE nexus.taxonomy_centroids_384 NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.taxonomy_centroids_384 DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -1,0 +1,488 @@
+name: Engine Service Native Release
+
+# RDR-157 P2 / beads nexus-vwvv5.6 + nexus-6o0bc.
+#
+# Publishes the native `nexus-service` binary (the engine storage server) as a
+# consumable artifact so conexus `deploy/engine` can build its runtime image
+# FROM the published binary instead of throwaway-cloning + JAR/jlink. This is
+# the RDR-157 "cloud habitat" variant: the same native binary, run with no
+# embedded PG — it connects to a managed Postgres via NX_DB_URL and skips
+# pg_provision.
+#
+# CHANNEL — deliberately separate from the `conexus` PyPI release (`vX.Y.Z`
+# tags / release.yml). The engine-service binary is a DIFFERENT artifact from
+# the conexus package, so an `engine-service-v*` tag here does NOT trip the
+# develop release boundary (RDR-155 P4a) and publishes nothing to PyPI.
+#
+#   - workflow_dispatch : build + smoke + upload an Actions artifact only
+#                         (reversible dev path — download it to smoke conexus
+#                         locally / in the cloud, no GitHub Release created).
+#   - push tag engine-service-v*
+#                       : build + smoke + create a GitHub Release and attach the
+#                         linux-amd64 native binary + its sha256 (what conexus
+#                         pins and pulls).
+#
+# Per-platform matrix (nexus-vwvv5.6): linux-amd64 + linux-arm64 + mac-arm64
+# native binaries on their own runners (native-image does not cross-compile).
+# The jOOQ decouple (nexus-f6j31) pre-generates sources on a Docker-capable linux
+# runner and passes them as an artifact, so mac-arm64 can BUILD without Docker.
+# mac-arm64 is build+publish but UNSMOKED: native-smoke.sh needs Docker (throwaway
+# pgvector) which GH macOS lacks, so its runtime correctness rests on the
+# mac-arm64 CA-3 gate + the lp2qo native-serving spike, not a per-build smoke.
+# That coverage gap (no per-build macOS service-binary smoke) is tracked in
+# nexus-4xf5m (substantive-critic O-B).
+# conexus pins/pulls the linux-amd64 asset; local-distro users grab their arch.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'engine-service-v*'
+
+permissions:
+  contents: write  # create the GitHub Release + upload assets on tag push
+  id-token: write  # nexus-1odsm: keyless cosign signing of release assets (OIDC)
+
+concurrency:
+  group: engine-service-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Generate jOOQ sources ONCE on a Docker-capable runner (testcontainers codegen
+  # needs Docker), upload them. The per-platform native builds then consume the
+  # artifact with -Pprebuilt-jooq and need no Docker — which unblocks mac-arm64
+  # (GH macOS runners have no Docker). nexus-f6j31.
+  jooq-codegen:
+    name: jOOQ codegen (linux, Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up GraalVM 25.0.3
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+      - name: Run testcontainers jOOQ codegen
+        working-directory: service
+        # generate-sources triggers testcontainers-jooq-codegen (boots pgvector,
+        # applies the master changelog, generates into target/generated-sources/jooq).
+        run: ./mvnw -q generate-sources
+      - name: Upload generated jOOQ sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: jooq-sources
+          path: service/target/generated-sources/jooq
+          if-no-files-found: error
+          retention-days: 3
+
+  build-publish:
+    name: Build + smoke + publish native nexus-service (${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.runner }}
+    needs: jooq-codegen
+    # Native-image build (~2-3m analysis + image) + native smoke (linux only).
+    # No jOOQ codegen here — sources come from the jooq-codegen artifact, so no
+    # Docker is needed to BUILD (mac-arm64 can build). 40m covers a cold runner.
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true }
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm, smoke: true }
+          # mac-arm64: build + publish, but UNSMOKED. native-smoke.sh needs Docker
+          # (throwaway pgvector) which GH macOS lacks; macOS runtime correctness is
+          # covered by the mac-arm64 CA-3 gate + the lp2qo native-serving spike.
+          - { arch: mac-arm64,   runner: macos-14,          smoke: false }
+    env:
+      ASSET: nexus-service-${{ matrix.target.arch }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up GraalVM 25.0.3
+        # SHA-pinned (not @v1): this is a PUBLISH path that creates a GitHub
+        # Release, so a floating tag is a supply-chain hole. bef4b0e == v1.
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f
+        with:
+          # >= 25.0.2 REQUIRED: the bundled jOOQ / liquibase reachability metadata
+          # use GraalVM's unified reachability-metadata schema (nexus-lp2qo).
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+
+      - name: Cache bge-768 ONNX model
+        # RDR-160: in local mode the native binary constructs Bge768Embedder,
+        # which loads the STANDARD fp32 bge-base-en-v1.5 ONNX from ~/.cache/nexus
+        # (NOT MiniLM, NOT fastembed's fused optimized export) — the native smoke
+        # needs it. STABLE key (immutable upstream export): one cold download per
+        # arch, restored thereafter; bump -v only if the model source changes.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/nexus/onnx_models/bge-base-en-v1.5
+          key: bge-onnx-standard-${{ runner.os }}-${{ matrix.target.arch }}-v1
+
+      - name: Prime bge-768 ONNX on cache miss
+        run: |
+          MODEL_DIR="$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx"
+          if [ ! -f "$MODEL_DIR/model.onnx" ]; then
+            echo "bge ONNX not in cache; downloading the standard fp32 export (~416MB)."
+            mkdir -p "$MODEL_DIR"
+            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx \
+              -o "$MODEL_DIR/model.onnx"
+            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json \
+              -o "$MODEL_DIR/tokenizer.json"
+            test -f "$MODEL_DIR/model.onnx" || { echo "bge model.onnx missing after download"; exit 1; }
+          else
+            echo "bge ONNX restored from cache."
+          fi
+
+      - name: Resolve engine-service version
+        id: ver
+        # On a tag push, the published version is the tag minus the
+        # 'engine-service-v' prefix. On workflow_dispatch (dev/smoke) there is no
+        # release version, so keep the pom's SNAPSHOT. The version must be stamped
+        # into the binary so its /version endpoint (VersionHandler reads
+        # pom.properties) does not report 1.0-SNAPSHOT under a real release tag —
+        # nx clients negotiate schema skew off /version (nexus-pebfx.4).
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF}" == refs/tags/engine-service-v* ]]; then
+            echo "version=${ref#engine-service-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download pre-generated jOOQ sources
+        # From the jooq-codegen job — compiled by -Pprebuilt-jooq below. No Docker
+        # needed to build, which is what lets mac-arm64 build here.
+        uses: actions/download-artifact@v4
+        with:
+          name: jooq-sources
+          path: service/target/generated-sources/jooq
+
+      - name: Stamp release version into the pom (tag push only)
+        if: steps.ver.outputs.version != ''
+        working-directory: service
+        run: ./mvnw -q versions:set -DnewVersion="${{ steps.ver.outputs.version }}" -DgenerateBackupPoms=false
+
+      - name: Build native image (-Pnative -Pprebuilt-jooq)
+        working-directory: service
+        # -Pprebuilt-jooq unbinds the testcontainers codegen and compiles the
+        # downloaded sources → no Docker needed (mac-arm64 builds here).
+        # Do NOT `clean`: it would wipe the downloaded target/generated-sources/jooq.
+        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests package
+
+      - name: Native smoke test (boot against throwaway pgvector)
+        if: matrix.target.smoke
+        working-directory: service
+        # Asserts liquibase migration + jOOQ INSERT/SELECT/FTS return 200 against
+        # a real Postgres — the cloud runtime path. Don't publish a broken binary.
+        # linux only: needs Docker, which GH macOS lacks (mac is build-only).
+        run: ./native-smoke.sh
+
+      - name: Stage artifact + sha256
+        id: stage
+        run: |
+          set -euo pipefail
+          src="service/target/nexus-service"
+          test -x "$src" || { echo "native binary missing at $src"; ls -la service/target; exit 1; }
+          # Size floor: a native image is tens of MB. A truncated/empty build that
+          # still had its exec bit set would otherwise pass the -x check.
+          # wc -c (not stat -c%s) for macOS/BSD portability.
+          sz=$(wc -c < "$src")
+          test "$sz" -gt 20000000 || { echo "native binary suspiciously small ($sz bytes)"; exit 1; }
+          mkdir -p dist
+          cp "$src" "dist/$ASSET"
+          # sha256sum on linux, shasum -a 256 on macOS (identical file format).
+          ( cd dist && { command -v sha256sum >/dev/null && sha256sum "$ASSET" || shasum -a 256 "$ASSET"; } > "$ASSET.sha256" )
+          ls -la dist
+          file "dist/$ASSET" || true
+
+      - name: Assert binary ABI floor (code-review M1)
+        # The release native image is built on ubuntu-latest (~glibc 2.39) — a
+        # HIGHER floor than the CA-3 bundle gate (manylinux 2.28). Enforcement was
+        # previously deferred entirely to conexus deploy/engine/build-image.sh, so a
+        # runner bump that pushed the floor ABOVE the consumer base would surface
+        # only at image-build time. Assert it here too: linux max-required GLIBC
+        # must be <= the conexus runtime base (debian:trixie-slim = 2.41). For mac,
+        # report the Mach-O minos (informational; no Docker smoke covers it).
+        #
+        # CROSS-REPO COUPLING (substantive-critic M1): the 2.41 ceiling is the glibc
+        # of conexus's runtime base, whose canonical definition lives in the conexus
+        # repo (deploy/engine/build-image.sh / its FROM image), NOT here. If conexus
+        # changes its runtime base distro/version, UPDATE this ceiling in lockstep —
+        # nothing in nexus/ will alert you otherwise. Keep this the looser (>=) of
+        # the two bases if they ever diverge so the assertion never blocks a release
+        # that the consumer would actually accept.
+        run: |
+          set -euo pipefail
+          asset="dist/$ASSET"
+          case "${{ matrix.target.arch }}" in
+            linux-*)
+              # Max GLIBC_x.y.z token referenced by the binary's dynamic symbols.
+              maxglibc=$(objdump -T "$asset" 2>/dev/null \
+                | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+                | sed 's/GLIBC_//' | sort -V | tail -1)
+              if [ -z "$maxglibc" ]; then
+                # No GLIBC tokens: a statically-linked binary (no floor to enforce).
+                # GraalVM on linux currently emits DYNAMIC binaries, so flag this as
+                # a surprising build change rather than silently passing (code-review L1).
+                echo "NOTE: no GLIBC symbol references in $asset — statically linked? (no floor to assert)"
+              else
+                echo "max required GLIBC: $maxglibc"
+                ceiling="2.41"  # conexus runtime base (debian:trixie-slim) — see header note
+                if [ "$(printf '%s\n%s\n' "$maxglibc" "$ceiling" | sort -V | tail -1)" != "$ceiling" ]; then
+                  echo "FAIL: binary requires GLIBC $maxglibc > consumer base $ceiling" >&2
+                  exit 1
+                fi
+              fi
+              ;;
+            mac-*)
+              otool -l "$asset" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print "Mach-O "$0; f=0}' || true
+              ;;
+            *)
+              echo "FAIL: unhandled arch '${{ matrix.target.arch }}' — no ABI floor check defined" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Install cosign (release tag only)
+        # nexus-1odsm: keyless Sigstore signing. Only needed on the publish path.
+        # SHA-pinned (not @v3.7.0): this is the tool that installs the release
+        # signing primitive, so a floating tag is the supply-chain hole this whole
+        # bead exists to close — same reasoning as the SHA-pinned graalvm action
+        # above. SHA backs v3.7.0.
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409  # v3.7.0
+
+      - name: Sign release asset (cosign keyless, release tag only)
+        # nexus-1odsm: the native binary runs with DB credentials in the conexus
+        # cloud and is opaque to static inspection, so a detached Sigstore
+        # signature matters more than for a JAR. Keyless: the GitHub Actions OIDC
+        # identity is bound into the Fulcio cert; the Rekor transparency log entry
+        # is embedded in the bundle. Verify with the identity + issuer below
+        # (see the release notes / conexus deploy ECR_PUSH.md).
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          # Two bundle formats, same keyless signature:
+          #  (1) .cosign.bundle      — old JSON format (cosign v2.4.1 default).
+          #      Consumed by conexus deploy's `cosign verify-blob` before docker run.
+          #  (2) .sigstore.json      — new protobuf bundle (--new-bundle-format).
+          #      Consumed by the local `nx daemon service install-binary` path via
+          #      sigstore-python (RDR-161 RF-161-1): offline-verifiable, no 130MB
+          #      cosign binary on the pip user's machine. The old JSON format only
+          #      carries an inclusion *promise* (SET), which sigstore-python cannot
+          #      verify offline; the protobuf format carries the full inclusion
+          #      proof. Both halves of RDR-161 P1 (this publisher + the consumer
+          #      command) land together or local verification is non-functional.
+          cosign sign-blob "dist/$ASSET" --bundle "dist/$ASSET.cosign.bundle"
+          cosign sign-blob "dist/$ASSET" --new-bundle-format --bundle "dist/$ASSET.sigstore.json"
+          # Self-verify BOTH before publishing so a malformed bundle fails the
+          # build, not the consumer. Identity = this workflow at this tag ref.
+          cosign verify-blob "dist/$ASSET" \
+            --bundle "dist/$ASSET.cosign.bundle" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          cosign verify-blob "dist/$ASSET" \
+            --new-bundle-format \
+            --bundle "dist/$ASSET.sigstore.json" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          echo "cosign signatures verified for $ASSET (.cosign.bundle + .sigstore.json)"
+
+      - name: Upload Actions artifact (always — dev smoke / non-tag path)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (engine-service-v* tag only)
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # printf (not a heredoc): immune to YAML run-block indentation.
+          printf '%s\n' \
+            "Native nexus-service binaries for the RDR-157 cloud + local habitats:" \
+            "run with no embedded PG, pointed at a managed Postgres via NX_DB_URL" \
+            "(skips pg_provision). Consumed by conexus deploy/engine (build the" \
+            "runtime image FROM the linux-amd64 binary). Per-platform assets +" \
+            "sha256 attached: nexus-service-linux-amd64, nexus-service-linux-arm64," \
+            "nexus-service-mac-arm64." \
+            "" \
+            "NOTE: the mac-arm64 binary is UNSMOKED (GH macOS runners have no Docker" \
+            "for native-smoke.sh). Its runtime correctness rests on the mac-arm64" \
+            "CA-3 gate + the lp2qo native-serving spike, not a per-build smoke —" \
+            "treat it as experimental. The linux binaries ARE smoke-tested." \
+            "" \
+            "glibc floor: linux binaries built on ubuntu-latest (~2.39). The runtime" \
+            "base must have glibc >= that (conexus uses debian:trixie-slim = 2.41);" \
+            "deploy/engine/build-image.sh enforces this via objdump." \
+            "" \
+            "ONNX model NOT bundled (RDR-160) — in local mode the binary loads the" \
+            "STANDARD fp32 bge-base-en-v1.5 ONNX from the filesystem at runtime." \
+            "Before building the runtime image, stage it (or run nx init --service):" \
+            "  MODEL_DIR=~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx; mkdir -p \$MODEL_DIR" \
+            "  curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx -o \$MODEL_DIR/model.onnx" \
+            "  curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json -o \$MODEL_DIR/tokenizer.json" \
+            "" \
+            "Provenance: each asset carries a sha256 AND a keyless cosign/Sigstore" \
+            "signature in TWO bundle formats — <asset>.cosign.bundle (old JSON) and" \
+            "<asset>.sigstore.json (new protobuf). Verify before use, either path:" \
+            "  cosign verify-blob <asset> --bundle <asset>.cosign.bundle \\" \
+            "    --certificate-oidc-issuer https://token.actions.githubusercontent.com \\" \
+            "    --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@refs/tags/engine-service-v.*'" \
+            "conexus deploy verifies the .cosign.bundle before docker run (ECR_PUSH.md)." \
+            "The local 'nx daemon service install-binary' path verifies the protobuf" \
+            ".sigstore.json offline via sigstore-python (no cosign binary required)." \
+            > notes.md
+          # Matrix-safe: create the release once (whichever arch job wins), then
+          # each job uploads its OWN arch assets (--clobber for re-runs). Use
+          # view-then-create rather than `create ... 2>/dev/null || true`: the old
+          # idiom swallowed auth/network/rate-limit failures identically to the
+          # expected 'already exists', then fell through to `upload` which failed
+          # with a confusing 'release not found' (code-review H1).
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            # Tolerate ONLY the matrix race (another arch job created it between the
+            # view and this create); surface auth/network/anything else.
+            if ! gh release create "$tag" --title "nexus-service (native) ${tag}" \
+                   --notes-file notes.md 2>create_err.txt; then
+              grep -qi "already exists" create_err.txt \
+                || { echo "release create failed:" >&2; cat create_err.txt >&2; exit 1; }
+            fi
+          fi
+          gh release upload "$tag" --clobber \
+            "dist/$ASSET" "dist/$ASSET.sha256" \
+            "dist/$ASSET.cosign.bundle" "dist/$ASSET.sigstore.json"
+
+  # RDR-161 P2 (nexus-9yt2p): publish the relocatable PostgreSQL+pgvector bundle
+  # as a release asset so `nx daemon service install-binary` / `nx init --service`
+  # can acquire+verify it (RF-161-3). Until now scripts/build_pg_bundle.sh was
+  # exercised only by ci.yml as a 7-day Actions artifact — nothing uploaded it to
+  # a release. Lives in THIS workflow so the cosign cert identity is
+  # `engine-service-release.yml@<tag>` — the SAME pin the consumer already
+  # verifies for the native binary, so one identity-regexp covers both artifacts.
+  build-publish-pg-bundle:
+    name: Build + sign + publish PG bundle (${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.runner }}
+    # The native-binary job creates the GitHub Release (with the rich notes);
+    # this job uploads the PG-bundle assets onto it. `needs` orders us AFTER it
+    # (release exists, no create-race on notes). `if: !cancelled()` decouples us
+    # from build-publish SUCCESS: build-publish is a 3-arch matrix, and a `needs`
+    # alone would skip ALL PG-bundle publishes if any single arch (e.g. the
+    # unsmoked mac-arm64) failed — leaving the surviving arches with a binary on
+    # the release but no PG bundle (install-binary then 404s on the bundle, a
+    # worse state than a clean failure). With !cancelled() the surviving arches
+    # still get their PG bundle; a TOTAL binary failure means no release exists
+    # and the upload below fails loud, which is correct (substantive-critic S2).
+    needs: build-publish
+    if: ${{ !cancelled() }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { arch: linux-amd64, runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64" }
+          # linux-arm64: built + published; full relocation proof is deferred to
+          # nexus-xqk5r (the ci.yml relocation smoke runs on amd64). The bundle
+          # itself builds identically via the aarch64 manylinux image.
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64" }
+          - { arch: mac-arm64,   runner: macos-14,         image: "" }
+    env:
+      # Pinned identically to ci.yml's CA-3 job (single source of truth is the
+      # build script; these select versions). PG17 aligns with the deployed stack.
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.2"
+      ASSET: nexus-pg-${{ matrix.target.arch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build PG + pgvector bundle and package .txz
+        env:
+          MANYLINUX_IMAGE: ${{ matrix.target.image }}
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/bundle"
+          mkdir -p "$bundle" dist
+          if [ -n "$MANYLINUX_IMAGE" ]; then
+            # linux: build inside manylinux_2_28 so the binaries' glibc floor is
+            # 2.28 (broad compatibility), exactly as ci.yml's CA-3 gate builds them.
+            docker run --rm \
+              -e PG_VERSION -e PGVECTOR_VERSION -e BUNDLE_PREFIX="$bundle" \
+              -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+              "$MANYLINUX_IMAGE" /bin/bash -c '
+                set -eux
+                bash "'"$GITHUB_WORKSPACE"'/scripts/build_pg_bundle.sh"
+              '
+          else
+            # mac-arm64: native build (the script brew-installs flex/bison and
+            # applies MACOSX_DEPLOYMENT_TARGET). GH macOS runners have no Docker.
+            BUNDLE_PREFIX="$bundle" bash scripts/build_pg_bundle.sh
+          fi
+          # -C parent + basename preserves the relative bin/ lib/ share/ layout
+          # relocation depends on (identical to ci.yml packaging).
+          tar -cJf "dist/$ASSET.txz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
+          sz=$(wc -c < "dist/$ASSET.txz")
+          echo "bundle .txz size: $sz bytes"
+          # CA-2 ship-alongside size tripwire (mirrors ci.yml): the verdict rests
+          # on a small (~5.7 MB) bundle; a configure-flag or contrib change that
+          # doubled it would invalidate the rationale — fail loud, don't ship it.
+          if [ "$sz" -gt $((10 * 1024 * 1024)) ]; then
+            echo "::error::nexus-pg bundle .txz is $sz bytes (> 10 MiB) — CA-2 ship-alongside size assumption breached"
+            exit 1
+          fi
+          ( cd dist && { sha256sum "$ASSET.txz" 2>/dev/null || shasum -a 256 "$ASSET.txz"; } > "$ASSET.txz.sha256" )
+
+      - name: Install cosign (release tag only)
+        # SHA-pinned (not @v3.7.0): same supply-chain reasoning as the native-binary
+        # job above — the signing primitive must not float.
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409  # v3.7.0
+
+      - name: Sign PG bundle (cosign keyless, release tag only)
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          # Protobuf bundle ONLY (.sigstore.json): the PG bundle is a NEW artifact
+          # with no legacy .cosign.bundle consumer, so it ships the single format
+          # the install seam's sigstore-python path verifies. Self-verify before
+          # publishing so a malformed bundle fails the build, not the consumer.
+          cosign sign-blob "dist/$ASSET.txz" --new-bundle-format --bundle "dist/$ASSET.txz.sigstore.json"
+          cosign verify-blob "dist/$ASSET.txz" \
+            --new-bundle-format \
+            --bundle "dist/$ASSET.txz.sigstore.json" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          echo "cosign signature verified for $ASSET.txz (.sigstore.json)"
+
+      - name: Upload Actions artifact (always — dev smoke / non-tag path)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish PG bundle to GitHub Release (engine-service-v* tag only)
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # The release already exists (this job `needs` build-publish). Attach the
+          # PG-bundle assets; --clobber makes re-runs idempotent.
+          gh release upload "$tag" --clobber \
+            "dist/$ASSET.txz" "dist/$ASSET.txz.sha256" "dist/$ASSET.txz.sigstore.json"

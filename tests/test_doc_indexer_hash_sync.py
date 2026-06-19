@@ -7,6 +7,7 @@ Verifies that:
 
 Also verifies force=True bypasses the staleness check for code, prose, and PDF files.
 """
+import pytest
 import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -281,3 +282,12 @@ def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
 
     assert result > 0, "force=True should return int > 0 (indexed) even when hash matches"
     mock_embed.assert_called()
+
+
+@pytest.fixture(autouse=True)
+def _legacy_vector_backend(monkeypatch):
+    """nexus-tawx0: service mode is the post-P4a DEFAULT (no-Python-embed
+    stubs fire unless opted out). This module tests the legacy
+    chroma/local embed pipeline, which is exactly the chroma-injected
+    configuration the opt-out exists for."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")

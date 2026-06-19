@@ -59,7 +59,54 @@ def t2_handle() -> Iterator[Any]:
     do NOT go through this helper — they must tolerate offline mode.
     """
     import click
+
+    # RDR-152 nexus-fjwxh: in SERVICE mode the Java service (PG) is the write
+    # arbiter, so the SQLite single-writer T2 daemon is not in the picture —
+    # route directly to a service-backed T2Database (its ``.memory`` is an
+    # HttpMemoryStore with the same interface as ``T2Client.memory``). The
+    # daemon-client path below is the SQLite-mode arbiter only.
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        import httpx
+
+        from nexus.db.t2 import T2Database
+
+        # Service mode routes T2Database to the HTTP service (PG arbiter), not a
+        # raw SQLite writer, so the RDR-128 single-writer concern does not apply.
+        #
+        # nexus-00en9: two distinct service-down failure points, both of which
+        # would otherwise reach Click as a raw traceback:
+        #  (a) PRE-YIELD construction — HttpMemoryStore resolves its endpoint via
+        #      resolve_service_config(), which raises RuntimeError fail-loud when
+        #      no lease/env is discoverable (the common "service never started"
+        #      case). Its message already names the operator fix.
+        #  (b) POST-YIELD RPC — the endpoint resolved (a lease existed) but the
+        #      service is unreachable/erroring when the actual RPC fires, raising
+        #      an httpx transport or status error.
+        try:
+            db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow: service mode routes to HTTP service, not a raw SQLite writer
+        except RuntimeError as exc:
+            raise click.ClickException(
+                f"T2 storage service unavailable: {exc}"
+            ) from exc
+        try:
+            yield db
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            # Narrow to transport/status failures (unreachable/erroring service).
+            # Decode/redirect/protocol httpx errors are service-side bugs that
+            # should keep their traceback during go-live, not be aliased to a
+            # reachability hint.
+            raise click.ClickException(
+                f"T2 storage service error: {exc}. "
+                "Check the storage service: nx doctor"
+            ) from exc
+        finally:
+            db.close()
+        return
+
     from nexus.daemon.t2_client import (
+        T2ClientError,
         T2DaemonNotReachableError,
         T2SchemaVersionMismatchError,
         make_t2_client,
@@ -68,6 +115,24 @@ def t2_handle() -> Iterator[Any]:
     client = make_t2_client()
     try:
         yield client
+    except T2ClientError as exc:
+        # nexus-00en9: a REACHABLE daemon that returns an error frame mid-RPC
+        # otherwise escapes as a raw traceback. T2ClientError is a sibling of the
+        # discovery errors below (no inheritance), so this catch never shadows
+        # them. Split by error_type so the operator gets the right remedy: a
+        # frame-level ProtocolError signals version skew (same class
+        # T2SchemaVersionMismatchError surfaces at handshake time), NOT transient
+        # contention.
+        if exc.error_type == "ProtocolError":
+            raise click.ClickException(
+                f"T2 protocol error (possible version skew): {exc.message}. "
+                "Check versions: nx --version vs the running daemon, then "
+                "restart it: nx daemon t2 restart"
+            ) from exc
+        raise click.ClickException(
+            f"T2 store error ({exc.error_type}): {exc.message}. "
+            "Retry, or check daemon state: nx daemon t2 status"
+        ) from exc
     except T2DaemonNotReachableError:
         # T2Client connects lazily on first RPC; the error surfaces here,
         # not during make_t2_client() construction. Convert to a clean

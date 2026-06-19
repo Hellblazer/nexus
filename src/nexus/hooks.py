@@ -32,8 +32,8 @@ def _default_db_path() -> Path:
 
 
 def _open_t1():
-    from nexus.db.t1 import T1Database
-    return T1Database()
+    from nexus.db.t1 import get_t1_database
+    return get_t1_database()
 
 
 def _infer_repo() -> str:

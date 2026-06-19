@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 nexus service — master Liquibase changelog.
+
+    Includes all store-specific changelogs in dependency order.
+    Add new <include> entries here as beads .11-.18 land.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- Store 0: nexus_svc role bootstrap (bead nexus-9qvam) — MUST be first; the
+         catalog grant DO-blocks and the final grants changeset are fail-loud when the
+         role is absent, and build-time jOOQ codegen applies this changelog against a
+         fresh container with no pre-hook. Idempotent; production DBA pre-creation
+         makes it a no-op. -->
+    <include file="db/changelog/role-001-nexus-svc.xml"/>
+
+    <!-- Store 1: memory (bead nexus-gmiaf.5) -->
+    <include file="db/changelog/memory-001-baseline.xml"/>
+
+    <!-- Store 2: plans (bead nexus-gmiaf.11) -->
+    <include file="db/changelog/plans-001-baseline.xml"/>
+
+    <!-- Store 3: telemetry (bead nexus-gmiaf.12) -->
+    <include file="db/changelog/telemetry-001-baseline.xml"/>
+
+    <!-- Store 4: T1 scratch (bead nexus-gmiaf.13) — UNLOGGED, t1 schema, session+tenant scoped -->
+    <include file="db/changelog/t1-001-baseline.xml"/>
+
+    <!-- Store 5: taxonomy (bead nexus-gmiaf.14) — NO FTS; exact-equality + doc_count sort -->
+    <include file="db/changelog/taxonomy-001-baseline.xml"/>
+
+    <!-- Store 6: aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15) -->
+    <include file="db/changelog/aspects-001-baseline.xml"/>
+
+    <!-- Store 7: chash_index (bead nexus-gmiaf.16) — content-addressed routing table, no FTS -->
+    <include file="db/changelog/chash-001-baseline.xml"/>
+
+    <!-- Store 8: catalog (bead nexus-gmiaf.18) — owners/documents/links/chunks/collections + FTS + RLS -->
+    <include file="db/changelog/catalog-001-baseline.xml"/>
+
+    <!-- Cross-store FKs (bead nexus-b7v6i) — (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler).
+         NOTE (nexus-sa14p): topic_assignments is intentionally EXCLUDED — its doc_id is a
+         chunk chash, not a tumbler. aspects/highlights/queue/chunks keep their FKs. -->
+    <include file="db/changelog/fk-001-catalog-cross-store.xml"/>
+
+    <!-- Store 9: bridge token lifecycle (bead nexus-gmiaf.32.1) — service_tokens +
+         session_tokens credential-resolution tables. NO RLS (read before tenant
+         context exists; the token resolves the tenant). nexus schema. -->
+    <include file="db/changelog/service-tokens-001-baseline.xml"/>
+    <!-- nexus-e4130: at-most-one-root-token partial unique index (operator invariant). -->
+    <include file="db/changelog/service-tokens-002-single-root-index.xml"/>
+
+    <!-- Store 10: pgvector chunks tables + manifest collection column (bead nexus-mf447) -->
+    <include file="db/changelog/vectors-001-baseline.xml"/>
+
+    <!-- Store 10b: trigram GIN indexes for the hybrid pg_trgm gate (bead nexus-eap5l) -->
+    <include file="db/changelog/vectors-002-trgm-index.xml"/>
+
+    <!-- Collection-registry FKs (bead nexus-70r3c.2, RDR-156 P0.2):
+         NOT VALID FKs from chunks_384/768/1024, chash_index, and topic_assignments to
+         catalog_collections(tenant_id, name). Includes backfill-stubs changeset.
+         Must come after vectors-001, chash-001, taxonomy-001, and catalog-001. -->
+    <include file="db/changelog/fk-002-collection-registry.xml"/>
+
+    <!-- Catalog hygiene (bead nexus-70r3c.2, RDR-156 P0.2):
+         temporal typing for catalog_collections.created_at/superseded_at (TEXT→timestamptz NULL),
+         and CHECK constraints for chash length = 32 and position >= 0. -->
+    <include file="db/changelog/catalog-002-hygiene.xml"/>
+
+    <!-- Soft-delete schema (bead nexus-70r3c.6, RDR-156 P1.2):
+         deleted_at timestamptz NULL on catalog_documents + catalog_links; partial
+         indexes WHERE deleted_at IS NULL; document_trash/document_restore/purge_trash
+         functions; live_chunks anti-join view. ZERO triggers. -->
+    <include file="db/changelog/catalog-003-soft-delete.xml"/>
+
+    <!-- Manifest functions (bead nexus-70r3c.9, RDR-156 P2.2):
+         nexus.manifest_orphans(dim int), nexus.manifest_backfill(), nexus.document_text(doc_id text).
+         All SECURITY INVOKER, tombstone-aware (deleted_at IS NULL). Promotes the RDR-155
+         generated-SQL-string artifacts to first-class DB objects. -->
+    <include file="db/changelog/catalog-004-manifest-functions.xml"/>
+
+    <!-- collection_vector_stats view (bead nexus-70r3c.12, RDR-156 P3.2):
+         SECURITY INVOKER aggregate over live_chunks — per-collection chunk count, dim,
+         last write. Tombstone-filtered by construction. Replaces remote count(*) calls
+         in doctor/status surfaces. Hard dependency: catalog-003 (live_chunks);
+         placed after catalog-004 to keep the catalog-NNN sequence in file order. -->
+    <include file="db/changelog/catalog-005-collection-vector-stats.xml"/>
+
+    <!-- Combined-query functions (bead nexus-70r3c.15, RDR-156 P4.2):
+         per-dim search_metadata_scoped_<dim> + search_topic_scoped_<dim> set-returning
+         SQL functions (Decision 5). Inlinable LANGUAGE sql, SECURITY INVOKER, query
+         vector as a plan-time argument (Finding 5a) so the HNSW index survives the join;
+         tombstone-filtered (deleted_at IS NULL). Depends on vectors-001 (chunks_<dim>),
+         catalog-001 (documents/manifest), catalog-003 (deleted_at), taxonomy-001
+         (topics/topic_assignments). Contract: CombinedQueryParityTest (P4.1). -->
+    <include file="db/changelog/catalog-006-combined-query-functions.xml"/>
+
+    <!-- Graph-hop combined-query function (bead nexus-houg9, RDR-156 P4 follow-on):
+         per-dim search_graph_hop_<dim> — a WITH RECURSIVE BFS over catalog_links collects
+         the reachable doc set, then joins chunks_<dim> and vector-ranks (Decision 5
+         "graph-hop + rank"). Retires the query() follow_links app-side graphBFS dance.
+         Recursive CTE is non-inlinable (Function Scan accepted); the reachable set is
+         materialized before the rank so HNSW survives the outer join. Returns the matched
+         chunk's chash (audit HIGH: rzqto populates RDR-086 chunk_text_hash from it).
+         Depends on catalog-001 (links/documents/manifest), catalog-003 (deleted_at),
+         vectors-001 (chunks_<dim>). Contract: GraphHopParityTest. -->
+    <include file="db/changelog/catalog-007-graph-hop-functions.xml"/>
+
+    <!-- Combined-query metadata-scoped extensions (bead nexus-889ff, RDR-156 P4 follow-on):
+         extends search_metadata_scoped_<dim> with subtree (tumbler prefix), where (jsonb
+         chunk-metadata containment), author ILIKE substring, and the matched-chunk chash
+         output column — the remaining query()-dance cases so the repoint (rzqto) can fully
+         collapse. Replaces the catalog-006 7-arg version with a 9-arg signature. Depends on
+         catalog-006. -->
+    <include file="db/changelog/catalog-008-combined-query-extensions.xml"/>
+
+    <!-- RDR-154 P1 (bead nexus-h9qyp): security_invoker read-shape views
+         (catalog_stats, collection_doc_counts, coverage_by_content_type,
+         collection_health_meta, topics_with_counts) replacing hand-assembled
+         Java/Python read paths + the coverage N+1. Must come after the tables
+         they read (catalog-001, taxonomy-001) and before grants-nexus-svc. -->
+    <include file="db/changelog/catalog-009-read-shape-views.xml"/>
+
+    <!-- nexus-agsq7: append index-age stale_source_ratio to collection_health_meta. -->
+    <include file="db/changelog/catalog-011-collection-health-stale-age.xml"/>
+
+    <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
+         taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB
+         collection into Postgres so service-mode taxonomy compute is chroma-free.
+         MUST come after vectors-001 (provides the `vector` extension) and taxonomy-001;
+         before grants-nexus-svc (schema-wide DML grants provision the new tables). -->
+    <include file="db/changelog/taxonomy-002-centroids.xml"/>
+
+    <!-- RDR-154 P0 (bead nexus-i7ivk): topics.doc_count statement-level
+         recompute triggers as the SOLE writer (SECURITY INVOKER). Must come
+         after taxonomy-001 (creates topics / topic_assignments) and before
+         grants-nexus-svc. -->
+    <include file="db/changelog/taxonomy-003-doc-count-trigger.xml"/>
+
+    <!-- nexus-slcn7 (RDR-154 follow-on): merge duplicate root topics + partial
+         unique (tenant_id, collection, label) index. After taxonomy-003 (the
+         doc_count trigger recomputes during the assignment moves). -->
+    <include file="db/changelog/taxonomy-004-dedup-root-topics.xml"/>
+
+    <!-- RDR-154 P2 (bead nexus-2zv75): DB-enforced updated_at on document_aspects
+         and topics ONLY, via a shared BEFORE UPDATE trigger (SECURITY INVOKER).
+         Must come after those tables exist (aspects-001, taxonomy-001) and
+         before grants-nexus-svc. -->
+    <include file="db/changelog/updated-at-001-triggers.xml"/>
+
+    <!--
+        Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
+        Must be LAST so all schema objects exist before grants are issued.
+        Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when
+        nexus_svc was created after the first migration run.
+    -->
+    <include file="db/changelog/grants-nexus-svc.xml"/>
+
+</databaseChangeLog>

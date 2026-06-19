@@ -35,11 +35,16 @@ def test_all_command_modules_registered():
         "command_context": "command-context",
         "config_cmd": "config",
         "context_cmd": "context",
+        "migrate_cmd": "migrate-to-service",
+        "migration_cmd": "migration",
         "doctor": "doctor",
         "hook": "hook",
         "mineru": "mineru",
         "search_cmd": "search",
+        "service_cmd": "service",
+        "storage_cmd": "storage",
         "taxonomy_cmd": "taxonomy",
+        "tenant_cmd": "tenant",
         "tier_status": "tier-status",
     }
 

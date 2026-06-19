@@ -8,7 +8,17 @@ RDR-021: replaces 3-tier stack with Docling primary + pymupdf_normalized fallbac
 """
 from pathlib import Path
 
+import pytest
+
 from nexus.pdf_extractor import PDFExtractor
+
+
+@pytest.fixture(autouse=True)
+def _require_docling(require_docling: None) -> None:
+    """nexus-c7gnx: every test here exercises the docling extraction path and
+    asserts extraction_method=='docling'. Skip cleanly when the models are
+    unavailable (local cold HF cache) instead of failing on the PyMuPDF
+    fallback. No-op in CI, which pre-fetches the models (ci.yml)."""
 
 
 class TestExtractSimple:

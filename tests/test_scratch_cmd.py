@@ -180,7 +180,7 @@ def test_scratch_list_friendly_error_when_t1_unresolvable(
     from nexus.db.t1 import T1ServerNotFoundError
 
     with patch(
-        "nexus.commands.scratch.T1Database",
+        "nexus.commands.scratch.get_t1_database",
         side_effect=T1ServerNotFoundError("T1 not configured for this process."),
     ):
         result = runner.invoke(main, ["scratch", "list"])

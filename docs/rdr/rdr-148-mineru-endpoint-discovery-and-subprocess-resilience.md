@@ -67,6 +67,16 @@ multiprocessing guard, exiting code 1 on the formula pages. **Verified
 shutdown` — a multiprocessing-without-guard signature. So even when the fallback
 is correctly chosen, it cannot extract formula PDFs on darwin/arm64.
 
+#### Gap 4: mineru-api server is spawned with stdout/stderr → DEVNULL
+
+`nx mineru start` (`src/nexus/commands/mineru.py:199`) launches the long-lived
+`mineru-api` server with both streams DEVNULL'd, so a server crash or startup
+failure leaves no record — the same silent-death class nexus-ovbr7 fixed for
+the storage-service/t3 daemons (2026-06-11). When this RDR's resilience work
+lands, the spawn should route output through
+`nexus.logging_setup.open_child_log("mineru_api", ...)` per the standing rule
+in `src/nexus/daemon/AGENTS.md` ("no daemon child is ever silent").
+
 ## Context
 
 ### Background

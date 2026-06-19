@@ -12,6 +12,8 @@ cloud credentials and ``is_local_mode()`` defaults to True there
 """
 from __future__ import annotations
 
+import os
+
 from pathlib import Path
 
 import pytest
@@ -482,6 +484,116 @@ class TestStaleMigrationOffer:
         assert seen == [("knowledge__notes__minilm-l6-v2-384__v1", True)]
 
 
+# ── P5: --service / Postgres provisioning flag ────────────────────────────────
+
+
+class TestServiceProvisioningFlag:
+    """Unit tests for the ``--service`` flag wiring in init_cmd.
+
+    These are pure unit tests — they stub out the provisioner so no real
+    Postgres cluster is needed.  The full integration evidence lives in
+    tests/db/test_pg_provision.py.
+    """
+
+    def _stub_provision(self, monkeypatch, *, already_provisioned: bool = False, fail: bool = False):
+        """Patch nexus.db.pg_provision.provision with a stub."""
+        from nexus.db.pg_provision import ProvisionResult
+
+        stub_result = ProvisionResult(
+            cluster_created=not already_provisioned,
+            db_created=not already_provisioned,
+            admin_role_created=not already_provisioned,
+            svc_role_created=not already_provisioned,
+            already_provisioned=already_provisioned,
+            port=15432,
+        )
+
+        def _fake_provision(config_dir=None, **kw):
+            if fail:
+                from nexus.db.pg_provision import PgBinaryNotFoundError
+                raise PgBinaryNotFoundError("No binaries. Install postgresql@16.")
+            return stub_result
+
+        monkeypatch.setattr("nexus.commands.init._provision_postgres_step",
+                            lambda: _fake_provision())
+
+        return stub_result
+
+    def test_service_flag_triggers_provisioning(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--service`` triggers _provision_postgres_step."""
+        called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: called.append("called"),
+        )
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        # Defensive: cloud mode returns before the start step, but stub it so a
+        # future local-mode flip can't reach the real service starter.
+        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
+
+        result = CliRunner().invoke(init_cmd, ["--service"])
+
+        assert result.exit_code == 0, result.output
+        assert called == ["called"], "provisioning step must be called with --service"
+
+    def test_service_flag_not_triggered_without_flag(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``--service``, provisioning is NOT triggered."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._warmup_bge", lambda: None)
+        called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: called.append("called"),
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert called == [], "provisioning step must NOT be called without --service"
+
+    def test_service_flag_auto_triggered_by_nx_storage_backend_env(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``NX_STORAGE_BACKEND=service`` is set, provisioning auto-triggers."""
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
+        called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: called.append("called"),
+        )
+
+        result = CliRunner().invoke(init_cmd, [])
+
+        assert result.exit_code == 0, result.output
+        assert called == ["called"], "auto-provisioning must fire when NX_STORAGE_BACKEND=service"
+
+    def test_service_flag_no_auto_trigger_without_env(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without NX_STORAGE_BACKEND=service, no auto-trigger."""
+        monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._warmup_bge", lambda: None)
+        called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: called.append("called"),
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert called == [], "provisioning must NOT auto-trigger without env var"
+
+
 def _wrap(fn):
     """Wrap a bare callable in a trivial Click command so CliRunner can drive
     its ``click.echo`` / ``click.confirm`` I/O."""
@@ -492,3 +604,309 @@ def _wrap(fn):
         fn()
 
     return _cmd
+
+
+# ── RDR-157 P3.4: first-run bundled-PG selection (bead nexus-vwvv5.13) ──────────
+
+
+def test_select_bundled_pg_sets_env_from_bundle(tmp_path, monkeypatch, make_pg_bundle_txz) -> None:
+    from nexus.commands.init import _select_bundled_pg
+    from nexus.db import pg_bundle
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    archive = make_pg_bundle_txz(tmp_path, "nexus-pg-x.txz")
+    monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(archive))
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+
+    bin_dir = _select_bundled_pg(config_dir)
+
+    assert bin_dir is not None
+    assert os.environ["NEXUS_PG_BIN"] == str(bin_dir)
+    assert str(bin_dir).startswith(str(config_dir))
+
+
+def test_select_bundled_pg_none_without_bundle(tmp_path, monkeypatch) -> None:
+    from nexus.commands.init import _select_bundled_pg
+    from nexus.db import pg_bundle
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    monkeypatch.delenv(pg_bundle.BUNDLE_ENV, raising=False)
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+
+    # Deterministic: explicit empty search dir (no reliance on what sits next to
+    # the test interpreter).
+    result = _select_bundled_pg(config_dir, search_dirs=[tmp_path / "empty"])
+    assert result is None
+    assert not os.environ.get("NEXUS_PG_BIN")
+
+
+def test_select_bundled_pg_defaults_to_service_dir(tmp_path, monkeypatch, make_pg_bundle_txz) -> None:
+    """RF-161-3 (nexus-06y9e): with no env override and no injected search_dirs,
+    the default search dir must be <config_dir>/service/ — where the P2 acquire
+    seam places the .txz — NOT the venv bin/. Before the fix _select_bundled_pg
+    passed search_dirs=None straight through, so ensure_pg_bundle defaulted to
+    [Path(sys.executable).parent] and a correctly-acquired bundle was never
+    found (silent host-PG fallback)."""
+    from nexus.commands.init import _select_bundled_pg
+    from nexus.db import pg_bundle
+    from nexus.db.pg_bundle import current_platform_tag
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    monkeypatch.delenv(pg_bundle.BUNDLE_ENV, raising=False)
+    config_dir = tmp_path / "cfg"
+    service_dir = config_dir / "service"
+    service_dir.mkdir(parents=True)
+    make_pg_bundle_txz(service_dir, f"nexus-pg-{current_platform_tag()}.txz")
+
+    # No search_dirs, no env: must still find the bundle under <config_dir>/service.
+    bin_dir = _select_bundled_pg(config_dir)
+    assert bin_dir is not None, "bundle in <config_dir>/service/ must be found"
+    assert os.environ["NEXUS_PG_BIN"] == str(bin_dir)
+    assert str(bin_dir).startswith(str(config_dir))
+
+
+def test_select_bundled_pg_respects_existing_env_override(tmp_path, monkeypatch, make_pg_bundle_txz) -> None:
+    from nexus.commands.init import _select_bundled_pg
+    from nexus.db import pg_bundle
+
+    # Operator already pointed NEXUS_PG_BIN somewhere -> bundle not consulted.
+    monkeypatch.setenv("NEXUS_PG_BIN", "/opt/my/pg/bin")
+    archive = make_pg_bundle_txz(tmp_path, "nexus-pg-y.txz")
+    monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(archive))
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+
+    assert _select_bundled_pg(config_dir) is None
+    assert os.environ["NEXUS_PG_BIN"] == "/opt/my/pg/bin"
+
+
+def test_provision_step_aborts_loud_on_broken_bundle(tmp_path, monkeypatch) -> None:
+    """M2: a set-but-missing NEXUS_PG_BUNDLE must SystemExit(1), never reach provision."""
+    import nexus.commands.init as init_mod
+    from nexus.db import pg_bundle
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(tmp_path / "does-not-exist.txz"))
+    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path / "cfg")
+
+    called = {"provision": False}
+
+    def _fail_if_called(*a, **k):  # provision must NOT run when the bundle is broken
+        called["provision"] = True
+        raise AssertionError("provision() must not be reached on a broken bundle")
+
+    monkeypatch.setattr("nexus.db.pg_provision.provision", _fail_if_called)
+
+    with pytest.raises(SystemExit) as exc:
+        init_mod._provision_postgres_step()
+    assert exc.value.code == 1
+    assert called["provision"] is False
+
+
+def test_provision_step_idempotent_on_rerun(tmp_path, monkeypatch, make_pg_bundle_txz) -> None:
+    """Composed re-run idempotency (RDR-157 §Approach P3 charge #1): running
+    _provision_postgres_step twice extracts the ship-alongside bundle EXACTLY
+    once (marker honored) and provisions each time, reporting already-provisioned
+    on the rerun. The components are individually idempotent; this locks the
+    composition (NEXUS_PG_BIN set on the first call must not force a re-extract)."""
+    from types import SimpleNamespace
+
+    import nexus.commands.init as init_mod
+    from nexus.db import pg_bundle
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    archive = make_pg_bundle_txz(tmp_path, "nexus-pg-rerun.txz")
+    monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(archive))
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: config_dir)
+
+    extractions = {"n": 0}
+    real_extract = pg_bundle.extract_bundle
+
+    def _counting_extract(*a, **k):
+        extractions["n"] += 1
+        return real_extract(*a, **k)
+
+    monkeypatch.setattr(pg_bundle, "extract_bundle", _counting_extract)
+
+    provisions = {"n": 0}
+
+    def _fake_provision(_cfg):
+        provisions["n"] += 1
+        return SimpleNamespace(already_provisioned=True, port=15432)
+
+    monkeypatch.setattr("nexus.db.pg_provision.provision", _fake_provision)
+
+    init_mod._provision_postgres_step()
+    init_mod._provision_postgres_step()
+
+    assert extractions["n"] == 1, "bundle re-extracted on rerun (marker not honored)"
+    assert provisions["n"] == 2, "provision must run on each invocation"
+
+
+class TestServiceLocalEmbedder:
+    """RDR-160 P3.1/P3.2: a local --service install locks bge-768 and fetches
+    the STANDARD ONNX the Java service reads. minilm-384 is non-operative here."""
+
+    def _patch_common(self, monkeypatch):
+        # No real Postgres, local mode, and a recording stub for the bge fetch.
+        monkeypatch.setattr("nexus.commands.init._provision_postgres_step", lambda: None)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        # RDR-157 P4.1: init --service now also starts the service. Stub it here
+        # so the embedder-focused tests stay hermetic (start coverage is in
+        # TestServiceStartStep below).
+        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
+        # RDR-161 P1: init now gates start on a resolvable native binary. These
+        # tests cover the embedder path, not binary acquisition (see
+        # tests/test_init_service_binary.py), so report the binary as ready.
+        monkeypatch.setattr(
+            "nexus.commands.init._ensure_service_binary_step", lambda cd: True
+        )
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.db.service_bge_model.fetch_service_bge_onnx",
+            lambda **kw: (calls.append("fetch"), Path("/fake/onnx"))[1],
+        )
+        return calls
+
+    def test_service_local_locks_bge_and_fetches(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._patch_common(monkeypatch)
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output
+        assert calls == ["fetch"], "standard bge ONNX must be fetched for --service"
+        assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
+        assert "bge-768 only" in result.output
+        # the interactive non-service prompt must NOT run
+        assert "choose your on-device" not in result.output.lower()
+
+    def test_service_local_minilm_gets_advisory_and_locks_bge(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._patch_common(monkeypatch)
+        result = CliRunner().invoke(init_cmd, ["--service", "--embedder", "minilm-384"])
+        assert result.exit_code == 0, result.output
+        assert "non-operative" in result.output
+        # locked to bge despite the minilm-384 request (no silent ignore)
+        assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
+        assert calls == ["fetch"]
+
+    def test_service_local_fetch_offline_is_loud_and_fatal(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The Java service cannot boot without the model, so a fetch failure must
+        # be FATAL (nonzero exit) — not a swallowed warning that makes the install
+        # look successful. Re-run when online (idempotent).
+        monkeypatch.setattr("nexus.commands.init._provision_postgres_step", lambda: None)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+
+        def _boom(**kw):
+            raise RuntimeError("offline — the service will not boot without /x/model.onnx")
+
+        monkeypatch.setattr("nexus.db.service_bge_model.fetch_service_bge_onnx", _boom)
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code != 0  # fail-loud + fatal
+        assert "will not boot" in result.output
+
+
+class TestServiceStartStep:
+    """RDR-157 P4.1 (nexus-vwvv5.17): nx init --service collapses through to a
+    started, status-green service. nexus-qke1e: _start_service_step now routes
+    through ensure_storage_supervisor (the PERSISTENT, heartbeated supervisor),
+    not the transient start_storage_service — and fails loud on any error."""
+
+    def test_start_step_reports_running_endpoint(self, monkeypatch) -> None:
+        import types
+
+        import nexus.commands.init as init_mod
+
+        lease = types.SimpleNamespace(
+            endpoint={"host": "127.0.0.1", "port": 18099, "pid": 4242},
+            generation=3,
+        )
+        monkeypatch.setattr(
+            "nexus.commands.daemon.ensure_storage_supervisor", lambda _cfg: lease
+        )
+        runner_out: list[str] = []
+        monkeypatch.setattr(init_mod.click, "echo", lambda *a, **k: runner_out.append(a[0] if a else ""))
+
+        init_mod._start_service_step()
+
+        joined = "\n".join(runner_out)
+        assert "127.0.0.1:18099" in joined
+        assert "serving" in joined.lower()
+
+    def test_start_step_fails_loud_on_start_error(self, monkeypatch) -> None:
+        import nexus.commands.init as init_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        def _boom(_cfg):
+            raise StorageServiceStartError(
+                "No nexus-service native binary found. Acquire one: "
+                "nx daemon service install-binary <tag>"
+            )
+
+        monkeypatch.setattr(
+            "nexus.commands.daemon.ensure_storage_supervisor", _boom
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            init_mod._start_service_step()
+        assert exc.value.code == 1
+
+    def test_init_service_local_wires_start_after_embedder(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The collapse order is provision -> embedder -> start, and start runs."""
+        order: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: order.append("pg"),
+        )
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.db.service_bge_model.fetch_service_bge_onnx",
+            lambda **kw: (order.append("embed"), Path("/fake/onnx"))[1],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._ensure_service_binary_step",
+            lambda cd: (order.append("binary"), True)[1],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._start_service_step",
+            lambda: order.append("start"),
+        )
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output
+        assert order == ["pg", "embed", "binary", "start"]
+
+    def test_auto_service_local_wires_start(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NX_STORAGE_BACKEND=service auto-trigger in LOCAL mode runs the full
+        collapse (pg -> embed -> start), not just provisioning. This is the
+        re-run path an operator hits after a first `nx init --service`."""
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        order: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step", lambda: order.append("pg")
+        )
+        monkeypatch.setattr(
+            "nexus.db.service_bge_model.fetch_service_bge_onnx",
+            lambda **kw: (order.append("embed"), Path("/fake/onnx"))[1],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._ensure_service_binary_step",
+            lambda cd: (order.append("binary"), True)[1],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._start_service_step", lambda: order.append("start")
+        )
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert order == ["pg", "embed", "binary", "start"]

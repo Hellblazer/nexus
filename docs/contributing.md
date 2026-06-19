@@ -54,6 +54,27 @@ set -a && source .env && set +a
 uv run pytest -m integration
 ```
 
+### Storage-stack sandbox gate (T1 + T2 + T3)
+
+The HTTP storage-tier suites (`tests/db/test_http_*_integration.py` and the Java
+serving contract tests) run entirely in-sandbox: each spins up its own ephemeral
+PG16 + a fresh service JAR with an isolated bearer — no production data, no live
+daemon, no API keys. Because they are `@pytest.mark.integration` (excluded from the
+default CI/unit run), storage-stack regressions can rot unseen. One button-press
+runs the whole tier stack:
+
+```bash
+scripts/validate/integration-stack.sh               # build jar, run T1+T2+T3
+scripts/validate/integration-stack.sh --no-build    # reuse the existing jar
+scripts/validate/integration-stack.sh --python-only # T1/T2/catalog suites only
+scripts/validate/integration-stack.sh --java-only   # T3 + repo-layer Java tests only
+```
+
+Run it after any change to the HTTP stores, the Java service handlers/schema, or
+the token/RLS model. Prereqs (dev box): a JDK/GraalVM and pg16 binaries. When the
+prereqs are absent the suites self-skip and the gate reports **inconclusive**
+(non-zero exit), never a false green.
+
 ## Code Conventions
 
 - **Python 3.12–3.13**: use `match/case`, `tomllib`, `typing.Protocol`, walrus operator

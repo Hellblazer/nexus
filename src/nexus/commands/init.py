@@ -12,6 +12,7 @@ guaranteed present). This module performs NO network or install work.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -281,6 +282,271 @@ def _warmup_bge() -> None:
         )
 
 
+# ── P3 service-embedder provisioning (RDR-160 P3.1 / P3.2) ────────────────────
+
+
+def _provision_service_embedder_step(embedder: str | None) -> None:
+    """Lock the service embedder to bge-768 and fetch the standard ONNX it reads.
+
+    RDR-160: a ``--service`` install routes EVERY collection through the Java
+    service's bge-768 embedder (768-dim). Two things follow:
+
+    * **P3.2 (RDR-144 reverse-gap):** ``minilm-384`` is non-operative on the
+      service T3 path, so an explicit ``--embedder minilm-384`` gets an ADVISORY
+      rather than being silently ignored. (minilm-384 stays valid for a
+      non-service local install.)
+    * **P3.1:** the CLI fetches the STANDARD un-fused bge ONNX (NOT fastembed's
+      optimized cache, which onnxruntime-java cannot load) to the stable
+      Java-read path; the service only reads the file. Offline failure is loud
+      (no silent fallback), mirroring :func:`_warmup_bge`.
+    """
+    from nexus.db.service_bge_model import (
+        SERVICE_BGE_DOWNLOAD_HINT,
+        fetch_service_bge_onnx,
+    )
+
+    if embedder == "minilm-384":
+        click.echo(
+            "\nNote: a --service install embeds every collection with bge-768 "
+            "(768-dim) in the Java service. The minilm-384 choice is non-operative "
+            "for the service T3 path; provisioning bge-768 instead. (minilm-384 "
+            "remains valid for a non-service local install.)",
+            err=True,
+        )
+
+    # Record bge-768 as the active local model so the rest of nx (catalog model
+    # segment, doctor advisory) agrees with what the service actually runs.
+    set_config_value(_EMBED_MODEL_KEY, _TIER1_MODEL)
+    click.echo(f"\nSaved: {_EMBED_MODEL_KEY} = {_TIER1_MODEL} (service: bge-768 only)")
+
+    click.echo(
+        f"\nProvisioning the standard bge-768 ONNX the service reads "
+        f"({SERVICE_BGE_DOWNLOAD_HINT}) — one-time download …"
+    )
+    try:
+        dest = fetch_service_bge_onnx()
+        click.echo(f"Done — service bge-768 model ready at {dest}.")
+    except Exception as exc:  # noqa: BLE001 — must stay actionable
+        # Fail loud AND fatal: unlike the Python fastembed path (_warmup_bge),
+        # which auto-fetches on first use, the Java service has NO retry — it
+        # fail-loud-crashes at boot without this file. So a swallowed failure
+        # would make `nx init --service` look successful while leaving an
+        # un-bootable service. Surface it as a hard error; re-run when online
+        # (idempotent — PG provisioning is skipped on the retry).
+        _log.warning("service_bge_provision_failed", error=str(exc))
+        raise click.ClickException(str(exc)) from exc
+
+
+def _ensure_service_binary_step(config_dir: Path) -> bool:
+    """Acquire the signed native service binary if none is already installed.
+
+    RDR-161 P1: between PG provisioning and starting the service, place the
+    verified native binary so ``_start_service_step`` has something to exec.
+
+    Idempotent: a binary already resolvable at the well-known location (or via
+    ``NEXUS_SERVICE_BIN``) is a no-op — it is NOT re-downloaded. When no binary
+    is present, the explicit ``engine-service-v*`` tag comes from
+    ``resolve_service_tag`` (``NEXUS_SERVICE_TAG`` env, then the build-time
+    pin); there is no "latest" resolution (RF-161-2). When no tag is
+    configured, instruct the user to install one explicitly rather than
+    guessing a tag or downloading silently.
+
+    Returns ``True`` when a native binary is ready to exec, ``False`` when none
+    is available and none could be acquired (no tag configured). The caller
+    MUST NOT start the service on ``False`` — since RDR-161 P3 expunged the
+    legacy JVM launch path, starting without a binary now fails loud rather than
+    silently degrading, but skipping the start keeps the UX clean (CRE C1).
+    Hard failures (broken ``NEXUS_SERVICE_BIN`` override, a configured tag that
+    fails verification) raise ``SystemExit``.
+    """
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    from nexus.daemon.binary_install import (
+        BinaryVerificationError,
+        install_binary,
+        resolve_service_tag,
+    )
+    from nexus.daemon.storage_service_daemon import (
+        StorageServiceStartError,
+        _find_service_binary,
+    )
+
+    try:
+        existing = _find_service_binary(config_dir)
+    except StorageServiceStartError as exc:
+        # e.g. NEXUS_SERVICE_BIN set-but-missing — surface, never auto-download
+        # over a deliberate (if broken) operator override.
+        click.echo(f"\nService binary check failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    if existing is not None:
+        click.echo(f"  Native service binary already installed: {existing} (no download).")
+        return True
+
+    tag = resolve_service_tag()
+    if not tag:
+        click.echo(
+            "\n  No native service binary is installed and no service tag is "
+            "pinned for this build.\n"
+            "  Install one explicitly, then re-run `nx init --service`:\n"
+            "    nx daemon service install-binary engine-service-vX.Y.Z\n"
+            "  (or set NEXUS_SERVICE_TAG=engine-service-vX.Y.Z)."
+        )
+        return False
+
+    try:
+        _nx_version = _pkg_version("conexus")
+    except PackageNotFoundError:
+        _nx_version = "unknown"
+
+    click.echo(f"\nInstalling the native service binary ({tag}) …")
+    try:
+        dest, prov = install_binary(
+            tag, config_dir, installed_by=f"conexus {_nx_version}",
+        )
+    except BinaryVerificationError as exc:
+        click.echo(f"\nService binary install failed: {exc}", err=True)
+        raise SystemExit(1)
+    click.echo(f"  Installed {prov['asset']} -> {dest} (sha256+signature verified).")
+    return True
+
+
+def _start_service_step() -> None:
+    """Start the PERSISTENT storage-service supervisor and confirm it is serving.
+
+    RDR-157 P4.1: the final step of the ``nx init --service`` one-command
+    collapse. nexus-qke1e: routes through ``ensure_storage_supervisor`` (the
+    single persistent-start path shared with ``nx daemon service start``) rather
+    than the old transient ``start_storage_service``. The transient path
+    published a lease WITHOUT a heartbeating supervisor, so the service looked
+    'serving' at init time but the lease aged out by TTL before the next client
+    (e.g. ``nx migrate-to-service``) could discover it. The persistent supervisor
+    heartbeats the lease for the process lifetime, so 'serving' stays true.
+    Idempotent — a live lease short-circuits, so re-running ``nx init`` is safe.
+    Any failure surfaces as an actionable error with a remedy, never a traceback.
+    """
+    from nexus.commands.daemon import ensure_storage_supervisor
+    from nexus.config import nexus_config_dir
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+    click.echo("\nStarting the storage service …")
+    try:
+        lease = ensure_storage_supervisor(nexus_config_dir())
+    except StorageServiceStartError as exc:
+        # StorageServiceStartError messages already carry a remedy (build/install
+        # the artifact, re-run init, etc.); relay verbatim, fail fatal.
+        click.echo(f"\nStorage service failed to start: {exc}", err=True)
+        raise SystemExit(1)
+    except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
+        _log.error("service_start_failed", error=str(exc))
+        click.echo(f"\nStorage service failed to start: {exc}", err=True)
+        raise SystemExit(1)
+
+    ep = lease.endpoint
+    click.echo(
+        f"  Service running on {ep.get('host')}:{ep.get('port')} "
+        f"(pid {ep.get('pid')}, generation {lease.generation})."
+    )
+    click.echo("  nx init --service complete — the service backend is serving.")
+
+
+# ── P5 (A) Postgres provisioning ──────────────────────────────────────────────
+
+
+def _select_bundled_pg(
+    config_dir: Path, *, search_dirs: list[Path] | None = None
+) -> Path | None:
+    """First-run: extract the ship-alongside PG bundle and select it for provisioning.
+
+    RDR-157 P3.4 (bead nexus-vwvv5.13). When a ``nexus-pg-<platform>.txz`` is
+    locatable (``NEXUS_PG_BUNDLE`` or next to the binary), extract it once under the
+    config dir and point ``NEXUS_PG_BIN`` at it so ``provision`` discovers the
+    bundle's PostgreSQL ahead of any host install. Returns the selected ``bin/`` dir,
+    or ``None`` when no bundle is present (dev / host-PG mode) — in which case
+    discovery proceeds unchanged.
+
+    An explicit pre-existing ``NEXUS_PG_BIN`` wins (operator override / tests): the
+    bundle is not consulted, so a deliberately pointed PG is never overridden.
+    """
+    if os.environ.get("NEXUS_PG_BIN", "").strip():
+        return None
+    from nexus.daemon.binary_lifecycle import well_known_binary_path
+    from nexus.db.pg_bundle import ensure_pg_bundle
+
+    if search_dirs is None:
+        # RF-161-3: default to <config_dir>/service/ — where the P2 acquire seam
+        # (install-binary / install-pg-bundle) places nexus-pg-<tag>.txz — not the
+        # venv bin/ that ensure_pg_bundle/locate_bundle_archive would otherwise
+        # use. The NEXUS_PG_BUNDLE env override still wins (checked first inside
+        # locate_bundle_archive) and an explicitly injected search_dirs is honoured.
+        search_dirs = [well_known_binary_path(config_dir).parent]
+    bin_dir = ensure_pg_bundle(config_dir, search_dirs=search_dirs)
+    if bin_dir is not None:
+        os.environ["NEXUS_PG_BIN"] = str(bin_dir)
+        _log.info("pg_bundle_selected", bin_dir=str(bin_dir))
+    return bin_dir
+
+
+def _provision_postgres_step() -> None:
+    """Provision (or verify) the nx-managed local Postgres cluster.
+
+    Called from init_cmd when ``--service`` is passed or when the service
+    storage backend is already configured (``NX_STORAGE_BACKEND=service``).
+
+    Structured to be robust: any failure is reported as a clear, actionable
+    error rather than a traceback — the user needs an install hint, not a
+    Python exception.
+    """
+    from nexus.db.pg_provision import PgBinaryNotFoundError, provision
+
+    config_dir = _config.nexus_config_dir()
+    click.echo("\nProvisioning local Postgres cluster for the service backend …")
+
+    # First-run local distribution: extract + select the ship-alongside PG bundle
+    # (no-op when none is shipped — host PG is then discovered as before).
+    try:
+        if _select_bundled_pg(config_dir) is not None:
+            click.echo("  Using bundled PostgreSQL (extracted on first run).")
+    except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
+        _log.error("pg_bundle_extract_failed", error=str(exc))
+        click.echo(f"\nBundled PostgreSQL extraction failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    try:
+        result = provision(config_dir)
+    except PgBinaryNotFoundError as exc:
+        click.echo(f"\nPostgres binaries not found.\n{exc}", err=True)
+        raise SystemExit(1)
+    except Exception as exc:  # noqa: BLE001 — user-facing
+        _log.error("pg_provision_failed", error=str(exc))
+        click.echo(f"\nPostgres provisioning failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    if result.already_provisioned:
+        click.echo(f"  Postgres already running on port {result.port} — no changes.")
+        return
+
+    lines = []
+    if result.cluster_created:
+        lines.append("  Cluster initialised.")
+    if result.db_created:
+        lines.append(f"  Database 'nexus' created at {result.credentials_path.parent / 'postgres'}.")
+    if result.admin_role_created:
+        lines.append("  Role nexus_admin created (schema owner).")
+    if result.svc_role_created:
+        lines.append("  Role nexus_svc created (DML service role).")
+    if result.vector_extension_created:
+        lines.append("  Extension 'vector' (pgvector) created.")
+    lines.append(f"  Credentials written to {result.credentials_path} (0600).")
+    lines.append(
+        f"  Cluster listening on 127.0.0.1:{result.port}.\n"
+        f"  Set NX_STORAGE_BACKEND=service and source {result.credentials_path} "
+        f"before starting the service."
+    )
+    for line in lines:
+        click.echo(line)
+
+
 @click.command("init")
 @click.option(
     "--embedder",
@@ -295,14 +561,67 @@ def _warmup_bge() -> None:
     is_flag=True,
     help="Accept the recommended default (bge-768 for local) without prompting.",
 )
-def init_cmd(embedder: str | None, assume_yes: bool) -> None:
+@click.option(
+    "--service",
+    "provision_service",
+    is_flag=True,
+    default=False,
+    help=(
+        "Provision the local Postgres cluster for the RDR-152 Java service backend. "
+        "Creates nexus_admin and nexus_svc roles and writes credentials to "
+        "~/.config/nexus/pg_credentials. Idempotent: safe to re-run."
+    ),
+)
+def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) -> None:
     """Guided first-run setup: choose your local embedding model.
 
     In cloud mode there is no local model to provision — embeddings run
     server-side via Voyage. In local mode this records your embedder choice
     so subsequent indexing/search uses it. The model itself is fetched later
     (``nx init`` does not download or install anything in this phase).
+
+    Pass ``--service`` to also provision the local Postgres cluster required
+    by the RDR-152 Java service backend.
     """
+    # Postgres provisioning: run if --service flag passed, or if the global
+    # NX_STORAGE_BACKEND is already set to 'service' (operator re-running
+    # init to refresh a provisioned cluster).
+    _auto_service = (
+        not provision_service
+        and "service" in os.environ.get("NX_STORAGE_BACKEND", "").lower()
+    )
+    if provision_service or _auto_service:
+        _provision_postgres_step()
+        if not _config.is_local_mode():
+            # Cloud mode + service backend: embeddings run server-side via Voyage.
+            return
+        # Local service backend (RDR-160): the Java service embeds every
+        # collection with bge-768. Lock the embedder + provision the standard
+        # ONNX it reads.
+        _provision_service_embedder_step(embedder)
+        # RDR-161 P1: acquire the verified native binary before starting (no-op
+        # when one is already installed). Between PG provisioning and start so
+        # _start_service_step has a binary to exec. When no binary is available
+        # and none can be acquired (no tag configured), do NOT start: with the
+        # legacy JVM launch path expunged (RDR-161 P3), starting without a binary
+        # now fails loud rather than degrading (CRE C1). PG is provisioned and the step printed an
+        # actionable install instruction; exit non-zero so the incomplete setup
+        # is not mistaken for a serving backend.
+        if not _ensure_service_binary_step(_config.nexus_config_dir()):
+            click.echo(
+                "\nService NOT started: no native binary available. Install one "
+                "(see above), then re-run `nx init --service` to finish.",
+                err=True,
+            )
+            raise SystemExit(1)
+        # RDR-157 P4.1: collapse fresh-install -> serving. Start the service and
+        # confirm status green before returning, so one command leaves the user
+        # with a running backend (idempotent; safe to re-run). The interactive
+        # local-embedder prompt below is for the non-service Python (fastembed)
+        # path only.
+        _start_service_step()
+        return
+
     # Import-site call so tests can patch ``nexus.config.is_local_mode``
     # (mem:feedback_pin_local_mode_in_cloud_tests).
     if not _config.is_local_mode():

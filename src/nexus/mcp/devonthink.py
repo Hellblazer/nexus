@@ -105,7 +105,7 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
         if writer is not None:
             writer.close()
         if cat is not None:
-            cat._db.close()
+            cat.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
 
 
 # ── Tool handlers (registered conditionally by build_server) ─────────────────

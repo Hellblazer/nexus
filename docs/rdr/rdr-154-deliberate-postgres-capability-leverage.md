@@ -1,0 +1,90 @@
+---
+title: "RDR-154: Deliberate Postgres-Capability Leverage for the RDR-152 Schema — Computed Views, Trigger-Maintained Invariants, security_invoker Discipline, and Counter-Drift Elimination"
+id: RDR-154
+type: Architecture
+status: closed
+priority: high
+author: Hal Hildebrand
+reviewed-by: self
+created: 2026-06-08
+accepted_date: 2026-06-08
+closed_date: 2026-06-16
+related_issues: [nexus-gmiaf, nexus-0jq9u, nexus-8luh]
+related_tests: []
+related: [RDR-152, RDR-153, RDR-149]
+---
+
+# RDR-154: Deliberate Postgres-Capability Leverage for the RDR-152 Schema
+
+## Problem Statement
+
+RDR-152 moved the T2 stores from SQLite (which enforces no FKs, has no RLS, no generated columns, no server-side functions) onto Postgres behind a Java service. The migration carried the *shape* of the old schema faithfully, but it largely carried the old *discipline* too: aggregates are stored and hand-maintained in application code, derived read-shapes are assembled by hand in Java/Python, and tenant isolation rests entirely on every query remembering to scope itself. Postgres offers a much richer modeling vocabulary (generated columns, `ON DELETE` referential actions, triggers, stored functions, plain and materialized views with `security_invoker`) and the schema uses only a thin slice of it (generated `tsvector`, `BIGSERIAL`, cascade FKs). The gap between "what the app maintains by hand" and "what the database could maintain authoritatively" is where drift, dual-source-of-truth bugs, N+1 read loops, and a latent cross-tenant-leak trap live today. A 4-facet audit (T2 memory `nexus_rdr/PG-CAPABILITIES-SURVEY-2026-06-08`) found concrete instances of each.
+
+This RDR makes a deliberate, recorded decision about *where* to lean on Postgres so the schema stays sustainable as it grows, rather than accreting hand-maintained denormalization that silently rots.
+
+### Evidence (the audit)
+
+Confirmed-drifting hand-maintained counters: `topics.doc_count` (production drift already band-aided in `src/nexus/context.py:133`), `catalog_documents.chunk_count` (a Python no-op whose comment falsely claimed Postgres tracked it). A whole defect class of `GREATEST`-merge applied to additive counters in the plans ETL. No `updated_at`/mutation-timestamp anywhere. Read-shapes assembled by hand and duplicated across the Java service and the Python local path (catalog stats), including a Java N+1 loop. Every tenant table is `FORCE ROW LEVEL SECURITY`, which makes a default (`security_definer`) view a silent tenant-isolation bypass.
+
+### Three root classes (gaps)
+
+#### Gap 1: Hand-maintained denormalized aggregates drift with no enforcement
+
+`topics.doc_count` is a stored cache the discovery pipeline pushes; the INSERT path recomputes it but the DELETE path and the `ON DELETE CASCADE` from `catalog_documents` never resync it, and the ETL merge `GREATEST` ratchets up only, so it cannot self-heal. The drift is not hypothetical: `context.py` carries a read-side dedup band-aid with a comment recording duplicate root topics surfaced in production (2026-05-28). `catalog_documents.chunk_count` had no working reconciliation in service mode at all. The unifying defect is `GREATEST`-merge on additive columns (`match_conf_sum`, `use_count`, `match_count`, `success_count`, `failure_count`), which is correct only for monotonic high-water marks and silently corrupts sums and tallies. (The two cleanly-app-fixable instances — `match_conf_sum` and `chunk_count` — are being fixed independently under bead `nexus-0jq9u`; `doc_count`, whose cascade-delete drift is *not* fixable in application code, is this RDR's P0.)
+
+#### Gap 2: No mutation-timestamp where consumers genuinely need one
+
+The schema has insert-time stamps (`created_at`, `ts`, `occurred_at DEFAULT now()`) but no `updated_at`/last-modified column and no `BEFORE UPDATE` trigger anywhere. Most mutable tables happen to carry a fit-for-purpose timestamp already (`last_used`, `indexed_at`, `last_attempt_at`, `ingested_at`, `last_hit_at`, `assigned_at`), so a blanket `updated_at` would be goldplate. But two tables have a real blind spot: `document_aspects` (partial UPDATEs to `salient_sentences`/`collection` bypass `extracted_at`, so a row can be modified without any timestamp moving) and `topics` (multiple writers — relabel, recount, ETL — with no mutation timestamp at all). These are the only places a mutation timestamp earns its keep, and because there are multiple writers, it must be DB-enforced, not app-set.
+
+#### Gap 3: Read-shapes assembled by hand, duplicated across services, and a latent RLS-view trap
+
+Derived read-shapes are built in application code instead of the database: catalog stats run five `selectCount` calls plus two `GROUP BY`s stitched together in Java (`CatalogRepository.java:1062`) *and* duplicated in the Python local path (`catalog.py:1082`) — a dual source of truth; `coverageByContentType` is a Java N+1 (1 + 2N queries, `:1292`); `topics`-with-counts is read then deduped in Python to mask the doc_count drift. None of these is a view. Worse, the moment we *do* reach for a view, there is a correctness trap: every tenant table is `FORCE ROW LEVEL SECURITY`, and a Postgres view defaults to `security_definer`, which runs RLS as the view owner and silently bypasses tenant isolation. There is no recorded rule requiring `security_invoker = true`, and materialized views cannot honor RLS at all.
+
+#### Gap 4: No recorded decision on when to use which Postgres capability
+
+The schema uses some declarative mechanisms well (generated `tsvector`, `BIGSERIAL`, `ON DELETE CASCADE`/`SET NULL`) and others not at all (triggers, functions, views), with no written rationale for the boundary. Without a recorded decision, future schema growth will either under-use Postgres (more hand-maintained drift) or over-use it (triggers as hidden control flow where a declarative constraint or a view would be clearer). The risk the audit specifically guards against: adding triggers reflexively. The disciplined finding was that *exactly one* trigger is justified today; everything else is better served by a view, a declarative constraint, or existing in-transaction logic.
+
+## Decision
+
+1. **Eliminate drifting hand-maintained aggregates by moving them into the database.** Per column, choose the cheapest mechanism that makes the value authoritative:
+   - **`topics.doc_count` → trigger-maintained, as the SOLE writer.** An `AFTER INSERT OR DELETE ON topic_assignments` (statement-level, recomputing affected topics) trigger maintains it. This closes the cascade-delete hole that application code structurally *cannot* see, and the scattered in-app recomputes are removed (the trigger is the only writer — split maintenance is the drift cause). A plain computed view was considered (see Alternatives) but `ORDER BY doc_count DESC` over a join loses the `idx_topics_tenant_collection_count` index on a hot read path; the stored-column-plus-trigger keeps the index. The `context.py` dedup band-aid is removed.
+     - **The trigger function MUST be `SECURITY INVOKER`, never `SECURITY DEFINER`.** A `SECURITY DEFINER` trigger function runs as its owner (the schema owner, which is not `NOBYPASSRLS`), so its `UPDATE nexus.topics` would bypass `FORCE ROW LEVEL SECURITY` and could mutate another tenant's `topics` row when a `topic_id` collides across tenants. As `SECURITY INVOKER` (explicit, required for plpgsql) the trigger inherits the session's `nexus.tenant` GUC and the FORCE-RLS policy correctly scopes its write. P0 includes a cross-tenant isolation test: with tenant A's GUC set, an assignment INSERT updates only tenant A's `topics` row even when a same-id topic exists under tenant B.
+     - **`doc_count` is removed from every ETL `ON CONFLICT DO UPDATE` clause.** The live `taxonomy-001-baseline.xml` changeset comment still instructs `topics.doc_count → GREATEST(EXCLUDED.doc_count, topics.doc_count)` — that instruction is **superseded** by this RDR. A Liquibase changeset cannot edit a prior one, so the P0 changeset carries a DDL comment marking `doc_count` trigger-maintained-do-not-ETL-write, and the taxonomy ETL upsert drops the column from its merge. P0 test: an ETL upsert on a topics row after a trigger-computed update does not stomp the trigger value.
+   - The additive-counter `GREATEST`-merge defect class is corrected at the ETL (source-authoritative on the one-shot migration) under `nexus-0jq9u`; this RDR records the principle: **a column Postgres maintains (trigger/generated) must not be an ETL-merge participant at all**, so a lossy snapshot can never clobber it.
+   - **Why `doc_count` needs a trigger but `chunk_count` does not** (the asymmetry that keeps the trigger count at one): `doc_count` lives on `topics`, whose row *survives* when a `catalog_documents` delete cascades away its `topic_assignments` — so the counter strands stale-high, invisibly. `chunk_count` lives on `catalog_documents` itself; when that document is deleted the whole row (counter included) is deleted, so it cannot strand. `chunk_count`'s residual drift is a *non-cascade* manifest-mutation case, adequately served by the HTTP resync reconciliation (`nexus-0jq9u`) until/unless a read-hot signal argues for promoting it too.
+
+2. **Add a DB-enforced `updated_at` to exactly the two tables that need it** (`document_aspects`, `topics`) via a shared `BEFORE UPDATE` trigger that stamps `now()`. Do **not** add `updated_at` to tables that already carry a purpose-built mutation timestamp, and **never** to the append-only logs (`chash_index`, `nx_answer_runs`, `hook_failures`, `aspect_promotion_log`). Separately, wire the already-present `catalog_documents.source_mtime` into the `collection_health` stale-source-ratio consumer that currently shows a placeholder (bead `nexus-8luh`).
+
+3. **Replace hand-assembled read-shapes with views, under a mandatory `security_invoker` rule.**
+   - **Standing rule (load-bearing):** every view over a tenant (RLS) table MUST be created `WITH (security_invoker = true)`. A materialized view MUST carry `tenant_id` as a real column, be refreshed by a BYPASSRLS/per-tenant refresher, and be fronted by a thin `security_invoker` plain view that re-applies `WHERE tenant_id = current_setting('nexus.tenant', true)`; consumers query the wrapper, never the matview. This is enforced by a test that greps the schema for `CREATE VIEW`/`CREATE MATERIALIZED VIEW` and asserts the invoker/wrapper discipline (mirroring the `_RLS_TENANT_TABLES` cross-walk guard from RDR-152 P5.4).
+   - Introduce plain `security_invoker` views for the high-value cases: `topics_with_counts`, `catalog_stats` (collapsing the 5+2 Java queries and ending the Java↔Python dual source of truth), `collection_doc_counts`, `coverage_by_content_type` (replacing the N+1), `collection_health_meta`. Defer matview candidates (`top_topics`/projection ICF aggregates, `telemetry_collection_stats`) until a read-hot signal justifies the refresh machinery.
+
+4. **Record the capability-selection boundary as the project's standing schema discipline** (Gap 4): prefer declarative mechanisms (generated columns, FK actions, CHECK, UNIQUE) first; use a view (always `security_invoker`) for derived read-shapes; use a trigger ONLY when an invariant cannot be maintained app-side (the cascade-delete case) or an atomicity/efficiency win is real; do not use a trigger where a constraint or a view suffices. The audit's disciplined "NOT worth it" list (dangler-logging triggers, queue state-machine guards, register-as-function) is recorded so the boundary is concrete, not aspirational.
+
+## Approach (phased)
+
+1. **P0 — `doc_count` trigger + counter principle.** **Gated prerequisite (must pass before the trigger changeset commits): a `doc_count` consumer audit** — enumerate every query path that reads `doc_count` for sorting or display (the Knowledge Map `ORDER BY doc_count DESC` in `context.py:125` and any sibling), and document per-path whether the *live assignment count* (what the trigger produces) is acceptable versus the *discovery-epoch snapshot* (intentionally-lagging) value the discovery pipeline froze. If any consumer depends on the frozen-epoch semantic, that is resolved (or the trigger scoped) before shipping — the trigger is not a pure maintenance change if it alters a read semantic. Then: add the statement-level trigger as sole writer (`SECURITY INVOKER`, new Liquibase changeset), drop `doc_count` from the taxonomy ETL `ON CONFLICT DO UPDATE`, remove the in-app recomputes, retire the `context.py` dedup band-aid, regenerate jOOQ. P0 tests (all exact, non-vacuous): cascade-delete leaves `doc_count` correct; ETL upsert after a trigger update does not stomp the value; **cross-tenant isolation** — tenant A's assignment INSERT updates only tenant A's `topics` row. TDD; this is the one change that fixes a structurally-app-unfixable drift.
+2. **P1 — `security_invoker` discipline + the view set.** **CI prerequisite:** the embedded-Postgres test binaries must be PG15+ on every CI platform before any `WITH (security_invoker = true)` view changeset lands — `service/pom.xml` pins only `darwin-arm64v8` at 16.x while `linux-amd64`/`darwin-amd64`/`windows-amd64` come transitively at 14.x, and the `security_invoker` view storage-parameter syntax does not exist on PG14, so a view changeset would pass on darwin CI and fail on Linux CI. Pin `embedded-postgres-binaries-linux-amd64` (and the others used in CI) at 16.x first. Then land the standing-rule test guard (red until the rule holds), introduce the plain views (`topics_with_counts`, `catalog_stats`, `collection_doc_counts`, `coverage_by_content_type`, `collection_health_meta`), each `security_invoker=true`, and repoint the Java/Python read paths at them (deleting the duplicated assembly + the N+1 loop). Cross-tenant isolation tests per view (a view that leaked would be a Critical).
+3. **P2 — `updated_at` triggers + source_mtime wiring.** Shared `BEFORE UPDATE` trigger stamping `updated_at` on `document_aspects` and `topics` only; add the columns; wire `source_mtime` into `collection_health` (folds `nexus-8luh`).
+4. **P3 — capability-selection discipline doc + matview deferral.** Record the standing boundary (Gap 4) in `src/nexus/db/AGENTS.md` (or the service schema AGENTS.md), with the "NOT worth it" trigger list. Leave matview candidates as a documented deferral with the read-hot trigger condition that would promote them.
+
+## Alternatives considered
+
+- **`doc_count` as a plain computed view instead of a trigger.** Cleanest semantically (single source of truth, zero maintenance), but `ORDER BY doc_count DESC` over a `LEFT JOIN … COUNT` loses the `idx_topics_tenant_collection_count` index on a hot read path. Rejected as the primary mechanism for `doc_count`; adopted as the general pattern for read-shapes that are not index-sorted (the view set in P1).
+- **Blanket `updated_at` on every mutable table.** Rejected as goldplate: most mutable tables already carry a fit-for-purpose mutation timestamp, and the append-only logs must not imply mutability they don't have.
+- **Reflexive triggers for every invariant** (dangler logging, queue state-machine guards, register-as-function). Rejected: danglers are intended (`allow_dangling`) and belong in RDR-153's batch report, not a write-path trigger; the queue state machine is already enforced by `WHERE`-guarded UPDATEs + `FOR UPDATE SKIP LOCKED`; catalog register is already one atomic `FOR UPDATE` transaction. Triggers there would be hidden control flow with no invariant or atomicity win.
+- **Leave it all app-maintained (status quo).** Rejected: it is the documented cause of the `doc_count`/`chunk_count` drift and the dual-source-of-truth catalog stats, and it does not scale as the schema grows — the explicit sustainability concern this RDR exists to address.
+
+## Consequences
+
+- Drifting aggregates become **authoritative-by-construction** (trigger/generated), removing a class of silent data-quality bugs and the read-side band-aids that mask them.
+- The **`security_invoker` standing rule + test guard** turns the single biggest view correctness trap (silent cross-tenant leak via default `security_definer`) into a mechanically-enforced invariant before any view ships.
+- Derived read-shapes get a **single source of truth** in the database, deleting duplicated Java/Python assembly and an N+1 loop — less code, faster reads, no drift between the two implementations.
+- A recorded **capability-selection boundary** keeps future schema growth from either under-using Postgres (more hand-maintained drift) or over-using triggers (hidden control flow).
+- **Cost:** plpgsql triggers add hidden control flow and a testing/debugging burden on hot write paths (the `doc_count` trigger fires on the bulk-assignment ETL path — statement-level, not per-row, to bound the cost). Views over RLS tables are a standing correctness hazard that the rule + guard must continuously enforce. This RDR deliberately keeps the trigger surface minimal (two invariant triggers + one shared `updated_at` trigger) to bound that cost.
+
+## Open questions
+
+- Should the `security_invoker` rule + matview-wrapper discipline live as a CI test in the Python suite (grepping the changelog XMLs, like the `_RLS_TENANT_TABLES` guard) or as a Java `SchemaLiquibaseTest`? (Leaning Python test for parity with the existing RLS cross-walk guard.)
+- For the `doc_count` trigger: statement-level recompute of affected topics vs per-row ±1 — the bulk ETL assignment path argues for statement-level, but a correctness benchmark on the discovery-rebuild path should confirm the chosen form before locking it.
+- Do any current consumers depend on `topics.doc_count` being the *discovery-snapshot* count (intentionally lagging) rather than the *live* assignment count? If so, the trigger changes a semantic, not just a maintenance mechanism — needs a consumer audit at P0.

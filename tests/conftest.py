@@ -230,6 +230,26 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.fixture(autouse=True)
+def _pin_storage_backend_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the unit suite to the SQLite storage backend (RDR-152 nexus-fjwxh).
+
+    ``storage_backend_for`` defaults to ``service`` since the T2 cutover, so a
+    bare ``T2Database(path)`` would construct the Http* stores and try to reach
+    the nexus-service — which unit tests neither run nor want. Pinning sqlite
+    here keeps the ~116 T2Database-constructing unit tests deterministic and
+    independent of ambient service/lease state (a dev box with the supervisor
+    running would otherwise auto-discover a real lease mid-unit-test).
+
+    Tests that exercise the resolver itself (``test_storage_mode.py``) carry
+    their own ``_clean_storage_env`` autouse fixture that ``delenv``s the
+    backend vars AFTER this one, so they still observe the true default. Any
+    test that wants service mode sets ``NX_STORAGE_BACKEND[_<store>]`` itself,
+    which overrides this pin (later ``setenv`` wins).
+    """
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CONFIG_DIR so child processes write under tmp_path.
 
@@ -432,6 +452,24 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # test pins mode explicitly via T3Database(local_mode=...), not the
     # ambient cloud_mode fixture.
     "test_local_daemon_client_embed.py",
+    # RDR-159 P0 detection classifier: voyage tokens are collection-NAME
+    # fixtures driving the support matrix; every test pins deployment mode
+    # explicitly via the ``voyage_key_present`` argument, never the ambient
+    # cloud_mode fixture (the classifier is a pure deployment-mode function).
+    "test_detection.py",
+    # RDR-159 P1d pre-gate + P1c quiesce: voyage tokens are collection-NAME /
+    # wired-model-set fixtures driving the support gate and the count-mismatch
+    # attribution message; mode is pinned explicitly via the injected
+    # WiredModelSource / ``voyage_key_present`` argument, never the ambient
+    # cloud_mode fixture.
+    "test_pregate.py",
+    "test_quiesce.py",
+    # RDR-001 managed-endpoint probe: voyage tokens appear only as
+    # embedding_models inside a FAKE /version response body (injected
+    # http_get) — the managed service's reported models, not cloud-mode
+    # behavior. The test touches no credentials and pins nothing on
+    # is_local_mode; the probe targets the unauthenticated /version handshake.
+    "test_managed_endpoint.py",
     "test_catalog_path.py",
     "test_chroma_retry.py",
     "test_collection_cmd.py",
@@ -462,6 +500,10 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     "test_catalog_concurrent_writer_lock.py",
     "test_catalog_consolidation.py",
     "test_catalog_db.py",
+    # RDR-152 catalog SQLite->Postgres ETL: voyage tokens are collection-NAME
+    # fixtures being migrated as data (owner/collection/document rows), never
+    # assertions of cloud-mode embedding behaviour. The whole file is mode-agnostic.
+    "test_catalog_etl.py",
     "test_catalog_doctor_collections_drift.py",
     # RDR-103 / nexus-j9ey + b03o advisor: voyage tokens appear in
     # synthetic collection names being asserted against, not as
@@ -551,10 +593,47 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
     #
+    # nexus-pebfx.2: Java-SOURCE-PARSING parity tests — they regex the
+    # EmbedderRouter/embedder .java files for RDR-103 model tokens and
+    # cross-check Python _MODEL_DIMS. The voyage tokens are registry
+    # labels being compared, not embedder behavior; no embedder runs and
+    # no mode-dependent code path is exercised ("canonical-set" class).
+    "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_cloud_mode_dispatch_tokens_are_known_models",
+    "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_embedder_model_tokens_match_java_overrides",
+    #
     # #1060: pure collection-NAME validation (length/charset) — references a
     # legacy voyage-named collection as realistic input but makes no cloud-mode
     # embedder assertion, so the cloud_mode fixture is not applicable.
     "tests/test_issue_1060_collection_name_overflow.py::test_short_known_voyage_name_passes",
+    #
+    # RDR-159 P4 (nexus-ue6g7.24): the guided-upgrade driver's two-leg test
+    # uses a conformant voyage-named collection STRING to assert the composite
+    # read client routes it to the cloud leg + that distinct dims (384, 1024)
+    # are extracted. The engine is fully mocked; no embedder runs and no
+    # mode-dependent path executes ("string-literal-as-name" class).
+    "tests/migration/test_driver.py::test_two_leg_composes_collections_and_dims",
+    #
+    # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
+    # fallback. Voyage tokens appear only as realistic collection-NAME /
+    # prepared-chunk-metadata fixtures (real docs collections ARE
+    # voyage-context-3); the test never calls Voyage — service mode embeds
+    # server-side — so it makes no cloud-mode embedder assertion and the
+    # cloud_mode fixture is not applicable.
+    "tests/test_indexer_seam_b_cutover.py::test_index_pdf_incremental_service_mode_skips_embed_fallback",
+    #
+    # RDR-152 nexus-qnp5s: catalog consumer migration tests. Voyage tokens
+    # appear only as realistic collection-NAME fixtures in collections_by_owner
+    # assertions (real collections ARE voyage-named); these test the catalog
+    # public-API methods, not cloud-mode embedder behavior, so cloud_mode is
+    # not applicable.
+    "tests/test_catalog_consumer_service_mode.py::TestSQLiteCatalogNewMethods::test_collections_by_owner_filters",
+    "tests/test_catalog_consumer_service_mode.py::TestHttpCatalogClientNewMethods::test_collections_by_owner",
+    #
+    # RDR-152 nexus-enehl: frecency metadata-update service client test. The
+    # voyage token is a realistic collection-NAME fixture for the update-chunks
+    # HTTP request body; the test asserts the request is POSTed to the
+    # /update-metadata endpoint, not any cloud-mode embedder behavior.
+    "tests/db/test_http_vector_client.py::TestUpdateChunks::test_posts_to_update_metadata_endpoint",
 })
 
 
@@ -718,3 +797,106 @@ def multipage_pdf(pdf_fixtures_dir: Path) -> Path:
 @pytest.fixture(scope="session")
 def type3_pdf(pdf_fixtures_dir: Path) -> Path:
     return pdf_fixtures_dir / "type3_font.pdf"
+
+
+# ── RDR-157 P3.4: synthetic PG bundle factory (bead nexus-vwvv5.13) ─────────────
+
+
+@pytest.fixture
+def make_pg_bundle_txz():
+    """Factory building a synthetic ``nexus-pg-*.txz`` for bundle-extract tests.
+
+    Mirrors the real P3.1 artifact shape: a ``bundle/`` root containing
+    ``bin/{initdb,pg_ctl,psql,createdb}`` (stub executables), ``include/``,
+    ``lib/``, ``share/``, and the ``.build_prefix`` relocation marker that
+    ``scripts/build_pg_bundle.sh`` stamps. Single source of truth so a layout
+    change (e.g. a new required binary) is a one-site edit.
+    """
+    import tarfile
+
+    def _factory(tmp: Path, name: str = "nexus-pg-test.txz", *, with_build_prefix: bool = True) -> Path:
+        staging = tmp / f"_stage_{name}"
+        bundle = staging / "bundle"
+        bin_dir = bundle / "bin"
+        bin_dir.mkdir(parents=True)
+        for b in ("initdb", "pg_ctl", "psql", "createdb"):
+            f = bin_dir / b
+            f.write_text("#!/bin/sh\nexit 0\n")
+            f.chmod(0o755)
+        for sub in ("include", "lib", "share"):
+            (bundle / sub).mkdir()
+        if with_build_prefix:
+            (bundle / ".build_prefix").write_text("/build/prefix/nexus-pg\n")
+        archive = tmp / name
+        with tarfile.open(archive, "w:xz") as tf:
+            tf.add(bundle, arcname="bundle")
+        return archive
+
+    return _factory
+
+
+# ── docling model availability (nexus-c7gnx) ─────────────────────────────────
+#
+# The docling PDF extractor loads its layout + TableFormer models from the
+# HuggingFace cache; when they are absent (offline, cold cache) docling raises
+# LocalEntryNotFoundError and the extractor SILENTLY falls back to PyMuPDF
+# (extraction_method='pymupdf_normalized'). Tests that assert
+# extraction_method=='docling' then fail with a confusing assertion rather than
+# a clear "models unavailable" signal. CI pre-fetches the models and HARD-FAILS
+# if it cannot (see .github/workflows/ci.yml), so in CI the models are always
+# present and these guards never skip. The skip only fires on a local run with a
+# cold HF cache — turning a baffling fallback-assertion failure into a clean skip.
+
+
+@pytest.fixture(scope="session")
+def docling_available(tmp_path_factory: pytest.TempPathFactory) -> bool:
+    """True iff docling actually performs the extraction (models present).
+
+    Faithful probe: docling loads models lazily at convert() time, so we run a
+    real extraction on a tiny generated PDF and check the SAME signal the tests
+    assert (extraction_method == 'docling'). A cold/offline model cache makes the
+    extractor fall back to PyMuPDF, which this detects as unavailable.
+
+    Known limitation: the probe CANNOT distinguish "models unavailable"
+    (environmental, skipping is correct) from "docling regressed in CODE so the
+    extractor fell back" (a real bug) — both surface as extraction_method !=
+    'docling'. This is acceptable because CI does NOT rely on the skip: the
+    pre-fetch step (scripts/ci_warm_docling.py) runs this same probe and
+    HARD-FAILS the job, so a docling code regression goes CI-red at pre-fetch.
+    The skip is a local-developer convenience only; see require_docling.
+    """
+    try:
+        import pymupdf
+
+        probe = tmp_path_factory.mktemp("docling-probe") / "probe.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "docling availability probe")
+        doc.save(str(probe))
+        doc.close()
+
+        from nexus.pdf_extractor import PDFExtractor
+
+        result = PDFExtractor().extract(probe)
+        return result.metadata.get("extraction_method") == "docling"
+    except Exception:
+        return False
+
+
+@pytest.fixture
+def require_docling(docling_available: bool) -> None:
+    """Skip the requesting test when docling did not perform the extraction.
+
+    Composes with the CI pre-fetch hard-fail: in CI the models are guaranteed
+    present so this never skips; locally it skips cleanly instead of failing on
+    the silent PyMuPDF fallback.
+    """
+    if not docling_available:
+        pytest.skip(
+            "docling did not perform the extraction. Locally this almost always "
+            "means a cold/offline HuggingFace model cache; it can ALSO indicate a "
+            "docling regression. CI does not rely on this skip — its pre-fetch step "
+            "runs the same probe and HARD-FAILS (red), which is what distinguishes a "
+            "genuine regression from a missing local cache. This skip only fires on "
+            "a local run."
+        )

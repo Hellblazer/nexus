@@ -389,11 +389,19 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
     """
     from nexus.config import default_db_path
     from nexus.db import make_t3
-    from nexus.db.t2.chash_index import ChashIndex
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
 
-    db_path = default_db_path()
-    if not db_path.exists():
-        return None
+    # RDR-152 nexus-gmiaf.16 seam: route through HttpChashIndex when the
+    # chash_index backend is the service, avoiding SQLite direct-open.
+    if storage_backend_for("chash_index") == StorageBackend.SERVICE:
+        from nexus.db.t2.http_chash_index import HttpChashIndex
+        idx = HttpChashIndex()
+    else:
+        from nexus.db.t2.chash_index import ChashIndex
+        db_path = default_db_path()
+        if not db_path.exists():
+            return None
+        idx = ChashIndex(db_path)
 
     # Review remediation (Reviewer B/I-1, B/S-3, C/I-4): open ChashIndex
     # once for the whole coverage computation instead of opening + closing
@@ -403,7 +411,6 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
     # happens between the two chash_index reads and a concurrent indexer
     # run can shift either side. Callers treat the number as a point-in-
     # time estimate.
-    idx = ChashIndex(db_path)
     try:
         indexed_rows = idx.count_for_collection(collection)
 

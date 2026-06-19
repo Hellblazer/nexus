@@ -164,11 +164,9 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
         # because we don't know it from here. ``documents`` is keyed
         # by tumbler primary key plus a unique (file_path) row per
         # indexed file, so this returns one row.
-        row = reader._db.execute(
-            "SELECT tumbler FROM documents WHERE file_path = ? LIMIT 1",
-            (str(file_path),),
-        ).fetchone()
-        if row is None:
+        # nexus-xnz0o: use catalog API (uniform SQLite + service mode).
+        entry = reader.find_by_file_path(str(file_path))
+        if entry is None:
             _log.warning(
                 "dt_stamp_no_entry_found",
                 file_path=str(file_path),
@@ -176,9 +174,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
             )
             return False
 
-        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-
-        tumbler = Tumbler.parse(row[0])
+        tumbler = entry.tumbler
         writer.update(
             tumbler,
             source_uri=dt_uri,
@@ -202,7 +198,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
     finally:
         writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()
 
 
 def _link_semantic_record(uuid: str) -> bool:
@@ -239,7 +235,7 @@ def _link_semantic_record(uuid: str) -> bool:
     finally:
         writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()
 
 
 def _writeback_record(uuid: str) -> bool:
@@ -277,7 +273,7 @@ def _writeback_record(uuid: str) -> bool:
         _log.warning("dt_writeback_failed", uuid=uuid, error=str(e))
         return False
     finally:
-        cat._db.close()
+        cat.close()
 
 
 def _ingest_highlights_record(uuid: str) -> bool:
@@ -338,7 +334,7 @@ def _ingest_highlights_record(uuid: str) -> bool:
         _log.warning("dt_highlights_failed", uuid=uuid, error=str(e))
         return False
     finally:
-        cat._db.close()
+        cat.close()
 
 
 #: RDR-139 Layer D extraction-source provenance values for DT-sourced text.
@@ -897,7 +893,7 @@ def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
         # future in-process callers) don't leak the write lock until
         # GC. Existing nx catalog commands rely on process-exit cleanup
         # which is fine for one-shot CLI but not for in-process reuse.
-        cat._db.close()
+        cat.close()
 
 
 @dt.command("open")

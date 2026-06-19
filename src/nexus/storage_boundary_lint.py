@@ -59,16 +59,13 @@ CATALOG_PHASE_ALLOWLIST_PREFIX: str = "src/nexus/catalog/"
 #:
 #: - ``T2Database(...)`` outside the daemon opens eight SQLite
 #:   connections that contend on memory.db's one WAL writer lock.
-#: - ``T3Database(local_mode=True, ...)`` WITHOUT an injected
-#:   ``_client`` opens its own ``chromadb.PersistentClient`` on the
-#:   local on-disk store, the T3 analogue of the same multi-process
-#:   contention (the ``chromadb.PersistentClient`` call itself lives
-#:   in the allowlisted ``db/t3.py`` so the BANLIST scan cannot catch
-#:   it — the consumer-side ``T3Database(...)`` construction is the
-#:   detectable boundary). Consumers must call ``make_t3()`` /
-#:   ``make_t3_client()`` (RDR-120 P6 made ``make_t3()`` route through
-#:   the daemon in local mode) instead of constructing T3Database
-#:   directly.
+#: - ``T3Database(...)`` constructed outside the substrate is the
+#:   detectable consumer-side boundary. Since RDR-155 P4a.2
+#:   (nexus-1k8s1) T3Database no longer opens Chroma clients itself
+#:   (it raises without an injected ``_client``); consumers call
+#:   ``make_t3()``, which returns the pgvector-service-backed
+#:   ``HttpVectorClient``. The construction ban survives so consumer
+#:   code cannot wrap raw chroma clients ad hoc.
 #:
 #: P3 (nexus-sbxbe.3) flipped the lint to ENFORCE — an un-annotated
 #: construction outside the construction-allowlist is a hard violation,
@@ -82,10 +79,8 @@ BANNED_CONSTRUCTORS: tuple[str, ...] = ("T2Database", "T3Database")
 
 #: Prefixes allowed to construct ``T2Database`` / ``T3Database``
 #: directly: the substrate that defines them (``db/``) and the daemon
-#: that runs them (``daemon/`` — e.g. ``make_t3_client`` builds the
-#: daemon-backed ``T3Database`` with an injected ``HttpClient``).
-#: Distinct from the connect-allowlist (which includes ``catalog/``
-#: P0-P4 but not ``daemon/``).
+#: that runs them (``daemon/``). Distinct from the connect-allowlist
+#: (which includes ``catalog/`` P0-P4 but not ``daemon/``).
 T2DATABASE_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "src/nexus/db/",
     "src/nexus/daemon/",
@@ -120,6 +115,33 @@ CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 )
 
 
+#: nexus-qnp5s: allowlist for ``._db`` attribute accesses.
+#: Only the catalog module itself and the daemon (which legitimately owns the
+#: catalog write handle via t2_daemon.py) may access ``._db`` internally.
+#: All consumer code must call the public API (curator_owner_tumbler_by_name,
+#: chunk_counts_for_docs, links_from_batch, etc.) which works on both
+#: SQLite Catalog and HttpCatalogClient.
+CATALOG_DB_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    "src/nexus/catalog/",
+    "src/nexus/daemon/",  # t2_daemon.py legitimately owns the catalog write handle
+)
+
+#: nexus-qnp5s: baseline for ``._db`` accesses outside the catalog module.
+#: Seeded at 46 then lowered to 44 after:
+#:   - removing the dead ``else: db = cat._db`` branch in mcp/catalog.py (-1)
+#:   - scoping daemon/ into the allowlist (t2_daemon.py owner-internal) (-1)
+#: Lowered from 44 to 3 by nexus-xnz0o: all 44 commands/ consumer sites migrated
+#: to the public catalog API. Lowered from 3 to 1 by nexus-3cwnx: coverage analytics
+#: migrated to service API (the ``coverage_cmd`` guard removed).
+#: Current unsuppressed count is 0: the two remaining ._db sites in
+#: catalog.py:514+516 (backfill-owner-id, SQLite-only write) both carry
+#: ``# epsilon-allow:`` annotations and are excluded from the scanner's count.
+#: Baseline 1 is the ceiling; a new unsuppressed ._db access anywhere outside
+#: the catalog/ allowlist will push the count to 1 and trip the assertion.
+#: Ratchets down to 0 when backfill-owner-id is ported to the service API.
+CATALOG_DB_ACCESS_BASELINE: int = 1
+
+
 #: RDR-146 catalog-construction floor. P0.1 seeded this at 49 (the AST
 #: count of bare ``Catalog(...)`` construction sites in consumer code at
 #: the start of the Phase-1 cutover). P1.2 (nexus-5p2ci.21) completed the
@@ -138,11 +160,21 @@ CATALOG_CONSTRUCTION_BASELINE: int = 0
 #: against AST ``Attribute(value=Name(id=module), attr=attribute)``
 #: nodes inside ``Call`` nodes. Alias resolution maps the alias back
 #: to the canonical module name before matching.
+#:
+#: RDR-152 Seam B (nexus-gmiaf.22): ``voyageai.Client`` is added as a
+#: structural tripwire for the INDEXER surface.  After the P3.3 cutover,
+#: embedding moves to the JVM (nexus-service) — any new direct
+#: ``voyageai.Client(...)`` in the indexer / client write surface is a
+#: regression.  The allowlist (db/, catalog/ P0-P4, daemon/) covers
+#: the Phase-4 deletion targets that still hold direct Voyage calls
+#: (t3.py, daemon/, catalog/).  Any new Voyage call outside those paths
+#: must carry a valid ``# epsilon-allow: <reason>`` annotation.
 BANLIST: tuple[tuple[str, str], ...] = (
     ("sqlite3", "connect"),
     ("chromadb", "PersistentClient"),
     ("chromadb", "CloudClient"),
     ("chromadb", "EphemeralClient"),
+    ("voyageai", "Client"),
 )
 
 
@@ -189,12 +221,25 @@ class LintResult:
     #: connect-allowlist that carry a valid ``# epsilon-allow:`` override.
     #: The deliberate raw-connect exceptions to the substrate boundary.
     epsilon_allow_connects: int = 0
+    #: RDR-152 Seam B (nexus-gmiaf.22): ``voyageai.Client`` sites that carry
+    #: a valid ``# epsilon-allow:`` override on the same line.  These are the
+    #: Phase-4 deletion targets — legacy non-service embed paths that must
+    #: not grow. Baseline == 3 (indexer.py, doc_indexer.py, commands/collection.py).
+    #: A new epsilon-allow on the service write path would increment this
+    #: counter and fail the baseline assertion, surfacing the regression.
+    voyageai_epsilon_allow_count: int = 0
     #: RDR-146 P0.1: ``Catalog(...)`` construction sites in consumer code
     #: (outside :data:`CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES`). A COUNTED
     #: baseline at P0.1 — these are the cutover surface for the catalog
     #: client-cutover, NOT yet promoted to hard violations. Ratchets down
     #: as Phase-1 waves migrate sites onto ``T2Client.catalog``.
     catalog_constructions: int = 0
+    #: nexus-qnp5s: ``._db`` attribute accesses outside ``src/nexus/catalog/``.
+    #: NOT yet enforced as hard violations — baseline seeded at 46 (commands/
+    #: consumer sites, nexus-xnz0o migration bead).  Ratchets down toward 0 as
+    #: subsequent beads port commands/ onto the public API.  The acceptance test
+    #: asserts ``<= CATALOG_DB_ACCESS_BASELINE`` (NOT included in total_violations).
+    catalog_db_accesses: int = 0
 
     @property
     def total_violations(self) -> int:
@@ -207,7 +252,9 @@ class LintResult:
             "catalog_allowlist_count": self.catalog_allowlist_count,
             "t2database_constructions": self.t2database_constructions,
             "epsilon_allow_connects": self.epsilon_allow_connects,
+            "voyageai_epsilon_allow_count": self.voyageai_epsilon_allow_count,
             "catalog_constructions": self.catalog_constructions,
+            "catalog_db_accesses": self.catalog_db_accesses,
         }
 
 
@@ -225,10 +272,16 @@ class FileScan:
     t2database_constructions_undocumented: list[Violation] = field(default_factory=list)
     #: Count of epsilon-allow'd ``sqlite3.connect`` sites in this file.
     epsilon_allow_connects: int = 0
+    #: Count of epsilon-allow'd ``voyageai.Client`` sites in this file
+    #: (RDR-152 Seam B Phase-4 deletion targets).
+    voyageai_epsilon_allow_count: int = 0
     #: RDR-146 P0.1: ``Catalog(...)`` construction sites in this file
     #: (the catalog client-cutover surface). Scoped by the catalog
     #: construction-allowlist in :func:`scan_repo`.
     catalog_constructions: list[Violation] = field(default_factory=list)
+    #: nexus-qnp5s: ``._db`` attribute accesses in this file.
+    #: Enforced at baseline=0 outside ``src/nexus/catalog/``.
+    catalog_db_accesses: list[Violation] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +391,11 @@ def _scan_file_full(
                     # silently skipping them.
                     if (canonical, func.attr) == ("sqlite3", "connect"):
                         scan.epsilon_allow_connects += 1
+                    elif (canonical, func.attr) == ("voyageai", "Client"):
+                        # RDR-152 Seam B: track Phase-4 deletion targets
+                        # so new service-path epsilon-allows surface as
+                        # baseline regressions (nexus-gmiaf.22).
+                        scan.voyageai_epsilon_allow_count += 1
                 else:
                     scan.violations.append(
                         Violation(
@@ -375,6 +433,23 @@ def _scan_file_full(
         if cat_ctor is not None:
             scan.catalog_constructions.append(
                 Violation(file=_rel(), line=line, symbol=cat_ctor)
+            )
+
+    # ── nexus-qnp5s: ._db attribute access scan (not Call-scoped) ──
+    # Walk all Attribute nodes (not just Call func nodes) to catch
+    # any ``something._db`` access regardless of whether it is called.
+    # Epsilon-allow on the same line suppresses the violation (for the one
+    # guarded SQLite-only path in collection_health.py).
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "_db"
+        ):
+            if _line_has_allowlist_token(source_lines, node.lineno):
+                continue
+            # Only flag outside catalog/ — the allowlist is applied by scan_repo.
+            scan.catalog_db_accesses.append(
+                Violation(file=_rel(), line=node.lineno, symbol="catalog._db")
             )
 
     return scan
@@ -415,6 +490,7 @@ def scan_repo(
     extra_files: Iterable[pathlib.Path] | None = None,
     construction_allowlist_prefixes: Iterable[str] | None = None,
     catalog_construction_allowlist_prefixes: Iterable[str] | None = None,
+    catalog_db_access_allowlist_prefixes: Iterable[str] | None = None,
 ) -> LintResult:
     """Scan the repo for banned call sites and the RDR-128 baseline
     populations.
@@ -452,6 +528,10 @@ def scan_repo(
         catalog_construction_allowlist_prefixes = tuple(
             catalog_construction_allowlist_prefixes
         )
+    if catalog_db_access_allowlist_prefixes is None:
+        catalog_db_access_allowlist_prefixes = CATALOG_DB_ACCESS_ALLOWLIST_PREFIXES
+    else:
+        catalog_db_access_allowlist_prefixes = tuple(catalog_db_access_allowlist_prefixes)
 
     result = LintResult()
 
@@ -468,6 +548,7 @@ def scan_repo(
         else:
             result.violations.extend(scan.violations)
             result.epsilon_allow_connects += scan.epsilon_allow_connects
+            result.voyageai_epsilon_allow_count += scan.voyageai_epsilon_allow_count
 
         # Population 2 (T2Database constructions): scoped by the separate
         # construction-allowlist (db/ + daemon/). RDR-128 P3 enforces:
@@ -484,16 +565,26 @@ def scan_repo(
         if not _is_allowlisted(rel, catalog_construction_allowlist_prefixes):
             result.catalog_constructions += len(scan.catalog_constructions)
 
+        # nexus-qnp5s: catalog._db accesses — counted baseline outside
+        # catalog/. Ratchets down toward 0 as commands/ sites migrate.
+        # NOT promoted to hard violations yet (46 sites in commands/).
+        # The acceptance test uses the ``catalog_db_accesses`` metric
+        # directly (assert <= CATALOG_DB_ACCESS_BASELINE).
+        if not _is_allowlisted(rel, catalog_db_access_allowlist_prefixes):
+            result.catalog_db_accesses += len(scan.catalog_db_accesses)
+
     # Extra files: always scanned, never allowlisted by path prefix.
     if extra_files:
         for extra in extra_files:
             scan = _scan_file_full(pathlib.Path(extra), repo_root)
             result.violations.extend(scan.violations)
             result.epsilon_allow_connects += scan.epsilon_allow_connects
+            result.voyageai_epsilon_allow_count += scan.voyageai_epsilon_allow_count
             result.t2database_constructions += len(
                 scan.t2database_constructions_documented
             )
             result.violations.extend(scan.t2database_constructions_undocumented)
             result.catalog_constructions += len(scan.catalog_constructions)
+            result.catalog_db_accesses += len(scan.catalog_db_accesses)
 
     return result
