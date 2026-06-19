@@ -18,8 +18,9 @@ from nexus.migration.guided_upgrade import (
     PreflightDetection,
     ProvisionResult,
     ServiceReadiness,
+    VoyageCapabilityOutcome,
 )
-from nexus.migration.detection import DetectionReport
+from nexus.migration.detection import CollectionClassification, DetectionReport
 
 _MOD = "nexus.commands.guided_upgrade_cmd"
 
@@ -28,6 +29,19 @@ def _preflight(needs: bool, data_bearing: int = 0) -> PreflightDetection:
     # A report whose legs_with_data drives needs_migration; we patch the
     # function anyway, so the report contents only feed the echo counts.
     return PreflightDetection(report=DetectionReport(classifications=()), needs_migration=needs)
+
+
+def _preflight_voyage() -> PreflightDetection:
+    # support="unsupported" is irrelevant to the gate (it keys on model+has_data),
+    # included only to construct a valid classification.
+    c = CollectionClassification(
+        collection="knowledge__o__voyage-context-3__v1", leg="local",
+        model="voyage-context-3", dim=None, support="unsupported",
+        source_count=12, has_data=True,
+    )
+    return PreflightDetection(
+        report=DetectionReport(classifications=(c,)), needs_migration=True
+    )
 
 
 def _ready(url: str = "http://127.0.0.1:8099") -> ServiceReadiness:
@@ -170,6 +184,66 @@ class TestGuidedUpgradeCmd:
         assert result.exit_code == 1
         assert "nx storage migrate vectors --rollback" in result.output
         assert "FAILED validation" in result.output
+
+    def test_voyage_footprint_incapable_service_fails_before_migrating(self) -> None:
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight_voyage()), \
+             patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
+             patch(f"{_MOD}.verify_voyage_capability",
+                   return_value=VoyageCapabilityOutcome(
+                       ok=False, reason="target service embeds with ['bge-base-en-v15-768']")), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 1
+        assert "cannot serve voyage" in result.output
+        mig.assert_not_called()
+
+    def test_voyage_footprint_capable_service_proceeds(self) -> None:
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight_voyage()), \
+             patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
+             patch(f"{_MOD}.verify_voyage_capability",
+                   return_value=VoyageCapabilityOutcome(ok=True, reason=None)) as cap, \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 0, result.output
+        cap.assert_called_once()
+        mig.assert_called_once()
+
+    def test_service_url_voyage_footprint_incapable_fails(self) -> None:
+        # The --service-url path runs the SAME voyage gate (it is not gated on
+        # service_url) — exercise the combination explicitly (CR-L1).
+        import os as _os
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight_voyage()), \
+             patch(f"{_MOD}.establish_verified_service",
+                   return_value=_ready("http://svc:9000")), \
+             patch(f"{_MOD}.verify_voyage_capability",
+                   return_value=VoyageCapabilityOutcome(
+                       ok=False, reason="target service embeds with ['bge-base-en-v15-768']")), \
+             patch.dict(_os.environ, {"NX_SERVICE_TOKEN": "tok"}, clear=False), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(
+                guided_upgrade_cmd, ["--yes", "--service-url", "http://svc:9000"])
+        assert result.exit_code == 1
+        assert "cannot serve voyage" in result.output
+        mig.assert_not_called()
+
+    def test_no_voyage_footprint_skips_capability_check(self) -> None:
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 2)), \
+             patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
+             patch(f"{_MOD}.verify_voyage_capability") as cap, \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration"):
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 0, result.output
+        cap.assert_not_called()  # no voyage collections -> no capability probe
 
     def test_missing_token_after_provision_fails_before_migrating(self) -> None:
         # The one-command flow self-loads pg_credentials; if no token is available
