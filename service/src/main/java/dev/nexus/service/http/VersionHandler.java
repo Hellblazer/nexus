@@ -133,6 +133,14 @@ public final class VersionHandler implements HttpHandler {
         if (v.isEmpty()) {
             return null;
         }
+        // Strip a leading v/V for symmetry with the Python consumer's parser
+        // (the workflow stamps without a prefix; this handles a manual set).
+        if (v.startsWith("v") || v.startsWith("V")) {
+            v = v.substring(1);
+        }
+        if (v.isEmpty()) {
+            return null;
+        }
         String lower = v.toLowerCase();
         if (lower.contains("snapshot") || lower.contains("dev")) {
             return null;

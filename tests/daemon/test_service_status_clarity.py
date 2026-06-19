@@ -48,8 +48,12 @@ def _lease_record() -> MagicMock:
 
 class TestStatusSurface:
     def _invoke(self, config_dir: Path, *, pg_up: bool = True,
-                svc_version: dict | None = None):
+                svc_version: dict | None = None,
+                installed: dict | None = None):
         with patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value=installed,
+        ), patch(
             "nexus.daemon.service_registry.ServiceRegistry.discover",
             return_value=_lease_record(),
         ), patch(
@@ -108,6 +112,61 @@ class TestStatusSurface:
         result = self._invoke(config_dir, svc_version=None)
         assert result.exit_code == 0, result.output
         assert "nx init --service" in result.output
+
+    # RDR-002: staleness compares the installed binary's tag version against the
+    # running service's release_version (NOT app_version, frozen at 1.0-SNAPSHOT).
+    def _svc(self, release_version) -> dict:  # noqa: ANN001
+        return {
+            "app_version": "1.0-SNAPSHOT",
+            "release_version": release_version,
+            "embedding_mode": "onnx-local",
+            "embedding_models": ["bge-base-en-v15-768"],
+            "schema_latest_id": "vectors-002",
+            "schema_changeset_count": 64,
+        }
+
+    def test_frozen_app_version_does_not_false_positive_stale(
+        self, tmp_path: Path
+    ) -> None:
+        # The regression guard: installed 0.1.6 vs app_version 1.0-SNAPSHOT must
+        # NOT report stale — the comparison is against release_version (0.1.6).
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        result = self._invoke(
+            config_dir,
+            svc_version=self._svc("0.1.6"),
+            installed={"version": "0.1.6", "installed_by": ""},
+        )
+        assert result.exit_code == 0, result.output
+        assert "stale" not in result.output.lower()
+        assert "restart to pick it up" not in result.output
+
+    def test_release_version_mismatch_reports_stale(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        result = self._invoke(
+            config_dir,
+            svc_version=self._svc("0.1.5"),
+            installed={"version": "0.1.6", "installed_by": ""},
+        )
+        assert result.exit_code == 0, result.output
+        assert "release_version=0.1.5" in result.output
+        assert "installed binary is 0.1.6" in result.output
+
+    def test_dev_service_null_release_version_is_not_stale(
+        self, tmp_path: Path
+    ) -> None:
+        # A dev/unstamped service reports release_version=null — cannot assert
+        # staleness against an installed tag, so no spurious warning.
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        result = self._invoke(
+            config_dir,
+            svc_version=self._svc(None),
+            installed={"version": "0.1.6", "installed_by": ""},
+        )
+        assert result.exit_code == 0, result.output
+        assert "restart to pick it up" not in result.output
 
 
 class TestStopPgClarity:

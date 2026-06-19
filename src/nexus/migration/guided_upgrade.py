@@ -360,7 +360,9 @@ def provision_and_serve(
     endpoint = getattr(lease, "endpoint", None) or {}
     host = endpoint.get("host")
     port = endpoint.get("port")
-    if not host or not port:
+    # `is None` (not falsiness): port 0 is a valid OS-assigned ephemeral port
+    # (code-review M2) — only a genuinely absent host/port is malformed.
+    if host is None or port is None or host == "":
         raise RuntimeError(
             "storage service started but its lease endpoint is missing host/port "
             f"(endpoint={endpoint!r}) — cannot derive a service_url"
@@ -438,6 +440,10 @@ def wait_for_service_health(
     """
     if timeout_s < 0:
         raise ValueError(f"timeout_s must be non-negative, got {timeout_s}")
+    if interval_s <= 0:
+        # A non-positive interval never advances an injected clock (and busy-loops
+        # a real one), so the bounded-poll guarantee would not hold (code-review M1).
+        raise ValueError(f"interval_s must be positive, got {interval_s}")
 
     import time  # noqa: PLC0415
 

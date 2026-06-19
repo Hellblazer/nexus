@@ -23,6 +23,14 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void leadingVPrefixIsStripped() {
+        // Symmetry with the Python consumer's parser (code-review L3).
+        assertThat(VersionHandler.normalizeReleaseVersion("v0.1.6")).isEqualTo("0.1.6");
+        assertThat(VersionHandler.normalizeReleaseVersion("V1.2.3")).isEqualTo("1.2.3");
+        assertThat(VersionHandler.normalizeReleaseVersion("v")).isNull();
+    }
+
+    @Test
     void blankOrNullFailsClosed() {
         assertThat(VersionHandler.normalizeReleaseVersion(null)).isNull();
         assertThat(VersionHandler.normalizeReleaseVersion("")).isNull();
