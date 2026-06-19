@@ -65,12 +65,16 @@ echo "[3/3] Staging a minimal build context + building image (WITH_CLOUD=$WITH_C
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
-# The native binary + its native-image .so siblings (libjvm/libawt/liblcms/...)
-# must travel together: native-image resolves dlopen'd JDK libs from the
-# executable's own directory, so they are co-located in the image.
+# The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
+# emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
+# co-located (native-image dlopen's JDK libs from the executable's own dir); a
+# RELEASE binary (engine-service-v*) is self-contained with NO .so siblings. So
+# the .so copy is best-effort — present them when they exist, skip when they don't.
 mkdir -p "$STAGE/native"
 cp service/target/nexus-service "$STAGE/native/"
-cp service/target/*.so "$STAGE/native/"
+if compgen -G "service/target/*.so" > /dev/null; then
+  cp service/target/*.so "$STAGE/native/"
+fi
 cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/seed_legacy.py" "$STAGE/"
 
 # Docker Desktop's credsStore=desktop helper can't reach a locked login keychain
