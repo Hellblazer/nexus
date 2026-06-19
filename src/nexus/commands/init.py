@@ -631,7 +631,22 @@ def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) ->
         and "service" in os.environ.get("NX_STORAGE_BACKEND", "").lower()
     )
     if provision_service or _auto_service:
-        if provision_and_start_service(embedder) is None:
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+        try:
+            lease = provision_and_start_service(embedder)
+        except StorageServiceStartError:
+            # No native binary available and none acquirable. PG is provisioned
+            # and _ensure_service_binary_step already printed an actionable
+            # install instruction; do NOT start (the legacy JVM path is expunged,
+            # RDR-161 P3 — starting without a binary fails loud, CRE C1). Exit
+            # non-zero so the incomplete setup is not mistaken for serving.
+            click.echo(
+                "\nService NOT started: no native binary available. Install one "
+                "(see above), then re-run `nx init --service` to finish.",
+                err=True,
+            )
+            raise SystemExit(1)
+        if lease is None:
             # Cloud mode + service backend: embeddings run server-side via Voyage,
             # no local service to start.
             return
