@@ -2,8 +2,9 @@
 title: "Truthful Post-RDR-160 Upgrade Path: Fix the Migration Model Classifier and Make the Legacy 384→768 Re-Index→Migrate Chain a Rehearsal-Proven Primitive"
 id: RDR-162
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-06-18
+closed_date: 2026-06-19
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
