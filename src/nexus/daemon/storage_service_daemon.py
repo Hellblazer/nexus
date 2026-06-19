@@ -53,6 +53,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -68,6 +69,7 @@ from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     ServiceRegistry,
     ServiceSupervisor,
+    ttl_for_tier,
 )
 
 _log = structlog.get_logger(__name__)
@@ -106,17 +108,15 @@ _RESTART_BACKOFF: float = 2.0
 #: Short HTTP timeout for /health probes.
 _HEALTH_TIMEOUT: float = 2.0
 
-#: Lease TTL for the storage-service tier (nexus-lz3f2). The shared default is 3s
-#: (service_registry.DEFAULT_TTL), tuned for the lightweight T1/T2 daemons. The
-#: storage-service supervisor's heartbeat tick can take up to
-#: ``_HEALTH_TIMEOUT`` (2s) + ``DEFAULT_HEARTBEAT_INTERVAL`` (1s) ≈ 3s — exactly
-#: the 3s default — so a single slow tick can graze the TTL and a concurrent
-#: ``discover()`` reads a transiently-stale lease. A 15s TTL gives ~15 missed
-#: beats of margin: a genuinely dead supervisor is still detected within 15s,
-#: but a transient stall (slow /health, GC pause, container contention) never
-#: false-expires a live service's lease. The TTL travels in the published record,
-#: so every discoverer honours it without coordination.
-_STORAGE_SERVICE_LEASE_TTL: float = 15.0
+#: The storage-service lease TTL is a SUBSTRATE parameter — it lives in the shared
+#: primitive (``service_registry.TIER_TTLS["storage_service"]``, resolved via
+#: ``ttl_for_tier``), NOT here, per RDR-149 (no tier-specific lifecycle code
+#: outside the substrate). nexus-lz3f2: the storage-service heartbeat tick can
+#: take up to ``_HEALTH_TIMEOUT`` (2s) + ``DEFAULT_HEARTBEAT_INTERVAL`` (1s) ≈ 3s,
+#: grazing the 3s default; the 15s tier override gives ~15 missed-beats of margin.
+#: TRADE-OFF (nexus-om64x): this also widens the post-restart stale-endpoint
+#: window — the old lease lingers until TTL — from 3s to 15s; the client re-spawn
+#: backstop nexus-03bcg is what closes that window for a dead supervisor.
 
 #: Number of clean heartbeats after a restart before the restart budget resets.
 #: Prevents lifetime-cumulative exhaustion from transient failure clusters.
@@ -446,6 +446,14 @@ class StorageServiceSupervisor:
         # production serving; set NX_SERVICE_MAX_HEAP (e.g. "1g") to bound it.
         max_heap = os.environ.get("NX_SERVICE_MAX_HEAP", "").strip()
         if max_heap:
+            # Validate before injection: a malformed -Xmx makes the native binary
+            # exit immediately, and the supervisor would then blame a /health
+            # timeout (pointing at the log, not the env var). Fail loud + actionable.
+            if not re.fullmatch(r"\d+[kKmMgG]", max_heap):
+                raise StorageServiceStartError(
+                    f"NX_SERVICE_MAX_HEAP={max_heap!r} is not a valid JVM heap size "
+                    "(expected e.g. '512m', '1g', '2048k')."
+                )
             argv.append(f"-Xmx{max_heap}")
         artifact = str(self._binary_path)
         # nexus-ovbr7: route both streams to one file so interleaved output keeps
@@ -560,7 +568,7 @@ class StorageServiceSupervisor:
             dir=self._config_dir,
             tier=_REGISTRY_TIER,
             clock=self._lease_clock,
-            ttl=_STORAGE_SERVICE_LEASE_TTL,
+            ttl=ttl_for_tier(_REGISTRY_TIER),
         )
         self._supervisor = ServiceSupervisor(
             self._registry,

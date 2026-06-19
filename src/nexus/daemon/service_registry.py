@@ -63,6 +63,25 @@ _log = structlog.get_logger(__name__)
 DEFAULT_HEARTBEAT_INTERVAL: float = 1.0
 DEFAULT_TTL: float = 3.0
 
+#: Per-tier lease-TTL overrides (nexus-lz3f2). The per-tier TTL is a SUBSTRATE
+#: parameter, so it lives here in the shared primitive — not in any tier's daemon
+#: module (RDR-149: "no tier-specific lifecycle code outside the substrate"). The
+#: 3s default fits the light T1/T2 daemons; the storage-service supervisor's
+#: heartbeat tick can take up to its /health probe timeout + the heartbeat
+#: interval (~3s), grazing a 3s TTL, so it gets a wider 15s window (~15 missed
+#: beats) — a transient stall never false-expires a LIVE service's lease, while a
+#: genuinely dead supervisor is still reaped within 15s. Discoverers honour the
+#: TTL stamped in the record, so this needs setting only where each tier
+#: publishes. Consumers MUST resolve via ``ttl_for_tier`` so the conformance
+#: suite and every publisher track one source of truth.
+TIER_TTLS: dict[str, float] = {"storage_service": 15.0}
+
+
+def ttl_for_tier(tier: str) -> float:
+    """Lease TTL for *tier* — the per-tier override, else the substrate default."""
+    return TIER_TTLS.get(tier, DEFAULT_TTL)
+
+
 _FORMAT_VERSION: int = 1
 
 Clock = Callable[[], float]
