@@ -117,14 +117,26 @@ def guided_upgrade_cmd(
 
     # 2. PROVISION + VERIFY — stand up (or gate) the service and confirm it is
     #    healthy AND version-pinned. Never migrate a not-ready/wrong service.
-    if service_url:
-        click.echo(f"\nVerifying the service at {service_url} …")
-        readiness = establish_verified_service(
-            timeout_s=timeout_s, provision=_provision_thunk_for_url(service_url)
-        )
-    else:
-        click.echo("\nProvisioning and starting the service stack …")
-        readiness = establish_verified_service(timeout_s=timeout_s)
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415
+        StorageServiceStartError,
+    )
+
+    try:
+        if service_url:
+            click.echo(f"\nVerifying the service at {service_url} …")
+            readiness = establish_verified_service(
+                timeout_s=timeout_s, provision=_provision_thunk_for_url(service_url)
+            )
+        else:
+            click.echo("\nProvisioning and starting the service stack …")
+            readiness = establish_verified_service(timeout_s=timeout_s)
+    except StorageServiceStartError as exc:
+        # provision_and_serve (-> init.provision_and_start_service) raises this
+        # when no native binary is available; render the remedy it carries
+        # rather than a traceback (code-review H2).
+        click.echo("", err=True)
+        click.echo(f"Could not start the storage service: {exc}", err=True)
+        raise SystemExit(1)
 
     if not readiness.ready:
         click.echo("", err=True)
@@ -162,6 +174,18 @@ def guided_upgrade_cmd(
                 err=True,
             )
             raise SystemExit(1)
+    elif not os.environ.get("NX_SERVICE_TOKEN", "").strip():
+        # --service-url path: the external service's token is the user's to
+        # supply. Gate here (not deep inside _run_migration's HTTP layer) so the
+        # remedy is a guided-upgrade checkpoint, not an opaque auth error
+        # (substantive-critic Sig-2).
+        click.echo("", err=True)
+        click.echo(
+            f"--service-url {service_url} requires NX_SERVICE_TOKEN to be set "
+            "(the managed service's bearer token) — export it and re-run.",
+            err=True,
+        )
+        raise SystemExit(1)
 
     # 3. HAND OFF — drive the existing migrate-to-service against the VERIFIED
     #    url. _run_migration renders the verdict and raises SystemExit(1) on any

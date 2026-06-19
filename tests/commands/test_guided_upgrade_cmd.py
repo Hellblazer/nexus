@@ -109,6 +109,8 @@ class TestGuidedUpgradeCmd:
         with patch(f"{_MOD}.detect_pending_migration",
                    return_value=_preflight(True, 1)), \
              patch(f"{_MOD}.establish_verified_service", side_effect=fake_establish), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env") as loadc, \
+             patch.dict("os.environ", {"NX_SERVICE_TOKEN": "user-tok"}, clear=False), \
              patch("nexus.commands.migrate_cmd._run_migration"):
             result = CliRunner().invoke(
                 guided_upgrade_cmd, ["--yes", "--service-url", "http://svc:9000/"]
@@ -116,6 +118,36 @@ class TestGuidedUpgradeCmd:
         assert result.exit_code == 0, result.output
         assert captured["has_provision"] is True
         assert captured["url"] == "http://svc:9000"  # trailing slash stripped
+        loadc.assert_not_called()  # --service-url never self-loads local creds
+
+    def test_service_url_without_token_fails_before_migrating(self) -> None:
+        import os as _os
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 1)), \
+             patch(f"{_MOD}.establish_verified_service",
+                   return_value=_ready("http://svc:9000")), \
+             patch.dict(_os.environ, {}, clear=False), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            _os.environ.pop("NX_SERVICE_TOKEN", None)
+            result = CliRunner().invoke(
+                guided_upgrade_cmd, ["--yes", "--service-url", "http://svc:9000"]
+            )
+        assert result.exit_code == 1
+        assert "NX_SERVICE_TOKEN" in result.output
+        mig.assert_not_called()
+
+    def test_storage_service_start_error_renders_remedy(self) -> None:
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 1)), \
+             patch(f"{_MOD}.establish_verified_service",
+                   side_effect=StorageServiceStartError("no native binary available")), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 1
+        assert "Could not start the storage service" in result.output
+        assert "no native binary available" in result.output
+        mig.assert_not_called()
 
     def test_migration_block_relays_rollback_offer_and_nonzero(self) -> None:
         # _run_migration emits the migrated-failed + rollback offer to stderr,

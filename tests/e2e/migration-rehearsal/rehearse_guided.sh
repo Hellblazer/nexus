@@ -131,6 +131,18 @@ except Exception as e:
     print(f"       validation harness error: {e}"); sys.exit(1)
 PY
 
+# Sourceless-note (RDR-162 P2) guarantee — the case that motivated the design.
+# Two-part proof: (1) the parity block above asserts the NOTE's bge-768 TARGET
+# (knowledge__rehearsal-note__bge-base-en-v15-768__v1) holds SEED_N vectors and
+# the minilm SOURCE name holds 0 — the cross-model re-embed landed; (2) the
+# topic_assignments.source_collection re-point is gated INDIRECTLY by the clean
+# "VERIFIED and unlocked" above (verify_taxonomy_consistency blocks unlock unless
+# every assignment resolves to a migrated collection). In service mode T2 is
+# Postgres behind the HTTP store, so there is no direct SQL probe here — the
+# migrate's own validation leg is the authoritative ref-remap check (same
+# honest limitation as the manual rehearse.sh).
+note "sourceless-note: target vectors asserted by parity; assignment re-point gated by the clean unlock"
+
 # ── Source intact (copy-not-move) ────────────────────────────────────────────
 say "Rollback safety — legacy Chroma untouched (copy-not-move)"
 python - "$CHROMA_LOCAL" "$SEED_JSON" <<'PY' && ok "legacy Chroma still intact" || bad "legacy Chroma damaged"

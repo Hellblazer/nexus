@@ -40,20 +40,27 @@ done
 # which is not the success path this MVV exercises). Force a native rebuild so
 # the stamp is actually baked in, and restore the file on exit. The stamp must
 # happen BEFORE the native build below.
+# Single restore hook for the stamped release.properties (folded into every EXIT
+# trap below so a later `trap ... EXIT` does not clobber it). Defined + armed
+# BEFORE the stamp mutation so a signal in the stamp window still restores it.
+_guided_restore() {
+  [ "$GUIDED" = 1 ] || return 0
+  rm -f "$RELEASE_PROPS.tmp" 2>/dev/null || true
+  git checkout -- "$RELEASE_PROPS" 2>/dev/null || true
+}
+trap '_guided_restore' EXIT
+
 if [ "$GUIDED" = 1 ]; then
+  # --guided force-rebuilds the native binary with the stamp baked in, so it is
+  # incompatible with --no-build (which would reuse a stale/unstamped binary).
+  [ "$DO_BUILD" = 0 ] && { echo "--guided requires a fresh native build; drop --no-build" >&2; exit 2; }
   echo "[guided] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
   grep -v '^release_version=' "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp"
   printf 'release_version=%s\n' "$GUIDED_STAMP_VERSION" >> "$RELEASE_PROPS.tmp"
   mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
-  # Force a fresh native build so the stamp is baked in (don't reuse a stale,
-  # unstamped binary).
+  # Force a fresh native build so the stamp is baked in.
   rm -f service/target/nexus-service
 fi
-
-# Single restore hook for the stamped release.properties (folded into every EXIT
-# trap below so a later `trap ... EXIT` does not clobber it).
-_guided_restore() { [ "$GUIDED" = 1 ] && git checkout -- "$RELEASE_PROPS" 2>/dev/null || true; }
-trap '_guided_restore' EXIT
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
 if [ "$DO_BUILD" = 1 ]; then
