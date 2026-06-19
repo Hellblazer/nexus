@@ -323,39 +323,40 @@ class ProvisionResult:
     generation: int | None
 
 
-def _default_provision_step() -> None:
-    from nexus.commands.init import _provision_postgres_step  # noqa: PLC0415
+def _default_serve() -> Any:
+    from nexus.commands.init import provision_and_start_service  # noqa: PLC0415
 
-    _provision_postgres_step()
-
-
-def _default_serve_step() -> Any:
-    from nexus.commands.init import _start_service_step  # noqa: PLC0415
-
-    return _start_service_step()
+    return provision_and_start_service()
 
 
 def provision_and_serve(
     *,
-    provision_step: Callable[[], None] | None = None,
-    serve_step: Callable[[], Any] | None = None,
+    serve: Callable[[], Any] | None = None,
 ) -> ProvisionResult:
-    """Provision Postgres then start the storage service, returning its endpoint.
+    """Provision + serve the local storage service, returning its endpoint.
 
-    Reuses the EXACT two steps ``nx init --service`` runs (no fork): provision
-    the local PG cluster, then the single persistent-supervisor start path
-    (``ensure_storage_supervisor`` via ``_start_service_step``). Provision runs
-    first and a provision failure aborts before any service start. The returned
-    ``service_url`` is UNVERIFIED — the caller (ez5.7) must version-pin + health-
-    gate it before treating it as ready.
+    Reuses the FULL ``nx init --service`` sequence (no fork): provision PG, lock
+    the embedder + fetch the bge-768 ONNX the service reads, acquire the native
+    binary, and start the persistent supervisor — via
+    ``init.provision_and_start_service``. (Calling only the PG-provision + start
+    steps and skipping the embedder/model fetch is what crashed the service on a
+    missing bge ONNX — RDR-002 ez5.13.) The returned ``service_url`` is
+    UNVERIFIED — the caller (ez5.7) version-pins + health-gates it first.
 
-    ``provision_step`` / ``serve_step`` are injection seams for tests.
+    Raises ``RuntimeError`` when the serve step yields no lease — the guided
+    upgrade's default provision path is LOCAL-mode only (cloud mode has no local
+    service to migrate into; cloud users gate an existing service via
+    ``--service-url``). ``serve`` is an injection seam for tests.
     """
-    _provision = provision_step if provision_step is not None else _default_provision_step
-    _serve = serve_step if serve_step is not None else _default_serve_step
+    _serve = serve if serve is not None else _default_serve
 
-    _provision()
     lease = _serve()
+    if lease is None:
+        raise RuntimeError(
+            "guided-upgrade provisioning requires a LOCAL service, but the "
+            "deployment is in cloud mode (no local service to migrate into) — "
+            "point --service-url at the managed service instead"
+        )
 
     endpoint = getattr(lease, "endpoint", None) or {}
     host = endpoint.get("host")

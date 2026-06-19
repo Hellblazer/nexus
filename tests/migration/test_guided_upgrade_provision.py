@@ -24,57 +24,37 @@ class _FakeLease:
 
 
 class TestProvisionAndServe:
-    def test_provision_runs_before_serve_and_returns_url(self) -> None:
-        order: list[str] = []
-
-        def provision_step() -> None:
-            order.append("provision")
-
-        def serve_step() -> _FakeLease:
-            order.append("serve")
+    def test_serve_lease_becomes_service_url(self) -> None:
+        def serve() -> _FakeLease:
             return _FakeLease(
                 {"host": "127.0.0.1", "port": 8099, "pid": 4242}, generation=3
             )
 
-        result = provision_and_serve(
-            provision_step=provision_step, serve_step=serve_step
-        )
+        result = provision_and_serve(serve=serve)
 
         assert isinstance(result, ProvisionResult)
-        # Postgres MUST be provisioned before the service supervisor starts.
-        assert order == ["provision", "serve"]
         assert result.service_url == "http://127.0.0.1:8099"
         assert result.host == "127.0.0.1"
         assert result.port == 8099
         assert result.pid == 4242
         assert result.generation == 3
 
-    def test_provision_failure_aborts_before_serve(self) -> None:
-        served = []
-
-        def provision_step() -> None:
+    def test_serve_failure_propagates(self) -> None:
+        def serve():  # noqa: ANN202
             raise SystemExit(1)
 
-        def serve_step():  # noqa: ANN202
-            served.append(True)
-            return _FakeLease({"host": "h", "port": 1}, generation=0)
-
         with pytest.raises(SystemExit):
-            provision_and_serve(
-                provision_step=provision_step, serve_step=serve_step
-            )
-        # Never start a service on a failed provision.
-        assert served == []
+            provision_and_serve(serve=serve)
+
+    def test_cloud_mode_no_local_lease_is_loud(self) -> None:
+        # The shared init sequence returns None in cloud mode (no local service);
+        # guided-upgrade's provision path is local-only — fail loud, don't migrate.
+        with pytest.raises(RuntimeError, match="cloud mode|LOCAL service"):
+            provision_and_serve(serve=lambda: None)
 
     def test_malformed_lease_endpoint_is_loud(self) -> None:
-        # A lease with no host/port must NOT yield a bogus service_url.
-        def provision_step() -> None:
-            pass
-
-        def serve_step() -> _FakeLease:
+        def serve() -> _FakeLease:
             return _FakeLease({"pid": 1}, generation=0)  # missing host/port
 
         with pytest.raises(RuntimeError, match="host.*port|endpoint"):
-            provision_and_serve(
-                provision_step=provision_step, serve_step=serve_step
-            )
+            provision_and_serve(serve=serve)
