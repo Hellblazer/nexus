@@ -143,7 +143,9 @@ migrate a composable, rehearsal-proven primitive that conexus RDR-001 drives.
   disposition (per §Open Questions), and the boundary with `embed_migrate`
   (`nexus.db.embed_migrate`, under `db/`, is LOCAL-only upgrade — not the service
   path). Update the RDR-157 P5 handoff doc if the contract shifts; relay to the
-  conexus RDR-001 instance.
+  conexus RDR-001 instance. **Pinned (2026-06-19):** the contract lives in
+  [`rdr-157-handoff-to-conexus-rdr-001.md`](rdr-157-handoff-to-conexus-rdr-001.md)
+  §7 "Cross-model migrate" (the consumer-facing handoff RDR-001 reads).
 - Phase-review-gate cross-walk + stacked review (behavioral change in the
   migration layer).
 

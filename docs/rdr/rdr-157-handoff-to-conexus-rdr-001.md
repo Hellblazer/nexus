@@ -152,9 +152,16 @@ serve. RDR-162 makes migrating them a rehearsal-proven primitive.
   re-runnable from the untouched source. The reference remap is the one mutation
   and is ordered STRICTLY AFTER the target verifies populated (mirror RDR-144
   reindex-first / delete-after-verify), so a mid-migrate failure never leaves
-  dangling references. A per-collection remap failure demotes that leg → the run
-  refuses partial success and leaves the `migrated-failed` sentinel (reads
-  degrade-loud); re-run to converge.
+  dangling references. Remap is **per-collection opportunistic, not leg-atomic**:
+  if collection A's remap commits and B's then fails, A keeps its repointed T2
+  references while the leg is demoted from `legs_ok` → the run refuses partial
+  success and leaves the `migrated-failed` sentinel (reads degrade-loud). A
+  re-run reconverges cleanly because the T2 cascade UPDATE is idempotent (A
+  re-points to the same target, a no-op) and copy-not-move keeps B's source
+  intact. **Rollback caveat for RDR-001:** `nx storage migrate vectors
+  --rollback` clears the pgvector copies but does NOT reverse a committed T2
+  reference remap — run `nx catalog rebuild` to re-sync after a rollback, and do
+  not assume source references are pristine after a `migrated-failed` outcome.
 - **BOUNDARY — not to be confused with `embed_migrate`:** `nexus.db.embed_migrate`
   (under `db/`) is the LOCAL-only 384 → 768 re-embed for a user **staying on
   Chroma** (no service). It re-reads SOURCE FILES and therefore CANNOT upgrade
