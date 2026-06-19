@@ -1402,3 +1402,102 @@ class TestEnsureStorageSupervisor:
              patch.object(daemon_mod.subprocess, "Popen", return_value=MagicMock()):
             with pytest.raises(StorageServiceStartError):
                 daemon_mod.ensure_storage_supervisor(config_dir)
+
+
+# ---------------------------------------------------------------------------
+# nexus-lz3f2: lease-TTL margin + optional service heap bound
+# ---------------------------------------------------------------------------
+class TestLeaseTtlAndHeapBound:
+    """nexus-lz3f2: the storage-service supervisor was OOM-killed at the boot
+    memory peak (its lease then vanished silently). Two robustness fixes:
+    (B) a 15s lease TTL so a transient heartbeat stall never false-expires a
+    LIVE service's lease; (C) an optional -Xmx bound so memory-constrained hosts
+    don't trip the OOM killer."""
+
+    def test_lease_published_with_extended_ttl(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        sup = _make_supervisor(config_dir, clock, supervised=True)
+        sup._proc = _FakeProc(pid=49001)
+        sup._service_port = 18077
+        sup._publish(18077)
+
+        # discover() judges freshness from the RECORD's ttl, not this registry's
+        # ttl arg — so a default-ttl registry still reads the 15s stamped at publish.
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        rec = registry.discover(str(os.getuid()))
+        assert rec is not None
+        # The published lease carries the storage-service tier TTL (shared
+        # primitive), not the 3s substrate default.
+        from nexus.daemon.service_registry import ttl_for_tier
+
+        assert rec.ttl == ttl_for_tier("storage_service") == 15.0
+
+    def test_ttl_exceeds_worst_case_heartbeat_tick(self) -> None:
+        # The margin invariant (debugger RF-1 finding): a heartbeat tick can take
+        # up to _HEALTH_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL; the TTL must exceed
+        # that with room, or a single slow tick grazes the TTL.
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.daemon.service_registry import DEFAULT_HEARTBEAT_INTERVAL, ttl_for_tier
+
+        worst_tick = ssd_mod._HEALTH_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL
+        assert ttl_for_tier("storage_service") >= 3 * worst_tick
+
+    def test_spawn_service_applies_max_heap_when_set(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        monkeypatch.setenv("NX_SERVICE_MAX_HEAP", "1g")
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured["argv"] = argv
+            return _FakeProc(pid=49100)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18078)
+        sup._spawn_service()
+        # -Xmx must immediately follow the binary path (native-image consumes
+        # runtime options before app args).
+        assert captured["argv"][0] == str(sup._binary_path)
+        assert captured["argv"][1] == "-Xmx1g"
+
+    def test_spawn_service_rejects_malformed_max_heap(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        monkeypatch.setenv("NX_SERVICE_MAX_HEAP", "abc")
+        sup = _make_supervisor(config_dir, clock)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18088)
+        # A malformed heap value fails loud BEFORE spawning (no /health-timeout
+        # misdiagnosis); Popen is never reached.
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("Popen reached")))
+        with pytest.raises(StorageServiceStartError, match="NX_SERVICE_MAX_HEAP"):
+            sup._spawn_service()
+
+    def test_spawn_service_no_heap_flag_by_default(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        monkeypatch.delenv("NX_SERVICE_MAX_HEAP", raising=False)
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured["argv"] = argv
+            return _FakeProc(pid=49101)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+        sup._spawn_service()
+        # Production default: no -Xmx — the binary keeps native-image's default heap.
+        assert not any(a.startswith("-Xmx") for a in captured["argv"][1:])
