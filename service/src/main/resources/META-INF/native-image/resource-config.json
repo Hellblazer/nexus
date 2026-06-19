@@ -7,7 +7,8 @@
       {"pattern": "liquibase.build.properties"},
       {"pattern": "liquibase/.*\\.xml"},
       {"pattern": "liquibase/servicelocator/.*"},
-      {"pattern": "native/lib/tokenizers.properties"}
+      {"pattern": "native/lib/tokenizers.properties"},
+      {"pattern": "\\QMETA-INF/nexus/release.properties\\E"}
     ]
   },
   "bundles": []

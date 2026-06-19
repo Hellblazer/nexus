@@ -21,11 +21,17 @@ import java.util.Properties;
  *
  * <p>Returns 200:
  * <pre>{"app_version":"1.0-SNAPSHOT",
+ *  "release_version":"0.1.6",
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
- * <p>{@code app_version} comes from the JAR's own Maven
- * {@code pom.properties}; the schema fields are the APPLIED Liquibase
+ * <p>{@code app_version} comes from the JAR's own Maven {@code pom.properties}
+ * and stays {@code 1.0-SNAPSHOT} — the dev coordinate, NOT the release identity
+ * (RDR-002: release identity is not carried by the Maven coordinate).
+ * {@code release_version} (RDR-002) is the release identity, stamped from the
+ * {@code engine-service-vX.Y.Z} git tag at native-build time; it is {@code null}
+ * on a dev / unstamped build so a version-pin consumer fail-closes. The schema
+ * fields are the APPLIED Liquibase
  * journal (the service ran {@code update} at startup, so applied ==
  * bundled for a healthy instance). On a journal read failure the schema
  * fields are {@code null} and {@code schema_error} carries the cause —
@@ -45,8 +51,13 @@ public final class VersionHandler implements HttpHandler {
     private static final String POM_PROPERTIES =
             "/META-INF/maven/dev.nexus/nexus-service/pom.properties";
 
+    /** RDR-002: the release identity, stamped from the git tag at build time. */
+    private static final String RELEASE_PROPERTIES =
+            "/META-INF/nexus/release.properties";
+
     private final DataSource dataSource;
     private final String appVersion;
+    private final String releaseVersion;   // RDR-002; null on dev / unstamped
     private final EmbedderRouter embedderRouter;   // nullable — mode "unknown"
 
     public VersionHandler(DataSource dataSource) {
@@ -64,6 +75,7 @@ public final class VersionHandler implements HttpHandler {
         this.dataSource = dataSource;
         this.embedderRouter = embedderRouter;
         this.appVersion = resolveAppVersion();
+        this.releaseVersion = resolveReleaseVersion();
     }
 
     /** Maven pom.properties (fat JAR) → Implementation-Version → "unknown". */
@@ -82,6 +94,50 @@ public final class VersionHandler implements HttpHandler {
         }
         String impl = VersionHandler.class.getPackage().getImplementationVersion();
         return impl != null ? impl : "unknown";
+    }
+
+    /**
+     * The stamped RDR-002 release identity, or {@code null} when this is not a
+     * release build.
+     *
+     * <p>Reads {@code release_version} from {@link #RELEASE_PROPERTIES} (stamped
+     * by the engine-service-release workflow from the git tag). A blank value, a
+     * {@code SNAPSHOT}/{@code dev} qualifier, or an unreadable/absent resource all
+     * map to {@code null}: an unstamped engine is, by definition, not a tagged
+     * release, so a version-pin consumer (RDR-002 ez5.4) must fail closed.
+     */
+    static String resolveReleaseVersion() {
+        try (InputStream in = VersionHandler.class.getResourceAsStream(RELEASE_PROPERTIES)) {
+            if (in != null) {
+                Properties props = new Properties();
+                props.load(in);
+                return normalizeReleaseVersion(props.getProperty("release_version"));
+            }
+        } catch (IOException e) {
+            log.debug("event=version_release_properties_unreadable error={}", e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Normalize a raw {@code release_version} property to either a release
+     * identity or {@code null} (fail-closed). Blank, a {@code SNAPSHOT}/dev
+     * qualifier, or {@code null} all map to {@code null}: only an explicit,
+     * non-dev stamped value is a release.
+     */
+    static String normalizeReleaseVersion(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String v = raw.trim();
+        if (v.isEmpty()) {
+            return null;
+        }
+        String lower = v.toLowerCase();
+        if (lower.contains("snapshot") || lower.contains("dev")) {
+            return null;
+        }
+        return v;
     }
 
     @Override
@@ -115,6 +171,10 @@ public final class VersionHandler implements HttpHandler {
 
         StringBuilder body = new StringBuilder(192);
         body.append("{\"app_version\":").append(HttpUtil.jsonString(appVersion));
+        // RDR-002: the release identity, explicit null on a dev/unstamped build
+        // (never silently omitted — the consumer keys its fail-closed pin on it).
+        body.append(",\"release_version\":")
+            .append(releaseVersion == null ? "null" : HttpUtil.jsonString(releaseVersion));
         if (embedderRouter != null) {
             body.append(",\"embedding_mode\":")
                 .append(HttpUtil.jsonString(embedderRouter.modeName()))

@@ -142,10 +142,11 @@ jobs:
         id: ver
         # On a tag push, the published version is the tag minus the
         # 'engine-service-v' prefix. On workflow_dispatch (dev/smoke) there is no
-        # release version, so keep the pom's SNAPSHOT. The version must be stamped
-        # into the binary so its /version endpoint (VersionHandler reads
-        # pom.properties) does not report 1.0-SNAPSHOT under a real release tag —
-        # nx clients negotiate schema skew off /version (nexus-pebfx.4).
+        # release version. RDR-002: the version is stamped into a dedicated
+        # release_version field (see the release.properties stamp step below), NOT
+        # into the Maven app_version — app_version stays 1.0-SNAPSHOT (the dev
+        # coordinate). nx clients pin on release_version (RDR-002 ez5.4) and
+        # fail-closed when it is null (dev/unstamped build).
         run: |
           set -euo pipefail
           ref="${GITHUB_REF_NAME}"
@@ -163,10 +164,27 @@ jobs:
           name: jooq-sources
           path: service/target/generated-sources/jooq
 
-      - name: Stamp release version into the pom (tag push only)
+      - name: Stamp release_version into the binary (tag push only)
+        # RDR-002 (conexus PR #78): bake the release identity into a dedicated
+        # release_version field read by VersionHandler from
+        # META-INF/nexus/release.properties — NOT into the Maven app_version
+        # (do NOT versions:set the pom; app_version stays 1.0-SNAPSHOT, the dev
+        # coordinate). On workflow_dispatch the file stays blank in source, so
+        # VersionHandler reports release_version=null and the RDR-002 pin
+        # fail-closes — exactly the intended dev-build behaviour.
         if: steps.ver.outputs.version != ''
         working-directory: service
-        run: ./mvnw -q versions:set -DnewVersion="${{ steps.ver.outputs.version }}" -DgenerateBackupPoms=false
+        run: |
+          set -euo pipefail
+          props="src/main/resources/META-INF/nexus/release.properties"
+          test -f "$props" || { echo "release.properties missing at $props"; exit 1; }
+          # Overwrite the release_version line in place (preserve the header).
+          tmp="$(mktemp)"
+          grep -v '^release_version=' "$props" > "$tmp"
+          echo "release_version=${{ steps.ver.outputs.version }}" >> "$tmp"
+          mv "$tmp" "$props"
+          echo "stamped release_version=${{ steps.ver.outputs.version }}"
+          grep '^release_version=' "$props"
 
       - name: Build native image (-Pnative -Pprebuilt-jooq)
         working-directory: service
