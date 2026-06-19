@@ -106,6 +106,18 @@ _RESTART_BACKOFF: float = 2.0
 #: Short HTTP timeout for /health probes.
 _HEALTH_TIMEOUT: float = 2.0
 
+#: Lease TTL for the storage-service tier (nexus-lz3f2). The shared default is 3s
+#: (service_registry.DEFAULT_TTL), tuned for the lightweight T1/T2 daemons. The
+#: storage-service supervisor's heartbeat tick can take up to
+#: ``_HEALTH_TIMEOUT`` (2s) + ``DEFAULT_HEARTBEAT_INTERVAL`` (1s) ≈ 3s — exactly
+#: the 3s default — so a single slow tick can graze the TTL and a concurrent
+#: ``discover()`` reads a transiently-stale lease. A 15s TTL gives ~15 missed
+#: beats of margin: a genuinely dead supervisor is still detected within 15s,
+#: but a transient stall (slow /health, GC pause, container contention) never
+#: false-expires a live service's lease. The TTL travels in the published record,
+#: so every discoverer honours it without coordination.
+_STORAGE_SERVICE_LEASE_TTL: float = 15.0
+
 #: Number of clean heartbeats after a restart before the restart budget resets.
 #: Prevents lifetime-cumulative exhaustion from transient failure clusters.
 #: At DEFAULT_HEARTBEAT_INTERVAL=1s, 300 heartbeats ≈ 5 minutes.
@@ -425,6 +437,16 @@ class StorageServiceSupervisor:
                 )
 
         argv = [str(self._binary_path)]
+        # nexus-lz3f2: optional max-heap bound for memory-constrained hosts
+        # (e.g. the migration-rehearsal container, where an unbounded native-image
+        # heap peak during bge-768 ONNX load + PG + the Python supervisor tripped
+        # the cgroup OOM killer — which SIGKILLed the *supervisor*, not the JVM,
+        # silently vanishing the lease). GraalVM native-image consumes -Xmx as a
+        # runtime option before the app sees argv. Unset by default → no change to
+        # production serving; set NX_SERVICE_MAX_HEAP (e.g. "1g") to bound it.
+        max_heap = os.environ.get("NX_SERVICE_MAX_HEAP", "").strip()
+        if max_heap:
+            argv.append(f"-Xmx{max_heap}")
         artifact = str(self._binary_path)
         # nexus-ovbr7: route both streams to one file so interleaved output keeps
         # its order; O_APPEND means a respawn never truncates the previous
@@ -538,6 +560,7 @@ class StorageServiceSupervisor:
             dir=self._config_dir,
             tier=_REGISTRY_TIER,
             clock=self._lease_clock,
+            ttl=_STORAGE_SERVICE_LEASE_TTL,
         )
         self._supervisor = ServiceSupervisor(
             self._registry,
