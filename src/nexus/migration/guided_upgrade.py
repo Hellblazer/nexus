@@ -135,23 +135,101 @@ class VersionPinOutcome:
     reason: str | None
 
 
-def _default_verify_version(service_url: str) -> VersionPinOutcome:
-    """Fail-CLOSED placeholder for the ez5.4 version-pin.
+#: Minimum engine-service release the guided upgrade will hand off to (RDR-002).
+REQUIRED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 5)
 
-    ez5.4 (assert engine-service >= v0.1.5 via GET /version) is blocked on the
-    engine ``app_version`` relay: the service's ``/version`` reports the Maven
-    project version (``1.0-SNAPSHOT``), not a release semver, so there is no
-    field to pin against yet. Until ez5.4 lands a real verifier here, the
-    contract MUST refuse — never emit a verified url without an actual pin.
+
+def _parse_semver(raw: str | None) -> tuple[int, int, int] | None:
+    """Parse ``X.Y.Z`` (optional leading ``v``) to a tuple, else ``None``.
+
+    Fail-closed by construction: a blank, ``SNAPSHOT``/``dev``-qualified, or
+    unparseable value returns ``None`` so the caller refuses. Trailing
+    pre-release/build qualifiers (``-rc1``, ``+meta``) are rejected rather than
+    silently accepted — a dev build is not a release.
     """
-    return VersionPinOutcome(
-        ok=False,
-        reason=(
-            "version-pin not yet implemented (RDR-002 ez5.4, blocked on the "
-            "engine /version app_version relay) — cannot confirm the service "
-            "is >= v0.1.5; refusing to proceed"
-        ),
-    )
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    if s[:1] in ("v", "V"):
+        s = s[1:]
+    lower = s.lower()
+    if "snapshot" in lower or "dev" in lower:
+        return None
+    parts = s.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        major, minor, patch = (int(p) for p in parts)
+    except ValueError:
+        return None
+    if major < 0 or minor < 0 or patch < 0:
+        return None
+    return (major, minor, patch)
+
+
+def verify_service_version(
+    service_url: str,
+    *,
+    required: tuple[int, int, int] = REQUIRED_RELEASE_VERSION,
+    http_get: Callable[[str, float], Any] | None = None,
+    timeout_s: float = 5.0,
+) -> VersionPinOutcome:
+    """RDR-002 ez5.4 version-pin: assert ``release_version >= required``.
+
+    GETs ``{service_url}/version`` and pins on the dedicated ``release_version``
+    field (the RDR-002 contract; ``app_version`` is the dev coordinate and is
+    NOT used). FAIL-CLOSED on every uncertain outcome: transport error, non-200,
+    a missing / null / blank / dev / SNAPSHOT ``release_version`` (an engine
+    predating the field is by definition older than the required release), an
+    unparseable version, or a version below ``required``. ``http_get`` is an
+    injection seam for tests.
+    """
+    req = ".".join(str(n) for n in required)
+    if http_get is not None:
+        _get = http_get
+    else:
+
+        def _get(url: str, timeout: float) -> Any:
+            import httpx  # noqa: PLC0415
+
+            return httpx.get(url, timeout=timeout)
+
+    url = service_url.rstrip("/") + "/version"
+    try:
+        resp = _get(url, timeout_s)
+    except Exception as exc:  # noqa: BLE001 — any probe failure is fail-closed
+        return VersionPinOutcome(
+            ok=False, reason=f"could not reach {url} to verify version: {exc}"
+        )
+    if getattr(resp, "status_code", None) != 200:
+        return VersionPinOutcome(
+            ok=False,
+            reason=f"{url} returned HTTP {getattr(resp, 'status_code', '?')}",
+        )
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001 — non-JSON body cannot confirm a version
+        body = {}
+    raw = body.get("release_version")
+    parsed = _parse_semver(raw if isinstance(raw, str) else None)
+    if parsed is None:
+        return VersionPinOutcome(
+            ok=False,
+            reason=(
+                f"engine-service reported no usable release_version "
+                f"(got {raw!r}); a dev/unstamped or pre-RDR-002 build is older "
+                f"than the required v{req} — refusing to proceed"
+            ),
+        )
+    if parsed < required:
+        got = ".".join(str(n) for n in parsed)
+        return VersionPinOutcome(
+            ok=False,
+            reason=f"engine-service v{got} < required v{req} — upgrade the service",
+        )
+    return VersionPinOutcome(ok=True, reason=None)
 
 
 @dataclass(frozen=True)
@@ -192,7 +270,7 @@ def establish_verified_service(
     """
     _provision = provision if provision is not None else provision_and_serve
     _health = health_gate if health_gate is not None else wait_for_service_health
-    _verify = verify_version if verify_version is not None else _default_verify_version
+    _verify = verify_version if verify_version is not None else verify_service_version
 
     prov = _provision()
 

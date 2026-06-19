@@ -20,6 +20,7 @@ from nexus.migration.guided_upgrade import (
     ServiceReadiness,
     VersionPinOutcome,
     establish_verified_service,
+    verify_service_version,
 )
 
 _URL = "http://127.0.0.1:8099"
@@ -94,11 +95,18 @@ class TestEstablishVerifiedService:
         )
         assert pinned == []  # version never probed on an unhealthy service
 
-    def test_default_version_pin_fails_closed(self) -> None:
-        # ez5.4 not yet wired: the default verifier must REFUSE (fail closed),
-        # so the contract cannot emit a verified url without a real pin.
+    def test_default_version_pin_is_the_real_verifier(self) -> None:
+        # With no verify_version injected, the default IS the real RDR-002
+        # verifier (verify_service_version). Proven hermetically: wire it with a
+        # failing http_get and confirm the contract fail-closes (no verified url
+        # without a real, passing pin).
+        def boom(url: str, timeout: float):  # noqa: ANN202
+            raise ConnectionError("connection refused")
+
         result = establish_verified_service(
-            provision=_prov, health_gate=_healthy
+            provision=_prov,
+            health_gate=_healthy,
+            verify_version=lambda url: verify_service_version(url, http_get=boom),
         )
         assert result.ready is False
         assert result.service_url is None
