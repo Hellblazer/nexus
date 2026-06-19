@@ -118,3 +118,129 @@ def detect_pending_migration(
         unsupported=len(report.unsupported),
     )
     return PreflightDetection(report=report, needs_migration=needs)
+
+
+# ── ez5.5: bounded health-gate ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class HealthGateResult:
+    """Outcome of the bounded wait for engine-service readiness.
+
+    ``ready`` is the gate the handoff (ez5.7) branches on: the command must
+    NEVER call ``migrate-to-service`` unless ``ready`` is True. The diagnostic
+    fields back the hard-fail remedy message on a not-ready service.
+    """
+
+    ready: bool
+    attempts: int
+    last_status: int | None
+    last_error: str | None
+    waited_s: float
+
+
+def _transport_error_types() -> tuple[type[BaseException], ...]:
+    """The connection/timeout errors a poll attempt may raise and retry on.
+
+    ``OSError`` (covers ``ConnectionError``) plus httpx's transport errors when
+    httpx is importable. Anything outside this set is a real bug and propagates
+    loud — the gate never swallows unexpected failures.
+    """
+    types: list[type[BaseException]] = [OSError]
+    try:
+        import httpx  # noqa: PLC0415
+
+        types.extend([httpx.ConnectError, httpx.TimeoutException])
+    except Exception:  # noqa: BLE001 — httpx optional at probe-build time
+        pass
+    return tuple(types)
+
+
+def wait_for_service_health(
+    *,
+    service_url: str,
+    timeout_s: float = 30.0,
+    interval_s: float = 1.0,
+    http_get: Callable[[str, float], Any] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
+) -> HealthGateResult:
+    """Poll ``GET {service_url}/health`` until ready, BOUNDED by ``timeout_s``.
+
+    Ready == HTTP 200 AND ``body["db"] == "up"`` (the ez5.1 pinned /health
+    contract). Always makes at least one attempt; never sleeps past the
+    deadline; returns ``ready=False`` with the last status/error when the
+    service does not come up in time — the caller hard-fails with a remedy
+    (ez5.7), it does NOT wait forever.
+
+    ``http_get`` / ``sleep`` / ``clock`` are injection seams for deterministic
+    tests; production uses ``httpx.get`` / ``time.sleep`` / ``time.monotonic``.
+    """
+    if timeout_s < 0:
+        raise ValueError(f"timeout_s must be non-negative, got {timeout_s}")
+
+    import time  # noqa: PLC0415
+
+    _sleep = sleep if sleep is not None else time.sleep
+    _clock = clock if clock is not None else time.monotonic
+    if http_get is not None:
+        _get = http_get
+    else:
+
+        def _get(url: str, timeout: float) -> Any:
+            import httpx  # noqa: PLC0415
+
+            return httpx.get(url, timeout=timeout)
+
+    url = service_url.rstrip("/") + "/health"
+    req_timeout = max(0.1, min(interval_s, 5.0)) if interval_s > 0 else 1.0
+    caught = _transport_error_types()
+
+    start = _clock()
+    attempts = 0
+    last_status: int | None = None
+    last_error: str | None = None
+
+    while True:
+        try:
+            resp = _get(url, req_timeout)
+            attempts += 1
+            last_status = resp.status_code
+            try:
+                body = resp.json()
+            except Exception:  # noqa: BLE001 — a non-JSON body is just "not ready"
+                body = {}
+            if resp.status_code == 200 and body.get("db") == "up":
+                return HealthGateResult(
+                    ready=True,
+                    attempts=attempts,
+                    last_status=last_status,
+                    last_error=None,
+                    waited_s=_clock() - start,
+                )
+            detail = body.get("detail")
+            last_error = detail or (
+                f"status={body.get('status')!r} db={body.get('db')!r}"
+            )
+        except caught as exc:
+            attempts += 1
+            last_error = str(exc)
+
+        elapsed = _clock() - start
+        if elapsed + interval_s >= timeout_s:
+            _log.warning(
+                "guided_upgrade_health_gate_timeout",
+                url=url,
+                attempts=attempts,
+                last_status=last_status,
+                last_error=last_error,
+                waited_s=elapsed,
+            )
+            return HealthGateResult(
+                ready=False,
+                attempts=attempts,
+                last_status=last_status,
+                last_error=last_error,
+                waited_s=elapsed,
+            )
+        _sleep(interval_s)
