@@ -75,6 +75,17 @@ if [ "$UP" = "1" ]; then
   curl "${B[@]}" "${AUTH[@]}" "$U/v1/chash/is_empty?collection=knowledge__x"
   curl "${B[@]}" "${AUTH[@]}" "$U/v1/chash/count_for_collection?collection=knowledge__x"
   curl "${B[@]}" "${AUTH[@]}" "$U/v1/chash/lookup?collection=knowledge__x&chash=abc"; echo
+  # LOCAL bge-768 EMBED (nexus-pqatt): the encode path drives the DJL HuggingFace
+  # tokenizers JNI (libtokenizers.so -> FindClass+NewObject on CharSpan) and the
+  # onnxruntime session run (OnnxTensor/TensorInfo JNI ctors). Without this call
+  # the agent never observes those jniAccessible registrations, the native image
+  # omits them, and the first embed SIGABRTs at lib.rs:475 (Result::unwrap on a
+  # JavaException). This boots in onnx-local mode (no NX_VOYAGE_API_KEY), so the
+  # injected Bge768Embedder serves /v1/vectors/embed.
+  echo -n "embed(bge-768): "
+  curl "${B[@]}" "${AUTH[@]}" "${J[@]}" -X POST \
+    -d '{"collection":"knowledge__x","texts":["native-image embed trace","second sentence for a multi-row batch"]}' \
+    "$U/v1/vectors/embed"; echo
   echo "--- workload done ---"
 else
   echo "SERVICE NEVER CAME UP — agent config may be incomplete"
