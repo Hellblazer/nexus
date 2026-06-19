@@ -120,6 +120,112 @@ def detect_pending_migration(
     return PreflightDetection(report=report, needs_migration=needs)
 
 
+# ── ez5.4 seam + ez5.7: readiness contract ─────────────────────────────────
+
+
+@dataclass(frozen=True)
+class VersionPinOutcome:
+    """Result of the engine-service version-pin check (ez5.4 seam).
+
+    ``ok`` is True only when the running service is at or above the required
+    release (>= v0.1.5). ``reason`` carries the remedy when not.
+    """
+
+    ok: bool
+    reason: str | None
+
+
+def _default_verify_version(service_url: str) -> VersionPinOutcome:
+    """Fail-CLOSED placeholder for the ez5.4 version-pin.
+
+    ez5.4 (assert engine-service >= v0.1.5 via GET /version) is blocked on the
+    engine ``app_version`` relay: the service's ``/version`` reports the Maven
+    project version (``1.0-SNAPSHOT``), not a release semver, so there is no
+    field to pin against yet. Until ez5.4 lands a real verifier here, the
+    contract MUST refuse — never emit a verified url without an actual pin.
+    """
+    return VersionPinOutcome(
+        ok=False,
+        reason=(
+            "version-pin not yet implemented (RDR-002 ez5.4, blocked on the "
+            "engine /version app_version relay) — cannot confirm the service "
+            "is >= v0.1.5; refusing to proceed"
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class ServiceReadiness:
+    """Outcome of the Stage 2->3 readiness contract.
+
+    ``service_url`` is the VERIFIED endpoint and is set ONLY when ``ready`` is
+    True (health-ready AND version-pinned). On any failure it is ``None`` and
+    ``reason`` carries the remedy — the caller (ez5.10) hard-fails and never
+    hands a not-ready service to ``migrate-to-service``.
+    """
+
+    ready: bool
+    service_url: str | None
+    reason: str | None
+    version_ok: bool
+    provision: "ProvisionResult | None"
+    health: "HealthGateResult | None"
+
+
+def establish_verified_service(
+    *,
+    timeout_s: float = 30.0,
+    interval_s: float = 1.0,
+    provision: Callable[[], "ProvisionResult"] | None = None,
+    health_gate: Callable[..., "HealthGateResult"] | None = None,
+    verify_version: Callable[[str], VersionPinOutcome] | None = None,
+) -> ServiceReadiness:
+    """Provision -> health-gate -> version-pin; emit a verified url iff all pass.
+
+    Order: stand up the service (ez5.6), then BOUNDED health-gate it (ez5.5 —
+    a not-ready service short-circuits before the version probe), then version-
+    pin it (ez5.4 seam). The verified ``service_url`` is emitted ONLY when the
+    service is both health-ready AND version-pinned.
+
+    All three steps are injection seams for tests; ``verify_version`` defaults
+    to the fail-closed placeholder until ez5.4 lands.
+    """
+    _provision = provision if provision is not None else provision_and_serve
+    _health = health_gate if health_gate is not None else wait_for_service_health
+    _verify = verify_version if verify_version is not None else _default_verify_version
+
+    prov = _provision()
+
+    health = _health(
+        service_url=prov.service_url, timeout_s=timeout_s, interval_s=interval_s
+    )
+    if not health.ready:
+        reason = (
+            f"storage service at {prov.service_url} did not become healthy "
+            f"within {timeout_s:.0f}s "
+            f"(last status={health.last_status}, error={health.last_error})"
+        )
+        _log.warning("guided_upgrade_not_ready", stage="health", reason=reason)
+        return ServiceReadiness(
+            ready=False, service_url=None, reason=reason,
+            version_ok=False, provision=prov, health=health,
+        )
+
+    pin = _verify(prov.service_url)
+    if not pin.ok:
+        _log.warning("guided_upgrade_not_ready", stage="version", reason=pin.reason)
+        return ServiceReadiness(
+            ready=False, service_url=None, reason=pin.reason,
+            version_ok=False, provision=prov, health=health,
+        )
+
+    _log.info("guided_upgrade_service_verified", service_url=prov.service_url)
+    return ServiceReadiness(
+        ready=True, service_url=prov.service_url, reason=None,
+        version_ok=True, provision=prov, health=health,
+    )
+
+
 # ── ez5.6: provision-and-serve sequence ────────────────────────────────────
 
 
