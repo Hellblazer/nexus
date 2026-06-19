@@ -69,6 +69,31 @@ assert "plans/search"          200 "${A[@]}" "${J[@]}" -X POST -d '{"query":"q",
 assert "taxonomy/topics"       200 "${A[@]}" "$U/v1/taxonomy/topics?collection=knowledge__x"
 assert "chash/distinct"        200 "${A[@]}" "$U/v1/chash/distinct_collections"
 
+# ── Local bge-768 EMBED (nexus-pqatt) ────────────────────────────────────────
+# The embed path drives the DJL HuggingFace tokenizers JNI (libtokenizers.so) and
+# the onnxruntime session run — both of which need jniAccessible registrations the
+# native image previously omitted, so the FIRST embed SIGABRTed at lib.rs:475
+# (Result::unwrap on a JavaException) while every other endpoint above worked. The
+# old gate never embedded, so the crash shipped. We assert the encode+infer path
+# returns a real 768-dim vector. Requires the ~416MB bge ONNX model (provisioned by
+# `nx init --service`). If it is absent we WARN+skip loudly rather than silently
+# pass — a model-less CI run must not read as "embed covered".
+BGE_MODEL="${NX_BGE_MODEL_PATH:-$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx}"
+if [ -f "$BGE_MODEL" ]; then
+  echo "local bge-768 embed path:"
+  ecode=$(curl -s -o /tmp/ns-embed.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+    -d '{"collection":"knowledge__x","texts":["native embed smoke"]}' "$U/v1/vectors/embed")
+  if [ "$ecode" = "200" ] && grep -q '"embeddings"' /tmp/ns-embed.out \
+     && [ "$(python3 -c "import json,sys;print(len(json.load(open('/tmp/ns-embed.out'))['embeddings'][0]))" 2>/dev/null)" = "768" ]; then
+    echo "  ok   embed (DJL tokenizer JNI + onnx run) -> 200, 768-dim"
+  else
+    echo "  FAIL embed -> $ecode (want 200 + 768-dim): $(head -c200 /tmp/ns-embed.out)"; fail=1
+  fi
+else
+  echo "  WARN embed path NOT covered — bge model absent at $BGE_MODEL"
+  echo "       (set NX_BGE_MODEL_PATH or provision via 'nx init --service' to gate the JNI embed path)"
+fi
+
 if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log; then
   echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log | head; fail=1
 fi

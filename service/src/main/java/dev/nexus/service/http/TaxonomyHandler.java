@@ -377,8 +377,13 @@ public final class TaxonomyHandler implements HttpHandler {
     private void handleRenameCollection(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
-        String oldCol = requireString(body, "old_collection");
-        String newCol = requireString(body, "new_collection");
+        // Field names are "old"/"new" — the convention every other rename_collection
+        // handler (chash, aspects, queue, highlights, telemetry, catalog) and every
+        // nexus HTTP client use. This handler was the lone "old_collection"/
+        // "new_collection" outlier, which 400'd the RDR-162 cross-model ref-remap
+        // (the first real caller of service-mode taxonomy rename).
+        String oldCol = requireString(body, "old");
+        String newCol = requireString(body, "new");
         HttpUtil.send(ex, 200, json(repo.renameCollection(tenant, oldCol, newCol)));
     }
 

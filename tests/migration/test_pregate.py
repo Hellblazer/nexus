@@ -168,6 +168,35 @@ def test_a_unsupported_minilm_blocks_with_reindex_diagnostic() -> None:
     assert "NX_VOYAGE_API_KEY" not in str(exc.value)  # not a credential issue
 
 
+def test_exempt_minilm_is_not_blocked() -> None:
+    # RDR-162 P2: a legacy minilm-384 collection the orchestrator will cross-model
+    # migrate (in ``exempt``) is NOT blocked — the ETL re-embeds its stored text
+    # into a bge-768 target. Without the exemption it would block (test_a above).
+    name = "docs__legacy__minilm-l6-v2-384__v1"
+    assert_models_supported(
+        [_cls(name, _LEGACY_384)],
+        voyage_key_present=True,
+        source=_FixedSource(_WIRED_WITH_VOYAGE),
+        exempt=frozenset({name}),
+    )
+
+
+def test_exempt_does_not_rescue_voyage_no_key() -> None:
+    # The exemption only covers the collections actually remapped. A voyage
+    # collection with no key is the credential case (never remapped) and still
+    # blocks even when an unrelated minilm name is exempt.
+    voyage = "knowledge__art__voyage-context-3__v1"
+    minilm = "docs__x__minilm-l6-v2-384__v1"
+    with pytest.raises(ModelPreGateBlocked) as exc:
+        assert_models_supported(
+            [_cls(voyage, _VOYAGE), _cls(minilm, _LEGACY_384)],
+            voyage_key_present=False,
+            source=_FixedSource(_WIRED_ONNX_ONLY),
+            exempt=frozenset({minilm}),
+        )
+    assert exc.value.collections == [voyage]
+
+
 def test_d_mixed_store_blocks_unsupported_subset() -> None:
     classifications = [
         _cls("code__nexus__bge-base-en-v15-768__v1", _ONNX),  # supported (bge)

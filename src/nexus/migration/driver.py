@@ -35,8 +35,10 @@ from typing import Any, Callable
 import structlog
 
 from nexus.migration.detection import (
+    _ONNX_MODEL,
     DetectionReport,
     classify_collections,
+    cross_model_remappable,
     open_read_legs,
     voyage_key_available,
 )
@@ -48,7 +50,13 @@ from nexus.migration.validation import (
     compose_validation_checks,
     validate_migration,
 )
-from nexus.migration.vector_etl import MigrationReport, migrate_cloud, migrate_local
+from nexus.migration.vector_etl import (
+    MigrationReport,
+    _dim_for_collection,
+    cross_model_target_name,
+    migrate_cloud,
+    migrate_local,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -163,12 +171,31 @@ def run_guided_upgrade(
         for client in (local, cloud):
             _close_quietly(client)
 
+    # RDR-162 P2: a legacy collection the service cannot serve under its current
+    # name (e.g. minilm-384 after RDR-160) is auto-migrated by re-embedding its
+    # STORED chunk text into a model-remapped target (bge-768) — not blocked with
+    # the re-index diagnostic. Policy lives here (the orchestrator), not in the
+    # ETL: build the source→target map, pass it down, and the sequencer exempts
+    # these from the pre-gate and re-points their references after they verify.
+    target_names = {
+        c.collection: cross_model_target_name(c.collection, _ONNX_MODEL)
+        for c in detection.classifications
+        if cross_model_remappable(c)
+    }
+    if target_names:
+        _log.info("guided_upgrade_cross_model_targets", targets=target_names)
+
     # 2. SEQUENCE — quiesce → pre-gate → T2 → T3-per-leg. The per-leg ETL opens
     #    + closes its OWN read client internally (we closed ours above).
     def _run_leg(leg: str) -> MigrationReport:
         if leg == "cloud":
-            return migrate_cloud(vector_client, on_result=on_leg_result)
-        return migrate_local(local_path, vector_client, on_result=on_leg_result)
+            return migrate_cloud(
+                vector_client, on_result=on_leg_result, target_names=target_names,
+            )
+        return migrate_local(
+            local_path, vector_client, on_result=on_leg_result,
+            target_names=target_names,
+        )
 
     sequence = run_sequenced_migration(
         detection,
@@ -176,6 +203,7 @@ def run_guided_upgrade(
         run_leg=_run_leg,
         voyage_key_present=key_present,
         on_progress=on_progress,
+        cross_model_targets=target_names,
     )
 
     # A fresh-user no-op (nothing data-bearing) is a clean success with no
@@ -194,8 +222,19 @@ def run_guided_upgrade(
     #    gate, and always close the reopened legs.
     legs = sorted(detection.legs_with_data)
     migrated_collections = [c.collection for c in detection.classifications if c.has_data]
+    # RDR-162 P2: a cross-model collection's chunks landed in its bge-768 TARGET,
+    # so its validation dim is the TARGET dim (768), not the source dim (384).
+    # The count check (below, via target_names) reads the source Chroma count and
+    # the TARGET pgvector count; the taxonomy/manifest legs see the remapped refs.
     dims = tuple(
-        sorted({c.dim for c in detection.classifications if c.has_data and c.dim})
+        sorted(
+            {
+                _dim_for_collection(target_names.get(c.collection, c.collection))[0]
+                or c.dim
+                for c in detection.classifications
+                if c.has_data and (c.dim or c.collection in target_names)
+            }
+        )
     )
     reopen = reopen_leg or (lambda leg: _default_reopen_leg(leg, local_path))
 
@@ -216,6 +255,7 @@ def run_guided_upgrade(
                 catalog_client=catalog_client,
                 collections=migrated_collections,
                 dims=dims,
+                target_names=target_names,
             )
             validation = validate_migration(
                 taxonomy_check=checks.taxonomy_check,

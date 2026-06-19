@@ -254,11 +254,11 @@ def test_compose_validation_checks_adapts_real_primitive_signatures(
     # zero-arg Callable contract so P4 does not re-derive them from fixtures.
     seen: dict[str, object] = {}
 
-    def _fake_taxonomy(t2_db_path, vector_client):  # type: ignore[no-untyped-def]
+    def _fake_taxonomy(t2_db_path, vector_client, target_names=None):  # type: ignore[no-untyped-def]
         seen["taxonomy_args"] = (t2_db_path, vector_client)
         return []
 
-    def _fake_counts(read_client, vector_client, collections):  # type: ignore[no-untyped-def]
+    def _fake_counts(read_client, vector_client, collections, target_names=None):  # type: ignore[no-untyped-def]
         seen["count_args"] = (read_client, vector_client, collections)
         return {c: (1, 1) for c in collections}
 

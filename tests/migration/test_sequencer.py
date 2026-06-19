@@ -88,7 +88,7 @@ def _noop_quiesce() -> None:
     return None
 
 
-def _noop_model_gate(classifications, *, voyage_key_present) -> None:  # type: ignore[no-untyped-def]
+def _noop_model_gate(classifications, *, voyage_key_present, exempt=frozenset()) -> None:  # type: ignore[no-untyped-def]
     return None
 
 
@@ -280,7 +280,7 @@ def test_pregates_run_before_t2_in_order() -> None:
         run_leg=lambda leg: order.append("leg") or _ok_leg("local", ["code__a__bge-base-en-v15-768__v1"]),  # type: ignore[func-returns-value]
         voyage_key_present=False,
         quiesce_check=lambda: order.append("quiesce"),
-        model_gate=lambda c, *, voyage_key_present: order.append("models"),
+        model_gate=lambda c, *, voyage_key_present, exempt=frozenset(): order.append("models"),
         started_at=_FIXED_STARTED_AT,
     )
     assert order == ["quiesce", "models", "t2", "leg"]
@@ -292,7 +292,7 @@ def test_model_gate_block_stops_before_t2() -> None:
     det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
     t2_calls: list[int] = []
 
-    def _model_gate(classifications, *, voyage_key_present) -> None:  # type: ignore[no-untyped-def]
+    def _model_gate(classifications, *, voyage_key_present, exempt=frozenset()) -> None:  # type: ignore[no-untyped-def]
         raise ModelPreGateBlocked([("code__a__bge-base-en-v15-768__v1", "unservable")])
 
     outcome = run_sequenced_migration(
@@ -413,3 +413,91 @@ def test_fresh_user_no_op_success_without_touching_anything() -> None:
     assert t2_calls == []  # nothing to migrate — T2/T3 untouched
     assert leg_calls == []
     assert current_phase() == "not-migrating"  # no sentinel left behind
+
+
+# --------------------------------------------------------------------------
+# RDR-162 P2 cross-model remap wiring
+# --------------------------------------------------------------------------
+
+_SRC = "knowledge__a__minilm-l6-v2-384__v1"
+_TGT = "knowledge__a__bge-base-en-v15-768__v1"
+
+
+def _cross_model_leg(leg: str) -> MigrationReport:
+    """A leg result for a cross-model collection: status migrated, target set."""
+    return MigrationReport(
+        leg=leg,  # type: ignore[arg-type]
+        results=(CollectionResult(_SRC, 10, 10, "migrated", target_collection=_TGT),),
+    )
+
+
+def test_cross_model_remap_called_after_verified_leg() -> None:
+    det = _detection(_cls(_SRC, "local"))
+    calls: list[tuple[str, str]] = []
+    exempt_seen: list[frozenset] = []
+
+    def _gate(classifications, *, voyage_key_present, exempt=frozenset()) -> None:  # type: ignore[no-untyped-def]
+        exempt_seen.append(exempt)
+
+    outcome = run_sequenced_migration(
+        det,
+        sources=None,
+        run_t2=lambda _s: _CLEAN_T2,
+        run_leg=_cross_model_leg,
+        voyage_key_present=False,
+        quiesce_check=_noop_quiesce,
+        model_gate=_gate,
+        started_at=_FIXED_STARTED_AT,
+        cross_model_targets={_SRC: _TGT},
+        remap_refs=lambda s, t: calls.append((s, t)),
+    )
+
+    assert outcome.ok is True
+    assert calls == [(_SRC, _TGT)]  # remap fired, source -> target
+    assert exempt_seen == [frozenset({_SRC})]  # gate exempted the cross-model coll
+    assert current_phase() != "migrated-failed"
+
+
+def test_remap_failure_demotes_leg_and_marks_failed() -> None:
+    det = _detection(_cls(_SRC, "local"))
+
+    def _boom(_s: str, _t: str) -> None:
+        raise RuntimeError("service rename_collection 500")
+
+    outcome = run_sequenced_migration(
+        det,
+        sources=None,
+        run_t2=lambda _s: _CLEAN_T2,
+        run_leg=_cross_model_leg,
+        voyage_key_present=False,
+        quiesce_check=_noop_quiesce,
+        model_gate=_noop_model_gate,
+        started_at=_FIXED_STARTED_AT,
+        cross_model_targets={_SRC: _TGT},
+        remap_refs=_boom,
+    )
+
+    assert outcome.ok is False  # remap failure demotes the leg
+    assert outcome.legs_attempted == ("local",)
+    assert outcome.legs_ok == ()  # demoted out of legs_ok
+    assert current_phase() == "migrated-failed"  # sentinel correct, not stuck
+
+
+def test_same_model_leg_never_calls_remap() -> None:
+    det = _detection(_cls("code__a__bge-base-en-v15-768__v1", "local"))
+    calls: list[tuple[str, str]] = []
+
+    outcome = run_sequenced_migration(
+        det,
+        sources=None,
+        run_t2=lambda _s: _CLEAN_T2,
+        run_leg=lambda leg: _ok_leg(leg, ["code__a__bge-base-en-v15-768__v1"]),
+        voyage_key_present=False,
+        quiesce_check=_noop_quiesce,
+        model_gate=_noop_model_gate,
+        started_at=_FIXED_STARTED_AT,
+        remap_refs=lambda s, t: calls.append((s, t)),
+    )
+
+    assert outcome.ok is True
+    assert calls == []  # byte-for-byte path: no target_collection, no remap

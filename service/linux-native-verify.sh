@@ -34,6 +34,7 @@ docker run --rm --name "$BUILDER" --platform linux/arm64 --network "$NET" \
   -v "$REPO:$REPO" -w "$REPO/service" \
   -v "$HOME/.m2:/root/.m2" \
   -v "$HOME/.cache/chroma:/root/.cache/chroma" \
+  -v "$HOME/.cache/nexus/onnx_models:/root/.cache/nexus/onnx_models" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
   -e DOCKER_HOST=unix:///var/run/docker.sock \
@@ -59,6 +60,12 @@ docker run --rm --name "$BUILDER" --platform linux/arm64 --network "$NET" \
     echo -n "put     : "; curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer lintoken" -H "Content-Type: application/json" -X POST -d "{\"project\":\"lin\",\"title\":\"a\",\"content\":\"linux native\",\"tags\":\"t\",\"ttl\":30}" http://localhost:8080/v1/memory/put; echo
     echo -n "get     : "; curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer lintoken" "http://localhost:8080/v1/memory/get?project=lin&title=a"; echo
     echo -n "search  : "; curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer lintoken" -H "Content-Type: application/json" -X POST -d "{\"query\":\"linux\",\"project\":\"lin\"}" http://localhost:8080/v1/memory/search; echo
+    # bge-768 EMBED (nexus-pqatt): the DJL tokenizers JNI + onnx-run path that
+    # SIGABRTed at lib.rs:475 under native-image. Model mounted from host cache.
+    echo -n "embed   : "
+    ecode=$(curl -s -o /tmp/lin-embed.out -w "%{http_code}" -H "Authorization: Bearer lintoken" -H "Content-Type: application/json" -X POST -d "{\"collection\":\"knowledge__x\",\"texts\":[\"linux native embed\"]}" http://localhost:8080/v1/vectors/embed); echo "$ecode"
+    kill -0 $PID 2>/dev/null || { echo "LINUX EMBED FAIL: service died on embed (SIGABRT?)"; tail -30 /tmp/lin-svc.log; exit 1; }
+    [ "$ecode" = 200 ] && grep -q "\"embeddings\"" /tmp/lin-embed.out || { echo "LINUX EMBED FAIL: $ecode $(head -c160 /tmp/lin-embed.out)"; tail -30 /tmp/lin-svc.log; exit 1; }
     grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointer" /tmp/lin-svc.log && { echo "LINUX RUNTIME ERROR"; exit 1; } || true
     kill $PID 2>/dev/null || true
     echo "LINUX NATIVE OK"

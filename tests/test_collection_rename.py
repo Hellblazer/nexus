@@ -1259,3 +1259,156 @@ class TestHalfCascadeNonZeroExit:
         assert "cascade" in result.output.lower() or "T2" in result.output, (
             f"Error message must name the failed cascade. Output: {result.output}"
         )
+
+
+# ── RDR-162 P2: cross-model reference remap (copy-not-move) ──────────────────
+
+
+class TestRemapCollectionReferences:
+    """RDR-162 P2: ``remap_collection_references`` re-points T2 + catalog
+    references source -> target WITHOUT renaming the T3 collection and WITHOUT
+    guarding on target existence (the cross-model migrate already populated the
+    target; the source is intentionally retained for re-runnability)."""
+
+    def test_repoints_t2_references_no_t3_rename(
+        self, tmp_path: Path, env_creds,
+    ) -> None:
+        from nexus.collection_rename import remap_collection_references
+        from nexus.db.t2 import T2Database
+
+        db_path = tmp_path / "memory.db"
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+
+        src = "knowledge__corpus__minilm-l6-v2-384__v1"
+        tgt = "knowledge__corpus__bge-base-en-v15-768__v1"
+        with T2Database(db_path) as t2db:
+            t2db.chash_index.upsert(chash="aa", collection=src)
+            t2db.chash_index.upsert(chash="bb", collection=src)
+
+        # No _t3 patch: remap must NEVER touch T3 (copy-not-move).
+        with patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
+             patch("nexus.config.catalog_path", return_value=cat_dir):
+            counts = remap_collection_references(src, tgt)
+
+        assert counts["chash"] == 2
+        with T2Database(db_path) as verify:
+            old_rows = verify.chash_index.conn.execute(
+                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
+                (src,),
+            ).fetchone()[0]
+            new_rows = verify.chash_index.conn.execute(
+                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
+                (tgt,),
+            ).fetchone()[0]
+        assert (old_rows, new_rows) == (0, 2)
+
+    def test_repoints_all_t2_cascade_tables(
+        self, tmp_path: Path, env_creds,
+    ) -> None:
+        """S2 (RDR-162 P2 review): the real cascade re-points EVERY T2 table that
+        names a collection (not just chash) — chash, document_aspects, and the
+        aspect queue — via the production ``rename_collection_cascade``."""
+        from nexus.collection_rename import remap_collection_references
+        from nexus.db.t2 import T2Database
+
+        db_path = tmp_path / "memory.db"
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        src = "knowledge__c__minilm-l6-v2-384__v1"
+        tgt = "knowledge__c__bge-base-en-v15-768__v1"
+
+        with T2Database(db_path) as t2db:
+            t2db.chash_index.upsert(chash="aa", collection=src)
+            t2db.document_aspects.conn.execute(
+                "INSERT INTO document_aspects "
+                "(collection, source_path, problem_formulation, proposed_method, "
+                " experimental_datasets, experimental_baselines, "
+                " experimental_results, extras, confidence, extracted_at, "
+                " model_version, extractor_name) "
+                "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
+                "        '2026-06-18T00:00:00Z', 'v1', 'test')",
+                (src, "a.py"),
+            )
+            t2db.document_aspects.conn.commit()
+            t2db.aspect_queue.enqueue(src, "b.py", doc_id="d2")
+
+        with patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
+             patch("nexus.config.catalog_path", return_value=cat_dir):
+            counts = remap_collection_references(src, tgt)
+
+        # The return dict carries the full cascade surface, incl. highlights.
+        assert "highlights" in counts
+        assert counts["chash"] == 1
+        with T2Database(db_path) as verify:
+            da_new = verify.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?", (tgt,),
+            ).fetchone()[0]
+            da_old = verify.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?", (src,),
+            ).fetchone()[0]
+            aq_new = verify.aspect_queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+                (tgt,),
+            ).fetchone()[0]
+            aq_old = verify.aspect_queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+                (src,),
+            ).fetchone()[0]
+        assert (da_new, da_old) == (1, 0)
+        assert (aq_new, aq_old) == (1, 0)
+
+    def test_t2_cascade_failure_raises(self, tmp_path: Path, env_creds) -> None:
+        import click
+
+        from nexus.collection_rename import remap_collection_references
+
+        db_path = tmp_path / "memory.db"
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+
+        def _t2_bomb(*a, **kw):
+            raise RuntimeError("simulated T2 cascade failure")
+
+        with patch("nexus.mcp_infra.t2_index_write", side_effect=_t2_bomb), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
+             patch("nexus.config.catalog_path", return_value=cat_dir):
+            with pytest.raises(click.ClickException) as exc:
+                remap_collection_references("code__a__minilm-l6-v2-384__v1",
+                                            "code__a__bge-base-en-v15-768__v1")
+        assert "cascade" in str(exc.value).lower()
+
+    def test_catalog_failure_is_fail_open(self, tmp_path: Path, env_creds) -> None:
+        from nexus.collection_rename import remap_collection_references
+        from nexus.db.t2 import T2Database
+
+        db_path = tmp_path / "memory.db"
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        src = "code__o__minilm-l6-v2-384__v1"
+        tgt = "code__o__bge-base-en-v15-768__v1"
+        with T2Database(db_path) as t2db:
+            t2db.chash_index.upsert(chash="aa", collection=src)
+
+        warnings: list[str] = []
+        bomb = MagicMock()
+        bomb.rename_collection = MagicMock(side_effect=RuntimeError("catalog down"))
+
+        with patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
+             patch("nexus.config.catalog_path", return_value=cat_dir):
+            counts = remap_collection_references(
+                src, tgt, catalog=bomb, on_warn=warnings.append,
+            )
+
+        # T2 cascade still committed; catalog failure only warned.
+        assert counts["chash"] == 1
+        assert any("catalog" in w.lower() for w in warnings)
+        with T2Database(db_path) as verify:
+            new_rows = verify.chash_index.conn.execute(
+                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
+                (tgt,),
+            ).fetchone()[0]
+        assert new_rows == 1

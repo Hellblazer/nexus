@@ -47,8 +47,8 @@ else
   bad "could not position native binary"
 fi
 
-note "nx init --service — provisioning PG16 + pgvector + nexus DB…"
-if nx init --service --embedder minilm-384 --yes 2>&1 | sed 's/^/       /'; then
+note "nx init --service — provisioning PG16 + pgvector + nexus DB (bge-768 service embedder, RDR-160)…"
+if nx init --service --embedder bge-768 --yes 2>&1 | sed 's/^/       /'; then
   ok "nx init --service (provision)"
 else
   bad "nx init --service failed"; say "ABORT (provision failed)"; exit 1
@@ -62,26 +62,19 @@ set -a; . /home/nexus/.config/nexus/pg_credentials; set +a
   && export VOYAGE_API_KEY="${VOYAGE_API_KEY:-$NX_VOYAGE_API_KEY}" \
             NX_VOYAGE_API_KEY="${NX_VOYAGE_API_KEY:-$VOYAGE_API_KEY}"
 
-# nexus-jrrve: the Java service constructs OnnxEmbedder UNCONDITIONALLY at boot
-# (the embedder choice is minilm-384 from `nx init`; a Voyage key only ADDS the
-# cloud leg on top, it does not replace onnx-local). So the minilm model must be
-# present even on the cloud leg, but no nx step fetches it on a fresh install.
-# Warm it the way a real first local-embed use would (chromadb downloads the
-# model to ~/.cache/chroma/onnx_models/...).
-note "warming all-MiniLM-L6-v2 ONNX cache (nexus-jrrve workaround)…"
-if python - <<'PY' 2>&1 | sed 's/^/       /'
-from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
-ONNXMiniLM_L6_V2()(["warmup"])
-print("onnx minilm model materialized")
-PY
-then :; else
-  # Don't let a silent warmup failure masquerade as a service/PG fault below.
-  bad "ONNX warmup failed (nexus-jrrve workaround) — service start will likely fail"
-fi
+# RDR-160: the service's local ONNX embedder is bge-768, fetched by
+# `nx init --service --embedder bge-768` above (the standard fp32 ONNX, closing
+# the nexus-jrrve fresh-install gap for the bge model). No separate minilm
+# warmup — minilm-384 is exactly the model the migrate must treat as UNSERVABLE
+# (the seeded legacy collections), so the rehearsal proves the cross-model
+# re-embed, not a minilm-served fallback.
 
-note "nx daemon service start — spawn native binary, migrate changesets, await /health…"
-nx daemon service start 2>&1 | sed 's/^/       /' || true
-# Poll the status surface (pebfx.5) for a healthy service.
+# nexus-qke1e: `nx init --service` ALREADY started the persistent, heartbeated
+# supervisor. Do NOT call `nx daemon service start` again — a second supervisor
+# races the first (short-circuits on the live lease, then its heartbeat loop
+# respawns the service), causing a mid-run port-churn + lease-fencing that breaks
+# the migrate. Just verify the init-started service is healthy.
+note "verifying the init-started service is healthy (no second supervisor)…"
 healthy=0
 for i in $(seq 1 30); do
   if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then
@@ -93,6 +86,16 @@ nx daemon service status 2>&1 | sed 's/^/       /' || true
 [ "$healthy" = 1 ] && ok "service healthy (native binary serving, schema migrated)" || bad "service did not reach healthy"
 
 if [ "$healthy" != 1 ]; then say "ABORT (service never came up — Phase A is the gate)"; exit 1; fi
+
+# Clients resolve the endpoint via the supervisor LEASE (now maintained by the
+# persistent supervisor — nexus-qke1e). Do NOT pin NX_SERVICE_URL/PORT: the
+# supervisor re-allocates the port + republishes the lease on any service
+# respawn, and a pinned env port would defeat that recovery (the stale-env-port
+# trap in service_endpoint.py). The token is stable across restarts, so the
+# pg_credentials NX_SERVICE_TOKEN (sourced above) is safe to keep.
+unset NX_SERVICE_URL NX_SERVICE_PORT NX_SERVICE_HOST 2>/dev/null || true
+[ -n "${NX_SERVICE_TOKEN:-}" ] && ok "NX_SERVICE_TOKEN present (from pg_credentials)" \
+  || bad "NX_SERVICE_TOKEN absent — guided migrate requires it (pg_credentials did not carry it)"
 
 # ── Phase B: seed legacy Chroma + migrate-to-service ─────────────────────────
 say "Phase B — seed legacy Chroma + migrate-to-service"
@@ -113,6 +116,25 @@ else
   bad "seed failed"; SEED_JSON='{}'
 fi
 
+# Diagnostic: dump service status + logs on demand (a connection-refused at
+# migrate time means the native service HTTP listener died after publishing a
+# healthy lease — a service-lifecycle/native-binary fault, not migration logic).
+_dump_service_diag() {
+  nx daemon service status 2>&1 | sed 's/^/         /' || true
+  for lg in storage_service.log storage_service_native.log storage_service.crash.log; do
+    f="$HOME/.config/nexus/logs/$lg"
+    [ -f "$f" ] && { echo "         --- tail $lg ---"; tail -30 "$f" | sed 's/^/         /'; }
+  done
+}
+
+# Informational pre-migrate status (NOT a gate): `nx service probe` can resolve a
+# configured MANAGED endpoint rather than the local lease, so it is a false
+# signal here — the authoritative reachability test is the migrate itself, whose
+# client resolves the local supervisor lease. The post-migrate log dump below is
+# the real diagnostic for a native-service death.
+note "pre-migrate service status (informational):"
+nx daemon service status 2>&1 | grep -iE "status:|health:|port:|pid:" | sed 's/^/       /' || true
+
 note "nx migrate-to-service --dry-run (classify footprint)…"
 nx migrate-to-service --dry-run --local-path "$CHROMA_LOCAL" 2>&1 | sed 's/^/       /' \
   && ok "dry-run classified the footprint" || bad "dry-run failed"
@@ -122,14 +144,19 @@ if nx migrate-to-service --local-path "$CHROMA_LOCAL" 2>&1 | sed 's/^/       /';
   ok "migrate-to-service completed"
 else
   bad "migrate-to-service failed"
+  note "service status + logs (post-migrate diagnosis):"; _dump_service_diag
 fi
 
-# Parity: the migrated collections should now be served from pgvector. Compare
-# the per-collection live count against the seeded count.
-note "validating parity (service collection counts == seeded)…"
-python - "$SEED_JSON" <<'PY' && ok "parity validated" || bad "parity mismatch / unverified"
+# Parity: each seeded collection should now be served from pgvector — but the
+# legacy minilm-384 collections were CROSS-MODEL migrated (RDR-162), so their
+# chunks land under the bge-768 TARGET name, not the source name. Compare the
+# live count at the TARGET name (source name for the byte-for-byte voyage leg).
+note "validating cross-model parity (pgvector TARGET counts == seeded)…"
+python - "$SEED_JSON" <<'PY' && ok "cross-model parity validated" || bad "parity mismatch / unverified"
 import json, sys
-seeded = json.loads(sys.argv[1]).get("collections", {})
+m = json.loads(sys.argv[1])
+seeded = m.get("collections", {})
+cross = m.get("cross_model", {})
 if not seeded:
     print("       no seed manifest — cannot validate"); sys.exit(1)
 try:
@@ -137,18 +164,39 @@ try:
     t3 = make_t3()
     bad = 0
     for name, want in seeded.items():
+        target = cross.get(name, name)  # cross-model -> bge target; else same
+        # Source name must be ABSENT from pgvector (re-embed lands at target).
+        if target != name:
+            try:
+                stray = t3.count(name)
+            except Exception:
+                stray = 0
+            if stray:
+                print(f"       {name}: SOURCE name has {stray} in pgvector (should be 0)")
+                bad += 1
         try:
-            got = t3.count(name)
+            got = t3.count(target)
         except Exception as e:
-            print(f"       {name}: count() error: {e}"); bad += 1; continue
+            print(f"       {target}: count() error: {e}"); bad += 1; continue
         flag = "ok" if got == want else "MISMATCH"
-        print(f"       {name}: service={got} seeded={want} [{flag}]")
+        print(f"       {name} -> {target}: service={got} seeded={want} [{flag}]")
         if got != want:
             bad += 1
     sys.exit(1 if bad else 0)
 except Exception as e:
     print(f"       validation harness error: {e}"); sys.exit(1)
 PY
+
+# RDR-162 P2: the SOURCELESS note proof. The note's topic_assignment named the
+# minilm source; the cross-model migrate must re-point it to the bge-768 target.
+# This is proven IMPLICITLY by the guided migrate's clean unlock above: the
+# validation gate runs verify_taxonomy_consistency, which BLOCKS unlock unless
+# every topic_assignments.source_collection resolves to a migrated (pgvector)
+# collection. A clean unlock therefore means the sourceless note's assignment was
+# re-pointed to its live bge target — the case embed_migrate cannot upgrade. (No
+# direct SQL probe here: in service mode T2 is Postgres behind the HTTP store, so
+# the migrate's own validation leg is the authoritative ref-remap check.)
+note "sourceless-note ref-remap is gated by the guided migrate's clean unlock above"
 
 # ── Phase C: rollback rehearsal (Chroma source intact) ───────────────────────
 say "Phase C — rollback safety (copy-not-move: legacy Chroma intact)"
