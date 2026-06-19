@@ -132,13 +132,16 @@ def _patch_engine(
         order.append("classify")
         return detection
 
-    def _run_sequenced(det, *, sources, run_leg, voyage_key_present, on_progress=None):
+    def _run_sequenced(
+        det, *, sources, run_leg, voyage_key_present, on_progress=None,
+        cross_model_targets=None,
+    ):
         order.append("sequence")
         # The detection legs MUST be closed before the ETL sequence runs.
         assert "detect-local" in closables and "detect-cloud" in closables
         return sequence
 
-    def _compose(*, t2_db_path, read_client, vector_client, catalog_client, collections, dims):
+    def _compose(*, t2_db_path, read_client, vector_client, catalog_client, collections, dims, target_names=None):
         if compose_capture is not None:
             compose_capture["read_client"] = read_client
             compose_capture["collections"] = collections

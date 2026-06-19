@@ -217,15 +217,22 @@ def _drive(
     voyage_key_present: bool,
     cloud_store: Any | None = None,
     reopen_overrides: dict[str, Any] | None = None,
+    remap_refs: Any | None = None,
 ) -> driver.GuidedUpgradeResult:
     """Drive the REAL ``run_guided_upgrade`` with the T2 ladder + quiescence
     injected and (optionally) a real second store backing the cloud leg.
 
     The model gate stays REAL (the unsupported-model block must be genuine).
+    ``remap_refs`` (RDR-162 P2) injects a hermetic reference-remap so the
+    cross-model scenario does not reach the real T2/catalog cascade; ``None``
+    leaves the sequencer's real default (only safe when no cross-model target
+    is present).
     """
     real_seq = _seq_mod.run_sequenced_migration
 
     def _seq(detection, **kw):  # type: ignore[no-untyped-def]
+        if remap_refs is not None:
+            kw.setdefault("remap_refs", remap_refs)
         return real_seq(
             detection,
             run_t2=lambda _sources: {"summary": {"total_failed": 0}},
@@ -243,9 +250,14 @@ def _drive(
     def _open_read_legs(_lp: Any = None):  # type: ignore[no-untyped-def]
         return local_client, cloud_store
 
-    def _migrate_cloud(vc: Any, on_result: Any = None):  # type: ignore[no-untyped-def]
+    def _migrate_cloud(  # type: ignore[no-untyped-def]
+        vc: Any, on_result: Any = None, target_names: Any = None,
+    ):
         assert cloud_store is not None
-        return migrate_collections(cloud_store, vc, leg="cloud", on_result=on_result)
+        return migrate_collections(
+            cloud_store, vc, leg="cloud", on_result=on_result,
+            target_names=target_names,
+        )
 
     monkeypatch.setattr(driver, "open_read_legs", _open_read_legs)
     monkeypatch.setattr(driver, "migrate_cloud", _migrate_cloud)
@@ -316,13 +328,74 @@ class TestHermeticOracle:
         # Sentinel cleared on a clean unlock (serving normal again).
         assert read_state() is None
 
-    def test_scenario3_unsupported_model_blocks_pre_migration(
+    def test_scenario3_legacy_minilm_cross_model_migrates_and_unlocks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """UNSUPPORTED minilm-384: detected and BLOCKED by the real model gate
-        BEFORE any ETL; NO data written, no validation, no clean ok."""
+        """RDR-162 P2: a legacy minilm-384 collection is NOT blocked — the
+        orchestrator re-embeds its STORED chunk text into a bge-768 TARGET
+        (model-segment remap), the count gate verifies source==target, the
+        references are re-pointed source->target, and the run unlocks clean."""
         store = tmp_path / "chroma"
-        name = _coll("oracle-bge", model=_MODEL_LEGACY)
+        source = _coll("oracle-x", model=_MODEL_LEGACY)
+        target = _coll("oracle-x", model=_MODEL_ONNX)  # the bge-768 remap target
+        ids = _seed_local_store(store, {source: 4})
+        # Seed a taxonomy assignment under the SOURCE name; the hermetic remap
+        # must re-point it to the TARGET so the taxonomy floor resolves clean.
+        t2 = _make_t2(tmp_path / "t2.db", assignments=(source,))
+        vc = FakeVectorClient()
+        cc = _FakeCatalogClient(doc_count=1, orphans_by_dim={768: 0})
+
+        remap_calls: list[tuple[str, str]] = []
+
+        def _hermetic_remap(src: str, tgt: str) -> dict[str, int]:
+            # Exercise a genuine reference re-point against the hermetic T2
+            # (the production cascade routes through t2_index_write / the
+            # service; here we apply the same source->target UPDATE directly).
+            remap_calls.append((src, tgt))
+            conn = sqlite3.connect(t2)
+            try:
+                n = conn.execute(
+                    "UPDATE topic_assignments SET source_collection = ? "
+                    "WHERE source_collection = ?",
+                    (tgt, src),
+                ).rowcount
+                conn.commit()
+            finally:
+                conn.close()
+            return {"tax_assignments": n}
+
+        result = _drive(
+            monkeypatch,
+            local_path=store,
+            vector_client=vc,
+            catalog_client=cc,
+            t2_path=t2,
+            voyage_key_present=False,
+            remap_refs=_hermetic_remap,
+        )
+
+        assert result.ok is True
+        assert result.validation is not None and result.validation.unlocked is True
+        # Data landed in the TARGET (bge-768) collection, not the source name.
+        assert vc.count(target) == 4
+        assert set(vc.store[target].keys()) == set(ids[source])
+        assert vc.store.get(source) is None
+        # References were re-pointed source -> target, exactly once.
+        assert remap_calls == [(source, target)]
+        # Validation ran against the TARGET dim (768), not the source dim (384).
+        assert cc.orphan_dim_queries == [768]
+        # Clean unlock clears the sentinel.
+        assert read_state() is None
+
+    def test_scenario3b_voyage_no_key_blocks_pre_migration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A still-genuinely-unsupported collection (voyage model, NO key) is
+        BLOCKED by the real model gate BEFORE any ETL — it is the credential
+        case (add NX_VOYAGE_API_KEY), NOT a model switch, so it is never
+        cross-model remapped. NO data written, no validation, no clean ok."""
+        store = tmp_path / "chroma"
+        name = _coll("oracle-vblock", model=_MODEL_VOYAGE)
         _seed_local_store(store, {name: 4})
         t2 = _make_t2(tmp_path / "t2.db")
         vc = FakeVectorClient()
@@ -342,12 +415,51 @@ class TestHermeticOracle:
         # NO data touched — the block is pre-migration.
         assert vc.store == {}
         assert cc.backfill_calls == 0
-        # The sentinel is migrated-failed (NOT a bare-empty index): the sequencer
-        # sets it BEFORE the pre-gate so reads degrade-LOUD, and a model block
-        # leaves it there with rollback offered. "No dead end" = recoverable
-        # (fix the model + re-run, idempotent), not a cleared sentinel. This
-        # matches the locked P2 contract (test_sequencer.py model-gate-block).
+        # The sentinel is migrated-failed (degrade-LOUD), recoverable by adding
+        # the key + re-running (idempotent), never a cleared sentinel.
         assert current_phase() == MIGRATED_FAILED
+
+    def test_scenario3c_mixed_legacy_and_onnx_in_one_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RDR-162 P2: a realistic partially-upgraded store — one bge-768 (already
+        servable) AND one minilm-384 (legacy) collection in the SAME run. The bge
+        migrates byte-for-byte (no remap), the minilm is cross-model remapped to
+        bge-768; only the legacy one triggers a reference re-point."""
+        store = tmp_path / "chroma"
+        onnx = _coll("oracle-mix-onnx", model=_MODEL_ONNX)
+        legacy_src = _coll("oracle-mix-legacy", model=_MODEL_LEGACY)
+        legacy_tgt = _coll("oracle-mix-legacy", model=_MODEL_ONNX)
+        ids = _seed_local_store(store, {onnx: 3, legacy_src: 5})
+        t2 = _make_t2(tmp_path / "t2.db")
+        vc = FakeVectorClient()
+        cc = _FakeCatalogClient(doc_count=1, orphans_by_dim={768: 0})
+
+        remap_calls: list[tuple[str, str]] = []
+
+        result = _drive(
+            monkeypatch,
+            local_path=store,
+            vector_client=vc,
+            catalog_client=cc,
+            t2_path=t2,
+            voyage_key_present=False,
+            remap_refs=lambda s, t: remap_calls.append((s, t)),
+        )
+
+        assert result.ok is True
+        assert result.validation is not None and result.validation.unlocked is True
+        # bge landed under its own name (byte-for-byte); legacy under the target.
+        assert vc.count(onnx) == 3
+        assert set(vc.store[onnx].keys()) == set(ids[onnx])
+        assert vc.count(legacy_tgt) == 5
+        assert set(vc.store[legacy_tgt].keys()) == set(ids[legacy_src])
+        assert vc.store.get(legacy_src) is None
+        # ONLY the legacy collection triggered a reference re-point.
+        assert remap_calls == [(legacy_src, legacy_tgt)]
+        # Validation scanned both dims (768 only — both targets are bge-768).
+        assert cc.orphan_dim_queries == [768]
+        assert read_state() is None
 
     def test_scenario1_cloud_voyage_unlocks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

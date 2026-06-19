@@ -133,6 +133,43 @@ def classify_model_support(
     )
 
 
+def cross_model_remappable(c: "CollectionClassification") -> bool:
+    """Whether *c* is a legacy collection the cross-model migrate can re-embed.
+
+    RDR-162 P2: a collection is auto-migratable via stored-text re-embed (rather
+    than blocked with the re-index diagnostic) iff ALL hold:
+
+    * it is data-bearing (an empty collection has nothing to migrate);
+    * its name is four-segment conformant (so the model segment can be remapped
+      by :func:`vector_etl.cross_model_target_name`);
+    * its model is NOT a voyage model — a voyage collection that is unsupported
+      is the credential case (gate C3: "add NX_VOYAGE_API_KEY"), NOT a model
+      switch; re-embedding voyage text into bge would silently change recall, so
+      it stays blocked;
+    * it is currently ``unsupported`` — wired by no service embedder.
+
+    The non-voyage unsupported case is INTENTIONALLY a catch-all, not a
+    minilm-384 allow-list: the cross-model migrate re-embeds the STORED chunk
+    text, which is model-agnostic, so ANY such collection (minilm-384, or any
+    third-party local embedder the service does not wire) can be re-embedded into
+    bge-768. This is the truthful upgrade path — re-embed whatever the service
+    cannot serve, rather than emit a dead-end re-index diagnostic. Voyage
+    collections are the deliberate exception (credential case, not a model
+    switch); a supported collection (already bge-768 or a wired voyage model)
+    migrates byte-for-byte and is never remapped.
+
+    The decision is policy: the orchestrator builds the ``target_names`` map from
+    this predicate and the pre-gate exempts exactly these collections.
+    """
+    if not c.has_data or c.model is None:
+        return False
+    if len(c.collection.split("__")) != 4:
+        return False
+    if c.model in _VOYAGE_MODELS:
+        return False
+    return c.support == "unsupported"
+
+
 @dataclass(frozen=True)
 class CollectionClassification:
     """Per-collection detection result along both axes (RF-2).
@@ -327,10 +364,15 @@ class ModelGroup:
     support: Support
     collection_count: int
     chunk_count: int
-    #: Token volume / time are estimated ONLY for migratable (supported)
-    #: groups; unsupported groups are blocked and contribute zero.
+    #: Token volume / time are estimated ONLY for migratable groups (supported
+    #: OR cross-model re-embed); genuinely-blocked groups contribute zero.
     est_tokens: int
     est_seconds: float
+    #: RDR-162 P2: True when this is an ``unsupported`` group the migrate will
+    #: CROSS-MODEL re-embed into bge-768 (legacy minilm, etc.) rather than block.
+    #: It counts toward the migratable totals; ``support`` stays ``unsupported``
+    #: (its current name is unservable) but it is NOT in ``DryRunPreview.unsupported``.
+    cross_model: bool = False
 
 
 @dataclass(frozen=True)
@@ -363,22 +405,36 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     for c in report.classifications:
         buckets.setdefault((c.leg, c.model, c.support), []).append(c)
 
+    # RDR-162 P2: a cross-model-remappable collection is migratable (re-embed to
+    # bge-768), not blocked. Decide per classification so a bucket is consistent.
+    remappable = {
+        id(c) for c in report.classifications if cross_model_remappable(c)
+    }
+
     groups: list[ModelGroup] = []
     migratable_chunks = 0
     total_est_tokens = 0
     est_seconds = 0.0
     for (leg, model, support), members in buckets.items():
         chunk_count = sum(m.source_count for m in members)
-        if support == "unsupported":
+        is_cross_model = support == "unsupported" and all(
+            id(m) in remappable for m in members
+        )
+        if support == "unsupported" and not is_cross_model:
+            # Genuinely blocked (voyage-no-key, non-conformant) — zero estimate.
             groups.append(
                 ModelGroup(leg, model, support, len(members), chunk_count, 0, 0.0)
             )
             continue
+        # Supported byte-for-byte OR cross-model re-embed: both migratable. The
+        # cross-model re-embed runs through the local ONNX (bge-768) path.
         tokens = chunk_count * _EST_TOKENS_PER_CHUNK
-        seconds = chunk_count / _throughput_for_support(support)
+        rate = _EST_ONNX_CHUNKS_PER_SEC if is_cross_model else _throughput_for_support(support)
+        seconds = chunk_count / rate
         groups.append(
             ModelGroup(
-                leg, model, support, len(members), chunk_count, tokens, seconds
+                leg, model, support, len(members), chunk_count, tokens, seconds,
+                cross_model=is_cross_model,
             )
         )
         migratable_chunks += chunk_count
@@ -387,9 +443,14 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
 
     # Stable order: leg, then support, then model — deterministic preview text.
     groups.sort(key=lambda g: (g.leg, g.support, g.model or ""))
+    # Only GENUINELY-blocked collections remain in unsupported — cross-model
+    # collections are migratable and must not gate the dry-run exit.
+    blocked = tuple(
+        c for c in report.unsupported if not cross_model_remappable(c)
+    )
     return DryRunPreview(
         groups=tuple(groups),
-        unsupported=report.unsupported,
+        unsupported=blocked,
         legs_with_data=report.legs_with_data,
         migratable_chunks=migratable_chunks,
         total_est_tokens=total_est_tokens,
@@ -413,12 +474,19 @@ def render_dry_run_preview(preview: DryRunPreview) -> str:
         )
         return "\n".join(lines)
 
-    migratable = [g for g in preview.groups if g.support != "unsupported"]
+    migratable = [
+        g for g in preview.groups if g.support != "unsupported" or g.cross_model
+    ]
     if migratable:
         lines.append("Would migrate (per leg / model):")
         for g in migratable:
+            kind = (
+                f"{g.model} -> bge-768 cross-model re-embed"
+                if g.cross_model
+                else f"{g.model} ({g.support})"
+            )
             lines.append(
-                f"  [{g.leg}] {g.model} ({g.support}): "
+                f"  [{g.leg}] {kind}: "
                 f"{g.collection_count} collection(s), {g.chunk_count} chunk(s), "
                 f"~{g.est_tokens:,} tokens, ~{g.est_seconds:.1f}s"
             )

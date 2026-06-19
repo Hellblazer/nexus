@@ -1342,3 +1342,63 @@ class TestSimultaneousJarPgDeath:
         assert code == 0
         assert sup.calls.count("ensure_pg") == 1
         assert "respawn" not in sup.calls
+
+
+# ---------------------------------------------------------------------------
+# nexus-qke1e: ensure_storage_supervisor — the single persistent-start path
+# ---------------------------------------------------------------------------
+class TestEnsureStorageSupervisor:
+    """nexus-qke1e: nx init --service AND nx daemon service start both route
+    through ensure_storage_supervisor, which guarantees a PERSISTENT supervisor
+    owns the lease (never a transient unsupervised lease that ages out by TTL)."""
+
+    def _publish_fresh_lease(self, config_dir: Path, port: int = 18091) -> None:
+        import time as _time
+
+        sup = _make_supervisor(config_dir, lambda: _time.time(), supervised=True)
+        sup._proc = _FakeProc(pid=42777)
+        sup._service_port = port
+        sup._publish(port)
+
+    def test_live_lease_short_circuits_without_spawn(self, config_dir: Path) -> None:
+        from nexus.commands import daemon as daemon_mod
+
+        self._publish_fresh_lease(config_dir)
+        with patch.object(daemon_mod.subprocess, "Popen") as popen:
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+        assert rec is not None
+        popen.assert_not_called()  # idempotent: a live lease is never re-spawned
+
+    def test_spawns_supervisor_when_no_lease(self, config_dir: Path) -> None:
+        from nexus.commands import daemon as daemon_mod
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        scope = str(os.getuid())
+        assert ServiceRegistry(dir=config_dir, tier="storage_service").discover(scope) is None
+
+        def _popen_publishes(*_a, **_k):
+            # The detached --foreground supervisor would publish the lease; model
+            # that so the wait loop resolves.
+            self._publish_fresh_lease(config_dir, port=18092)
+            return MagicMock()
+
+        with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
+             patch.object(daemon_mod.subprocess, "Popen", side_effect=_popen_publishes) as popen:
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+        popen.assert_called_once()
+        assert rec is not None and rec.endpoint.get("port") == 18092
+
+    def test_timeout_raises_loud(self, config_dir: Path, monkeypatch) -> None:
+        import nexus.commands.daemon as daemon_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        # A Popen that never publishes; advance the monotonic clock past the 60s
+        # deadline on the second read (first read sets the deadline, second is
+        # already past it) so the wait loop exits without a real 60s spin.
+        ticks = iter([0.0, 10_000.0, 10_000.0])
+        monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: next(ticks))
+        monkeypatch.setattr(daemon_mod.time, "sleep", lambda _s: None)
+        with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
+             patch.object(daemon_mod.subprocess, "Popen", return_value=MagicMock()):
+            with pytest.raises(StorageServiceStartError):
+                daemon_mod.ensure_storage_supervisor(config_dir)

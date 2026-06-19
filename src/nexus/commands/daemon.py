@@ -1492,6 +1492,78 @@ def service_group() -> None:
     """Storage-service daemon: managed native service binary + local Postgres."""
 
 
+def ensure_storage_supervisor(config_dir: Path):
+    """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
+
+    Returns the live :class:`LeaseRecord`. If a FRESH lease already exists this
+    is a no-op (idempotent — re-running ``nx init --service`` / ``nx daemon
+    service start`` is safe). Otherwise it detached-spawns the ``--foreground``
+    supervisor (``start_new_session=True``) and waits up to 60s for it to publish
+    a lease.
+
+    Liveness is TTL-FRESHNESS, not process-aliveness: the short-circuit returns
+    any lease whose heartbeat is within the ServiceRegistry TTL (a supervisor
+    that crashed within the last TTL window still passes the freshness check and
+    its lease expires shortly after). It also does not distinguish a supervised
+    lease (``payload.supervisor_pid`` set) from a legacy transient one. In the
+    current code paths this is sound because BOTH ``nx init --service`` and ``nx
+    daemon service start`` route through here and the old transient
+    ``start_storage_service`` init path is retired — so a fresh lease is a
+    supervised one. A caller needing process-level liveness should poll the
+    service ``/health`` endpoint directly (or ``nx service probe``).
+
+    This is the SINGLE persistent-start path (nexus-qke1e): routing both surfaces
+    through it means neither leaves a transient unsupervised lease that ages out
+    by TTL because nothing heartbeats it. The bug it closes: ``start_storage_service``
+    (the old init path) published a lease without a heartbeating supervisor, so
+    the service looked 'serving' at init time but the lease aged out before the
+    next client (e.g. ``nx migrate-to-service``) could discover it.
+
+    Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
+    """
+    from nexus.daemon.service_registry import ServiceRegistry
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    scope = str(os.getuid())
+    existing = registry.discover(scope)
+    if existing is not None:
+        return existing
+
+    argv = [
+        *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
+        "--config-dir", str(config_dir),
+    ]
+    # nexus-ovbr7: route the child's streams to a crash-channel file so a failure
+    # BEFORE run_storage_supervisor's configure_logging runs (import error, bad
+    # argv) and interpreter-fatal tracebacks are captured. Post-configure, the
+    # daemon drops its stderr handler (non-tty), so this file stays quiet healthy.
+    from nexus.logging_setup import open_child_log_or_devnull
+
+    spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
+    try:
+        subprocess.Popen(
+            argv,
+            stdout=spawn_log,
+            stderr=spawn_log,
+            start_new_session=True,
+        )
+    finally:
+        if not isinstance(spawn_log, int):
+            spawn_log.close()
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        existing = registry.discover(scope)
+        if existing is not None:
+            return existing
+        time.sleep(0.5)
+    raise StorageServiceStartError(
+        "Storage service supervisor did not become ready within 60s. "
+        f"Check {config_dir / 'logs' / 'storage_service.log'} "
+        "or run 'nx daemon service start --foreground' to see the error."
+    )
+
+
 @service_group.command("start")
 @click.option(
     "--config-dir",
@@ -1539,9 +1611,7 @@ def service_start_cmd(
     from nexus.daemon.storage_service_daemon import (
         StorageServiceStartError,
         run_storage_supervisor,
-        start_storage_service,
     )
-    from nexus.daemon.service_registry import ServiceRegistry
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
 
@@ -1553,48 +1623,12 @@ def service_start_cmd(
             sys.exit(2)
         sys.exit(code)
 
-    # Non-foreground: check for a live lease; spawn detached supervisor if needed.
-    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    import os as _os
-    scope = str(_os.getuid())
-    existing = registry.discover(scope)
-    if existing is None:
-        argv = [
-            *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
-            "--config-dir", str(config_dir),
-        ]
-        # nexus-ovbr7: route the child's streams to a crash-channel file so a
-        # failure BEFORE run_storage_supervisor's configure_logging runs
-        # (import error, bad argv) and interpreter-fatal tracebacks are
-        # captured. Post-configure, the daemon drops its stderr handler
-        # (non-tty), so this file stays quiet in healthy operation.
-        from nexus.logging_setup import open_child_log_or_devnull
-
-        spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
-        try:
-            subprocess.Popen(
-                argv,
-                stdout=spawn_log,
-                stderr=spawn_log,
-                start_new_session=True,
-            )
-        finally:
-            if not isinstance(spawn_log, int):
-                spawn_log.close()
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            existing = registry.discover(scope)
-            if existing is not None:
-                break
-            time.sleep(0.5)
-        if existing is None:
-            click.echo(
-                "Error: Storage service supervisor did not become ready within 60s. "
-                f"Check {config_dir / 'logs' / 'storage_service.log'} "
-                "or run with --foreground to see the error.",
-                err=True,
-            )
-            sys.exit(2)
+    # Non-foreground: ensure a persistent (heartbeated) supervisor owns the lease.
+    try:
+        existing = ensure_storage_supervisor(config_dir)
+    except StorageServiceStartError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
 
     ep = existing.endpoint
     if announce_stdout:

@@ -44,6 +44,7 @@ from nexus.migration.detection import (
     build_dry_run_preview,
     classify_collections,
     classify_model_support,
+    cross_model_remappable,
     render_dry_run_preview,
     voyage_key_available,
     wired_models,
@@ -417,31 +418,49 @@ class TestDryRunPreview:
         assert g.est_seconds == pytest.approx(2.0)
         assert g.est_tokens == 400 * 512
 
-    def test_unsupported_excluded_from_migratable_totals(self) -> None:
-        local = _FakeChromaClient({BGE_768: 10, ONNX_384: 99})
+    def test_genuinely_blocked_excluded_from_migratable_totals(self) -> None:
+        # voyage-no-key is GENUINELY blocked (credential case, not cross-model);
+        # it contributes nothing to migratable totals. bge is supported.
+        local = _FakeChromaClient({BGE_768: 10, VOYAGE_CTX_1024: 99})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=False
+        )
+        preview = build_dry_run_preview(report)
+        assert preview.migratable_chunks == 10
+        assert preview.total_est_tokens == 10 * 512
+        assert len(preview.unsupported) == 1
+        assert preview.unsupported[0].collection == VOYAGE_CTX_1024
+        text = render_dry_run_preview(preview)
+        assert "BLOCKED" in text
+        assert VOYAGE_CTX_1024 in text
+        assert "NX_VOYAGE_API_KEY" in text
+        assert "DRY RUN" in text
+
+    def test_minilm_is_cross_model_migratable_not_blocked(self) -> None:
+        # RDR-162 P2: a legacy minilm-384 collection is MIGRATABLE via cross-model
+        # re-embed, NOT blocked. It counts toward migratable totals and is absent
+        # from the blocked list; the preview names the bge-768 re-embed.
+        local = _FakeChromaClient({BGE_768: 10, ONNX_384: 7})
         report = classify_collections(
             local_client=local, cloud_client=None, voyage_key_present=True
         )
         preview = build_dry_run_preview(report)
-        # the legacy minilm-384 collection contributes NOTHING to migratable
-        # totals — it would be blocked (needs re-index to bge-768 first).
-        assert preview.migratable_chunks == 10
-        assert preview.total_est_tokens == 10 * 512
-        assert len(preview.unsupported) == 1
-        assert preview.unsupported[0].collection == ONNX_384
+        assert preview.migratable_chunks == 17  # both legs migratable
+        assert preview.unsupported == ()  # minilm is NOT blocked
+        cross = [g for g in preview.groups if g.cross_model]
+        assert len(cross) == 1
+        assert cross[0].model == "minilm-l6-v2-384"
+        assert cross[0].chunk_count == 7
         text = render_dry_run_preview(preview)
-        assert "BLOCKED" in text
-        assert ONNX_384 in text
-        assert "re-index" in text.lower()
-        # The minilm chunk count is NOT in the migratable line.
-        assert "DRY RUN" in text
+        assert "cross-model re-embed" in text
+        assert "BLOCKED" not in text
 
-    def test_all_unsupported_render_has_no_dangling_migrate_section(self) -> None:
-        # Every collection blocked → the "Would migrate (per leg / model):"
-        # header must NOT appear with an empty body beneath it.
-        local = _FakeChromaClient({ONNX_384: 4})
+    def test_all_blocked_render_has_no_dangling_migrate_section(self) -> None:
+        # Every collection GENUINELY blocked (voyage, no key) → the "Would
+        # migrate" header must NOT appear with an empty body beneath it.
+        local = _FakeChromaClient({VOYAGE_CTX_1024: 4})
         report = classify_collections(
-            local_client=local, cloud_client=None, voyage_key_present=True
+            local_client=local, cloud_client=None, voyage_key_present=False
         )
         text = render_dry_run_preview(build_dry_run_preview(report))
         assert "Would migrate (per leg / model):" not in text
@@ -489,14 +508,21 @@ class TestMigrateToServiceCli:
         assert "[local]" in result.output
         assert "bge-base-en-v15-768" in result.output
 
-    def test_dry_run_with_unsupported_exits_nonzero(self, monkeypatch) -> None:
+    def test_dry_run_with_blocked_exits_nonzero(self, monkeypatch) -> None:
+        # A GENUINELY-blocked collection (voyage, no key) gates the dry-run
+        # non-zero so a script never proceeds past it silently.
+        local = _FakeChromaClient({VOYAGE_CTX_1024: 2})
+        result = self._run(monkeypatch, ["--dry-run"], local=local, voyage=False)
+        assert result.exit_code == 1
+
+    def test_dry_run_minilm_cross_model_exits_zero(self, monkeypatch) -> None:
+        # RDR-162 P2: a legacy minilm-384 collection is migratable cross-model,
+        # so the dry-run does NOT gate non-zero on it.
         local = _FakeChromaClient({ONNX_384: 2})
         result = self._run(monkeypatch, ["--dry-run"], local=local)
-        # Unsupported collections would block a real run — dry-run gates non-zero.
-        assert result.exit_code == 1
-        assert "BLOCKED" in result.output
-        # No dangling migratable section when everything is blocked.
-        assert "Would migrate (per leg / model):" not in result.output
+        assert result.exit_code == 0
+        assert "cross-model re-embed" in result.output
+        assert "BLOCKED" not in result.output
 
     def test_dry_run_passes_local_path_to_opener(self, monkeypatch) -> None:
         from click.testing import CliRunner
@@ -662,3 +688,37 @@ class TestMigrateToServiceRun:
         assert "NX_SERVICE_TOKEN is required" in cli.output
         # The engine was never reached.
         assert captured == {}
+
+
+class TestCrossModelRemappable:
+    """RDR-162 P2: which unsupported collections the orchestrator auto-migrates
+    via stored-text re-embed (cross-model remap to bge-768) vs leaves blocked."""
+
+    def _cls(self, collection, model, *, support, has_data=True, dim=None):
+        return CollectionClassification(
+            collection=collection, leg="local", model=model, dim=dim,
+            support=support, source_count=1 if has_data else 0, has_data=has_data,
+        )
+
+    def test_legacy_minilm_is_remappable(self) -> None:
+        c = self._cls(ONNX_384, "minilm-l6-v2-384", support="unsupported", dim=384)
+        assert cross_model_remappable(c) is True
+
+    def test_supported_bge_is_not_remappable(self) -> None:
+        # Already servable — migrates byte-for-byte, never remapped.
+        c = self._cls(BGE_768, "bge-base-en-v15-768", support="supported-onnx", dim=768)
+        assert cross_model_remappable(c) is False
+
+    def test_voyage_unsupported_is_not_remappable(self) -> None:
+        # Credential case (add the key), not a model switch — stays blocked.
+        c = self._cls(VOYAGE_CTX_1024, "voyage-context-3", support="unsupported")
+        assert cross_model_remappable(c) is False
+
+    def test_non_conformant_name_is_not_remappable(self) -> None:
+        c = self._cls(NON_CONFORMANT, None, support="unsupported")
+        assert cross_model_remappable(c) is False
+
+    def test_empty_collection_is_not_remappable(self) -> None:
+        c = self._cls(ONNX_384, "minilm-l6-v2-384", support="unsupported",
+                      has_data=False)
+        assert cross_model_remappable(c) is False

@@ -82,6 +82,8 @@ def run_sequenced_migration(
     model_gate: Callable[..., None] = assert_models_supported,
     on_progress: Callable[[int, int], None] | None = None,
     started_at: str | None = None,
+    cross_model_targets: dict[str, str] | None = None,
+    remap_refs: Callable[[str, str], Any] | None = None,
 ) -> SequenceOutcome:
     """Drive the T2-then-T3 sequence for a detected Chroma footprint.
 
@@ -90,7 +92,20 @@ def run_sequenced_migration(
     returns its :class:`MigrationReport`. ``run_t2(sources)`` runs the T2
     ``migrate all`` and returns the RDR-153 report dict. Both pre-gates raise to
     block.
+
+    ``cross_model_targets`` (RDR-162 P2) maps each cross-model source collection
+    name to its model-remapped target. Its keys are passed to ``model_gate`` as
+    the ``exempt`` set (those collections are re-embedded, not blocked). After a
+    leg verifies, ``remap_refs(source, target)`` re-points the T2 + catalog
+    references for every cross-model result — STRICTLY after the verified report,
+    so a mid-migrate failure never leaves dangling references. ``remap_refs``
+    defaults to :func:`nexus.collection_rename.remap_collection_references`.
     """
+    targets = cross_model_targets or {}
+    if remap_refs is None:
+        from nexus.collection_rename import remap_collection_references  # noqa: PLC0415
+
+        remap_refs = remap_collection_references
     total = sum(1 for c in detection.classifications if c.has_data)
     legs = tuple(sorted(detection.legs_with_data))
 
@@ -140,7 +155,11 @@ def run_sequenced_migration(
 
     # 4. Per-collection-model pre-gate (gates S1 + C3) — before any ETL.
     try:
-        model_gate(detection.classifications, voyage_key_present=voyage_key_present)
+        model_gate(
+            detection.classifications,
+            voyage_key_present=voyage_key_present,
+            exempt=frozenset(targets),
+        )
     except Exception as exc:  # ModelPreGateBlocked (or any gate failure)
         _log.warning("sequencer_model_gate_blocked", error=str(exc))
         return _fail(str(exc))
@@ -192,6 +211,33 @@ def run_sequenced_migration(
         except Exception as exc:  # noqa: BLE001 — leg failure, recorded below
             _log.error("sequencer_leg_raised", leg=leg, error=str(exc))
             continue
+        # RDR-162 P2: re-point references for every cross-model collection that
+        # VERIFIED populated (status == "migrated"). Each collection's remap is
+        # ordered strictly after ITS OWN verified populate (_migrate_one only
+        # returns "migrated" past the post-write count check), so a reference is
+        # never repointed at an unpopulated target. The remap is per-collection-
+        # opportunistic, NOT leg-atomic: if collection B fails after A succeeded,
+        # A's refs are already repointed while the leg is demoted. That is safe,
+        # not a dangling ref — A's target IS populated, so A names a live
+        # collection; copy-not-move keeps the source intact and the cascade
+        # UPDATE is idempotent, so the demoted leg re-runs cleanly (A re-remaps to
+        # the same target, B retries). A remap failure DEMOTES the leg (drops it
+        # from legs_ok) so refuse-partial marks the run failed — never a sentinel
+        # stuck `migrating`.
+        remap_ok = True
+        for r in report.results:
+            if r.status == "migrated" and r.target_collection:
+                try:
+                    remap_refs(r.collection, r.target_collection)
+                except Exception as exc:  # noqa: BLE001 — demotes the leg, recorded
+                    remap_ok = False
+                    _log.error(
+                        "sequencer_remap_failed",
+                        leg=leg,
+                        source=r.collection,
+                        target=r.target_collection,
+                        error=str(exc),
+                    )
         done += _migrated_count(report)
         # Clamp the surface value: the store can gain collections between
         # detection and ETL (idempotent re-run), and a >100% progress display
@@ -207,7 +253,7 @@ def run_sequenced_migration(
         record_progress(collections_done=shown, collections_total=total)
         if on_progress is not None:
             on_progress(shown, total)
-        if report.ok:
+        if report.ok and remap_ok:
             legs_ok.append(leg)
     done = min(done, total)
 

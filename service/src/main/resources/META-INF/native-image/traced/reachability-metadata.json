@@ -1,6 +1,50 @@
 {
   "reflection": [
     {
+      "type": "ai.djl.huggingface.tokenizers.jni.CharSpan",
+      "jniAccessible": true,
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "int",
+            "int"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "ai.djl.huggingface.tokenizers.jni.CharSpan[]"
+    },
+    {
+      "type": "ai.onnxruntime.OnnxTensor",
+      "jniAccessible": true,
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "long",
+            "long",
+            "ai.onnxruntime.TensorInfo"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "ai.onnxruntime.TensorInfo",
+      "jniAccessible": true,
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "long[]",
+            "java.lang.String[]",
+            "int"
+          ]
+        }
+      ]
+    },
+    {
       "type": "ch.qos.logback.classic.encoder.PatternLayoutEncoder",
       "methods": [
         {
@@ -582,6 +626,9 @@
       "type": "dev.nexus.service.jooq.nexus.tables.records.PlansRecord"
     },
     {
+      "type": "float[][][]"
+    },
+    {
       "type": "java.beans.PropertyVetoException"
     },
     {
@@ -668,6 +715,9 @@
           "parameterTypes": []
         }
       ]
+    },
+    {
+      "type": "java.lang.Comparable"
     },
     {
       "type": "java.lang.Double",
@@ -763,6 +813,9 @@
     },
     {
       "type": "java.lang.Long[]"
+    },
+    {
+      "type": "java.lang.Number"
     },
     {
       "type": "java.lang.Object",
@@ -909,6 +962,12 @@
           "name": "TYPE"
         }
       ]
+    },
+    {
+      "type": "java.lang.constant.Constable"
+    },
+    {
+      "type": "java.lang.constant.ConstantDesc"
     },
     {
       "type": "java.lang.reflect.Method",
@@ -3457,6 +3516,21 @@
       "glob": "db/changelog/catalog-005-collection-vector-stats.xml"
     },
     {
+      "glob": "db/changelog/catalog-006-combined-query-functions.xml"
+    },
+    {
+      "glob": "db/changelog/catalog-007-graph-hop-functions.xml"
+    },
+    {
+      "glob": "db/changelog/catalog-008-combined-query-extensions.xml"
+    },
+    {
+      "glob": "db/changelog/catalog-009-read-shape-views.xml"
+    },
+    {
+      "glob": "db/changelog/catalog-011-collection-health-stale-age.xml"
+    },
+    {
       "glob": "db/changelog/chash-001-baseline.xml"
     },
     {
@@ -3484,6 +3558,9 @@
       "glob": "db/changelog/service-tokens-001-baseline.xml"
     },
     {
+      "glob": "db/changelog/service-tokens-002-single-root-index.xml"
+    },
+    {
       "glob": "db/changelog/t1-001-baseline.xml"
     },
     {
@@ -3493,7 +3570,16 @@
       "glob": "db/changelog/taxonomy-002-centroids.xml"
     },
     {
+      "glob": "db/changelog/taxonomy-003-doc-count-trigger.xml"
+    },
+    {
+      "glob": "db/changelog/taxonomy-004-dedup-root-topics.xml"
+    },
+    {
       "glob": "db/changelog/telemetry-001-baseline.xml"
+    },
+    {
+      "glob": "db/changelog/updated-at-001-triggers.xml"
     },
     {
       "glob": "db/changelog/vectors-001-baseline.xml"
