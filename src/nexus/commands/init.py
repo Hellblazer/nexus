@@ -359,6 +359,8 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
     Hard failures (broken ``NEXUS_SERVICE_BIN`` override, a configured tag that
     fails verification) raise ``SystemExit``.
     """
+    import os
+
     from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
     from nexus.daemon.binary_install import (
@@ -370,6 +372,16 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
         StorageServiceStartError,
         _find_service_binary,
     )
+
+    # Explicit dev/test JAR opt-in (RDR-161 amendment): when NEXUS_SERVICE_JAR is
+    # set the supervisor launches the JVM, so no native binary need be acquired.
+    # The supervisor's own resolution fails loud if the path is set-but-missing.
+    if os.environ.get("NEXUS_SERVICE_JAR", "").strip():
+        click.echo(
+            "  Using NEXUS_SERVICE_JAR (dev/test JVM launch, UNVERIFIED) — "
+            "skipping native binary acquisition."
+        )
+        return True
 
     try:
         existing = _find_service_binary(config_dir)

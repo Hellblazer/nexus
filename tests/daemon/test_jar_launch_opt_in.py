@@ -131,3 +131,21 @@ def test_jar_argv_with_heap_orders_xmx_before_jar(monkeypatch):
     jar = Path("/build/nexus-service.jar")
     argv = _spawn_capture(monkeypatch, launch_kind="jar", artifact=jar, max_heap="1g")
     assert argv == ["/usr/bin/java", "-Xmx1g", "-jar", str(jar)]
+
+
+# ── nx init --service honours the JAR opt-in (no native binary required) ─────
+
+
+def test_init_service_skips_binary_acquire_with_jar(monkeypatch, tmp_path):
+    """_ensure_service_binary_step returns True (and acquires nothing) when
+    NEXUS_SERVICE_JAR is set — so `nx init --service` works on a host with no
+    native binary."""
+    from nexus.commands.init import _ensure_service_binary_step
+
+    jar = tmp_path / "svc.jar"
+    jar.write_text("x")
+    monkeypatch.setenv("NEXUS_SERVICE_JAR", str(jar))
+    # If it tried to acquire, _find_service_binary would be consulted; make it
+    # explode so a regression that ignores the opt-in fails loudly.
+    monkeypatch.setattr(ssd, "_find_service_binary", lambda cd: (_ for _ in ()).throw(AssertionError("should not check native binary")))
+    assert _ensure_service_binary_step(tmp_path) is True
