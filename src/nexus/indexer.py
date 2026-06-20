@@ -69,9 +69,19 @@ PIPELINE_VERSION: str = "4"
 
 
 def stamp_collection_version(col: object) -> None:
-    """Write PIPELINE_VERSION to collection metadata, preserving existing keys."""
+    """Write PIPELINE_VERSION to collection metadata, preserving existing keys.
+
+    nexus-kwkkz: collection-level metadata via ``modify`` is Chroma-specific;
+    service-backed collections (``_ServiceCollectionStub``) do not expose it, so
+    pipeline-version stamping is a no-op there. This is a staleness optimization,
+    not a correctness input — the read side (``get_collection_pipeline_version``)
+    already degrades to ``None`` (treated as a fresh collection) for these.
+    """
+    modify = getattr(col, "modify", None)
+    if not callable(modify):
+        return
     existing = getattr(col, "metadata", None) or {}
-    col.modify(metadata={**existing, "pipeline_version": PIPELINE_VERSION})  # type: ignore[attr-defined]
+    modify(metadata={**existing, "pipeline_version": PIPELINE_VERSION})
 
 
 def get_collection_pipeline_version(col: object) -> str | None:
