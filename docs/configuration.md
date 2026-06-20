@@ -18,7 +18,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 | Env var | Default | Description |
 |---|---|---|
 | `NX_LOCAL` | (auto) | `1` = force local, `0` = force cloud, unset = auto-detect |
-| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Override local ChromaDB storage path |
+| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to the legacy ChromaDB store. As of 6.0 this is read only as the **migration source** (`nx guided-upgrade`); T3 serves from the Postgres+pgvector service, not this path. |
 | `NX_LOCAL_EMBED_MODEL` | (auto) | Force a specific local embedding model name |
 | `NEXUS_CATALOG_PATH` | `~/.config/nexus/catalog` | Override catalog git repo location |
 | `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` | unset | Set to `1` to bypass the register-time cross-project source_uri guard. Emergency-only escape hatch for known-good recovery scripts that legitimately need to register rows across project boundaries; never the right answer for normal indexing |
@@ -163,10 +163,17 @@ operator-facing matrix of transport choices per platform.
 
 ## Storage Service (Postgres) Prerequisites
 
+> **Local installs: skip this section.** `nx init --service` provisions the
+> bundled relocatable Postgres + pgvector cluster, creates the roles, and enables
+> the extensions for you — no DBA, no manual `CREATE EXTENSION`. The prerequisites
+> below apply only when you bring your **own** Postgres (an operator pointing the
+> service at a managed/self-hosted cluster via `NX_DB_*`).
+
 The Java storage service (RDR-152/RDR-155) applies its Liquibase changelog at
 startup using the `NX_DB_ADMIN_*` credentials (falling back to `NX_DB_*` in
-single-role development setups). Two prerequisites must be satisfied by a DBA
-(superuser) before the first migration run:
+single-role development setups). When you bring your own Postgres, two
+prerequisites must be satisfied by a DBA (superuser) before the first migration
+run:
 
 1. **Extensions.** `CREATE EXTENSION IF NOT EXISTS vector;` and
    `CREATE EXTENSION IF NOT EXISTS pg_trgm;` — neither is a trusted extension,
@@ -283,7 +290,8 @@ If no marker file is found and no command is configured, the test check is skipp
 | File | Purpose |
 |---|---|
 | `~/.config/nexus/config.yml` | Global config and credentials |
-| `~/.local/share/nexus/chroma/` | Local T3 ChromaDB PersistentClient data (local mode) |
+| `~/.local/share/nexus/chroma/` | Legacy ChromaDB store — migration source only as of 6.0 (`nx guided-upgrade`); not live T3 data |
+| `~/.config/nexus/postgres/` | The nx-provisioned Postgres cluster the service serves T3 from (local `nx init --service`) |
 | `~/.config/nexus/memory.db` | T2 SQLite database |
 | `~/.config/nexus/catalog/.catalog.db` | Catalog: canonical repo→collection registration, documents, and links (`nx index repo` writes here). Replaced `repos.json` as the source of truth in 5.4.0 (RDR-137); a one-shot migration on `nx upgrade` folds any legacy `repos.json` into the catalog and removes it. |
 | `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |
