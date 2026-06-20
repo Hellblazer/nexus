@@ -789,10 +789,12 @@ def run_collection_postprocessing(
                         f"  Review:   {unreviewed} topics pending. "
                         f"Run `nx taxonomy review` to curate."
                     )
-                # Cross-collection projection pass (RDR-075 SC-7)
+                # Cross-collection projection pass (RDR-075 SC-7). nexus-9pqoj:
+                # project_against handles both backends; pass the chroma client
+                # for a raw T3Database or the service handle itself.
                 try:
                     proj_total = _project_cross_collections(
-                        db.taxonomy, collections, t3._client,
+                        db.taxonomy, collections, getattr(t3, "_client", t3),
                     )
                     if proj_total:
                         _say(f"  Project:  {proj_total} cross-collection assignments.")

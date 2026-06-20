@@ -45,27 +45,6 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
-def _reject_service_backed_handle(t3: Any) -> None:
-    """Fail loud when the T3 handle has no raw Chroma client.
-
-    Retained for the taxonomy paths NOT yet ported to the service
-    (``nx taxonomy split`` / ``project``): their bodies still cluster + write
-    centroids through a raw Chroma client. ``nx taxonomy discover`` / ``rebuild``
-    ARE ported (nexus-7ydks) and instead use
-    :func:`_require_supported_taxonomy_backend`, so do not add this guard there.
-    """
-    from nexus.db.http_vector_client import is_service_backed
-
-    if is_service_backed(t3):
-        raise click.ClickException(
-            "this taxonomy operation needs a raw Chroma client, which retired "
-            "with the Chroma serving paths (RDR-155 Phase 4a). `nx taxonomy "
-            "discover` and `rebuild` are supported on the service; split / "
-            "project on the pgvector service are a tracked follow-on "
-            "(nexus-7ydks)."
-        )
-
-
 def _require_supported_taxonomy_backend(t3: Any, taxonomy: Any) -> None:
     """Block only the unsupported split: service T3 + raw-SQLite taxonomy.
 
@@ -740,24 +719,19 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
             else:
                 click.echo(f"  {col_name}: skipped")
 
-        # Cross-collection projection pass (RDR-075 SC-7).
-        # nexus-7ydks: project_against still uses a raw Chroma client (not yet
-        # ported to the service), so skip it LOUDLY in service mode rather than
-        # AttributeError on t3._client and swallow it as a generic failure.
-        from nexus.db.http_vector_client import is_service_backed
-        if total_topics and len(targets) > 1 and is_service_backed(t3):
-            click.echo(
-                "  Projection: skipped (cross-collection projection on the "
-                "pgvector service is a tracked follow-on, nexus-7ydks)"
-            )
-        elif total_topics and len(targets) > 1:
+        # Cross-collection projection pass (RDR-075 SC-7). nexus-9pqoj:
+        # project_against handles both backends; pass the raw chroma client for
+        # a raw T3Database (has ._client) or the service handle itself for an
+        # HttpVectorClient (no ._client).
+        _proj_handle = getattr(t3, "_client", t3)
+        if total_topics and len(targets) > 1:
             try:
                 proj_count = 0
                 for col_name in targets:
                     others = [c for c in targets if c != col_name]
                     if others:
                         result = db.taxonomy.project_against(
-                            col_name, others, t3._client, threshold=0.85,
+                            col_name, others, _proj_handle, threshold=0.85,
                         )
                         assignments = result.get("chunk_assignments", [])
                         if assignments:
@@ -1080,7 +1054,26 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
 
         collection_name = topic["collection"]
         t3 = make_t3()
-        _reject_service_backed_handle(t3)
+
+        # nexus-9pqoj: service-backed split. The store's split_topic does the
+        # full fetch -> compute -> persist -> centroid round-trip via the service.
+        if not _has_raw_access(db.taxonomy):
+            # service-backed split_topic persists through the Java service (the
+            # single writer for HttpTaxonomyStore), not the SQLite WAL writer the
+            # boundary lint guards, so t2_index_write routing does not apply.
+            child_count = db.taxonomy.split_topic(topic_id, k, t3)  # epsilon-allow: service single-writer persist
+            click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
+            if child_count:
+                coll_scope = collection_name or collection
+                scope = f" -c {coll_scope}" if coll_scope else ""
+                click.echo(
+                    f"Action: {child_count} new sub-topics have n-gram labels. "
+                    f"Run `nx taxonomy label{scope}` to get human-readable labels."
+                )
+            return
+
+        # Raw path (unchanged): refuse the split-backend config, then inline.
+        _require_supported_taxonomy_backend(t3, db.taxonomy)
         chroma_client = t3._client
 
         # Fetch texts from T3 collection
@@ -1678,6 +1671,11 @@ def project_cmd(
 
     db = _T2Database(_default_db_path())
     t3 = make_t3()
+    # nexus-9pqoj: refuse the split-backend config; project_against handles both
+    # backends, so pass the chroma client (raw T3Database) or the service handle
+    # (HttpVectorClient has no ._client).
+    _require_supported_taxonomy_backend(t3, db.taxonomy)
+    _proj_handle = getattr(t3, "_client", t3)
 
     # Resolve threshold: explicit flag wins; otherwise per-corpus default
     # (defaults applied at the per-source level inside _run_backfill).
@@ -1688,7 +1686,7 @@ def project_cmd(
     try:
         if backfill:
             _run_backfill(
-                db.taxonomy, t3._client,
+                db.taxonomy, _proj_handle,
                 threshold=threshold, top_k=top_k, persist=persist,
                 use_icf=use_icf,
             )
@@ -1732,7 +1730,7 @@ def project_cmd(
             db.taxonomy.compute_icf_map(use_cache=True) if use_icf else None
         )
         result = db.taxonomy.project_against(
-            source_collection, targets, t3._client,
+            source_collection, targets, _proj_handle,
             threshold=resolved_threshold, top_k=top_k,
             icf_map=icf_map,
             progress=True,

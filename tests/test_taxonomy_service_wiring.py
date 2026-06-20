@@ -220,3 +220,67 @@ def test_assign_batch_hook_routes_through_service_store(monkeypatch):
 
     assert persisted, "service-mode hook did not persist any assignments (regressed to bail)"
     assert len(persisted[0]) == 4
+
+
+# ── split/project service fetch helpers (nexus-9pqoj) ───────────────────────
+
+
+class _StubWithIds:
+    """Service collection stub supporting both ids= (store-get) and paginated get."""
+
+    def __init__(self, ids, docs):  # noqa: ANN001
+        self._ids = ids
+        self._docs = docs
+
+    def get(self, ids=None, where=None, include=None, limit=10, offset=0):  # noqa: ANN001
+        if ids is not None:
+            idx = {i: d for i, d in zip(self._ids, self._docs)}
+            rids = [i for i in ids if i in idx]
+            return {"ids": rids, "documents": [idx[i] for i in rids]}
+        sl = slice(offset, offset + limit)
+        return {"ids": self._ids[sl], "documents": self._docs[sl]}
+
+
+class _SplitT3:
+    def __init__(self, ids, docs, embs):  # noqa: ANN001
+        self._ids, self._docs = ids, docs
+        self._embs = {i: e for i, e in zip(ids, embs)}
+
+    def count(self, collection):  # noqa: ANN001
+        return len(self._ids)
+
+    def get_or_create_collection(self, name):  # noqa: ANN001
+        return _StubWithIds(self._ids, self._docs)
+
+    def get_embeddings(self, collection, ids):  # noqa: ANN001
+        return np.asarray([self._embs[i] for i in ids], dtype=np.float32)
+
+
+def test_svc_fetch_by_ids_aligned():
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+    ids, docs, embs = _corpus(6)
+    t3 = _SplitT3(ids, docs, embs)
+    g_ids, g_texts, g_embs = HttpTaxonomyStore._svc_fetch_by_ids(t3, "docs__d", ids[:4])
+    assert g_ids == ids[:4]
+    assert g_texts == docs[:4]
+    assert g_embs.shape == (4, 3)
+
+
+def test_svc_fetch_by_ids_bails_on_misalign():
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+    ids, docs, embs = _corpus(6)
+
+    class _Drop(_SplitT3):
+        def get_embeddings(self, collection, ids):  # noqa: ANN001
+            return np.asarray(embs[:2], dtype=np.float32)  # short
+
+    g_ids, g_texts, g_embs = HttpTaxonomyStore._svc_fetch_by_ids(_Drop(ids, docs, embs), "docs__d", ids)
+    assert g_embs is None  # refuses misaligned
+
+
+def test_svc_fetch_all_embeddings_paginates():
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+    ids, docs, embs = _corpus(7)
+    g_ids, g_embs = HttpTaxonomyStore._svc_fetch_all_embeddings(_SplitT3(ids, docs, embs), "docs__d")
+    assert g_ids == ids
+    assert g_embs.shape == (7, 3)
