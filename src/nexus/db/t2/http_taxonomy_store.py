@@ -940,6 +940,9 @@ class HttpTaxonomyStore:
         _PAGE = 250
         for i in range(0, len(doc_ids), _PAGE):
             batch = doc_ids[i:i + _PAGE]
+            # The service store-get path ignores `include` and always returns
+            # the full {ids, documents, metadatas} envelope (VectorHandler P4a.2,
+            # nexus-1k8s1); we pass include for intent only.
             res = stub.get(ids=batch, include=["documents"])
             for fid, fdoc in zip(res.get("ids") or [], res.get("documents") or []):
                 if fdoc:
@@ -1114,7 +1117,13 @@ class HttpTaxonomyStore:
             src_ids, src_embs = self._svc_fetch_all_embeddings(
                 chroma_client, source_collection,
             )
-            if not src_ids or src_embs is None or src_embs.size == 0:
+            # nexus-9pqoj S1: distinguish an INCOMPLETE fetch (service could not
+            # align embeddings to ids) from a legitimately empty collection.
+            # Silent-zero on a fetch failure looks like 'no matches' to the user;
+            # flag it so the CLI surfaces it (feedback_no_silent_fallbacks).
+            if src_embs is None:
+                return {**_empty, "incomplete_fetch": True}
+            if not src_ids or src_embs.size == 0:
                 return dict(_empty)
         else:
             try:

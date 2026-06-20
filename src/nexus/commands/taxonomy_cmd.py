@@ -733,6 +733,12 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                         result = db.taxonomy.project_against(
                             col_name, others, _proj_handle, threshold=0.85,
                         )
+                        if result.get("incomplete_fetch"):
+                            click.echo(
+                                f"  Projection: skipped {col_name} (incomplete "
+                                "service embedding read; collection may be mid-index)"
+                            )
+                            continue
                         assignments = result.get("chunk_assignments", [])
                         if assignments:
                             _persist_assignments(
@@ -1735,6 +1741,16 @@ def project_cmd(
             icf_map=icf_map,
             progress=True,
         )
+        # nexus-9pqoj S1: a service fetch that could not align embeddings to ids
+        # returns empty-with-flag; surface it loudly instead of looking like
+        # "no matches".
+        if result.get("incomplete_fetch"):
+            raise click.ClickException(
+                f"Could not read all source embeddings for {source_collection} "
+                "from the service (count mismatch). The collection may be mid-"
+                "index; retry once indexing settles, or re-index it."
+            )
+
         # Fall through: display logic uses `threshold` local — rebind
         # to the resolved value so messages reflect what was applied.
         threshold = resolved_threshold
@@ -1865,6 +1881,12 @@ def _run_backfill(
                 icf_map=icf_map,
                 progress=True,
             )
+            if result.get("incomplete_fetch"):
+                click.echo(
+                    f"    Skipped: incomplete service embedding read for {src} "
+                    "(collection may be mid-index; retry later)"
+                )
+                continue
             matched = len(result["matched_topics"])
             novel = len(result["novel_chunks"])
             chunks = result["total_chunks"]

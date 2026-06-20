@@ -284,3 +284,18 @@ def test_svc_fetch_all_embeddings_paginates():
     g_ids, g_embs = HttpTaxonomyStore._svc_fetch_all_embeddings(_SplitT3(ids, docs, embs), "docs__d")
     assert g_ids == ids
     assert g_embs.shape == (7, 3)
+
+
+def test_svc_fetch_all_embeddings_bails_on_misalign():
+    # nexus-9pqoj S1 regression: a count skew between enumerated ids and the
+    # returned embeddings must return (ids, None), NOT a silent partial set.
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+    ids, docs, embs = _corpus(7)
+
+    class _Drop(_SplitT3):
+        def get_embeddings(self, collection, ids):  # noqa: ANN001
+            return np.asarray(embs[:3], dtype=np.float32)  # short
+
+    g_ids, g_embs = HttpTaxonomyStore._svc_fetch_all_embeddings(_Drop(ids, docs, embs), "docs__d")
+    assert g_ids == ids
+    assert g_embs is None
