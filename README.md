@@ -42,20 +42,22 @@ For the full deployment story across all three surfaces (install, daemon lifecyc
 - **Semantic search** — index your code, docs, RDRs, and PDFs once; search by meaning afterward. Tree-sitter AST chunking across 23 languages, CCE prose chunking, PDF auto-routing.
 - **Typed document catalog** — Xanadu-inspired addressing with typed links (`cites`, `implements`, `supersedes`). Walk from a design doc to the code that implements it.
 - **RDR: Research-Design-Review** — write a spec before you code. Captures the problem, research, alternatives, and chosen approach. The corpus is searchable, so prior decisions surface during new design work.
-- **Local-first** — default install runs entirely on your machine with ONNX MiniLM + local ChromaDB. Voyage AI + ChromaDB Cloud are opt-in for higher-quality embeddings.
+- **Local-first** — runs entirely on your machine: an on-device bge-768 ONNX embedder over a bundled Postgres 16 + pgvector service that `nx init --service` provisions for you. Voyage AI (server-side embeddings) is opt-in for the managed-cloud deployment.
 
 ## CLI quick-start
 
 ```bash
-uv tool install conexus                  # install the nx CLI (built-in ONNX MiniLM embedder)
-nx init                                  # guided: choose your local embedder (384 vs bge-768)
-nx daemon t2 install --autostart         # register the T2 daemon (one-time)
-nx doctor                                # verify installation
+uv tool install conexus                  # install the nx CLI
+nx init --service                        # provision the local Postgres + pgvector service + bge-768 embedder, and start it
+nx daemon t2 install --autostart         # register the T2 (notes/plans) daemon (one-time)
+nx doctor                                # verify the stack
 nx index repo .                          # index your repo + discover topics
 nx search "how does retry work"          # semantic search, fully local
 ```
 
-`nx init` presents the embedder choice (recommended bge-768, ~140 MB one-time download, for materially better local search, vs the bundled 384-dim MiniLM), adds the `[local]` extra for you when you pick bge-768, and migrates any pre-existing 384-dim collections safely. To request the higher-quality embedder directly at install time instead: `uv tool install "conexus[local]"`.
+`nx init --service` provisions the bundled Postgres 16 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, and starts the persistent service supervisor. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically (see [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full service-install flow and the `nx daemon service install-binary` step).
+
+> **Upgrading from a pre-6.0 install?** 6.0 moves the permanent vector store from ChromaDB to the Postgres + pgvector service. After `uv tool upgrade conexus`, run **`nx guided-upgrade`** — one command detects your existing store, provisions and version-pins the service, and migrates your data with validation and copy-not-move rollback safety. Your ChromaDB data is left intact as the migration source.
 
 The `nx` CLI provides direct access to all storage tiers, indexing, search, the catalog, and taxonomy. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for a walkthrough, [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) for every command and flag.
 
