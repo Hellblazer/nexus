@@ -192,11 +192,15 @@ def index() -> None:
         )
 
 
-def _discover_taxonomy(collection_name, taxonomy, chroma_client, *, force=False):
-    """Wrapper for discover_for_collection — importable for patching in tests."""
+def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False):
+    """Wrapper for discover_for_collection — importable for patching in tests.
+
+    nexus-7ydks: now takes the T3 handle (``T3Database`` raw or
+    ``HttpVectorClient`` service), not the raw ``_client``.
+    """
     from nexus.commands.taxonomy_cmd import discover_for_collection
     return discover_for_collection(
-        collection_name, taxonomy, chroma_client, force=force,
+        collection_name, taxonomy, t3, force=force,
     )
 
 
@@ -750,7 +754,7 @@ def run_collection_postprocessing(
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for col_name in collections:
                 try:
-                    n = _discover_taxonomy(col_name, db.taxonomy, t3._client)
+                    n = _discover_taxonomy(col_name, db.taxonomy, t3)
                     total_topics += n
                 except Exception:
                     _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)

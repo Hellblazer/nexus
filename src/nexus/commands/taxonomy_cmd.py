@@ -48,21 +48,150 @@ _log = structlog.get_logger(__name__)
 def _reject_service_backed_handle(t3: Any) -> None:
     """Fail loud when the T3 handle has no raw Chroma client.
 
-    RDR-155 P4a.2 (nexus-1k8s1): taxonomy discovery reads embeddings through
-    the raw Chroma client, which retired with the Chroma serving paths —
-    ``make_t3()`` returns the service-backed handle in production now.
-    Taxonomy on the pgvector service is a tracked follow-on
-    (nexus-gmiaf.21+); until it lands this command refuses cleanly instead
-    of surfacing an AttributeError.
+    Retained for the taxonomy paths NOT yet ported to the service
+    (``nx taxonomy split`` / ``project``): their bodies still cluster + write
+    centroids through a raw Chroma client. ``nx taxonomy discover`` / ``rebuild``
+    ARE ported (nexus-7ydks) and instead use
+    :func:`_require_supported_taxonomy_backend`, so do not add this guard there.
     """
     from nexus.db.http_vector_client import is_service_backed
 
     if is_service_backed(t3):
         raise click.ClickException(
-            "taxonomy discovery needs a raw Chroma client, which retired with "
-            "the Chroma serving paths (RDR-155 Phase 4a). Taxonomy on the "
-            "pgvector service is a tracked follow-on (nexus-gmiaf.21+)."
+            "this taxonomy operation needs a raw Chroma client, which retired "
+            "with the Chroma serving paths (RDR-155 Phase 4a). `nx taxonomy "
+            "discover` and `rebuild` are supported on the service; split / "
+            "project on the pgvector service are a tracked follow-on "
+            "(nexus-7ydks)."
         )
+
+
+def _require_supported_taxonomy_backend(t3: Any, taxonomy: Any) -> None:
+    """Block only the unsupported split: service T3 + raw-SQLite taxonomy.
+
+    nexus-7ydks. Supported: both service-backed (6.0 default) or both raw
+    (legacy / ``NX_STORAGE_BACKEND=sqlite``). The split case has no raw Chroma
+    client for the legacy centroid path, so refuse cleanly.
+    """
+    from nexus.db.http_vector_client import is_service_backed
+
+    if is_service_backed(t3) and _has_raw_access(taxonomy):
+        raise click.ClickException(
+            "taxonomy discovery is not supported with a service-backed T3 vector "
+            "store but a raw-SQLite taxonomy store (NX_STORAGE_BACKEND_TAXONOMY="
+            "sqlite). Use a uniform backend: either let both default to the "
+            "service, or set NX_STORAGE_BACKEND=sqlite for both."
+        )
+
+
+def _enumerate_discoverable_collections(t3: Any, exclude: list[str]) -> list[str]:
+    """Return collection names with >=5 chunks, skipping excludes + taxonomy__.
+
+    Backend-uniform: raw T3 exposes ``_client.list_collections()`` (Chroma
+    Collection objects); service T3 exposes ``list_collections()`` (list of
+    dicts with ``name``/``count``). nexus-7ydks.
+    """
+    from fnmatch import fnmatch
+
+    from nexus.db.http_vector_client import is_service_backed
+
+    names: list[tuple[str, int]] = []
+    if is_service_backed(t3):
+        for c in t3.list_collections():
+            names.append((c.get("name", ""), int(c.get("count", 0) or 0)))
+    else:
+        for c in t3._client.list_collections():
+            names.append((c.name, c.count()))
+    return [
+        name for name, count in names
+        if count >= 5
+        and name
+        and not name.startswith("taxonomy__")
+        and not any(fnmatch(name, pat) for pat in exclude)
+    ]
+
+
+def _fetch_service_vectors(
+    collection_name: str, t3: Any,
+) -> tuple[list[str], list[str], "np.ndarray"] | None:
+    """Fetch (doc_ids, texts, embeddings) for a collection via the nexus-service.
+
+    nexus-7ydks. Enumerates ids + documents through the service collection
+    stub's paginated ``get`` and pulls the stored embeddings server-side via
+    ``t3.get_embeddings`` (no re-embed). Returns ``None`` on a fatal fetch
+    problem (collection missing, or embeddings the service could not align to
+    the requested ids — which would silently corrupt clustering).
+    """
+    try:
+        n = t3.count(collection_name)
+    except Exception:
+        _log.warning("taxonomy_service_count_failed", collection=collection_name)
+        return None
+    if n < 5:
+        return [], [], np.empty((0, 0), dtype=np.float32)
+
+    stub = t3.get_or_create_collection(collection_name)
+    ids: list[str] = []
+    texts: list[str] = []
+    offset = 0
+    page_size = 250  # service quota: Get limit 300
+    _milestone = max(n // 4, 1)
+    _next = _milestone
+    while offset < n:
+        if offset >= _next and _next < n:
+            _progress(f"    fetching {offset:,}/{n:,} chunks ({100 * offset // n}%)")
+            _next += _milestone
+        page = stub.get(include=["documents"], limit=page_size, offset=offset)
+        page_ids = page.get("ids") or []
+        page_docs = page.get("documents") or []
+        if not page_ids:
+            break
+        for i, pid in enumerate(page_ids):
+            doc = page_docs[i] if i < len(page_docs) else None
+            if doc is not None:
+                ids.append(pid)
+                texts.append(doc)
+        offset += len(page_ids)
+        if len(page_ids) < page_size:
+            break
+
+    _progress(f"    fetched {len(ids):,} chunks")
+    embeddings = t3.get_embeddings(collection_name, ids)
+    if embeddings is None or len(embeddings) != len(ids):
+        # get_embeddings drops ids the service cannot resolve (N < len(ids)),
+        # which would desync ids/texts/embeddings. Refuse rather than cluster
+        # misaligned rows (feedback_no_silent_fallbacks_for_correctness).
+        _log.warning(
+            "taxonomy_service_embedding_misalign",
+            collection=collection_name,
+            ids=len(ids),
+            embeddings=0 if embeddings is None else len(embeddings),
+        )
+        return None
+    return ids, texts, np.asarray(embeddings, dtype=np.float32)
+
+
+def _discover_via_service(
+    collection_name: str, taxonomy: Any, t3: Any, *, force: bool,
+) -> int:
+    """Service-backed discovery: fetch vectors from the service, persist through
+    the HttpTaxonomyStore drop-in (centroids via the taxonomy port).
+
+    nexus-7ydks. The store's ``discover_topics`` / ``rebuild_taxonomy`` are
+    complete CatalogTaxonomy mirrors and persist through the Java service (the
+    single writer), so no daemon-routed split is needed here.
+    """
+    fetched = _fetch_service_vectors(collection_name, t3)
+    if fetched is None:
+        return 0
+    doc_ids, texts, embeddings = fetched
+    if len(doc_ids) < 5:
+        _log.info("too_few_docs", collection=collection_name, n=len(doc_ids))
+        return 0
+    _progress(f"    clustering {len(doc_ids):,} x {embeddings.shape[1]}d (service)...")
+    if force:
+        return taxonomy.rebuild_taxonomy(collection_name, doc_ids, embeddings, texts)
+    return taxonomy.discover_topics(collection_name, doc_ids, embeddings, texts)
 
 
 def _progress(msg: str) -> None:
@@ -82,7 +211,7 @@ def _progress(msg: str) -> None:
 def discover_for_collection(
     collection_name: str,
     taxonomy: "CatalogTaxonomy",
-    chroma_client: Any,
+    t3: Any,
     *,
     force: bool = False,
 ) -> int:
@@ -102,9 +231,11 @@ def discover_for_collection(
     collection_name:
         ChromaDB collection to discover topics for.
     taxonomy:
-        :class:`CatalogTaxonomy` instance (owns T2 topic tables).
-    chroma_client:
-        Raw ``chromadb.ClientAPI`` (not ``T3Database``).
+        :class:`CatalogTaxonomy` (raw) or ``HttpTaxonomyStore`` (service).
+    t3:
+        The T3 handle (``T3Database`` raw, or ``HttpVectorClient`` service).
+        nexus-7ydks: service-backed handles route through
+        :func:`_discover_via_service`; raw handles use ``t3._client``.
     force:
         If True, delete existing topics for this collection before
         re-discovering (calls ``rebuild_taxonomy``).
@@ -114,6 +245,15 @@ def discover_for_collection(
     int
         Number of topics created.
     """
+    # nexus-7ydks: service-backed taxonomy store → fetch from the service and
+    # persist through the HttpTaxonomyStore drop-in (centroids via the port).
+    if not _has_raw_access(taxonomy):
+        return _discover_via_service(collection_name, taxonomy, t3, force=force)
+
+    # Raw path (unchanged): daemon-routed persist (RDR-128/151) over a raw
+    # Chroma client. Accept either a ``T3Database`` handle (use ``._client``)
+    # or a raw chroma client passed directly (programmatic / test callers).
+    chroma_client = getattr(t3, "_client", t3)
     try:
         coll = chroma_client.get_collection(
             collection_name, embedding_function=None,
@@ -549,16 +689,11 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         if is_local_mode() else []
     )
     t3 = make_t3()
-    _reject_service_backed_handle(t3)
 
     if discover_all:
-        colls = t3._client.list_collections()
-        targets = [
-            c.name for c in colls
-            if c.count() >= 5
-            and not any(fnmatch(c.name, pat) for pat in exclude)
-            and not c.name.startswith("taxonomy__")
-        ]
+        # Backend-support is checked per-collection inside the loop below
+        # (authoritative); enumeration itself needs no taxonomy handle.
+        targets = _enumerate_discoverable_collections(t3, exclude)
         if not targets:
             click.echo("No eligible collections found.")
             return
@@ -580,8 +715,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         for i, col_name in enumerate(targets, 1):
             if len(targets) > 1:
                 click.echo(f"[{i}/{len(targets)}] {col_name}")
+            _require_supported_taxonomy_backend(t3, db.taxonomy)
             count = discover_for_collection(
-                col_name, db.taxonomy, t3._client, force=force,
+                col_name, db.taxonomy, t3, force=force,
             )
             if count:
                 click.echo(f"  {col_name}: {count} topics")
@@ -597,8 +733,17 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
             else:
                 click.echo(f"  {col_name}: skipped")
 
-        # Cross-collection projection pass (RDR-075 SC-7)
-        if total_topics and len(targets) > 1:
+        # Cross-collection projection pass (RDR-075 SC-7).
+        # nexus-7ydks: project_against still uses a raw Chroma client (not yet
+        # ported to the service), so skip it LOUDLY in service mode rather than
+        # AttributeError on t3._client and swallow it as a generic failure.
+        from nexus.db.http_vector_client import is_service_backed
+        if total_topics and len(targets) > 1 and is_service_backed(t3):
+            click.echo(
+                "  Projection: skipped (cross-collection projection on the "
+                "pgvector service is a tracked follow-on, nexus-7ydks)"
+            )
+        elif total_topics and len(targets) > 1:
             try:
                 proj_count = 0
                 for col_name in targets:
@@ -661,9 +806,9 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
 
     with _T2Database(_default_db_path()) as db:
         t3 = make_t3()
-        _reject_service_backed_handle(t3)
+        _require_supported_taxonomy_backend(t3, db.taxonomy)
         count = discover_for_collection(
-            collection, db.taxonomy, t3._client, force=True,
+            collection, db.taxonomy, t3, force=True,
         )
     click.echo(f"Rebuilt {count} topics for collection {collection!r}.")
 
