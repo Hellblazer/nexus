@@ -198,7 +198,13 @@ def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False):
     nexus-7ydks: now takes the T3 handle (``T3Database`` raw or
     ``HttpVectorClient`` service), not the raw ``_client``.
     """
-    from nexus.commands.taxonomy_cmd import discover_for_collection
+    from nexus.commands.taxonomy_cmd import (
+        _require_supported_taxonomy_backend,
+        discover_for_collection,
+    )
+    # nexus-7ydks S1: close the split-backend hole on the post-index path too
+    # (discover_cmd/rebuild_cmd already guard; this shared wrapper did not).
+    _require_supported_taxonomy_backend(t3, taxonomy)
     return discover_for_collection(
         collection_name, taxonomy, t3, force=force,
     )

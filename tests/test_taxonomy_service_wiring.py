@@ -171,3 +171,52 @@ def test_discover_for_collection_service_too_few_docs_returns_zero():
 
     assert discover_for_collection("docs__demo", tax, t3) == 0
     assert not tax.discover_calls
+
+
+# ── Incremental-assignment hook (nexus-7ydks C1) ────────────────────────────
+
+
+def test_assign_batch_hook_routes_through_service_store(monkeypatch):
+    """The per-store_put assignment hook must persist via the service store in
+    service mode, not bail (the Critical the substantive-critic caught)."""
+    import nexus.mcp_infra as mi
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    ids = [f"c{i}" for i in range(4)]
+    embs = [[float(i), 1.0, 2.0] for i in range(4)]
+
+    # A real-typed (isinstance) HttpVectorClient so is_service_backed() is True,
+    # with the two methods the hook calls stubbed.
+    class _SvcT3(HttpVectorClient):
+        def __init__(self):  # noqa: D107
+            pass
+
+        def get_embeddings(self, collection, doc_ids):  # noqa: ANN001
+            import numpy as _np
+            return _np.asarray(embs, dtype=_np.float32)
+
+    persisted: list[list[dict]] = []
+
+    class _SvcTax:
+        def compute_assignments(self, collection, doc_ids, embeddings, *, cross_collection=False):  # noqa: ANN001
+            # one assignment per doc for the same-collection pass, none cross
+            return [] if cross_collection else [{"doc_id": d, "topic_id": 1} for d in doc_ids]
+
+        def persist_assignments(self, assignments):  # noqa: ANN001
+            persisted.append(assignments)
+            return len(assignments)
+
+    class _DB:
+        taxonomy = _SvcTax()
+
+    monkeypatch.setattr(mi, "get_t3", lambda: _SvcT3())
+    # is_local_mode is a local import from nexus.config inside the hook.
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+    # t2_index_write just runs the fn with our fake db (no daemon).
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+
+    # embeddings=None forces the service get_embeddings fetch path.
+    mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 4, None, None)
+
+    assert persisted, "service-mode hook did not persist any assignments (regressed to bail)"
+    assert len(persisted[0]) == 4

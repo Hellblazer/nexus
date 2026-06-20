@@ -156,6 +156,11 @@ def _fetch_service_vectors(
             break
 
     _progress(f"    fetched {len(ids):,} chunks")
+    # Positional-alignment assumption (nexus-7ydks S2): get_embeddings returns
+    # rows in request order (documented contract, http_vector_client.py), so
+    # embeddings[i] pairs with ids[i]/texts[i]. The count-equality check below
+    # is the tripwire; if the service ever returned an id->vector MAP instead,
+    # this would need a by-id realign rather than the positional zip.
     embeddings = t3.get_embeddings(collection_name, ids)
     if embeddings is None or len(embeddings) != len(ids):
         # get_embeddings drops ids the service cannot resolve (N < len(ids)),

@@ -681,13 +681,50 @@ def taxonomy_assign_batch_hook(
     # unconditionally while tests inject chroma-backed T3Database fixtures.
     from nexus.db.http_vector_client import is_service_backed
     if is_service_backed(get_t3()):
-        import structlog
-        structlog.get_logger().info(
-            "taxonomy_assign_skipped_service_mode",
-            collection=collection,
-            doc_count=len(doc_ids),
-            note="taxonomy-via-chroma not supported on service backend; tracked in nexus-gmiaf.21+",
-        )
+        # nexus-7ydks: service-backed incremental assignment. Mirrors the raw
+        # path below (compute same + cross, one persist) but persists through
+        # the Java service via the HttpTaxonomyStore drop-in — no raw Chroma
+        # client, no daemon-routed SQLite write.
+        if is_local_mode():
+            exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
+            if any(fnmatch(collection, pat) for pat in exclude):
+                return
+        svc_embeddings = embeddings
+        if not svc_embeddings:
+            try:
+                arr = get_t3().get_embeddings(collection, doc_ids)
+            except Exception:
+                arr = None
+            # get_embeddings drops ids it cannot resolve; a count skew would
+            # mis-pair vectors to docs, so skip rather than assign misaligned.
+            if arr is None or len(arr) != len(doc_ids):
+                import structlog
+                structlog.get_logger().debug(
+                    "taxonomy_assign_service_embed_unavailable",
+                    collection=collection,
+                    want=len(doc_ids),
+                    got=0 if arr is None else len(arr),
+                )
+                return
+            svc_embeddings = arr.tolist()
+        try:
+            def _svc_assign(db):  # noqa: ANN001
+                same = db.taxonomy.compute_assignments(
+                    collection, doc_ids, svc_embeddings, cross_collection=False,
+                )
+                cross = db.taxonomy.compute_assignments(
+                    collection, doc_ids, svc_embeddings, cross_collection=True,
+                )
+                a = same + cross
+                if a:
+                    db.taxonomy.persist_assignments(a)
+                return len(a)
+            t2_index_write(_svc_assign)
+        except Exception:
+            import structlog
+            structlog.get_logger().debug(
+                "taxonomy_assign_batch_service_failed", exc_info=True,
+            )
         return
 
     if is_local_mode():
