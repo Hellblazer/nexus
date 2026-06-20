@@ -313,6 +313,53 @@ class TelemetryRepositoryTest {
         }
     }
 
+    // ── live record path (nexus-pyzk7) ───────────────────────────────────────────
+    // The MCP consumer POSTs to /v1/telemetry/{tier_writes,nx_answer_runs}/record,
+    // which route through TelemetryHandler to recordTierWrite / recordNxAnswerRun.
+    // These assert the REPOSITORY write path persists and is retrievable under
+    // tenant scope. They do NOT exercise the HTTP handler / RequestContext tenant
+    // resolution, so they establish that the insert *can* land, not the full
+    // client-to-row chain. Read alongside the field report where a manual psql
+    // saw 0 rows after an HTTP-200 POST: this proves the repo layer is sound, so
+    // that 0 most likely reflects an RLS / wrong-tenant / wrong-db query rather
+    // than a dropped write — but the handler path itself is not covered here.
+
+    @Test @Order(30)
+    void recordTierWrite_livePath_persistsAndIsRetrievableUnderTenant() {
+        repo.recordTierWrite(TENANT_A,
+            "sess-tier-live", PAST_TS, "store_put", "T3", "developer", "proj-live", "doc.md");
+
+        try (Connection conn = pg.createConnection("")) {
+            conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
+            var rs = conn.createStatement().executeQuery(
+                "SELECT tier, tool FROM nexus.tier_writes "
+                + "WHERE session_id='sess-tier-live' AND tool='store_put'");
+            assertThat(rs.next()).as("recordTierWrite row must persist via the live path").isTrue();
+            assertThat(rs.getString("tier")).isEqualTo("T3");
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test @Order(31)
+    void recordNxAnswerRun_livePath_persistsAndIsRetrievableUnderTenant() {
+        repo.recordNxAnswerRun(TENANT_A,
+            "live record question?", 7L, 0.81,
+            2, "live answer text", 0.002, 900, PAST_TS);
+
+        try (Connection conn = pg.createConnection("")) {
+            conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
+            var rs = conn.createStatement().executeQuery(
+                "SELECT step_count, final_text FROM nexus.nx_answer_runs "
+                + "WHERE question='live record question?'");
+            assertThat(rs.next()).as("recordNxAnswerRun row must persist via the live path").isTrue();
+            assertThat(rs.getInt("step_count")).isEqualTo(2);
+            assertThat(rs.getString("final_text")).isEqualTo("live answer text");
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     // ── hook_failures ──────────────────────────────────────────────────────────
 
     @Test @Order(11)

@@ -131,6 +131,54 @@ class HttpTelemetryStore:
         resp = self._post("/v1/telemetry/relevance/log", payload)
         return int(resp.get("id", 0))
 
+    def record_tier_write(
+        self,
+        *,
+        session_id: str,
+        ts: str,
+        tool: str,
+        tier: str,
+        agent: str | None = None,
+        project: str | None = None,
+        target_title: str | None = None,
+    ) -> None:
+        """Record a tier-write event. Calls ``POST /v1/telemetry/tier_writes/record``.
+
+        nexus-pyzk7: the service-side table + endpoint already exist; this routes
+        the MCP consumer there instead of a raw SQLite conn the service has not.
+        """
+        self._post("/v1/telemetry/tier_writes/record", {
+            "session_id":   session_id,
+            "ts":           ts,
+            "tool":         tool,
+            "tier":         tier,
+            "agent":        agent,
+            "project":      project,
+            "target_title": target_title,
+        })
+
+    def record_nx_answer_run(
+        self,
+        *,
+        question: str,
+        plan_id: int | None,
+        matched_confidence: float | None,
+        step_count: int,
+        final_text: str,
+        cost_usd: float,
+        duration_ms: int,
+    ) -> None:
+        """Record an nx_answer run. Calls ``POST /v1/telemetry/nx_answer_runs/record``."""
+        self._post("/v1/telemetry/nx_answer_runs/record", {
+            "question":           question,
+            "plan_id":            plan_id,
+            "matched_confidence": matched_confidence,
+            "step_count":         step_count,
+            "final_text":         final_text,
+            "cost_usd":           cost_usd,
+            "duration_ms":        duration_ms,
+        })
+
     def log_relevance_batch(
         self,
         rows: list[tuple[str, str, str, str, str]],

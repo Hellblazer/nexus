@@ -651,6 +651,27 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
 # ── Tier-discipline telemetry (Phase 1A nexus-kren) ─────────────────────────
 
 
+# nexus-pyzk7: telemetry is best-effort (a failed write must never break a tool
+# call), but a SILENT drop is the exact bug this bead fixes. When the persist
+# raises — service 5xx/timeout, or a backend with no such store — log ONCE per
+# table so the loss is visible in the process log instead of vanishing.
+_telemetry_drop_warned: set[str] = set()
+
+
+def _warn_telemetry_drop(table: str, exc: BaseException) -> None:
+    if table in _telemetry_drop_warned:
+        return
+    _telemetry_drop_warned.add(table)
+    import structlog
+    structlog.get_logger(__name__).warning(
+        "telemetry_write_dropped",
+        table=table,
+        error=f"{type(exc).__name__}: {exc}",
+        note="telemetry row not persisted (best-effort); subsequent drops for "
+             "this table are suppressed this process (tracked: nexus-pyzk7).",
+    )
+
+
 def _record_tier_write(
     *,
     tool: str,
@@ -680,29 +701,23 @@ def _record_tier_write(
     try:
         from datetime import datetime, timezone
 
-        from nexus.db.migrations import migrate_tier_writes
         from nexus.mcp_infra import t2_ctx
         from nexus.session import resolve_active_session_id
 
         session_id = resolve_active_session_id() or "unknown"
         ts = datetime.now(timezone.utc).isoformat()
         with t2_ctx() as t2:
-            # Any domain conn points at the same SQLite file; reuse the
-            # taxonomy connection because it is constructed eagerly and
-            # carries the per-store lock semantics this insert needs.
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                migrate_tier_writes(conn)
-                conn.execute(
-                    "INSERT INTO tier_writes "
-                    "(session_id, ts, tool, tier, agent, project, target_title) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (session_id, ts, tool, tier, agent, project, target_title),
-                )
-                conn.commit()
-    except Exception:
-        # Best-effort. Telemetry breaking a tool call is the worst kind of regression.
-        pass
+            # nexus-pyzk7: route through the telemetry store, which persists to
+            # SQLite (raw) or the service (POST /v1/telemetry/tier_writes/record)
+            # depending on backend — no raw ``.conn`` reach, no silent drop.
+            t2.telemetry.record_tier_write(
+                session_id=session_id, ts=ts, tool=tool, tier=tier,
+                agent=agent, project=project, target_title=target_title,
+            )
+    except Exception as exc:
+        # Best-effort. Telemetry breaking a tool call is the worst kind of
+        # regression — but warn once so the drop is visible, not silent.
+        _warn_telemetry_drop("tier_writes", exc)
 
 
 # ── Post-store hooks (process-local registry constructed above) ─────────────
@@ -4107,7 +4122,7 @@ def _maybe_unwrap_output_envelope(text: str, *, max_depth: int = 3) -> str:
 
 
 def _nx_answer_record_run(
-    conn: Any,
+    telemetry: Any,
     *,
     question: str,
     plan_id: int | None,
@@ -4118,19 +4133,25 @@ def _nx_answer_record_run(
     duration_ms: int,
     trace: bool,
 ) -> None:
-    """Write one row to ``nx_answer_runs``. Redacts when ``trace=False``."""
-    from nexus.db.migrations import migrate_nx_answer_runs
-    migrate_nx_answer_runs(conn)
+    """Persist one ``nx_answer_runs`` row via the telemetry store. Redacts when
+    ``trace=False``.
+
+    nexus-pyzk7: routes through ``telemetry.record_nx_answer_run`` (SQLite raw OR
+    the service's POST /v1/telemetry/nx_answer_runs/record), so it persists in
+    BOTH backends instead of reaching for a raw ``.conn`` the service lacks.
+    """
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
-    conn.execute(
-        """INSERT INTO nx_answer_runs
-           (question, plan_id, matched_confidence, step_count,
-            final_text, cost_usd, duration_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (q, plan_id, matched_confidence, step_count, text, cost_usd, duration_ms),
-    )
-    conn.commit()
+    try:
+        telemetry.record_nx_answer_run(
+            question=q, plan_id=plan_id, matched_confidence=matched_confidence,
+            step_count=step_count, final_text=text, cost_usd=cost_usd,
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:
+        # Best-effort, but warn once so a service-mode drop is visible (the call
+        # sites also swallow; this makes the failure mode observable). nexus-pyzk7.
+        _warn_telemetry_drop("nx_answer_runs", exc)
 
 
 def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
@@ -4506,7 +4527,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=None,
+                        db.telemetry, question=question, plan_id=None,
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
                         cost_usd=0.0, duration_ms=elapsed_ms, trace=trace,
@@ -4613,7 +4634,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=best.plan_id,
+                        db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=str(result_text)[:2000], cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
@@ -4632,7 +4653,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=best.plan_id,
+                        db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=f"Error: {exc}", cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
@@ -4688,7 +4709,7 @@ async def nx_answer(
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
-                    db.telemetry.conn, question=question, plan_id=best.plan_id,
+                    db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=0,
                     final_text=f"Error: {exc}", cost_usd=0.0,
                     duration_ms=elapsed_ms, trace=trace,
@@ -4781,7 +4802,7 @@ async def nx_answer(
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
-                    db.telemetry.conn, question=question, plan_id=best.plan_id,
+                    db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
                     final_text=no_match[:2000], cost_usd=0.0,
@@ -4880,7 +4901,7 @@ async def nx_answer(
     try:
         with _t2_ctx() as db:
             _nx_answer_record_run(
-                db.telemetry.conn, question=question, plan_id=best.plan_id,
+                db.telemetry, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
                 final_text=final_text[:2000], cost_usd=0.0,
                 duration_ms=elapsed_ms, trace=trace,
