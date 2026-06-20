@@ -91,7 +91,7 @@ query(question="database design", follow_links="cites", depth=1)  # + citation g
 | `follow_links` | string | Link type to follow (e.g., `cites`) — enriches with linked documents |
 | `depth` | integer | Hops to follow in the link graph (default 1) |
 | `n` | integer | Maximum results (default 10) |
-| `where` | string | ChromaDB metadata filter |
+| `where` | string | Vector-store metadata filter (e.g. `bib_year>=2020,section_type!=references`) |
 
 ### How catalog routing works
 
@@ -199,6 +199,8 @@ Several mechanisms run automatically across all interfaces.
 
 ### Topic-aware ranking
 
+> **Note (6.0):** Topic *discovery* is suspended in service mode (the default since 6.0) — `nx taxonomy discover` errors and `nx index repo` skips discovery, pending the pgvector follow-on (`nexus-gmiaf.21+`). Ranking against **previously-computed** topics (`topic=`, `cluster_by="semantic"`, distance boosts) still works; only the discovery of new topics is paused.
+
 After `nx index repo` (or `nx taxonomy discover --all`), topics are clustered via HDBSCAN with Claude-Haiku auto-labels. Topic-aware ranking then works three ways:
 
 - **Topic boost** — results sharing a topic cluster get a distance reduction of 0.1; results in adjacent linked topics get 0.05. Automatic on `search` and `query`.
@@ -235,7 +237,7 @@ Knowledge, docs, and RDR collections fetch 4x the requested result count before 
 
 ### Catalog pre-filtering
 
-When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog SQLite database and passes them as a `source_path` filter to ChromaDB. Avoids HNSW/SPANN stalling in predicate-sparse graph regions. Automatic when a catalog is available.
+When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog SQLite database and passes them as a `source_path` filter to the vector store. This reduces the scan space before retrieval, avoiding the latency cliff an ANN index hits in predicate-sparse regions. Automatic when a catalog is available.
 
 ### Multi-probe collection health
 

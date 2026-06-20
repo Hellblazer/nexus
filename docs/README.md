@@ -12,6 +12,13 @@ Start with [Getting Started](getting-started.md) for installation. Then explore 
 - [Configuration](configuration.md) — Config hierarchy, `.nexus.yml`, environment variables, logging
 - [Container Integration](container-integration.md) — Daemon model for containers and Cowork
 
+## Upgrading to 6.0 (off ChromaDB)
+
+6.0 retires ChromaDB T3 serving for the native nexus-service (Postgres 16 + pgvector). Existing users migrate with one command, `nx guided-upgrade`.
+
+- [Getting Started § Cloud mode](getting-started.md#cloud-mode-optional) and `nx init --service` — stand up the service stack
+- [Migration Runbook](migration-runbook.md) — the operational order of operations, quiescence, rollback, and the two-release deprecation window
+
 ## Workflow
 
 - [RDR: Research-Design-Review](rdr.md) — Lifecycle, workflow, Nexus integration, templates
