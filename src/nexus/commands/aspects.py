@@ -237,8 +237,8 @@ def aspects_gc_fixtures(yes: bool) -> None:
         # post-RDR-108; older installs may not have it yet, so guard the
         # presence check via PRAGMA.
         stores = [
-            ("document_aspects", db.document_aspects.conn),
-            ("aspect_extraction_queue", db.aspect_queue.conn),
+            ("document_aspects", db.document_aspects.conn),  # epsilon-allow: guarded by storage_backend_for service-mode UsageError above (gmiaf.37)
+            ("aspect_extraction_queue", db.aspect_queue.conn),  # epsilon-allow: guarded by storage_backend_for service-mode UsageError above (gmiaf.37)
         ]
         for table, conn in stores:
             present = conn.execute(

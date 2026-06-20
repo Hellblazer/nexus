@@ -156,6 +156,43 @@ CATALOG_DB_ACCESS_BASELINE: int = 1
 CATALOG_CONSTRUCTION_BASELINE: int = 0
 
 
+#: nexus-9613q.1 (Part 2 of nexus-pyzk7): T2 store handles whose ``.conn`` /
+#: ``._lock`` are raw SQLite-only attributes. In service mode (the 6.0
+#: default) each resolves to an Http*Store with no such attribute, so a
+#: consumer that reaches ``<x>.<store>.conn`` / ``._lock`` breaks — silently
+#: when wrapped in ``try/except`` (the telemetry silent-loss class pyzk7
+#: fixed), loudly otherwise. Consumers must route through a public store
+#: method or guard with ``_has_raw_access`` (hasattr conn + _lock).
+T2_STORE_HANDLE_NAMES: frozenset[str] = frozenset({
+    "taxonomy",
+    "document_aspects",
+    "telemetry",
+    "memory",
+    "plans",
+    "chash_index",
+    "aspect_queue",
+    "document_highlights",
+})
+
+#: The raw SQLite-only attributes guarded on a T2 store handle.
+T2_RAW_HANDLE_ATTRS: frozenset[str] = frozenset({"conn", "_lock"})
+
+#: db/ defines the SQLite stores; daemon/ is the legitimate single writer.
+#: Both legitimately reach ``.conn`` / ``._lock`` on a concrete store.
+T2_RAW_HANDLE_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    "src/nexus/db/",
+    "src/nexus/daemon/",
+)
+
+#: nexus-9613q.1: baseline for un-annotated ``<x>.<t2_store>.conn|._lock``
+#: accesses outside db/ + daemon/. Seeded at the offender count that survives
+#: epsilon-allow annotation of the storage_backend_for-guarded sites
+#: (aspect_promotion.py, operators/aspect_sql.py). Ratchets to 0 as
+#: nexus-9613q.3 (hook_registry) and nexus-9613q.4 (collection_health /
+#: collection_audit / merge_candidates) land in this branch.
+T2_RAW_HANDLE_BASELINE: int = 12
+
+
 #: Banned call sites. Each entry is ``(module, attribute)`` matched
 #: against AST ``Attribute(value=Name(id=module), attr=attribute)``
 #: nodes inside ``Call`` nodes. Alias resolution maps the alias back
@@ -240,6 +277,12 @@ class LintResult:
     #: subsequent beads port commands/ onto the public API.  The acceptance test
     #: asserts ``<= CATALOG_DB_ACCESS_BASELINE`` (NOT included in total_violations).
     catalog_db_accesses: int = 0
+    #: nexus-9613q.1: un-annotated ``<x>.<t2_store>.conn|._lock`` accesses
+    #: outside db/ + daemon/. Counted baseline (NOT in total_violations);
+    #: the acceptance test asserts ``<= T2_RAW_HANDLE_BASELINE``.
+    t2_raw_handle_accesses: int = 0
+    #: The concrete sites backing ``t2_raw_handle_accesses`` (for diagnostics).
+    t2_raw_handle_access_sites: list[Violation] = field(default_factory=list)
 
     @property
     def total_violations(self) -> int:
@@ -255,6 +298,7 @@ class LintResult:
             "voyageai_epsilon_allow_count": self.voyageai_epsilon_allow_count,
             "catalog_constructions": self.catalog_constructions,
             "catalog_db_accesses": self.catalog_db_accesses,
+            "t2_raw_handle_accesses": self.t2_raw_handle_accesses,
         }
 
 
@@ -282,6 +326,10 @@ class FileScan:
     #: nexus-qnp5s: ``._db`` attribute accesses in this file.
     #: Enforced at baseline=0 outside ``src/nexus/catalog/``.
     catalog_db_accesses: list[Violation] = field(default_factory=list)
+    #: nexus-9613q.1: ``<x>.<t2_store>.conn|._lock`` raw-handle accesses in
+    #: this file (un-annotated). Scoped by the raw-handle access-allowlist
+    #: (db/ + daemon/) in :func:`scan_repo`.
+    t2_raw_handle_accesses: list[Violation] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +500,31 @@ def _scan_file_full(
                 Violation(file=_rel(), line=node.lineno, symbol="catalog._db")
             )
 
+    # ── nexus-9613q.1: T2 raw-handle .conn/._lock access scan ──
+    # Match ``<x>.<t2_store>.conn`` / ``<x>.<t2_store>._lock`` precisely:
+    # an Attribute whose attr is conn/_lock AND whose value is itself an
+    # Attribute whose attr is a known T2 store name. This is tight enough to
+    # avoid the generic ``.conn`` false positive (e.g. ``client.pool.conn``).
+    # Epsilon-allow on the same line marks a documented survivor (a raw access
+    # inside a storage_backend_for-guarded SQLite-only branch the AST can't
+    # see). The allowlist (db/ + daemon/) is applied by scan_repo.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in T2_RAW_HANDLE_ATTRS
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr in T2_STORE_HANDLE_NAMES
+        ):
+            if _line_has_allowlist_token(source_lines, node.lineno):
+                continue
+            scan.t2_raw_handle_accesses.append(
+                Violation(
+                    file=_rel(),
+                    line=node.lineno,
+                    symbol=f"{node.value.attr}.{node.attr}",
+                )
+            )
+
     return scan
 
 
@@ -491,6 +564,7 @@ def scan_repo(
     construction_allowlist_prefixes: Iterable[str] | None = None,
     catalog_construction_allowlist_prefixes: Iterable[str] | None = None,
     catalog_db_access_allowlist_prefixes: Iterable[str] | None = None,
+    t2_raw_handle_access_allowlist_prefixes: Iterable[str] | None = None,
 ) -> LintResult:
     """Scan the repo for banned call sites and the RDR-128 baseline
     populations.
@@ -532,6 +606,12 @@ def scan_repo(
         catalog_db_access_allowlist_prefixes = CATALOG_DB_ACCESS_ALLOWLIST_PREFIXES
     else:
         catalog_db_access_allowlist_prefixes = tuple(catalog_db_access_allowlist_prefixes)
+    if t2_raw_handle_access_allowlist_prefixes is None:
+        t2_raw_handle_access_allowlist_prefixes = T2_RAW_HANDLE_ACCESS_ALLOWLIST_PREFIXES
+    else:
+        t2_raw_handle_access_allowlist_prefixes = tuple(
+            t2_raw_handle_access_allowlist_prefixes
+        )
 
     result = LintResult()
 
@@ -573,6 +653,12 @@ def scan_repo(
         if not _is_allowlisted(rel, catalog_db_access_allowlist_prefixes):
             result.catalog_db_accesses += len(scan.catalog_db_accesses)
 
+        # nexus-9613q.1: T2 raw-handle .conn/._lock accesses — counted
+        # baseline outside db/ + daemon/. Ratchets to 0 as .3/.4 land.
+        if not _is_allowlisted(rel, t2_raw_handle_access_allowlist_prefixes):
+            result.t2_raw_handle_accesses += len(scan.t2_raw_handle_accesses)
+            result.t2_raw_handle_access_sites.extend(scan.t2_raw_handle_accesses)
+
     # Extra files: always scanned, never allowlisted by path prefix.
     if extra_files:
         for extra in extra_files:
@@ -586,5 +672,7 @@ def scan_repo(
             result.violations.extend(scan.t2database_constructions_undocumented)
             result.catalog_constructions += len(scan.catalog_constructions)
             result.catalog_db_accesses += len(scan.catalog_db_accesses)
+            result.t2_raw_handle_accesses += len(scan.t2_raw_handle_accesses)
+            result.t2_raw_handle_access_sites.extend(scan.t2_raw_handle_accesses)
 
     return result
