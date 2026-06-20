@@ -4,13 +4,13 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 **Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_conexus_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [conexus/README.md](../conexus/README.md#mcp-servers) for MCP tool details.
 
-**One arbitrator per tier**: Since conexus 4.34.0 (RDR-120), both T2 and (local-mode) T3 are wrapped in dedicated daemon processes. Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers (via TCP loopback or UDS mount) — routes through the same daemon, so the underlying SQLite / ChromaDB instance has exactly one writer. Start the daemons once via `nx daemon t2 install --autostart` (and `nx daemon t3 install --autostart` in local mode); the Claude Code plugin's SessionStart hook also auto-spawns them on each session start.
+**One arbitrator per tier**: Since conexus 4.34.0 (RDR-120), T2 is wrapped in a dedicated daemon process; since RDR-155, T3 serving routes through the native nexus-service (Postgres 16 + pgvector). Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers — routes through the same arbitrator, so the underlying SQLite instance has exactly one writer and all vector traffic goes through one service. Start the T2 daemon once via `nx daemon t2 install --autostart`, and the storage service via `nx daemon service start`; the Claude Code plugin's SessionStart hook also auto-spawns the T2 daemon on each session start.
 
-| Tier | Storage | Daemon | Transport | Durability | Use |
-|------|---------|--------|-----------|------------|-----|
-| T1 -- scratch | ChromaDB EphemeralClient (per-MCP-process) | none | Process-local | Session only | Working notes, hypotheses |
+| Tier | Storage | Arbitrator | Transport | Durability | Use |
+|------|---------|------------|-----------|------------|-----|
+| T1 -- scratch | ChromaDB EphemeralClient / per-session HTTP server | none | Process-local | Session only | Working notes, hypotheses |
 | T2 -- memory | SQLite + FTS5 (WAL) | T2 daemon (`nx daemon t2`) | UDS + 127.0.0.1 loopback | Survives restarts | Per-project notes, session context |
-| T3 -- knowledge | Local ChromaDB or ChromaDB Cloud + Voyage AI | local: T3 daemon; cloud: direct HTTPS | local: localhost / cloud: required | Permanent | Semantic search, indexed code/docs |
+| T3 -- knowledge | Postgres 16 + pgvector behind the native nexus-service (both modes); embedding server-side (bge-768 local / Voyage managed-cloud) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
 | Catalog | T2-store-backed (eighth domain store; RDR-120 P5.A) + events.jsonl (canonical) | shared with T2 daemon | UDS + 127.0.0.1 loopback | Permanent | Document registry, typed link graph, provenance |
 
 The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
@@ -116,7 +116,7 @@ Merges use SQLite's write lock via `with self.conn:` to ensure UPDATE and DELETE
 
 **Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry — not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
 
-**Domain split (RDR-063)**: T2 is implemented as four domain stores under `src/nexus/db/t2/` — `MemoryStore` (memory table), `PlanLibrary` (plans table), `CatalogTaxonomy` (topics + topic_assignments + taxonomy_meta + topic_links), and `Telemetry` (relevance_log). Each store opens its own `sqlite3.Connection` against the shared SQLite file in WAL mode with `busy_timeout=5000`, so reads in one domain are never blocked by writes in another. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls continue to work via method delegation, and new code can reach the domain stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
+**Domain split (RDR-063)**: T2 is implemented as four domain stores under `src/nexus/db/t2/` — `MemoryStore` (memory table), `PlanLibrary` (plans table), `CatalogTaxonomy` (topics + topic_assignments + taxonomy_meta + topic_links), and `Telemetry` (relevance_log). Each store opens its own `sqlite3.Connection` against the shared SQLite file in WAL mode with `busy_timeout=30000` (raised from 5000 in RDR-129 B1), so reads in one domain are never blocked by writes in another. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls continue to work via method delegation, and new code can reach the domain stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
 
 **Topic taxonomy**: `CatalogTaxonomy` discovers topics from T3 collection embeddings using HDBSCAN, labels them automatically with Claude Haiku, and uses them for search grouping and relevance boosting. Topics are discovered automatically after `nx index repo`. Operator-curated labels are preserved across re-discovery runs. See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set and [taxonomy.md](taxonomy.md) for architecture details.
 
@@ -137,42 +137,47 @@ The taxonomy spans two storage tiers:
 
 ## T3 -- Permanent Knowledge
 
-T3 has two backends: **local** (zero-config) and **cloud** (higher quality).
+Since RDR-155, T3 serving routes through the **native nexus-service** (Postgres
+16 + pgvector) in BOTH modes. The Python client is `HttpVectorClient`
+(`make_t3()` in `db/__init__.py` returns it by default); it talks to the
+service over HTTP `/v1/vectors`, reading `NX_SERVICE_URL` + `NX_SERVICE_TOKEN`
+with supervisor-lease discovery (`~/.config/nexus/storage_service_addr.<uid>`).
+Embedding happens **server-side**, so the choice of model is a property of the
+service, not of the client. The two modes differ only in which embedder the
+service runs:
 
-### Local backend (default when no cloud credentials)
-
-Backed by `chromadb.PersistentClient` with local ONNX embeddings. No API keys or network required. Data stored at `~/.local/share/nexus/chroma`.
-
-| | Tier 0 (bundled) | Tier 1 (`uv tool install conexus --with "conexus[local]" --force`) |
+| | Local mode (default) | Managed-cloud mode |
 |---|---|---|
-| Model | all-MiniLM-L6-v2 | bge-base-en-v1.5 |
-| Dimensions | 384 | 768 |
-| Quality | Basic semantic matching | Better code & prose retrieval |
-| Install | Included | `uv tool install conexus --with "conexus[local]" --force` |
+| Embedder (server-side) | bge-768 (ONNX, RDR-160) | Voyage (`voyage-code-3` / `voyage-context-3`) |
+| Dimensions | 768 | 1024 |
+| Credentials | none required | Voyage API key on the service |
+| Reranking | unavailable | available |
 
-All collection types use the same local model (no per-prefix splitting). Reranking is unavailable in local mode.
+bge-768 is the standard local-mode service embedder (RDR-160 replaced the
+earlier MiniLM-384), not an opt-in extra. Run `nx daemon service start` to
+bring the stack up and `nx daemon service status` to verify health (lease, PG
+cluster, `/version` handshake with `embedding_mode`).
 
-### Cloud backend
-
-Backed by a single `chromadb.CloudClient` with `VoyageAIEmbeddingFunction`. Requires `CHROMA_API_KEY`, `CHROMA_DATABASE`, and `VOYAGE_API_KEY`. `CHROMA_TENANT` is optional — the CloudClient infers the tenant UUID from your API key.
-
-All collections coexist in one ChromaDB Cloud database (`CHROMA_DATABASE` value, e.g. `nexus`). The database is provisioned automatically by `nx config init`. Run `nx doctor` to verify connectivity.
+> **The legacy ChromaDB serving path is retired.** Pre-RDR-155, T3 was backed by
+> `chromadb.PersistentClient` (local) or `chromadb.CloudClient` + Voyage
+> (cloud). That path (`db/t3.py`, `nx daemon t3`) still registers but serves
+> nothing — it survives only as the immutable migration *source* until RDR-155
+> P4b deletes it. Existing Chroma data migrates onto the service via
+> `nx guided-upgrade` (see [Migration Runbook](migration-runbook.md)).
 
 ### Collections
 
-Collections are namespaced by corpus type using `__` (double underscore) as separator:
+Collections are namespaced by corpus type using `__` (double underscore) as separator. Each collection's embedding model is fixed; the service routes by collection name:
 
-| Pattern | Contents | Cloud index model | Cloud query model |
-|---------|----------|-------------------|-------------------|
-| `code__<repo>-<hash>` | Indexed source code | voyage-code-3 | voyage-code-3 |
-| `docs__<repo>-<hash>` | Indexed prose files | voyage-context-3 (CCE) | voyage-context-3 |
-| `rdr__<repo>-<hash>` | Indexed RDR documents | voyage-context-3 (CCE) | voyage-context-3 |
-| `docs__<corpus>` | Indexed PDFs and markdown | voyage-context-3 (CCE) | voyage-context-3 |
-| `knowledge__<topic>` | Stored agent outputs and notes | voyage-context-3 (CCE) | voyage-context-3 |
+| Pattern | Contents | Managed-cloud model | Local model |
+|---------|----------|---------------------|-------------|
+| `code__<repo>-<hash>` | Indexed source code | voyage-code-3 | bge-768 |
+| `docs__<repo>-<hash>` | Indexed prose files | voyage-context-3 (CCE) | bge-768 |
+| `rdr__<repo>-<hash>` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 |
+| `docs__<corpus>` | Indexed PDFs and markdown | voyage-context-3 (CCE) | bge-768 |
+| `knowledge__<topic>` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 |
 
-All collections use the same embedding model for both index and query. Mixing models across vector spaces produces near-random similarity scores.
-
-In local mode, all collections use the active local model for both index and query.
+A collection is indexed and queried under the same embedding model — mixing models across one vector space produces near-random similarity scores. The voyage-capability gate (`nx guided-upgrade`) refuses to migrate voyage-model collections onto a bge-only service for exactly this reason.
 
 **TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.
 
