@@ -708,18 +708,20 @@ def taxonomy_assign_batch_hook(
                 return
             svc_embeddings = arr.tolist()
         try:
-            def _svc_assign(db):  # noqa: ANN001
-                same = db.taxonomy.compute_assignments(
-                    collection, doc_ids, svc_embeddings, cross_collection=False,
+            # Compute (read: queries centroids via the service) + persist in a
+            # single inline t2_index_write lambda — the storage-boundary lint
+            # recognises this routed form, and in service mode persist lands on
+            # the Java service (the single writer).
+            t2_index_write(
+                lambda db: db.taxonomy.persist_assignments(
+                    db.taxonomy.compute_assignments(
+                        collection, doc_ids, svc_embeddings, cross_collection=False,
+                    )
+                    + db.taxonomy.compute_assignments(
+                        collection, doc_ids, svc_embeddings, cross_collection=True,
+                    )
                 )
-                cross = db.taxonomy.compute_assignments(
-                    collection, doc_ids, svc_embeddings, cross_collection=True,
-                )
-                a = same + cross
-                if a:
-                    db.taxonomy.persist_assignments(a)
-                return len(a)
-            t2_index_write(_svc_assign)
+            )
         except Exception:
             import structlog
             structlog.get_logger().debug(
