@@ -241,11 +241,41 @@ public final class CatalogRepository {
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
         tenantScope.withTenant(tenant, ctx -> {
+            // nexus-0cy4b: tumbler_prefix is NOT NULL. The SQLite catalog
+            // (Catalog.register_owner) assigns the owner prefix server-side; the
+            // HTTP client sends none and expects the same here. Mirror it: reuse
+            // the existing owner's prefix for this repo (idempotent), else
+            // allocate 1.{MAX+1}. An explicit prefix (ETL/import) is honoured.
+            String prefix = s(o, "tumbler_prefix");
+            if (prefix == null || prefix.isBlank()) {
+                String repoHash = s(o, "repo_hash");
+                if (repoHash != null && !repoHash.isBlank()) {
+                    prefix = ctx.select(F_OWN_PREFIX)
+                                .from(T_OWNERS)
+                                .where(F_OWN_REPO.eq(repoHash))
+                                .limit(1)
+                                .fetchOne(F_OWN_PREFIX);
+                }
+                if (prefix == null || prefix.isBlank()) {
+                    // Next owner number: MAX(int after the first dot) + 1 over
+                    // '1.%' owners. RLS scopes this to the tenant.
+                    Integer maxNum = ctx.select(
+                            DSL.coalesce(
+                                DSL.max(DSL.field(
+                                    "CAST(split_part(tumbler_prefix, '.', 2) AS INTEGER)",
+                                    Integer.class)),
+                                DSL.inline(0)))
+                        .from(T_OWNERS)
+                        .where(F_OWN_PREFIX.like("1.%"))
+                        .fetchOne(0, Integer.class);
+                    prefix = "1." + ((maxNum == null ? 0 : maxNum) + 1);
+                }
+            }
             ctx.insertInto(T_OWNERS,
                     F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
                     F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
                .values(tenant,
-                       s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
+                       prefix, s(o,"name"), s(o,"owner_type"),
                        s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
                        s(o,"head_hash"))
                .onConflict(F_OWN_TENANT, F_OWN_PREFIX)

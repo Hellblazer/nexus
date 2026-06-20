@@ -259,8 +259,8 @@ class HttpCatalogClient:
 
     def ensure_owner_for_repo(
         self,
-        *,
         repo: Path | str,
+        *,
         name: str | None = None,
         owner_type: str = "repo",
         head_hash: str | None = None,
@@ -270,12 +270,28 @@ class HttpCatalogClient:
 
         If ``tumbler_prefix`` is provided (e.g. during ETL migration) it is used
         directly.  Otherwise the server assigns a prefix; we query it back.
+
+        nexus-0cy4b: mirror the canonical ``Catalog.ensure_owner_for_repo`` — key
+        the owner on ``repo_hash`` (from ``_repo_identity_with_main`` so it is
+        stable across worktrees) and send it. The server dedups by repo_hash and
+        assigns the prefix; without repo_hash the server would allocate a fresh
+        prefix per call and collide on the (name, owner_type) unique constraint.
         """
-        effective_name = name or Path(repo).name
+        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
+
+        derived_name, repo_hash, main_repo = _repo_identity_with_main(Path(repo))
+        effective_name = name or derived_name
+        # Idempotent fast path: an owner already exists for this repo
+        # (owner_for_repo returns None on 404).
+        if owner_type == "repo" and repo_hash:
+            existing = self.owner_for_repo(repo_hash)
+            if existing is not None:
+                return existing
         payload: dict = {
             "name": effective_name,
             "owner_type": owner_type,
-            "repo_root": str(repo),
+            "repo_root": str(main_repo),
+            "repo_hash": repo_hash,
         }
         if tumbler_prefix: payload["tumbler_prefix"] = tumbler_prefix
         if head_hash:      payload["head_hash"] = head_hash
@@ -284,7 +300,11 @@ class HttpCatalogClient:
             return Tumbler.parse(result["tumbler_prefix"])
         if tumbler_prefix:
             return Tumbler.parse(tumbler_prefix)
-        # Query back
+        # Query back — prefer the exact repo_hash lookup over name (ambiguous).
+        if owner_type == "repo" and repo_hash:
+            existing = self.owner_for_repo(repo_hash)
+            if existing is not None:
+                return existing
         owners = self._get("/owners/by_name", name=effective_name)
         rows = owners.get("owners", []) if owners else []
         if rows:
