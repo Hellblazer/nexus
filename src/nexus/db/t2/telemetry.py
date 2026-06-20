@@ -176,6 +176,63 @@ class Telemetry:
             self.conn.commit()
             return cur.lastrowid
 
+    def record_tier_write(
+        self,
+        *,
+        session_id: str,
+        ts: str,
+        tool: str,
+        tier: str,
+        agent: str | None = None,
+        project: str | None = None,
+        target_title: str | None = None,
+    ) -> None:
+        """Append one row to ``tier_writes`` (tier-discipline audit).
+
+        nexus-pyzk7: the canonical store owns the INSERT so the MCP consumers
+        call ``db.telemetry.record_tier_write(...)`` instead of reaching for a
+        raw ``.conn`` (which a service-backed store does not have).
+        """
+        from nexus.db.migrations import migrate_tier_writes  # noqa: PLC0415
+        with self._lock:
+            migrate_tier_writes(self.conn)
+            self.conn.execute(
+                "INSERT INTO tier_writes "
+                "(session_id, ts, tool, tier, agent, project, target_title) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, ts, tool, tier, agent, project, target_title),
+            )
+            self.conn.commit()
+
+    def record_nx_answer_run(
+        self,
+        *,
+        question: str,
+        plan_id: int | None,
+        matched_confidence: float | None,
+        step_count: int,
+        final_text: str,
+        cost_usd: float,
+        duration_ms: int,
+    ) -> None:
+        """Append one row to ``nx_answer_runs`` (RDR-080 run metrics).
+
+        nexus-pyzk7: consumer redaction (trace=False) is applied by the caller
+        before invoking this; the store just persists the given values.
+        """
+        from nexus.db.migrations import migrate_nx_answer_runs  # noqa: PLC0415
+        with self._lock:
+            migrate_nx_answer_runs(self.conn)
+            self.conn.execute(
+                "INSERT INTO nx_answer_runs "
+                "(question, plan_id, matched_confidence, step_count, "
+                "final_text, cost_usd, duration_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (question, plan_id, matched_confidence, step_count,
+                 final_text, cost_usd, duration_ms),
+            )
+            self.conn.commit()
+
     def log_relevance_batch(
         self,
         rows: list[tuple[str, str, str, str, str]],

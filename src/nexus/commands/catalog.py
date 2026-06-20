@@ -1771,6 +1771,12 @@ def _taxonomy_stats() -> dict | None:
 
     try:
         with T2Database(db_path) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+            # nexus-pyzk7: service-backed taxonomy has no raw .conn. This is a
+            # read-only topic-stats display; skip cleanly in service mode rather
+            # than relying on the AttributeError → except below (the docstring
+            # promised a graceful skip the bare access did not deliver).
+            if not hasattr(db.taxonomy, "conn"):
+                return None
             conn = db.taxonomy.conn
             with db.taxonomy._lock:
                 topic_total = conn.execute(
