@@ -27,7 +27,9 @@ migration tool; the Chroma source remains the immutable migration origin
 
 - **`nx guided-upgrade` (RDR-002): one command from a pre-upgrade install to a
   migrated service stack.** Detects the legacy footprint, provisions and starts
-  the engine-service, version-pins it (`/version` `release_version >= v0.1.6`),
+  the engine-service, version-pins it (its `/version` `release_version` must be
+  present — from engine-service v0.1.6+; the code floor is v0.1.5 but earlier
+  binaries omit the field and fail closed),
   bounded health-gates it, then drives `migrate-to-service` (detect → ETL →
   validate → unlock) with taxonomy ref-remap and copy-not-move rollback safety.
   Voyage-capability and version pre-flights fail loud **before** any migration.
