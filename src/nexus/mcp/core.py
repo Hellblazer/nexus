@@ -687,10 +687,14 @@ def _record_tier_write(
         session_id = resolve_active_session_id() or "unknown"
         ts = datetime.now(timezone.utc).isoformat()
         with t2_ctx() as t2:
-            # Any domain conn points at the same SQLite file; reuse the
-            # taxonomy connection because it is constructed eagerly and
-            # carries the per-store lock semantics this insert needs.
-            conn = t2.taxonomy.conn
+            # Any raw-SQLite domain conn points at the same file; reuse the
+            # taxonomy connection. nexus-pyzk7: service-backed stores have no
+            # ``.conn`` — degrade VISIBLY (a swallowed AttributeError here was
+            # silently dropping every tier_writes row in service mode).
+            conn = getattr(t2.taxonomy, "conn", None)
+            if conn is None:
+                _warn_telemetry_unavailable("tier_writes")
+                return
             with t2.taxonomy._lock:
                 migrate_tier_writes(conn)
                 conn.execute(
@@ -4106,6 +4110,34 @@ def _maybe_unwrap_output_envelope(text: str, *, max_depth: int = 3) -> str:
     return current
 
 
+# nexus-pyzk7: service-backed T2 stores have no raw SQLite ``.conn``. The direct-
+# SQLite telemetry writers below (nx_answer_runs, tier_writes) must DEGRADE
+# VISIBLY in service mode, never silently — a swallowed AttributeError on
+# ``.conn`` was silently dropping every telemetry row (confirmed live 2026-06-20).
+_telemetry_unavailable_warned: set[str] = set()
+
+
+def _warn_telemetry_unavailable(table: str) -> None:
+    """Warn ONCE per process that a direct-SQLite telemetry table is not
+    persisted in service mode (visible, not silent)."""
+    if table in _telemetry_unavailable_warned:
+        return
+    _telemetry_unavailable_warned.add(table)
+    import structlog
+    structlog.get_logger().warning(
+        "telemetry_unavailable_service_mode",
+        table=table,
+        note="service-backed T2 has no raw SQLite conn; this telemetry is not "
+             "persisted in service mode. Skipping visibly (tracked: nexus-pyzk7 "
+             "service-side telemetry endpoint).",
+    )
+
+
+def _telemetry_conn(db: Any) -> Any:
+    """Return the raw telemetry SQLite conn, or None in service mode."""
+    return getattr(db.telemetry, "conn", None)
+
+
 def _nx_answer_record_run(
     conn: Any,
     *,
@@ -4119,6 +4151,10 @@ def _nx_answer_record_run(
     trace: bool,
 ) -> None:
     """Write one row to ``nx_answer_runs``. Redacts when ``trace=False``."""
+    if conn is None:
+        # Service mode: no raw SQLite conn. Visible skip, not a silent drop.
+        _warn_telemetry_unavailable("nx_answer_runs")
+        return
     from nexus.db.migrations import migrate_nx_answer_runs
     migrate_nx_answer_runs(conn)
     q = question if trace else "[redacted]"
@@ -4506,7 +4542,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=None,
+                        _telemetry_conn(db), question=question, plan_id=None,
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
                         cost_usd=0.0, duration_ms=elapsed_ms, trace=trace,
@@ -4613,7 +4649,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=best.plan_id,
+                        _telemetry_conn(db), question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=str(result_text)[:2000], cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
@@ -4632,7 +4668,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=best.plan_id,
+                        _telemetry_conn(db), question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=f"Error: {exc}", cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
@@ -4688,7 +4724,7 @@ async def nx_answer(
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
-                    db.telemetry.conn, question=question, plan_id=best.plan_id,
+                    _telemetry_conn(db), question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=0,
                     final_text=f"Error: {exc}", cost_usd=0.0,
                     duration_ms=elapsed_ms, trace=trace,
@@ -4781,7 +4817,7 @@ async def nx_answer(
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
-                    db.telemetry.conn, question=question, plan_id=best.plan_id,
+                    _telemetry_conn(db), question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
                     final_text=no_match[:2000], cost_usd=0.0,
@@ -4880,7 +4916,7 @@ async def nx_answer(
     try:
         with _t2_ctx() as db:
             _nx_answer_record_run(
-                db.telemetry.conn, question=question, plan_id=best.plan_id,
+                _telemetry_conn(db), question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
                 final_text=final_text[:2000], cost_usd=0.0,
                 duration_ms=elapsed_ms, trace=trace,
