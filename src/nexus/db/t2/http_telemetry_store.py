@@ -179,6 +179,38 @@ class HttpTelemetryStore:
             "duration_ms":        duration_ms,
         })
 
+    def record_hook_failure(
+        self,
+        *,
+        doc_id: str,
+        collection: str,
+        hook_name: str,
+        error: str,
+        chain: str,
+        batch_doc_ids: str | None = None,
+        is_batch: bool = False,
+        occurred_at: str | None = None,
+    ) -> None:
+        """Record a hook failure. Calls ``POST /v1/telemetry/hook_failures/record``.
+
+        nexus-9613q.3: the service-side table + endpoint already exist; this
+        routes the hook_registry consumer there instead of a raw SQLite conn
+        the service-backed store has not (every row was silently dropped).
+        """
+        payload: dict[str, Any] = {
+            "doc_id":      doc_id,
+            "collection":  collection,
+            "hook_name":   hook_name,
+            "error":       error,
+            "chain":       chain,
+            "is_batch":    is_batch,
+        }
+        if batch_doc_ids is not None:
+            payload["batch_doc_ids"] = batch_doc_ids
+        if occurred_at is not None:
+            payload["occurred_at"] = occurred_at
+        self._post("/v1/telemetry/hook_failures/record", payload)
+
     def log_relevance_batch(
         self,
         rows: list[tuple[str, str, str, str, str]],

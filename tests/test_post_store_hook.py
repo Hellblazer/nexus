@@ -300,87 +300,23 @@ def test_fire_batch_partial_commit_failure_mode(
     assert "cross_collection_projection_failed" in error
 
 
-def test_fire_batch_falls_back_to_scalar_when_columns_absent(
+def test_record_batch_hook_failure_transient_store_error_is_swallowed(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """If batch_doc_ids/is_batch columns aren't present on the live DB
-    (mixed-version operator scenario: a write path running fresh code
-    against an older T2 schema), the failure capture writes a scalar-
-    only row rather than crashing.
-
-    Bypasses ``T2Database`` because at this package version the auto-
-    migration would create the new columns immediately. Builds a raw
-    sqlite connection at the pre-4.14.1 schema and mocks ``t2_ctx``
-    to expose just the surface ``_record_batch_hook_failure`` reads
-    (``taxonomy.conn`` + ``taxonomy._lock``).
+    """nexus-9613q.3: a transient error from the telemetry store (e.g. a
+    'database is locked' under WAL contention, or a service 5xx) must NOT
+    block ingest and must NOT write any degraded row — the persist is
+    best-effort (warned once), and there is no scalar fallback ladder to
+    silently coerce a lock error into a degraded row.
     """
-    import threading
-    import nexus.mcp_infra as mod
-    from nexus.db.migrations import migrate_hook_failures
-    import sqlite3
-
-    db_path = tmp_path / "pre_migration.db"
-    raw = sqlite3.connect(str(db_path), isolation_level=None)
-    migrate_hook_failures(raw)  # only 4.9.10; NOT 4.14.1
-
-    cols = {
-        r[1] for r in raw.execute("PRAGMA table_info(hook_failures)").fetchall()
-    }
-    assert "batch_doc_ids" not in cols, (
-        "pre-condition: hook_failures must lack batch_doc_ids before the test runs"
-    )
-
-    class _FakeTaxonomy:
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self.conn = conn
-            self._lock = threading.RLock()
-
-    class _FakeT2:
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self.taxonomy = _FakeTaxonomy(conn)
-        def __enter__(self) -> "_FakeT2":
-            return self
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(mod, "t2_ctx", lambda: _FakeT2(raw))
-
-    def raising(doc_ids, collection, contents, embeddings, metadatas):
-        raise RuntimeError("kaboom")
-
-    registry = HookRegistry()
-    registry.register_batch(raising)
-    registry.fire_batch(
-        ["d1", "d2"], "code__nexus", ["c1", "c2"], None, None,
-    )
-
-    rows = raw.execute(
-        "SELECT doc_id, hook_name, error FROM hook_failures"
-    ).fetchall()
-    raw.close()
-
-    assert len(rows) == 1
-    assert rows[0][0] == "d1"
-    assert rows[0][1] == "raising"
-    assert "kaboom" in rows[0][2]
-
-
-def test_record_batch_hook_failure_non_schema_operational_error_propagates(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """A transient OperationalError that is NOT a schema-missing-column
-    error must NOT silently fall through to the scalar-only insert path.
-
-    The outer try/except on _record_batch_hook_failure still swallows it
-    so ingest is unaffected, but the scalar fallback row must NOT be
-    written for unrelated lock/IO failures.
-    """
+    import nexus.hook_registry as hr
     import nexus.mcp_infra as mod
     from nexus.db.migrations import (
         migrate_hook_failures,
         migrate_hook_failures_batch_columns,
     )
     from nexus.hook_registry import _record_batch_hook_failure
+    from contextlib import contextmanager
     import sqlite3
 
     db_path = tmp_path / "lock_propagate.db"
@@ -390,43 +326,31 @@ def test_record_batch_hook_failure_non_schema_operational_error_propagates(
     migrate_hook_failures_batch_columns(conn)
     conn.close()
 
+    hr._hook_failure_drop_warned.discard("batch")
+
+    class _LockingTelemetry:
+        def record_hook_failure(self, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
     class _LockingT2:
-        """Stub T2 ctx whose execute always raises a transient lock error."""
-        def __enter__(self):
-            return self
-        def __exit__(self, *a):
-            return False
+        telemetry = _LockingTelemetry()
 
-        class _Taxonomy:
-            class _ConnRaisesLock:
-                def execute(self, *a, **kw):
-                    raise sqlite3.OperationalError("database is locked")
-                def commit(self):
-                    pass
-            conn = _ConnRaisesLock()
-            class _Lock:
-                def __enter__(self):
-                    return None
-                def __exit__(self, *a):
-                    return False
-            _lock = _Lock()
-        taxonomy = _Taxonomy()
+    @contextmanager
+    def _fake_t2_ctx():
+        yield _LockingT2()
 
-    monkeypatch.setattr(mod, "t2_ctx", lambda: _LockingT2())
+    monkeypatch.setattr(mod, "t2_ctx", _fake_t2_ctx)
 
-    # Must not raise: the outer try/except in _record_batch_hook_failure
-    # swallows the propagated lock error.
+    # Must not raise: the persist is best-effort.
     _record_batch_hook_failure(
         doc_ids=["d1", "d2"],
         collection="code__nexus",
         hook_name="probe",
         error="boom",
     )
+    assert "batch" in hr._hook_failure_drop_warned
 
-    # Confirm the scalar-only fallback path did NOT write a row to the
-    # real DB (the locking stub never reaches a real connection, but
-    # this test pins the contract that the narrow except clause does
-    # not silently coerce a lock error into a degraded row).
+    # No degraded row written.
     real = sqlite3.connect(str(db_path))
     rows = real.execute("SELECT COUNT(*) FROM hook_failures").fetchone()
     real.close()
