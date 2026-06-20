@@ -259,8 +259,8 @@ class HttpCatalogClient:
 
     def ensure_owner_for_repo(
         self,
-        *,
         repo: Path | str,
+        *,
         name: str | None = None,
         owner_type: str = "repo",
         head_hash: str | None = None,
