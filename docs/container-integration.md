@@ -4,10 +4,22 @@ Running nexus from inside a container — Docker dev container, Claude
 Cowork VM, CI agent, multi-agent Co-Work session — and sharing T2 /
 T3 state with the host CLI Claude and any other nexus consumers.
 
-This page assumes RDR-120 4.34.1+ is installed on the host. Earlier
-releases ran every consumer against its own SQLite file and silently
-diverged across containers; the daemon model in 4.34.x is what makes
-shared state real.
+This page assumes a 6.0+ install on the host. The T2 (notes/plans/taxonomy)
+daemon model (RDR-120) makes shared SQLite state real across containers.
+
+> **6.0 change — T3 now serves through the nexus-service.** The permanent
+> vector store (T3) no longer runs as a `nx daemon t3` ChromaDB process; it
+> serves through the native nexus-service over Postgres + pgvector in both local
+> and cloud mode. A container reaches it over loopback TCP to the host's service
+> using **`NX_SERVICE_HOST` / `NX_SERVICE_PORT` + `NX_SERVICE_TOKEN`** (the token
+> is now required), not `NX_T3_ADDR`. The T2-daemon transport guidance below is
+> unchanged; the T3 sections have been updated accordingly.
+>
+> **This two-process shape is a waypoint, not the destination.** 6.0 migrated T3
+> to the service; T2 (notes/plans/taxonomy) is still SQLite behind its
+> single-writer daemon. RDR-152 moves T2 (and T1 scratch + the catalog) into the
+> same Postgres service and retires the SQLite daemon class entirely — at which
+> point there is one service to reach, not a daemon + a service.
 
 ## TL;DR
 
@@ -34,19 +46,19 @@ Picking a path:
 For one-shot starts:
 
 ```
-# Always
+# T2 (notes/plans/taxonomy) daemon
 nx daemon t2 start
 
-# Local-mode T3 only (cloud-mode T3 is already HTTP-served; no daemon)
-nx daemon t3 start
+# T3 (vector store) — the nexus-service over Postgres + pgvector
+nx daemon service start
 ```
 
-For durable always-running daemons (recommended for any host that
+For durable always-running services (recommended for any host that
 runs Claude Code regularly):
 
 ```
 nx daemon t2 install --autostart          # writes the LaunchAgent / systemd unit
-nx daemon t3 install --autostart          # local-mode T3 only
+nx init --service                         # provisions + starts the persistent nexus-service supervisor
 ```
 
 This installs `~/Library/LaunchAgents/com.nexus.t2.plist` on macOS or
@@ -90,11 +102,18 @@ macOS / Windows Docker Desktop.
 
 ```bash
 PORT=$(nx daemon t2 status | grep tcp_port | awk '{print $2}')
+SVC_PORT=$(nx daemon service status --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["port"])')
+TOKEN=$(grep '^NX_SERVICE_TOKEN=' ~/.config/nexus/pg_credentials | cut -d= -f2)
 docker run --rm \
     -e NX_T2_ADDR=host.docker.internal:$PORT \
-    -e NX_T3_ADDR=host.docker.internal:<t3_port>   # local-mode T3 only
+    -e NX_SERVICE_URL=http://host.docker.internal:$SVC_PORT \
+    -e NX_SERVICE_TOKEN=$TOKEN \
     <image-with-conexus>
 ```
+
+The T3 (vector) calls reach the host's nexus-service. The T3 client reads the
+full `NX_SERVICE_URL` (not a split host/port) plus `NX_SERVICE_TOKEN`; the token
+is in `~/.config/nexus/pg_credentials` on the host.
 
 `--network=host` does NOT work on macOS Docker Desktop — the
 container's `127.0.0.1` stays in the container's own namespace.
@@ -154,8 +173,9 @@ container runs as UID 0 (root) inside its user namespace, and the
 socket's `0o600` permission gate fires `EACCES` (errno 13). The
 CLI's error message names the fix.
 
-T3 has no UDS path; the T3 daemon is HTTP-only (chromadb upstream
-contract). Use the TCP path for T3 even when T2 goes through UDS.
+T3 has no UDS path; the nexus-service is HTTP-only. Use the TCP path
+(`NX_SERVICE_HOST`/`NX_SERVICE_PORT` + `NX_SERVICE_TOKEN`) for T3 even when T2
+goes through UDS.
 
 ## Path C: Operator-side forward (fallback)
 
@@ -196,8 +216,8 @@ What works:
 1. Install the conexus plugin in your Claude Code installation:
    `/plugin install conexus@nexus-plugins`. The plugin registers
    `nx-mcp` as an MCP server in your Claude Desktop config.
-2. Start the daemons on the host: `nx daemon t2 start` (and
-   `nx daemon t3 start` if local-mode).
+2. Start the host services: `nx daemon t2 start` (T2) and
+   `nx daemon service start` (T3 vector store).
 3. Open a Cowork session. Claude Desktop **passes the configured
    MCP servers into the VM via `--mcp-config` with
    `"type": "sdk"`** — the MCP server itself stays running on the
@@ -224,7 +244,10 @@ CLI from the shell.
 |---|---|---|
 | `NX_T2_ADDR` | TCP host:port for the T2 daemon | discovery file |
 | `NX_T2_SOCK` | UDS path for the T2 daemon | discovery file |
-| `NX_T3_ADDR` | TCP host:port for the T3 daemon | discovery file |
+| `NX_SERVICE_URL` | full base URL of the nexus-service for the **T3 vector store** (e.g. `http://host:port`) | discovery lease (`storage_service_addr.<uid>`) |
+| `NX_SERVICE_HOST` / `NX_SERVICE_PORT` | host + port for the **T2 domain stores + catalog** HTTP path (separate resolver from T3) | discovery lease |
+| `NX_SERVICE_TOKEN` | bearer token for the nexus-service (required) | discovery lease, or `~/.config/nexus/pg_credentials` |
+| `NX_T3_ADDR` | *(legacy)* TCP host:port for the retired ChromaDB T3 daemon | discovery file |
 | `NX_PYTEST_DAEMON_MODE` | (tests only) skip the conftest direct-mode pin | unset |
 
 `NX_T2_ADDR` and `NX_T2_SOCK` are mutually exclusive — set one or
