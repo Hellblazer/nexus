@@ -190,6 +190,16 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
     """
     from nexus.config import is_local_mode  # noqa: PLC0415
     if is_local_mode():
+        # nexus-xq8f9: in service-vector mode (the 6.0 default) the nexus-service
+        # embeds server-side with bge-768 (RDR-160), independent of whether the
+        # CLIENT has the [local]/fastembed extra. Naming the collection from the
+        # client's local-EF tier (which falls back to minilm-384 when fastembed
+        # is absent) makes the service refuse the write (HTTP 422, model
+        # mismatch). Follow the service's embedder token instead.
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL  # noqa: PLC0415
+            return _MODEL_TOKENS[_TIER1_MODEL]  # bge-base-en-v15-768
         from nexus.db.local_ef import local_model_token  # noqa: PLC0415
         return local_model_token()
     return canonical_embedding_model(content_type)

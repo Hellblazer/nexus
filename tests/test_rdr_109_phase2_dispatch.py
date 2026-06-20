@@ -49,6 +49,27 @@ def test_effective_in_local_mode_returns_local_token(monkeypatch) -> None:
     assert effective_embedding_model_for_writes("code") in LOCAL_EMBEDDING_MODELS
 
 
+def test_effective_local_service_mode_uses_bge_not_client_fastembed_tier(monkeypatch) -> None:
+    # nexus-xq8f9: in local + service-vector mode the service embeds bge-768
+    # server-side, so the write token must be bge-768 even when the CLIENT has
+    # no fastembed extra (which would otherwise resolve minilm-384 and make the
+    # service refuse the write with HTTP 422).
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.db.http_vector_client.is_vector_service_mode", lambda: True)
+    # Even if the client falls back to minilm (no fastembed), service path wins.
+    monkeypatch.setattr("nexus.db.local_ef._fastembed_available", lambda: False)
+    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "BAAI/bge-base-en-v1.5")
+    assert effective_embedding_model_for_writes("code") == "bge-base-en-v15-768"
+    assert effective_embedding_model_for_writes("docs") == "bge-base-en-v15-768"
+
+
+def test_effective_local_nonservice_mode_uses_client_token(monkeypatch) -> None:
+    # Raw local (no service vectors): the client's local-EF token is correct.
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.db.http_vector_client.is_vector_service_mode", lambda: False)
+    assert effective_embedding_model_for_writes("code") in LOCAL_EMBEDDING_MODELS
+
+
 def test_effective_in_cloud_mode_delegates_to_canonical(cloud_mode) -> None:
     assert (
         effective_embedding_model_for_writes("docs")
