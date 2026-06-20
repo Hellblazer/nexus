@@ -250,7 +250,7 @@ reference earlier output via `$stepK.<field>`.
 | `search` | `{ids, tumblers, distances, collections}` |
 | `query` | `{ids, tumblers, collections}` |
 | `traverse` | `{tumblers, ids, collections}` — walks the catalog link graph |
-| `store_get_many` | `{contents, missing}` — batch hydration past the ChromaDB 300-record cap |
+| `store_get_many` | `{contents, missing}` — batch hydration past the per-request 300-record cap |
 | `operator_extract` | schema-conforming dict (e.g. `{extractions: [...]}`) |
 | `operator_rank` | schema-conforming dict (e.g. `{ranked: [...]}`) |
 | `operator_compare` | schema-conforming dict |

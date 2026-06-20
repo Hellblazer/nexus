@@ -11,8 +11,10 @@ daemon model (RDR-120) makes shared SQLite state real across containers.
 > vector store (T3) no longer runs as a `nx daemon t3` ChromaDB process; it
 > serves through the native nexus-service over Postgres + pgvector in both local
 > and cloud mode. A container reaches it over loopback TCP to the host's service
-> using **`NX_SERVICE_HOST` / `NX_SERVICE_PORT` + `NX_SERVICE_TOKEN`** (the token
-> is now required), not `NX_T3_ADDR`. The T2-daemon transport guidance below is
+> using **`NX_SERVICE_URL` (a full base URL) + `NX_SERVICE_TOKEN`** (the token is
+> now required), not `NX_T3_ADDR`. (`NX_SERVICE_HOST` / `NX_SERVICE_PORT` are a
+> separate resolver for the T2 domain stores and catalog, not T3.) The T2-daemon
+> transport guidance below is
 > unchanged; the T3 sections have been updated accordingly.
 >
 > **This two-process shape is a waypoint, not the destination.** 6.0 migrated T3

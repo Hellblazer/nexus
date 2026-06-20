@@ -106,10 +106,14 @@ See [architecture.md](architecture.md) for the full module map.
 
 ## Adding a T2 Domain Feature
 
-T2 is split into four domain stores under `src/nexus/db/t2/`:
-`memory_store.py`, `plan_library.py`, `catalog_taxonomy.py`, and
-`telemetry.py`. See [architecture.md § T2 Domain Stores](architecture.md#t2-domain-stores)
-for the map.
+T2 is split into eight domain stores under `src/nexus/db/t2/`:
+`memory_store.py`, `plan_library.py`, `catalog_taxonomy.py`,
+`telemetry.py`, `chash_index.py`, `document_aspects.py`,
+`aspect_extraction_queue.py`, and `document_highlights.py`. See
+[architecture.md § T2 Domain Stores](architecture.md#t2-domain-stores)
+for the map (note: `chash_index`, `taxonomy`, `document_aspects`, and
+`aspect_queue` are reached directly via their attributes, not through
+facade delegates).
 
 **Adding a method to an existing store** (the common case):
 
@@ -141,7 +145,9 @@ for the map.
 
 1. Create `src/nexus/db/t2/<your_domain>.py` with a store class that
    takes a `Path` and opens its own `sqlite3.Connection` in WAL mode
-   with `PRAGMA busy_timeout = 5000`.
+   with `PRAGMA busy_timeout = 30000` (the canonical serving value,
+   `nexus.db.t2._tuning.SERVING_BUSY_TIMEOUT_MS`, raised from 5000 in
+   RDR-129 B1).
 2. Add a `threading.Lock` on the store and guard every write with it.
 3. Add the store to `T2Database.__init__` in construction order
    (stores created later may depend on earlier ones — `CatalogTaxonomy`
@@ -256,22 +262,34 @@ Every step below is **required**. Missing any one of them has caused problems in
    Add a release entry. If there are no plugin-level changes, write:
    > Plugin version aligned with Nexus CLI X.Y.Z. No plugin-level functional changes.
 
-7. **Update `.claude-plugin/marketplace.json`**
-   Bump the `"version"` field in **both** the `nx` and `sn` plugin entries to match the new version.
-   Also update `conexus/.claude-plugin/plugin.json` and `sn/.claude-plugin/plugin.json` to match.
-   Claude Code uses each plugin's `plugin.json` version to decide whether to refresh the cache — forgetting either one leaves stale skills/agents running.
+7. **Bump every manifest in lock-step (CI enforces parity)**
+   All seven version surfaces must equal the new `X.Y.Z`, and **both** `source.ref` fields must become `vX.Y.Z`:
+   - `pyproject.toml` — `version`
+   - `mcpb/pyproject.toml` — `version`
+   - `mcpb/manifest.json` — `version`
+   - `.claude-plugin/marketplace.json` — both `plugins[].version` (nx + sn) **and both `plugins[].source.ref`** (the pinned tag that decouples installed users from main HEAD; CI test `TestMarketplaceVersion::test_marketplace_source_ref_matches_pyproject` enforces `source.ref == "v" + pyproject.version`)
+   - `conexus/.claude-plugin/plugin.json` — `version` (controls nx plugin cache refresh)
+   - `sn/.claude-plugin/plugin.json` — `version` (controls sn plugin cache refresh)
 
-8. **Commit all release artifacts directly to `main`**
+   Forgetting any one fails CI parity; forgetting `source.ref` ships a release that installed Claude Code users never receive.
+
+8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push)
    ```bash
-   git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md conexus/.claude-plugin/plugin.json sn/.claude-plugin/plugin.json .claude-plugin/marketplace.json docs/
-   git commit -m "chore: bump version to X.Y.Z"
-   git push
+   git checkout main && git pull && git checkout -b release/vX.Y.Z
+   git add pyproject.toml mcpb/pyproject.toml mcpb/manifest.json uv.lock \
+           CHANGELOG.md conexus/CHANGELOG.md \
+           conexus/.claude-plugin/plugin.json sn/.claude-plugin/plugin.json \
+           .claude-plugin/marketplace.json docs/
+   git commit -m "chore(release): conexus X.Y.Z"
+   git push -u origin release/vX.Y.Z
+   gh pr create --base main --title "release: conexus X.Y.Z"
    ```
-   Release version-bump commits go directly to `main` (not via PR) because the tag must point to `main`.
+   Wait for CI green, then `gh pr merge <N> --merge` (NOT `--squash` — preserves the release commit SHA). The tag in step 9 points at the merge commit. The human cuts the release; AI prepares the branch.
 
-9. **Tag and push — this triggers the full release pipeline**
+9. **Tag the merge commit and push — this triggers the full release pipeline**
    ```bash
-   git tag vX.Y.Z
+   git checkout main && git pull
+   git tag -a vX.Y.Z -m "conexus X.Y.Z" $(git rev-parse HEAD)
    git push origin vX.Y.Z
    ```
    The `release.yml` workflow:
@@ -297,10 +315,12 @@ Every step below is **required**. Missing any one of them has caused problems in
 | File | What to update |
 |------|----------------|
 | `pyproject.toml` | `version` field |
+| `mcpb/pyproject.toml` | `version` field |
+| `mcpb/manifest.json` | `version` field |
 | `uv.lock` | auto-updated by `uv sync` — **must be committed** |
 | `CHANGELOG.md` | move Unreleased → `[X.Y.Z]`, add empty Unreleased |
 | `conexus/CHANGELOG.md` | add `[X.Y.Z]` entry |
-| `.claude-plugin/marketplace.json` | bump `"version"` in both `nx` and `sn` plugin entries |
+| `.claude-plugin/marketplace.json` | bump both `plugins[].version` (nx + sn) **and both `plugins[].source.ref` to `vX.Y.Z`** (parity-tested) |
 | `conexus/.claude-plugin/plugin.json` | bump `"version"` to match — **controls nx cache refresh** |
 | `sn/.claude-plugin/plugin.json` | bump `"version"` to match — **controls sn cache refresh** |
 | `docs/cli-reference.md` | new/changed CLI flags and subcommands |

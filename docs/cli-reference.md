@@ -744,7 +744,7 @@ Returns non-zero on any check failure. `--json` emits the per-check result for C
 
 ## nx t3
 
-T3 (ChromaDB) maintenance commands. Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
+T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 16 + pgvector behind the native nexus-service; these commands operate on that store through the vector client. (`nx t3 reidentify` was the RDR-108 ChromaDB natural-ID migration and is retained for legacy collections.) Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
 
 ### nx t3 prune-stale
 
@@ -875,7 +875,7 @@ taxonomy:
 ```yaml
 taxonomy:
   auto_label: true                    # label with Claude haiku after discover (default: true)
-  local_exclude_collections: []       # default: ["code__*"] — MiniLM clusters poorly on code
+  local_exclude_collections: []       # default: ["code__*"] — local embeddings cluster poorly on code
 ```
 
 **Upgrade path**: Run `nx upgrade` after upgrading to apply pending migrations and T3 upgrade steps (including cross-collection projection backfill). Run `nx taxonomy discover --all` to populate topics for new collections.
@@ -1054,7 +1054,7 @@ nx collection list
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
 | `backfill-hash [NAME]` | Add `chunk_text_hash` metadata to chunks missing it (no re-embedding) |
-| `rename OLD NEW` | In-place rename via ChromaDB `modify(name=)` + T2 + catalog cascade (4.8.0, nexus-1ccq) |
+| `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq) |
 | `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics, chash coverage (RDR-087 Phase 4) |
 | `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score, chash coverage (RDR-087 Phase 3.4) |
 | `delete NAME` | Delete collection (irreversible) |
@@ -1079,7 +1079,7 @@ The `reindex` command performs a pre-delete safety check before wiping the colle
 |------|-------------|
 | `--all` | Backfill all collections instead of a single named one |
 
-Reads each chunk's stored text from ChromaDB and computes `sha256(text.encode()).hexdigest()`, updating metadata in-place. Embeddings and documents are untouched — no API keys or re-embedding needed. Idempotent: chunks that already have `chunk_text_hash` are skipped. Also runs automatically during `nx catalog setup`.
+Reads each chunk's stored text from the T3 store and computes `sha256(text.encode()).hexdigest()`, updating metadata in-place. Embeddings and documents are untouched — no API keys or re-embedding needed. Idempotent: chunks that already have `chunk_text_hash` are skipped. Also runs automatically during `nx catalog setup`.
 
 **RDR-086 Phase 1.3 — T2 `chash_index` reconciliation.** The same per-chunk
 pass also populates the T2 `chash_index` table so `nx doc cite` and
@@ -1098,7 +1098,7 @@ takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
 |------|-------------|
 | `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`). Embedding-model spaces differ across prefixes, so the renamed collection is query-incompatible with its old clients — use only when you've deleted every downstream reader |
 
-Uses ChromaDB's native `modify(name=)` for an O(1) metadata update — no embedding re-upload, no Voyage cost, no ChromaDB egress. Cascades the new name through T2 taxonomy, `chash_index`, and catalog (JSONL + SQLite). The cascade is fail-open by design: T3 renames first; a T2 or catalog failure prints a `warn: …` line on stderr but leaves T3 renamed so the operation is recoverable by retrying the cascade alone.
+Renames the collection in the T3 vector store via `t3.rename_collection` (a metadata-only update on the pgvector service path — no embedding re-upload, no Voyage cost, no vector egress), and cascades the new name through T2 taxonomy, `chash_index`, and catalog (JSONL + SQLite). Ordering (SIG-8 / nexus-nhyh): the T2 cascade runs FIRST, then the T3 rename, so a partial failure is recoverable: if the T3 rename fails the T2/catalog rows can be re-pointed or the rename re-run; if T2 fails no T3 rename was attempted.
 
 **`audit` flags:**
 
@@ -1339,7 +1339,7 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks: ChromaDB API key, ChromaDB tenant, T3 database (`CHROMA_DATABASE`), Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention). The T2 integrity check now reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4).
+Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and the legacy on-disk Chroma store (reported as awaiting the migration ETL, not as the live backend). Then: Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention). The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The ChromaDB Cloud credential lines (`CHROMA_API_KEY` / `CHROMA_TENANT` / `CHROMA_DATABASE`) are still surfaced, but as of 6.0 they describe migration-source / pre-6.0 cloud config — the live T3 health surface is the vector-service probe above and `nx daemon service status`. A fresh local install with no Chroma keys is healthy.
 
 ```
 nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files
@@ -1382,7 +1382,7 @@ nx doctor --check-quotas            # Report ChromaDB Cloud + Voyage AI free-tie
 nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
 ```
 
-The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a three-section pre-flight report: (1) ChromaDB Cloud limits drawn from `nexus.db.chroma_quotas.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps) plus a live reachability probe of the configured tenant; (2) Voyage AI per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`) with `VOYAGE_API_KEY` presence check; (3) the cumulative retry accumulator from `nexus.retry.get_retry_stats()` so any transient-error backoffs observed in the current process surface alongside the static limits.
+The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a three-section pre-flight report: (1) the per-request limits drawn from `nexus.db.chroma_quotas.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps) which the managed-cloud path still honours, plus a reachability probe that fires only when a ChromaDB Cloud migration source is configured; (2) Voyage AI per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`) with `VOYAGE_API_KEY` presence check; (3) the cumulative retry accumulator from `nexus.retry.get_retry_stats()` so any transient-error backoffs observed in the current process surface alongside the static limits.
 
 Exit codes:
 - `0` — reachable cloud tenant or local-mode (limits are reference-only).

@@ -234,7 +234,7 @@ The catalog tracks every indexed document and the relationships between them. It
 
 The enhanced `query` MCP tool uses catalog metadata for scoped search — `query(question="...", author="Fagin")` searches only that author's collections in a single call.
 
-If you use cloud mode (ChromaDB Cloud), add a git remote so the catalog survives disk loss:
+If you use managed-cloud mode (a hosted nexus service), add a git remote so the local catalog survives disk loss:
 
 ```bash
 cd ~/.config/nexus/catalog && git remote add origin git@github.com:you/nexus-catalog.git
@@ -268,32 +268,20 @@ claude --plugin-dir ./nx
 
 Local mode embeds with the on-device bge-768 ONNX model (768-dim) the service provisions; the bundled minilm-384 remains a zero-download fallback. The managed-cloud deployment embeds server-side with Voyage AI (1024d), cross-chunk context (CCE), and reranking.
 
-### 1. Create accounts
+In managed-cloud mode there is no local service and no local Postgres: `nx` talks HTTPS to a hosted nexus service that owns its cloud Postgres + pgvector and embeds with Voyage AI server-side. You do not create a ChromaDB Cloud account or supply a Voyage key yourself (the service owns it).
 
-| Service | Purpose | Free tier |
-|---------|---------|-----------|
-| [ChromaDB Cloud](https://trychroma.com) | Vector storage | Generous for individual use |
-| [Voyage AI](https://voyageai.com) | Embeddings | 200M tokens/month |
+### 1. Point nx at the managed service
 
-Both free tiers cover typical usage at no cost.
-
-### 2. Configure credentials
-
-Interactive wizard:
+Set the service endpoint and your bearer token in the environment:
 
 ```bash
-nx config init
+export NX_SERVICE_URL=https://api.conexus-nexus.com   # or your provider's URL
+export NX_SERVICE_TOKEN=<your-managed-service-token>
 ```
 
-Or set individually:
+`NX_SERVICE_URL` defaults to `https://api.conexus-nexus.com`, so a hosted user on the default deployment only needs `NX_SERVICE_TOKEN`. (These are read from the environment; persist them in your shell profile or your process manager.)
 
-```bash
-nx config set chroma_api_key sk-...
-nx config set chroma_database nexus
-nx config set voyage_api_key pa-...
-```
-
-### 3. Verify
+### 2. Verify
 
 ```bash
 nx doctor
@@ -301,7 +289,7 @@ nx doctor
 
 All items should show `✓`. Fix anything marked `✗` before proceeding.
 
-### 4. Index and search
+### 3. Index and search
 
 ```bash
 nx index repo .
@@ -351,11 +339,9 @@ uv tool install conexus --force --python 3.13   # use "conexus[local]" here if y
 
 Note: `uv tool upgrade` reuses the existing environment's Python — it won't switch from 3.14 to 3.13 automatically. You must use `--force --python 3.13` to rebuild the environment. Because `--force` rebuilds from scratch it drops optional extras, so re-include `[local]` (i.e. install `"conexus[local]"`) if you use the bge-768 embedder.
 
-**`nx doctor` reports credentials not set** — Expected for local mode. Only needed if you want cloud embeddings — run `nx config init`.
+**`nx doctor` reports credentials not set** — Expected for local mode. Only needed for managed-cloud mode — export `NX_SERVICE_URL` + `NX_SERVICE_TOKEN` in the environment.
 
-**Provisioning failed during `nx config init`** — If your ChromaDB plan restricts automatic database creation, create the database manually in the [dashboard](https://trychroma.com) using your `chroma_database` value as the name.
-
-**`nx index repo .` fails with "credentials not set"** — In cloud mode, indexing requires T3 credentials. Run `nx config init` first, or use local mode (no credentials needed).
+**`nx index repo .` fails with a service-auth error** — In managed-cloud mode, indexing requires a reachable service and a valid `NX_SERVICE_TOKEN`. Export the token (`export NX_SERVICE_TOKEN=…`) and confirm the endpoint with `nx doctor`, or use local mode (run `nx daemon service start`, no token needed).
 
 **`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14. Fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed; re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
 
