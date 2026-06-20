@@ -180,7 +180,8 @@ def _discover_via_service(
     collection_name: str, taxonomy: Any, t3: Any, *, force: bool,
 ) -> int:
     """Service-backed discovery: fetch vectors from the service, persist through
-    the HttpTaxonomyStore drop-in (centroids via the taxonomy port).
+    the HttpTaxonomyStore drop-in (centroids via the service's
+    ``/v1/taxonomy/centroids`` HTTP route).
 
     nexus-7ydks. The store's ``discover_topics`` / ``rebuild_taxonomy`` are
     complete CatalogTaxonomy mirrors and persist through the Java service (the
@@ -251,7 +252,8 @@ def discover_for_collection(
         Number of topics created.
     """
     # nexus-7ydks: service-backed taxonomy store → fetch from the service and
-    # persist through the HttpTaxonomyStore drop-in (centroids via the port).
+    # persist through the HttpTaxonomyStore drop-in (centroids via the service's
+    # /v1/taxonomy/centroids HTTP route).
     if not _has_raw_access(taxonomy):
         return _discover_via_service(collection_name, taxonomy, t3, force=force)
 
