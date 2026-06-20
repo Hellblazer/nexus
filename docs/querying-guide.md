@@ -199,7 +199,7 @@ Several mechanisms run automatically across all interfaces.
 
 ### Topic-aware ranking
 
-> **Note (6.0):** Topic *discovery* is suspended in service mode (the default since 6.0) — `nx taxonomy discover` errors and `nx index repo` skips discovery, pending the pgvector follow-on (`nexus-gmiaf.21+`). Ranking against **previously-computed** topics (`topic=`, `cluster_by="semantic"`, distance boosts) still works; only the discovery of new topics is paused.
+> **Note (6.0):** Topic *discovery*, *rebuild*, and per-document *assignment* run on the nexus-service backend (the default since 6.0) — `nx taxonomy discover` and `nx index repo` work normally (nexus-7ydks). `nx taxonomy split` / `project` and the cross-collection projection pass are still being ported and refuse cleanly on the service.
 
 After `nx index repo` (or `nx taxonomy discover --all`), topics are clustered via HDBSCAN with Claude-Haiku auto-labels. Topic-aware ranking then works three ways:
 

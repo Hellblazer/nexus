@@ -263,16 +263,13 @@ This means `nx catalog search` and `nx catalog links` work immediately after ind
 
 ## Taxonomy Auto-Discovery
 
-> **Note (6.0):** Taxonomy *discovery* is temporarily suspended while the
-> nexus-service is the T3 backend (service mode, the default since 6.0).
-> Discovery reads embeddings through a raw Chroma client that retired with the
-> Chroma serving paths (RDR-155 P4a); it is a tracked follow-on
-> (`nexus-gmiaf.21+`). In practice: `nx index repo` produces no new topics
-> (the discovery step is skipped silently), and `nx taxonomy discover` exits
-> with a clear error. Search features that read **previously-computed**
-> taxonomy (`topic=`, `cluster_by="semantic"`, topic boosts) continue to work.
-> The behavior described below is the pre-6.0 model and the target once
-> discovery is restored on the pgvector service.
+> **Note (6.0):** Taxonomy *discovery*, *rebuild*, and per-document
+> *assignment* run on the nexus-service backend (service mode, the default
+> since 6.0): they fetch embeddings server-side and persist topics + centroids
+> through the service (nexus-7ydks). `nx index repo` discovers and assigns
+> normally. Two operations are still being ported (`nexus-7ydks`): `nx taxonomy
+> split` / `project` and the automatic cross-collection projection pass — they
+> remain raw-Chroma-only and refuse cleanly on the service.
 
 After indexing completes, `nx index repo` automatically runs topic discovery on the new or updated collections. HDBSCAN clusters the collection's embeddings to find natural topic groupings, and each cluster is labeled with a short descriptive phrase using Claude Haiku (when an Anthropic API key is available). The results are stored in T2 and surfaced by `nx search` as topic filters.
 

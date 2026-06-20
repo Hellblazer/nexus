@@ -192,11 +192,21 @@ def index() -> None:
         )
 
 
-def _discover_taxonomy(collection_name, taxonomy, chroma_client, *, force=False):
-    """Wrapper for discover_for_collection — importable for patching in tests."""
-    from nexus.commands.taxonomy_cmd import discover_for_collection
+def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False):
+    """Wrapper for discover_for_collection — importable for patching in tests.
+
+    nexus-7ydks: now takes the T3 handle (``T3Database`` raw or
+    ``HttpVectorClient`` service), not the raw ``_client``.
+    """
+    from nexus.commands.taxonomy_cmd import (
+        _require_supported_taxonomy_backend,
+        discover_for_collection,
+    )
+    # nexus-7ydks S1: close the split-backend hole on the post-index path too
+    # (discover_cmd/rebuild_cmd already guard; this shared wrapper did not).
+    _require_supported_taxonomy_backend(t3, taxonomy)
     return discover_for_collection(
-        collection_name, taxonomy, chroma_client, force=force,
+        collection_name, taxonomy, t3, force=force,
     )
 
 
@@ -750,7 +760,7 @@ def run_collection_postprocessing(
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for col_name in collections:
                 try:
-                    n = _discover_taxonomy(col_name, db.taxonomy, t3._client)
+                    n = _discover_taxonomy(col_name, db.taxonomy, t3)
                     total_topics += n
                 except Exception:
                     _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)
@@ -779,10 +789,12 @@ def run_collection_postprocessing(
                         f"  Review:   {unreviewed} topics pending. "
                         f"Run `nx taxonomy review` to curate."
                     )
-                # Cross-collection projection pass (RDR-075 SC-7)
+                # Cross-collection projection pass (RDR-075 SC-7). nexus-9pqoj:
+                # project_against handles both backends; pass the chroma client
+                # for a raw T3Database or the service handle itself.
                 try:
                     proj_total = _project_cross_collections(
-                        db.taxonomy, collections, t3._client,
+                        db.taxonomy, collections, getattr(t3, "_client", t3),
                     )
                     if proj_total:
                         _say(f"  Project:  {proj_total} cross-collection assignments.")
