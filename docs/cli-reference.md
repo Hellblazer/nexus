@@ -1859,7 +1859,9 @@ Sequence: **pre-flight detect** (if there is no ChromaDB footprint to migrate it
 no-ops without provisioning) → **provision + serve** the local service (the full
 `nx init --service` path: Postgres + bge-768 ONNX + the native binary) — or, with
 `--service-url`, gate an already-running service → **version-pin** (`/version`
-`release_version >= v0.1.6`; fail-closed) → **bounded health-gate** → **voyage-
+`/version` must report a `release_version` — present from engine-service
+v0.1.6+, code floor v0.1.5; older binaries omit it and fail closed) → **bounded
+health-gate** → **voyage-
 capability pre-flight** (if the footprint has voyage collections, the target
 service must be able to serve them — fail loud before migrating) → drive
 **`nx migrate-to-service`** (detect → ETL → validate → unlock) → advisory

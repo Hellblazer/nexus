@@ -130,6 +130,13 @@ nx daemon service install-binary <engine-service-vX.Y.Z>   # acquire the cosign-
 nx init --service                                          # provision Postgres, fetch the bge-768 ONNX, start the service supervisor
 ```
 
+Pick `<engine-service-vX.Y.Z>` from the
+[engine-service releases](https://github.com/Hellblazer/nexus/releases) (the
+newest `engine-service-v*` tag). There is no `latest` resolution — the tag is
+explicit. You can instead export `NEXUS_SERVICE_TAG=engine-service-vX.Y.Z`, in
+which case `nx init --service` acquires the binary itself and the explicit
+`install-binary` step is optional.
+
 `nx init --service` is idempotent — safe to re-run. The service embeds with
 bge-768 (local) or, in the managed-cloud deployment, server-side via Voyage with
 the operator's key (clients supply only `NX_SERVICE_TOKEN`, never a Voyage key).
@@ -172,7 +179,9 @@ nx guided-upgrade             # detect -> provision+verify the service -> migrat
 ```
 
 `nx guided-upgrade` detects your existing ChromaDB footprint, provisions and
-starts the service, version-pins it (`/version` `release_version >= v0.1.6`),
+starts the service, version-pins it (its `/version` must report a
+`release_version` — present from engine-service v0.1.6+; the code floor is
+v0.1.5 but earlier binaries omit the field and fail closed),
 health-gates it, then migrates your collections into pgvector with validation
 and **copy-not-move** rollback safety — your ChromaDB store is left intact as
 the source. Voyage-capability and version pre-flights fail loud *before* any
