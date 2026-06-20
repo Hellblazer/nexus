@@ -57,7 +57,9 @@ def _body_to_queue_row(body: dict[str, Any]) -> QueueRow:
     )
 
 
-class HttpAspectQueue:
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+
+class HttpAspectQueue(RawHandleGuardMixin):
     """AspectExtractionQueue drop-in that delegates to the RDR-152 Java HTTP service.
 
     The ``rename_lock`` parameter is accepted to match AspectExtractionQueue's

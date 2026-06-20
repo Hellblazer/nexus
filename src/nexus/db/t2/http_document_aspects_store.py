@@ -96,7 +96,9 @@ def _body_to_record(body: dict[str, Any]) -> AspectRecord:
     )
 
 
-class HttpDocumentAspectsStore:
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+
+class HttpDocumentAspectsStore(RawHandleGuardMixin):
     """DocumentAspects drop-in that delegates to the RDR-152 Java HTTP service.
 
     NOTE: ``promote_extras_field`` and ``list_promotions`` in

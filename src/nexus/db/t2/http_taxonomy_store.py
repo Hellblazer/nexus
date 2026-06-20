@@ -92,7 +92,9 @@ def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
 # ── HttpTaxonomyStore ──────────────────────────────────────────────────────────
 
 
-class HttpTaxonomyStore:
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+
+class HttpTaxonomyStore(RawHandleGuardMixin):
     """CatalogTaxonomy drop-in that delegates to the RDR-152 Java HTTP service.
 
     Uses a keep-alive :class:`httpx.Client` connection pool.  Reads

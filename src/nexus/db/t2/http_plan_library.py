@@ -47,7 +47,9 @@ from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 # ── HttpPlanLibrary ────────────────────────────────────────────────────────────
 
 
-class HttpPlanLibrary:
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+
+class HttpPlanLibrary(RawHandleGuardMixin):
     """PlanLibrary drop-in that delegates to the RDR-152 Java HTTP service.
 
     Uses a keep-alive :class:`httpx.Client` connection pool. Reads

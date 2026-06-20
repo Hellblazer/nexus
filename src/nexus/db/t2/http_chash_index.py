@@ -61,7 +61,9 @@ from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 # ── HttpChashIndex ─────────────────────────────────────────────────────────────
 
 
-class HttpChashIndex:
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+
+class HttpChashIndex(RawHandleGuardMixin):
     """ChashIndex drop-in that delegates to the RDR-152 Java HTTP service.
 
     Uses a keep-alive :class:`httpx.Client` connection pool. Reads
@@ -73,12 +75,11 @@ class HttpChashIndex:
     semantics (``ValueError`` for empty chash/collection).
 
     Thread safety: ``httpx.Client`` is thread-safe for concurrent requests.
-    The ``_lock`` attribute is present on ``ChashIndex`` (SQLite) for its
-    own reasons; ``HttpChashIndex`` does not need it but exposes the attribute
-    as ``None`` so any caller checking ``hasattr(store, '_lock')`` does not crash.
+    Like every service-backed store this has no raw SQLite ``.conn`` /
+    ``._lock``; both are provided by ``RawHandleGuardMixin`` and fail loud
+    with an actionable ``AttributeError`` (so ``hasattr`` /
+    ``has_raw_access`` cleanly return False — nexus-9613q.2).
     """
-
-    _lock = None  # public attribute compatibility
 
     def __init__(
         self,

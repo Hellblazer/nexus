@@ -74,3 +74,50 @@ def test_collection_audit_does_not_crash_in_service_mode(monkeypatch):
     assert report.distance_histogram.source == "empty"
     assert report.cross_projections == []
     assert report.hub_assignments == []
+
+
+# ── nexus-9613q.2: fail-loud raw-handle guard on the Http*Stores ─────────────
+
+_HTTP_T2_STORE_CLASSES = [
+    ("nexus.db.t2.http_taxonomy_store", "HttpTaxonomyStore"),
+    ("nexus.db.t2.http_document_aspects_store", "HttpDocumentAspectsStore"),
+    ("nexus.db.t2.http_telemetry_store", "HttpTelemetryStore"),
+    ("nexus.db.t2.http_memory_store", "HttpMemoryStore"),
+    ("nexus.db.t2.http_plan_library", "HttpPlanLibrary"),
+    ("nexus.db.t2.http_chash_index", "HttpChashIndex"),
+    ("nexus.db.t2.http_aspect_queue", "HttpAspectQueue"),
+    ("nexus.db.t2.http_document_highlights_store", "HttpDocumentHighlightsStore"),
+]
+
+
+def _import_cls(mod_name: str, cls_name: str):
+    import importlib
+
+    return getattr(importlib.import_module(mod_name), cls_name)
+
+
+@pytest.mark.parametrize("mod_name,cls_name", _HTTP_T2_STORE_CLASSES)
+def test_all_http_t2_stores_carry_raw_handle_guard(mod_name, cls_name):
+    from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+
+    cls = _import_cls(mod_name, cls_name)
+    assert issubclass(cls, RawHandleGuardMixin), cls
+
+
+@pytest.mark.parametrize("mod_name,cls_name", _HTTP_T2_STORE_CLASSES)
+def test_http_store_conn_and_lock_raise_actionable_attribute_error(mod_name, cls_name):
+    from nexus.db.storage_mode import has_raw_access
+
+    cls = _import_cls(mod_name, cls_name)
+    store = cls.__new__(cls)  # bypass network init; the guard touches no state
+
+    with pytest.raises(AttributeError) as ei:
+        _ = store.conn
+    msg = str(ei.value)
+    assert "has_raw_access" in msg and "conn" in msg
+
+    with pytest.raises(AttributeError):
+        _ = store._lock
+
+    # Must raise AttributeError (not RuntimeError) so hasattr/has_raw_access work.
+    assert has_raw_access(store) is False

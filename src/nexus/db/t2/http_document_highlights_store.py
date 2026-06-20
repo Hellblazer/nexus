@@ -57,7 +57,9 @@ def _body_to_record(body: dict[str, Any]) -> HighlightRecord:
     )
 
 
-class HttpDocumentHighlightsStore:
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+
+class HttpDocumentHighlightsStore(RawHandleGuardMixin):
     """DocumentHighlights drop-in that delegates to the RDR-152 Java HTTP service.
 
     Args:
