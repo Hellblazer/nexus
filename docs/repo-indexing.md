@@ -42,16 +42,16 @@ Classification is overridable via `.nexus.yml` (see [Per-Repo Configuration](#ne
 
 ## Dual-Collection Architecture
 
-Each indexed repository produces two T3 collections (local ONNX or cloud Voyage AI):
+Each indexed repository produces two T3 collections. Embedding happens server-side in the nexus-service (local mode: bge-768; managed-cloud: Voyage AI):
 
-| Collection | Cloud Index Model | Cloud Query Model | Contents |
+| Collection | Managed-cloud model | Local model | Contents |
 |---|---|---|---|
-| `code__<name>-<hash8>` | `voyage-code-3` | `voyage-code-3` | Code files |
-| `docs__<name>-<hash8>` | `voyage-context-3` (CCE) | `voyage-context-3` | Prose + PDF files |
+| `code__<name>-<hash8>` | `voyage-code-3` | `bge-768` | Code files |
+| `docs__<name>-<hash8>` | `voyage-context-3` (CCE) | `bge-768` | Prose + PDF files |
 
 `<name>` is the repository basename; `<hash8>` is the first 8 hex characters of the
 SHA-256 digest of the main repository path. Long basenames are truncated to stay within
-ChromaDB's 63-character collection name limit. Collection names are **stable across git
+the 63-character collection name limit (a nexus naming-convention constraint). Collection names are **stable across git
 worktrees** — `git rev-parse --git-common-dir` resolves to the shared `.git` directory,
 so a worktree and its parent produce identical collection names.
 
@@ -113,8 +113,8 @@ Individual lines exceeding the byte limit (12 KB) are pre-split at natural code 
 ### Context Prefix Injection (Embed-Only)
 
 Each code chunk's **embedded text** is prefixed with a one-line context header identifying
-the file, class, method, and line range. The raw chunk text is stored in ChromaDB unchanged
-— the prefix affects only the Voyage AI embedding call, not stored documents or search previews.
+the file, class, method, and line range. The raw chunk text is stored in the T3 vector store unchanged
+— the prefix affects only the server-side embedding call, not stored documents or search previews.
 
 ```
 // File: art-modules/art-core/src/FuzzyART.java  Class: FuzzyART  Method: computeMatch  Lines: 200–350
@@ -239,8 +239,9 @@ Run `nx index repo --force` once to stamp them.
 
 ## Transient Error Resilience
 
-All ChromaDB Cloud network calls (staleness checks, upserts, deletes, queries) are wrapped
-with `_chroma_with_retry` — an exponential backoff helper in `retry.py`. If a call raises a
+All nexus-service network calls (staleness checks, upserts, deletes, queries) are wrapped
+with `_chroma_with_retry` — an exponential backoff helper in `retry.py` (the name is
+historical; it now wraps the `/v1/vectors` HTTP calls to the service). If a call raises a
 transient error (HTTP 502/503/504/429, or a transport-level error such as `ConnectError` or
 `ReadTimeout`), it is retried up to 5 times with delays of 2 → 4 → 8 → 16 → 30 s (capped).
 Non-retryable errors (400, 401, 403, 404) raise immediately without retry.
@@ -249,9 +250,10 @@ Each retry attempt is logged at WARNING level with the event key
 `chroma_transient_error_retry`. After 5 failed attempts the original exception propagates
 and the indexing job fails fast.
 
-This means a single transient 504 from the ChromaDB Cloud gateway no longer aborts a
+This means a single transient 504 from the nexus-service endpoint no longer aborts a
 multi-thousand-file indexing run. See [RDR-019](rdr/rdr-019-chromadb-transient-retry.md)
-for the full decision record.
+for the original (ChromaDB-era) decision record; the retry mechanism was carried forward to
+the service path.
 
 ## Catalog Registration
 
@@ -261,11 +263,22 @@ This means `nx catalog search` and `nx catalog links` work immediately after ind
 
 ## Taxonomy Auto-Discovery
 
+> **Note (6.0):** Taxonomy *discovery* is temporarily suspended while the
+> nexus-service is the T3 backend (service mode, the default since 6.0).
+> Discovery reads embeddings through a raw Chroma client that retired with the
+> Chroma serving paths (RDR-155 P4a); it is a tracked follow-on
+> (`nexus-gmiaf.21+`). In practice: `nx index repo` produces no new topics
+> (the discovery step is skipped silently), and `nx taxonomy discover` exits
+> with a clear error. Search features that read **previously-computed**
+> taxonomy (`topic=`, `cluster_by="semantic"`, topic boosts) continue to work.
+> The behavior described below is the pre-6.0 model and the target once
+> discovery is restored on the pgvector service.
+
 After indexing completes, `nx index repo` automatically runs topic discovery on the new or updated collections. HDBSCAN clusters the collection's embeddings to find natural topic groupings, and each cluster is labeled with a short descriptive phrase using Claude Haiku (when an Anthropic API key is available). The results are stored in T2 and surfaced by `nx search` as topic filters.
 
 To skip this step, pass `--no-taxonomy`. This is useful for fast incremental updates or in CI pipelines where the additional API calls are not wanted.
 
-In **local mode** (ONNX MiniLM embeddings), code collections are excluded from taxonomy discovery by default — MiniLM's 384-dimension general-purpose embeddings produce poorly separated clusters on code. Prose, RDR, and knowledge collections are still discovered. In **cloud mode** (Voyage AI), all collection types including code are included, since `voyage-code-3` embeddings produce well-separated clusters.
+In **local mode** (bge-768 ONNX embeddings, embedded server-side by the nexus-service), code collections are excluded from taxonomy discovery by default — general-purpose embeddings produce poorly separated clusters on code. Prose, RDR, and knowledge collections are still discovered. In **managed-cloud mode** (Voyage AI), all collection types including code are included, since `voyage-code-3` embeddings produce well-separated clusters.
 
 ## Searching Indexed Repos
 

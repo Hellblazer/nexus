@@ -67,7 +67,7 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     └── Storage tiers (RDR-120 substrate split; T2 daemon-mediated, T3 service-mediated)
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
           T2: SQLite + FTS5 daemon ── nx daemon t2 start
-                Nine domain stores behind T2Database / T2Client
+                Eight domain stores (incl. catalog) behind T2Database / T2Client
                 Transport: UDS (UID-gated) + 127.0.0.1 loopback TCP
                 memory · plans · chash_index · taxonomy · telemetry ·
                 document_aspects · aspect_queue · document_highlights · catalog
@@ -277,7 +277,7 @@ Pre-existing drift surfaced during Phase 5 verification (filed as separate beads
 
 Taxonomy (RDR-070) builds a topic hierarchy over T3 collections using existing embeddings, without re-embedding. HDBSCAN clusters the vectors already stored in ChromaDB, labels them with c-TF-IDF, and persists topic assignments to T2 SQLite. Every subsequent `store_put` call assigns the new document to the nearest centroid via ANN lookup. Search then uses these assignments to boost same-topic results and group output.
 
-In local mode, `code__*` collections are excluded by default because MiniLM clusters code poorly. Cloud mode uses `voyage-code-3` and is unaffected. `nx index repo` triggers discovery automatically after indexing.
+In local mode, `code__*` collections are excluded by default because the general-purpose local embedder (bge-768) clusters code poorly. Cloud mode uses `voyage-code-3` and is unaffected. (Note: as of 6.0, taxonomy discovery is suspended while the nexus-service is the T3 backend; see the taxonomy command docs.)
 
 ### Data Flow
 
@@ -574,8 +574,8 @@ constructions skip all DB access. Domain stores retain their own
 `_migrated_paths` guards for standalone construction outside `T2Database`.
 
 **T3 Upgrade Steps**: `T3UpgradeStep(introduced, name, fn)` entries in the
-`T3_UPGRADES` list handle ChromaDB operations (backfills, re-indexing) that
-require a `T3Database` client. These run via `nx upgrade` (not `--auto` mode).
+`T3_UPGRADES` list handle T3 vector-store operations (backfills, re-indexing)
+that require a T3 client. These run via `nx upgrade` (not `--auto` mode).
 
 **Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook,
 applying T2 migrations silently. T3 steps are skipped in auto mode.
