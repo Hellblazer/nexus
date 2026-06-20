@@ -247,6 +247,10 @@ def _pg_config_value(pg_config: Path, flag: str) -> str | None:
     """Return a ``pg_config <flag>`` value, or None when indeterminate."""
     cmd = [str(pg_config), flag]
     try:
+        # env is now an os.environ SNAPSHOT (was: inherited live by reference).
+        # subprocess.run is synchronous and os.environ is not mutated mid-call,
+        # so this is equivalent in practice — the snapshot is to thread the
+        # bundle lib path (code-review H2).
         result = subprocess.run(
             cmd,
             capture_output=True, text=True, timeout=10,
@@ -376,9 +380,22 @@ def _bundle_lib_env(cmd: list[str], env: dict | None) -> dict:
     ``debian:trixie-slim`` where ``libpq.so.5`` is absent system-wide — ``initdb``
     exited 127). Point the dynamic loader at the binary's sibling ``lib/`` so
     ``initdb`` / ``pg_ctl`` / the started ``postgres`` (which inherits this env)
-    resolve their bundled libs. Harmless for a system PostgreSQL — its lib dir is
-    already on the default search path. The durable fix is an RPATH in the bundle
-    build; this is the consumer-side guard so the published bundle works today.
+    resolve their bundled libs.
+
+    SCOPE (reviewed, not bundle-gated): this fires for ANY ``cmd[0]`` with a
+    sibling ``../lib`` dir, which also includes Homebrew PG on macOS. It is safe
+    in every supported layout because the prepend only exposes the binary's OWN
+    co-located libs earlier on the search path, never a foreign one:
+      * nexus bundle ``<root>/bin/initdb`` → ``<root>/lib`` (the intended fix);
+      * Debian/PGDG ``/usr/bin/initdb`` → resolves (symlink) to
+        ``/usr/lib/postgresql/N/bin`` whose ``../lib`` does NOT exist (libs live
+        in ``/usr/lib/<triplet>/``) → ``is_dir()`` False → no-op;
+      * macOS (Homebrew or system) → ``dyld`` ignores ``LD_LIBRARY_PATH`` → no
+        effect regardless.
+    A non-symlink ``/usr/bin/initdb`` on Linux would prepend ``/usr/lib`` (already
+    the default path) — a benign, persistent env on the started ``postgres``. The
+    durable fix is an RPATH in the bundle build (nexus-iytd3); this consumer-side
+    guard makes the already-published bundle work for nx-managed provisioning.
     """
     base = dict(os.environ if env is None else env)
     try:

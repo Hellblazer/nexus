@@ -55,6 +55,7 @@ _guided_restore() {
 trap '_guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
+[ "$COLD" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--cold always rebuilds the wheel + cold-acquires the binary; --no-build is irrelevant" >&2; exit 2; }
 
 if [ "$GUIDED" = 1 ]; then
   # --guided force-rebuilds the native binary with the stamp baked in, so it is

@@ -74,15 +74,22 @@ nx daemon service status 2>&1 | sed 's/^/       /' || true
 # The PUBLISHED binary must report release_version == the acquired tag — proves
 # both the Option-B stamp AND that install-binary fetched the right release.
 RV="$(nx daemon service status --json 2>/dev/null | python -c 'import sys,json;print(json.load(sys.stdin).get("service_release_version") or "")' 2>/dev/null)"
-[ "$RV" = "$EXPECT_RELEASE_VERSION" ] \
-  && ok "/version release_version=$RV matches the acquired tag" \
-  || bad "release_version=$RV != expected $EXPECT_RELEASE_VERSION (wrong binary or stamp)"
+if [ "$RV" = "$EXPECT_RELEASE_VERSION" ]; then
+  ok "/version release_version=$RV matches the acquired tag"
+elif [ -z "$RV" ]; then
+  bad "no release_version on /version (service unreachable or field absent), expected $EXPECT_RELEASE_VERSION"
+else
+  bad "release_version=$RV != expected $EXPECT_RELEASE_VERSION (wrong binary or stamp)"
+fi
 
 # ── Seed pre-RDR-160 footprint + guided-upgrade (ONNX leg, secret-free) ───────
 say "Seed pre-RDR-160 footprint + nx guided-upgrade"
 if SEED_RAW="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --n "$SEED_N")"; then
   SEED_JSON="$(printf '%s\n' "$SEED_RAW" | tail -1)"
-  ok "seeded legacy footprint: $SEED_JSON"
+  case "$SEED_JSON" in
+    '{'*'}') ok "seeded legacy footprint: $SEED_JSON" ;;
+    *) bad "seed produced no JSON manifest (got: '$SEED_JSON')"; say "ABORT"; exit 1 ;;
+  esac
 else
   bad "seed failed"; say "ABORT"; exit 1
 fi
