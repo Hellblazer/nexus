@@ -121,18 +121,33 @@ will auto-spawn the daemon on every session start anyway, so plugin
 users still get a working substrate. The autostart path is recommended
 if you also use `nx` directly from the shell.
 
-**Local-mode T3 only**: the T3 daemon wraps a local ChromaDB process.
-Register it the same way:
+**T3 (the permanent vector store)** is served by the native nexus-service over
+Postgres 16 + pgvector — in **both** local and cloud mode. Provision and start
+it with:
 
 ```bash
-nx daemon t3 install --autostart   # only when NX_LOCAL=1 / no cloud creds
+nx daemon service install-binary <engine-service-vX.Y.Z>   # acquire the cosign-verified native binary + relocatable PG+pgvector bundle
+nx init --service                                          # provision Postgres, fetch the bge-768 ONNX, start the service supervisor
 ```
 
-Cloud-mode T3 talks directly to ChromaDB Cloud over HTTP and has no
-daemon — `nx daemon t3` is a no-op in that configuration.
+Pick `<engine-service-vX.Y.Z>` from the
+[engine-service releases](https://github.com/Hellblazer/nexus/releases) (the
+newest `engine-service-v*` tag). There is no `latest` resolution — the tag is
+explicit. You can instead export `NEXUS_SERVICE_TAG=engine-service-vX.Y.Z`, in
+which case `nx init --service` acquires the binary itself and the explicit
+`install-binary` step is optional.
 
-See [docs/container-integration.md](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) for the full daemon-model story
-including TCP / UDS / Cowork transport details.
+`nx init --service` is idempotent — safe to re-run. The service embeds with
+bge-768 (local) or, in the managed-cloud deployment, server-side via Voyage with
+the operator's key (clients supply only `NX_SERVICE_TOKEN`, never a Voyage key).
+
+> The legacy `nx daemon t3` (a managed ChromaDB subprocess) is retired as a
+> serving path — T3 no longer serves from ChromaDB. ChromaDB data from a
+> pre-6.0 install is read only as the migration *source* (see Upgrading below).
+
+See [docs/container-integration.md](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) for reaching the
+service from a container, and [docs/migration-runbook.md](https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md) for the
+migration details.
 
 ## Update
 
@@ -152,6 +167,27 @@ nx daemon t2 stop && nx daemon t2 start    # or: launchctl kickstart -k gui/<uid
 The schema-version handshake (RDR-120 P3b) fails loud on
 client/daemon version mismatch, so stale daemons fail closed rather
 than silently corrupting state.
+
+### Upgrading to 6.0 (migrating off ChromaDB)
+
+6.0 moves the permanent vector store (T3) from ChromaDB to the Postgres +
+pgvector service. Existing installs migrate with one command:
+
+```bash
+uv tool upgrade conexus       # get the 6.0 CLI
+nx guided-upgrade             # detect -> provision+verify the service -> migrate -> validate -> unlock
+```
+
+`nx guided-upgrade` detects your existing ChromaDB footprint, provisions and
+starts the service, version-pins it (its `/version` must report a
+`release_version` — present from engine-service v0.1.6+; the code floor is
+v0.1.5 but earlier binaries omit the field and fail closed),
+health-gates it, then migrates your collections into pgvector with validation
+and **copy-not-move** rollback safety — your ChromaDB store is left intact as
+the source. Voyage-capability and version pre-flights fail loud *before* any
+migration. It is idempotent (safe to re-run) but not a no-op after success: a
+re-run re-copies at full cost. On a validation block it leaves the migration
+state `migrated-failed` and offers a rollback command rather than auto-reverting.
 
 ## Use it (no API keys needed)
 
@@ -230,7 +266,7 @@ claude --plugin-dir ./nx
 
 ## Cloud mode (optional)
 
-Local mode uses bundled ONNX embeddings (384d MiniLM). Cloud mode upgrades to Voyage AI (1024d), cross-chunk context (CCE), and reranking.
+Local mode embeds with the on-device bge-768 ONNX model (768-dim) the service provisions; the bundled minilm-384 remains a zero-download fallback. The managed-cloud deployment embeds server-side with Voyage AI (1024d), cross-chunk context (CCE), and reranking.
 
 ### 1. Create accounts
 
@@ -281,10 +317,11 @@ Common flags: `-n 20` (result count), `--json`, `--files` (paths only), `-c` (sh
 
 ### Upgrade local embedding quality (optional)
 
-For better local-only embeddings (768d bge-base) without cloud:
+For the Python-side bge-768 embedder (used by non-service local indexing paths;
+the `nx init --service` stack already embeds with bge-768 server-side):
 
 ```bash
-uv tool install conexus --with "conexus[local]" --force
+uv tool install --reinstall "conexus[local]"
 ```
 
 To force local mode even when cloud credentials exist: `NX_LOCAL=1`.

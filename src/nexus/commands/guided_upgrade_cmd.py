@@ -7,7 +7,7 @@ Stands up + verifies the bge-768 engine-service, then drives the EXISTING
 
   pre-flight detect (ez5.2) → provision + health-gate + version-pin (ez5.6/5/4,
   via establish_verified_service ez5.7) → migrate-to-service (RDR-162
-  _run_migration) → advisory ``nx catalog rebuild``.
+  _run_migration) → advisory ``nx doctor``.
 
 SERVICE path only (never embed_migrate). A fresh user with nothing to migrate
 no-ops WITHOUT provisioning. A not-ready / wrong-version service hard-fails

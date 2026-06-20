@@ -1180,12 +1180,14 @@ provisions the on-device embedding model for local mode.
 nx init                       # interactive: prompt for the embedder
 nx init --yes                 # accept the recommended bge-768, no prompt
 nx init --embedder minilm-384 # pick a specific embedder, no prompt
+nx init --service             # provision the Postgres+pgvector service backend + start it
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--embedder [bge-768\|minilm-384]` | Select the embedder non-interactively (skips the prompt) |
 | `--yes` / `-y` | Accept the recommended default (bge-768) without prompting |
+| `--service` | Provision the local Postgres + pgvector cluster the RDR-152 service backend uses, lock the embedder to bge-768, acquire + verify the native service binary, fetch the bge-768 ONNX, and start the persistent service supervisor. Idempotent. This is the path that stands up T3 serving for a local install. (Also auto-runs when `NX_STORAGE_BACKEND=service` is set.) Acquire the binary + PG bundle first with `nx daemon service install-binary <engine-service-vX.Y.Z>`. |
 
 **Local mode** presents the two on-device embedders and records the choice in
 `~/.config/nexus/config.yml` under `local.embed_model`:
@@ -1452,17 +1454,18 @@ leave them running. For a brand-new install the recommended setup
 sequence is:
 
 ```
-uv tool install conexus                    # or "conexus[local]" for the bge-768 local embedder
-nx daemon t2 install --autostart           # writes LaunchAgent/systemd unit
+uv tool install conexus                    # the nx CLI
+nx daemon t2 install --autostart           # the T2 (notes/plans) daemon: writes LaunchAgent/systemd unit
 nx daemon t2 status                        # confirm running
-# (local-mode T3 only)
-nx daemon t3 install --autostart
+nx daemon service install-binary <engine-service-vX.Y.Z>   # acquire the signed native service binary + PG bundle
+nx init --service                          # provision Postgres+pgvector, fetch bge-768, start the T3 service
 ```
 
 Upgrade later with `uv tool upgrade conexus` (preserves extras like `[local]`); avoid `uv tool install --force`, which resets the environment and drops them.
 
-Cloud-mode T3 uses HTTP transport directly to ChromaDB Cloud and
-has no daemon; only `t2` is needed in that configuration.
+T3 (the permanent vector store) serves through the native nexus-service over
+Postgres + pgvector in **both** local and cloud mode (`nx daemon service`); the
+legacy `nx daemon t3` ChromaDB daemon is a retired serving path.
 
 When the conexus plugin is installed, the plugin's
 SessionStart hook auto-spawns the T2 daemon via
@@ -1616,14 +1619,15 @@ Reverse of `install --autostart`: deactivate via
 
 ### nx daemon t3 start / stop / status / install / uninstall
 
-Same shape as the `t2` subcommands, applies to the T3 daemon.
-**Only used in local mode (`NX_LOCAL=1` or no cloud credentials).**
-Cloud-mode T3 talks directly to ChromaDB Cloud via HTTP and has no
-daemon process — `nx daemon t3` is a no-op there.
+> **Legacy / retired serving path (6.0).** T3 no longer serves from ChromaDB.
+> The permanent vector store now serves through the native nexus-service over
+> Postgres + pgvector — see `nx daemon service` below and `nx init --service`.
+> `nx daemon t3` (the managed `chroma run` subprocess) remains only for reading a
+> pre-6.0 ChromaDB store as the **migration source** (`nx guided-upgrade`).
 
-Local-mode T3 wraps the upstream `chroma run` server lifecycle
-under launchd / systemd supervision; templates ship as
-`com.nexus.t3.plist` / `nexus-t3.service`.
+Same shape as the `t2` subcommands, applies to the legacy T3 ChromaDB daemon.
+It wraps the upstream `chroma run` server lifecycle under launchd / systemd
+supervision (templates `com.nexus.t3.plist` / `nexus-t3.service`).
 
 ### nx daemon service start / stop / status
 
@@ -1840,15 +1844,53 @@ nx service token list [--tenant TENANT]
 
 List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revoked`), label, expiry, and revocation time. Never prints the raw token. Use the id prefix with `nx service token revoke`.
 
+## nx guided-upgrade
+
+```
+nx guided-upgrade [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--timeout SECS] [--yes]
+```
+
+The **one-command upgrade from a pre-6.0 (ChromaDB) install to the service
+stack** (RDR-002). It is the recommended migration entry point — it stands up
+the service and then drives `nx migrate-to-service`, so you never hand-sequence
+provisioning + migration.
+
+Sequence: **pre-flight detect** (if there is no ChromaDB footprint to migrate it
+no-ops without provisioning) → **provision + serve** the local service (the full
+`nx init --service` path: Postgres + bge-768 ONNX + the native binary) — or, with
+`--service-url`, gate an already-running service → **version-pin** (`/version`
+`/version` must report a `release_version` — present from engine-service
+v0.1.6+, code floor v0.1.5; older binaries omit it and fail closed) → **bounded
+health-gate** → **voyage-
+capability pre-flight** (if the footprint has voyage collections, the target
+service must be able to serve them — fail loud before migrating) → drive
+**`nx migrate-to-service`** (detect → ETL → validate → unlock) → advisory
+`nx doctor`.
+
+- `--service-url URL` migrates into an already-running service instead of
+  provisioning a local one; requires `NX_SERVICE_TOKEN` to be set.
+- `--timeout SECS` bounds the wait for the service to become healthy (default 120).
+- `--yes` / `-y` skips the confirmation prompt.
+
+A not-ready or wrong-version service **hard-fails before any migration**.
+Idempotent and safe to re-run, but **not a no-op after success** — a re-run
+re-copies at full cost (the ChromaDB source is intact, so it is re-detected). On
+a validation block it leaves the `migrated-failed` sentinel and offers a rollback
+command (copy-not-move; never auto-reverts). Operational narrative:
+[`docs/migration-runbook.md`](migration-runbook.md).
+
 ## nx migrate-to-service
 
 ```
 nx migrate-to-service [--dry-run] [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL]
 ```
 
-The single guided Chroma-to-service upgrade (RDR-159) — it wraps and sequences
-the proven `nx storage migrate` primitives into one survivable command so a
-user never hand-sequences the ~8-step gauntlet.
+The lower-level Chroma-to-service migration primitive (RDR-159) that
+`nx guided-upgrade` wraps. Use `nx guided-upgrade` for the full one-command
+experience; use this directly when the service is **already provisioned and
+running** and you only need the migration step. It sequences the proven
+`nx storage migrate` primitives into one survivable command so a user never
+hand-sequences the ~8-step gauntlet.
 
 - `--dry-run` ships the read-only front half: it classifies the Chroma
   footprint per collection (source leg × embedding model, resolved against the
