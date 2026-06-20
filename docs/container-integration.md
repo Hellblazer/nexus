@@ -102,17 +102,18 @@ macOS / Windows Docker Desktop.
 
 ```bash
 PORT=$(nx daemon t2 status | grep tcp_port | awk '{print $2}')
-SVC_PORT=$(nx daemon service status | grep -i port | awk '{print $2}')
+SVC_PORT=$(nx daemon service status --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["port"])')
+TOKEN=$(grep '^NX_SERVICE_TOKEN=' ~/.config/nexus/pg_credentials | cut -d= -f2)
 docker run --rm \
     -e NX_T2_ADDR=host.docker.internal:$PORT \
-    -e NX_SERVICE_HOST=host.docker.internal \
-    -e NX_SERVICE_PORT=$SVC_PORT \
-    -e NX_SERVICE_TOKEN=$NX_SERVICE_TOKEN \
+    -e NX_SERVICE_URL=http://host.docker.internal:$SVC_PORT \
+    -e NX_SERVICE_TOKEN=$TOKEN \
     <image-with-conexus>
 ```
 
-The T3 (vector) calls reach the host's nexus-service; `NX_SERVICE_TOKEN` is
-required (read it from `~/.config/nexus/pg_credentials` on the host).
+The T3 (vector) calls reach the host's nexus-service. The T3 client reads the
+full `NX_SERVICE_URL` (not a split host/port) plus `NX_SERVICE_TOKEN`; the token
+is in `~/.config/nexus/pg_credentials` on the host.
 
 `--network=host` does NOT work on macOS Docker Desktop — the
 container's `127.0.0.1` stays in the container's own namespace.
@@ -243,8 +244,9 @@ CLI from the shell.
 |---|---|---|
 | `NX_T2_ADDR` | TCP host:port for the T2 daemon | discovery file |
 | `NX_T2_SOCK` | UDS path for the T2 daemon | discovery file |
-| `NX_SERVICE_HOST` / `NX_SERVICE_PORT` | host:port of the nexus-service (T3 vector store) | discovery lease (`storage_service_addr.<uid>`) |
-| `NX_SERVICE_TOKEN` | bearer token for the nexus-service (required for T3 access) | `~/.config/nexus/pg_credentials` |
+| `NX_SERVICE_URL` | full base URL of the nexus-service for the **T3 vector store** (e.g. `http://host:port`) | discovery lease (`storage_service_addr.<uid>`) |
+| `NX_SERVICE_HOST` / `NX_SERVICE_PORT` | host + port for the **T2 domain stores + catalog** HTTP path (separate resolver from T3) | discovery lease |
+| `NX_SERVICE_TOKEN` | bearer token for the nexus-service (required) | discovery lease, or `~/.config/nexus/pg_credentials` |
 | `NX_T3_ADDR` | *(legacy)* TCP host:port for the retired ChromaDB T3 daemon | discovery file |
 | `NX_PYTEST_DAEMON_MODE` | (tests only) skip the conftest direct-mode pin | unset |
 
