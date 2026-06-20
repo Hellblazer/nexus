@@ -197,6 +197,37 @@ class CatalogRepositoryTest {
         assertThat(found).isNull();
     }
 
+    @Test @Order(99)
+    void owner_serverSideAllocatesPrefix_whenAbsent() {
+        // nexus-0cy4b: the HTTP client (Catalog.ensure_owner_for_repo) sends NO
+        // tumbler_prefix and expects the server to assign one (the column is
+        // NOT NULL). Fresh tenant -> RLS-clean owner space -> deterministic
+        // 1.1, 1.2, and idempotent reuse by repo_hash.
+        final String T = "cat-tenant-alloc";
+        repo.upsertOwner(T, Map.of(
+            "name", "repoA", "owner_type", "repo", "repo_hash", "hashA",
+            "repo_root", "/x/a"));
+        repo.upsertOwner(T, Map.of(
+            "name", "repoB", "owner_type", "repo", "repo_hash", "hashB",
+            "repo_root", "/x/b"));
+
+        var a = repo.ownerByRepoHash(T, "hashA");
+        var b = repo.ownerByRepoHash(T, "hashB");
+        assertThat(a).isNotNull();
+        assertThat(b).isNotNull();
+        assertThat(a.get("tumbler_prefix")).isEqualTo("1.1");
+        assertThat(b.get("tumbler_prefix")).isEqualTo("1.2");
+
+        // Re-register repoA with no prefix -> idempotent (reuses 1.1, not 1.3).
+        repo.upsertOwner(T, Map.of(
+            "name", "repoA-renamed", "owner_type", "repo", "repo_hash", "hashA",
+            "repo_root", "/x/a"));
+        var a2 = repo.ownerByRepoHash(T, "hashA");
+        assertThat(a2.get("tumbler_prefix")).isEqualTo("1.1");
+        assertThat(a2.get("name")).isEqualTo("repoA-renamed");
+        assertThat(repo.listOwners(T)).hasSize(2);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // DOCUMENTS
     // ══════════════════════════════════════════════════════════════════════════

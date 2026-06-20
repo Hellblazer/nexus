@@ -241,13 +241,11 @@ taxonomy:
 
 ### How it works
 
-> **Note (6.0):** Taxonomy *discovery* is suspended in service mode (the default
-> since 6.0): `nx taxonomy discover` exits with a clear error and `nx index repo`
-> skips the discovery step. Discovery needs a raw Chroma client retired with the
-> Chroma serving paths (RDR-155 P4a); restoring it on the pgvector service is a
-> tracked follow-on (`nexus-gmiaf.21+`). Previously-computed assignments still
-> drive search boosts and `topic=` scoping. The flow below is the pre-6.0 model
-> and the target once discovery is restored.
+> **Note (6.0):** Taxonomy *discovery*, *rebuild*, and per-document *assignment*
+> run on the nexus-service backend (the default since 6.0): embeddings are read
+> server-side and topics + centroids persist through the service (nexus-7ydks).
+> Still being ported (`nexus-7ydks`): `nx taxonomy split` / `project` and the
+> automatic cross-collection projection pass refuse cleanly on the service.
 
 After `nx index repo` (or `nx taxonomy discover --all`):
 

@@ -924,6 +924,80 @@ class HttpTaxonomyStore:
         self.record_discover_count(collection_name, len(doc_ids))
         return len(topic_ids)
 
+    @staticmethod
+    def _svc_fetch_by_ids(t3: Any, collection: str, doc_ids: list[str]):
+        """Fetch (ids, texts, embeddings) for specific doc_ids via the service.
+
+        nexus-9pqoj. Texts come from the service store-get (`stub.get(ids=...)`),
+        embeddings server-side via `t3.get_embeddings` (the collection's native
+        space). Returns the aligned subset that resolved; ``embeddings`` is
+        ``None`` when the service could not align vectors to the fetched ids
+        (count skew → refuse rather than mis-pair).
+        """
+        stub = t3.get_or_create_collection(collection)
+        ids: list[str] = []
+        texts: list[str] = []
+        _PAGE = 250
+        for i in range(0, len(doc_ids), _PAGE):
+            batch = doc_ids[i:i + _PAGE]
+            # The service store-get path ignores `include` and always returns
+            # the full {ids, documents, metadatas} envelope (VectorHandler P4a.2,
+            # nexus-1k8s1); we pass include for intent only.
+            res = stub.get(ids=batch, include=["documents"])
+            for fid, fdoc in zip(res.get("ids") or [], res.get("documents") or []):
+                if fdoc:
+                    ids.append(fid)
+                    texts.append(fdoc)
+        if not ids:
+            return [], [], None
+        embs = t3.get_embeddings(collection, ids)
+        if embs is None or len(embs) != len(ids):
+            _log.warning(
+                "taxonomy_svc_fetch_by_ids_misalign",
+                collection=collection, want=len(ids),
+                got=0 if embs is None else len(embs),
+            )
+            return ids, texts, None
+        return ids, texts, np.asarray(embs, dtype=np.float32)
+
+    @staticmethod
+    def _svc_fetch_all_embeddings(t3: Any, collection: str):
+        """Fetch (ids, embeddings) for ALL chunks in a collection via the service.
+
+        nexus-9pqoj — the project source-side equivalent of
+        :meth:`_svc_fetch_by_ids`. Returns ``(ids, None)`` on count skew.
+        """
+        try:
+            n = t3.count(collection)
+        except Exception:
+            return [], None
+        if n == 0:
+            return [], np.empty((0, 0), dtype=np.float32)
+        stub = t3.get_or_create_collection(collection)
+        ids: list[str] = []
+        offset = 0
+        _PAGE = 300
+        while offset < n:
+            page = stub.get(include=[], limit=_PAGE, offset=offset)
+            pids = page.get("ids") or []
+            if not pids:
+                break
+            ids.extend(pids)
+            offset += len(pids)
+            if len(pids) < _PAGE:
+                break
+        if not ids:
+            return [], np.empty((0, 0), dtype=np.float32)
+        embs = t3.get_embeddings(collection, ids)
+        if embs is None or len(embs) != len(ids):
+            _log.warning(
+                "taxonomy_svc_fetch_all_misalign",
+                collection=collection, want=len(ids),
+                got=0 if embs is None else len(embs),
+            )
+            return ids, None
+        return ids, np.asarray(embs, dtype=np.float32)
+
     def split_topic(
         self,
         topic_id: int,
@@ -949,27 +1023,42 @@ class HttpTaxonomyStore:
             return 0
 
         collection_name = topic["collection"]
-        try:
-            coll = chroma_client.get_collection(collection_name, embedding_function=None)
-        except Exception:
-            _log.warning("split_collection_not_found", collection=collection_name)
-            return 0
 
-        _PAGE = 250
-        fetched_ids: list[str] = []
-        texts: list[str] = []
-        for i in range(0, len(doc_ids), _PAGE):
-            batch = doc_ids[i:i + _PAGE]
-            result = coll.get(ids=batch, include=["documents"])
-            for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
-                if fdoc:
-                    fetched_ids.append(fid)
-                    texts.append(fdoc)
-        if len(texts) < k:
-            return 0
+        # nexus-9pqoj: service-backed source reads. When the handle is the
+        # HttpVectorClient (service-mode CLI), pull the topic's STORED vectors
+        # via the service — NOT a MiniLM-384 re-embed, because parent and child
+        # centroids must share the collection's bge-768 / voyage space for ANN
+        # assignment to work. Raw chroma handles keep the legacy re-embed path.
+        from nexus.db.http_vector_client import is_service_backed
 
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        embeddings = np.array(ef(texts), dtype=np.float32)
+        if is_service_backed(chroma_client):
+            fetched_ids, texts, embeddings = self._svc_fetch_by_ids(
+                chroma_client, collection_name, doc_ids,
+            )
+            if not fetched_ids or len(texts) < k or embeddings is None:
+                return 0
+        else:
+            try:
+                coll = chroma_client.get_collection(collection_name, embedding_function=None)
+            except Exception:
+                _log.warning("split_collection_not_found", collection=collection_name)
+                return 0
+
+            _PAGE = 250
+            fetched_ids = []
+            texts = []
+            for i in range(0, len(doc_ids), _PAGE):
+                batch = doc_ids[i:i + _PAGE]
+                result = coll.get(ids=batch, include=["documents"])
+                for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
+                    if fdoc:
+                        fetched_ids.append(fid)
+                        texts.append(fdoc)
+            if len(texts) < k:
+                return 0
+
+            ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+            embeddings = np.array(ef(texts), dtype=np.float32)
 
         split_result = self.compute_split(
             topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
@@ -1019,29 +1108,46 @@ class HttpTaxonomyStore:
             "matched_topics": [], "novel_chunks": [],
             "total_chunks": 0, "total_centroids": 0,
         }
-        # 1. Source chunk embeddings from T3 (chroma_client), paginated.
-        try:
-            src_coll = chroma_client.get_collection(source_collection, embedding_function=None)
-        except Exception:
-            return dict(_empty)
-        _PAGE = 300
-        src_ids: list[str] = []
-        src_emb_pages: list[np.ndarray] = []
-        offset = 0
-        while True:
-            page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
-            page_ids = page.get("ids", [])
-            page_embs = page.get("embeddings")
-            if not page_ids or page_embs is None:
-                break
-            src_ids.extend(page_ids)
-            src_emb_pages.append(np.array(page_embs, dtype=np.float32))
-            if len(page_ids) < _PAGE:
-                break
-            offset += _PAGE
-        if not src_ids:
-            return dict(_empty)
-        src_embs = np.concatenate(src_emb_pages)
+        # 1. Source chunk embeddings. nexus-9pqoj: via the service when the
+        # handle is the HttpVectorClient (the stub's get() drops embeddings, so
+        # we must use get_embeddings); raw chroma keeps the legacy include path.
+        from nexus.db.http_vector_client import is_service_backed
+
+        if is_service_backed(chroma_client):
+            src_ids, src_embs = self._svc_fetch_all_embeddings(
+                chroma_client, source_collection,
+            )
+            # nexus-9pqoj S1: distinguish an INCOMPLETE fetch (service could not
+            # align embeddings to ids) from a legitimately empty collection.
+            # Silent-zero on a fetch failure looks like 'no matches' to the user;
+            # flag it so the CLI surfaces it (feedback_no_silent_fallbacks).
+            if src_embs is None:
+                return {**_empty, "incomplete_fetch": True}
+            if not src_ids or src_embs.size == 0:
+                return dict(_empty)
+        else:
+            try:
+                src_coll = chroma_client.get_collection(source_collection, embedding_function=None)
+            except Exception:
+                return dict(_empty)
+            _PAGE = 300
+            src_ids = []
+            src_emb_pages: list[np.ndarray] = []
+            offset = 0
+            while True:
+                page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
+                page_ids = page.get("ids", [])
+                page_embs = page.get("embeddings")
+                if not page_ids or page_embs is None:
+                    break
+                src_ids.extend(page_ids)
+                src_emb_pages.append(np.array(page_embs, dtype=np.float32))
+                if len(page_ids) < _PAGE:
+                    break
+                offset += _PAGE
+            if not src_ids:
+                return dict(_empty)
+            src_embs = np.concatenate(src_emb_pages)
 
         # 2. Target centroids from the centroid-port ($in target_collections).
         ctr_raw: list[list[float]] = []
