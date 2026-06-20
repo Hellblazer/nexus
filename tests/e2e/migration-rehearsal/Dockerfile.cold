@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+# nexus-4mm24 — COLD-ACQUIRE fresh-machine validation box.
+#
+# Unlike the soup-to-nuts MVV (Dockerfile), this is a TRUE quarantine machine:
+# it pre-stages NOTHING the service needs. No system PostgreSQL, no native
+# binary, no PG bundle, no ONNX model. Just the OS, Python, and the conexus
+# wheel — exactly what `pip install conexus` leaves a fresh user with.
+#
+# `nx daemon service install-binary <tag>` then cold-acquires from the PUBLISHED
+# engine-service-v* GitHub Release (cosign-verified): the native binary AND the
+# relocatable PG+pgvector bundle. `nx init --service` extracts the bundle,
+# provisions PG, downloads the bge-768 ONNX, and starts the service. This proves
+# the auto-acquire + auto-provision paths the MVV skips by pre-staging.
+#
+# Base = debian:trixie-slim — conexus's actual runtime deploy base (glibc 2.41),
+# so this ALSO validates the published linux binary's glibc floor + runtime-lib
+# deps against the real target, not a build-matched host.
+FROM debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PYTHONUNBUFFERED=1
+
+# Deliberately minimal: ca-certificates (TLS for the release + HF downloads),
+# git (Catalog.init runs `git init`), python + uv for the wheel, and libgomp1
+# (the native binary's bundled ONNX runtime dlopens OpenMP). NO postgresql —
+# the relocatable PG bundle is cold-acquired + provisioned by nx itself, which
+# is the whole point of this box.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        python3 python3-venv python3-pip \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user — initdb (run by `nx init --service`) refuses to run as root.
+RUN useradd -m -s /bin/bash nexus
+ENV PATH="/home/nexus/nxenv/bin:${PATH}"
+
+RUN pip3 install --no-cache-dir --break-system-packages uv
+
+USER nexus
+WORKDIR /home/nexus
+
+# The conexus wheel — staged to the context root by run.sh (keeps its real PEP
+# 427 name). This is the ONLY conexus artifact in the image; everything the
+# service needs is cold-acquired at runtime.
+COPY conexus-*.whl /tmp/
+RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
+    uv venv --python 3.12 /home/nexus/nxenv \
+    && uv pip install --python /home/nexus/nxenv /tmp/conexus-*.whl \
+    && nx --version
+
+# Driver + seed last (trivial layers).
+COPY rehearse_cold.sh /home/nexus/rehearse_cold.sh
+COPY seed_legacy.py /home/nexus/seed_legacy.py
+
+ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_cold.sh"]

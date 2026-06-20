@@ -245,10 +245,16 @@ def discover_pg_binaries() -> PgBinaries:
 
 def _pg_config_value(pg_config: Path, flag: str) -> str | None:
     """Return a ``pg_config <flag>`` value, or None when indeterminate."""
+    cmd = [str(pg_config), flag]
     try:
+        # env is now an os.environ SNAPSHOT (was: inherited live by reference).
+        # subprocess.run is synchronous and os.environ is not mutated mid-call,
+        # so this is equivalent in practice — the snapshot is to thread the
+        # bundle lib path (code-review H2).
         result = subprocess.run(
-            [str(pg_config), flag],
+            cmd,
             capture_output=True, text=True, timeout=10,
+            env=_bundle_lib_env(cmd, None),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         _log.warning("pgvector_preflight_indeterminate", error=str(exc), flag=flag)
@@ -366,14 +372,50 @@ class ProvisionResult:
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
 
+def _bundle_lib_env(cmd: list[str], env: dict | None) -> dict:
+    """Build a subprocess env that lets a relocatable PG binary find its own libs.
+
+    The RDR-161 relocatable PG bundle ships its libraries in ``<bundle>/lib`` but
+    its ``bin/`` binaries carry NO RPATH/RUNPATH (nexus-4mm24: caught on a minimal
+    ``debian:trixie-slim`` where ``libpq.so.5`` is absent system-wide — ``initdb``
+    exited 127). Point the dynamic loader at the binary's sibling ``lib/`` so
+    ``initdb`` / ``pg_ctl`` / the started ``postgres`` (which inherits this env)
+    resolve their bundled libs.
+
+    SCOPE (reviewed, not bundle-gated): this fires for ANY ``cmd[0]`` with a
+    sibling ``../lib`` dir, which also includes Homebrew PG on macOS. It is safe
+    in every supported layout because the prepend only exposes the binary's OWN
+    co-located libs earlier on the search path, never a foreign one:
+      * nexus bundle ``<root>/bin/initdb`` → ``<root>/lib`` (the intended fix);
+      * Debian/PGDG ``/usr/bin/initdb`` → resolves (symlink) to
+        ``/usr/lib/postgresql/N/bin`` whose ``../lib`` does NOT exist (libs live
+        in ``/usr/lib/<triplet>/``) → ``is_dir()`` False → no-op;
+      * macOS (Homebrew or system) → ``dyld`` ignores ``LD_LIBRARY_PATH`` → no
+        effect regardless.
+    A non-symlink ``/usr/bin/initdb`` on Linux would prepend ``/usr/lib`` (already
+    the default path) — a benign, persistent env on the started ``postgres``. The
+    durable fix is an RPATH in the bundle build (nexus-iytd3); this consumer-side
+    guard makes the already-published bundle work for nx-managed provisioning.
+    """
+    base = dict(os.environ if env is None else env)
+    try:
+        lib_dir = Path(cmd[0]).resolve().parent.parent / "lib"
+    except (IndexError, OSError):
+        return base
+    if lib_dir.is_dir():
+        existing = base.get("LD_LIBRARY_PATH", "")
+        base["LD_LIBRARY_PATH"] = (
+            f"{lib_dir}{os.pathsep}{existing}" if existing else str(lib_dir)
+        )
+    return base
+
+
 def _run(cmd: list[str], *, check: bool = True, capture: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
     """Run a subprocess, raising on non-zero exit when *check* is True."""
     _log.debug("pg_provision_run", cmd=cmd)
-    kw: dict = dict(check=check, text=True)
+    kw: dict = dict(check=check, text=True, env=_bundle_lib_env(cmd, env))
     if capture:
         kw["capture_output"] = True
-    if env is not None:
-        kw["env"] = env
     return subprocess.run(cmd, **kw)  # type: ignore[call-overload]
 
 

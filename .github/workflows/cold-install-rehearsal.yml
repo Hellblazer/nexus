@@ -1,0 +1,48 @@
+name: Cold-acquire fresh-install rehearsal
+
+# nexus-4mm24 — fresh quarantine-machine install + migrate validation.
+#
+# Proves the journey the soup-to-nuts MVV skips by pre-staging: from a bare
+# debian:trixie-slim container with ONLY the conexus wheel, `nx daemon service
+# install-binary <tag>` + `nx init --service` cold-acquire the native binary, the
+# PG+pgvector bundle, and the bge-768 ONNX from the PUBLISHED engine-service
+# release, provision, and migrate via `nx guided-upgrade`.
+#
+# Secret-free (ONNX leg only — the local service embeds with bge-768; no Voyage
+# key). The container is the quarantine: GitHub's hosted runners are pre-loaded
+# (ubuntu ships PostgreSQL), so the bare box is the minimal container, not the
+# runner. Requires the target tag's GitHub Release to be PUBLISHED first.
+#
+# Manual-dispatch only (deferred from CI-required per nexus-myk4e / the luxe6
+# release boundary): run it on demand against a published engine-service tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_tag:
+        description: "Published engine-service tag to cold-acquire from"
+        required: true
+        default: "engine-service-v0.1.6"
+
+permissions:
+  contents: read
+
+jobs:
+  cold-install:
+    name: Cold-acquire + migrate (${{ github.event.inputs.service_tag }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run the cold-acquire rehearsal
+        # run.sh --cold builds the wheel on the host, builds the minimal
+        # Dockerfile.cold image (no PG, no binary, no ONNX), and runs
+        # rehearse_cold.sh inside it. NEXUS_SERVICE_TAG selects the published
+        # release to acquire from.
+        env:
+          NEXUS_SERVICE_TAG: ${{ github.event.inputs.service_tag }}
+        run: bash tests/e2e/migration-rehearsal/run.sh --cold

@@ -22,15 +22,19 @@ IMAGE="nexus-migration-rehearsal"
 WITH_CLOUD=0
 DO_BUILD=1
 GUIDED=0
+COLD=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= v0.1.5 and the guided-upgrade version-pin PASSES.
 GUIDED_STAMP_VERSION="0.1.6"
 RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
+# nexus-4mm24: the published engine-service tag the COLD box auto-acquires from.
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.6}"
 for a in "$@"; do
   case "$a" in
     --with-cloud) WITH_CLOUD=1 ;;
     --no-build)   DO_BUILD=0 ;;
     --guided)     GUIDED=1 ;;   # RDR-002 ez5.13: drive nx guided-upgrade
+    --cold)       COLD=1 ;;     # nexus-4mm24: cold-acquire from the published release
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -50,6 +54,9 @@ _guided_restore() {
 }
 trap '_guided_restore' EXIT
 
+[ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
+[ "$COLD" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--cold always rebuilds the wheel + cold-acquires the binary; --no-build is irrelevant" >&2; exit 2; }
+
 if [ "$GUIDED" = 1 ]; then
   # --guided force-rebuilds the native binary with the stamp baked in, so it is
   # incompatible with --no-build (which would reuse a stale/unstamped binary).
@@ -63,7 +70,13 @@ if [ "$GUIDED" = 1 ]; then
 fi
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
-if [ "$DO_BUILD" = 1 ]; then
+if [ "$COLD" = 1 ]; then
+  # nexus-4mm24: the cold box acquires the PUBLISHED binary + PG bundle at
+  # runtime — NO local native build, NO stamping. Just the wheel.
+  echo "[1/2] Building the conexus wheel (host)…"
+  uv build --wheel >/dev/null 2>&1
+  ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/" >&2; exit 1; }
+elif [ "$DO_BUILD" = 1 ]; then
   echo "[1/3] Building the conexus wheel (host)…"
   uv build --wheel >/dev/null 2>&1
   echo "[2/3] Building the LINUX native nexus-service binary (GraalVM container, ~2-3m)…"
@@ -88,27 +101,37 @@ else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
 fi
 
-ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/ — drop --no-build" >&2; exit 1; }
-[ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
+if [ "$COLD" = 0 ]; then
+  ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/ — drop --no-build" >&2; exit 1; }
+  [ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
+fi
 
-echo "[3/3] Staging a minimal build context + building image (WITH_CLOUD=$WITH_CLOUD)…"
+echo "[stage] Staging a minimal build context + building image (COLD=$COLD WITH_CLOUD=$WITH_CLOUD)…"
 # Flatten wheel + JAR + driver to fixed names in a tiny throwaway context. The
 # repo .dockerignore excludes dist/, and the inputs live in three different
 # trees — staging sidesteps both without touching the shared .dockerignore.
 STAGE="$(mktemp -d)"
 trap '_guided_restore; rm -rf "$STAGE"' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
-# The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
-# emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
-# co-located (native-image dlopen's JDK libs from the executable's own dir); a
-# RELEASE binary (engine-service-v*) is self-contained with NO .so siblings. So
-# the .so copy is best-effort — present them when they exist, skip when they don't.
-mkdir -p "$STAGE/native"
-cp service/target/nexus-service "$STAGE/native/"
-if compgen -G "service/target/*.so" > /dev/null; then
-  cp service/target/*.so "$STAGE/native/"
+if [ "$COLD" = 1 ]; then
+  # nexus-4mm24: NOTHING the service needs is staged — the cold box acquires the
+  # binary + PG bundle from the published release at runtime. Only the wheel +
+  # the cold driver + seed travel in.
+  cp "$HERE/Dockerfile.cold" "$STAGE/Dockerfile"
+  cp "$HERE/rehearse_cold.sh" "$HERE/seed_legacy.py" "$STAGE/"
+else
+  # The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
+  # emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
+  # co-located (native-image dlopen's JDK libs from the executable's own dir); a
+  # RELEASE binary (engine-service-v*) is self-contained with NO .so siblings. So
+  # the .so copy is best-effort — present them when they exist, skip when they don't.
+  mkdir -p "$STAGE/native"
+  cp service/target/nexus-service "$STAGE/native/"
+  if compgen -G "service/target/*.so" > /dev/null; then
+    cp service/target/*.so "$STAGE/native/"
+  fi
+  cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_guided.sh" "$HERE/seed_legacy.py" "$STAGE/"
 fi
-cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_guided.sh" "$HERE/seed_legacy.py" "$STAGE/"
 
 # Docker Desktop's credsStore=desktop helper can't reach a locked login keychain
 # in a non-interactive session, which fails even cached/anonymous image
@@ -125,6 +148,10 @@ fi
 docker build -q -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE" >/dev/null
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD")
+if [ "$COLD" = 1 ]; then
+  # nexus-4mm24: tell the cold box which published release to acquire from.
+  run_env+=(-e "NEXUS_SERVICE_TAG=$COLD_TAG")
+fi
 if [ "$WITH_CLOUD" = 1 ]; then
   # Forward the Voyage key from .env (export VOYAGE_API_KEY=…) under both names
   # the code probes. Never echoed.
@@ -138,7 +165,10 @@ fi
 # NOT `exec` — exec replaces this shell and would suppress the EXIT trap that
 # restores ~/.docker/config.json + release.properties and removes the staging
 # dir. Run as a child and propagate its exit code.
-if [ "$GUIDED" = 1 ]; then
+if [ "$COLD" = 1 ]; then
+  # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.
+  docker run --rm "${run_env[@]}" "$IMAGE"
+elif [ "$GUIDED" = 1 ]; then
   # RDR-002 ez5.13: override the default entrypoint to drive the one-command
   # guided-upgrade MVV instead of the full manual rehearsal.
   docker run --rm "${run_env[@]}" --entrypoint /bin/bash "$IMAGE" \
