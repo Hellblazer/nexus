@@ -1091,3 +1091,21 @@ def test_t2_raw_handle_metric_dict_includes_field():
 
     r = LintResult(t2_raw_handle_accesses=5)
     assert r.as_metric_dict()["t2_raw_handle_accesses"] == 5
+
+
+def test_t2_raw_handle_aliased_access_is_a_documented_blind_spot(tmp_path):
+    """nexus-9613q review M3: the matcher catches only the literal two-level
+    chain. An aliased access and a getattr() form are NOT counted — this test
+    PINS that known limit so the gap is explicit (documented, not silent) and a
+    future tightening that closes it will trip this test deliberately."""
+    base = _raw_handle_check().t2_raw_handle_accesses
+    target = tmp_path / "aliased_raw.py"
+    target.write_text(
+        "def via_alias(db):\n"
+        "    s = db.taxonomy\n"
+        "    return s.conn.execute('SELECT 1')\n"   # alias — not matched
+        "def via_getattr(db):\n"
+        "    return getattr(db.taxonomy, 'conn')\n"  # getattr — not matched
+    )
+    result = _raw_handle_check(extra_files=[target])
+    assert result.t2_raw_handle_accesses == base

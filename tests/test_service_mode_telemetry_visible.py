@@ -156,7 +156,7 @@ def test_hook_failure_store_failure_warns_once_and_does_not_raise(monkeypatch):
     import nexus.hook_registry as hr
     from contextlib import contextmanager
 
-    hr._hook_failure_drop_warned.discard("single")
+    hr._hook_failure_drop_warned.discard(("single", "h"))
 
     class _BoomTelemetry:
         def record_hook_failure(self, **kwargs):
@@ -171,7 +171,35 @@ def test_hook_failure_store_failure_warns_once_and_does_not_raise(monkeypatch):
 
     monkeypatch.setattr("nexus.mcp_infra.t2_ctx", _fake_t2_ctx)
     hr._record_hook_failure(doc_id="d", collection="c", hook_name="h", error="e")
-    assert "single" in hr._hook_failure_drop_warned
+    assert ("single", "h") in hr._hook_failure_drop_warned
+
+
+def test_hook_failure_warn_once_is_per_hook_not_per_chain(monkeypatch):
+    # nexus-9613q review M1: a transient failure of one hook must NOT silence
+    # every other hook of the same chain. The warn-once key is (chain, hook).
+    import nexus.hook_registry as hr
+    from contextlib import contextmanager
+
+    hr._hook_failure_drop_warned.discard(("single", "hookA"))
+    hr._hook_failure_drop_warned.discard(("single", "hookB"))
+
+    class _BoomTelemetry:
+        def record_hook_failure(self, **kwargs):
+            raise RuntimeError("service 503")
+
+    class _FakeT2:
+        telemetry = _BoomTelemetry()
+
+    @contextmanager
+    def _fake_t2_ctx():
+        yield _FakeT2()
+
+    monkeypatch.setattr("nexus.mcp_infra.t2_ctx", _fake_t2_ctx)
+    hr._record_hook_failure(doc_id="d", collection="c", hook_name="hookA", error="e")
+    hr._record_hook_failure(doc_id="d", collection="c", hook_name="hookB", error="e")
+    # Both distinct hooks recorded a warning key — neither was masked by the other.
+    assert ("single", "hookA") in hr._hook_failure_drop_warned
+    assert ("single", "hookB") in hr._hook_failure_drop_warned
 
 
 def test_hook_failure_routes_through_telemetry_store(monkeypatch):

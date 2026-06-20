@@ -351,9 +351,12 @@ def install_default_hooks(registry: HookRegistry) -> None:
 # ── Failure-record helpers (moved from mcp_infra) ────────────────────────────
 
 
-#: nexus-9613q.3: warn-once-per-chain guard so a failed hook_failures persist
-#: (e.g. a service 5xx) is VISIBLE rather than silently swallowed at DEBUG.
-_hook_failure_drop_warned: set[str] = set()
+#: nexus-9613q.3: warn-once guard so a failed hook_failures persist (e.g. a
+#: service 5xx) is VISIBLE rather than silently swallowed at DEBUG. Keyed on
+#: ``(chain, hook_name)`` — NOT ``chain`` alone — so a transient failure of one
+#: hook does not permanently silence every other hook of the same chain for the
+#: process lifetime (nexus-9613q review M1).
+_hook_failure_drop_warned: set[tuple[str, str]] = set()
 
 
 def _persist_hook_failure(
@@ -392,8 +395,9 @@ def _persist_hook_failure(
                 is_batch=is_batch,
             )
     except Exception:
-        if chain not in _hook_failure_drop_warned:
-            _hook_failure_drop_warned.add(chain)
+        key = (chain, hook_name)
+        if key not in _hook_failure_drop_warned:
+            _hook_failure_drop_warned.add(key)
             _log.warning(
                 "hook_failure_persist_dropped",
                 chain=chain,

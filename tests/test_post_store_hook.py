@@ -326,7 +326,7 @@ def test_record_batch_hook_failure_transient_store_error_is_swallowed(
     migrate_hook_failures_batch_columns(conn)
     conn.close()
 
-    hr._hook_failure_drop_warned.discard("batch")
+    hr._hook_failure_drop_warned.discard(("batch", "probe"))
 
     class _LockingTelemetry:
         def record_hook_failure(self, **kwargs):
@@ -348,7 +348,7 @@ def test_record_batch_hook_failure_transient_store_error_is_swallowed(
         hook_name="probe",
         error="boom",
     )
-    assert "batch" in hr._hook_failure_drop_warned
+    assert ("batch", "probe") in hr._hook_failure_drop_warned
 
     # No degraded row written.
     real = sqlite3.connect(str(db_path))

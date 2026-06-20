@@ -221,7 +221,7 @@ def test_fire_document_persist_swallowed_when_store_raises(
     import nexus.mcp_infra as mod
     from contextlib import contextmanager
 
-    hr._hook_failure_drop_warned.discard("document")
+    hr._hook_failure_drop_warned.discard(("document", "bad"))
 
     class _BoomTelemetry:
         def record_hook_failure(self, **kwargs):
@@ -242,7 +242,7 @@ def test_fire_document_persist_swallowed_when_store_raises(
     registry = HookRegistry()
     registry.register_document(bad)
     registry.fire_document("/path/z.md", "knowledge__delos", "x")  # must not raise
-    assert "document" in hr._hook_failure_drop_warned
+    assert ("document", "bad") in hr._hook_failure_drop_warned
 
 
 def test_fire_document_persist_failure_is_best_effort(

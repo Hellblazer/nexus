@@ -509,6 +509,16 @@ def _scan_file_full(
     # Epsilon-allow on the same line marks a documented survivor (a raw access
     # inside a storage_backend_for-guarded SQLite-only branch the AST can't
     # see). The allowlist (db/ + daemon/) is applied by scan_repo.
+    #
+    # KNOWN BLIND SPOT (nexus-9613q review M3): this matches only the literal
+    # two-level chain. It does NOT catch an aliased access (``s = db.taxonomy;
+    # s.conn``), a parameter-threaded access (``def f(store): store.conn``), or
+    # ``getattr(db.taxonomy, "conn")``. Resolving those needs dataflow, which
+    # the storage-boundary lints deliberately avoid (cf. the taxonomy-WRITE
+    # lint's same documented non-goal). The baseline=0 therefore guards the
+    # idiomatic chain form; a deliberately-obfuscated alias can still evade it.
+    # The fail-loud RawHandleGuardMixin (nexus-9613q.2) is the runtime backstop
+    # for whatever the static lint misses.
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)

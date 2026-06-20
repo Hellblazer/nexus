@@ -175,6 +175,12 @@ def _default_projection_rank_fn(cols: list[str]) -> dict[str, int]:
         return {}
     try:
         from nexus.db.storage_mode import has_raw_access
+        # nexus-9613q.4: this is a diagnostic ENRICHMENT column, so silent
+        # degrade-to-empty in service mode is the right contract (the display
+        # renders absence). Contrast merge_candidates, whose raw-taxonomy read
+        # IS the command's primary output, so it returns an explicit
+        # "unavailable in service mode" message instead. Do not "fix" this into
+        # a message without also revisiting that asymmetry.
         if not has_raw_access(t2.taxonomy):
             return {}  # service mode: projection-rank display unavailable
         conn = t2.taxonomy.conn  # epsilon-allow: guarded by has_raw_access above (service-mode skip)

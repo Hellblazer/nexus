@@ -44,6 +44,7 @@ DEFAULT_TENANT: str = "default"
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
 from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 
 
 def _body_to_queue_row(body: dict[str, Any]) -> QueueRow:
@@ -56,8 +57,6 @@ def _body_to_queue_row(body: dict[str, Any]) -> QueueRow:
         doc_id=body.get("doc_id", "") or "",
     )
 
-
-from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 
 class HttpAspectQueue(RawHandleGuardMixin):
     """AspectExtractionQueue drop-in that delegates to the RDR-152 Java HTTP service.
