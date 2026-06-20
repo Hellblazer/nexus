@@ -180,6 +180,20 @@ def storage_backend_for(store: str) -> StorageBackend:
     return StorageBackend.SERVICE
 
 
+def has_raw_access(store: object) -> bool:
+    """Return True when *store* is a raw-SQLite T2 store (``.conn`` + ``._lock``).
+
+    Returns False for the ``Http*Store`` service-backed variants, which expose
+    no raw cursor or lock. Consumers that need aggregate SELECTs not on the
+    public store API must guard with this and skip / degrade gracefully in
+    service mode rather than crash on the missing attribute (nexus-9613q.4;
+    mirrors the ``commands.taxonomy_cmd._has_raw_access`` exemplar). Order
+    matters: only ``AttributeError`` makes ``hasattr`` return False, so a
+    guard property must raise ``AttributeError`` for this to hold.
+    """
+    return hasattr(store, "conn") and hasattr(store, "_lock")
+
+
 def _parse_backend(raw: str, env_key: str) -> StorageBackend:
     """Validate *raw* and return the corresponding :class:`StorageBackend`.
 

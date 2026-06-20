@@ -174,7 +174,10 @@ def _default_projection_rank_fn(cols: list[str]) -> dict[str, int]:
     if t2 is None:
         return {}
     try:
-        conn = t2.taxonomy.conn
+        from nexus.db.storage_mode import has_raw_access
+        if not has_raw_access(t2.taxonomy):
+            return {}  # service mode: projection-rank display unavailable
+        conn = t2.taxonomy.conn  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
         rows = conn.execute(
             "SELECT t.collection AS col, "
             "COUNT(DISTINCT ta.source_collection) AS src_count "
@@ -204,7 +207,10 @@ def _default_hub_score_fn(col: str) -> float | None:
     if t2 is None:
         return None
     try:
-        conn = t2.taxonomy.conn
+        from nexus.db.storage_mode import has_raw_access
+        if not has_raw_access(t2.taxonomy):
+            return None  # service mode: hub-score display unavailable
+        conn = t2.taxonomy.conn  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
         # Top-10 hubs: topics whose assignments span the most distinct
         # source collections. Ranks deterministically by
         # ``(src_count DESC, topic_id ASC)``.

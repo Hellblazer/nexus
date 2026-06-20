@@ -184,13 +184,14 @@ T2_RAW_HANDLE_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "src/nexus/daemon/",
 )
 
-#: nexus-9613q.1: baseline for un-annotated ``<x>.<t2_store>.conn|._lock``
-#: accesses outside db/ + daemon/. Seeded at the offender count that survives
-#: epsilon-allow annotation of the storage_backend_for-guarded sites
-#: (aspect_promotion.py, operators/aspect_sql.py). Ratchets to 0 as
-#: nexus-9613q.3 (hook_registry) and nexus-9613q.4 (collection_health /
-#: collection_audit / merge_candidates) land in this branch.
-T2_RAW_HANDLE_BASELINE: int = 12
+#: nexus-9613q: baseline for un-annotated ``<x>.<t2_store>.conn|._lock``
+#: accesses outside db/ + daemon/. Now 0 (ENFORCED): every raw access in
+#: consumer code is either routed through a store method (nexus-9613q.3
+#: hook_registry → telemetry store) or guarded by ``has_raw_access`` /
+#: ``storage_backend_for`` with a ``# epsilon-allow:`` documenting the guard.
+#: A new un-annotated raw reach trips the baseline assertion and must either
+#: route, guard+annotate, or justify with an epsilon-allow reason.
+T2_RAW_HANDLE_BASELINE: int = 0
 
 
 #: Banned call sites. Each entry is ``(module, attribute)`` matched
