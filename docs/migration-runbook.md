@@ -190,8 +190,10 @@ Check, in order:
 - No stale-binary warning (running binary differs from the installed
   provenance sidecar). Install the intended binary first via
   `nx daemon service install-binary <engine-service-vX.Y.Z>` (RDR-161: the
-  native binary is the sole launch artifact; the legacy `java -jar` path and
-  its schema-skew gate are expunged).
+  cosign-verified native binary is the production launch artifact). For local
+  dev/test on a host without a native binary, set `NEXUS_SERVICE_JAR` to a
+  built `nexus-service-*.jar` — an explicit, never-auto-discovered opt-in that
+  launches the JVM and is logged as UNVERIFIED (RDR-161 amendment, 2026-06-20).
 
 The T2 ladder commands read the service endpoint from the environment
 (`NX_SERVICE_PORT` + `NX_SERVICE_TOKEN` are required; the per-store
