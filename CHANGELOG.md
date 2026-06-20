@@ -6,6 +6,60 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Target: **6.0.0** — the migration-capable release. The storage substrate moves
+from ChromaDB to Postgres 16 + pgvector behind a native service, and
+`nx guided-upgrade` is the one-command, validated, rollback-safe path that
+carries an existing install across. This is the first of a two-release
+deprecation window: this release ships both the new substrate **and** the
+migration tool; the Chroma source remains the immutable migration origin
+(copy-not-move) and is removed only in the following release.
+
+### Changed (BREAKING)
+
+- **Permanent vector storage (T3) moves from ChromaDB to Postgres 16 + pgvector
+  behind the native nexus-service (RDR-155).** The direct-Chroma serving paths
+  are retired; search/store now route through the service stack. An installed
+  user MUST migrate their existing Chroma data — `nx guided-upgrade` does this in
+  one command. Chroma is kept intact as the migration **source** (copy-not-move)
+  and is not read for serving.
+
+### Added
+
+- **`nx guided-upgrade` (RDR-002): one command from a pre-upgrade install to a
+  migrated service stack.** Detects the legacy footprint, provisions and starts
+  the engine-service, version-pins it (`/version` `release_version >= v0.1.6`),
+  bounded health-gates it, then drives `migrate-to-service` (detect → ETL →
+  validate → unlock) with taxonomy ref-remap and copy-not-move rollback safety.
+  Voyage-capability and version pre-flights fail loud **before** any migration.
+- **One-command service install (RDR-157 / RDR-161).** The native engine-service
+  binary and a relocatable PG16 + pgvector bundle are published and
+  cosign-signed; `nx daemon service install-binary <tag>` cold-acquires and
+  verifies both, and `nx init --service` provisions Postgres, fetches the bge-768
+  ONNX, and starts the service — no hand-assembly of PostgreSQL or a service JAR.
+- **engine-service version handshake.** `/version` exposes a dedicated
+  `release_version` (stamped from the release tag); nx clients pin against it.
+- Supporting substrate work: RDR-152 (Postgres + Java service + thin HTTP
+  bridge), RDR-156 (vector-store capability leverage), RDR-160 (bge-768 local
+  embedder), RDR-162 (cross-model migrate for legacy collections).
+
+### Fixed
+
+- **Relocatable PG bundle on a minimal base.** nx provisioning now points the
+  dynamic loader at the bundle's own `lib/` so the bundled `initdb`/`pg_ctl`
+  resolve `libpq.so.5` etc. on a stripped image (nexus-4mm24; the durable
+  RPATH-in-bundle-build fix is tracked separately).
+
+### Known limitations / upgrade notes
+
+- **Cloud (managed) embedding is server-side** with the operator's Voyage key;
+  tenants supply only `NX_SERVICE_TOKEN`, never a Voyage key (no per-tenant key).
+- **The macOS engine-service binary is ad-hoc signed** (not Developer-ID /
+  notarized). It runs via `nx daemon service install-binary` (no quarantine); a
+  copy downloaded through a browser is Gatekeeper-blocked — clear it with
+  `xattr -d com.apple.quarantine`.
+- **`nx guided-upgrade` is idempotent but not a no-op after success** — re-running
+  re-copies at full cost (the Chroma source is intact, so it is re-detected).
+
 ## [5.10.6] - 2026-06-07
 
 Hotfix: the RDR-080 agent-replacement MCP tools regressed when Claude Code
