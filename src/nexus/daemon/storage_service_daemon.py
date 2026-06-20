@@ -12,9 +12,11 @@ logic lives in the shared primitive, not here. This module:
 2. Starts the native nexus-service binary (RDR-157 native-image; acquired via
    ``nx daemon service install-binary``) with the environment variables read
    from ``pg_credentials``, a free ``NX_SERVICE_PORT``, and process-group
-   isolation (``start_new_session=True`` / ``os.killpg`` on stop). The native
-   binary is the SOLE launch artifact — RDR-161 expunged the legacy JVM
-   launch path.
+   isolation (``start_new_session=True`` / ``os.killpg`` on stop). The
+   cosign-verified native binary is the production launch artifact (RDR-161).
+   ``NEXUS_SERVICE_JAR`` is an EXPLICIT dev/test opt-in that launches a JVM
+   (``java -jar``) instead — never auto-discovered, never a silent fallback,
+   and logged loudly as UNVERIFIED (amends RDR-161).
 3. Waits for ``GET /health`` to return HTTP 200 (richer than bare-TCP: the
    HealthHandler returns ``{"status":"ok","db":"up"}`` or ``{"status":"error",
    "db":"down"}`` with a 503 status).
@@ -54,6 +56,7 @@ import contextlib
 import errno
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -215,6 +218,84 @@ def _require_executable(p: Path, label: str) -> Path:
     return p
 
 
+def _find_service_jar() -> Path | None:
+    """Resolve an EXPLICIT, opt-in service JAR, or None.
+
+    Dev/test escape hatch amending RDR-161 (which made the cosign-signed native
+    binary the sole launch artifact). The JAR is **never auto-discovered and
+    never a silent fallback** — it launches ONLY when ``NEXUS_SERVICE_JAR`` is
+    set, preserving RDR-161's "never silently mask a missing native binary"
+    supply-chain intent. The JAR is NOT signature-verified; the caller logs
+    that loudly. Set-but-missing fails loud (an operator who named a JAR that
+    does not exist made a mistake worth surfacing).
+    """
+    override = os.environ.get("NEXUS_SERVICE_JAR", "").strip()
+    if not override:
+        return None
+    p = Path(override)
+    if p.is_file():
+        return p
+    raise StorageServiceStartError(
+        f"NEXUS_SERVICE_JAR is set to {override!r} but the file does not exist. "
+        "Point it at a built nexus-service-*.jar, or unset it to use the "
+        "installed native binary."
+    )
+
+
+def _resolve_java_executable() -> str:
+    """Return the ``java`` launcher for the JAR path, or fail loud with a remedy.
+
+    Honours ``JAVA_HOME`` (``$JAVA_HOME/bin/java``) then falls back to ``java``
+    on ``PATH``. A JAR launch with no JVM available must fail with an actionable
+    message, not a bare ``FileNotFoundError`` from ``Popen``.
+    """
+    java_home = os.environ.get("JAVA_HOME", "").strip()
+    if java_home:
+        cand = Path(java_home) / "bin" / "java"
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    found = shutil.which("java")
+    if found:
+        return found
+    raise StorageServiceStartError(
+        "NEXUS_SERVICE_JAR launch requires a Java runtime, but no 'java' was "
+        "found on PATH or via JAVA_HOME. Install a JDK (>= 21), or unset "
+        "NEXUS_SERVICE_JAR to use the native binary."
+    )
+
+
+def _resolve_launch_artifact(config_dir: Path) -> tuple[Path, str]:
+    """Resolve the service launch artifact and its kind.
+
+    Returns ``(path, kind)`` where kind is ``"jar"`` (explicit ``NEXUS_SERVICE_JAR``
+    opt-in, dev/test, UNVERIFIED) or ``"native"`` (the RDR-161 cosign-verified
+    binary, the production default). The JAR is checked first ONLY because it is
+    an explicit override; with it unset the native binary is the sole path.
+    """
+    jar = _find_service_jar()
+    if jar is not None:
+        _log.warning(
+            "storage_service_jar_launch",
+            jar=str(jar),
+            verified=False,
+            note="launching the UNVERIFIED dev/test JAR via NEXUS_SERVICE_JAR, "
+                 "not the cosign-signed native binary (RDR-161). For production "
+                 "use the installed native binary.",
+        )
+        return jar, "jar"
+    binary = _find_service_binary(config_dir)
+    if binary is None:
+        raise StorageServiceStartError(
+            "No nexus-service launch artifact found. Acquire the signed native "
+            "binary:\n"
+            "  nx daemon service install-binary <engine-service tag>\n"
+            "or point NEXUS_SERVICE_BIN at a built native binary. For local "
+            "dev/test you may instead set NEXUS_SERVICE_JAR to a built "
+            "nexus-service-*.jar (unverified; requires a JVM)."
+        )
+    return binary, "native"
+
+
 # ── Port helpers ───────────────────────────────────────────────────────────────
 
 
@@ -314,20 +395,31 @@ class StorageServiceSupervisor:
         service_port: int,
         creds: dict[str, str],
         binary_path: Path,
+        launch_kind: str = "native",
         lease_clock: Callable[[], float] = time.time,
         supervised: bool = False,
     ) -> None:
-        # RDR-161: the native binary is the SOLE launch artifact — the
-        # legacy JVM launch path is expunged. A missing binary is fatal here.
+        # RDR-161: the cosign-verified native binary is the production launch
+        # artifact. ``launch_kind="jar"`` is the explicit dev/test opt-in
+        # (NEXUS_SERVICE_JAR), launched via the JVM — never an auto-fallback.
         if binary_path is None:
             raise StorageServiceStartError(
-                "StorageServiceSupervisor needs a native binary to launch; "
-                "none was provided. Acquire one via "
-                "'nx daemon service install-binary <tag>'."
+                "StorageServiceSupervisor needs a launch artifact; none was "
+                "provided. Acquire the native binary via "
+                "'nx daemon service install-binary <tag>', or set "
+                "NEXUS_SERVICE_JAR for a local dev/test JVM launch."
+            )
+        if launch_kind not in ("native", "jar"):
+            raise StorageServiceStartError(
+                f"launch_kind must be 'native' or 'jar', got {launch_kind!r}."
             )
         self._config_dir = config_dir
         self._binary_path = binary_path
-        self._svc_log_name = "storage_service_native"
+        self._launch_kind = launch_kind
+        self._svc_log_name = (
+            "storage_service_jar" if launch_kind == "jar"
+            else "storage_service_native"
+        )
         self._pg_port = pg_port
         self._service_port = service_port
         self._creds = creds
@@ -436,7 +528,14 @@ class StorageServiceSupervisor:
                     hint="set VOYAGE_API_KEY or `nx config set voyage_api_key <key>`",
                 )
 
-        argv = [str(self._binary_path)]
+        # Launch artifact: native binary (argv[0] = binary) or, when explicitly
+        # opted in via NEXUS_SERVICE_JAR, the JVM (argv = java -jar <jar>). The
+        # -Xmx option below is accepted by both GraalVM native-image and the JVM.
+        if self._launch_kind == "jar":
+            java_exe = _resolve_java_executable()
+            argv = [java_exe]
+        else:
+            argv = [str(self._binary_path)]
         # nexus-lz3f2: optional max-heap bound for memory-constrained hosts
         # (e.g. the migration-rehearsal container, where an unbounded native-image
         # heap peak during bge-768 ONNX load + PG + the Python supervisor tripped
@@ -455,6 +554,11 @@ class StorageServiceSupervisor:
                     "(expected e.g. '512m', '1g', '2048k')."
                 )
             argv.append(f"-Xmx{max_heap}")
+        # JVM launch: the runnable artifact follows as `-jar <jar>` (after any
+        # -Xmx, which the JVM requires before -jar). Native: argv[0] is already
+        # the binary.
+        if self._launch_kind == "jar":
+            argv += ["-jar", str(self._binary_path)]
         artifact = str(self._binary_path)
         # nexus-ovbr7: route both streams to one file so interleaved output keeps
         # its order; O_APPEND means a respawn never truncates the previous
@@ -481,6 +585,8 @@ class StorageServiceSupervisor:
             pid=proc.pid,
             port=port,
             artifact=artifact,
+            launch_kind=self._launch_kind,
+            verified=self._launch_kind == "native",
             service_log=getattr(svc_log, "name", "DEVNULL"),
         )
         return proc, port
@@ -930,21 +1036,6 @@ def _load_credentials(config_dir: Path) -> dict[str, str]:
     return creds
 
 
-def _require_service_binary(config_dir: Path) -> Path:
-    """Resolve the native service binary or fail loud (RDR-161 native-only).
-
-    There is no legacy JVM fallback: a missing binary means the service was
-    never acquired. Direct the operator at the install verb.
-    """
-    binary_path = _find_service_binary(config_dir)
-    if binary_path is None:
-        raise StorageServiceStartError(
-            "No nexus-service native binary found. Acquire one:\n"
-            "  nx daemon service install-binary <engine-service tag>\n"
-            "  (installs to the well-known location under the config dir),\n"
-            "or point NEXUS_SERVICE_BIN at a built native binary."
-        )
-    return binary_path
 
 
 def start_storage_service(
@@ -972,11 +1063,12 @@ def start_storage_service(
         )
     pg_port = int(pg_port_str)
 
-    binary_path = _require_service_binary(config_dir)
+    binary_path, launch_kind = _resolve_launch_artifact(config_dir)
 
     sup = StorageServiceSupervisor(
         config_dir=config_dir,
         binary_path=binary_path,
+        launch_kind=launch_kind,
         pg_port=pg_port,
         service_port=0,  # allocated inside start()
         creds=creds,
@@ -1041,12 +1133,13 @@ def run_storage_supervisor(
         )
     pg_port = int(pg_port_str)
 
-    binary_path = _require_service_binary(config_dir)
+    binary_path, launch_kind = _resolve_launch_artifact(config_dir)
 
     _log.info(
         "storage_service_supervisor_started",
         pid=os.getpid(),
         artifact=str(binary_path),
+        launch_kind=launch_kind,
         pg_port=pg_port,
         config_dir=str(config_dir),
     )
@@ -1054,6 +1147,7 @@ def run_storage_supervisor(
     sup = StorageServiceSupervisor(
         config_dir=config_dir,
         binary_path=binary_path,
+        launch_kind=launch_kind,
         pg_port=pg_port,
         service_port=0,
         creds=creds,

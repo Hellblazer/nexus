@@ -297,3 +297,33 @@ gate (substantive-critic, 2026-06-18); retained here as the audit trail:
 - Phase 2 carries the `_select_bundled_pg` search-dir bug fix plus a published-bundle
   round-trip test, alongside the publish job + acquire seam.
 - One platform convention (`current_platform_tag()`) spans binary + PG bundle.
+
+## Amendment (2026-06-20): explicit dev/test JAR opt-in (bead nexus follow-on)
+
+The native-only decision held one assumption that bit local development: a host
+without a native binary for its platform (e.g. a darwin dev box where only the
+Linux native binary and the shaded JAR are built) cannot run
+`nx daemon service start` at all, which blocked local live testing (surfaced by
+the 2026-06-20 taxonomy service smoke).
+
+**Amendment, not reversal.** `StorageServiceSupervisor` now accepts an
+**explicit, opt-in** JAR launch via `NEXUS_SERVICE_JAR`
+(`_resolve_launch_artifact` → `launch_kind="jar"`,
+`argv = [java, -Xmx?, -jar, <jar>]` with a `java`-on-PATH guard). It preserves
+every load-bearing property of the original decision:
+
+- **No auto-discovery, no silent fallback.** The JAR launches ONLY when
+  `NEXUS_SERVICE_JAR` is set. With it unset the native binary is still the sole
+  path; a missing native binary still fails loud. The "never silently mask a
+  missing native binary" supply-chain intent is intact.
+- **Native stays the production default and the only verified path.** The JAR is
+  NOT signature-verified; the supervisor logs the launch loudly as
+  `storage_service_jar_launch … verified=False` and stamps `launch_kind` on the
+  spawn record so status/logs show which artifact ran.
+- **The install + release path is unchanged.** Releases still ship only the
+  cosign-signed native binary + signatures; `install-binary` is untouched.
+
+The JVM path RDR-161 *expunged* was the auto-fallback dual-mode (`_launch_mode`,
+JVM heartbeat, `service install-jar`, two provenance shapes). That stays gone.
+This amendment adds back only a single, explicit, transparent escape hatch for
+local dev/test.
