@@ -211,6 +211,20 @@ class HttpCatalogClient:
             return []
         return [_to_entry(d) for d in result.get("documents", []) if d.get("tumbler")]
 
+    def delete_collection(self, name: str) -> dict[str, int]:
+        """RDR-164 P2: atomically delete a collection + all its in-Postgres
+        derived state via the service's single transactional deleteCollection.
+
+        Returns the per-table deleted-row count map (``chunks_384``,
+        ``chash_index``, ``topic_assignments``, ``topics``,
+        ``taxonomy_centroids_*``, ``document_aspects``, ``document_highlights``,
+        ``aspect_extraction_queue``, ``catalog_documents``,
+        ``catalog_collections``). ``pipeline.db`` and the local-mode cascade
+        stay client-side (see ``purge_collection_cascade``).
+        """
+        result = self._post("/collections/delete", {"name": name})
+        return (result or {}).get("deleted", {}) or {}
+
     # ══════════════════════════════════════════════════════════════════════════
     # OWNERS
     # ══════════════════════════════════════════════════════════════════════════

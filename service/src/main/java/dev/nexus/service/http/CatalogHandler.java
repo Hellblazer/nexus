@@ -55,6 +55,7 @@ import java.util.*;
  *   GET   /v1/catalog/collections/get    get collection by name
  *   POST  /v1/catalog/collections/supersede supersede collection
  *   POST  /v1/catalog/collections/rename rename collection (cascade)
+ *   POST  /v1/catalog/collections/delete delete collection + cascade all in-PG lifecycle state (RDR-164 P2)
  *   GET   /v1/catalog/coverage            link coverage by content type (nexus-3cwnx)
  *   POST  /v1/catalog/import/owner       ETL import owner
  *   POST  /v1/catalog/import/document    ETL import document
@@ -144,6 +145,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/collections/get"       -> handleCollectionGet(exchange, tenant, method);
                 case "/collections/supersede" -> handleCollectionSupersede(exchange, tenant, method);
                 case "/collections/rename"    -> handleCollectionRename(exchange, tenant, method);
+                case "/collections/delete"    -> handleCollectionDelete(exchange, tenant, method);
                 case "/collections/for_tuple" -> handleCollectionForTuple(exchange, tenant, method);
                 case "/collections/health"    -> handleCollectionHealth(exchange, tenant, method);
 
@@ -645,6 +647,23 @@ public final class CatalogHandler implements HttpHandler {
         }
         Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
+    }
+
+    /**
+     * RDR-164 P2: atomically delete a collection and all its in-Postgres derived state.
+     * Returns per-table deleted-row counts so the client can preserve its CascadeCounts
+     * contract. {@code pipeline.db} and local-mode cascades remain client-side.
+     */
+    private void handleCollectionDelete(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        // Accept both "name" (canonical) and "collection" (client compat).
+        String name = body.get("name") instanceof String s ? s : (String) body.get("collection");
+        if (name == null || name.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"name (or collection) required\"}"); return;
+        }
+        Map<String, Integer> counts = repo.deleteCollection(tenant, name);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("deleted", counts)));
     }
 
     private void handleCollectionForTuple(HttpExchange exchange, String tenant, String method) throws IOException {
