@@ -691,7 +691,14 @@ def taxonomy_assign_batch_hook(
             if any(fnmatch(collection, pat) for pat in exclude):
                 return
         svc_embeddings = embeddings
-        if not svc_embeddings:
+        # nexus-reskd: re-fetch when embeddings are absent OR all-empty. The
+        # server-side-embed paths (doc_indexer / streaming PDF) pass
+        # ``[[], [], ...]`` placeholders — a non-empty OUTER list, so the old
+        # ``if not svc_embeddings`` was False and zero-dim vectors reached
+        # compute_assignments, silently producing no taxonomy assignments.
+        # ``not any(...)`` catches the all-empty-inner case; the ``not
+        # svc_embeddings`` short-circuit guards None / [] (any(None) raises).
+        if not svc_embeddings or not any(svc_embeddings):
             try:
                 arr = get_t3().get_embeddings(collection, doc_ids)
             except Exception:

@@ -710,14 +710,21 @@ def migrate_hook_failures_batch_columns(conn: sqlite3.Connection) -> None:
     if row is None:
         return
     cols = {r[1] for r in conn.execute("PRAGMA table_info(hook_failures)").fetchall()}
+    changed = False
     if "batch_doc_ids" not in cols:
         conn.execute("ALTER TABLE hook_failures ADD COLUMN batch_doc_ids TEXT")
+        changed = True
     if "is_batch" not in cols:
         conn.execute(
             "ALTER TABLE hook_failures ADD COLUMN is_batch INTEGER NOT NULL DEFAULT 0"
         )
-    conn.commit()
-    _log.info("Migrated: hook_failures.batch_doc_ids + is_batch (RDR-095)")
+        changed = True
+    # Commit + log only on an actual schema change: record_hook_failure calls
+    # this on every write, so an unconditional commit/log would spam the
+    # structured log with spurious "Migrated" events (nexus-9613q review H1).
+    if changed:
+        conn.commit()
+        _log.info("Migrated: hook_failures.batch_doc_ids + is_batch (RDR-095)")
 
 
 def migrate_hook_failures_chain_column(conn: sqlite3.Connection) -> None:
@@ -765,8 +772,11 @@ def migrate_hook_failures_chain_column(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE hook_failures SET chain='batch' WHERE is_batch=1"
             )
-    conn.commit()
-    _log.info("Migrated: hook_failures.chain enum column (RDR-089)")
+        # Commit + log only on an actual schema change: record_hook_failure
+        # calls this on every write, so an unconditional commit/log would spam
+        # the structured log with spurious "Migrated" events (nexus-9613q H1).
+        conn.commit()
+        _log.info("Migrated: hook_failures.chain enum column (RDR-089)")
 
 
 def migrate_document_aspects_table(conn: sqlite3.Connection) -> None:

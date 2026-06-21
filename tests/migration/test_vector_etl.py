@@ -1023,15 +1023,25 @@ def vec_etl_service(vec_etl_pg_instance):
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_VOYAGE_API_KEY", None)
 
+    # nexus-o06g4: write the JAR's startup output to a FILE, not undrained
+    # PIPEs. With stdout/stderr=PIPE and nobody draining them, the JAR's
+    # ~120-changeset Liquibase + Helidon boot output fills the 64KB pipe
+    # buffer, the JVM BLOCKS on write, never finishes startup, and never binds
+    # the port — _wait_tcp then times out (the real cause of the integration-run
+    # failures, NOT a too-short timeout). The production launcher
+    # (storage_service_daemon) redirects to log files for exactly this reason.
+    import tempfile
+    log_path = os.path.join(tempfile.gettempdir(), f"nexus-svc-vecetl-{svc_port}.log")
+    log_fh = open(log_path, "wb")
     proc = subprocess.Popen(
         [str(_JAVA), "-jar", str(_JAR)],
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=40.0)
+        _wait_tcp("127.0.0.1", svc_port, timeout=180.0)
         yield f"http://127.0.0.1:{svc_port}", token, proc
     finally:
         try:
@@ -1099,7 +1109,7 @@ class TestVectorEtlIntegration:
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlint1")
+        name = _coll("etlint1", model=_MODEL_768)
         store, ids, texts = _make_local_store(tmp_path, name, 5)
 
         report = migrate_local(store, vec_etl_vector_client)
@@ -1110,25 +1120,25 @@ class TestVectorEtlIntegration:
 
         # (a) exact row count, direct SQL.
         rows = _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert rows == ["5"]
         # (b) chash verbatim — pgvector chash set == source Chroma id set.
         chashes = _psql_rows(
-            pg, f"SELECT chash FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT chash FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert sorted(chashes) == sorted(ids)
         # (b) text byte-identical for a spot chunk.
         text = _psql_rows(
             pg,
-            "SELECT chunk_text FROM nexus.chunks_384"
+            "SELECT chunk_text FROM nexus.chunks_768"
             f" WHERE collection = '{name}' AND chash = '{ids[3]}'",
         )
         assert text == [texts[3]]
         # Collection name verbatim and tenant stamping.
         tenants = _psql_rows(
             pg,
-            "SELECT DISTINCT tenant_id FROM nexus.chunks_384"
+            "SELECT DISTINCT tenant_id FROM nexus.chunks_768"
             f" WHERE collection = '{name}'",
         )
         assert tenants == ["default"]
@@ -1137,16 +1147,16 @@ class TestVectorEtlIntegration:
         # float values.
         dims = _psql_rows(
             pg,
-            "SELECT DISTINCT vector_dims(embedding) FROM nexus.chunks_384"
+            "SELECT DISTINCT vector_dims(embedding) FROM nexus.chunks_768"
             f" WHERE collection = '{name}'",
         )
-        assert dims == ["384"]
+        assert dims == ["768"]
 
     def test_second_run_is_idempotent(
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlint2")
+        name = _coll("etlint2", model=_MODEL_768)
         store, _, _ = _make_local_store(tmp_path, name, 4)
 
         first = migrate_local(store, vec_etl_vector_client)
@@ -1155,14 +1165,14 @@ class TestVectorEtlIntegration:
         assert first.ok is True
         assert second.ok is True
         rows = _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert rows == ["4"]
 
     def test_copy_not_move_source_store_intact(
         self, vec_etl_vector_client, tmp_path
     ) -> None:
-        name = _coll("etlint3")
+        name = _coll("etlint3", model=_MODEL_768)
         store, ids, texts = _make_local_store(tmp_path, name, 3)
 
         migrate_local(store, vec_etl_vector_client)
@@ -1178,11 +1188,11 @@ class TestVectorEtlIntegration:
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlint4")
+        name = _coll("etlint4", model=_MODEL_768)
         store, _, _ = _make_local_store(tmp_path, name, 6)
         migrate_local(store, vec_etl_vector_client)
         assert _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         ) == ["6"]
 
         from nexus.migration.chroma_read import open_local_read_client
@@ -1193,7 +1203,7 @@ class TestVectorEtlIntegration:
 
         assert deleted == {name: 6}
         assert _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         ) == ["0"]
         client = chromadb.PersistentClient(path=str(store))
         assert client.get_collection(name).count() == 6
@@ -1211,14 +1221,21 @@ class TestManifestFkIntegration:
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlmanifest")
+        # nexus-l84aj: the MIGRATED collection is bge-768 (the service only
+        # embeds bge-768 since RDR-160). The cross-dim 384 collection is
+        # inserted via DIRECT SQL (not migrated) so the 384/768 orphan-scoping
+        # isolation stays non-vacuous.
+        name = _coll("etlmanifest", model=_MODEL_768)
+        name384 = f"docs__etlv__{_MODEL_384}__v1"
         store, ids, _ = _make_local_store(tmp_path, name, 5)
         try:
-            self._run_manifest_flow(pg, name, ids, store, vec_etl_vector_client)
+            self._run_manifest_flow(
+                pg, name, name384, ids, store, vec_etl_vector_client
+            )
         finally:
-            # The PG instance is module-scoped: clear the seeded catalog +
-            # 768-lane rows so the deliberate orphan cannot leak into any
-            # test added to this module later.
+            # The PG instance is module-scoped: clear the seeded catalog + both
+            # the migrated 768 rows and the direct-SQL 384 rows so the
+            # deliberate orphan cannot leak into a later test in this module.
             _psql_exec(
                 pg,
                 "DELETE FROM nexus.catalog_document_chunks"
@@ -1227,11 +1244,12 @@ class TestManifestFkIntegration:
                 " WHERE tumbler IN ('9000.1', '9000.2');"
                 " DELETE FROM nexus.catalog_owners"
                 " WHERE tumbler_prefix = '9000';"
-                " DELETE FROM nexus.chunks_768"
-                f" WHERE collection = 'docs__etlv__{_MODEL_768}__v1'",
+                f" DELETE FROM nexus.chunks_768 WHERE collection = '{name}';"
+                f" DELETE FROM nexus.chunks_384 WHERE collection = '{name384}';"
+                f" DELETE FROM nexus.catalog_collections WHERE name = '{name384}'",
             )
 
-    def _run_manifest_flow(self, pg, name, ids, store, vec_etl_vector_client) -> None:
+    def _run_manifest_flow(self, pg, name, name384, ids, store, vec_etl_vector_client) -> None:
         # Manifest fixture: owner -> document (physical_collection = the
         # migrated collection) -> 5 chunk rows, collection NOT yet
         # backfilled (NULL — the pre-Phase-5 state).
@@ -1266,39 +1284,48 @@ class TestManifestFkIntegration:
         )
         assert backfilled == ["5"]
 
-        # Clean state: zero orphans at 384.
-        assert _psql_rows(pg, manifest_orphan_sql(384)) == []
+        # Clean state: zero orphans at 768 (the migrated bge-768 dim).
+        assert _psql_rows(pg, manifest_orphan_sql(768)) == []
 
-        # Cross-dim scoping: a 768-collection manifest row resolved by a
-        # chunks_768 row must NOT appear as a 384 orphan (and is clean at
-        # its own dim).
-        name768 = f"docs__etlv__{_MODEL_768}__v1"
-        chash768 = _chash("a 768-lane chunk")
-        vec768 = "[" + ",".join(["0"] * 768) + "]"
+        # Cross-dim scoping: a 384-collection manifest row resolved by a
+        # chunks_384 row must NOT appear as a 768 orphan (and is clean at its
+        # own dim). The 384 lane is seeded by DIRECT SQL — the bge-768 service
+        # cannot embed a 384 collection (nexus-l84aj).
+        chash384 = _chash("a 384-lane chunk")
+        vec384 = "[" + ",".join(["0"] * 384) + "]"
+        # chunks_384 has an FK on (tenant_id, collection) -> catalog_collections.
+        # The migrated bge-768 collection's registry row is created by the
+        # service; the direct-SQL 384 lane needs it stamped manually.
+        _psql_exec(
+            pg,
+            "INSERT INTO nexus.catalog_collections (tenant_id, name)"
+            f" VALUES ('default', '{name384}')",
+        )
         _psql_exec(
             pg,
             "INSERT INTO nexus.catalog_documents"
             " (tenant_id, tumbler, title, physical_collection)"
-            f" VALUES ('default', '9000.2', 'ETL Doc 768', '{name768}')",
+            f" VALUES ('default', '9000.2', 'ETL Doc 384', '{name384}')",
         )
         _psql_exec(
             pg,
             "INSERT INTO nexus.catalog_document_chunks"
             " (tenant_id, doc_id, position, chash, collection)"
-            f" VALUES ('default', '9000.2', 0, '{chash768}', '{name768}')",
+            f" VALUES ('default', '9000.2', 0, '{chash384}', '{name384}')",
         )
         _psql_exec(
             pg,
-            "INSERT INTO nexus.chunks_768"
+            "INSERT INTO nexus.chunks_384"
             " (tenant_id, collection, chash, chunk_text, embedding)"
-            f" VALUES ('default', '{name768}', '{chash768}',"
-            f" 'a 768-lane chunk', '{vec768}')",
+            f" VALUES ('default', '{name384}', '{chash384}',"
+            f" 'a 384-lane chunk', '{vec384}')",
         )
-        assert _psql_rows(pg, manifest_orphan_sql(384)) == []
         assert _psql_rows(pg, manifest_orphan_sql(768)) == []
+        assert _psql_rows(pg, manifest_orphan_sql(384)) == []
 
         # Deliberate orphan: a manifest row whose chash was never migrated
-        # MUST be detected (non-vacuous validation).
+        # MUST be detected (non-vacuous validation) — in the migrated bge-768
+        # collection, so it surfaces at dim 768.
         bogus = "feedfacefeedfacefeedfacefeedface"
         _psql_exec(
             pg,
@@ -1306,9 +1333,26 @@ class TestManifestFkIntegration:
             " (tenant_id, doc_id, position, chash, collection)"
             f" VALUES ('default', '9000.1', 99, '{bogus}', '{name}')",
         )
-        orphans = _psql_rows(pg, manifest_orphan_sql(384))
+        orphans = _psql_rows(pg, manifest_orphan_sql(768))
         assert len(orphans) == 1
         assert bogus in orphans[0]
+
+        # Symmetric true-positive (review): a never-migrated chash in the 384
+        # lane MUST be detected at dim 384 — proving 384 orphan detection is
+        # non-vacuous (the other half of cross-dim scoping), not just that 384
+        # ignores 768-lane rows.
+        bogus384 = "0123456789abcdef0123456789abcdef"
+        _psql_exec(
+            pg,
+            "INSERT INTO nexus.catalog_document_chunks"
+            " (tenant_id, doc_id, position, chash, collection)"
+            f" VALUES ('default', '9000.2', 99, '{bogus384}', '{name384}')",
+        )
+        orphans384 = _psql_rows(pg, manifest_orphan_sql(384))
+        assert len(orphans384) == 1
+        assert bogus384 in orphans384[0]
+        # And each dim's query still surfaces only its own lane's orphan.
+        assert len(_psql_rows(pg, manifest_orphan_sql(768))) == 1
 
 
 @pytest.mark.integration
@@ -1320,8 +1364,8 @@ class TestTaxonomyConsistencyIntegration:
         """(d) against the real service: assignments pointing at the
         migrated collection resolve; a never-migrated collection is
         reported as exactly the unresolved set."""
-        name = _coll("etltaxint")
-        ghost = _coll("etltaxint-ghost")
+        name = _coll("etltaxint", model=_MODEL_768)
+        ghost = _coll("etltaxint-ghost", model=_MODEL_768)
         store, _, _ = _make_local_store(tmp_path, name, 3)
         migrate_local(store, vec_etl_vector_client)
 

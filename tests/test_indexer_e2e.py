@@ -97,6 +97,19 @@ def registry(tmp_path: Path, mini_repo: Path) -> RepoRegistry:
 
 
 @pytest.fixture(autouse=True)
+def _legacy_vector_backend(monkeypatch):
+    # nexus-o06g4: these e2e tests wire a raw-Chroma EphemeralClient ``local_t3``
+    # + ``mock_voyage_client`` and exercise the CLIENT-embed indexing path. Pin
+    # the vector backend off the 6.0 service default (is_vector_service_mode()
+    # is True by default since RDR-155 P4a) so the indexer client-embeds into
+    # the fixture instead of passing empty server-side-embed placeholders that
+    # raw chromadb rejects with "IndexError: list index out of range in upsert"
+    # (normalize_insert_record_set). The service-mode indexing path is covered
+    # by the unit seam-B tests + the live service smokes, not here.
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
+
+
+@pytest.fixture(autouse=True)
 def mock_voyage_client():
     ef = DefaultEmbeddingFunction()
     mock_client = MagicMock()

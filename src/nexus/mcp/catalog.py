@@ -439,10 +439,18 @@ def catalog_links(
         t, err = _resolve_tumbler_mcp(cat, tumbler)
         if err:
             return {"error": err}
-        result = cat.graph(t, depth=depth, direction=direction, link_type=link_type)
+        # nexus-qtj24: normalize to the plural ``link_types`` both backends
+        # accept. HttpCatalogClient.graph is keyword-only and has NO singular
+        # ``link_type`` param, so the old ``link_type=`` kwarg raised TypeError
+        # in service mode (swallowed into {"error": ...}).
+        link_types = [link_type] if link_type else None
+        result = cat.graph(t, depth=depth, direction=direction, link_types=link_types)
+        # nexus-qtj24: nodes/edges are CatalogEntry/CatalogLink objects on the
+        # SQLite path but plain dicts from the service /traverse path — guard
+        # .to_dict() (mirrors catalog_link_query).
         return {
-            "nodes": [n.to_dict() for n in result["nodes"]],
-            "edges": [e.to_dict() for e in result["edges"]],
+            "nodes": [n if isinstance(n, dict) else n.to_dict() for n in result["nodes"]],
+            "edges": [e if isinstance(e, dict) else e.to_dict() for e in result["edges"]],
         }
     except Exception as e:
         return {"error": str(e)}

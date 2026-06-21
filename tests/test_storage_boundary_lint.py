@@ -967,3 +967,145 @@ def test_catalog_db_access_metric_dict_includes_field():
 
     r = LintResult(catalog_db_accesses=7)
     assert r.as_metric_dict()["catalog_db_accesses"] == 7
+
+
+# ---------------------------------------------------------------------------
+# nexus-9613q.1 (Part 2 of nexus-pyzk7): T2 raw-handle .conn/._lock access lint.
+#
+# A consumer that reaches ``<x>.<t2_store>.conn`` or ``<x>.<t2_store>._lock``
+# (store ∈ taxonomy, document_aspects, telemetry, memory, plans, chash_index,
+# aspect_queue, document_highlights) assumes a raw SQLite handle. In service
+# mode (the 6.0 default) that store resolves to an Http*Store with no ``.conn``
+# / ``._lock`` — the access raises AttributeError, which several call sites
+# swallow inside ``try/except``, silently dropping the operation (the exact
+# telemetry silent-loss class nexus-pyzk7 fixed). The lint counts un-annotated
+# raw-handle accesses outside src/nexus/db/ + src/nexus/daemon/ as a ratcheting
+# baseline; epsilon-allow (>= 8 char reason) marks a documented survivor (a
+# raw access inside a ``storage_backend_for(...)``-guarded SQLite-only branch
+# the AST cannot see, e.g. aspect_promotion.py / operators/aspect_sql.py).
+# ---------------------------------------------------------------------------
+
+
+def _raw_handle_check(extra_files=None, t2_raw_handle_access_allowlist_prefixes=None):
+    from nexus.storage_boundary_lint import scan_repo
+
+    return scan_repo(
+        repo_root=REPO_ROOT,
+        extra_files=extra_files,
+        t2_raw_handle_access_allowlist_prefixes=t2_raw_handle_access_allowlist_prefixes,
+    )
+
+
+def test_t2_raw_handle_conn_in_consumer_is_counted(tmp_path):
+    """``db.taxonomy.conn`` in consumer code is counted into the baseline."""
+    base = _raw_handle_check().t2_raw_handle_accesses
+    target = tmp_path / "raw_conn_consumer.py"
+    target.write_text(
+        "def bad(db):\n"
+        "    return db.taxonomy.conn.execute('SELECT 1').fetchone()\n"
+    )
+    result = _raw_handle_check(extra_files=[target])
+    assert result.t2_raw_handle_accesses == base + 1
+
+
+def test_t2_raw_handle_lock_is_counted(tmp_path):
+    """``db.document_aspects._lock`` (the ``._lock`` attr) is also counted."""
+    base = _raw_handle_check().t2_raw_handle_accesses
+    target = tmp_path / "raw_lock_consumer.py"
+    target.write_text(
+        "def bad(db):\n"
+        "    with db.document_aspects._lock:\n"
+        "        pass\n"
+    )
+    result = _raw_handle_check(extra_files=[target])
+    assert result.t2_raw_handle_accesses == base + 1
+
+
+def test_t2_raw_handle_epsilon_allow_suppresses(tmp_path):
+    """A raw-handle access tagged ``# epsilon-allow: <reason>`` is NOT counted
+    (the documented SQLite-only-branch survivor, e.g. aspect_sql.py)."""
+    base = _raw_handle_check().t2_raw_handle_accesses
+    target = tmp_path / "raw_guarded_consumer.py"
+    target.write_text(
+        "def ok(db):\n"
+        "    conn = db.taxonomy.conn  "
+        "# epsilon-allow: service handled above via storage_backend_for branch\n"
+        "    return conn\n"
+    )
+    result = _raw_handle_check(extra_files=[target])
+    assert result.t2_raw_handle_accesses == base
+
+
+def test_t2_raw_handle_non_store_attr_not_matched(tmp_path):
+    """``foo.bar.conn`` where ``bar`` is not a T2 store name must NOT match —
+    the matcher is precise to ``<x>.<t2_store>.conn|._lock`` to avoid the
+    generic-attribute-name false positive."""
+    base = _raw_handle_check().t2_raw_handle_accesses
+    target = tmp_path / "unrelated_conn.py"
+    target.write_text(
+        "def ok(client):\n"
+        "    return client.pool.conn\n"  # pool is not a T2 store
+    )
+    result = _raw_handle_check(extra_files=[target])
+    assert result.t2_raw_handle_accesses == base
+
+
+def test_t2_raw_handle_short_epsilon_reason_does_not_suppress(tmp_path):
+    """An epsilon-allow with < 8 char reason does NOT suppress — same floor."""
+    base = _raw_handle_check().t2_raw_handle_accesses
+    target = tmp_path / "raw_shortreason.py"
+    target.write_text(
+        "def bad(db):\n"
+        "    return db.taxonomy.conn  # epsilon-allow: x\n"
+    )
+    result = _raw_handle_check(extra_files=[target])
+    assert result.t2_raw_handle_accesses == base + 1
+
+
+def test_t2_raw_handle_db_and_daemon_allowlisted(tmp_path):
+    """src/nexus/db/ and src/nexus/daemon/ legitimately hold raw handles and
+    are excluded; widening the allowlist to empty must count strictly more."""
+    wide = _raw_handle_check(t2_raw_handle_access_allowlist_prefixes=())
+    narrow = _raw_handle_check()
+    assert wide.t2_raw_handle_accesses > narrow.t2_raw_handle_accesses
+
+
+def test_t2_raw_handle_never_exceeds_baseline():
+    """nexus-9613q.1: the live un-annotated raw-handle count must not exceed
+    the recorded baseline. Ratchets to 0 as .3 (hook_registry) and .4
+    (collection_health/audit/merge) land in this branch."""
+    from nexus.storage_boundary_lint import T2_RAW_HANDLE_BASELINE
+
+    result = _raw_handle_check()
+    assert result.t2_raw_handle_accesses <= T2_RAW_HANDLE_BASELINE, (
+        f"raw-handle accesses ({result.t2_raw_handle_accesses}) exceed "
+        f"baseline ({T2_RAW_HANDLE_BASELINE}): "
+        f"{[(v.file, v.line, v.symbol) for v in result.t2_raw_handle_access_sites]}"
+    )
+
+
+def test_t2_raw_handle_metric_dict_includes_field():
+    """``as_metric_dict`` must surface ``t2_raw_handle_accesses`` for T2
+    telemetry storage."""
+    from nexus.storage_boundary_lint import LintResult
+
+    r = LintResult(t2_raw_handle_accesses=5)
+    assert r.as_metric_dict()["t2_raw_handle_accesses"] == 5
+
+
+def test_t2_raw_handle_aliased_access_is_a_documented_blind_spot(tmp_path):
+    """nexus-9613q review M3: the matcher catches only the literal two-level
+    chain. An aliased access and a getattr() form are NOT counted — this test
+    PINS that known limit so the gap is explicit (documented, not silent) and a
+    future tightening that closes it will trip this test deliberately."""
+    base = _raw_handle_check().t2_raw_handle_accesses
+    target = tmp_path / "aliased_raw.py"
+    target.write_text(
+        "def via_alias(db):\n"
+        "    s = db.taxonomy\n"
+        "    return s.conn.execute('SELECT 1')\n"   # alias — not matched
+        "def via_getattr(db):\n"
+        "    return getattr(db.taxonomy, 'conn')\n"  # getattr — not matched
+    )
+    result = _raw_handle_check(extra_files=[target])
+    assert result.t2_raw_handle_accesses == base

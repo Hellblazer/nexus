@@ -77,6 +77,22 @@ _JAVA = (
 
 _HAS_VOYAGE_KEY = bool(os.environ.get("VOYAGE_API_KEY"))
 
+
+def _has_fastembed() -> bool:
+    # nexus-wrfiy: RDR-160 made the LOCAL model bge-768. The Java service embeds
+    # with the standard bge-768 ONNX; to compare, the Python side needs the
+    # bge-768 embedder, which nexus.db.local_ef provides only via fastembed (the
+    # conexus[local] extra). Without it Python falls back to minilm-384 and the
+    # parity check is meaningless (different model + dims).
+    try:
+        import fastembed  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+_HAS_FASTEMBED = _has_fastembed()
+
 _ALL_PREREQS = (
     _JAR.exists()
     and _INITDB.exists()
@@ -128,7 +144,7 @@ CORPUS = [
 # In local mode (no VOYAGE key): ALL collections → OnnxEmbedder.
 _VOYAGE_COLLECTION = "code__parity-test__voyage-code-3__v1"
 _CCE_COLLECTION    = "knowledge__parity-test__voyage-context-3__v1"
-_ONNX_COLLECTION   = "knowledge__parity-test__minilm-l6-v2-384__v1"
+_ONNX_COLLECTION   = "knowledge__parity-test__bge-base-en-v15-768__v1"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -140,7 +156,11 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _wait_tcp(host: str, port: int, timeout: float = 30.0) -> None:
+def _wait_tcp(host: str, port: int, timeout: float = 180.0) -> None:
+    # nexus-o06g4: the JAR runs ~120 Liquibase changesets + loads the bge-768
+    # ONNX at startup; 30/45s was too short on slower hosts (darwin JVM) and
+    # produced false TimeoutError "errors" in the integration run. 180s matches
+    # the observed cold-start budget (init --service ~1-2 min).
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -163,79 +183,87 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
 _BOOTSTRAP_SQL = """\
 CREATE SCHEMA IF NOT EXISTS nexus;
 DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_parity') THEN
-    CREATE ROLE svc_parity LOGIN PASSWORD 'svc_parity_pass';
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass';
   END IF;
 END $$;
-GRANT USAGE ON SCHEMA nexus TO svc_parity;
-GRANT USAGE ON SCHEMA public TO svc_parity;
--- The service runs Liquibase at startup AS this role (NX_DB_USER=svc_parity).
+GRANT USAGE ON SCHEMA nexus TO nexus_svc;
+GRANT USAGE ON SCHEMA public TO nexus_svc;
+-- The service runs Liquibase at startup AS this role (NX_DB_USER=nexus_svc).
 -- It must create the public.databasechangelog tracker, the t1 schema, and tables
 -- in the nexus schema. PostgreSQL 15+ no longer grants CREATE on public by default,
 -- so mirror the DDL grants production gives the schema-owner role (nexus_admin):
 -- pg_provision grants CREATE ON SCHEMA public + CREATE ON DATABASE to the migrator.
-GRANT CREATE ON DATABASE paritytest TO svc_parity;
-GRANT CREATE ON SCHEMA public TO svc_parity;
-GRANT CREATE ON SCHEMA nexus TO svc_parity;
+GRANT CREATE ON DATABASE paritytest TO nexus_svc;
+GRANT CREATE ON SCHEMA public TO nexus_svc;
+GRANT CREATE ON SCHEMA nexus TO nexus_svc;
 """
 
 
 # ── Module-scoped fixtures ─────────────────────────────────────────────────────
 
-@pytest.fixture(scope="module")
-def pg_instance() -> Generator[dict, None, None]:
-    """Hermetic Postgres 16 instance."""
+def _provision_pg() -> tuple[dict, str]:
+    """Provision a fresh hermetic Postgres 16 + service roles.
+
+    nexus-wrfiy: returns ``(pg_dict, pgdata)`` so each service fixture gets its
+    OWN database. The JAR bootstraps a single root service_token at startup
+    (UNIQUE idx_service_tokens_single_root); two services sharing one PG (the
+    old module-scoped ``pg_instance``) collided on it. Per-service PGs isolate
+    the bootstrap.
+    """
     pgdata  = tempfile.mkdtemp(prefix="nexus_parity_pg_")
     pg_port = _free_port()
     pglog   = os.path.join(pgdata, "pg.log")
     pg_user = os.environ["USER"]
 
-    try:
-        subprocess.run(
-            [str(_INITDB), "-D", pgdata, "--no-locale", "-E", "UTF8", "--auth=trust"],
-            check=True, capture_output=True,
+    subprocess.run(
+        [str(_INITDB), "-D", pgdata, "--no-locale", "-E", "UTF8", "--auth=trust"],
+        check=True, capture_output=True,
+    )
+    with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
+        f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
+    subprocess.run(
+        [str(_PG_CTL), "-D", pgdata, "-l", pglog,
+         "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),
+         "-U", pg_user, "paritytest"],
+        check=True, capture_output=True,
+    )
+    # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
+    subprocess.run(
+        [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
+         "-U", pg_user, "-d", "paritytest",
+         "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
+        check=True, capture_output=True,
+    )
+    proc = subprocess.run(
+        [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
+         "-U", pg_user, "-d", "paritytest",
+         "-v", "ON_ERROR_STOP=1", "-c", _BOOTSTRAP_SQL],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        _teardown_pg(pgdata)
+        raise RuntimeError(
+            f"Bootstrap SQL failed (rc={proc.returncode}):\n"
+            f"stdout={proc.stdout}\nstderr={proc.stderr}"
         )
-        with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
-            f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
-        subprocess.run(
-            [str(_PG_CTL), "-D", pgdata, "-l", pglog,
-             "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "paritytest"],
-            check=True, capture_output=True,
-        )
-        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
-        subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", "paritytest",
-             "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
-            check=True, capture_output=True,
-        )
-        proc = subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", "paritytest",
-             "-v", "ON_ERROR_STOP=1", "-c", _BOOTSTRAP_SQL],
-            capture_output=True, text=True,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"Bootstrap SQL failed (rc={proc.returncode}):\n"
-                f"stdout={proc.stdout}\nstderr={proc.stderr}"
-            )
-        yield {"port": pg_port, "dbname": "paritytest", "user": pg_user}
-    finally:
-        subprocess.run(
-            [str(_PG_CTL), "-D", pgdata, "stop", "-m", "immediate"],
-            capture_output=True,
-        )
-        shutil.rmtree(pgdata, ignore_errors=True)
+    return {"port": pg_port, "dbname": "paritytest", "user": pg_user}, pgdata
+
+
+def _teardown_pg(pgdata: str) -> None:
+    subprocess.run(
+        [str(_PG_CTL), "-D", pgdata, "stop", "-m", "immediate"],
+        capture_output=True,
+    )
+    shutil.rmtree(pgdata, ignore_errors=True)
 
 
 def _start_service(pg: dict, token: str, voyage_key: str | None = None,
-                   timeout: float = 45.0) -> tuple[subprocess.Popen, int]:
+                   timeout: float = 180.0) -> tuple[subprocess.Popen, int]:
     """Launch JAR in parity-gate mode.  Returns (proc, port)."""
     svc_port = _free_port()
     env = {
@@ -245,8 +273,21 @@ def _start_service(pg: dict, token: str, voyage_key: str | None = None,
         "NX_DB_URL": (
             f"jdbc:postgresql://127.0.0.1:{pg['port']}/{pg['dbname']}"
         ),
-        "NX_DB_USER": "svc_parity",
-        "NX_DB_PASS": "svc_parity_pass",
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
+        # nexus-o06g4: the JAR's Liquibase runs CREATE EXTENSION vector at
+        # startup, which requires a SUPERUSER. The app role nexus_svc is not
+        # one, so the service must be given an admin pool (NX_DB_ADMIN_*) for
+        # DDL — exactly as the production launcher (storage_service_daemon) and
+        # the vector-ETL fixture do. pg["user"] is the initdb bootstrap
+        # superuser; --auth=trust means no password. Without this the JAR died
+        # at boot ("permission denied to create extension vector") and never
+        # bound the port.
+        "NX_DB_ADMIN_URL": (
+            f"jdbc:postgresql://127.0.0.1:{pg['port']}/{pg['dbname']}"
+        ),
+        "NX_DB_ADMIN_USER": pg["user"],
+        "NX_DB_ADMIN_PASS": "",
         "NX_POOL_SIZE": "2",
         "NX_CHROMA_MODE": "none",
     }
@@ -258,14 +299,34 @@ def _start_service(pg: dict, token: str, voyage_key: str | None = None,
         env.pop("NX_VOYAGE_API_KEY", None)
         env.pop("VOYAGE_API_KEY", None)  # ensure local mode
 
+    # nexus-o06g4: write the JAR's startup output to a FILE, not undrained
+    # PIPEs. The service logs ~120 Liquibase changesets + Helidon startup at
+    # boot; with stdout/stderr=PIPE and nobody draining them, the 64KB pipe
+    # buffer fills, the JVM BLOCKS on write, never finishes startup, and never
+    # binds the port — so _wait_tcp always timed out (the real cause of the
+    # integration-run "TimeoutError" errors, NOT a too-short timeout). The
+    # production launcher (storage_service_daemon) redirects to log files for
+    # exactly this reason.
+    log_path = os.path.join(tempfile.gettempdir(), f"nexus-svc-parity-{svc_port}.log")
+    log_fh = open(log_path, "wb")
     proc = subprocess.Popen(
         [str(_JAVA), "-jar", str(_JAR)],
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
-    _wait_tcp("127.0.0.1", svc_port, timeout=timeout)
+    try:
+        _wait_tcp("127.0.0.1", svc_port, timeout=timeout)
+    except TimeoutError:
+        log_fh.flush()
+        try:
+            tail = open(log_path).read()[-1500:]
+        except OSError:
+            tail = "(log unavailable)"
+        raise TimeoutError(
+            f"service did not bind {svc_port} in {timeout}s; JAR log tail:\n{tail}"
+        )
     return proc, svc_port
 
 
@@ -284,38 +345,46 @@ def _stop_service(proc: subprocess.Popen) -> None:
 
 
 @pytest.fixture(scope="module")
-def cloud_service(pg_instance: dict) -> Generator[tuple[str, str], None, None]:
+def cloud_service() -> Generator[tuple[str, str], None, None]:
     """Java service in CLOUD mode (NX_VOYAGE_API_KEY set).
 
     Cloud routing:
       code__*       → VoyageEmbedder (voyage-code-3, no input_type, truncation=True)
       knowledge__*  → CceEmbedder (voyage-context-3, input_type=document, per-text)
-    Yields (base_url, token).
+    Yields (base_url, token). nexus-wrfiy: owns its PG (see _provision_pg).
     """
     if not _HAS_VOYAGE_KEY:
         pytest.skip("VOYAGE_API_KEY not set — skipping cloud service fixture")
 
+    pg, pgdata = _provision_pg()
     token = "parity-cloud-token"
-    proc, port = _start_service(pg_instance, token, voyage_key=os.environ["VOYAGE_API_KEY"])
     try:
-        yield f"http://127.0.0.1:{port}", token
+        proc, port = _start_service(pg, token, voyage_key=os.environ["VOYAGE_API_KEY"])
+        try:
+            yield f"http://127.0.0.1:{port}", token
+        finally:
+            _stop_service(proc)
     finally:
-        _stop_service(proc)
+        _teardown_pg(pgdata)
 
 
 @pytest.fixture(scope="module")
-def local_service(pg_instance: dict) -> Generator[tuple[str, str], None, None]:
+def local_service() -> Generator[tuple[str, str], None, None]:
     """Java service in LOCAL mode (NX_VOYAGE_API_KEY absent).
 
     ALL collection prefixes → OnnxEmbedder.  No cloud credentials required.
-    Yields (base_url, token).
+    Yields (base_url, token). nexus-wrfiy: owns its PG (see _provision_pg).
     """
+    pg, pgdata = _provision_pg()
     token = "parity-local-token"
-    proc, port = _start_service(pg_instance, token, voyage_key=None)
     try:
-        yield f"http://127.0.0.1:{port}", token
+        proc, port = _start_service(pg, token, voyage_key=None)
+        try:
+            yield f"http://127.0.0.1:{port}", token
+        finally:
+            _stop_service(proc)
     finally:
-        _stop_service(proc)
+        _teardown_pg(pgdata)
 
 
 def _java_embed(base_url: str, token: str, collection: str, texts: list[str]) -> list[list[float]]:
@@ -416,37 +485,42 @@ class TestEmbedParity:
 
     # ── Path 1: LOCAL ONNX ─────────────────────────────────────────────────────
 
+    @pytest.mark.skipif(
+        not _HAS_FASTEMBED,
+        reason="nexus-wrfiy: RDR-160 made the local model bge-768; the Python "
+        "parity side needs the bge-768 embedder (conexus[local]/fastembed), which "
+        "is not installed in this env. The Java side is bge-768; without fastembed "
+        "Python falls back to minilm-384 and parity is meaningless.",
+    )
     def test_onnx_parity(self, local_service: tuple[str, str]) -> None:
-        """LOCAL ONNX: Python chromadb ONNXMiniLM_L6_V2 == Java OnnxEmbedder.
+        """LOCAL bge-768: Python local EF == Java OnnxEmbedder (RDR-160).
 
-        The LOCAL-MODE service (no VOYAGE key) routes ALL collections to ONNX —
-        no unrecognized-prefix fallback needed.  Collection name is the conformant
-        ONNX collection: knowledge__parity-test__minilm-l6-v2-384__v1.
+        The LOCAL-MODE service (no VOYAGE key) routes ALL collections to the
+        bundled bge-768 ONNX. The Python side uses nexus.db.local_ef's
+        LocalEmbeddingFunction, which resolves to bge-768 when fastembed (the
+        conexus[local] extra) is installed.
 
-        Float32 bit-exact AND cosine >= 1-1e-9.
-        Note: cosine may be 1 - 2.4e-13 (float64 arithmetic on identical float32
-        unit vectors, not real drift — passes the 1e-9 threshold).
+        Cosine-only gate at 1e-4 (RDR-160 parity floor): the Java service uses
+        the standard fp32 bge ONNX while fastembed uses a fused export, so they
+        are cosine-close (>= 0.9999), not bit-exact.
         """
-        from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+        from nexus.db.local_ef import LocalEmbeddingFunction
 
         base_url, token = local_service
 
-        # Python path: chromadb ONNXMiniLM_L6_V2 (same model artifact as Java)
-        python_ef = ONNXMiniLM_L6_V2()
-        # Returns list[np.ndarray] with float32 elements
+        # Python path: nexus local EF (bge-768 via fastembed under conexus[local]).
+        python_ef = LocalEmbeddingFunction(model_name="BAAI/bge-base-en-v1.5")
         python_raw = python_ef(CORPUS)
         python_f32 = [np.array(v, dtype=np.float32) for v in python_raw]
 
-        # Java path: local-mode service → EmbedderRouter → OnnxEmbedder
-        # _ONNX_COLLECTION starts with knowledge__ — in local mode all → ONNX
+        # Java path: local-mode service → EmbedderRouter → bge-768 OnnxEmbedder.
         java_vecs = _java_embed(base_url, token, _ONNX_COLLECTION, CORPUS)
 
-        print(f"\nONNX parity ({len(CORPUS)} texts):")
-        # ONNX: cosine-only gate.  Float32 ULP check is skipped because mean-pool +
-        # L2-normalize in Java float32 arithmetic vs Python float32 arithmetic differ
-        # in summation order (6000+ ULPs empirically), which is expected for an
-        # iterative computation.  The cosine == 1.0 gate proves same embedding space.
-        _assert_parity("ONNX", python_f32, java_vecs, max_ulp_threshold=None)
+        print(f"\nbge-768 parity ({len(CORPUS)} texts):")
+        _assert_parity(
+            "bge-768", python_f32, java_vecs,
+            max_ulp_threshold=None, cosine_threshold=1e-4,
+        )
         print("ONNX: PASS")
 
     # ── Path 2: CLOUD STANDARD (voyage-code-3) ────────────────────────────────

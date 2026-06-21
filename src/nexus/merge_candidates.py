@@ -160,12 +160,20 @@ def run_merge_candidates(
     limit: int,
     fmt: str,
 ) -> str:
+    from nexus.db.storage_mode import has_raw_access
     t2 = _open_t2()
     if t2 is None:
         return "T2 database not initialised."
+    if not has_raw_access(t2.taxonomy):
+        t2.close()
+        return (
+            "Merge-candidate analysis requires a SQLite-backed taxonomy store; "
+            "it is not available in service mode "
+            "(NX_STORAGE_BACKEND_TAXONOMY=service)."
+        )
     try:
         pairs = compute_merge_candidates(
-            t2.taxonomy.conn,
+            t2.taxonomy.conn,  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
             min_shared=min_shared,
             min_similarity=min_similarity,
             exclude_hubs=exclude_hubs,

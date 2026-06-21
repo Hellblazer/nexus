@@ -222,6 +222,53 @@ def test_assign_batch_hook_routes_through_service_store(monkeypatch):
     assert len(persisted[0]) == 4
 
 
+def test_assign_batch_hook_refetches_on_empty_placeholder_embeddings(monkeypatch):
+    """nexus-reskd: the server-side-embed paths (doc_indexer / streaming PDF)
+    pass ``[[], [], ...]`` placeholder embeddings. The hook must RE-FETCH real
+    vectors via get_embeddings — the old ``if not svc_embeddings`` was False for
+    a non-empty outer list, so zero-dim vectors reached compute_assignments and
+    silently produced no assignments."""
+    import nexus.mcp_infra as mi
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    ids = [f"c{i}" for i in range(3)]
+    real = [[float(i), 1.0, 2.0] for i in range(3)]
+    fetched: list[list[str]] = []
+    seen_embeddings: list = []
+
+    class _SvcT3(HttpVectorClient):
+        def __init__(self):  # noqa: D107
+            pass
+
+        def get_embeddings(self, collection, doc_ids):  # noqa: ANN001
+            import numpy as _np
+            fetched.append(list(doc_ids))
+            return _np.asarray(real, dtype=_np.float32)
+
+    class _SvcTax:
+        def compute_assignments(self, collection, doc_ids, embeddings, *, cross_collection=False):  # noqa: ANN001
+            seen_embeddings.append(embeddings)
+            return []
+
+        def persist_assignments(self, assignments):  # noqa: ANN001
+            return 0
+
+    class _DB:
+        taxonomy = _SvcTax()
+
+    monkeypatch.setattr(mi, "get_t3", lambda: _SvcT3())
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+
+    # The empty-placeholder shape ([[], [], []]) MUST trigger the re-fetch.
+    mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 3, [[] for _ in ids], None)
+
+    assert fetched == [ids], "empty-placeholder embeddings did not trigger get_embeddings re-fetch"
+    assert seen_embeddings, "compute_assignments was never called"
+    # compute_assignments saw the REAL re-fetched 3-dim vectors, not the empties.
+    assert all(len(v) == 3 for v in seen_embeddings[0])
+
+
 # ── split/project service fetch helpers (nexus-9pqoj) ───────────────────────
 
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.corpus import index_model_for_collection
@@ -20,6 +21,18 @@ from nexus.doc_indexer import index_pdf
 from nexus.indexer import _git_metadata, _index_pdf_file
 
 _local_ef = DefaultEmbeddingFunction()
+
+
+@pytest.fixture(autouse=True)
+def _legacy_vector_backend(monkeypatch):
+    # nexus-9n1u3: these e2e tests use a raw chromadb EphemeralClient T3 +
+    # DefaultEmbeddingFunction and exercise the CLIENT-embed PDF path. Pin the
+    # vector backend off the 6.0 service default (is_vector_service_mode() is
+    # True by default since RDR-155 P4a) so the streaming pipeline client-embeds
+    # into the fixture instead of writing empty server-side-embed placeholders
+    # that raw chromadb rejects with "IndexError: list index out of range in
+    # upsert". The service-mode PDF path is covered by the live service smoke.
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
 
 
 def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None):

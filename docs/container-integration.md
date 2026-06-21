@@ -176,8 +176,9 @@ socket's `0o600` permission gate fires `EACCES` (errno 13). The
 CLI's error message names the fix.
 
 T3 has no UDS path; the nexus-service is HTTP-only. Use the TCP path
-(`NX_SERVICE_HOST`/`NX_SERVICE_PORT` + `NX_SERVICE_TOKEN`) for T3 even when T2
-goes through UDS.
+(`NX_SERVICE_URL`, a full base URL, + `NX_SERVICE_TOKEN`) for T3 even when T2
+goes through UDS. (`NX_SERVICE_HOST`/`NX_SERVICE_PORT` are the separate T2
+domain-store + catalog resolver, not T3 — see the intro callout.)
 
 ## Path C: Operator-side forward (fallback)
 

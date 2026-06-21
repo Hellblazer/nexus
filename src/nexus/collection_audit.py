@@ -496,13 +496,19 @@ def run_collection_audit(
     The telemetry path is always tried first so warm collections
     stay cheap. Budget: ~10 s for N=25 probes against cloud T3.
     """
+    from nexus.db.storage_mode import has_raw_access
     t2 = _open_t2()
     cat_conn = _open_catalog_conn()
     try:
-        if t2 is not None:
-            hist = compute_distance_histogram(t2.taxonomy.conn, collection)
-            projections = compute_cross_projections(t2.taxonomy.conn, collection)
-            hubs = compute_hub_assignments(t2.taxonomy.conn, collection)
+        # nexus-9613q.4: in service mode t2.taxonomy is an HttpTaxonomyStore
+        # with no raw .conn; these are diagnostic SELECTs not on the public
+        # API, so degrade to the empty-telemetry result (live-probe fallback
+        # below still runs) instead of crashing on the missing attribute.
+        if t2 is not None and has_raw_access(t2.taxonomy):
+            conn = t2.taxonomy.conn  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
+            hist = compute_distance_histogram(conn, collection)
+            projections = compute_cross_projections(conn, collection)
+            hubs = compute_hub_assignments(conn, collection)
         else:
             hist = DistanceHistogram(buckets=[0] * _HIST_BINS, source="empty", sample_size=0)
             projections = []
