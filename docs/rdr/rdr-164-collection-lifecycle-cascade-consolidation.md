@@ -89,12 +89,31 @@ The alternative of leaving everything client-side is rejected: it is the proven 
 
 *(Phase intent is settled below; the per-phase bead decomposition is finalized post-accept. FK strategy is NOT an open phase decision — Q6 settled it: RESTRICT + explicit ordered DELETE at collection level, CASCADE only for the existing document-level FKs.)*
 
-- **P0 — Audit lock.** Ratify the inventory above. No FK-strategy or local-mode decision remains open — Q6 (RESTRICT + ordered DELETE for collection level) and CA-5 (local mode keeps a parallel client cascade) are settled. P0's only remaining work is confirming the per-table cascade/no-cascade list (taxonomy/aspect tables cascade; `relevance_log`/`search_telemetry`/`hook_failures` do not) and the retention policy for the audit tables.
-- **P1 — Collection-registry backfill + FK validation.** Register every referenced collection in `catalog_collections` (mirror `fk-002-0-backfill-stubs`); reconcile orphans per the Q5 policy (stub-register live / DELETE-with-count genuinely-orphaned / FAIL-LOUD on ambiguous); then `VALIDATE CONSTRAINT` the five existing `NOT VALID` RESTRICT FKs and add `ON DELETE RESTRICT` FKs to the remaining FK-eligible collection-level tables (`document_aspects`, `aspect_extraction_queue`, `topics`, `taxonomy_meta`, `document_highlights`). Backfill MUST precede validation. Migration + rehearsal (RDR-153 discipline).
-- **P2 — Server-side `deleteCollection(tenant, name)` method (closes nexus-tquoj + the service-mode cugrk centroid fix).** Java `CatalogRepository.deleteCollection` doing the explicit ordered DELETE (chunks → chash → topic_assignments/topics/centroids → aspects/highlights/queue → catalog rows → registry row) in one `TenantScope.withTenant` transaction. Re-point `purge_collection_cascade`'s in-PG steps at it; keep the `pipeline.db` (and local-mode) steps client-side. **This is where nexus-tquoj (queue not purged) and the service-mode centroid leak are fixed** — the beads close here, not in P5.
-- **P3 — Server-side `renameCollection` method.** Consolidate the 8 per-store renames into one transactional re-home; simplify `rename_collection_data_plane`.
-- **P4 — Verify + retire the document-level path (cascade already exists).** `fk-001` already provides `ON DELETE CASCADE` from `catalog_documents` to `catalog_document_chunks`/`document_aspects`/`document_highlights`/`aspect_extraction_queue` (CA-3) — P4 is NOT new schema. P4 = verify that cascade fires correctly in the service path, retire the stale SQLite-era "caller responsible / not cascaded" comment at `document_aspects.py:699`, and delete the now-redundant client-side caller cleanup code. Confirm the assignment orphan-on-document-delete gap is closed.
-- **P5 — Retire the now-redundant client orchestration + caller-responsible contracts.** Delete the dead `failures` accumulation and the per-store "caller removes the centroid" contracts that P2/P3 made atomic. Land **nexus-5kl1b** (cugrk local-mode leg) here — or close it obsolete if RDR-158 retires local sqlite first. (nexus-tquoj closes in P2, not here.)
+**Phase 0: Audit lock**
+- Ratify the §Evidence inventory (2 cascade orchestrators, 8 per-store renames, 4 post-write centroid cleanups, 5 caller-responsible contracts, 10 denorm `collection` TEXT columns). No FK-strategy or local-mode decision remains open — Q6 (RESTRICT + ordered DELETE for collection level) and CA-5 (local mode keeps a parallel client cascade) are settled.
+- Confirm the per-table cascade/no-cascade list (taxonomy/aspect/centroid/chash cascade; `relevance_log`/`search_telemetry`/`hook_failures` do NOT) against the live Liquibase schema, verifying each FK-target table carries a `collection` column.
+- Pick the retention/TTL policy for the three no-cascade audit tables.
+
+**Phase 1: Collection-registry backfill + FK validation**
+- Register every referenced collection in `catalog_collections` (mirror `fk-002-0-backfill-stubs`); reconcile orphans per the Q5 policy (stub-register live / DELETE-with-count genuinely-orphaned / FAIL-LOUD on ambiguous). Backfill MUST precede validation.
+- Add `ON DELETE RESTRICT` `NOT VALID` FKs to the remaining FK-eligible collection-level tables (`document_aspects`, `aspect_extraction_queue`, `topics`, `taxonomy_meta`, `document_highlights`); this half ships on the critical path now.
+- `VALIDATE CONSTRAINT` the five existing `NOT VALID` RESTRICT FKs (and the new ones). This half is world-blocked on the RDR-153 data migration / RDR-156 P0.3 and trails as a separate sub-bead — NOT on the P2→P5 path. Migration + rehearsal (RDR-153 discipline).
+
+**Phase 2: Server-side `deleteCollection(tenant, name)` method**
+- Extend Java `CatalogRepository.deleteCollection` (registry-only today) into the explicit ordered DELETE (chunks → chash → topic_assignments/topics/centroids → aspects/highlights/queue → catalog rows → registry row last) in one `TenantScope.withTenant` transaction. Re-point `purge_collection_cascade`'s in-PG steps at it; keep the `pipeline.db` (and local-mode) steps client-side.
+- Close **nexus-tquoj** (aspect_extraction_queue not purged) — the explicit collection-DELETE catches the doc-less queue rows fk-001 cannot reach. Fold the service-mode cugrk centroid fix atomically (explicit centroid DELETE WHERE collection). The beads close here, not in P5.
+
+**Phase 3: Server-side `renameCollection` method**
+- Consolidate the 8 per-store renames into one transactional re-home, preserving the RDR-162 cross-model `targetExists` branch already at `renameCollection`; simplify `rename_collection_data_plane`.
+- Re-home (not cascade) the three audit tables (`relevance_log`, `search_telemetry`, `hook_failures`) within the same transaction.
+
+**Phase 4: Verify + retire the document-level path (cascade already exists)**
+- Verify the existing `fk-001` `ON DELETE CASCADE` (catalog_documents → catalog_document_chunks/document_aspects/document_highlights/aspect_extraction_queue) fires correctly in the service path — NO new schema (CA-3).
+- Retire the stale SQLite-era "caller responsible / not cascaded" comment at `document_aspects.py:699` and the now-redundant service-mode client-side caller cleanup; confirm the assignment orphan-on-document-delete gap is closed (keep `purge_assignments_for_doc` only where it covers a local-mode gap fk-001 does not).
+
+**Phase 5: Retire the now-redundant client orchestration + caller-responsible contracts**
+- Delete the dead `failures` accumulation and the per-store "caller removes the centroid" contracts that P2/P3 made atomic (service path only; the parallel local-mode client cascade is preserved per CA-5).
+- Land **nexus-5kl1b** (cugrk local-mode leg) — or close it obsolete with a written disposition citing RDR-158-P3 / RDR-155-P4b status by bead+status. (nexus-tquoj closes in P2, not here.) Epic closeout.
 
 ## Alternatives considered
 
