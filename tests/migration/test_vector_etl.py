@@ -1209,9 +1209,6 @@ class TestVectorEtlIntegration:
         assert client.get_collection(name).count() == 6
 
 
-@pytest.mark.skip(
-    reason="nexus-wrfiy: the cross-dim orphan-detection logic needs rework for bge-768. The migrated collection is now 768 (service only embeds bge-768), but the test also needs a 384 collection (inserted via direct SQL, not migrate) to prove 384/768 orphan-scoping isolation. Distinct from the model-token conversion done for the other ETL integration classes."
-)
 @pytest.mark.integration
 @_SKIP_INTEGRATION
 class TestManifestFkIntegration:
@@ -1224,14 +1221,21 @@ class TestManifestFkIntegration:
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlmanifest")
+        # nexus-l84aj: the MIGRATED collection is bge-768 (the service only
+        # embeds bge-768 since RDR-160). The cross-dim 384 collection is
+        # inserted via DIRECT SQL (not migrated) so the 384/768 orphan-scoping
+        # isolation stays non-vacuous.
+        name = _coll("etlmanifest", model=_MODEL_768)
+        name384 = f"docs__etlv__{_MODEL_384}__v1"
         store, ids, _ = _make_local_store(tmp_path, name, 5)
         try:
-            self._run_manifest_flow(pg, name, ids, store, vec_etl_vector_client)
+            self._run_manifest_flow(
+                pg, name, name384, ids, store, vec_etl_vector_client
+            )
         finally:
-            # The PG instance is module-scoped: clear the seeded catalog +
-            # 768-lane rows so the deliberate orphan cannot leak into any
-            # test added to this module later.
+            # The PG instance is module-scoped: clear the seeded catalog + both
+            # the migrated 768 rows and the direct-SQL 384 rows so the
+            # deliberate orphan cannot leak into a later test in this module.
             _psql_exec(
                 pg,
                 "DELETE FROM nexus.catalog_document_chunks"
@@ -1240,11 +1244,12 @@ class TestManifestFkIntegration:
                 " WHERE tumbler IN ('9000.1', '9000.2');"
                 " DELETE FROM nexus.catalog_owners"
                 " WHERE tumbler_prefix = '9000';"
-                " DELETE FROM nexus.chunks_768"
-                f" WHERE collection = 'docs__etlv__{_MODEL_768}__v1'",
+                f" DELETE FROM nexus.chunks_768 WHERE collection = '{name}';"
+                f" DELETE FROM nexus.chunks_384 WHERE collection = '{name384}';"
+                f" DELETE FROM nexus.catalog_collections WHERE name = '{name384}'",
             )
 
-    def _run_manifest_flow(self, pg, name, ids, store, vec_etl_vector_client) -> None:
+    def _run_manifest_flow(self, pg, name, name384, ids, store, vec_etl_vector_client) -> None:
         # Manifest fixture: owner -> document (physical_collection = the
         # migrated collection) -> 5 chunk rows, collection NOT yet
         # backfilled (NULL — the pre-Phase-5 state).
@@ -1279,39 +1284,48 @@ class TestManifestFkIntegration:
         )
         assert backfilled == ["5"]
 
-        # Clean state: zero orphans at 384.
-        assert _psql_rows(pg, manifest_orphan_sql(384)) == []
+        # Clean state: zero orphans at 768 (the migrated bge-768 dim).
+        assert _psql_rows(pg, manifest_orphan_sql(768)) == []
 
-        # Cross-dim scoping: a 768-collection manifest row resolved by a
-        # chunks_768 row must NOT appear as a 384 orphan (and is clean at
-        # its own dim).
-        name768 = f"docs__etlv__{_MODEL_768}__v1"
-        chash768 = _chash("a 768-lane chunk")
-        vec768 = "[" + ",".join(["0"] * 768) + "]"
+        # Cross-dim scoping: a 384-collection manifest row resolved by a
+        # chunks_384 row must NOT appear as a 768 orphan (and is clean at its
+        # own dim). The 384 lane is seeded by DIRECT SQL — the bge-768 service
+        # cannot embed a 384 collection (nexus-l84aj).
+        chash384 = _chash("a 384-lane chunk")
+        vec384 = "[" + ",".join(["0"] * 384) + "]"
+        # chunks_384 has an FK on (tenant_id, collection) -> catalog_collections.
+        # The migrated bge-768 collection's registry row is created by the
+        # service; the direct-SQL 384 lane needs it stamped manually.
+        _psql_exec(
+            pg,
+            "INSERT INTO nexus.catalog_collections (tenant_id, name)"
+            f" VALUES ('default', '{name384}')",
+        )
         _psql_exec(
             pg,
             "INSERT INTO nexus.catalog_documents"
             " (tenant_id, tumbler, title, physical_collection)"
-            f" VALUES ('default', '9000.2', 'ETL Doc 768', '{name768}')",
+            f" VALUES ('default', '9000.2', 'ETL Doc 384', '{name384}')",
         )
         _psql_exec(
             pg,
             "INSERT INTO nexus.catalog_document_chunks"
             " (tenant_id, doc_id, position, chash, collection)"
-            f" VALUES ('default', '9000.2', 0, '{chash768}', '{name768}')",
+            f" VALUES ('default', '9000.2', 0, '{chash384}', '{name384}')",
         )
         _psql_exec(
             pg,
-            "INSERT INTO nexus.chunks_768"
+            "INSERT INTO nexus.chunks_384"
             " (tenant_id, collection, chash, chunk_text, embedding)"
-            f" VALUES ('default', '{name768}', '{chash768}',"
-            f" 'a 768-lane chunk', '{vec768}')",
+            f" VALUES ('default', '{name384}', '{chash384}',"
+            f" 'a 384-lane chunk', '{vec384}')",
         )
-        assert _psql_rows(pg, manifest_orphan_sql(384)) == []
         assert _psql_rows(pg, manifest_orphan_sql(768)) == []
+        assert _psql_rows(pg, manifest_orphan_sql(384)) == []
 
         # Deliberate orphan: a manifest row whose chash was never migrated
-        # MUST be detected (non-vacuous validation).
+        # MUST be detected (non-vacuous validation) — in the migrated bge-768
+        # collection, so it surfaces at dim 768.
         bogus = "feedfacefeedfacefeedfacefeedface"
         _psql_exec(
             pg,
@@ -1319,7 +1333,7 @@ class TestManifestFkIntegration:
             " (tenant_id, doc_id, position, chash, collection)"
             f" VALUES ('default', '9000.1', 99, '{bogus}', '{name}')",
         )
-        orphans = _psql_rows(pg, manifest_orphan_sql(384))
+        orphans = _psql_rows(pg, manifest_orphan_sql(768))
         assert len(orphans) == 1
         assert bogus in orphans[0]
 
