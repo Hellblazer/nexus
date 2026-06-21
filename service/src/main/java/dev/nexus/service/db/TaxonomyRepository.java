@@ -15,6 +15,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.*;
+import static org.jooq.impl.DSL.*;
+
 /**
  * RDR-152 bead nexus-gmiaf.14 — jOOQ-based taxonomy repository.
  *
@@ -40,13 +43,6 @@ import java.util.Optional;
  *       full-recompute — see that method's javadoc (RDR-152 nexus-1di3r.4).</li>
  *   <li>taxonomy_meta counters: GREATEST(EXCLUDED, existing)</li>
  * </ul>
- *
- * <p>NOTE: Uses raw SQL queries via DSLContext.fetch/execute to avoid a
- * chicken-and-egg compile dependency on jOOQ-generated table classes that
- * are themselves generated from this schema. After {@code mvn -Pcodegen},
- * the generated Tables.* classes are available; future refactors may switch
- * to typed references for IDE navigation. Raw SQL is equivalent and safe
- * under RLS (the GUC stamp is applied by TenantScope before each query).
  */
 public final class TaxonomyRepository {
 
@@ -96,24 +92,34 @@ public final class TaxonomyRepository {
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) return;
-        ctx.execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) " +
-            "ON CONFLICT (tenant_id, name) DO NOTHING",
-            tenant, collection);
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .values(tenant, collection)
+           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .doNothing()
+           .execute();
     }
+
+    // ⚠ DRIFT RISK (RDR-164 review S4): several ON CONFLICT DO UPDATE sites below
+    // (mergeTopics, assignTopic, recordDiscoverCount, importAssignment, importTaxonomyMeta,
+    // computeIcfRows) use inline field("...GREATEST/COALESCE/CASE/EXCLUDED...", Type.class)
+    // fragments that embed literal column names jOOQ codegen cannot type-check (no typed API
+    // for the EXCLUDED pseudo-table or cross-row GREATEST). Referenced columns:
+    // topic_assignments.{similarity,assigned_at,assigned_by,source_collection},
+    // taxonomy_meta.{last_discover_doc_count,last_discover_at}. If any is renamed in a
+    // Liquibase changelog, these strings compile but fail at runtime — update them at each site.
 
     private static Map<String, Object> buildTopicMap(org.jooq.Record r) {
         var m = new LinkedHashMap<String, Object>();
-        m.put("id",            r.get("id",             Long.class));
-        m.put("label",         r.get("label",          String.class));
-        m.put("parent_id",     r.get("parent_id",      Long.class));
-        m.put("collection",    r.get("collection",     String.class));
-        m.put("centroid_hash", r.get("centroid_hash",  String.class));
-        m.put("doc_count",     r.get("doc_count",      Integer.class));
-        Object ca = r.get("created_at");
+        m.put("id",            r.get(TOPICS.ID));
+        m.put("label",         r.get(TOPICS.LABEL));
+        m.put("parent_id",     r.get(TOPICS.PARENT_ID));
+        m.put("collection",    r.get(TOPICS.COLLECTION));
+        m.put("centroid_hash", r.get(TOPICS.CENTROID_HASH));
+        m.put("doc_count",     r.get(TOPICS.DOC_COUNT));
+        Object ca = r.get(TOPICS.CREATED_AT);
         m.put("created_at",    ca instanceof OffsetDateTime odt ? odt.format(UTC_SECOND) : (String) ca);
-        m.put("review_status", r.get("review_status",  String.class));
-        m.put("terms",         r.get("terms",          String.class));
+        m.put("review_status", r.get(TOPICS.REVIEW_STATUS));
+        m.put("terms",         r.get(TOPICS.TERMS));
         return Collections.unmodifiableMap(m);
     }
 
@@ -122,106 +128,129 @@ public final class TaxonomyRepository {
     /** Return root topics (parent_id IS NULL), ordered by doc_count DESC. */
     public List<Map<String, Object>> getRootTopics(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("""
-                SELECT id, label, parent_id, collection, centroid_hash,
-                       doc_count, created_at, review_status, terms
-                FROM nexus.topics WHERE parent_id IS NULL ORDER BY doc_count DESC
-                """).map(TaxonomyRepository::buildTopicMap));
+            ctx.select(
+                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
+                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
+                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+               .from(TOPICS)
+               .where(TOPICS.PARENT_ID.isNull())
+               .orderBy(TOPICS.DOC_COUNT.desc())
+               .fetch()
+               .map(TaxonomyRepository::buildTopicMap));
     }
 
     /** Return children of a topic, ordered by doc_count DESC. */
     public List<Map<String, Object>> getChildTopics(String tenant, long parentId) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("""
-                SELECT id, label, parent_id, collection, centroid_hash,
-                       doc_count, created_at, review_status, terms
-                FROM nexus.topics WHERE parent_id = ? ORDER BY doc_count DESC
-                """, parentId).map(TaxonomyRepository::buildTopicMap));
+            ctx.select(
+                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
+                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
+                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+               .from(TOPICS)
+               .where(TOPICS.PARENT_ID.eq(parentId))
+               .orderBy(TOPICS.DOC_COUNT.desc())
+               .fetch()
+               .map(TaxonomyRepository::buildTopicMap));
     }
 
     /** Return all topics, optionally filtered by collection, ordered by doc_count DESC. */
     public List<Map<String, Object>> getAllTopics(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
+            var q = ctx.select(
+                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
+                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
+                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+               .from(TOPICS);
             if (collection != null && !collection.isBlank())
-                return ctx.fetch("""
-                    SELECT id, label, parent_id, collection, centroid_hash,
-                           doc_count, created_at, review_status, terms
-                    FROM nexus.topics WHERE collection = ? ORDER BY doc_count DESC
-                    """, collection).map(TaxonomyRepository::buildTopicMap);
-            return ctx.fetch("""
-                SELECT id, label, parent_id, collection, centroid_hash,
-                       doc_count, created_at, review_status, terms
-                FROM nexus.topics ORDER BY doc_count DESC
-                """).map(TaxonomyRepository::buildTopicMap);
+                return q.where(TOPICS.COLLECTION.eq(collection))
+                        .orderBy(TOPICS.DOC_COUNT.desc())
+                        .fetch()
+                        .map(TaxonomyRepository::buildTopicMap);
+            return q.orderBy(TOPICS.DOC_COUNT.desc())
+                    .fetch()
+                    .map(TaxonomyRepository::buildTopicMap);
         });
     }
 
     /** Return topics with review_status='pending', ordered by doc_count DESC. */
     public List<Map<String, Object>> getUnreviewedTopics(String tenant, String collection, int limit) {
         return tenantScope.withTenant(tenant, ctx -> {
-            if (collection != null && !collection.isBlank())
-                return ctx.fetch("""
-                    SELECT id, label, parent_id, collection, centroid_hash,
-                           doc_count, created_at, review_status, terms
-                    FROM nexus.topics WHERE review_status = 'pending' AND collection = ?
-                    ORDER BY doc_count DESC LIMIT ?
-                    """, collection, limit).map(TaxonomyRepository::buildTopicMap);
-            return ctx.fetch("""
-                SELECT id, label, parent_id, collection, centroid_hash,
-                       doc_count, created_at, review_status, terms
-                FROM nexus.topics WHERE review_status = 'pending'
-                ORDER BY doc_count DESC LIMIT ?
-                """, limit).map(TaxonomyRepository::buildTopicMap);
+            var q = ctx.select(
+                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
+                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
+                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+               .from(TOPICS)
+               .where(collection != null && !collection.isBlank()
+                   ? TOPICS.REVIEW_STATUS.eq("pending").and(TOPICS.COLLECTION.eq(collection))
+                   : TOPICS.REVIEW_STATUS.eq("pending"))
+               .orderBy(TOPICS.DOC_COUNT.desc())
+               .limit(limit);
+            return q.fetch().map(TaxonomyRepository::buildTopicMap);
         });
     }
 
     /** Return a single topic by id, or empty. */
     public Optional<Map<String, Object>> getTopicById(String tenant, long id) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("""
-                SELECT id, label, parent_id, collection, centroid_hash,
-                       doc_count, created_at, review_status, terms
-                FROM nexus.topics WHERE id = ?
-                """, id).map(TaxonomyRepository::buildTopicMap).stream().findFirst());
+            ctx.select(
+                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
+                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
+                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+               .from(TOPICS)
+               .where(TOPICS.ID.eq(id))
+               .fetch()
+               .map(TaxonomyRepository::buildTopicMap)
+               .stream().findFirst());
     }
 
     /** Resolve topic label to id (exact match). Optionally scoped by collection. */
     public Optional<Long> resolveLabel(String tenant, String label, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            org.jooq.Result<?> r = (collection != null && !collection.isBlank())
-                ? ctx.fetch("SELECT id FROM nexus.topics WHERE label = ? AND collection = ? LIMIT 1",
-                            label, collection)
-                : ctx.fetch("SELECT id FROM nexus.topics WHERE label = ? LIMIT 1", label);
-            return r.stream().findFirst().map(row -> row.get("id", Long.class));
+            var q = ctx.select(TOPICS.ID)
+                .from(TOPICS)
+                .where(collection != null && !collection.isBlank()
+                    ? TOPICS.LABEL.eq(label).and(TOPICS.COLLECTION.eq(collection))
+                    : TOPICS.LABEL.eq(label))
+                .limit(1);
+            return q.fetch().stream().findFirst().map(r -> r.get(TOPICS.ID));
         });
     }
 
     /** Return distinct collection names that have at least one topic. */
     public List<String> getDistinctCollections(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("SELECT DISTINCT collection FROM nexus.topics ORDER BY collection")
-               .map(r -> r.get("collection", String.class)));
+            ctx.selectDistinct(TOPICS.COLLECTION)
+               .from(TOPICS)
+               .orderBy(TOPICS.COLLECTION)
+               .fetch()
+               .map(r -> r.get(TOPICS.COLLECTION)));
     }
 
     /** Insert a new topic row. Returns the generated id. */
     public long insertTopic(String tenant, String label, Long parentId,
                              String collection, int docCount, String createdAt,
                              String terms) {
-        String tsStr = fmtTs(parseTs(createdAt));
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetchOne("""
-                INSERT INTO nexus.topics
-                    (tenant_id, label, parent_id, collection, doc_count, created_at, review_status, terms)
-                VALUES (?, ?, ?, ?, ?, ?::timestamptz, 'pending', ?)
-                RETURNING id
-                """, tenant, label, parentId, collection, docCount, tsStr, terms)
-               .get("id", Long.class));
+        OffsetDateTime createdAtTs = parseTs(createdAt);
+        return tenantScope.withTenant(tenant, ctx -> {
+            ensureCollectionRegistered(ctx, tenant, collection);
+            return ctx.insertInto(TOPICS,
+                    TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
+                    TOPICS.COLLECTION, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
+                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+                .values(tenant, label, parentId, collection, docCount, createdAtTs, "pending", terms)
+                .returningResult(TOPICS.ID)
+                .fetchOne()
+                .get(TOPICS.ID);
+        });
     }
 
     /** Update topic label without changing review_status. */
     public void updateTopicLabel(String tenant, long topicId, String newLabel) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("UPDATE nexus.topics SET label = ? WHERE id = ?", newLabel, topicId);
+            ctx.update(TOPICS)
+               .set(TOPICS.LABEL, newLabel)
+               .where(TOPICS.ID.eq(topicId))
+               .execute();
             return null;
         });
     }
@@ -229,8 +258,11 @@ public final class TaxonomyRepository {
     /** Rename topic and mark as accepted. */
     public void renameTopic(String tenant, long topicId, String newLabel) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("UPDATE nexus.topics SET label = ?, review_status = 'accepted' WHERE id = ?",
-                        newLabel, topicId);
+            ctx.update(TOPICS)
+               .set(TOPICS.LABEL, newLabel)
+               .set(TOPICS.REVIEW_STATUS, "accepted")
+               .where(TOPICS.ID.eq(topicId))
+               .execute();
             return null;
         });
     }
@@ -238,7 +270,10 @@ public final class TaxonomyRepository {
     /** Update review_status. */
     public void markTopicReviewed(String tenant, long topicId, String status) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("UPDATE nexus.topics SET review_status = ? WHERE id = ?", status, topicId);
+            ctx.update(TOPICS)
+               .set(TOPICS.REVIEW_STATUS, status)
+               .where(TOPICS.ID.eq(topicId))
+               .execute();
             return null;
         });
     }
@@ -255,8 +290,10 @@ public final class TaxonomyRepository {
      */
     public int countAssignments(String tenant, long topicId) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetchOne("SELECT COUNT(*) AS c FROM nexus.topic_assignments WHERE topic_id = ?", topicId)
-               .get("c", Integer.class));
+            ctx.selectCount()
+               .from(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId))
+               .fetchOne(0, Integer.class));
     }
 
     /**
@@ -265,11 +302,14 @@ public final class TaxonomyRepository {
      */
     public Optional<String> deleteTopic(String tenant, long topicId) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var row = ctx.fetchOne("SELECT collection FROM nexus.topics WHERE id = ?", topicId);
-            if (row == null) return Optional.<String>empty();
-            String collection = row.get("collection", String.class);
+            var rows = ctx.select(TOPICS.COLLECTION)
+                .from(TOPICS)
+                .where(TOPICS.ID.eq(topicId))
+                .fetch();
+            if (rows.isEmpty()) return Optional.<String>empty();
+            String collection = rows.get(0).get(TOPICS.COLLECTION);
             // Assignments cascade via FK ON DELETE CASCADE
-            ctx.execute("DELETE FROM nexus.topics WHERE id = ?", topicId);
+            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(topicId)).execute();
             return Optional.of(collection);
         });
     }
@@ -281,39 +321,65 @@ public final class TaxonomyRepository {
     public Optional<String> mergeTopics(String tenant, long sourceId, long targetId) {
         if (sourceId == targetId) return Optional.empty();
         return tenantScope.withTenant(tenant, ctx -> {
-            var row = ctx.fetchOne("SELECT collection FROM nexus.topics WHERE id = ?", sourceId);
-            if (row == null) return Optional.<String>empty();
-            String collection = row.get("collection", String.class);
+            var rows = ctx.select(TOPICS.COLLECTION)
+                .from(TOPICS)
+                .where(TOPICS.ID.eq(sourceId))
+                .fetch();
+            if (rows.isEmpty()) return Optional.<String>empty();
+            String collection = rows.get(0).get(TOPICS.COLLECTION);
 
-            // Move assignments: prefer higher similarity on conflict
-            ctx.execute("""
-                INSERT INTO nexus.topic_assignments
-                    (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
-                SELECT tenant_id, doc_id, ?, assigned_by, similarity, assigned_at, source_collection
-                FROM nexus.topic_assignments WHERE topic_id = ?
-                ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
-                    similarity = GREATEST(
-                        COALESCE(nexus.topic_assignments.similarity, -1.0),
-                        COALESCE(EXCLUDED.similarity, -1.0)),
-                    assigned_at = CASE
-                        WHEN COALESCE(EXCLUDED.similarity, -1.0) >
-                             COALESCE(nexus.topic_assignments.similarity, -1.0)
-                        THEN EXCLUDED.assigned_at
-                        ELSE nexus.topic_assignments.assigned_at END,
-                    source_collection = CASE
-                        WHEN COALESCE(EXCLUDED.similarity, -1.0) >
-                             COALESCE(nexus.topic_assignments.similarity, -1.0)
-                        THEN EXCLUDED.source_collection
-                        ELSE nexus.topic_assignments.source_collection END
-                """, targetId, sourceId);
+            // Move assignments: prefer higher similarity on conflict.
+            // GREATEST(COALESCE(...), COALESCE(...)) + CASE WHEN expressions referencing
+            // both EXCLUDED.* and the existing table row are Postgres-specific constructs
+            // with no clean typed DSL equivalent; retained as DSL.field() fragments per spec.
+            ctx.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SIMILARITY,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+               .select(
+                    select(
+                        TOPIC_ASSIGNMENTS.TENANT_ID,
+                        TOPIC_ASSIGNMENTS.DOC_ID,
+                        inline(targetId),
+                        TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                        TOPIC_ASSIGNMENTS.SIMILARITY,
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                    .from(TOPIC_ASSIGNMENTS)
+                    .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId)))
+               .onConflict(
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .doUpdate()
+               .set(TOPIC_ASSIGNMENTS.SIMILARITY,
+                    field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
+                        + " COALESCE(EXCLUDED.similarity, -1.0))", Double.class))
+               .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                    field("CASE WHEN COALESCE(EXCLUDED.similarity, -1.0)"
+                        + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
+                        + " THEN EXCLUDED.assigned_at"
+                        + " ELSE nexus.topic_assignments.assigned_at END", OffsetDateTime.class))
+               .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    field("CASE WHEN COALESCE(EXCLUDED.similarity, -1.0)"
+                        + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
+                        + " THEN EXCLUDED.source_collection"
+                        + " ELSE nexus.topic_assignments.source_collection END", String.class))
+               .execute();
 
-            ctx.execute("DELETE FROM nexus.topic_assignments WHERE topic_id = ?", sourceId);
+            ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId))
+               .execute();
 
             // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. The assignment
             // move (INSERT) and source purge (DELETE) above each fire the
             // statement-level triggers, which recompute target.doc_count from the
             // live assignment rows; the trigger is the sole writer.
-            ctx.execute("DELETE FROM nexus.topics WHERE id = ?", sourceId);
+            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(sourceId)).execute();
 
             return Optional.of(collection);
         });
@@ -333,35 +399,54 @@ public final class TaxonomyRepository {
             if ("projection".equals(assignedBy)) {
                 // RDR-156 P0.2: ensure collection is registered before the assignment write
                 ensureCollectionRegistered(ctx, tenant, sourceCollection);
-                String tsStr = fmtTs(assignedAt != null ? parseTs(assignedAt)
-                                                        : OffsetDateTime.now(ZoneOffset.UTC));
-                ctx.execute("""
-                    INSERT INTO nexus.topic_assignments
-                        (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
-                    VALUES (?, ?, ?, 'projection', ?, ?::timestamptz, ?)
-                    ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
-                        similarity = GREATEST(
-                            COALESCE(nexus.topic_assignments.similarity, -1.0),
-                            EXCLUDED.similarity),
-                        assigned_at = CASE
-                            WHEN EXCLUDED.similarity >
-                                 COALESCE(nexus.topic_assignments.similarity, -1.0)
-                            THEN EXCLUDED.assigned_at
-                            ELSE nexus.topic_assignments.assigned_at END,
-                        source_collection = CASE
-                            WHEN EXCLUDED.similarity >
-                                 COALESCE(nexus.topic_assignments.similarity, -1.0)
-                            THEN EXCLUDED.source_collection
-                            ELSE nexus.topic_assignments.source_collection END,
-                        assigned_by = 'projection'
-                    """, tenant, docId, topicId, similarity, tsStr, sourceCollection);
+                OffsetDateTime assignedAtTs = assignedAt != null
+                    ? parseTs(assignedAt)
+                    : OffsetDateTime.now(ZoneOffset.UTC);
+                // GREATEST(COALESCE(...), ...) + CASE WHEN EXCLUDED.similarity > ... patterns
+                // referencing both EXCLUDED.* and the existing table row are Postgres-specific
+                // constructs retained as DSL.field() fragments per spec.
+                ctx.insertInto(TOPIC_ASSIGNMENTS,
+                        TOPIC_ASSIGNMENTS.TENANT_ID,
+                        TOPIC_ASSIGNMENTS.DOC_ID,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID,
+                        TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                        TOPIC_ASSIGNMENTS.SIMILARITY,
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                   .values(tenant, docId, topicId, "projection", similarity, assignedAtTs, sourceCollection)
+                   .onConflict(
+                        TOPIC_ASSIGNMENTS.TENANT_ID,
+                        TOPIC_ASSIGNMENTS.DOC_ID,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID)
+                   .doUpdate()
+                   .set(TOPIC_ASSIGNMENTS.SIMILARITY,
+                        field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
+                            + " EXCLUDED.similarity)", Double.class))
+                   .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                        field("CASE WHEN EXCLUDED.similarity"
+                            + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
+                            + " THEN EXCLUDED.assigned_at"
+                            + " ELSE nexus.topic_assignments.assigned_at END", OffsetDateTime.class))
+                   .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                        field("CASE WHEN EXCLUDED.similarity"
+                            + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
+                            + " THEN EXCLUDED.source_collection"
+                            + " ELSE nexus.topic_assignments.source_collection END", String.class))
+                   .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
+                   .execute();
             } else {
-                ctx.execute("""
-                    INSERT INTO nexus.topic_assignments
-                        (tenant_id, doc_id, topic_id, assigned_by)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
-                    """, tenant, docId, topicId, assignedBy);
+                ctx.insertInto(TOPIC_ASSIGNMENTS,
+                        TOPIC_ASSIGNMENTS.TENANT_ID,
+                        TOPIC_ASSIGNMENTS.DOC_ID,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID,
+                        TOPIC_ASSIGNMENTS.ASSIGNED_BY)
+                   .values(tenant, docId, topicId, assignedBy)
+                   .onConflict(
+                       TOPIC_ASSIGNMENTS.TENANT_ID,
+                       TOPIC_ASSIGNMENTS.DOC_ID,
+                       TOPIC_ASSIGNMENTS.TOPIC_ID)
+                   .doNothing()
+                   .execute();
             }
             // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. A fresh
             // assignment INSERT fires the AFTER INSERT statement-level trigger,
@@ -375,37 +460,36 @@ public final class TaxonomyRepository {
     /** Return doc_ids assigned to a topic. limit=0 means no limit. */
     public List<String> getTopicDocIds(String tenant, long topicId, int limit) {
         return tenantScope.withTenant(tenant, ctx -> {
-            if (limit > 0)
-                return ctx.fetch("SELECT doc_id FROM nexus.topic_assignments WHERE topic_id = ? LIMIT ?",
-                                 topicId, limit)
-                          .map(r -> r.get("doc_id", String.class));
-            return ctx.fetch("SELECT doc_id FROM nexus.topic_assignments WHERE topic_id = ?", topicId)
-                      .map(r -> r.get("doc_id", String.class));
+            var q = ctx.select(TOPIC_ASSIGNMENTS.DOC_ID)
+                .from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId));
+            var rows = (limit > 0 ? q.limit(limit) : q).fetch();
+            return rows.map(r -> r.get(TOPIC_ASSIGNMENTS.DOC_ID));
         });
     }
 
     /** Return {doc_id, topic_id} pairs for given doc_ids. */
     public List<Map<String, Object>> getAssignmentsForDocs(String tenant, List<String> docIds) {
         if (docIds == null || docIds.isEmpty()) return List.of();
-        return tenantScope.withTenant(tenant, ctx -> {
-            String placeholders = "?,".repeat(docIds.size()).replaceAll(",$", "");
-            List<Object> params = new ArrayList<>(docIds);
-            return ctx.fetch(
-                "SELECT doc_id, topic_id FROM nexus.topic_assignments WHERE doc_id IN ("
-                + placeholders + ")", params.toArray())
-               .map(r -> Map.of("doc_id", r.get("doc_id", String.class),
-                                "topic_id", r.get("topic_id", Long.class)));
-        });
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .from(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIds))
+               .fetch()
+               .map(r -> Map.of(
+                   "doc_id",   r.get(TOPIC_ASSIGNMENTS.DOC_ID),
+                   "topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID))));
     }
 
     /** Return doc_ids labeled with a given topic label. */
     public List<String> getDocIdsForLabel(String tenant, String label) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("""
-                SELECT ta.doc_id FROM nexus.topic_assignments ta
-                JOIN nexus.topics t ON t.id = ta.topic_id WHERE t.label = ?
-                """, label)
-               .map(r -> r.get("doc_id", String.class)));
+            ctx.select(TOPIC_ASSIGNMENTS.DOC_ID)
+               .from(TOPIC_ASSIGNMENTS)
+               .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
+               .where(TOPICS.LABEL.eq(label))
+               .fetch()
+               .map(r -> r.get(TOPIC_ASSIGNMENTS.DOC_ID)));
     }
 
     /**
@@ -414,16 +498,16 @@ public final class TaxonomyRepository {
      */
     public int purgeAssignmentsForDoc(String tenant, String project, String title) {
         return tenantScope.withTenant(tenant, ctx -> {
-            int removed = ctx.execute("""
-                DELETE FROM nexus.topic_assignments
-                WHERE doc_id = ?
-                  AND topic_id IN (SELECT id FROM nexus.topics WHERE collection = ?)
-                """, title, project);
-            ctx.execute("""
-                DELETE FROM nexus.topics
-                WHERE collection = ?
-                  AND id NOT IN (SELECT DISTINCT topic_id FROM nexus.topic_assignments)
-                """, project);
+            int removed = ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(title)
+                    .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(
+                        select(TOPICS.ID).from(TOPICS).where(TOPICS.COLLECTION.eq(project)))))
+                .execute();
+            ctx.deleteFrom(TOPICS)
+               .where(TOPICS.COLLECTION.eq(project)
+                   .and(TOPICS.ID.notIn(
+                       selectDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID).from(TOPIC_ASSIGNMENTS))))
+               .execute();
             return removed;
         });
     }
@@ -431,23 +515,30 @@ public final class TaxonomyRepository {
     /** Purge all taxonomy rows for a collection. */
     public Map<String, Integer> purgeCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var doomedIds = ctx.fetch("SELECT id FROM nexus.topics WHERE collection = ?", collection)
-                               .map(r -> r.get("id", Long.class));
+            var doomedIds = ctx.select(TOPICS.ID)
+                .from(TOPICS)
+                .where(TOPICS.COLLECTION.eq(collection))
+                .fetch()
+                .map(r -> r.get(TOPICS.ID));
             int links = 0, assignments = 0;
             if (!doomedIds.isEmpty()) {
-                String ph = "?,".repeat(doomedIds.size()).replaceAll(",$", "");
-                List<Object> ids = new ArrayList<>(doomedIds);
-                List<Object> doubleIds = new ArrayList<>(ids);
-                doubleIds.addAll(ids);
-                links = ctx.execute("DELETE FROM nexus.topic_links WHERE from_topic_id IN ("
-                    + ph + ") OR to_topic_id IN (" + ph + ")", doubleIds.toArray());
-                assignments = ctx.execute("DELETE FROM nexus.topic_assignments WHERE topic_id IN ("
-                    + ph + ")", ids.toArray());
+                links = ctx.deleteFrom(TOPIC_LINKS)
+                    .where(TOPIC_LINKS.FROM_TOPIC_ID.in(doomedIds)
+                        .or(TOPIC_LINKS.TO_TOPIC_ID.in(doomedIds)))
+                    .execute();
+                assignments = ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+                    .where(TOPIC_ASSIGNMENTS.TOPIC_ID.in(doomedIds))
+                    .execute();
             }
-            assignments += ctx.execute("DELETE FROM nexus.topic_assignments WHERE source_collection = ?",
-                                       collection);
-            int topics = ctx.execute("DELETE FROM nexus.topics WHERE collection = ?", collection);
-            int meta   = ctx.execute("DELETE FROM nexus.taxonomy_meta WHERE collection = ?", collection);
+            assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
+                .execute();
+            int topics = ctx.deleteFrom(TOPICS)
+                .where(TOPICS.COLLECTION.eq(collection))
+                .execute();
+            int meta = ctx.deleteFrom(TAXONOMY_META)
+                .where(TAXONOMY_META.COLLECTION.eq(collection))
+                .execute();
             return Map.of("topics", topics, "assignments", assignments, "links", links, "meta", meta);
         });
     }
@@ -455,13 +546,23 @@ public final class TaxonomyRepository {
     /** Rename all taxonomy rows from old to new collection. */
     public Map<String, Integer> renameCollection(String tenant, String oldCol, String newCol) {
         return tenantScope.withTenant(tenant, ctx -> {
-            int topics = ctx.execute("UPDATE nexus.topics SET collection = ? WHERE collection = ?",
-                                     newCol, oldCol);
-            int assignments = ctx.execute(
-                "UPDATE nexus.topic_assignments SET source_collection = ? WHERE source_collection = ?",
-                newCol, oldCol);
-            int meta = ctx.execute("UPDATE nexus.taxonomy_meta SET collection = ? WHERE collection = ?",
-                                   newCol, oldCol);
+            // RDR-164 P1a: the new collection name must be registered before the denorm
+            // columns are re-pointed at it (topics/taxonomy_meta carry NOT VALID RESTRICT
+            // FKs to catalog_collections; topic_assignments' FK is ON UPDATE CASCADE but
+            // the child UPDATE to newCol still requires the value to exist in the registry).
+            ensureCollectionRegistered(ctx, tenant, newCol);
+            int topics = ctx.update(TOPICS)
+                .set(TOPICS.COLLECTION, newCol)
+                .where(TOPICS.COLLECTION.eq(oldCol))
+                .execute();
+            int assignments = ctx.update(TOPIC_ASSIGNMENTS)
+                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, newCol)
+                .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldCol))
+                .execute();
+            int meta = ctx.update(TAXONOMY_META)
+                .set(TAXONOMY_META.COLLECTION, newCol)
+                .where(TAXONOMY_META.COLLECTION.eq(oldCol))
+                .execute();
             return Map.of("topics", topics, "assignments", assignments, "meta", meta);
         });
     }
@@ -470,19 +571,26 @@ public final class TaxonomyRepository {
 
     /** Record discover count. Matches record_discover_count. */
     public void recordDiscoverCount(String tenant, String collection, int docCount, String discoveredAt) {
-        String tsStr = fmtTs(parseTs(discoveredAt));
+        OffsetDateTime discoveredAtTs = parseTs(discoveredAt);
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("""
-                INSERT INTO nexus.taxonomy_meta (tenant_id, collection, last_discover_doc_count, last_discover_at)
-                VALUES (?, ?, ?, ?::timestamptz)
-                ON CONFLICT (tenant_id, collection) DO UPDATE SET
-                    last_discover_doc_count = GREATEST(
-                        nexus.taxonomy_meta.last_discover_doc_count,
-                        EXCLUDED.last_discover_doc_count),
-                    last_discover_at = GREATEST(
-                        nexus.taxonomy_meta.last_discover_at,
-                        EXCLUDED.last_discover_at)
-                """, tenant, collection, docCount, tsStr);
+            ensureCollectionRegistered(ctx, tenant, collection);
+            // GREATEST(existing_col, EXCLUDED.col) — references both the table row and
+            // EXCLUDED in the same expression; retained as DSL.field() fragments per spec.
+            ctx.insertInto(TAXONOMY_META,
+                    TAXONOMY_META.TENANT_ID,
+                    TAXONOMY_META.COLLECTION,
+                    TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
+                    TAXONOMY_META.LAST_DISCOVER_AT)
+               .values(tenant, collection, docCount, discoveredAtTs)
+               .onConflict(TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .doUpdate()
+               .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
+                    field("GREATEST(nexus.taxonomy_meta.last_discover_doc_count,"
+                        + " EXCLUDED.last_discover_doc_count)", Integer.class))
+               .set(TAXONOMY_META.LAST_DISCOVER_AT,
+                    field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
+                        + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
+               .execute();
             return null;
         });
     }
@@ -490,11 +598,12 @@ public final class TaxonomyRepository {
     /** Get the last discover doc_count for rebalance check. */
     public Optional<Integer> getLastDiscoverDocCount(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var row = ctx.fetchOne(
-                "SELECT last_discover_doc_count FROM nexus.taxonomy_meta WHERE collection = ?",
-                collection);
-            return row == null ? Optional.empty()
-                               : Optional.of(row.get("last_discover_doc_count", Integer.class));
+            var rows = ctx.select(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT)
+                .from(TAXONOMY_META)
+                .where(TAXONOMY_META.COLLECTION.eq(collection))
+                .fetch();
+            return rows.isEmpty() ? Optional.empty()
+                : Optional.of(rows.get(0).get(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT));
         });
     }
 
@@ -503,19 +612,16 @@ public final class TaxonomyRepository {
     /** Get topic link pairs for a set of topic ids. */
     public List<Map<String, Object>> getTopicLinkPairs(String tenant, List<Long> topicIds) {
         if (topicIds == null || topicIds.isEmpty()) return List.of();
-        return tenantScope.withTenant(tenant, ctx -> {
-            String ph = "?,".repeat(topicIds.size()).replaceAll(",$", "");
-            List<Object> doubleIds = new ArrayList<>(topicIds);
-            doubleIds.addAll(topicIds);
-            return ctx.fetch(
-                "SELECT from_topic_id, to_topic_id, link_count FROM nexus.topic_links "
-                + "WHERE from_topic_id IN (" + ph + ") AND to_topic_id IN (" + ph + ")",
-                doubleIds.toArray())
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT)
+               .from(TOPIC_LINKS)
+               .where(TOPIC_LINKS.FROM_TOPIC_ID.in(topicIds)
+                   .and(TOPIC_LINKS.TO_TOPIC_ID.in(topicIds)))
+               .fetch()
                .map(r -> Map.of(
-                   "from_topic_id", r.get("from_topic_id", Long.class),
-                   "to_topic_id",   r.get("to_topic_id",   Long.class),
-                   "link_count",    r.get("link_count",     Integer.class)));
-        });
+                   "from_topic_id", r.get(TOPIC_LINKS.FROM_TOPIC_ID),
+                   "to_topic_id",   r.get(TOPIC_LINKS.TO_TOPIC_ID),
+                   "link_count",    r.get(TOPIC_LINKS.LINK_COUNT))));
     }
 
     /**
@@ -535,13 +641,15 @@ public final class TaxonomyRepository {
      */
     public void upsertTopicLink(String tenant, long fromId, long toId, int linkCount, String linkTypes) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("""
-                INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_count, link_types)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (tenant_id, from_topic_id, to_topic_id) DO UPDATE SET
-                    link_count = EXCLUDED.link_count,
-                    link_types = EXCLUDED.link_types
-                """, tenant, fromId, toId, linkCount, linkTypes);
+            ctx.insertInto(TOPIC_LINKS,
+                    TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
+                    TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
+               .values(tenant, fromId, toId, linkCount, linkTypes)
+               .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
+               .doUpdate()
+               .set(TOPIC_LINKS.LINK_COUNT, field("EXCLUDED.link_count", Integer.class))
+               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+               .execute();
             return null;
         });
     }
@@ -551,30 +659,37 @@ public final class TaxonomyRepository {
     /** Count distinct source_collections for projection rows (N_effective for ICF). */
     public int countDistinctSourceCollections(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetchOne("""
-                SELECT COUNT(DISTINCT source_collection) AS n
-                FROM nexus.topic_assignments
-                WHERE assigned_by = 'projection' AND source_collection IS NOT NULL
-                """).get("n", Integer.class));
+            ctx.select(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+               .from(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
+               .fetchOne(0, Integer.class));
     }
 
     /**
      * Return ICF rows {topic_id, icf_raw} for N_effective>=2.
      * icf_raw = N_effective / DF — caller applies log2.
+     *
+     * <p>CAST(? AS DOUBLE PRECISION) / COUNT(DISTINCT ...) — the numeric division of a
+     * bind value cast to double by an aggregate is expressible via jOOQ arithmetic;
+     * retained as a DSL.field() cast fragment for the CAST expression per spec.
      */
     public List<Map<String, Object>> computeIcfRows(String tenant, int nEffective) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("""
-                SELECT topic_id,
-                       CAST(? AS DOUBLE PRECISION) / COUNT(DISTINCT source_collection) AS icf_raw
-                FROM nexus.topic_assignments
-                WHERE assigned_by = 'projection' AND source_collection IS NOT NULL
-                GROUP BY topic_id
-                HAVING COUNT(DISTINCT source_collection) > 0
-                """, nEffective)
+            ctx.select(
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    field("CAST({0} AS DOUBLE PRECISION)", Double.class, val(nEffective))
+                        .div(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+                        .as("icf_raw"))
+               .from(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
+               .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .having(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).gt(0))
+               .fetch()
                .map(r -> Map.of(
-                   "topic_id", r.get("topic_id", Long.class),
-                   "icf_raw",  r.get("icf_raw",  Double.class))));
+                   "topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID),
+                   "icf_raw",  r.get("icf_raw", Double.class))));
     }
 
     // ── Top topics / corpus evidence ───────────────────────────────────────────
@@ -582,35 +697,37 @@ public final class TaxonomyRepository {
     /** Return top-N projection topics for a collection. */
     public List<Map<String, Object>> topTopicsForCollection(String tenant, String collection, int topN) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("""
-                SELECT t.label, COUNT(*) AS chunks, SUM(ta.similarity) AS sum_sim
-                FROM nexus.topic_assignments ta
-                JOIN nexus.topics t ON t.id = ta.topic_id
-                WHERE ta.assigned_by = 'projection'
-                  AND ta.source_collection = ?
-                  AND ta.similarity IS NOT NULL
-                GROUP BY ta.topic_id, t.label
-                ORDER BY sum_sim DESC, chunks DESC
-                LIMIT ?
-                """, collection, topN)
+            ctx.select(
+                    TOPICS.LABEL,
+                    count().as("chunks"),
+                    sum(TOPIC_ASSIGNMENTS.SIMILARITY).as("sum_sim"))
+               .from(TOPIC_ASSIGNMENTS)
+               .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
+               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
+                   .and(TOPIC_ASSIGNMENTS.SIMILARITY.isNotNull()))
+               .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPICS.LABEL)
+               .orderBy(sum(TOPIC_ASSIGNMENTS.SIMILARITY).desc(), count().desc())
+               .limit(topN)
+               .fetch()
                .map(r -> Map.of(
-                   "label",          r.get("label",   String.class),
-                   "chunks",         r.get("chunks",  Integer.class),
+                   "label",          r.get(TOPICS.LABEL),
+                   "chunks",         r.get("chunks", Integer.class),
                    "sum_similarity", r.get("sum_sim", Double.class))));
     }
 
     /** Return max similarity for a doc's projection into a source_collection. */
     public Optional<Double> chunkGroundedIn(String tenant, String docId, String sourceCollection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var row = ctx.fetchOne("""
-                SELECT MAX(similarity) AS ms
-                FROM nexus.topic_assignments
-                WHERE assigned_by = 'projection'
-                  AND doc_id = ? AND source_collection = ?
-                  AND similarity IS NOT NULL
-                """, docId, sourceCollection);
-            if (row == null) return Optional.<Double>empty();
-            Double v = row.get("ms", Double.class);
+            var rows = ctx.select(max(TOPIC_ASSIGNMENTS.SIMILARITY).as("ms"))
+                .from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                    .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(docId))
+                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(sourceCollection))
+                    .and(TOPIC_ASSIGNMENTS.SIMILARITY.isNotNull()))
+                .fetch();
+            if (rows.isEmpty()) return Optional.<Double>empty();
+            Double v = rows.get(0).get("ms", Double.class);
             return v == null ? Optional.<Double>empty() : Optional.of(v);
         });
     }
@@ -618,15 +735,15 @@ public final class TaxonomyRepository {
     /** Return projection count by source_collection. */
     public List<Map<String, Object>> getProjectionCountsByCollection(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("""
-                SELECT source_collection, COUNT(*) AS cnt
-                FROM nexus.topic_assignments
-                WHERE assigned_by = 'projection'
-                  AND source_collection IS NOT NULL AND source_collection != ''
-                GROUP BY source_collection
-                """)
+            ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, count().as("cnt"))
+               .from(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull())
+                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.ne("")))
+               .groupBy(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+               .fetch()
                .map(r -> Map.of(
-                   "source_collection", r.get("source_collection", String.class),
+                   "source_collection", r.get(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
                    "count",             r.get("cnt", Integer.class))));
     }
 
@@ -643,23 +760,25 @@ public final class TaxonomyRepository {
                              String reviewStatus, String terms) {
         // BIGSERIAL allows explicit ID insertion without OVERRIDING SYSTEM VALUE
         // (that clause only applies to GENERATED ALWAYS identity columns).
-        String tsStr = fmtTs(parseTsStrict(createdAt));
+        OffsetDateTime createdAtTs = parseTsStrict(createdAt);
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("""
-                INSERT INTO nexus.topics
-                    (id, tenant_id, label, parent_id, collection, centroid_hash,
-                     doc_count, created_at, review_status, terms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?, ?)
-                ON CONFLICT (id) DO UPDATE SET
-                    -- RDR-154 P0 (nexus-i7ivk): doc_count is trigger-maintained and
-                    -- is NOT an ETL merge participant. The INSERT branch seeds it for
-                    -- a brand-new topic; on conflict the live (trigger-computed) value
-                    -- is left untouched so a lossy snapshot can never clobber it.
-                    review_status = EXCLUDED.review_status,
-                    centroid_hash = EXCLUDED.centroid_hash,
-                    terms         = EXCLUDED.terms
-                """, srcId, tenant, label, parentId, collection, centroidHash,
-                     docCount, tsStr, reviewStatus, terms);
+            ensureCollectionRegistered(ctx, tenant, collection);
+            ctx.insertInto(TOPICS,
+                    TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
+                    TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
+                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+               .values(srcId, tenant, label, parentId, collection, centroidHash,
+                       docCount, createdAtTs, reviewStatus, terms)
+               .onConflict(TOPICS.ID)
+               .doUpdate()
+               // RDR-154 P0 (nexus-i7ivk): doc_count is trigger-maintained and
+               // is NOT an ETL merge participant. The INSERT branch seeds it for
+               // a brand-new topic; on conflict the live (trigger-computed) value
+               // is left untouched so a lossy snapshot can never clobber it.
+               .set(TOPICS.REVIEW_STATUS, field("EXCLUDED.review_status", String.class))
+               .set(TOPICS.CENTROID_HASH, field("EXCLUDED.centroid_hash", String.class))
+               .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
+               .execute();
             return null;
         });
         return srcId;
@@ -681,29 +800,42 @@ public final class TaxonomyRepository {
     public boolean importAssignment(String tenant, String docId, long topicId,
                                      String assignedBy, Double similarity,
                                      String assignedAt, String sourceCollection) {
-        String tsStr = (assignedAt != null && !assignedAt.isBlank())
-            ? fmtTs(parseTsStrict(assignedAt)) : null;
+        OffsetDateTime assignedAtTs = (assignedAt != null && !assignedAt.isBlank())
+            ? parseTsStrict(assignedAt) : null;
         tenantScope.withTenant(tenant, ctx -> {
             // RDR-156 P0.2: ensure collection is registered before the assignment write
             ensureCollectionRegistered(ctx, tenant, sourceCollection);
-            ctx.execute("""
-                INSERT INTO nexus.topic_assignments
-                    (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
-                VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?)
-                ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
-                    -- Never downgrade 'projection' to 'hdbscan' or similar:
-                    -- keep existing assigned_by unless the incoming row is 'projection'
-                    -- (the highest-provenance tag).
-                    assigned_by       = CASE
-                                            WHEN EXCLUDED.assigned_by = 'projection' THEN 'projection'
-                                            ELSE nexus.topic_assignments.assigned_by
-                                        END,
-                    similarity        = GREATEST(
-                        COALESCE(nexus.topic_assignments.similarity, -1.0),
-                        COALESCE(EXCLUDED.similarity, -1.0)),
-                    assigned_at       = EXCLUDED.assigned_at,
-                    source_collection = EXCLUDED.source_collection
-                """, tenant, docId, topicId, assignedBy, similarity, tsStr, sourceCollection);
+            // GREATEST(COALESCE(existing, -1.0), COALESCE(EXCLUDED, -1.0)) +
+            // CASE WHEN EXCLUDED.assigned_by = 'projection' referencing the existing table row:
+            // Postgres-specific; retained as DSL.field() fragments per spec.
+            ctx.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SIMILARITY,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+               .values(tenant, docId, topicId, assignedBy, similarity, assignedAtTs, sourceCollection)
+               .onConflict(
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .doUpdate()
+               // Never downgrade 'projection' to 'hdbscan' or similar:
+               // keep existing assigned_by unless the incoming row is 'projection'.
+               .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    field("CASE WHEN EXCLUDED.assigned_by = 'projection'"
+                        + " THEN 'projection'"
+                        + " ELSE nexus.topic_assignments.assigned_by END", String.class))
+               .set(TOPIC_ASSIGNMENTS.SIMILARITY,
+                    field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
+                        + " COALESCE(EXCLUDED.similarity, -1.0))", Double.class))
+               .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                    field("EXCLUDED.assigned_at", OffsetDateTime.class))
+               .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    field("EXCLUDED.source_collection", String.class))
+               .execute();
             return null;
         });
         return true;
@@ -713,13 +845,19 @@ public final class TaxonomyRepository {
     public void importTopicLink(String tenant, long fromId, long toId,
                                  int linkCount, String linkTypes) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("""
-                INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_count, link_types)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (tenant_id, from_topic_id, to_topic_id) DO UPDATE SET
-                    link_count = GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count),
-                    link_types = EXCLUDED.link_types
-                """, tenant, fromId, toId, linkCount, linkTypes);
+            // GREATEST(existing.link_count, EXCLUDED.link_count) — ETL path uses GREATEST
+            // to never downgrade a live PG value from a stale SQLite snapshot.
+            // GREATEST over two table references is an irreducible plain-SQL fragment.
+            ctx.insertInto(TOPIC_LINKS,
+                    TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
+                    TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
+               .values(tenant, fromId, toId, linkCount, linkTypes)
+               .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
+               .doUpdate()
+               .set(TOPIC_LINKS.LINK_COUNT,
+                    field("GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count)", Integer.class))
+               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+               .execute();
             return null;
         });
     }
@@ -727,20 +865,27 @@ public final class TaxonomyRepository {
     /** Fidelity-preserving import for a taxonomy_meta row. */
     public void importTaxonomyMeta(String tenant, String collection,
                                     int lastDiscoverDocCount, String lastDiscoverAt) {
-        String tsStr = (lastDiscoverAt != null && !lastDiscoverAt.isBlank())
-            ? fmtTs(parseTsStrict(lastDiscoverAt)) : null;
+        OffsetDateTime lastDiscoverAtTs = (lastDiscoverAt != null && !lastDiscoverAt.isBlank())
+            ? parseTsStrict(lastDiscoverAt) : null;
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("""
-                INSERT INTO nexus.taxonomy_meta (tenant_id, collection, last_discover_doc_count, last_discover_at)
-                VALUES (?, ?, ?, ?::timestamptz)
-                ON CONFLICT (tenant_id, collection) DO UPDATE SET
-                    last_discover_doc_count =
-                        GREATEST(nexus.taxonomy_meta.last_discover_doc_count,
-                                 EXCLUDED.last_discover_doc_count),
-                    last_discover_at =
-                        GREATEST(nexus.taxonomy_meta.last_discover_at,
-                                 EXCLUDED.last_discover_at)
-                """, tenant, collection, lastDiscoverDocCount, tsStr);
+            ensureCollectionRegistered(ctx, tenant, collection);
+            // GREATEST(existing_col, EXCLUDED.col) — references both the table row and
+            // EXCLUDED in the same expression; retained as DSL.field() fragments per spec.
+            ctx.insertInto(TAXONOMY_META,
+                    TAXONOMY_META.TENANT_ID,
+                    TAXONOMY_META.COLLECTION,
+                    TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
+                    TAXONOMY_META.LAST_DISCOVER_AT)
+               .values(tenant, collection, lastDiscoverDocCount, lastDiscoverAtTs)
+               .onConflict(TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .doUpdate()
+               .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
+                    field("GREATEST(nexus.taxonomy_meta.last_discover_doc_count,"
+                        + " EXCLUDED.last_discover_doc_count)", Integer.class))
+               .set(TAXONOMY_META.LAST_DISCOVER_AT,
+                    field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
+                        + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
+               .execute();
             return null;
         });
     }
@@ -753,25 +898,27 @@ public final class TaxonomyRepository {
      */
     public Map<String, Object> computeIcfMapAtomic(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // n_effective = count of distinct source_collection values
-            var nRow = ctx.fetchOne(
-                "SELECT COUNT(DISTINCT source_collection) AS n "
-                + "FROM nexus.topic_assignments "
-                + "WHERE assigned_by = 'projection' AND source_collection IS NOT NULL");
-            int nEffective = nRow == null ? 0 : ((Number) nRow.get("n")).intValue();
+            int nEffective = ctx.select(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+                .from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
+                .fetchOne(0, Integer.class);
 
             List<Map<String, Object>> rows = new ArrayList<>();
             if (nEffective >= 2) {
-                var icfRows = ctx.fetch(
-                    "SELECT topic_id, COUNT(DISTINCT source_collection) AS df "
-                    + "FROM nexus.topic_assignments "
-                    + "WHERE assigned_by = 'projection' AND source_collection IS NOT NULL "
-                    + "GROUP BY topic_id "
-                    + "HAVING COUNT(DISTINCT source_collection) > 0");
+                var icfRows = ctx.select(
+                        TOPIC_ASSIGNMENTS.TOPIC_ID,
+                        countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).as("df"))
+                    .from(TOPIC_ASSIGNMENTS)
+                    .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                        .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
+                    .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID)
+                    .having(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).gt(0))
+                    .fetch();
                 for (var r : icfRows) {
                     var m = new LinkedHashMap<String, Object>();
-                    m.put("topic_id", ((Number) r.get("topic_id")).longValue());
-                    m.put("df", ((Number) r.get("df")).intValue());
+                    m.put("topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
+                    m.put("df", r.get("df", Integer.class));
                     rows.add(m);
                 }
             }
@@ -790,47 +937,47 @@ public final class TaxonomyRepository {
      */
     public List<Map<String, Object>> detectHubsData(String tenant, int minCollections) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch("""
-                SELECT
-                    t.id           AS topic_id,
-                    t.label,
-                    t.collection,
-                    COUNT(DISTINCT ta.source_collection) AS df,
-                    COUNT(*)                              AS total_chunks,
-                    MAX(ta.assigned_at)                   AS last_assigned_at
-                FROM nexus.topic_assignments ta
-                JOIN nexus.topics t ON t.id = ta.topic_id
-                WHERE ta.assigned_by = 'projection'
-                  AND ta.source_collection IS NOT NULL
-                GROUP BY t.id, t.label, t.collection
-                HAVING COUNT(DISTINCT ta.source_collection) >= ?
-                ORDER BY COUNT(*) DESC
-                """, minCollections);
+            var rows = ctx.select(
+                    TOPICS.ID.as("topic_id"),
+                    TOPICS.LABEL,
+                    TOPICS.COLLECTION,
+                    countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).as("df"),
+                    count().as("total_chunks"),
+                    max(TOPIC_ASSIGNMENTS.ASSIGNED_AT).as("last_assigned_at"))
+               .from(TOPIC_ASSIGNMENTS)
+               .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
+               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
+               .groupBy(TOPICS.ID, TOPICS.LABEL, TOPICS.COLLECTION)
+               .having(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).ge(minCollections))
+               .orderBy(count().desc())
+               .fetch();
 
             // Per-hub source collection sets
-            var allSources = ctx.fetch(
-                "SELECT topic_id, source_collection "
-                + "FROM nexus.topic_assignments "
-                + "WHERE assigned_by = 'projection' AND source_collection IS NOT NULL "
-                + "ORDER BY topic_id, source_collection");
+            var allSources = ctx.select(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                .from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
+                .orderBy(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                .fetch();
 
             // Build topic_id -> [source_collection, ...] map
             java.util.Map<Long, List<String>> sourcesMap = new java.util.HashMap<>();
             for (var r : allSources) {
-                long tid = ((Number) r.get("topic_id")).longValue();
-                String sc = (String) r.get("source_collection");
+                long tid = r.get(TOPIC_ASSIGNMENTS.TOPIC_ID);
+                String sc = r.get(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
                 sourcesMap.computeIfAbsent(tid, k -> new ArrayList<>()).add(sc);
             }
 
             List<Map<String, Object>> result = new ArrayList<>();
             for (var r : rows) {
-                long tid = ((Number) r.get("topic_id")).longValue();
+                long tid = r.get("topic_id", Long.class);
                 var m = new LinkedHashMap<String, Object>();
                 m.put("topic_id", tid);
-                m.put("label", r.get("label"));
-                m.put("collection", r.get("collection"));
-                m.put("df", ((Number) r.get("df")).intValue());
-                m.put("total_chunks", ((Number) r.get("total_chunks")).intValue());
+                m.put("label", r.get(TOPICS.LABEL));
+                m.put("collection", r.get(TOPICS.COLLECTION));
+                m.put("df", r.get("df", Integer.class));
+                m.put("total_chunks", r.get("total_chunks", Integer.class));
                 Object lastAt = r.get("last_assigned_at");
                 m.put("last_assigned_at", lastAt != null ? lastAt.toString() : null);
                 m.put("source_collections", sourcesMap.getOrDefault(tid, List.of()));
@@ -846,35 +993,38 @@ public final class TaxonomyRepository {
      */
     public Map<String, Object> auditCollectionData(String tenant, String collection, int topN) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var simRows = ctx.fetch(
-                "SELECT similarity FROM nexus.topic_assignments "
-                + "WHERE assigned_by = 'projection' "
-                + "AND source_collection = ? AND similarity IS NOT NULL "
-                + "ORDER BY similarity ASC",
-                collection);
+            var simRows = ctx.select(TOPIC_ASSIGNMENTS.SIMILARITY)
+                .from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
+                    .and(TOPIC_ASSIGNMENTS.SIMILARITY.isNotNull()))
+                .orderBy(TOPIC_ASSIGNMENTS.SIMILARITY.asc())
+                .fetch();
 
             List<Double> sims = new ArrayList<>();
             for (var r : simRows) {
-                sims.add(((Number) r.get("similarity")).doubleValue());
+                sims.add(r.get(TOPIC_ASSIGNMENTS.SIMILARITY));
             }
 
-            var hubRows = ctx.fetch("""
-                SELECT ta.topic_id, t.label, COUNT(*) AS chunks
-                FROM nexus.topic_assignments ta
-                JOIN nexus.topics t ON t.id = ta.topic_id
-                WHERE ta.assigned_by = 'projection'
-                  AND ta.source_collection = ?
-                GROUP BY ta.topic_id, t.label
-                ORDER BY COUNT(*) DESC
-                LIMIT ?
-                """, collection, topN);
+            var hubRows = ctx.select(
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPICS.LABEL,
+                    count().as("chunks"))
+               .from(TOPIC_ASSIGNMENTS)
+               .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
+               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection)))
+               .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPICS.LABEL)
+               .orderBy(count().desc())
+               .limit(topN)
+               .fetch();
 
             List<Map<String, Object>> hubs = new ArrayList<>();
             for (var r : hubRows) {
                 var m = new LinkedHashMap<String, Object>();
-                m.put("topic_id", ((Number) r.get("topic_id")).longValue());
-                m.put("label", r.get("label"));
-                m.put("chunk_count", ((Number) r.get("chunks")).intValue());
+                m.put("topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
+                m.put("label", r.get(TOPICS.LABEL));
+                m.put("chunk_count", r.get("chunks", Integer.class));
                 hubs.add(m);
             }
 
@@ -892,31 +1042,43 @@ public final class TaxonomyRepository {
      */
     public int generateCooccurrenceLinks(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var pairs = ctx.fetch("""
-                SELECT LEAST(a.topic_id, b.topic_id) AS from_id,
-                       GREATEST(a.topic_id, b.topic_id) AS to_id,
-                       COUNT(*) AS cnt
-                FROM nexus.topic_assignments a
-                JOIN nexus.topic_assignments b ON a.doc_id = b.doc_id
-                JOIN nexus.topics ta ON a.topic_id = ta.id
-                JOIN nexus.topics tb ON b.topic_id = tb.id
-                WHERE a.topic_id < b.topic_id AND ta.collection != tb.collection
-                GROUP BY LEAST(a.topic_id, b.topic_id), GREATEST(a.topic_id, b.topic_id)
-                """);
+            // LEAST/GREATEST over column references (a.topic_id, b.topic_id) for
+            // canonical pair ordering: these are Postgres-specific aggregate functions
+            // applied to column expressions (not per-row scalar), retained as DSL.sql.
+            var ta = TOPIC_ASSIGNMENTS.as("a");
+            var tb = TOPIC_ASSIGNMENTS.as("b");
+            var ta2 = TOPICS.as("ta");
+            var tb2 = TOPICS.as("tb");
+            var pairs = ctx.select(
+                    field("LEAST(a.topic_id, b.topic_id)", Long.class).as("from_id"),
+                    field("GREATEST(a.topic_id, b.topic_id)", Long.class).as("to_id"),
+                    count().as("cnt"))
+               .from(ta)
+               .join(tb).on(ta.DOC_ID.eq(tb.DOC_ID))
+               .join(ta2).on(ta.TOPIC_ID.eq(ta2.ID))
+               .join(tb2).on(tb.TOPIC_ID.eq(tb2.ID))
+               .where(ta.TOPIC_ID.lt(tb.TOPIC_ID)
+                   .and(ta2.COLLECTION.ne(tb2.COLLECTION)))
+               .groupBy(
+                   field("LEAST(a.topic_id, b.topic_id)", Long.class),
+                   field("GREATEST(a.topic_id, b.topic_id)", Long.class))
+               .fetch();
 
             if (pairs.isEmpty()) return 0;
 
             for (var r : pairs) {
-                long fromId = ((Number) r.get("from_id")).longValue();
-                long toId   = ((Number) r.get("to_id")).longValue();
-                int  cnt    = ((Number) r.get("cnt")).intValue();
-                ctx.execute("""
-                    INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_count, link_types)
-                    VALUES (?, ?, ?, ?, '["cooccurrence"]')
-                    ON CONFLICT (tenant_id, from_topic_id, to_topic_id) DO UPDATE SET
-                        link_count = EXCLUDED.link_count,
-                        link_types = '["cooccurrence"]'
-                    """, tenant, fromId, toId, cnt);
+                long fromId = r.get("from_id", Long.class);
+                long toId   = r.get("to_id",   Long.class);
+                int  cnt    = r.get("cnt",      Integer.class);
+                ctx.insertInto(TOPIC_LINKS,
+                        TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
+                        TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
+                   .values(tenant, fromId, toId, cnt, "[\"cooccurrence\"]")
+                   .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
+                   .doUpdate()
+                   .set(TOPIC_LINKS.LINK_COUNT, field("EXCLUDED.link_count", Integer.class))
+                   .set(TOPIC_LINKS.LINK_TYPES, "[\"cooccurrence\"]")
+                   .execute();
             }
             log.info("cooccurrence_links generated count={}", pairs.size());
             return pairs.size();
@@ -929,29 +1091,32 @@ public final class TaxonomyRepository {
      */
     public int refreshProjectionLinks(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch("""
-                SELECT src.topic_id AS src_id, tgt.topic_id AS tgt_id, COUNT(*) AS cnt
-                FROM nexus.topic_assignments tgt
-                JOIN nexus.topic_assignments src
-                  ON src.doc_id = tgt.doc_id
-                 AND src.topic_id != tgt.topic_id
-                 AND src.assigned_by != 'projection'
-                WHERE tgt.assigned_by = 'projection'
-                GROUP BY src.topic_id, tgt.topic_id
-                HAVING COUNT(*) > 0
-                """);
+            var tgt = TOPIC_ASSIGNMENTS.as("tgt");
+            var src = TOPIC_ASSIGNMENTS.as("src");
+            var rows = ctx.select(
+                    src.TOPIC_ID.as("src_id"),
+                    tgt.TOPIC_ID.as("tgt_id"),
+                    count().as("cnt"))
+               .from(tgt)
+               .join(src).on(src.DOC_ID.eq(tgt.DOC_ID)
+                   .and(src.TOPIC_ID.ne(tgt.TOPIC_ID))
+                   .and(src.ASSIGNED_BY.ne("projection")))
+               .where(tgt.ASSIGNED_BY.eq("projection"))
+               .groupBy(src.TOPIC_ID, tgt.TOPIC_ID)
+               .having(count().gt(0))
+               .fetch();
 
             if (rows.isEmpty()) return 0;
 
             // Canonicalize pair ordering
             java.util.Map<String, Integer> aggregated = new java.util.LinkedHashMap<>();
             for (var r : rows) {
-                long s = ((Number) r.get("src_id")).longValue();
-                long t = ((Number) r.get("tgt_id")).longValue();
+                long s = r.get("src_id", Long.class);
+                long t = r.get("tgt_id", Long.class);
                 long fromId = Math.min(s, t);
                 long toId   = Math.max(s, t);
                 String key = fromId + ":" + toId;
-                aggregated.merge(key, ((Number) r.get("cnt")).intValue(), Integer::sum);
+                aggregated.merge(key, r.get("cnt", Integer.class), Integer::sum);
             }
 
             for (var entry : aggregated.entrySet()) {
@@ -960,14 +1125,16 @@ public final class TaxonomyRepository {
                 long toId   = Long.parseLong(parts[1]);
 
                 // Fetch existing link_types to merge 'projection' in
-                var existing = ctx.fetchOne(
-                    "SELECT link_types FROM nexus.topic_links "
-                    + "WHERE tenant_id = ? AND from_topic_id = ? AND to_topic_id = ?",
-                    tenant, fromId, toId);
+                var existing = ctx.select(TOPIC_LINKS.LINK_TYPES)
+                    .from(TOPIC_LINKS)
+                    .where(TOPIC_LINKS.TENANT_ID.eq(tenant)
+                        .and(TOPIC_LINKS.FROM_TOPIC_ID.eq(fromId))
+                        .and(TOPIC_LINKS.TO_TOPIC_ID.eq(toId)))
+                    .fetch();
 
                 String mergedTypes;
-                if (existing != null && existing.get("link_types") != null) {
-                    String lt = (String) existing.get("link_types");
+                if (!existing.isEmpty() && existing.get(0).get(TOPIC_LINKS.LINK_TYPES) != null) {
+                    String lt = existing.get(0).get(TOPIC_LINKS.LINK_TYPES);
                     if (!lt.contains("\"projection\"")) {
                         // Insert projection into the JSON array
                         mergedTypes = lt.replace("]", ", \"projection\"]")
@@ -983,13 +1150,15 @@ public final class TaxonomyRepository {
                     mergedTypes = "[\"projection\"]";
                 }
 
-                ctx.execute("""
-                    INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_count, link_types)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT (tenant_id, from_topic_id, to_topic_id) DO UPDATE SET
-                        link_count = EXCLUDED.link_count,
-                        link_types = EXCLUDED.link_types
-                    """, tenant, fromId, toId, entry.getValue(), mergedTypes);
+                ctx.insertInto(TOPIC_LINKS,
+                        TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
+                        TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
+                   .values(tenant, fromId, toId, entry.getValue(), mergedTypes)
+                   .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
+                   .doUpdate()
+                   .set(TOPIC_LINKS.LINK_COUNT, field("EXCLUDED.link_count", Integer.class))
+                   .set(TOPIC_LINKS.LINK_TYPES,  field("EXCLUDED.link_types",  String.class))
+                   .execute();
             }
 
             log.info("projection_links refreshed count={}", aggregated.size());
@@ -1010,9 +1179,12 @@ public final class TaxonomyRepository {
                                     String collectionName,
                                     List<Map<String, Object>> childSpecs) {
         return tenantScope.withTenant(tenant, ctx -> {
+            ensureCollectionRegistered(ctx, tenant, collectionName);
             // Delete parent assignments
-            ctx.execute("DELETE FROM nexus.topic_assignments WHERE tenant_id = ? AND topic_id = ?",
-                        tenant, topicId);
+            ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
+                   .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId)))
+               .execute();
 
             List<Long> childIds = new ArrayList<>();
             for (var spec : childSpecs) {
@@ -1022,14 +1194,14 @@ public final class TaxonomyRepository {
                 String termsJson  = (String) spec.getOrDefault("terms_json", null);
                 List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
 
-                String tsStr = fmtTs(parseTsStrict(createdAt));
-                var row = ctx.fetchOne("""
-                    INSERT INTO nexus.topics
-                        (tenant_id, label, parent_id, collection, doc_count, created_at, terms)
-                    VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?)
-                    RETURNING id
-                    """, tenant, label, topicId, collectionName, docCount, tsStr, termsJson);
-                long childId = row == null ? -1 : ((Number) row.get("id")).longValue();
+                OffsetDateTime createdAtTs = parseTsStrict(createdAt);
+                long childId = ctx.insertInto(TOPICS,
+                        TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
+                        TOPICS.COLLECTION, TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS)
+                    .values(tenant, label, topicId, collectionName, docCount, createdAtTs, termsJson)
+                    .returningResult(TOPICS.ID)
+                    .fetchOne()
+                    .get(TOPICS.ID);
                 childIds.add(childId);
 
                 batchInsertAssignments(ctx, tenant, childId, docIds, "split");
@@ -1059,23 +1231,29 @@ public final class TaxonomyRepository {
      */
     public Map<String, Object> readRebuildOldState(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            List<Map<String, Object>> oldTopicMap = ctx.fetch("""
-                SELECT id, label, review_status FROM nexus.topics WHERE collection = ?
-                """, collection).map(r -> {
+            List<Map<String, Object>> oldTopicMap = ctx.select(
+                    TOPICS.ID, TOPICS.LABEL, TOPICS.REVIEW_STATUS)
+                .from(TOPICS)
+                .where(TOPICS.COLLECTION.eq(collection))
+                .fetch()
+                .map(r -> {
                     Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("id",            r.get("id",            Long.class));
-                    m.put("label",         r.get("label",         String.class));
-                    m.put("review_status", r.get("review_status", String.class));
+                    m.put("id",            r.get(TOPICS.ID));
+                    m.put("label",         r.get(TOPICS.LABEL));
+                    m.put("review_status", r.get(TOPICS.REVIEW_STATUS));
                     return m;
                 });
-            List<Map<String, Object>> manualAssignments = ctx.fetch("""
-                SELECT ta.doc_id, ta.topic_id FROM nexus.topic_assignments ta
-                JOIN nexus.topics t ON t.id = ta.topic_id
-                WHERE ta.assigned_by = 'manual' AND t.collection = ?
-                """, collection).map(r -> {
+            List<Map<String, Object>> manualAssignments = ctx.select(
+                    TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
+                .from(TOPIC_ASSIGNMENTS)
+                .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
+                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("manual")
+                    .and(TOPICS.COLLECTION.eq(collection)))
+                .fetch()
+                .map(r -> {
                     Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("doc_id",   r.get("doc_id",   String.class));
-                    m.put("topic_id", r.get("topic_id", Long.class));
+                    m.put("doc_id",   r.get(TOPIC_ASSIGNMENTS.DOC_ID));
+                    m.put("topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
                     return m;
                 });
             Map<String, Object> out = new LinkedHashMap<>();
@@ -1107,14 +1285,15 @@ public final class TaxonomyRepository {
         List<Map<String, Object>> safeSpecs = specs == null ? List.of() : specs;
         Map<String, Object> transfers = manualTransfers == null ? Map.of() : manualTransfers;
         return tenantScope.withTenant(tenant, ctx -> {
+            ensureCollectionRegistered(ctx, tenant, collection);
             // REPLACE semantics — clear old rows even when there are no new specs.
-            ctx.execute("""
-                DELETE FROM nexus.topic_assignments WHERE topic_id IN
-                    (SELECT id FROM nexus.topics WHERE collection = ?)
-                """, collection);
-            ctx.execute("DELETE FROM nexus.topics WHERE collection = ?", collection);
+            ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.TOPIC_ID.in(
+                   select(TOPICS.ID).from(TOPICS).where(TOPICS.COLLECTION.eq(collection))))
+               .execute();
+            ctx.deleteFrom(TOPICS).where(TOPICS.COLLECTION.eq(collection)).execute();
 
-            String tsStr = fmtTs(OffsetDateTime.now(ZoneOffset.UTC));
+            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             List<Long> topicIds = new ArrayList<>();
             for (var spec : safeSpecs) {
                 String label        = (String) spec.get("label");
@@ -1124,13 +1303,13 @@ public final class TaxonomyRepository {
                 String assignedBy   = (String) spec.getOrDefault("assigned_by", "hdbscan");
                 List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
 
-                var row = ctx.fetchOne("""
-                    INSERT INTO nexus.topics
-                        (tenant_id, label, collection, doc_count, created_at, terms, review_status)
-                    VALUES (?, ?, ?, ?, ?::timestamptz, ?, ?)
-                    RETURNING id
-                    """, tenant, label, collection, docCount, tsStr, terms, reviewStatus);
-                long topicId = row == null ? -1 : ((Number) row.get("id")).longValue();
+                long topicId = ctx.insertInto(TOPICS,
+                        TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
+                        TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.REVIEW_STATUS)
+                    .values(tenant, label, collection, docCount, now, terms, reviewStatus)
+                    .returningResult(TOPICS.ID)
+                    .fetchOne()
+                    .get(TOPICS.ID);
                 topicIds.add(topicId);
 
                 batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
@@ -1144,11 +1323,19 @@ public final class TaxonomyRepository {
             for (var e : transfers.entrySet()) {
                 int specIndex = ((Number) e.getValue()).intValue();
                 if (specIndex >= 0 && specIndex < topicIds.size()) {
-                    ctx.execute("""
-                        INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by)
-                        VALUES (?, ?, ?, 'manual')
-                        ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET assigned_by = 'manual'
-                        """, tenant, e.getKey(), topicIds.get(specIndex));
+                    ctx.insertInto(TOPIC_ASSIGNMENTS,
+                            TOPIC_ASSIGNMENTS.TENANT_ID,
+                            TOPIC_ASSIGNMENTS.DOC_ID,
+                            TOPIC_ASSIGNMENTS.TOPIC_ID,
+                            TOPIC_ASSIGNMENTS.ASSIGNED_BY)
+                       .values(tenant, e.getKey(), topicIds.get(specIndex), "manual")
+                       .onConflict(
+                           TOPIC_ASSIGNMENTS.TENANT_ID,
+                           TOPIC_ASSIGNMENTS.DOC_ID,
+                           TOPIC_ASSIGNMENTS.TOPIC_ID)
+                       .doUpdate()
+                       .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "manual")
+                       .execute();
                 }
             }
             log.info("persist_rebuild collection={} topics={}", collection, topicIds.size());
@@ -1173,15 +1360,17 @@ public final class TaxonomyRepository {
                                                List<Map<String, Object>> specs) {
         if (specs == null || specs.isEmpty()) return List.of();
         return tenantScope.withTenant(tenant, ctx -> {
-            int existing = ctx.fetchOne(
-                "SELECT COUNT(*) AS c FROM nexus.topics WHERE collection = ?", collection)
-                .get("c", Integer.class);
+            ensureCollectionRegistered(ctx, tenant, collection);
+            int existing = ctx.selectCount()
+                .from(TOPICS)
+                .where(TOPICS.COLLECTION.eq(collection))
+                .fetchOne(0, Integer.class);
             if (existing > 0) {
                 log.info("discover_skip_existing collection={} existing_topics={}",
                          collection, existing);
                 return List.of();
             }
-            String tsStr = fmtTs(OffsetDateTime.now(ZoneOffset.UTC));
+            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             List<Long> topicIds = new ArrayList<>();
             for (var spec : specs) {
                 String label        = (String) spec.get("label");
@@ -1190,13 +1379,13 @@ public final class TaxonomyRepository {
                 String assignedBy   = (String) spec.getOrDefault("assigned_by", "hdbscan");
                 List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
 
-                var row = ctx.fetchOne("""
-                    INSERT INTO nexus.topics
-                        (tenant_id, label, collection, doc_count, created_at, terms)
-                    VALUES (?, ?, ?, ?, ?::timestamptz, ?)
-                    RETURNING id
-                    """, tenant, label, collection, docCount, tsStr, terms);
-                long topicId = row == null ? -1 : ((Number) row.get("id")).longValue();
+                long topicId = ctx.insertInto(TOPICS,
+                        TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
+                        TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS)
+                    .values(tenant, label, collection, docCount, now, terms)
+                    .returningResult(TOPICS.ID)
+                    .fetchOne()
+                    .get(TOPICS.ID);
                 topicIds.add(topicId);
 
                 batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
@@ -1220,6 +1409,12 @@ public final class TaxonomyRepository {
      * <p>{@code ON CONFLICT DO NOTHING} preserves the prior idempotency, including
      * for duplicate doc_ids within a single batch (a self-conflict is skipped, not
      * an error — DO NOTHING, not DO UPDATE).
+     *
+     * <p>Dynamic multi-row VALUES with variable count is the sole reason this
+     * method uses raw SQL string building — jOOQ's typed multi-row INSERT requires
+     * a statically-known row count and would require a separate parameter object
+     * per row (losing the batch-statement benefit). This is the minimal irreducible
+     * plain-SQL fragment per spec.
      */
     private static void batchInsertAssignments(org.jooq.DSLContext ctx, String tenant,
                                                long topicId, List<String> docIds,

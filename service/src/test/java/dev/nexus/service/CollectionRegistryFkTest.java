@@ -358,8 +358,12 @@ class CollectionRegistryFkTest {
 
             // Fixture: catalog_documents row (required by fk-001 (tenant_id,doc_id) FK)
             insertCatalogDocument(su, TENANT_A, "casc-doc-1");
-            // Fixture: topics row (required by topic_id FK)
-            insertTopic(su, TENANT_A, 8001L, "casc-topic", "casc__old");
+            // Fixture: topics row (required only for the topic_id FK). Its OWN collection must
+            // NOT be the collection under rename — RDR-164 P1a's topics_collection_fk is
+            // ON UPDATE NO ACTION, so a topic sitting on 'casc__old' would block the parent
+            // rename. The topic's home collection is incidental to this test, which targets
+            // topic_assignments.source_collection's ON UPDATE CASCADE specifically.
+            insertTopic(su, TENANT_A, 8001L, "casc-topic", "casc__topic_home");
             // Fixture: registered collection 'casc__old'
             insertCollection(su, TENANT_A, "casc__old");
             // Fixture: topic_assignment with source_collection='casc__old'
@@ -419,12 +423,15 @@ class CollectionRegistryFkTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "unreg-src-doc");
-            insertTopic(su, TENANT_A, 8003L, "unreg-src-topic", "unreg-src-col");
+            // insertTopic registers the topic's own collection (RDR-164 P1a topics_collection_fk),
+            // so the assignment must reference a DISTINCT, still-unregistered source_collection to
+            // preserve this test's intent (non-null source_collection absent from catalog_collections).
+            insertTopic(su, TENANT_A, 8003L, "unreg-src-topic", "unreg-src-topic-col");
             PSQLException ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.topic_assignments " +
                     "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', 'unreg-src-doc', 8003, 'hdbscan', 'unreg-src-col', NOW())")
+                    "('" + TENANT_A + "', 'unreg-src-doc', 8003, 'hdbscan', 'truly-unreg-src-col', NOW())")
             );
             assertThat(ex.getMessage())
                 .as("topic_assignments_collection_fk must reject non-null source_collection not in catalog_collections")
@@ -1160,6 +1167,12 @@ class CollectionRegistryFkTest {
      */
     private static void insertTopic(Connection su, String tenantId, long id, String label, String collection)
             throws Exception {
+        // RDR-164 P1a: topics now carries topics_collection_fk → catalog_collections.
+        // Register the topic's collection first so the fixture satisfies the NOT VALID FK.
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+            "VALUES ('" + tenantId + "', '" + collection + "') " +
+            "ON CONFLICT (tenant_id, name) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) " +
             "VALUES (" + id + ", '" + tenantId + "', '" + label + "', '" + collection + "', 0, NOW(), 'pending') " +

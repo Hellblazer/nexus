@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    fk-003-collection-registry-extra.xml — RDR-164 P1a (bead nexus-dcqml)
+
+    Extends the collection-registry FK spine started by fk-002 (RDR-156 P0.2) to the
+    five remaining FK-eligible collection-level lifecycle tables:
+
+      document_aspects        (collection NOT NULL)
+      aspect_extraction_queue (collection NOT NULL)
+      topics                  (collection NOT NULL)
+      taxonomy_meta           (collection NOT NULL, PK = (tenant_id, collection))
+      document_highlights     (collection NULLABLE — MATCH SIMPLE: null rows escape the FK
+                               and rely on the fk-001 catalog_documents cascade instead)
+
+    Each FK is FOREIGN KEY (tenant_id, collection) REFERENCES catalog_collections(tenant_id, name)
+    ON DELETE RESTRICT NOT VALID — identical shape to fk-002. The composite (tenant_id, *)
+    key keeps every reference tenant-safe.
+
+    Constraint names are a fixed contract (CollectionRegistryFkExtraTest):
+      document_aspects_collection_fk
+      aspect_extraction_queue_collection_fk
+      topics_collection_fk
+      taxonomy_meta_collection_fk
+      document_highlights_collection_fk
+
+    SCOPE (RDR-164 P0 + P1a): this changelog ships the STUB-REGISTER backfill (fk-003-0,
+    mirroring fk-002-0-backfill-stubs) plus the five NOT VALID FKs. It deliberately does
+    NOT add VALIDATE CONSTRAINT — that is the P1b sibling of bead nexus-70r3c.3,
+    world-blocked on the RDR-153 production migration completing with summary.total_failed==0.
+    The Q5 orphan RECONCILE (DELETE genuinely-orphaned / FAIL-LOUD ambiguous) runs in that
+    migration where real data exists; it is not part of this schema changelog.
+
+    Must come after aspects-001 (document_aspects/document_highlights/aspect_extraction_queue),
+    taxonomy-001 (topics/taxonomy_meta), and catalog-001 (catalog_collections).
+
+    ON UPDATE SEMANTICS — INVARIANT FOR RDR-164 P3 (renameCollection). These five FKs are
+    `ON DELETE RESTRICT` with the DEFAULT `ON UPDATE NO ACTION`. This INTENTIONALLY differs
+    from fk-002's topic_assignments_collection_fk, which is `ON UPDATE CASCADE`. Consequence:
+    a bare `UPDATE catalog_collections SET name = ...` (e.g. CatalogRepository.renameCollection's
+    targetExists-false branch) will NOT propagate to document_aspects/aspect_extraction_queue/
+    topics/taxonomy_meta/document_highlights — only topic_assignments.source_collection follows
+    automatically. P3 MUST keep issuing the explicit per-store child-table
+    `UPDATE <table> SET collection = <newName>` calls (TaxonomyRepository.renameCollection,
+    AspectRepository.rename*Collection) and MUST NOT replace them by relying on FK cascade.
+    Leaving these RESTRICT/NO-ACTION (rather than CASCADE) is the gate-settled choice: collection
+    rename is a destructive-admin op handled by an explicit transactional re-home (RDR-164 Q6),
+    not a silent parent-row UPDATE. The P3 phase-review gate must verify all five child tables are
+    explicitly re-homed.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset fk-003-0: backfill stubs into catalog_collections ─────────── -->
+    <!--
+        Same deploy-order landmine fk-002-0 documents: derived rows (aspects, queue,
+        topics, taxonomy_meta, highlights) accumulate before the catalog ETL registers
+        the collection. Without this backfill the NOT VALID FKs added by fk-003-1..5
+        would reject new serving writes at deploy time (NOT VALID still enforces NEW
+        inserts; it only skips retroactive validation of pre-existing rows). Each stub
+        row carries empty metadata fields ('') and is upgradable by importCollection's
+        DO UPDATE WHERE-stub logic once the catalog ETL runs. STUB-REGISTER only — the
+        orphan reconcile (DELETE/FAIL-LOUD, Q5) rides with the RDR-153 migration (P1b).
+        document_highlights contributes only non-null, non-empty collection values.
+    -->
+    <changeSet id="fk-003-0-backfill-stubs" author="nexus-dcqml">
+        <comment>
+            Backfill catalog_collections stub rows for every collection name referenced by
+            document_aspects, aspect_extraction_queue, topics, taxonomy_meta, and
+            document_highlights (non-null) that is not already registered.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.document_aspects
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.aspect_extraction_queue
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.topics
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.taxonomy_meta
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.document_highlights
+WHERE collection IS NOT NULL AND collection != ''
+ON CONFLICT (tenant_id, name) DO NOTHING;
+        </sql>
+        <rollback>
+            <!-- No rollback: stub rows are inert; the FKs being added next drop via their
+                 own rollbacks. Removing stubs here could break existing references. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-1: document_aspects → catalog_collections FK ───────── -->
+    <changeSet id="fk-003-1" author="nexus-dcqml">
+        <comment>
+            document_aspects_collection_fk: FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_aspects
+    ADD CONSTRAINT document_aspects_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.document_aspects DROP CONSTRAINT IF EXISTS document_aspects_collection_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-2: aspect_extraction_queue → catalog_collections FK ── -->
+    <changeSet id="fk-003-2" author="nexus-dcqml">
+        <comment>
+            aspect_extraction_queue_collection_fk: FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.aspect_extraction_queue
+    ADD CONSTRAINT aspect_extraction_queue_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.aspect_extraction_queue DROP CONSTRAINT IF EXISTS aspect_extraction_queue_collection_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-3: topics → catalog_collections FK ─────────────────── -->
+    <changeSet id="fk-003-3" author="nexus-dcqml">
+        <comment>
+            topics_collection_fk: FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topics
+    ADD CONSTRAINT topics_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.topics DROP CONSTRAINT IF EXISTS topics_collection_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-4: taxonomy_meta → catalog_collections FK ──────────── -->
+    <changeSet id="fk-003-4" author="nexus-dcqml">
+        <comment>
+            taxonomy_meta_collection_fk: FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.taxonomy_meta
+    ADD CONSTRAINT taxonomy_meta_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.taxonomy_meta DROP CONSTRAINT IF EXISTS taxonomy_meta_collection_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-5: document_highlights → catalog_collections FK ─────── -->
+    <changeSet id="fk-003-5" author="nexus-dcqml">
+        <comment>
+            document_highlights_collection_fk: FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID.
+            collection is NULLABLE: MATCH SIMPLE means null-collection rows escape the FK and
+            rely on the fk-001 catalog_documents ON DELETE CASCADE instead.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_highlights
+    ADD CONSTRAINT document_highlights_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.document_highlights DROP CONSTRAINT IF EXISTS document_highlights_collection_fk;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

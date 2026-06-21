@@ -66,6 +66,13 @@
          Must come after vectors-001, chash-001, taxonomy-001, and catalog-001. -->
     <include file="db/changelog/fk-002-collection-registry.xml"/>
 
+    <!-- Collection-registry FKs, second wave (bead nexus-dcqml, RDR-164 P1a):
+         NOT VALID ON DELETE RESTRICT FKs from document_aspects, aspect_extraction_queue,
+         topics, taxonomy_meta, and document_highlights to catalog_collections(tenant_id, name),
+         plus a stub-register backfill. VALIDATE is deferred to P1b (world-blocked).
+         Must come after aspects-001, taxonomy-001, and catalog-001. -->
+    <include file="db/changelog/fk-003-collection-registry-extra.xml"/>
+
     <!-- Catalog hygiene (bead nexus-70r3c.2, RDR-156 P0.2):
          temporal typing for catalog_collections.created_at/superseded_at (TEXT→timestamptz NULL),
          and CHECK constraints for chash length = 32 and position >= 0. -->

@@ -1122,6 +1122,10 @@ class SoftDeleteTest {
      */
     private static void insertAspectRow(Connection su, String tenantId, String tumbler,
                                          String collection, String sourcePath) throws Exception {
+        // RDR-164 P1a: register the collection (document_aspects_collection_fk).
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenantId + "', '"
+            + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.document_aspects " +
             "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) " +

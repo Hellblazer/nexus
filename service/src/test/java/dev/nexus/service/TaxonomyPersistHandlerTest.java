@@ -84,6 +84,10 @@ class TaxonomyPersistHandlerTest {
             }
             su.createStatement().execute("GRANT USAGE ON SEQUENCE nexus.topics_id_seq TO " + SVC_ROLE);
             su.createStatement().execute("GRANT SELECT ON nexus.catalog_documents TO " + SVC_ROLE);
+            // RDR-164 P1a: topics/taxonomy_meta writes ensure-register their collection
+            // (catalog_collections stub) to satisfy the new fk-003 collection FKs.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
             su.createStatement().execute(
