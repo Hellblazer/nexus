@@ -21,6 +21,16 @@ from nexus.pdf_extractor import PDFExtractor
 from tests.conftest import set_credentials
 
 
+@pytest.fixture(autouse=True)
+def _legacy_vector_backend(monkeypatch):
+    # nexus-9n1u3: these tests use a raw chromadb T3 + client-embed (fake/local
+    # voyage) PDF path. Pin the vector backend off the 6.0 service default so the
+    # streaming pipeline client-embeds into the fixture instead of writing empty
+    # server-side-embed placeholders that raw chromadb rejects (IndexError in
+    # upsert). The service-mode PDF path is covered by the live service smoke.
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
+
+
 def _make_ruled_table_pdf(path: Path) -> None:
     """Create a PDF with a visible ruled table (borders drawn as lines).
 
