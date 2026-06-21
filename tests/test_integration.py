@@ -17,16 +17,16 @@ from nexus.cli import main
 
 
 def _t3_reachable() -> bool:
-    if not all([
-        os.environ.get("CHROMA_API_KEY"),
-        os.environ.get("VOYAGE_API_KEY"),
-        os.environ.get("CHROMA_TENANT"),
-        os.environ.get("CHROMA_DATABASE"),
-    ]):
-        return False
+    # nexus-o06g4: in 6.0 (RDR-155 P4a) T3 serves through the nexus-service, not
+    # ChromaDB Cloud. The old guard checked for Chroma-Cloud creds, and
+    # ``make_t3()`` only CONSTRUCTS the client lazily (no connection), so it
+    # returned reachable=True with creds present and the tests then false-FAILED
+    # on first real use with "nexus-service endpoint is not resolvable". Probe
+    # the actual service endpoint instead, so these tests skip honestly when no
+    # service is running and run when one is.
     try:
-        from nexus.db import make_t3
-        make_t3()
+        from nexus.db.service_endpoint import resolve_service_config
+        resolve_service_config()  # raises RuntimeError when no endpoint resolves
         return True
     except Exception:
         return False
@@ -36,7 +36,7 @@ _T3_AVAILABLE: bool = _t3_reachable()
 
 requires_t3 = pytest.mark.skipif(
     not _T3_AVAILABLE,
-    reason="T3 integration requires CHROMA_API_KEY, VOYAGE_API_KEY, CHROMA_TENANT, CHROMA_DATABASE",
+    reason="T3 integration requires a reachable nexus-service (start with 'nx daemon service start' or export NX_SERVICE_URL/NX_SERVICE_TOKEN)",
 )
 
 _T3_COL = "knowledge__nexus-integration-test"
