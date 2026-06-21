@@ -2,6 +2,22 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_INDEX;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_384;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_768;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Condition;
@@ -1132,11 +1148,67 @@ public final class CatalogRepository {
         );
     }
 
-    /** Delete a collection projection row. */
-    public int deleteCollection(String tenant, String name) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(T_COLLS).where(F_COL_NAME.eq(name)).execute()
-        );
+    /**
+     * Atomically delete a collection and ALL its derived in-Postgres state in ONE
+     * tenant-scoped transaction (RDR-164 P2). Replaces the SQLite-era client-side
+     * {@code purge_collection_cascade} fan-out for the service path: the explicit
+     * ordered DELETE removes every lifecycle table's rows in dependency order, with
+     * the {@code catalog_collections} registry row LAST so the {@code ON DELETE
+     * RESTRICT} child FKs (fk-002 / fk-003) act as a safety net rather than a blocker.
+     *
+     * <p>Order (children → registry): chunks_* → chash_index → topic_assignments →
+     * topics → taxonomy_centroids_* → document_aspects → document_highlights →
+     * aspect_extraction_queue → catalog_documents (fk-001 cascades any doc-rooted
+     * aspect/highlight/queue/manifest remainder) → catalog_collections.
+     *
+     * <p>This is where RDR-164 closes <strong>nexus-tquoj</strong> (the client cascade
+     * never purged {@code aspect_extraction_queue}; the explicit DELETE here catches it,
+     * including doc-less {@code doc_id=''} rows the fk-001 document cascade cannot reach)
+     * and the service-mode <strong>nexus-cugrk</strong> centroid leak ({@code
+     * taxonomy_centroids_*} have no FK to {@code topics}, CA-6 — purged by explicit
+     * {@code DELETE WHERE collection=?} in the same txn).
+     *
+     * <p>RLS scopes every DELETE to the caller's tenant via the {@code nexus.tenant}
+     * GUC, so a same-named collection under another tenant is untouched. Returns a
+     * per-table deleted-row count map (preserves the {@code CascadeCounts} / CLI-render
+     * + telemetry contract); no {@code failures} list — the operation is all-or-nothing.
+     *
+     * <p>Out of scope (stays client-side, RDR-164 CA-4/CA-5): the {@code pipeline.db}
+     * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
+     */
+    public Map<String, Integer> deleteCollection(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            // 1. T3 chunk vectors (registry children, fk-002 RESTRICT).
+            counts.put("chunks_384",  ctx.deleteFrom(CHUNKS_384).where(CHUNKS_384.COLLECTION.eq(name)).execute());
+            counts.put("chunks_768",  ctx.deleteFrom(CHUNKS_768).where(CHUNKS_768.COLLECTION.eq(name)).execute());
+            counts.put("chunks_1024", ctx.deleteFrom(CHUNKS_1024).where(CHUNKS_1024.COLLECTION.eq(name)).execute());
+            // 2. chash index (physical_collection; fk-002-4 RESTRICT).
+            counts.put("chash_index", ctx.deleteFrom(CHASH_INDEX).where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(name)).execute());
+            // 3. taxonomy: projection assignments by source_collection (fk-002-5 RESTRICT),
+            //    then topics (fk-003 RESTRICT) — deleting topics cascades any remaining
+            //    assignments via topic_assignments.topic_id -> topics(id) ON DELETE CASCADE.
+            counts.put("topic_assignments", ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(name)).execute());
+            counts.put("topics", ctx.deleteFrom(TOPICS).where(TOPICS.COLLECTION.eq(name)).execute());
+            // 3b. taxonomy_meta (fk-003-4 RESTRICT; PK (tenant_id, collection) — explicit DELETE).
+            //     topic_links clears via topics(id) ON DELETE CASCADE in step 3, so it needs no row here.
+            counts.put("taxonomy_meta", ctx.deleteFrom(TAXONOMY_META).where(TAXONOMY_META.COLLECTION.eq(name)).execute());
+            // 4. centroids (CA-6: no FK to topics — explicit DELETE; the cugrk fix).
+            counts.put("taxonomy_centroids_384",  ctx.deleteFrom(TAXONOMY_CENTROIDS_384).where(TAXONOMY_CENTROIDS_384.COLLECTION.eq(name)).execute());
+            counts.put("taxonomy_centroids_768",  ctx.deleteFrom(TAXONOMY_CENTROIDS_768).where(TAXONOMY_CENTROIDS_768.COLLECTION.eq(name)).execute());
+            counts.put("taxonomy_centroids_1024", ctx.deleteFrom(TAXONOMY_CENTROIDS_1024).where(TAXONOMY_CENTROIDS_1024.COLLECTION.eq(name)).execute());
+            // 5. aspect family (fk-003 RESTRICT). Explicit collection delete catches
+            //    doc-less (doc_id='') rows fk-001's document cascade cannot reach — the tquoj fix.
+            counts.put("document_aspects",        ctx.deleteFrom(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.COLLECTION.eq(name)).execute());
+            counts.put("document_highlights",     ctx.deleteFrom(DOCUMENT_HIGHLIGHTS).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(name)).execute());
+            counts.put("aspect_extraction_queue", ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(name)).execute());
+            // 6. catalog documents for this physical collection; fk-001 cascades any
+            //    doc-rooted aspect/highlight/queue/manifest rows still present.
+            counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
+            // 7. registry row LAST (RESTRICT children are now gone).
+            counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
+            return counts;
+        });
     }
 
     /**
