@@ -12,6 +12,7 @@ import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -113,6 +114,12 @@ class AspectRepositoryTest {
                 su.createStatement().execute(
                     "GRANT USAGE ON SEQUENCE nexus." + table + "_id_seq TO " + SVC_ROLE);
             }
+            // RDR-164 P1a: aspect/highlight/queue writes now ensure-register their collection
+            // (catalog_collections stub) to satisfy the new fk-003 collection FKs, so the
+            // service role needs INSERT on catalog_collections (production grants this via
+            // GRANT ... ON ALL TABLES IN SCHEMA nexus; the test role is scoped explicitly).
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
 
@@ -660,8 +667,51 @@ class AspectRepositoryTest {
         importBody.put("retry_count", 1);
         repo.importQueueRow(TENANT_A, importBody);
 
-        // pending_count confirms row is still there
-        assertThat(repo.pendingCount(TENANT_A)).isGreaterThanOrEqualTo(1);
+        // GREATEST(existing, EXCLUDED) must keep retry_count=3, NOT overwrite to 1.
+        // Read the value back (a plain EXCLUDED.retry_count overwrite would yield 1 and
+        // pass a >= 1 assertion — this exact-value check is the non-vacuous guard).
+        Map<String, Object> row = repo.listPending(TENANT_A, 1000).stream()
+            .filter(r -> "gr.pdf".equals(r.get("source_path")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("imported queue row gr.pdf not found in listPending"));
+        assertThat(((Number) row.get("retry_count")).intValue())
+            .as("GREATEST(retry_count) must preserve the higher existing value (3), not the stale import (1)")
+            .isEqualTo(3);
+    }
+
+    @Test @Order(39)
+    void importQueueRow_least_enqueuedAt_keepsEarliest() {
+        // LEAST(existing.enqueued_at, EXCLUDED.enqueued_at): a later re-import must NOT
+        // push enqueued_at forward. A plain EXCLUDED.enqueued_at overwrite would replace
+        // the earlier value and pass any "row exists" assertion — so read the value back.
+        String tenant = "etl-least-tenant-" + System.nanoTime();
+        String path   = "least.pdf";
+        String early  = "2025-01-01T00:00:00.000000Z";
+        String later  = "2026-06-01T00:00:00.000000Z";
+
+        var seed = new java.util.LinkedHashMap<String, Object>();
+        seed.put("collection",  "least-coll");
+        seed.put("source_path", path);
+        seed.put("status",      "pending");
+        seed.put("retry_count", 0);
+        seed.put("enqueued_at", early);
+        repo.importQueueRow(tenant, seed);
+
+        seed.put("enqueued_at", later);   // stale (later) re-import
+        repo.importQueueRow(tenant, seed);
+
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT enqueued_at FROM nexus.aspect_extraction_queue "
+                + "WHERE tenant_id = '" + tenant + "' AND source_path = '" + path + "'");
+            assertThat(rs.next()).as("queue row must exist").isTrue();
+            var enqueuedAt = rs.getObject("enqueued_at", java.time.OffsetDateTime.class).toInstant();
+            assertThat(enqueuedAt)
+                .as("LEAST(enqueued_at) must keep the EARLIER 2025 timestamp, not the later 2026 re-import")
+                .isEqualTo(java.time.OffsetDateTime.parse(early).toInstant());
+        } catch (Exception e) {
+            throw new AssertionError("failed to read back enqueued_at", e);
+        }
     }
 
     @Test @Order(39)
