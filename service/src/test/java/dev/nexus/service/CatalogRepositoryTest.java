@@ -110,6 +110,10 @@ class CatalogRepositoryTest {
                 su.createStatement().execute(
                     "GRANT SELECT ON nexus." + ct + " TO " + SVC_ROLE);
             }
+            // RDR-164 P3: renameCollection re-homes every denorm-collection table in one txn;
+            // grant write broadly so the coherent rename can move children off the old name.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -750,8 +754,10 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "rn.1", "title", "Rename Test",
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__old__v1"));
-        int updated = repo.renameCollection(TENANT_A, "knowledge__old__v1", "knowledge__new__v1");
-        assertThat(updated).isEqualTo(1); // 1 document updated
+        var counts = repo.renameCollection(TENANT_A, "knowledge__old__v1", "knowledge__new__v1");
+        assertThat(counts.get("catalog_documents")).as("1 document re-homed").isEqualTo(1);
+        assertThat(counts.get("catalog_collections_inserted")).as("registry Y inserted").isEqualTo(1);
+        assertThat(counts.get("catalog_collections_deleted")).as("registry X deleted").isEqualTo(1);
         var doc = repo.getDocument(TENANT_A, "rn.1");
         assertThat(doc.get("physical_collection")).isEqualTo("knowledge__new__v1");
     }
@@ -774,9 +780,11 @@ class CatalogRepositoryTest {
             "name", tgt, "content_type", "knowledge", "owner_id", "nexus-1-1",
             "embedding_model", "bge-base-en-v15-768", "model_version", "v1"));
 
-        // Pre-RDR-162 this threw a 500 (PK collision on the registry rename).
-        int updated = repo.renameCollection(TENANT_A, src, tgt);
-        assertThat(updated).isEqualTo(1);
+        // Pre-RDR-162 this threw a 500 (PK collision on the registry rename). The cross-model
+        // COPY branch (target exists) repoints catalog_documents only and returns just that key.
+        var counts = repo.renameCollection(TENANT_A, src, tgt);
+        assertThat(counts).as("cross-model branch returns only catalog_documents").containsOnlyKeys("catalog_documents");
+        assertThat(counts.get("catalog_documents")).isEqualTo(1);
         assertThat(repo.getDocument(TENANT_A, "xmrn.1").get("physical_collection")).isEqualTo(tgt);
         // The pre-registered target row is intact (not collided, not duplicated).
         assertThat(repo.getCollection(TENANT_A, tgt)).isNotNull();
