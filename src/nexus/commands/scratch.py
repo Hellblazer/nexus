@@ -17,9 +17,11 @@ def _t1():
       (Postgres UNLOGGED, RDR-152 bead nexus-gmiaf.13).
     * Default → :class:`~nexus.db.t1.T1Database` (ChromaDB path, unchanged).
 
-    On ``T1ServerNotFoundError`` (Chroma path only), surface a clean actionable
-    message via ``click.ClickException`` (exit 1, no traceback) rather than a
-    wall of traceback (nexus-gff3g).
+    On ``T1ServerNotFoundError`` (Chroma path) or a service-endpoint
+    ``RuntimeError`` (service path, ``NX_STORAGE_BACKEND=service`` with no
+    reachable nexus-service — nexus-0l5ym), surface a clean actionable message
+    via ``click.ClickException`` (exit 1, no traceback) rather than a wall of
+    traceback (nexus-gff3g).
     """
     try:
         return get_t1_database()
@@ -30,6 +32,18 @@ def _t1():
             "in-process ephemeral scratch (not shared with the MCP server), or "
             "reconnect the conexus MCP/extension so a session-id lease is "
             "published for this session."
+        ) from exc
+    except RuntimeError as exc:
+        # nexus-0l5ym: service-mode T1 (HttpScratchStore) raises a raw
+        # RuntimeError from resolve_service_config when no nexus-service
+        # endpoint resolves. Convert it to the same clean guidance instead of
+        # dumping a traceback on `nx scratch`.
+        raise click.ClickException(
+            f"{exc}\n\n"
+            "Quick fix: prefix the command with NX_T1_ISOLATED=1 for an "
+            "in-process ephemeral scratch, start the service with "
+            "'nx daemon service start', or export NX_SERVICE_URL / "
+            "NX_SERVICE_TOKEN so the service-backed T1 endpoint resolves."
         ) from exc
 
 
