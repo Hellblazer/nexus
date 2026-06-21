@@ -716,6 +716,19 @@ def _run_check_tier_discipline() -> None:
         click.echo(f"  T2 database not found at {db_path} (skip).")
         return
 
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+        # nexus-wyu1g: in service mode tier_writes go to the service-backed
+        # telemetry store (Postgres), not local SQLite. Reading the empty local
+        # table here reported a false-clean "no writes seen"; report the
+        # backend honestly instead.
+        click.echo("Tier-discipline check:")
+        click.echo(
+            "  service-backed telemetry (Postgres) — local inspection N/A; "
+            "tier writes are recorded in the nexus-service, not local SQLite."
+        )
+        return
+
     conn = _sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only tier_writes inspection
     try:
         has_table = conn.execute(

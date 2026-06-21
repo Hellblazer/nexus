@@ -192,3 +192,61 @@ class TestEmptyOrMissing:
         )
         assert result.exit_code == 0, result.output
         assert "no writes" in result.output
+
+
+class TestServiceModeReadParity:
+    """nexus-wyu1g: in service mode tier_writes live in Postgres, not local
+    SQLite. The diagnostics must report that honestly instead of silently
+    showing 0 (false wrong-result)."""
+
+    def test_tier_status_service_mode_reports_service_backed(
+        self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.commands.tier_status import tier_status_cmd
+
+        # Seed a local row — service mode must NOT read it (it would falsely
+        # report counts; in real service mode the local table is empty/stale).
+        _seed_t2(isolated_t2, [("sess-A", "memory_put", "T2", None, "nexus", "x")])
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+
+        result = CliRunner().invoke(tier_status_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "service-backed" in result.output
+        assert "total: 1" not in result.output  # did not read the local row
+
+    def test_tier_status_service_mode_json(
+        self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.commands.tier_status import tier_status_cmd
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        result = CliRunner().invoke(tier_status_cmd, ["--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload.get("service_backed") is True
+
+    def test_doctor_tier_discipline_service_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from click.testing import CliRunner as _CR
+        import nexus.commands.doctor as doc
+
+        db = tmp_path / "t.db"
+        db.touch()
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db)
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+
+        # _run_check_tier_discipline prints via click.echo; capture with a runner.
+        import click
+
+        @click.command()
+        def _wrap() -> None:
+            doc._run_check_tier_discipline()
+
+        result = _CR().invoke(_wrap, [])
+        assert result.exit_code == 0, result.output
+        assert "service-backed" in result.output and "N/A" in result.output
+        assert "no writes seen" not in result.output
