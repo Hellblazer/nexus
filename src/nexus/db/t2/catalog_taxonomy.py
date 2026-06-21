@@ -162,9 +162,12 @@ class CatalogTaxonomy:
     """Owns the ``topics`` and ``topic_assignments`` tables.
 
     RDR-070 (nexus-9k5): topic discovery uses sklearn HDBSCAN on
-    pre-computed embeddings. Centroids stored in ChromaDB
-    ``taxonomy__centroids`` collection. c-TF-IDF labels via
-    CountVectorizer + TfidfTransformer for c-TF-IDF labels.
+    pre-computed embeddings. Centroids historically lived in the Chroma
+    ``taxonomy__centroids`` collection; since RDR-155 P4a.2 the serving path
+    is pgvector via the nexus-service (the discover/rebuild centroid-write
+    helpers retain raw-Chroma access only for injected-client / legacy-ETL
+    paths, slated for removal in RDR-155 P4b). c-TF-IDF labels via
+    CountVectorizer + TfidfTransformer.
 
     Constructor takes a :class:`MemoryStore` reference for
     :meth:`get_topic_docs` JOIN resolution (RDR-063 §Cross-Domain
@@ -1058,15 +1061,23 @@ class CatalogTaxonomy:
             self.conn.commit()
 
     def delete_topic(self, topic_id: int, *, chroma_client: Any = None) -> str | None:
-        """Delete a topic, its assignments, and its centroid.
+        """Delete a topic and its assignments. Returns the collection name.
 
-        Returns the collection name (needed by routed callers for chroma
-        centroid cleanup when ``chroma_client`` is not passed in).  When
-        ``chroma_client`` is provided the cleanup happens internally as
-        before (backward-compatible).  RDR-151 Phase 3 (nexus-uzay8):
-        the T2 DELETE part can now be routed through the daemon; the
-        caller performs the local chroma centroid delete using the
-        returned collection name.
+        RDR-164 P5 (nexus-c6vze, closes nexus-5kl1b obsolete): the old inline
+        Chroma ``taxonomy__centroids`` cleanup is removed. It was dead code:
+        NO caller ever passed ``chroma_client`` (grep-verified across the CLI +
+        MCP paths — review_cmd routes delete/merge through ``t2_index_write``
+        with no client), so the ``if chroma_client and collection`` guard never
+        fired. Removing it is therefore behaviour-preserving in every config,
+        including ``NX_STORAGE_BACKEND=sqlite``, where topic delete/merge already
+        did not clean Chroma centroids (a pre-existing gap, not introduced here).
+
+        Centroid lifecycle is owned by the service-backed taxonomy store
+        (:class:`HttpTaxonomyStore`, which self-cleans via its pgvector centroid
+        port — the cugrk service leg). ``chroma_client`` is retained only for
+        signature parity with that drop-in and is now ignored; the full Chroma
+        deletion (incl. the discover/rebuild centroid-write path) is RDR-155
+        P4b's scope, not this method's.
         """
         # Read collection before deleting the row
         with self._lock:
@@ -1079,15 +1090,6 @@ class CatalogTaxonomy:
             )
             self.conn.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
             self.conn.commit()
-        # Clean up centroid outside the lock
-        if chroma_client and collection:
-            try:
-                coll = chroma_client.get_collection(
-                    "taxonomy__centroids", embedding_function=None,
-                )
-                coll.delete(ids=[f"{collection}:{topic_id}"])
-            except Exception:
-                pass
         return collection
 
     def merge_topics(
@@ -1097,11 +1099,15 @@ class CatalogTaxonomy:
 
         Uses INSERT OR IGNORE to handle docs assigned to both topics
         (dedup). Updates target's doc_count to the actual assignment count.
-        Cleans up source centroid from ChromaDB when chroma_client provided.
+        Returns the source topic's collection name.
 
-        Returns the source topic's collection name (needed by routed callers
-        for chroma centroid cleanup).  RDR-151 Phase 3 (nexus-uzay8): the
-        T2 writes route through the daemon; caller does local centroid delete.
+        RDR-164 P5 (nexus-c6vze, closes nexus-5kl1b obsolete): the old inline
+        Chroma ``taxonomy__centroids`` source-centroid cleanup is removed. Like
+        :meth:`delete_topic`, it was dead code — no caller ever passed
+        ``chroma_client`` (grep-verified), so removal is behaviour-preserving in
+        every config. Centroid lifecycle is owned by the service-backed
+        :class:`HttpTaxonomyStore` drop-in (pgvector). ``chroma_client`` is
+        retained for signature parity and ignored.
         """
         if source_id == target_id:
             return None  # Self-merge is a no-op
@@ -1153,15 +1159,6 @@ class CatalogTaxonomy:
             # Delete source topic
             self.conn.execute("DELETE FROM topics WHERE id = ?", (source_id,))
             self.conn.commit()
-        # Clean up source centroid outside the lock
-        if chroma_client and collection:
-            try:
-                coll = chroma_client.get_collection(
-                    "taxonomy__centroids", embedding_function=None,
-                )
-                coll.delete(ids=[f"{collection}:{source_id}"])
-            except Exception:
-                pass
         return collection
 
     def get_topic_by_id(self, topic_id: int) -> dict[str, Any] | None:
