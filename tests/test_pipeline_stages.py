@@ -158,7 +158,8 @@ class TestServiceModeStreaming:
         t3.upsert_chunks_with_embeddings.assert_called()
         # Forwarded embeddings are empty — the service embeds, client vectors
         # are discarded (HttpVectorClient.upsert_chunks_with_embeddings).
-        embs = t3.upsert_chunks_with_embeddings.call_args[0][3]
+        ca = t3.upsert_chunks_with_embeddings.call_args
+        embs = ca.args[3] if len(ca.args) > 3 else ca.kwargs["embeddings"]
         assert embs and all(e == [] for e in embs)
 
     def test_non_service_no_voyage_still_raises(self, db) -> None:
@@ -331,18 +332,35 @@ class TestChunkerLoop:
         assert calls == []
 
     def test_embed_fn_none_writes_service_mode_sentinel(self, db, done_event) -> None:
-        # nexus-9n1u3: embed_fn=None is the service-mode path (the orchestrator
-        # only leaves it None in service mode). The embed stage writes a
-        # non-NULL empty-blob sentinel so the chunk stays uploadable; the JVM
-        # embeds at upload time.
+        # nexus-9n1u3: in SERVICE mode, embed_fn=None makes the embed stage
+        # write a non-NULL empty-blob sentinel so the chunk stays uploadable;
+        # the JVM embeds at upload time.
         _pop_pages(db, "h1", 2)
-        with patch(_P_CHK) as MC:
+        with patch(_P_CHK) as MC, patch(
+            "nexus.db.http_vector_client.is_vector_service_mode", return_value=True
+        ):
             MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {}))
             chunker_loop("h1", db, threading.Event(), embed_fn=None, extraction_done=done_event)
         out = db.read_ready_chunks("h1")
         assert len(out) == 1 and out[0]["embedding"] == b""
         # non-NULL sentinel -> the uploader will pick it up (was dropped when None)
         assert len(db.read_uploadable_chunks("h1")) == 1
+
+    def test_embed_fn_none_non_service_does_not_write_sentinel(self, db, done_event) -> None:
+        # review Sig-1: the b"" sentinel is gated LOCALLY on is_vector_service_mode().
+        # A caller that bypasses the orchestrator and passes embed_fn=None in
+        # NON-service mode must NOT silently write an uploadable zero-vector
+        # chunk — it falls through to NULL (dropped by read_uploadable_chunks),
+        # surfacing the misuse instead of corrupting.
+        _pop_pages(db, "h1", 2)
+        with patch(_P_CHK) as MC, patch(
+            "nexus.db.http_vector_client.is_vector_service_mode", return_value=False
+        ):
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {}))
+            chunker_loop("h1", db, threading.Event(), embed_fn=None, extraction_done=done_event)
+        out = db.read_ready_chunks("h1")
+        assert len(out) == 1 and out[0]["embedding"] is None
+        assert db.read_uploadable_chunks("h1") == []
 
     def test_incremental_chunking_before_extraction_done(self, db) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")

@@ -192,6 +192,8 @@ def _embed_and_write_batch(
     if not chunks_to_embed:
         return 0, target_model
 
+    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+
     chunk_texts = [c.text for c in chunks_to_embed]
     embeddings: list[list[float]] = []
     actual_model = target_model
@@ -212,16 +214,19 @@ def _embed_and_write_batch(
         emb_bytes: bytes | None
         if i < len(embeddings):
             emb_bytes = struct.pack(f"{len(embeddings[i])}f", *embeddings[i])
-        elif embed_fn is None:
+        elif embed_fn is None and is_vector_service_mode():
             # nexus-9n1u3: service mode — the JVM embeds server-side at upload.
             # Write a non-NULL empty-blob sentinel (not None) so
             # ``read_uploadable_chunks`` (``embedding IS NOT NULL``) still picks
             # the chunk up; the uploader struct.unpacks ``b""`` to ``[]`` and
             # ``HttpVectorClient.upsert_chunks_with_embeddings`` discards the
             # empty vector and embeds from the chunk text. Mirrors the batch
-            # path (doc_indexer server-side-embed branch). embed_fn is None at
-            # this stage ONLY in service mode — the orchestrator raises
-            # otherwise.
+            # path (doc_indexer server-side-embed branch). The service-mode
+            # check is LOCAL (not inferred from embed_fn=None) so a caller that
+            # bypasses the orchestrator and passes embed_fn=None outside service
+            # mode does NOT silently write zero-vector chunks — it falls through
+            # to emb_bytes=None, which read_uploadable_chunks drops, surfacing
+            # the misuse instead of corrupting (review nexus-9n1u3 Sig-1).
             emb_bytes = b""
         else:
             emb_bytes = None

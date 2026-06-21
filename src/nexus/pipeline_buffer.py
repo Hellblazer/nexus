@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS pdf_chunks (
     chunk_text    TEXT NOT NULL,
     chunk_id      TEXT NOT NULL,
     metadata_json TEXT DEFAULT '{}',
-    embedding     BLOB DEFAULT NULL,
+    embedding     BLOB DEFAULT NULL,  -- NULL = not embedded; packed floats = client vectors; b"" = service-mode sentinel (JVM embeds at upload, nexus-9n1u3)
     uploaded      INTEGER DEFAULT 0,
     created_at    TEXT NOT NULL,
     PRIMARY KEY (content_hash, chunk_index)
