@@ -566,10 +566,16 @@ def reset_stores():
 
 @pytest.fixture
 def client(fake_server: str) -> HttpTaxonomyStore:
-    """HttpTaxonomyStore pointed at the fake server."""
+    """HttpTaxonomyStore pointed at the fake server.
+
+    Injects an in-memory ``_FakeCentroidStore`` so delete_topic/merge_topics
+    centroid self-cleaning (nexus-cugrk) does not fire a real HTTP round-trip
+    at the fake taxonomy server (which has no centroid route).
+    """
     return HttpTaxonomyStore(
         base_url=fake_server,
         _token=TOKEN,
+        centroid_store=_FakeCentroidStore([]),
     )
 
 
@@ -811,6 +817,69 @@ class TestDeleteAndMerge:
         assert client.get_topic_by_id(10) is None
         # Target topic still exists
         assert client.get_topic_by_id(20) is not None
+
+    # ── nexus-cugrk: delete/merge self-clean the centroid ──────────────────────
+    # (_FakeCentroidStore — defined later in this module — records delete_ids in
+    #  .calls as ("delete_ids", collection, [topic_ids]).)
+
+    def test_delete_topic_cleans_its_centroid(self, fake_server: str) -> None:
+        centroid = _FakeCentroidStore([])
+        store = HttpTaxonomyStore(base_url=fake_server, _token=TOKEN, centroid_store=centroid)
+        store.import_topic(
+            src_id=1, label="t", parent_id=None, collection="knowledge__papers",
+            centroid_hash=None, doc_count=1, created_at="2026-01-01T00:00:00Z",
+            review_status="pending", terms=None,
+        )
+        store.delete_topic(1)
+        assert centroid.calls == [("delete_ids", "knowledge__papers", [1])], (
+            "delete_topic must remove the topic's centroid from the centroid store, "
+            "not leak it as a chunk-attracting orphan"
+        )
+
+    def test_merge_topics_cleans_source_centroid_only(self, fake_server: str) -> None:
+        centroid = _FakeCentroidStore([])
+        store = HttpTaxonomyStore(base_url=fake_server, _token=TOKEN, centroid_store=centroid)
+        for tid, label in ((10, "source"), (20, "target")):
+            store.import_topic(
+                src_id=tid, label=label, parent_id=None, collection="knowledge__papers",
+                centroid_hash=None, doc_count=1, created_at="2026-01-01T00:00:00Z",
+                review_status="pending", terms=None,
+            )
+        store.merge_topics(10, 20)
+        assert centroid.calls == [("delete_ids", "knowledge__papers", [10])], (
+            "merge removes only the SOURCE centroid (10); the surviving target (20) "
+            "keeps its centroid until the next rebuild"
+        )
+
+    def test_delete_topic_not_found_skips_centroid(self, fake_server: str) -> None:
+        centroid = _FakeCentroidStore([])
+        store = HttpTaxonomyStore(base_url=fake_server, _token=TOKEN, centroid_store=centroid)
+        assert store.delete_topic(9999) is None
+        assert centroid.calls == [], "a 404 (no such topic) must not touch the centroid store"
+
+    def test_merge_topics_not_found_skips_centroid(self, fake_server: str) -> None:
+        centroid = _FakeCentroidStore([])
+        store = HttpTaxonomyStore(base_url=fake_server, _token=TOKEN, centroid_store=centroid)
+        assert store.merge_topics(9998, 9999) is None
+        assert centroid.calls == [], "a 404 source must not touch the centroid store"
+
+    def test_delete_topic_centroid_failure_is_swallowed(self, fake_server: str) -> None:
+        # The relational delete already committed; a centroid-store hiccup must not
+        # raise (stale centroid is recoverable on rebuild, post-commit raise is worse).
+        centroid = _FakeCentroidStore([])
+
+        def _boom(collection: str, topic_ids: list[int]) -> int:
+            raise RuntimeError("centroid store unreachable")
+
+        centroid.delete_ids = _boom  # type: ignore[method-assign]
+        store = HttpTaxonomyStore(base_url=fake_server, _token=TOKEN, centroid_store=centroid)
+        store.import_topic(
+            src_id=1, label="t", parent_id=None, collection="c",
+            centroid_hash=None, doc_count=1, created_at="2026-01-01T00:00:00Z",
+            review_status="pending", terms=None,
+        )
+        assert store.delete_topic(1) == "c"
+        assert store.get_topic_by_id(1) is None
 
     def test_merge_reassigns_docs_to_target(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
