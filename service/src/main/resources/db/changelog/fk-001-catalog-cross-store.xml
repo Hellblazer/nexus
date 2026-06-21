@@ -26,10 +26,15 @@
       non-NULL values are checked against the parent table.
 
     ON DELETE SEMANTICS:
-      topic_assignments → CASCADE:
-        Topic assignments are derived projections of a document onto the taxonomy. If the catalog
-        document is deleted, the assignments have no parent and should be removed. A surviving
-        orphan assignment would point to nothing meaningful.
+      topic_assignments → NO FK (lookup index only; see changeset 1, nexus-sa14p / RDR-164 P4):
+        topic_assignments.doc_id is a CHUNK content-hash (the HDBSCAN taxonomy clusters chunk
+        embeddings), NOT a document tumbler, so a FK to catalog_documents(tumbler) would target
+        the wrong identity space and could never be satisfied. There is therefore NO document-
+        rooted ON DELETE CASCADE for topic_assignments — a catalog_documents delete does NOT
+        remove its assignments via this migration. (Collection-scoped cleanup lives in fk-002 +
+        the taxonomy cascade; the per-memory-entry cascade lives in T2Database.delete ->
+        CatalogTaxonomy.purge_assignments_for_doc, which is orthogonal to fk-001 and must NOT be
+        retired.) Only the supporting (tenant_id, doc_id) index is created.
 
       document_aspects → CASCADE:
         Aspects are extracted annotations on a document. They have no independent existence; their
@@ -52,13 +57,17 @@
         therefore correct both semantically (stale queue items for a deleted doc should be removed)
         and necessary for PG14 compatibility.
 
-    TABLES AFFECTED:
-      nexus.topic_assignments      — (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) CASCADE
+    TABLES AFFECTED (RDR-164 P4: this summary corrected to match the actual changesets below):
+      nexus.topic_assignments      — NO cross-store FK (changeset 1 = lookup index only; see above)
       nexus.document_aspects       — (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) CASCADE
                                      + column: doc_id TEXT DEFAULT '' → nullable (NULL when unset)
       nexus.document_highlights    — (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) CASCADE
-      nexus.aspect_extraction_queue— (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) SET NULL
+      nexus.aspect_extraction_queue— (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) CASCADE
+                                     (changeset 4; CASCADE, not SET NULL — PG14 can't column-list
+                                     SET NULL on a composite FK without nulling tenant_id)
                                      + column: doc_id TEXT DEFAULT '' → nullable (NULL when unset)
+      nexus.catalog_document_chunks— (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) CASCADE
+                                     (changeset 5; the RDR-108 manifest)
 
     TABLES NOT AFFECTED:
       topic_links — references nexus.topics via from_topic_id/to_topic_id (already real FKs); no

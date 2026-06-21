@@ -697,13 +697,25 @@ class DocumentAspects:
         appears in the catalog ``documents`` table (RDR-108 nexus-urj4).
 
         Aspects are extracted asynchronously after a document is
-        registered. When the document is later deleted (via
-        ``cat.delete_document``, source-file removal, etc.) the
-        corresponding aspect rows are NOT cascaded today (the catalog
-        and T2 live in separate SQLite files; cross-DB FK CASCADE is
-        not supported by SQLite). This method is the periodic-sweep
-        cleanup for the orphans that accumulate between extraction
-        and deletion lifecycle events.
+        registered. Whether a document delete reaches its aspect rows
+        depends on the storage backend (RDR-164 P4):
+
+          * Service mode (single Postgres): ``fk-001`` adds a real
+            ``(tenant_id, doc_id) -> catalog_documents`` FK with
+            ``ON DELETE CASCADE``, so a HARD delete of the parent
+            ``catalog_documents`` row (the path a collection delete
+            takes) removes the aspect rows in the same transaction.
+            BUT the per-document ``cat.delete_document`` API is a SOFT
+            tombstone (``UPDATE deleted_at``), and ``ON DELETE CASCADE``
+            does not fire on an UPDATE — so aspects for soft-deleted
+            (not yet hard-purged) documents still accumulate.
+          * Local mode (catalog and T2 in separate SQLite files):
+            there is no cross-DB FK at all, so no document delete
+            cascades to aspects.
+
+        Either way this method is the periodic-sweep cleanup (and
+        defense-in-depth) for the orphans that accumulate between
+        extraction and deletion lifecycle events.
 
         Behavior:
           - Aspects whose ``source_uri`` is empty are NOT classified
