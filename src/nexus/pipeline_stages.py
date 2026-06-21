@@ -209,9 +209,22 @@ def _embed_and_write_batch(
     write_count = len(embeddings) if embed_fn is not None else len(chunks_to_embed)
     for i in range(write_count):
         chunk = chunks_to_embed[i]
-        emb_bytes = None
+        emb_bytes: bytes | None
         if i < len(embeddings):
             emb_bytes = struct.pack(f"{len(embeddings[i])}f", *embeddings[i])
+        elif embed_fn is None:
+            # nexus-9n1u3: service mode — the JVM embeds server-side at upload.
+            # Write a non-NULL empty-blob sentinel (not None) so
+            # ``read_uploadable_chunks`` (``embedding IS NOT NULL``) still picks
+            # the chunk up; the uploader struct.unpacks ``b""`` to ``[]`` and
+            # ``HttpVectorClient.upsert_chunks_with_embeddings`` discards the
+            # empty vector and embeds from the chunk text. Mirrors the batch
+            # path (doc_indexer server-side-embed branch). embed_fn is None at
+            # this stage ONLY in service mode — the orchestrator raises
+            # otherwise.
+            emb_bytes = b""
+        else:
+            emb_bytes = None
         # RDR-108 D1 / nexus-kmb6: streaming PDF chunk natural ID is
         # chunk_text_hash[:32] (matches code/prose/doc indexer write
         # paths). Identical chunk text in the same collection collapses
@@ -666,15 +679,28 @@ def pipeline_index_pdf(
 
     # Resolve embed_fn from credentials when not provided (matches batch path).
     if embed_fn is None:
-        from nexus.config import get_credential, load_config
-        voyage_key = get_credential("voyage_api_key")
-        if voyage_key:
-            from nexus.doc_indexer import _embed_with_fallback
-            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-            embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            # nexus-9n1u3 / RDR-152 Seam B: leave embed_fn=None — the service
+            # embeds server-side at upload time. The embed stage writes a
+            # non-NULL empty-blob sentinel and the uploader routes through
+            # HttpVectorClient.upsert_chunks_with_embeddings (JVM embeds).
+            # Mirrors the batch path (doc_indexer._index_pdf_document).
+            pass
         else:
-            db.mark_failed(content_hash, error="voyage_api_key not configured")
-            raise RuntimeError("voyage_api_key not configured — cannot embed for streaming pipeline")
+            from nexus.config import get_credential, load_config
+            voyage_key = get_credential("voyage_api_key")
+            if voyage_key:
+                from nexus.doc_indexer import _embed_with_fallback
+                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
+            else:
+                db.mark_failed(content_hash, error="voyage_api_key not configured")
+                raise RuntimeError(
+                    "voyage_api_key not configured — cannot embed for streaming "
+                    "pipeline (set a Voyage key, or use service mode for "
+                    "server-side embedding)"
+                )
 
     cancel = threading.Event()
     extraction_done = threading.Event()
