@@ -645,8 +645,8 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
-        int updated = repo.renameCollection(tenant, oldName, newName);
-        HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
+        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
     }
 
     /**
