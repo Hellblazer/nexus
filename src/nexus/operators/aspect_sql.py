@@ -593,7 +593,7 @@ def _query_filter(
             # Batch in 300s to leave plenty of headroom under SQLite's
             # 999-param default cap.
             with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-                conn = db.document_aspects.conn
+                conn = db.document_aspects.conn  # epsilon-allow: SQLite-only branch; service path handled above via storage_backend_for (nexus-l9hd8)
                 uri_list = list(ident_to_uri.values())
                 for chunk_start in range(0, len(uri_list), 300):
                     batch = uri_list[chunk_start:chunk_start + 300]
@@ -689,7 +689,7 @@ def _query_groupby(
                 fetched[ident] = uri_to_value[u]
     else:
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-            conn = db.document_aspects.conn
+            conn = db.document_aspects.conn  # epsilon-allow: SQLite-only branch; service path handled above via storage_backend_for (nexus-l9hd8)
             uri_list = list(ident_to_uri.values())
             for chunk_start in range(0, len(uri_list), 300):
                 batch = uri_list[chunk_start:chunk_start + 300]
@@ -781,7 +781,7 @@ def _query_confidence_aggregate(
         finally:
             client.close()
     with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-        conn = db.document_aspects.conn
+        conn = db.document_aspects.conn  # epsilon-allow: SQLite-only branch; service path handled above via storage_backend_for (nexus-l9hd8)
         for chunk_start in range(0, len(uris_for_query), 300):
             batch = uris_for_query[chunk_start:chunk_start + 300]
             placeholders = ",".join(["?"] * len(batch))

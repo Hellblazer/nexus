@@ -701,6 +701,7 @@ _WRITE_OPS: frozenset[str] = frozenset({
     "telemetry.expire_relevance_log", "telemetry.log_search_batch",
     "telemetry.trim_search_telemetry", "telemetry.rename_collection",
     "telemetry.record_tier_write", "telemetry.record_nx_answer_run",
+    "telemetry.record_hook_failure",
     # document aspects (upsert/get are RPC-denied; these are the dispatchable writes)
     "document_aspects.set_salient_sentences",
     "document_aspects.set_salient_sentences_by_key",

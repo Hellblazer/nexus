@@ -209,106 +209,32 @@ def test_fire_document_persists_failure_to_t2(
     assert chain == "document"
 
 
-def test_fire_document_falls_back_to_scalar_when_chain_column_absent(
+def test_fire_document_persist_swallowed_when_store_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the ``chain`` column is absent (pre-4.14.2 schema, mixed-version
-    operator scenario: a write path running fresh code against an older
-    T2 schema), the failure capture writes a chain-less row rather than
-    crashing.
-
-    Bypasses ``T2Database`` because it would auto-apply migrations
-    through 4.14.1 inclusive (the package version stays at 4.14.1 until
-    the next release tag — see ``pyproject.toml``). Builds a raw sqlite
-    connection at the 4.14.1 schema and mocks ``t2_ctx`` to expose just
-    the surface ``_record_document_hook_failure`` reads.
+    """nexus-9613q.3: if the telemetry store's record_hook_failure raises
+    (e.g. an extreme legacy DB missing the table, or a service 5xx), ingest is
+    never blocked — the persist failure is caught (and warned once), the
+    original hook exception is not masked, and fire_document does not raise.
     """
-    import threading
-
+    import nexus.hook_registry as hr
     import nexus.mcp_infra as mod
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
+    from contextlib import contextmanager
 
-    db_path = tmp_path / "pre_4_14_2.db"
-    raw = sqlite3.connect(str(db_path), isolation_level=None)
-    migrate_hook_failures(raw)
-    migrate_hook_failures_batch_columns(raw)  # 4.14.1 — but NOT 4.14.2
+    hr._hook_failure_drop_warned.discard(("document", "bad"))
 
-    cols = {r[1] for r in raw.execute("PRAGMA table_info(hook_failures)").fetchall()}
-    assert "chain" not in cols, (
-        "pre-condition: hook_failures must lack the chain column"
-    )
-
-    class _FakeTaxonomy:
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self.conn = conn
-            self._lock = threading.RLock()
+    class _BoomTelemetry:
+        def record_hook_failure(self, **kwargs):
+            raise sqlite3.OperationalError("no such table: hook_failures")
 
     class _FakeT2:
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self.taxonomy = _FakeTaxonomy(conn)
-        def __enter__(self) -> "_FakeT2":
-            return self
-        def __exit__(self, *_: object) -> None:
-            return None
+        telemetry = _BoomTelemetry()
 
-    monkeypatch.setattr(mod, "t2_ctx", lambda: _FakeT2(raw))
+    @contextmanager
+    def _fake_t2_ctx():
+        yield _FakeT2()
 
-    def raising(source_path, collection, content):
-        raise RuntimeError("doc kaboom")
-
-    registry = HookRegistry()
-    registry.register_document(raising)
-    registry.fire_document("/path/missing-chain.md", "knowledge__delos", "x")
-
-    rows = raw.execute(
-        "SELECT doc_id, hook_name, error FROM hook_failures"
-    ).fetchall()
-    raw.close()
-
-    # Fallback path persists scalar fields; the chain marker is dropped
-    # silently because the column does not exist on this DB.
-    assert len(rows) == 1
-    assert rows[0][0] == "/path/missing-chain.md"
-    assert rows[0][1] == "raising"
-    assert "doc kaboom" in rows[0][2]
-
-
-def test_fire_document_persist_swallowed_when_table_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If the hook_failures table is absent (extreme legacy DB), ingest
-    is never blocked — the persist failure is caught silently.
-    """
-    import nexus.mcp_infra as mod
-
-    db_path = tmp_path / "no_table.db"
-    raw = sqlite3.connect(str(db_path))
-    raw.close()  # empty DB — no hook_failures
-
-    class _NoTaxonomy:
-        class _Tax:
-            class _Conn:
-                def execute(self, *a, **kw):
-                    raise sqlite3.OperationalError("no such table: hook_failures")
-                def commit(self):
-                    pass
-            conn = _Conn()
-            class _Lock:
-                def __enter__(self):
-                    return None
-                def __exit__(self, *a):
-                    return False
-            _lock = _Lock()
-        taxonomy = _Tax()
-        def __enter__(self):
-            return self
-        def __exit__(self, *a):
-            return False
-
-    monkeypatch.setattr(mod, "t2_ctx", lambda: _NoTaxonomy())
+    monkeypatch.setattr(mod, "t2_ctx", _fake_t2_ctx)
 
     def bad(source_path, collection, content):
         raise RuntimeError("primary failure")
@@ -316,6 +242,7 @@ def test_fire_document_persist_swallowed_when_table_missing(
     registry = HookRegistry()
     registry.register_document(bad)
     registry.fire_document("/path/z.md", "knowledge__delos", "x")  # must not raise
+    assert ("document", "bad") in hr._hook_failure_drop_warned
 
 
 def test_fire_document_persist_failure_is_best_effort(
@@ -468,66 +395,6 @@ def test_record_hook_failure_writes_chain_single(
             "SELECT doc_id, chain FROM hook_failures"
         ).fetchone()
     assert row == ("doc-1", "single")
-
-
-def test_record_hook_failure_falls_back_when_chain_column_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Symmetric coverage with the document-chain fallback test: the
-    single-doc chain's failure recorder also falls back to a chain-less
-    INSERT on pre-4.14.2 schemas. Pinned so a future change to the
-    schema-fallback wording (`'no column named'` / `'no such column'`)
-    does not silently break the fallback path.
-    """
-    import threading
-
-    import nexus.mcp_infra as mod
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
-
-    db_path = tmp_path / "single_pre_4_14_2.db"
-    raw = sqlite3.connect(str(db_path), isolation_level=None)
-    migrate_hook_failures(raw)
-    migrate_hook_failures_batch_columns(raw)  # 4.14.1 — but NOT 4.14.2
-
-    cols = {r[1] for r in raw.execute("PRAGMA table_info(hook_failures)").fetchall()}
-    assert "chain" not in cols, (
-        "pre-condition: hook_failures must lack the chain column"
-    )
-
-    class _FakeTaxonomy:
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self.conn = conn
-            self._lock = threading.RLock()
-
-    class _FakeT2:
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self.taxonomy = _FakeTaxonomy(conn)
-        def __enter__(self) -> "_FakeT2":
-            return self
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(mod, "t2_ctx", lambda: _FakeT2(raw))
-
-    def raising(doc_id, collection, content):
-        raise RuntimeError("single boom")
-
-    registry = HookRegistry()
-    registry.register_single(raising)
-    registry.fire_single("doc-pre-4-14-2", "knowledge__delos", "x")
-
-    rows = raw.execute(
-        "SELECT doc_id, hook_name, error FROM hook_failures"
-    ).fetchall()
-    raw.close()
-
-    assert len(rows) == 1
-    assert rows[0][0] == "doc-pre-4-14-2"
-    assert rows[0][1] == "raising"
-    assert "single boom" in rows[0][2]
 
 
 def test_record_batch_hook_failure_writes_chain_batch(

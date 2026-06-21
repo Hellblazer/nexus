@@ -233,6 +233,52 @@ class Telemetry:
             )
             self.conn.commit()
 
+    def record_hook_failure(
+        self,
+        *,
+        doc_id: str,
+        collection: str,
+        hook_name: str,
+        error: str,
+        chain: str,
+        batch_doc_ids: str | None = None,
+        is_batch: bool = False,
+        occurred_at: str | None = None,
+    ) -> None:
+        """Append one row to ``hook_failures`` (post-store hook failure audit).
+
+        nexus-9613q.3: the canonical store owns the INSERT so hook_registry
+        calls ``db.telemetry.record_hook_failure(...)`` instead of reaching a
+        raw ``.conn`` — which a service-backed store lacks, so every row was
+        silently dropped in service mode (the silent-loss class nexus-pyzk7
+        closed for tier_writes). Ensures the full RDR-095/RDR-089 column set
+        exists, then writes a single complete row (no per-caller column
+        fallback ladder — the migration guarantees the columns).
+        """
+        from nexus.db.migrations import (  # noqa: PLC0415
+            migrate_hook_failures,
+            migrate_hook_failures_batch_columns,
+            migrate_hook_failures_chain_column,
+        )
+        with self._lock:
+            migrate_hook_failures(self.conn)
+            migrate_hook_failures_batch_columns(self.conn)
+            migrate_hook_failures_chain_column(self.conn)
+            cols = ["doc_id", "collection", "hook_name", "error",
+                    "batch_doc_ids", "is_batch", "chain"]
+            vals: list[Any] = [doc_id, collection, hook_name, error,
+                               batch_doc_ids, 1 if is_batch else 0, chain]
+            if occurred_at is not None:
+                cols.append("occurred_at")
+                vals.append(occurred_at)
+            placeholders = ", ".join(["?"] * len(vals))
+            self.conn.execute(
+                f"INSERT INTO hook_failures ({', '.join(cols)}) "
+                f"VALUES ({placeholders})",
+                vals,
+            )
+            self.conn.commit()
+
     def log_relevance_batch(
         self,
         rows: list[tuple[str, str, str, str, str]],

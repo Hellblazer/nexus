@@ -1777,8 +1777,8 @@ def _taxonomy_stats() -> dict | None:
             # promised a graceful skip the bare access did not deliver).
             if not hasattr(db.taxonomy, "conn"):
                 return None
-            conn = db.taxonomy.conn
-            with db.taxonomy._lock:
+            conn = db.taxonomy.conn  # epsilon-allow: guarded by hasattr(db.taxonomy,'conn') skip above (nexus-pyzk7 Part 3)
+            with db.taxonomy._lock:  # epsilon-allow: guarded by hasattr(db.taxonomy,'conn') skip above (nexus-pyzk7 Part 3)
                 topic_total = conn.execute(
                     "SELECT count(*) FROM topics"
                 ).fetchone()[0]

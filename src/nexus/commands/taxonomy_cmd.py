@@ -405,8 +405,8 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             # Storage review I-1: every .conn access goes through the
             # domain-store lock. These are read-only queries but the lock
             # protects against a concurrent writer on the same connection.
-            with db.taxonomy._lock:
-                all_topics = db.taxonomy.conn.execute(
+            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
+                all_topics = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                     "SELECT collection, COUNT(*), SUM(doc_count), "
                     "SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END), "
                     "SUM(CASE WHEN review_status = 'accepted' THEN 1 ELSE 0 END) "
@@ -452,8 +452,8 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         ]
 
         if _has_raw_access(db.taxonomy):
-            with db.taxonomy._lock:
-                link_count = db.taxonomy.conn.execute(
+            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
+                link_count = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                     "SELECT COUNT(*) FROM topic_links"
                 ).fetchone()[0]
         else:
@@ -475,8 +475,8 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             click.echo("Taxonomy Status\n")
             for coll, n_topics, n_docs, n_pending, n_accepted in rows:
                 if _has_raw_access(db.taxonomy):
-                    with db.taxonomy._lock:
-                        meta = db.taxonomy.conn.execute(
+                    with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
+                        meta = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                             "SELECT last_discover_doc_count, last_discover_at "
                             "FROM taxonomy_meta WHERE collection = ?",
                             (coll,),
@@ -524,9 +524,9 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         rows: list[tuple[str, int, int, str | None]] = []
         try:
             if _has_raw_access(db.taxonomy):
-                with db.taxonomy._lock:
+                with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                     try:
-                        rows = db.taxonomy.conn.execute(
+                        rows = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                             "SELECT hook_name, is_batch, "
                             "       COALESCE(batch_doc_ids, '') "
                             "FROM hook_failures "
@@ -536,7 +536,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                     except Exception:
                         # Pre-4.14.1 schema: batch columns absent. Read with
                         # legacy shape and treat every row as scalar.
-                        legacy = db.taxonomy.conn.execute(
+                        legacy = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                             "SELECT hook_name FROM hook_failures "
                             "WHERE occurred_at >= datetime('now', '-1 day')"
                         ).fetchall()
@@ -591,8 +591,8 @@ def list_cmd(collection: str, depth: int) -> None:
         # Count docs with no topic assignment (noise / uncategorized).
         # Lock taken per storage review I-1 (SQLite only).
         if _has_raw_access(db.taxonomy):
-            with db.taxonomy._lock:
-                total_assigned = db.taxonomy.conn.execute(
+            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
+                total_assigned = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                     "SELECT COUNT(DISTINCT doc_id) FROM topic_assignments"
                     + (" WHERE topic_id IN (SELECT id FROM topics WHERE collection = ?)" if collection else ""),
                     (collection,) if collection else (),
@@ -1319,9 +1319,9 @@ def links_cmd(collection: str, refresh: bool) -> None:
         # Display all rows in topic_links, joined with topic labels.
         # Lock taken per storage review I-1 (SQLite only).
         if _has_raw_access(db.taxonomy):
-            with db.taxonomy._lock:
+            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                 if collection:
-                    rows = db.taxonomy.conn.execute(
+                    rows = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                         "SELECT t1.label, t1.collection, t2.label, t2.collection, "
                         "       tl.link_count, tl.link_types "
                         "FROM topic_links tl "
@@ -1332,7 +1332,7 @@ def links_cmd(collection: str, refresh: bool) -> None:
                         (collection, collection),
                     ).fetchall()
                 else:
-                    rows = db.taxonomy.conn.execute(
+                    rows = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                         "SELECT t1.label, t1.collection, t2.label, t2.collection, "
                         "       tl.link_count, tl.link_types "
                         "FROM topic_links tl "
