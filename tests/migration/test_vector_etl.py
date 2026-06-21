@@ -1098,9 +1098,6 @@ def _make_local_store(root: Path, name: str, n: int) -> tuple[Path, list[str], l
     return store, ids, texts
 
 
-@pytest.mark.skip(
-    reason="nexus-wrfiy: deeper rot beyond nexus-o06g4. The pipe-deadlock fix is in place, but the test data seeds minilm-l6-v2-384 collections that the service (RDR-160 bge-768) refuses with HTTP 422. Re-enable after migrating the test data to bge-768 (tracked in nexus-wrfiy)."
-)
 @pytest.mark.integration
 @_SKIP_INTEGRATION
 class TestVectorEtlIntegration:
@@ -1112,7 +1109,7 @@ class TestVectorEtlIntegration:
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlint1")
+        name = _coll("etlint1", model=_MODEL_768)
         store, ids, texts = _make_local_store(tmp_path, name, 5)
 
         report = migrate_local(store, vec_etl_vector_client)
@@ -1123,25 +1120,25 @@ class TestVectorEtlIntegration:
 
         # (a) exact row count, direct SQL.
         rows = _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert rows == ["5"]
         # (b) chash verbatim — pgvector chash set == source Chroma id set.
         chashes = _psql_rows(
-            pg, f"SELECT chash FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT chash FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert sorted(chashes) == sorted(ids)
         # (b) text byte-identical for a spot chunk.
         text = _psql_rows(
             pg,
-            "SELECT chunk_text FROM nexus.chunks_384"
+            "SELECT chunk_text FROM nexus.chunks_768"
             f" WHERE collection = '{name}' AND chash = '{ids[3]}'",
         )
         assert text == [texts[3]]
         # Collection name verbatim and tenant stamping.
         tenants = _psql_rows(
             pg,
-            "SELECT DISTINCT tenant_id FROM nexus.chunks_384"
+            "SELECT DISTINCT tenant_id FROM nexus.chunks_768"
             f" WHERE collection = '{name}'",
         )
         assert tenants == ["default"]
@@ -1150,16 +1147,16 @@ class TestVectorEtlIntegration:
         # float values.
         dims = _psql_rows(
             pg,
-            "SELECT DISTINCT vector_dims(embedding) FROM nexus.chunks_384"
+            "SELECT DISTINCT vector_dims(embedding) FROM nexus.chunks_768"
             f" WHERE collection = '{name}'",
         )
-        assert dims == ["384"]
+        assert dims == ["768"]
 
     def test_second_run_is_idempotent(
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlint2")
+        name = _coll("etlint2", model=_MODEL_768)
         store, _, _ = _make_local_store(tmp_path, name, 4)
 
         first = migrate_local(store, vec_etl_vector_client)
@@ -1168,14 +1165,14 @@ class TestVectorEtlIntegration:
         assert first.ok is True
         assert second.ok is True
         rows = _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert rows == ["4"]
 
     def test_copy_not_move_source_store_intact(
         self, vec_etl_vector_client, tmp_path
     ) -> None:
-        name = _coll("etlint3")
+        name = _coll("etlint3", model=_MODEL_768)
         store, ids, texts = _make_local_store(tmp_path, name, 3)
 
         migrate_local(store, vec_etl_vector_client)
@@ -1191,11 +1188,11 @@ class TestVectorEtlIntegration:
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlint4")
+        name = _coll("etlint4", model=_MODEL_768)
         store, _, _ = _make_local_store(tmp_path, name, 6)
         migrate_local(store, vec_etl_vector_client)
         assert _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         ) == ["6"]
 
         from nexus.migration.chroma_read import open_local_read_client
@@ -1206,14 +1203,14 @@ class TestVectorEtlIntegration:
 
         assert deleted == {name: 6}
         assert _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         ) == ["0"]
         client = chromadb.PersistentClient(path=str(store))
         assert client.get_collection(name).count() == 6
 
 
 @pytest.mark.skip(
-    reason="nexus-wrfiy: deeper rot beyond nexus-o06g4. The pipe-deadlock fix is in place, but the test data seeds minilm-l6-v2-384 collections that the service (RDR-160 bge-768) refuses with HTTP 422. Re-enable after migrating the test data to bge-768 (tracked in nexus-wrfiy)."
+    reason="nexus-wrfiy: the cross-dim orphan-detection logic needs rework for bge-768. The migrated collection is now 768 (service only embeds bge-768), but the test also needs a 384 collection (inserted via direct SQL, not migrate) to prove 384/768 orphan-scoping isolation. Distinct from the model-token conversion done for the other ETL integration classes."
 )
 @pytest.mark.integration
 @_SKIP_INTEGRATION
@@ -1327,9 +1324,6 @@ class TestManifestFkIntegration:
         assert bogus in orphans[0]
 
 
-@pytest.mark.skip(
-    reason="nexus-wrfiy: deeper rot beyond nexus-o06g4. The pipe-deadlock fix is in place, but the test data seeds minilm-l6-v2-384 collections that the service (RDR-160 bge-768) refuses with HTTP 422. Re-enable after migrating the test data to bge-768 (tracked in nexus-wrfiy)."
-)
 @pytest.mark.integration
 @_SKIP_INTEGRATION
 class TestTaxonomyConsistencyIntegration:
@@ -1339,8 +1333,8 @@ class TestTaxonomyConsistencyIntegration:
         """(d) against the real service: assignments pointing at the
         migrated collection resolve; a never-migrated collection is
         reported as exactly the unresolved set."""
-        name = _coll("etltaxint")
-        ghost = _coll("etltaxint-ghost")
+        name = _coll("etltaxint", model=_MODEL_768)
+        ghost = _coll("etltaxint-ghost", model=_MODEL_768)
         store, _, _ = _make_local_store(tmp_path, name, 3)
         migrate_local(store, vec_etl_vector_client)
 
