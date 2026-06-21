@@ -495,6 +495,136 @@ class PgVectorRepositoryContractTest {
             .containsExactly("andc1000000000000000000000000000");
     }
 
+    // Contract 4b: operator-form where-filters on the bridge (nexus-05bfd).
+    // seedSearchFixture: snear{kind=a} d0.0, smid{kind=b} d0.2, sfar{kind=a} d1.0.
+
+    @Test
+    void search_whereNe_excludesMatching_distanceOrdered() {
+        String col = "code__searchne__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("kind", Map.of("$ne", "b")));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("{kind:{$ne:b}} drops the one kind=b row, keeps both kind=a, distance-ordered")
+            .containsExactly("snear000000000000000000000000000", "sfar0000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereEqOperatorForm_matchesPlainEquality() {
+        String col = "code__searcheq__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("kind", Map.of("$eq", "a")));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("{kind:{$eq:a}} is identical to plain {kind:a}")
+            .containsExactly("snear000000000000000000000000000", "sfar0000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereIn_matchesAnyListed() {
+        String col = "code__searchin__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        assertThat(repo1024.search(TENANT_A, "search query", List.of(col), 10,
+                Map.of("kind", Map.of("$in", List.of("b")))))
+            .as("{kind:{$in:[b]}} returns exactly the kind=b row")
+            .extracting(r -> r.get("id"))
+            .containsExactly("smid0000000000000000000000000000");
+
+        assertThat(repo1024.search(TENANT_A, "search query", List.of(col), 10,
+                Map.of("kind", Map.of("$in", List.of("a", "b")))))
+            .as("{kind:{$in:[a,b]}} returns all three, distance-ordered")
+            .extracting(r -> r.get("id"))
+            .containsExactly("snear000000000000000000000000000", "smid0000000000000000000000000000", "sfar0000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereNin_excludesListed() {
+        String col = "code__searchnin__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("kind", Map.of("$nin", List.of("b"))));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("{kind:{$nin:[b]}} excludes kind=b, keeps both kind=a")
+            .containsExactly("snear000000000000000000000000000", "sfar0000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereNe_keepsRowsMissingTheKey() {
+        // Chroma "field != value" intent: a row that carries no `section_type` at all
+        // must be KEPT when filtering section_type != references (IS DISTINCT FROM, not !=).
+        String col = "code__searchnemiss__voyage-code-3__v1";
+        embedder1024.register("search query", 1.0f, 0.0f);
+        embedder1024.register("has key", 1.0f, 0.0f);
+        embedder1024.register("no key", 0.8f, 0.6f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("haskey00000000000000000000000000", "nokey000000000000000000000000000"),
+            List.of("has key", "no key"),
+            List.of(Map.of("section_type", "references"), Map.of("other", "x")));
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("section_type", Map.of("$ne", "references")));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("$ne keeps the row whose section_type is ABSENT, drops the explicit references row")
+            .containsExactly("nokey000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereUnsupportedOperator_failsLoud() {
+        String col = "code__searchbadop__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        assertThatThrownBy(() -> repo1024.search(TENANT_A, "search query", List.of(col), 10,
+                Map.of("kind", Map.of("$regex", "a.*"))))
+            .as("an unsupported operator must fail loud (400), not silently match nothing")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("$regex");
+    }
+
+    @Test
+    void search_whereCompoundOperator_failsLoud() {
+        String col = "code__searchcompound__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        assertThatThrownBy(() -> repo1024.search(TENANT_A, "search query", List.of(col), 10,
+                Map.of("$or", List.of(Map.of("kind", "a"), Map.of("kind", "b")))))
+            .as("compound $or is not supported and must fail loud, not bind as a literal column")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("$or");
+    }
+
+    @Test
+    void getWhere_operatorForm_filtersExactly() {
+        // The same translator backs getWhere (store-get with where) — exercise the
+        // second call site so its bind ordering is covered too.
+        String col = "code__getwherene__voyage-code-3__v1";
+        embedder1024.register("gw a", 1.0f, 0.0f);
+        embedder1024.register("gw b", 0.8f, 0.6f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("gwa10000000000000000000000000000", "gwb10000000000000000000000000000"),
+            List.of("gw a", "gw b"),
+            List.of(Map.of("kind", "a"), Map.of("kind", "b")));
+
+        @SuppressWarnings("unchecked")
+        List<String> ids = (List<String>) repo1024.getWhere(
+            TENANT_A, col, Map.of("kind", Map.of("$ne", "b")), 100, 0).get("ids");
+
+        assertThat(ids)
+            .as("getWhere {kind:{$ne:b}} returns only the kind=a chunk")
+            .containsExactly("gwa10000000000000000000000000000");
+    }
+
     @Test
     void search_mixedDimCollections_failsLoud() {
         // COL_CODE_1024 dispatches to chunks_1024, COL_BGE_768 to chunks_768: one query

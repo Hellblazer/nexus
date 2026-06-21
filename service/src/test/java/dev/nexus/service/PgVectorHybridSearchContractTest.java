@@ -384,6 +384,19 @@ class PgVectorHybridSearchContractTest {
     }
 
     @Test
+    void hybridSearch_whereOperatorForm_composesWithTextGate() {
+        // nexus-05bfd: operator-form on the hybrid path exercises the dual
+        // gate+scope builder. wh-c1 matches the text gate and is lang!=py;
+        // {lang:{$ne:py}} must return it (the inverse of the plain-equality test).
+        List<Map<String, Object>> rows =
+            repo768.hybridSearch(TENANT_A, Q, List.of(COL_WH), 10, Map.of("lang", Map.of("$ne", "py")));
+
+        assertThat(ids(rows))
+            .as("{lang:{$ne:py}} keeps the gate-matching non-py row, drops the py row")
+            .containsExactly("wh-c1000000000000000000000000000");
+    }
+
+    @Test
     void hybridSearch_respectsNResultsLimit() {
         List<Map<String, Object>> rows =
             repo1024.hybridSearch(TENANT_A, Q, List.of(COL_HY), 2, null);

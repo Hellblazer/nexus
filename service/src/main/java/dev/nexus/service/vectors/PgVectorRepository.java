@@ -418,9 +418,7 @@ public final class PgVectorRepository {
         binds.addAll(collectionNames);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
-                sql.append(" AND metadata->>? = ?");
-                binds.add(e.getKey());
-                binds.add(String.valueOf(e.getValue()));
+                appendWherePredicate(sql, binds, e.getKey(), e.getValue());
             }
         }
         sql.append(" ORDER BY distance ASC, chash ASC LIMIT ?");
@@ -642,12 +640,8 @@ public final class PgVectorRepository {
         gateBinds.add(queryText);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
-                gate.append(" AND metadata->>? = ?");
-                scope.append(" AND metadata->>? = ?");
-                gateBinds.add(e.getKey());
-                gateBinds.add(String.valueOf(e.getValue()));
-                scopeBinds.add(e.getKey());
-                scopeBinds.add(String.valueOf(e.getValue()));
+                appendWherePredicate(gate, gateBinds, e.getKey(), e.getValue());
+                appendWherePredicate(scope, scopeBinds, e.getKey(), e.getValue());
             }
         }
         final String table = chunksTable(dim);
@@ -893,11 +887,13 @@ public final class PgVectorRepository {
      *
      * <p>The incremental-sync staleness check's shape: the Python
      * {@code _ServiceCollectionStub.get(where=...)} asks for chunks whose
-     * {@code source_key} / {@code content_hash} match. Only plain equality
-     * predicates are supported (ANDed) — the same subset {@link #search} applies;
-     * Chroma operator-form filters ({@code $and}, {@code $gte}, ...) are NOT
-     * translated (deliberately unpinned by the P4a.1 contract, recorded on
-     * nexus-1k8s1).
+     * {@code source_key} / {@code content_hash} match. Plain-equality predicates
+     * (ANDed) and the common single-field Chroma operator-form
+     * ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}) are supported via
+     * {@link #appendWherePredicate} — the same subset {@link #search} applies
+     * (nexus-05bfd). Unsupported operator shapes fail loud with 400 rather than
+     * silently matching nothing; compound {@code $and}/{@code $or} and range
+     * operators remain untranslated.
      *
      * @param where metadata equality predicates (ANDed); null/empty returns the
      *              collection paginated (the {@code store-get}-without-ids shape)
@@ -916,9 +912,7 @@ public final class PgVectorRepository {
         binds.add(collection);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
-                sql.append(" AND metadata->>? = ?");
-                binds.add(e.getKey());
-                binds.add(String.valueOf(e.getValue()));
+                appendWherePredicate(sql, binds, e.getKey(), e.getValue());
             }
         }
         sql.append(" ORDER BY chash ASC LIMIT ? OFFSET ?");
@@ -1547,6 +1541,99 @@ public final class PgVectorRepository {
             throw new IllegalArgumentException("placeholders requires n >= 1, got " + n);
         }
         return String.join(",", java.util.Collections.nCopies(n, "?"));
+    }
+
+    /**
+     * Translate one metadata {@code where} entry into a SQL predicate appended to
+     * {@code sql}, with its binds added to {@code binds} in placeholder order
+     * (nexus-05bfd, consumer-driven from conexus RDR-001).
+     *
+     * <p>Supports plain equality (a scalar value) and the common Chroma
+     * operator-form on a single field, where the value is a one-entry map:
+     * <ul>
+     *   <li>{@code {"k": "v"}}            → {@code metadata->>'k' = 'v'}</li>
+     *   <li>{@code {"k": {"$eq": "v"}}}   → {@code metadata->>'k' = 'v'}</li>
+     *   <li>{@code {"k": {"$ne": "v"}}}   → {@code metadata->>'k' IS DISTINCT FROM 'v'}</li>
+     *   <li>{@code {"k": {"$in":  [...]}}} → {@code metadata->>'k' IN (...)}</li>
+     *   <li>{@code {"k": {"$nin": [...]}}} → {@code (metadata->>'k' IS NULL OR metadata->>'k' NOT IN (...))}</li>
+     * </ul>
+     *
+     * <p>{@code $ne}/{@code $nin} use {@code IS DISTINCT FROM} / {@code IS NULL OR}
+     * semantics so a row whose metadata key is ABSENT is KEPT. This is NULL-inclusive
+     * and intentionally chosen for the noise-dropping use case (e.g. drop only the rows
+     * explicitly tagged {@code section_type = references}, keep everything else including
+     * untagged chunks). Note this DIFFERS from Chroma local-mode, whose DuckDB filter
+     * treats {@code field != value} as NULL-exclusive ({@code NULL != 'x'} is false, so
+     * absent-key rows are dropped). The divergence is moot for the driving consumer:
+     * {@code section_type} is schema-defaulted to {@code ""} (never absent) on indexed
+     * chunks, so both engines keep the same rows in practice.
+     *
+     * <p>Unsupported shapes fail loud with {@link IllegalArgumentException} (mapped
+     * to HTTP 400 by {@code VectorHandler}) rather than silently matching nothing:
+     * a {@code $}-prefixed FIELD key (compound {@code $and}/{@code $or}), an operator
+     * map with more than one operator, a non-list operand for {@code $in}/{@code $nin},
+     * or an unrecognized operator. Before nexus-05bfd an operator-form value was
+     * {@code String.valueOf(map)}-bound and matched no rows with no error.
+     */
+    static void appendWherePredicate(StringBuilder sql, List<Object> binds,
+                                     String key, Object value) {
+        if (key.startsWith("$")) {
+            throw new IllegalArgumentException(
+                "compound where operator '" + key + "' is not supported on the vector "
+                + "bridge; express each field as its own predicate (all fields are ANDed)");
+        }
+        if (!(value instanceof Map<?, ?> ops)) {
+            sql.append(" AND metadata->>? = ?");
+            binds.add(key);
+            binds.add(String.valueOf(value));
+            return;
+        }
+        if (ops.size() != 1) {
+            throw new IllegalArgumentException(
+                "where operator map for field '" + key + "' must hold exactly one operator, got "
+                + ops.keySet());
+        }
+        Map.Entry<?, ?> op = ops.entrySet().iterator().next();
+        String operator = String.valueOf(op.getKey());
+        Object operand = op.getValue();
+        switch (operator) {
+            case "$eq" -> {
+                sql.append(" AND metadata->>? = ?");
+                binds.add(key);
+                binds.add(String.valueOf(operand));
+            }
+            case "$ne" -> {
+                sql.append(" AND metadata->>? IS DISTINCT FROM ?");
+                binds.add(key);
+                binds.add(String.valueOf(operand));
+            }
+            case "$in", "$nin" -> {
+                if (!(operand instanceof List<?> items)) {
+                    throw new IllegalArgumentException(
+                        operator + " for field '" + key + "' expects a list operand, got "
+                        + (operand == null ? "null" : operand.getClass().getSimpleName()));
+                }
+                if (items.isEmpty()) {
+                    // $in [] matches nothing; $nin [] excludes nothing.
+                    sql.append("$in".equals(operator) ? " AND FALSE" : " AND TRUE");
+                    return;
+                }
+                String ph = placeholders(items.size());
+                if ("$in".equals(operator)) {
+                    sql.append(" AND metadata->>? IN (").append(ph).append(")");
+                    binds.add(key);
+                } else {
+                    sql.append(" AND (metadata->>? IS NULL OR metadata->>? NOT IN (")
+                       .append(ph).append("))");
+                    binds.add(key);
+                    binds.add(key);
+                }
+                for (Object it : items) binds.add(String.valueOf(it));
+            }
+            default -> throw new IllegalArgumentException(
+                "unsupported where operator '" + operator + "' for field '" + key
+                + "'; supported: $eq, $ne, $in, $nin");
+        }
     }
 
     private static String toJson(Map<String, Object> metadata) {
