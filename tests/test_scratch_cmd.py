@@ -189,3 +189,23 @@ def test_scratch_list_friendly_error_when_t1_unresolvable(
     assert "Traceback" not in result.output
     assert "NX_T1_ISOLATED=1" in result.output
     assert "T1 not configured" in result.output
+
+
+def test_scratch_put_service_mode_no_endpoint_clean_error(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-0l5ym: in service mode (NX_STORAGE_BACKEND=service) with no
+    reachable nexus-service, `nx scratch put` must give a clean ClickException
+    (exit 1, no raw RuntimeError traceback) with NX_T1_ISOLATED guidance."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+    for var in ("NX_SERVICE_URL", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN",
+                "NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
+        monkeypatch.delenv(var, raising=False)
+
+    result = runner.invoke(main, ["scratch", "put", "hello"])
+
+    assert result.exit_code == 1
+    # The fix converts HttpScratchStore's raw RuntimeError into a clean
+    # ClickException — no RuntimeError should escape to the CLI runner.
+    assert not isinstance(result.exception, RuntimeError), result.exception
+    assert "NX_T1_ISOLATED" in result.output

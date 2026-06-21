@@ -322,3 +322,50 @@ def test_link_audit(cat, monkeypatch) -> None:
 def test_resolve(cat, resolve_kw) -> None:
     catalog_register(title="A", owner="1.1", physical_collection="code__test")
     assert "code__test" in catalog_resolve(**resolve_kw)
+
+
+def test_catalog_links_service_mode_plain_dicts_and_link_types(monkeypatch):
+    """nexus-qtj24: catalog_links must (1) pass ``link_types`` (plural) — the
+    only kwarg HttpCatalogClient.graph accepts (it has no singular link_type and
+    is keyword-only) — and (2) handle plain-dict nodes/edges from the service
+    /traverse path instead of calling .to_dict() unconditionally."""
+    import nexus.mcp.catalog as mc
+
+    captured: dict = {}
+
+    class _FakeServiceCat:
+        def graph(self, tumbler, *, link_types=None, direction="both", depth=1):
+            captured["link_types"] = link_types
+            captured["depth"] = depth
+            # The service /traverse path returns plain dicts (no .to_dict()).
+            return {
+                "nodes": [{"tumbler": "1.1"}],
+                "edges": [{"from_tumbler": "1.1", "to_tumbler": "1.2"}],
+            }
+
+    monkeypatch.setattr(mc, "_require_catalog", lambda: (_FakeServiceCat(), None))
+    monkeypatch.setattr(mc, "_resolve_tumbler_mcp", lambda cat, t: (t, None))
+
+    result = mc.catalog_links(tumbler="1.1", link_type="cites")
+
+    assert "error" not in result, result
+    assert captured["link_types"] == ["cites"], "singular link_type not normalized to plural"
+    assert result["nodes"] == [{"tumbler": "1.1"}], "plain-dict node did not survive (.to_dict crash)"
+    assert result["edges"][0]["from_tumbler"] == "1.1"
+
+
+def test_catalog_links_no_link_type_passes_none(monkeypatch):
+    """Empty link_type -> link_types=None (traverse all link types)."""
+    import nexus.mcp.catalog as mc
+
+    captured: dict = {}
+
+    class _FakeCat:
+        def graph(self, tumbler, *, link_types=None, direction="both", depth=1):
+            captured["link_types"] = link_types
+            return {"nodes": [], "edges": []}
+
+    monkeypatch.setattr(mc, "_require_catalog", lambda: (_FakeCat(), None))
+    monkeypatch.setattr(mc, "_resolve_tumbler_mcp", lambda cat, t: (t, None))
+    mc.catalog_links(tumbler="1.1")
+    assert captured["link_types"] is None
