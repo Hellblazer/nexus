@@ -2351,6 +2351,53 @@ class TestReviewMethods:
         ).fetchone()[0]
         assert count == 1
 
+    # ── RDR-164 P5 (nexus-c6vze): dead Chroma centroid cleanup removed ────────
+    # nexus-5kl1b closed obsolete: post-RDR-155 P4a the raw-Chroma
+    # taxonomy__centroids path is unreachable (make_t3 -> HttpVectorClient).
+    # delete_topic/merge_topics must NO LONGER touch a passed chroma_client.
+
+    def test_delete_topic_ignores_chroma_client(self, db: T2Database) -> None:
+        from unittest.mock import MagicMock
+
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+            ("doomed", "proj", 1, "2026-01-01T00:00:00Z"),
+        )
+        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.taxonomy.conn.commit()
+        mock_chroma = MagicMock()
+
+        db.taxonomy.delete_topic(tid, chroma_client=mock_chroma)
+
+        # Relational delete still happens; the retired Chroma cleanup does not.
+        assert db.taxonomy.conn.execute(
+            "SELECT COUNT(*) FROM topics WHERE id = ?", (tid,)
+        ).fetchone()[0] == 0
+        mock_chroma.get_collection.assert_not_called()
+
+    def test_merge_topics_ignores_chroma_client(self, db: T2Database) -> None:
+        from unittest.mock import MagicMock
+
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+            ("source", "proj", 1, "2026-01-01T00:00:00Z"),
+        )
+        source_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+            ("target", "proj", 1, "2026-01-01T00:00:00Z"),
+        )
+        target_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.taxonomy.conn.commit()
+        mock_chroma = MagicMock()
+
+        db.taxonomy.merge_topics(source_id, target_id, chroma_client=mock_chroma)
+
+        assert db.taxonomy.conn.execute(
+            "SELECT COUNT(*) FROM topics WHERE id = ?", (source_id,)
+        ).fetchone()[0] == 0
+        mock_chroma.get_collection.assert_not_called()
+
     def test_get_topic_by_id(self, db: T2Database) -> None:
         """get_topic_by_id returns a single topic dict or None."""
         db.taxonomy.conn.execute(
