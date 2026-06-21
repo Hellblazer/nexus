@@ -1337,6 +1337,23 @@ class TestManifestFkIntegration:
         assert len(orphans) == 1
         assert bogus in orphans[0]
 
+        # Symmetric true-positive (review): a never-migrated chash in the 384
+        # lane MUST be detected at dim 384 — proving 384 orphan detection is
+        # non-vacuous (the other half of cross-dim scoping), not just that 384
+        # ignores 768-lane rows.
+        bogus384 = "0123456789abcdef0123456789abcdef"
+        _psql_exec(
+            pg,
+            "INSERT INTO nexus.catalog_document_chunks"
+            " (tenant_id, doc_id, position, chash, collection)"
+            f" VALUES ('default', '9000.2', 99, '{bogus384}', '{name384}')",
+        )
+        orphans384 = _psql_rows(pg, manifest_orphan_sql(384))
+        assert len(orphans384) == 1
+        assert bogus384 in orphans384[0]
+        # And each dim's query still surfaces only its own lane's orphan.
+        assert len(_psql_rows(pg, manifest_orphan_sql(768))) == 1
+
 
 @pytest.mark.integration
 @_SKIP_INTEGRATION

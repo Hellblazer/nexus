@@ -152,7 +152,8 @@ def tier_status_cmd(
         # service-backed telemetry store (Postgres), not local SQLite. Reading
         # the local table would silently report 0 writes; say so honestly
         # instead (and don't require a local T2 db). Full service-side read
-        # parity — a GET /v1/telemetry/tier_writes endpoint — is deferred.
+        # parity — a GET /v1/telemetry/tier_writes endpoint — is deferred to
+        # nexus-59wjj.
         msg = (
             "tier_writes are recorded in the service-backed telemetry store "
             "(Postgres); local inspection is not available in service mode."
