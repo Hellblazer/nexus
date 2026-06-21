@@ -224,7 +224,7 @@ class TestServiceModeReadParity:
         monkeypatch.setenv("NX_SESSION_ID", "sess-A")
         result = CliRunner().invoke(tier_status_cmd, ["--json"])
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload.get("service_backed") is True
 
     def test_doctor_tier_discipline_service_mode(
