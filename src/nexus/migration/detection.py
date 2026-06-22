@@ -415,6 +415,14 @@ _EST_TOKENS_PER_CHUNK: int = 512
 _EST_VOYAGE_CHUNKS_PER_SEC: float = 200.0
 _EST_ONNX_CHUNKS_PER_SEC: float = 100.0
 
+#: Coarse Voyage re-embed price (USD per 1M tokens), for the cost guardrail
+#: (nexus-cewad / RDR-166 Gap 4). Order-of-magnitude planning figure across the
+#: voyage-context-3 / voyage-code-3 family — NOT a billing-accurate quote; the
+#: operator's actual invoice is set by Voyage's current pricing. Only the
+#: cross-model→voyage RE-EMBED is billed: byte-for-byte voyage copies reuse
+#: stored embeddings (no API call), and ONNX/bge re-embeds run locally.
+_VOYAGE_COST_USD_PER_1M_TOKENS: float = 0.12
+
 
 @dataclass(frozen=True)
 class ModelGroup:
@@ -451,6 +459,13 @@ class DryRunPreview:
     migratable_chunks: int
     total_est_tokens: int
     est_seconds: float
+    #: nexus-cewad: token volume that will be RE-EMBEDDED through a Voyage model
+    #: (cross-model→voyage groups only) and therefore billed to the operator key.
+    #: Byte-for-byte voyage copies and ONNX/bge re-embeds contribute zero.
+    billed_voyage_tokens: int = 0
+    #: Coarse USD estimate for ``billed_voyage_tokens`` at
+    #: :data:`_VOYAGE_COST_USD_PER_1M_TOKENS`. ``0.0`` when nothing is billed.
+    est_voyage_cost_usd: float = 0.0
 
 
 def _throughput_for_support(support: Support) -> float:
@@ -490,6 +505,7 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     migratable_chunks = 0
     total_est_tokens = 0
     est_seconds = 0.0
+    billed_voyage_tokens = 0
     for (leg, model, support, target_model), members in buckets.items():
         chunk_count = sum(m.source_count for m in members)
         is_cross_model = target_model is not None
@@ -522,6 +538,11 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
         migratable_chunks += chunk_count
         total_est_tokens += tokens
         est_seconds += seconds
+        # Billed iff the re-embed runs through a Voyage model (cross-model→voyage).
+        # Byte-for-byte voyage copies (support == supported-voyage-1024, not
+        # cross_model) reuse stored embeddings — no API call, no bill.
+        if is_cross_model and target_model in _VOYAGE_MODELS:
+            billed_voyage_tokens += tokens
 
     # Stable order: leg, support, model, then target — deterministic preview text.
     groups.sort(key=lambda g: (g.leg, g.support, g.model or "", g.target_model or ""))
@@ -537,6 +558,8 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
         migratable_chunks=migratable_chunks,
         total_est_tokens=total_est_tokens,
         est_seconds=round(est_seconds, 1),
+        billed_voyage_tokens=billed_voyage_tokens,
+        est_voyage_cost_usd=billed_voyage_tokens / 1_000_000 * _VOYAGE_COST_USD_PER_1M_TOKENS,
     )
 
 
@@ -602,3 +625,28 @@ def render_dry_run_preview(preview: DryRunPreview) -> str:
         "live run reports exact counts."
     )
     return "\n".join(lines)
+
+
+def render_cost_confirmation(preview: DryRunPreview) -> str | None:
+    """Operator-facing cost warning for a billed Voyage re-embed, or ``None``.
+
+    Returns ``None`` when the migration bills nothing (no cross-model→voyage
+    re-embed) — the caller then proceeds without a cost prompt. When there IS a
+    billed re-embed, returns a warning that surfaces (a) the coarse USD estimate
+    and the token volume it is based on, and (b) the re-run-at-full-cost
+    foot-gun (nexus-1sx01): this guardrail WARNS and CONFIRMS; it does NOT
+    deduplicate or avoid re-billing a repeated run (copy-not-move has no
+    server-side cost memory). Pure formatting — no I/O.
+    """
+    if preview.billed_voyage_tokens <= 0:
+        return None
+    return (
+        f"⚠  This migration will RE-EMBED ~{preview.billed_voyage_tokens:,} tokens "
+        f"through a Voyage model, billed to the operator's Voyage key — an "
+        f"estimated ${preview.est_voyage_cost_usd:.2f} (coarse planning figure at "
+        f"~${_VOYAGE_COST_USD_PER_1M_TOKENS:.2f}/1M tokens; the real invoice "
+        f"follows Voyage's current pricing).\n"
+        f"   Re-running this migration re-embeds the same chunks again at full "
+        f"cost — the copy carries no server-side cost memory, so a repeat run is "
+        f"billed in full, not deduplicated."
+    )

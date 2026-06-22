@@ -45,6 +45,7 @@ from nexus.migration.detection import (
     classify_collections,
     classify_model_support,
     cross_model_remappable,
+    render_cost_confirmation,
     render_dry_run_preview,
     voyage_key_available,
     wired_models,
@@ -511,6 +512,77 @@ class TestDryRunPreview:
         assert "[local]" in text
         assert "[cloud]" in text
         assert "rough estimate" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Voyage re-embed COST estimate (nexus-cewad / RDR-166 Gap 4) — only the
+# cross-model→voyage re-embed is billed to the operator key. Byte-for-byte
+# voyage copies (embeddings already exist) and ONNX/bge local re-embeds are
+# NOT billed.
+# ---------------------------------------------------------------------------
+class TestVoyageCostEstimate:
+    def test_onnx_only_is_free(self) -> None:
+        # bge-768 local re-embed runs on the local ONNX runtime — no Voyage bill.
+        local = _FakeChromaClient({BGE_768: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=False
+        )
+        preview = build_dry_run_preview(report)
+        assert preview.billed_voyage_tokens == 0
+        assert preview.est_voyage_cost_usd == 0.0
+
+    def test_byte_for_byte_voyage_copy_is_not_billed(self) -> None:
+        # A collection ALREADY on a wired voyage model is migrated by copying its
+        # stored embeddings — no re-embed, no Voyage API call, no bill.
+        cloud = _FakeChromaClient({VOYAGE_CTX_1024: 500})
+        report = classify_collections(
+            local_client=None, cloud_client=cloud, voyage_key_present=True
+        )
+        preview = build_dry_run_preview(report)
+        assert preview.billed_voyage_tokens == 0
+        assert preview.est_voyage_cost_usd == 0.0
+
+    def test_cross_model_to_voyage_is_billed_and_scales(self) -> None:
+        # minilm-384 in cloud mode → voyage-context-3 re-embed → BILLED.
+        local = _FakeChromaClient({ONNX_384: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        preview = build_dry_run_preview(report)
+        # 1000 chunks x 512 tokens/chunk, all voyage-targeted.
+        assert preview.billed_voyage_tokens == 1000 * 512
+        # 512_000 tokens x $0.12 / 1_000_000 = $0.06144 (exact constant rate).
+        assert preview.est_voyage_cost_usd == pytest.approx(512_000 / 1_000_000 * 0.12)
+
+    def test_only_voyage_targeted_tokens_are_billed_in_mixed_footprint(self) -> None:
+        # bge byte-for-byte (free) + minilm→voyage (billed): only the latter bills.
+        local = _FakeChromaClient({BGE_768: 9999, ONNX_384: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        preview = build_dry_run_preview(report)
+        assert preview.billed_voyage_tokens == 1000 * 512  # bge excluded
+        assert preview.est_voyage_cost_usd == pytest.approx(512_000 / 1_000_000 * 0.12)
+
+    def test_render_cost_confirmation_none_when_free(self) -> None:
+        local = _FakeChromaClient({BGE_768: 10})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=False
+        )
+        assert render_cost_confirmation(build_dry_run_preview(report)) is None
+
+    def test_render_cost_confirmation_surfaces_cost_and_rerun_footgun(self) -> None:
+        local = _FakeChromaClient({ONNX_384: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        text = render_cost_confirmation(build_dry_run_preview(report))
+        assert text is not None
+        assert "$" in text
+        assert "512,000" in text or "512000" in text  # the billed token volume
+        # the re-run-at-full-cost foot-gun (nexus-1sx01) must be stated.
+        assert "re-run" in text.lower() or "again" in text.lower()
+        assert "operator" in text.lower()
 
 
 # ---------------------------------------------------------------------------
