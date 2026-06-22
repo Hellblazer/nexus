@@ -652,6 +652,17 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 404,
                 "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + oldName) + "}"); return;
         }
+        // nexus-gaou3: if new_name is ALREADY a registered collection, renameCollection silently
+        // takes the RDR-162 cross-model COPY branch (repoints catalog_documents ONLY; chunks/
+        // taxonomy/aspects are NOT moved). That is correct ONLY for the deliberate cross-model
+        // migrate. A plain rename onto an existing collection is a collision: fail loud with 409
+        // unless the caller opts into the COPY branch via cross_model:true.
+        boolean crossModel = Boolean.TRUE.equals(body.get("cross_model"));
+        if (!crossModel && repo.collectionExists(tenant, newName)) {
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString("target collection already exists: " + newName
+                    + " (pass cross_model:true only for a deliberate cross-model repoint)") + "}"); return;
+        }
         Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
     }

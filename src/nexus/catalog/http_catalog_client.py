@@ -1061,13 +1061,15 @@ class HttpCatalogClient:
         result = self._post("/collections/supersede", payload)
         return int(result.get("updated", 0) if result else 0)
 
-    def rename_collection(self, old: str, new: str) -> int:
+    def rename_collection(self, old: str, new: str, *, cross_model: bool = False) -> int:
         # RDR-164 P3: the consolidated endpoint returns {"renamed": {per-table counts}}.
         # The int contract reports the re-homed catalog_documents count.
-        renamed = self.rename_collection_cascade(old, new)
+        renamed = self.rename_collection_cascade(old, new, cross_model=cross_model)
         return int(renamed.get("catalog_documents", 0))
 
-    def rename_collection_cascade(self, old: str, new: str) -> dict[str, int]:
+    def rename_collection_cascade(
+        self, old: str, new: str, *, cross_model: bool = False
+    ) -> dict[str, int]:
         """RDR-164 P3: atomically re-home a collection X->Y and all its in-Postgres
         derived state via the service's single transactional renameCollection.
 
@@ -1079,8 +1081,16 @@ class HttpCatalogClient:
         The cross-model COPY branch (target already registered) returns only
         ``catalog_documents``. ``pipeline.db`` and the local-mode fan-out stay
         client-side (see ``rename_collection_data_plane``).
+
+        ``cross_model`` (nexus-gaou3): pass ``True`` ONLY for a deliberate RDR-162
+        cross-model repoint where ``new`` is already a populated target. With the
+        default ``False`` the service rejects an existing ``new`` with 409 (a plain
+        rename onto an existing collection is a collision, not a silent COPY).
         """
-        result = self._post("/collections/rename", {"old_name": old, "new_name": new})
+        body: dict[str, Any] = {"old_name": old, "new_name": new}
+        if cross_model:
+            body["cross_model"] = True
+        result = self._post("/collections/rename", body)
         renamed = (result or {}).get("renamed", {}) or {}
         return {k: int(v) for k, v in renamed.items()}
 
