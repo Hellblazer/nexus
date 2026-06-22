@@ -173,6 +173,11 @@
          before grants-nexus-svc. -->
     <include file="db/changelog/updated-at-001-triggers.xml"/>
 
+    <!-- nexus-wk3s9: (tenant_id, collection) indexes for the RDR-164 rename
+         audit re-home. After the tables exist (telemetry-001, aspects-001),
+         before grants. -->
+    <include file="db/changelog/perf-001-rename-collection-indexes.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
