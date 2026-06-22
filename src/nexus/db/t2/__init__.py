@@ -1242,6 +1242,10 @@ class T2Database:
     def expire_relevance_log(self, days: int = 90) -> int:
         return self.telemetry.expire_relevance_log(days=days)
 
+    def trim_hook_failures(self, days: int = 30) -> int:
+        """Facade delegate for the hook_failures age reaper (nexus-7365x)."""
+        return self.telemetry.trim_hook_failures(days=days)
+
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
     def expire(self, relevance_log_days: int = 90) -> int:

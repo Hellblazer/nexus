@@ -389,6 +389,33 @@ class TelemetryRepositoryTest {
         }
     }
 
+    @Test @Order(25)
+    void hookFailures_trimByAge_exactCount() {
+        // nexus-7365x: age reaper parity with trimSearchTelemetry. Dedicated tenant so
+        // the delete count is exact. Two 2024 rows (older than 30d) + one ~now row.
+        final String tenant = "tel-trim-hooks";
+        repo.importHookFailureRow(tenant, "th-old-1", "code__nexus", "hook_a",
+            "boom", PAST_TS, null, false, "single");
+        repo.importHookFailureRow(tenant, "th-old-2", "code__nexus", "hook_b",
+            "boom", PAST_TS, null, false, "single");
+        String nowTs = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).toString();
+        repo.importHookFailureRow(tenant, "th-recent", "code__nexus", "hook_c",
+            "boom", nowTs, null, false, "single");
+
+        int deleted = repo.trimHookFailures(tenant, 30);
+
+        assertThat(deleted).as("trim must delete exactly the two aged rows").isEqualTo(2);
+        try (Connection conn = pg.createConnection("")) {
+            conn.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            var rs = conn.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + tenant + "'");
+            rs.next();
+            assertThat(rs.getInt(1)).as("only the recent row survives").isEqualTo(1);
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     // ── frecency ───────────────────────────────────────────────────────────────
 
     @Test @Order(12)
