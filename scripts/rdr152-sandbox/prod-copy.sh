@@ -97,16 +97,22 @@ if [[ -f "${PROD_MEMORY_DB}" ]]; then
     #                    collapses duplicate event rows; baseline = distinct(question,created_at).
     #   plans          — PG UNIQUE(tenant,project,query) collapses dimension-less dups that
     #                    SQLite's UNIQUE(project,dimensions) keeps; baseline = distinct(project,query).
+    #   hook_failures  — PG idx_hook_failures_etl_dedup(tenant,doc_id,hook_name,occurred_at)
+    #                    + ON CONFLICT DO NOTHING; baseline = distinct(doc_id,hook_name,occurred_at).
+    # The PG natural keys are tenant-prefixed; the SQLite source is single-tenant (no tenant_id
+    # column), so tenant is invariant and omitted from the DISTINCT keys here. If a multi-tenant
+    # SQLite source is ever introduced, add the tenant column to each DISTINCT below.
     PROD_TOPIC_LINKS_LIVE="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM topic_links tl WHERE EXISTS(SELECT 1 FROM topics t WHERE t.id=tl.from_topic_id) AND EXISTS(SELECT 1 FROM topics t WHERE t.id=tl.to_topic_id);" 2>/dev/null || echo 0)"
     PROD_TELEMETRY_RUNS_DISTINCT="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM (SELECT DISTINCT question, created_at FROM nx_answer_runs);" 2>/dev/null || echo 0)"
     PROD_PLANS_DISTINCT="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM (SELECT DISTINCT project, query FROM plans);" 2>/dev/null || echo 0)"
+    PROD_TELEMETRY_HOOKS_DISTINCT="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM (SELECT DISTINCT doc_id, hook_name, occurred_at FROM hook_failures);" 2>/dev/null || echo 0)"
     echo "[prod-copy] Prod counts: memory=${PROD_MEMORY_COUNT} plans=${PROD_PLANS_COUNT} chash=${PROD_CHASH_COUNT}"
     echo "[prod-copy]             topics=${PROD_TOPICS_COUNT} assignments=${PROD_TOPIC_ASSIGN_COUNT} topic_links=${PROD_TOPIC_LINKS_COUNT}"
     echo "[prod-copy]             telemetry: relevance=${PROD_TELEMETRY_RELEVANCE} search=${PROD_TELEMETRY_SEARCH}"
     echo "[prod-copy]                        nx_answer_runs=${PROD_TELEMETRY_RUNS} hook_failures=${PROD_TELEMETRY_HOOKS}"
     echo "[prod-copy]                        tier_writes=${PROD_TELEMETRY_TIER} frecency=${PROD_TELEMETRY_FRECENCY}"
     # nexus-tzosw: post-ETL-semantics baselines used for parity (vs raw COUNT above).
-    echo "[prod-copy]             post-ETL baselines: topic_links_live=${PROD_TOPIC_LINKS_LIVE} nx_answer_runs_distinct=${PROD_TELEMETRY_RUNS_DISTINCT} plans_distinct=${PROD_PLANS_DISTINCT}"
+    echo "[prod-copy]             post-ETL baselines: topic_links_live=${PROD_TOPIC_LINKS_LIVE} nx_answer_runs_distinct=${PROD_TELEMETRY_RUNS_DISTINCT} plans_distinct=${PROD_PLANS_DISTINCT} hook_failures_distinct=${PROD_TELEMETRY_HOOKS_DISTINCT}"
     # Re-capture sidecar mtimes after reads (--readonly may create -shm if absent).
     # If -shm didn't exist before and now does, record the new mtime as the baseline
     # for the post-copy assertion (the sidecar was created empty, not written with data).
@@ -306,35 +312,9 @@ verify_pg_count_at_least() {
     fi
 }
 
-# verify_pg_count_known_gap: for stores with a known service bug (bead reference
-# in comment) — verify the known-gap count exactly so the harness detects when
-# the bug is fixed without operator attention.
-verify_pg_count_known_gap() {
-    local label="$1"
-    local table="$2"
-    local prod_count="$3"
-    local known_sbx_count="$4"  # expected sandbox count given the bug
-    local bead="$5"             # tracking bead for the gap
-    if [[ -z "${PSQL_BIN}" ]]; then
-        SKIPPED=$((SKIPPED+1)); echo "[prod-copy] SKIP ${label} (psql not found)"
-        return
-    fi
-    SBX_COUNT="$("${PSQL_BIN}" -h 127.0.0.1 -p "${PG_PORT}" \
-        -U "${OS_USER}" -d nexus \
-        -t -c "SELECT COUNT(*) FROM nexus.${table};" \
-        2>/dev/null | tr -d ' ' || echo '?')"
-    if [[ "${SBX_COUNT}" =~ ^[0-9]+$ && "${SBX_COUNT}" -eq "${prod_count}" ]]; then
-        echo "[prod-copy] PASS ${label}: prod=${prod_count} sandbox=${SBX_COUNT} (gap ${bead} appears FIXED — remove known-gap override)"
-    elif [[ "${SBX_COUNT}" =~ ^[0-9]+$ && "${SBX_COUNT}" -eq "${known_sbx_count}" ]]; then
-        echo "[prod-copy] WARN ${label}: prod=${prod_count} sandbox=${SBX_COUNT} (known gap ${bead})"
-    elif [[ "${SBX_COUNT}" =~ ^[0-9]+$ ]]; then
-        echo "[prod-copy] FAIL ${label}: prod=${prod_count} sandbox=${SBX_COUNT} expected ${known_sbx_count} (gap ${bead})" >&2
-        FAIL=1
-    else
-        echo "[prod-copy] FAIL ${label}: count query returned '${SBX_COUNT}'" >&2
-        FAIL=1
-    fi
-}
+# (verify_pg_count_known_gap removed — nexus-tzosw: the two former callers (plans,
+# hook_failures) now verify against post-ETL-semantics baselines; no known-gap overrides
+# remain. Re-add the helper from git history if a genuine known service-bug gap recurs.)
 
 # memory: allow +1 for the probe write during ETL bootstrap.
 verify_pg_count_exact   "memory"              "memory"             "${PROD_MEMORY_COUNT:-0}"      1
@@ -355,7 +335,10 @@ verify_pg_count_exact   "frecency"            "frecency"           "${PROD_TELEM
 # plans: imports fully (no type mismatch — the old nexus-5gaj7 override was telemetry,
 # misattributed). PG UNIQUE(tenant,project,query) collapses dimension-less duplicate plans
 # that SQLite's partial UNIQUE(project,dimensions) WHERE dimensions IS NOT NULL keeps, so
-# the right baseline is distinct(project,query), NOT raw COUNT(*). nexus-tzosw.
+# the right baseline is distinct(project,query), NOT raw COUNT(*). at_least (not exact):
+# plans ARE written live (plan_save fires during nx_answer runs), so the prod source can gain
+# rows between the baseline snapshot and the ETL read — exact would false-FAIL on a live prod
+# (same reason the telemetry/chash checks use at_least). nexus-tzosw.
 verify_pg_count_at_least "plans"              "plans"              "${PROD_PLANS_DISTINCT:-0}"
 # topic_assignments: doc_id is a chunk chash with NO catalog FK (nexus-sa14p), so
 # assignments import independently of the catalog. The shortfall vs prod is NOT a
@@ -376,9 +359,12 @@ verify_pg_count_at_least "topic_links"       "topic_links"        "${PROD_TOPIC_
 # DB level, NOT counted as ETL-skipped), so the right baseline is distinct(question,created_at),
 # NOT raw COUNT(*). at_least also tolerates live writes during ETL. nexus-tzosw.
 verify_pg_count_at_least "nx_answer_runs"    "nx_answer_runs"     "${PROD_TELEMETRY_RUNS_DISTINCT:-0}"
-# hook_failures: ClassCastException FIXED (nexus-5gaj7); imports fully now. Plain telemetry
-# table (no dedup/orphan collapse); at_least tolerates live writes during ETL. nexus-tzosw.
-verify_pg_count_at_least "hook_failures"      "hook_failures"      "${PROD_TELEMETRY_HOOKS:-0}"
+# hook_failures: ClassCastException FIXED (nexus-5gaj7); imports fully now. BUT it has the
+# SAME dedup as nx_answer_runs — PG idx_hook_failures_etl_dedup(tenant,doc_id,hook_name,
+# occurred_at) + ON CONFLICT DO NOTHING — so the right baseline is distinct(doc_id,hook_name,
+# occurred_at), NOT raw COUNT(*) (raw==distinct on the 2026-06-22 state, but a future
+# exact-timestamp dup would re-fail against raw). at_least tolerates live writes. nexus-tzosw.
+verify_pg_count_at_least "hook_failures"      "hook_failures"      "${PROD_TELEMETRY_HOOKS_DISTINCT:-0}"
 
 # Verify Chroma copy (sandbox copy should be bit-exact: same embedding count).
 if [[ -n "${CHROMA_SQLITE}" && -f "${CHROMA_SQLITE}" && -f "${SANDBOX_CHROMA}/chroma.sqlite3" ]]; then
