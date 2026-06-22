@@ -28,7 +28,7 @@ pgvector count probe) is tracked separately, not part of this wiring.
 from __future__ import annotations
 
 import os
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import click
 import structlog
@@ -233,8 +233,9 @@ def guided_upgrade_cmd(
     # version-pinned above, so authoritative) so every leg resolves through env
     # priority-1 with no lease dependency. Save/restore to avoid leaking into the
     # process after this command (mirrors the NX_SERVICE_URL handling, code-review M1).
-    from urllib.parse import urlsplit  # noqa: PLC0415
-
+    # On the --service-url path, HOST/PORT are derived from the supplied (verified)
+    # URL and take precedence over any pre-set NX_SERVICE_HOST/PORT for the duration
+    # of the migration; the originals are restored in the finally below.
     _verified = urlsplit(readiness.service_url)
     _prev_url = os.environ.get("NX_SERVICE_URL")
     _prev_host = os.environ.get("NX_SERVICE_HOST")

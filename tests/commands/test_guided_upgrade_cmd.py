@@ -139,6 +139,40 @@ class TestGuidedUpgradeCmd:
         # restored after the command — no leak of the pinned port into the process.
         assert _os.environ.get("NX_SERVICE_PORT") != "52203"
 
+    def test_service_url_pins_supplied_endpoint_over_preset_env_and_restores(self) -> None:
+        # nexus-qvemn (critic Sig-1): on the --service-url path, HOST/PORT derive from
+        # the supplied (verified) URL and take precedence over a user's pre-set
+        # NX_SERVICE_HOST/PORT for the migration's duration, then restore.
+        import os as _os
+
+        captured: dict[str, object] = {}
+
+        def _capture(*_a, **_k) -> None:
+            captured["host"] = _os.environ.get("NX_SERVICE_HOST")
+            captured["port"] = _os.environ.get("NX_SERVICE_PORT")
+
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 1)), \
+             patch(f"{_MOD}.establish_verified_service",
+                   return_value=_ready("http://svc:9000")), \
+             patch.dict(_os.environ,
+                        {"NX_SERVICE_TOKEN": "user-tok",
+                         "NX_SERVICE_HOST": "stale-host",
+                         "NX_SERVICE_PORT": "9999"}, clear=False), \
+             patch("nexus.commands.migrate_cmd._run_migration", side_effect=_capture):
+            result = CliRunner().invoke(
+                guided_upgrade_cmd, ["--yes", "--service-url", "http://svc:9000"]
+            )
+            # Assert INSIDE the patch.dict block so the pre-set values are still the
+            # baseline (patch.dict reverts os.environ on exit).
+            assert result.exit_code == 0, result.output
+            # during migration: pinned to the supplied URL, not the stale pre-set env.
+            assert captured["host"] == "svc"
+            assert captured["port"] == "9000"
+            # after the command: the user's pre-set values are restored (no leak/clobber).
+            assert _os.environ.get("NX_SERVICE_HOST") == "stale-host"
+            assert _os.environ.get("NX_SERVICE_PORT") == "9999"
+
     def test_abort_at_confirm_does_not_provision(self) -> None:
         with patch(f"{_MOD}.detect_pending_migration",
                    return_value=_preflight(True, 1)), \
