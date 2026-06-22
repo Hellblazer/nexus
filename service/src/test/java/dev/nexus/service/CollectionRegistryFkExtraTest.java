@@ -416,72 +416,174 @@ class CollectionRegistryFkExtraTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP G — RDR-164 P1b (nexus-p9aw6): the reconcile→VALIDATE flow.
+    // GROUP G — RDR-164 P1b (nexus-p9aw6): the reconcile→VALIDATE flow, per FK.
     //
     // Proves the gap-window reconcile is LOAD-BEARING for VALIDATE: a row referencing
     // an unregistered collection (the gap-window orphan class) makes VALIDATE FAIL;
     // re-running the stub-register reconcile registers the collection so VALIDATE then
-    // SUCCEEDS and flips convalidated=true. Self-contained: re-creates the FK itself
-    // (GROUP F @Order(60) dropped it) and seeds the orphan while the FK is ABSENT
-    // (NOT VALID still enforces NEW inserts, so the orphan cannot be inserted under it).
-    // The SQL mirrors fk-003-validate.xml changesets fk-003-6-reconcile + fk-003-7.
+    // SUCCEEDS and flips convalidated=true. Self-contained per test: re-creates the FK
+    // itself (GROUP F @Order(60) dropped all five) and seeds the orphan while the FK is
+    // ABSENT (NOT VALID still enforces NEW inserts, so the orphan cannot be inserted
+    // under it). Each test uses a distinct tenant so the "not registered before
+    // reconcile" precondition holds independently.
+    //
+    // Coverage spans ALL FIVE FKs, mirroring fk-003-validate.xml changesets
+    // fk-003-6-reconcile (the five INSERT-SELECT arms) + fk-003-7..11 (VALIDATE). The
+    // four tables beyond document_aspects have materially distinct shapes — topics
+    // (BIGSERIAL PK), taxonomy_meta (PK = (tenant_id, collection)), document_highlights
+    // (NULLABLE collection + the reconcile's WHERE collection IS NOT NULL AND != ''
+    // filter) — so each gets its own causal proof rather than relying on SQL similarity.
+    //
+    // Teardown is container-scoped: @AfterAll pg.stop() drops the whole DB, so the
+    // re-added FKs and orphan rows these tests leave behind do not leak. Any future
+    // @Order(>74) group must account for that residual state explicitly.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(70)
-    void reconcileThenValidate_registersGapWindowOrphan_soValidateSucceeds() throws Exception {
-        final String T = "crfkx-p1b-tenant";
-        final String ORPHAN_COL = "p1b-orphan-col";
+    void reconcileThenValidate_documentAspects_gapWindowOrphan() throws Exception {
+        final String T = "crfkx-p1b-aspects";
+        final String ORPHAN_COL = "p1b-orphan-aspects";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-
-            // FK absent (dropped by GROUP F); seed an orphan row while it is absent.
-            su.createStatement().execute(
-                "ALTER TABLE nexus.document_aspects DROP CONSTRAINT IF EXISTS document_aspects_collection_fk");
-            su.createStatement().execute(
+            assertReconcileLoadBearing(su, "document_aspects", FK_DOC_ASPECTS, T, ORPHAN_COL,
                 "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name) " +
-                "VALUES ('" + T + "', '" + ORPHAN_COL + "', '/p1b/o.md', NOW(), 'v1', 'test')");
-            assertThat(count(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
-                "WHERE tenant_id='" + T + "' AND name='" + ORPHAN_COL + "'"))
-                .as("orphan collection is NOT registered before reconcile").isZero();
-
-            // Re-add the FK as NOT VALID — succeeds (NOT VALID skips existing-row validation).
-            su.createStatement().execute(
-                "ALTER TABLE nexus.document_aspects " +
-                "ADD CONSTRAINT document_aspects_collection_fk " +
-                "FOREIGN KEY (tenant_id, collection) " +
-                "REFERENCES nexus.catalog_collections (tenant_id, name) " +
-                "ON DELETE RESTRICT NOT VALID");
-
-            // VALIDATE must FAIL while the orphan is unregistered — proves it is load-bearing.
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "ALTER TABLE nexus.document_aspects VALIDATE CONSTRAINT document_aspects_collection_fk"));
-            assertThat(ex.getMessage())
-                .as("VALIDATE must fail loud on a gap-window orphan before reconcile")
-                .containsIgnoringCase("document_aspects_collection_fk");
-
-            // Reconcile: re-run the document_aspects stub-register (fk-003-6-reconcile arm).
-            su.createStatement().execute(
+                "VALUES ('" + T + "', '" + ORPHAN_COL + "', '/p1b/o.md', NOW(), 'v1', 'test')",
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
                 "SELECT DISTINCT tenant_id, collection FROM nexus.document_aspects " +
                 "ON CONFLICT (tenant_id, name) DO NOTHING");
-            assertThat(count(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
-                "WHERE tenant_id='" + T + "' AND name='" + ORPHAN_COL + "'"))
-                .as("reconcile stub-registers the gap-window collection").isEqualTo(1);
+        }
+    }
 
-            // VALIDATE now SUCCEEDS and flips convalidated=true.
+    @Test @Order(71)
+    void reconcileThenValidate_aspectQueue_gapWindowOrphan() throws Exception {
+        final String T = "crfkx-p1b-queue";
+        final String ORPHAN_COL = "p1b-orphan-queue";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            assertReconcileLoadBearing(su, "aspect_extraction_queue", FK_ASPECT_QUEUE, T, ORPHAN_COL,
+                "INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at) " +
+                "VALUES ('" + T + "', '" + ORPHAN_COL + "', '/p1b/q.md', 'pending', NOW())",
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, collection FROM nexus.aspect_extraction_queue " +
+                "ON CONFLICT (tenant_id, name) DO NOTHING");
+        }
+    }
+
+    @Test @Order(72)
+    void reconcileThenValidate_topics_gapWindowOrphan() throws Exception {
+        final String T = "crfkx-p1b-topics";
+        final String ORPHAN_COL = "p1b-orphan-topic";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            assertReconcileLoadBearing(su, "topics", FK_TOPICS, T, ORPHAN_COL,
+                "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) " +
+                "VALUES ('" + T + "', 'topic-p1b', '" + ORPHAN_COL + "', 0, NOW(), 'pending')",
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, collection FROM nexus.topics " +
+                "ON CONFLICT (tenant_id, name) DO NOTHING");
+        }
+    }
+
+    @Test @Order(73)
+    void reconcileThenValidate_taxonomyMeta_gapWindowOrphan() throws Exception {
+        final String T = "crfkx-p1b-meta";
+        final String ORPHAN_COL = "p1b-orphan-meta";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            assertReconcileLoadBearing(su, "taxonomy_meta", FK_TAX_META, T, ORPHAN_COL,
+                "INSERT INTO nexus.taxonomy_meta (tenant_id, collection) " +
+                "VALUES ('" + T + "', '" + ORPHAN_COL + "')",
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, collection FROM nexus.taxonomy_meta " +
+                "ON CONFLICT (tenant_id, name) DO NOTHING");
+        }
+    }
+
+    @Test @Order(74)
+    void reconcileThenValidate_documentHighlights_gapWindowOrphan() throws Exception {
+        final String T = "crfkx-p1b-hl";
+        final String ORPHAN_COL = "p1b-orphan-hl";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // GROUP F @Order(60) deliberately left an empty-string-collection highlight row
+            // (bf-hl-3, collection='') and proved the reconcile's WHERE collection != '' filter
+            // refuses to register it. Such a row is a STUB-UNSATISFIABLE orphan: it is non-null
+            // (MATCH SIMPLE enforces it) yet the reconcile will never give it a parent, so
+            // VALIDATE fails LOUD on it by design (arm-c, the intended safety property; the
+            // non-registration is already asserted by GROUP F). Remove it here so this case can
+            // isolate the happy-path gap-window reconcile proof for a real (non-empty) collection.
             su.createStatement().execute(
-                "ALTER TABLE nexus.document_aspects VALIDATE CONSTRAINT document_aspects_collection_fk");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT convalidated FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace " +
-                "WHERE c.contype='f' AND c.conname='document_aspects_collection_fk' AND n.nspname='nexus'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getBoolean("convalidated"))
-                .as("VALIDATE succeeds after reconcile → convalidated=true").isTrue();
+                "DELETE FROM nexus.document_highlights WHERE collection = ''");
+            // document_highlights is doc-rooted (fk-001): seed the parent catalog_documents
+            // row so the ONLY remaining VALIDATE failure is the collection FK under test.
+            insertCatalogDocument(su, T, "hl-doc-p1b");
+            // The document_highlights reconcile arm carries the WHERE collection IS NOT NULL
+            // AND collection != '' filter (collection is NULLABLE here, MATCH SIMPLE) — this
+            // is the materially-distinct arm; proving it still registers a real gap-window
+            // collection is the point of this case.
+            assertReconcileLoadBearing(su, "document_highlights", FK_DOC_HL, T, ORPHAN_COL,
+                "INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, ingested_at) " +
+                "VALUES ('" + T + "', 'hl-doc-p1b', '" + ORPHAN_COL + "', NOW())",
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, collection FROM nexus.document_highlights " +
+                "WHERE collection IS NOT NULL AND collection != '' " +
+                "ON CONFLICT (tenant_id, name) DO NOTHING");
         }
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────
+
+    /**
+     * Drives the RDR-164 P1b reconcile→VALIDATE causal proof for one collection FK:
+     * the FK is absent (GROUP F dropped all five), an orphan row referencing an
+     * unregistered collection is seeded while absent, the FK is re-added NOT VALID,
+     * VALIDATE FAILS on the orphan, the reconcile stub-registers the collection, and
+     * VALIDATE then SUCCEEDS with convalidated=true. {@code orphanInsertSql} and
+     * {@code reconcileInsertSql} are the table-specific arms mirroring
+     * fk-003-validate.xml fk-003-6-reconcile.
+     */
+    private void assertReconcileLoadBearing(
+            Connection su, String table, String fkName, String tenant, String orphanCol,
+            String orphanInsertSql, String reconcileInsertSql) throws Exception {
+        // FK absent (dropped by GROUP F); seed an orphan row while it is absent.
+        su.createStatement().execute(
+            "ALTER TABLE nexus." + table + " DROP CONSTRAINT IF EXISTS " + fkName);
+        su.createStatement().execute(orphanInsertSql);
+        assertThat(count(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
+            "WHERE tenant_id='" + tenant + "' AND name='" + orphanCol + "'"))
+            .as(table + ": orphan collection is NOT registered before reconcile").isZero();
+
+        // Re-add the FK as NOT VALID — succeeds (NOT VALID skips existing-row validation).
+        su.createStatement().execute(
+            "ALTER TABLE nexus." + table + " ADD CONSTRAINT " + fkName + " " +
+            "FOREIGN KEY (tenant_id, collection) " +
+            "REFERENCES nexus.catalog_collections (tenant_id, name) " +
+            "ON DELETE RESTRICT NOT VALID");
+
+        // VALIDATE must FAIL while the orphan is unregistered — proves reconcile is load-bearing.
+        PSQLException ex = assertThrows(PSQLException.class, () ->
+            su.createStatement().execute(
+                "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName));
+        assertThat(ex.getMessage())
+            .as(table + ": VALIDATE must fail loud on a gap-window orphan before reconcile")
+            .containsIgnoringCase(fkName);
+
+        // Reconcile: re-run this table's stub-register arm (fk-003-6-reconcile).
+        su.createStatement().execute(reconcileInsertSql);
+        assertThat(count(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
+            "WHERE tenant_id='" + tenant + "' AND name='" + orphanCol + "'"))
+            .as(table + ": reconcile stub-registers the gap-window collection").isEqualTo(1);
+
+        // VALIDATE now SUCCEEDS and flips convalidated=true.
+        su.createStatement().execute(
+            "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName);
+        ResultSet rs = su.createStatement().executeQuery(
+            "SELECT convalidated FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace " +
+            "WHERE c.contype='f' AND c.conname='" + fkName + "' AND n.nspname='nexus'");
+        assertThat(rs.next()).isTrue();
+        assertThat(rs.getBoolean("convalidated"))
+            .as(table + ": VALIDATE succeeds after reconcile → convalidated=true").isTrue();
+    }
 
     private static void insertCollection(Connection su, String tenantId, String name) throws Exception {
         su.createStatement().execute(
