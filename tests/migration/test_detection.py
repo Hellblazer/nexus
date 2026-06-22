@@ -515,10 +515,10 @@ class TestDryRunPreview:
 
 
 # ---------------------------------------------------------------------------
-# Voyage re-embed COST estimate (nexus-cewad / RDR-166 Gap 4) — only the
-# cross-model→voyage re-embed is billed to the operator key. Byte-for-byte
-# voyage copies (embeddings already exist) and ONNX/bge local re-embeds are
-# NOT billed.
+# Voyage re-embed COST estimate (nexus-cewad / RDR-166 Gap 4) — billed whenever
+# the effective target embedder is a Voyage model: cross-model→voyage AND
+# supported-voyage-1024 (Seam B re-embeds server-side for every chunk, so a
+# same-model voyage migration is billed too). ONNX/bge local re-embeds are free.
 # ---------------------------------------------------------------------------
 class TestVoyageCostEstimate:
     def test_onnx_only_is_free(self) -> None:

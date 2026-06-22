@@ -418,9 +418,11 @@ _EST_ONNX_CHUNKS_PER_SEC: float = 100.0
 #: Coarse Voyage re-embed price (USD per 1M tokens), for the cost guardrail
 #: (nexus-cewad / RDR-166 Gap 4). Order-of-magnitude planning figure across the
 #: voyage-context-3 / voyage-code-3 family — NOT a billing-accurate quote; the
-#: operator's actual invoice is set by Voyage's current pricing. Only the
-#: cross-model→voyage RE-EMBED is billed: byte-for-byte voyage copies reuse
-#: stored embeddings (no API call), and ONNX/bge re-embeds run locally.
+#: operator's actual invoice is set by Voyage's current pricing. Billed whenever
+#: the effective TARGET embedder is a Voyage model — both cross-model→voyage AND
+#: same-model supported-voyage-1024 (Seam B discards stored vectors;
+#: upsert_chunks re-embeds server-side for every migrated chunk). ONNX/bge
+#: re-embeds run locally and are not billed.
 _VOYAGE_COST_USD_PER_1M_TOKENS: float = 0.12
 
 
@@ -460,8 +462,10 @@ class DryRunPreview:
     total_est_tokens: int
     est_seconds: float
     #: nexus-cewad: token volume that will be RE-EMBEDDED through a Voyage model
-    #: (cross-model→voyage groups only) and therefore billed to the operator key.
-    #: Byte-for-byte voyage copies and ONNX/bge re-embeds contribute zero.
+    #: and therefore billed to the operator key — includes BOTH cross-model→voyage
+    #: AND supported-voyage-1024 (same-model) groups. Seam B discards stored
+    #: vectors and re-embeds server-side for every migrated chunk, so there is no
+    #: free byte-for-byte copy. ONNX/bge re-embeds run locally and contribute zero.
     billed_voyage_tokens: int = 0
     #: Coarse USD estimate for ``billed_voyage_tokens`` at
     #: :data:`_VOYAGE_COST_USD_PER_1M_TOKENS`. ``0.0`` when nothing is billed.
