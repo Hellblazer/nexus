@@ -88,11 +88,25 @@ if [[ -f "${PROD_MEMORY_DB}" ]]; then
     PROD_TELEMETRY_HOOKS="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM hook_failures;" 2>/dev/null || echo 0)"
     PROD_TELEMETRY_TIER="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM tier_writes;" 2>/dev/null || echo 0)"
     PROD_TELEMETRY_FRECENCY="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM frecency;" 2>/dev/null || echo 0)"
+    # nexus-tzosw: the raw source COUNT(*) is NOT the right parity baseline for stores
+    # whose ETL legitimately collapses rows. Three stores need the post-ETL-semantics
+    # count instead (verified exact against the sandbox 2026-06-22):
+    #   topic_links    — taxonomy ETL excludes orphan links (FK to a deleted topic);
+    #                    baseline = links whose BOTH endpoints reference a live topic.
+    #   nx_answer_runs — PG UNIQUE(tenant,question,created_at) + ON CONFLICT DO NOTHING
+    #                    collapses duplicate event rows; baseline = distinct(question,created_at).
+    #   plans          — PG UNIQUE(tenant,project,query) collapses dimension-less dups that
+    #                    SQLite's UNIQUE(project,dimensions) keeps; baseline = distinct(project,query).
+    PROD_TOPIC_LINKS_LIVE="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM topic_links tl WHERE EXISTS(SELECT 1 FROM topics t WHERE t.id=tl.from_topic_id) AND EXISTS(SELECT 1 FROM topics t WHERE t.id=tl.to_topic_id);" 2>/dev/null || echo 0)"
+    PROD_TELEMETRY_RUNS_DISTINCT="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM (SELECT DISTINCT question, created_at FROM nx_answer_runs);" 2>/dev/null || echo 0)"
+    PROD_PLANS_DISTINCT="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM (SELECT DISTINCT project, query FROM plans);" 2>/dev/null || echo 0)"
     echo "[prod-copy] Prod counts: memory=${PROD_MEMORY_COUNT} plans=${PROD_PLANS_COUNT} chash=${PROD_CHASH_COUNT}"
     echo "[prod-copy]             topics=${PROD_TOPICS_COUNT} assignments=${PROD_TOPIC_ASSIGN_COUNT} topic_links=${PROD_TOPIC_LINKS_COUNT}"
     echo "[prod-copy]             telemetry: relevance=${PROD_TELEMETRY_RELEVANCE} search=${PROD_TELEMETRY_SEARCH}"
     echo "[prod-copy]                        nx_answer_runs=${PROD_TELEMETRY_RUNS} hook_failures=${PROD_TELEMETRY_HOOKS}"
     echo "[prod-copy]                        tier_writes=${PROD_TELEMETRY_TIER} frecency=${PROD_TELEMETRY_FRECENCY}"
+    # nexus-tzosw: post-ETL-semantics baselines used for parity (vs raw COUNT above).
+    echo "[prod-copy]             post-ETL baselines: topic_links_live=${PROD_TOPIC_LINKS_LIVE} nx_answer_runs_distinct=${PROD_TELEMETRY_RUNS_DISTINCT} plans_distinct=${PROD_PLANS_DISTINCT}"
     # Re-capture sidecar mtimes after reads (--readonly may create -shm if absent).
     # If -shm didn't exist before and now does, record the new mtime as the baseline
     # for the post-copy assertion (the sidecar was created empty, not written with data).
@@ -338,10 +352,11 @@ verify_pg_count_at_least "relevance_log"      "relevance_log"      "${PROD_TELEM
 verify_pg_count_at_least "search_telemetry"   "search_telemetry"   "${PROD_TELEMETRY_SEARCH:-0}"
 verify_pg_count_at_least "tier_writes"        "tier_writes"        "${PROD_TELEMETRY_TIER:-0}"
 verify_pg_count_exact   "frecency"            "frecency"           "${PROD_TELEMETRY_FRECENCY:-0}" 0
-# plans: partial import (type mismatch on some rows).
-# Gap tracked in nexus-5gaj7 (same TelemetryHandler/PlanHandler cast issue class).
-# Expected sandbox count: ~70 of 88 (stable across runs on this prod state).
-verify_pg_count_known_gap "plans"             "plans"              "${PROD_PLANS_COUNT:-0}"       70 "nexus-5gaj7"
+# plans: imports fully (no type mismatch — the old nexus-5gaj7 override was telemetry,
+# misattributed). PG UNIQUE(tenant,project,query) collapses dimension-less duplicate plans
+# that SQLite's partial UNIQUE(project,dimensions) WHERE dimensions IS NOT NULL keeps, so
+# the right baseline is distinct(project,query), NOT raw COUNT(*). nexus-tzosw.
+verify_pg_count_at_least "plans"              "plans"              "${PROD_PLANS_DISTINCT:-0}"
 # topic_assignments: doc_id is a chunk chash with NO catalog FK (nexus-sa14p), so
 # assignments import independently of the catalog. The shortfall vs prod is NOT a
 # catalog issue: ~28% of source assignments reference a DELETED topic (orphan topic_id)
@@ -351,15 +366,19 @@ verify_pg_count_known_gap "plans"             "plans"              "${PROD_PLANS
 # RDR-153: the migration-report.json will carry the exact expected-valid count, at which
 # point this floor becomes verify against report.summary, not a heuristic percentage.
 verify_pg_count_at_least "topic_assignments" "topic_assignments"  "$(( ${PROD_TOPIC_ASSIGN_COUNT:-0} * 65 / 100 ))"
-# topic_links: FK is topic→topic only (no catalog FK); topics migrate first, so links
-# import fully. nexus-0a7xc.
-verify_pg_count_at_least "topic_links"       "topic_links"        "${PROD_TOPIC_LINKS_COUNT:-0}"
-# nx_answer_runs: plan_id String→Number ClassCastException FIXED (nexus-5gaj7). Expect
-# full import (event log; at_least tolerates live writes during ETL).
-verify_pg_count_at_least "nx_answer_runs"    "nx_answer_runs"     "${PROD_TELEMETRY_RUNS:-0}"
-# hook_failures: likely same ClassCastException pattern.
-# Gap tracked in nexus-5gaj7. Expected sandbox count: 0.
-verify_pg_count_known_gap "hook_failures"     "hook_failures"      "${PROD_TELEMETRY_HOOKS:-0}"   0 "nexus-5gaj7"
+# topic_links: FK is topic(id)→topic(id) only. The taxonomy ETL correctly EXCLUDES orphan
+# links whose from/to endpoint references a deleted topic (RDR-153 FK policy), so the right
+# baseline is live-both-endpoints, NOT raw COUNT(*) (prod carries large orphan drift — e.g.
+# 11138 of 17775 orphaned on the 2026-06-22 state). nexus-0a7xc / nexus-tzosw.
+verify_pg_count_at_least "topic_links"       "topic_links"        "${PROD_TOPIC_LINKS_LIVE:-0}"
+# nx_answer_runs: plan_id ClassCastException FIXED (nexus-5gaj7). PG UNIQUE(tenant,question,
+# created_at) + ON CONFLICT DO NOTHING collapses duplicate event rows (collapse happens at the
+# DB level, NOT counted as ETL-skipped), so the right baseline is distinct(question,created_at),
+# NOT raw COUNT(*). at_least also tolerates live writes during ETL. nexus-tzosw.
+verify_pg_count_at_least "nx_answer_runs"    "nx_answer_runs"     "${PROD_TELEMETRY_RUNS_DISTINCT:-0}"
+# hook_failures: ClassCastException FIXED (nexus-5gaj7); imports fully now. Plain telemetry
+# table (no dedup/orphan collapse); at_least tolerates live writes during ETL. nexus-tzosw.
+verify_pg_count_at_least "hook_failures"      "hook_failures"      "${PROD_TELEMETRY_HOOKS:-0}"
 
 # Verify Chroma copy (sandbox copy should be bit-exact: same embedding count).
 if [[ -n "${CHROMA_SQLITE}" && -f "${CHROMA_SQLITE}" && -f "${SANDBOX_CHROMA}/chroma.sqlite3" ]]; then
