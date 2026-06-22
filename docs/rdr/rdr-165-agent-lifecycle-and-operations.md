@@ -92,13 +92,13 @@ out as its own tracked bead/RDR rather than expanding this one.
    + marker clear + data-preserving default + `--remove-data`, wrapping
    `installer.uninstall_daemon`. Plus the managed-only client teardown
    (bead **nexus-wigzi**, Phase 3.a). TDD; nexus-only.
-   - **Release-timing decision (OWNER, PENDING).** 6.0.0 is the migration-capable
-     release that instructs every user to install the PG + engine-service stack.
-     Shipping install with no clean CLI uninstall is the asymmetry this RDR
-     closes. **Decision needed:** is `nexus-eu4u4` a **6.0.0 blocker**
-     (`blocks nexus-y5avl`) or a **6.0.1 fast-follow**? Recommendation: 6.0.0,
-     since mandating a service install without a teardown is exactly the
-     "cleanup later" failure mode. To be confirmed by the owner before gate.
+   - **Release-timing decision (OWNER, DECIDED 2026-06-22): 6.0.0 BLOCKER.**
+     6.0.0 mandates installing the PG + engine-service stack; shipping it with no
+     clean CLI uninstall is the asymmetry that causes "cleanup later." So
+     `nexus-eu4u4` now **`blocks nexus-y5avl`** — the service-aware local
+     uninstall must land before the cut. (The managed-only teardown, Phase 3.a /
+     `nexus-wigzi`, ships with RDR-166's managed work, not 6.0.0, since 6.0.0 is
+     local→local-service only.)
 4. **Wire into the docs surface.** Reference the new doc from README,
    `docs/cli-reference.md`, and the 6.0.0 release notes; ensure discoverability.
 
@@ -135,9 +135,9 @@ out as its own tracked bead/RDR rather than expanding this one.
    RDR-149 is the authoritative lease/registry mechanism.
 
 _Open Questions resolved by the 2026-06-22 gap audit. Tracked beads:
-**nexus-eu4u4** (service-aware uninstall), **nexus-wigzi** (managed-client
-teardown, Phase 3.a). One owner decision remains before gate: is `nexus-eu4u4`
-a 6.0.0 blocker or a 6.0.1 fast-follow (see §Approach Phase 3)._
+**nexus-eu4u4** (service-aware uninstall — DECIDED a 6.0.0 blocker,
+`blocks nexus-y5avl`), **nexus-wigzi** (managed-client teardown, Phase 3.a, ships
+with RDR-166). Ready for `/conexus:rdr-gate`._
 
 ## Research Findings
 
