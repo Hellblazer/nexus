@@ -645,6 +645,13 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
+        // nexus-hz785: a rename of an unregistered collection used to return 200 with all-zero
+        // counts (insert-select copies 0 rows, every child UPDATE touches 0) — a silent no-op on
+        // a typo. Fail loud with a legible 404 instead.
+        if (!repo.collectionExists(tenant, oldName)) {
+            HttpUtil.send(exchange, 404,
+                "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + oldName) + "}"); return;
+        }
         Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
     }
