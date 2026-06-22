@@ -50,6 +50,13 @@ migration tool; the Chroma source remains the immutable migration origin
   dynamic loader at the bundle's own `lib/` so the bundled `initdb`/`pg_ctl`
   resolve `libpq.so.5` etc. on a stripped image (nexus-4mm24; the durable
   RPATH-in-bundle-build fix is tracked separately).
+- **Guided-upgrade cross-model remap target is embedding-mode-aware** (RDR-162).
+  A guided upgrade onto a voyage-mode (cloud) service now re-embeds legacy
+  local-model collections into the content-type-appropriate voyage model
+  (`voyage-code-3` / `voyage-context-3`) instead of an unconditional bge-768
+  target, which a cloud service cannot serve. This unblocks the mixed migrant
+  (ran locally, migrates onto a voyage service); the dry-run preview names the
+  actual target and estimates its rate (nexus-gilf2).
 
 ### Known limitations / upgrade notes
 
