@@ -81,15 +81,21 @@ to the conexus instance (the T2 bus is passive; Hal relays).
 
 1. **Consumer-requirement + handoff design.** Pin the operator-provisioned
    token contract (where the token comes from, how `nx` consumes it, failure
-   modes). Enumerate the conexus-side asks (tenant provisioning, token issuance,
-   onboarding doc) and relay them; mirror each as a child under `nexus-w5v8j`.
+   modes). The conexus-side asks are mirrored under `nexus-w5v8j`:
+   **nexus-i67t3** (token delivery + `nx config` ergonomics) and **nexus-hm389**
+   (tenant onboarding/issuance handoff shape). **This phase gates Phase 2** — a
+   real tenant token is required before greenfield onboarding can be validated
+   E2E. The asks must be relayed to the conexus instance (passive bus; Hal
+   carries).
 2. **Greenfield onboarding journey.** Document + test the no-prior-install path
    against the managed endpoint (config, capability probe fail-loud, first
-   search/store). Confirm `nx init`/config shape for a managed-only client.
-3. **Local→managed migration hardening.** Confirm `resolve_service_config`
-   handles the `https://…:443` managed endpoint; validate the cross-model→voyage
-   ETL leg E2E against a (throwaway) managed tenant; add a rehearsal target;
-   surface cost + the re-migration foot-gun in the UX and notes.
+   search/store). The transport is already plumbed (vwvv5.12); this phase is the
+   journey + `nx config` ergonomics. Depends on Phase 1 (token).
+3. **Local→managed migration hardening.** Land the **scheme-aware
+   `resolve_service_config`** fix (bead **nexus-n3bwh**, a correctness
+   prerequisite — see Research Finding 2); validate the cross-model→voyage ETL
+   leg E2E against a throwaway managed tenant (bead **nexus-6hoa6**); surface
+   cost + the re-migration foot-gun in the UX and notes.
 4. **Documentation.** Both journeys documented (links from RDR-165's lifecycle
    doc); pgvector→managed limitation stated explicitly with the follow-on bead.
 
@@ -119,23 +125,34 @@ to the conexus instance (the T2 bus is passive; Hal relays).
 ## Open Questions
 
 1. **Token issuance UX** — `NX_SERVICE_TOKEN` env is the consume point
-   (research). **Remaining:** the `nx config` ergonomics for setting
-   `NX_SERVICE_URL` + `NX_SERVICE_TOKEN` cleanly, and how the operator delivers
-   the token. (Cross-repo: conexus issuance side.)
+   (research). **Remaining (tracked):** `nx config` ergonomics → bead
+   **nexus-i67t3**; operator-side issuance/delivery → bead **nexus-hm389**
+   (both under `nexus-w5v8j`, cross-repo, relay owed to conexus).
 2. ~~**Managed `nx init`**~~ — **ANSWERED (research):** greenfield reuses the
    `NX_SERVICE_URL`/`_resolve_endpoint` (https-capable) client + the vwvv5.12
    probe; no provisioning. Remaining work is the journey + config ergonomics,
    not a distinct init.
-3. **E2E managed-tenant test fixture** — how to exercise local→managed against a
+3. **E2E managed-tenant test fixture** — exercise local→managed against a
    throwaway managed tenant without touching the real `nexus` tenant (mirror the
-   RDR-164 throwaway-tenant probe discipline). Open.
-4. ~~**TLS/443 resolution**~~ — **ANSWERED (research):** the pre-gate /
-   version-pin legs (`resolve_service_config`, http-only host/port) break on an
-   https managed endpoint; the data path (`NX_SERVICE_URL`) does not. Fix =
-   scheme-aware resolution for the pre-gate. (See Research Finding 2.)
+   RDR-164 throwaway-tenant probe discipline). **Tracked:** bead **nexus-6hoa6**
+   (depends on nexus-n3bwh).
+4. ~~**TLS/443 resolution**~~ — **RESOLVED → CORRECTNESS DEFECT, NOT an open
+   question.** The pre-gate / version-pin legs (`resolve_service_config`,
+   http-only host/port) build `http://host:443` and break on an https managed
+   endpoint; the data path (`NX_SERVICE_URL`) does not. **Tracked:** bead
+   **nexus-n3bwh** (P1, prerequisite for Phase 3). See Research Finding 2.
 5. **Cost guardrails** — should a managed migration estimate + confirm the
-   voyage re-embed cost before proceeding (ties to `nexus-jioh1`)? Open
-   (design choice for the gate).
+   voyage re-embed cost before proceeding? Gate-time design choice; cross-refs
+   `nexus-jioh1` (P3 observation). Not a blocker.
+
+**pgvector→managed limitation** is tracked as bead **nexus-wm3t5** (build only if
+demand warrants).
+
+_Critical/Significant findings from the 2026-06-22 pair critique
+(`nexus/rdr-165-166-pair-critique`) are closed: the managed-client teardown seam
+is owned by RDR-165 (nexus-wigzi), every deferred item has a filed bead, and the
+TLS defect is reclassified + tracked. One action remains before gate: relay the
+conexus asks (nexus-i67t3 / nexus-hm389)._
 
 ## Research Findings
 

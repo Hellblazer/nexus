@@ -56,8 +56,18 @@ that is the single source of truth for:
    `nx daemon service install-binary <tag>`, PG bundle, bge-768 ONNX fetch,
    token plumbing), consolidating RDR-157/161/144 into one walkthrough.
 3. **Uninstall** — a complete, discoverable teardown, with a data-preserving
-   default and an explicit `--remove-data` escalation. Close any CLI gap so the
-   `daemon_uninstall` MCP capability has a first-class `nx` command equivalent.
+   default and an explicit `--remove-data` escalation. Close the CLI gap so the
+   `daemon_uninstall` MCP capability has a first-class `nx` command equivalent
+   (bead **nexus-eu4u4**), and — crucially — make it **service-aware**: it must
+   stop the engine-service/PG (`nx daemon service stop --with-pg`), not just
+   `nx daemon t2 stop`.
+   - **3.a Managed-only client teardown** (bead **nexus-wigzi**, the RDR-165↔166
+     seam). A user who followed RDR-166's greenfield onboarding has a
+     managed-only config (`NX_SERVICE_URL`/`NX_SERVICE_TOKEN`, no local
+     service/PG). The same `nx` uninstall must handle this case: clear the
+     managed config + cached probe state, **skip** `service stop --with-pg`,
+     **skip** data-wipe (data is remote). RDR-165 owns this because it owns the
+     CLI uninstall surface.
 4. **Upgrade** — the operational framing of `nx guided-upgrade`: what it
    detects, provisions, migrates, validates, and how copy-not-move gives a free
    rollback; the re-migration foot-gun (`nexus-1sx01`) and version-pin handshake.
@@ -77,10 +87,18 @@ out as its own tracked bead/RDR rather than expanding this one.
    state model + the three operational walkthroughs (install / uninstall /
    upgrade). Link out to the authoritative RDRs rather than duplicating design
    rationale.
-3. **Close surfaced CLI gaps.** Implement the small gaps the audit finds — most
-   likely a first-class `nx` uninstall command with the `daemon_uninstall`
-   tool's completeness (autostart unit removal, daemon stop, marker clear,
-   data-preserving default + `--remove-data`). TDD; nexus-only.
+3. **Close surfaced CLI gaps.** Implement a first-class **service-aware** `nx`
+   uninstall (bead **nexus-eu4u4**): `service stop --with-pg` + autostart removal
+   + marker clear + data-preserving default + `--remove-data`, wrapping
+   `installer.uninstall_daemon`. Plus the managed-only client teardown
+   (bead **nexus-wigzi**, Phase 3.a). TDD; nexus-only.
+   - **Release-timing decision (OWNER, PENDING).** 6.0.0 is the migration-capable
+     release that instructs every user to install the PG + engine-service stack.
+     Shipping install with no clean CLI uninstall is the asymmetry this RDR
+     closes. **Decision needed:** is `nexus-eu4u4` a **6.0.0 blocker**
+     (`blocks nexus-y5avl`) or a **6.0.1 fast-follow**? Recommendation: 6.0.0,
+     since mandating a service install without a teardown is exactly the
+     "cleanup later" failure mode. To be confirmed by the owner before gate.
 4. **Wire into the docs surface.** Reference the new doc from README,
    `docs/cli-reference.md`, and the 6.0.0 release notes; ensure discoverability.
 
@@ -116,7 +134,10 @@ out as its own tracked bead/RDR rather than expanding this one.
 4. ~~**Relationship to RDR-149**~~ — **ANSWERED (research):** link, don't restate;
    RDR-149 is the authoritative lease/registry mechanism.
 
-_All Open Questions resolved by the 2026-06-22 gap audit; ready for `/conexus:rdr-gate`._
+_Open Questions resolved by the 2026-06-22 gap audit. Tracked beads:
+**nexus-eu4u4** (service-aware uninstall), **nexus-wigzi** (managed-client
+teardown, Phase 3.a). One owner decision remains before gate: is `nexus-eu4u4`
+a 6.0.0 blocker or a 6.0.1 fast-follow (see §Approach Phase 3)._
 
 ## Research Findings
 
