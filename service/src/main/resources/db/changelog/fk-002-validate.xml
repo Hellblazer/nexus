@@ -35,7 +35,16 @@
          referenced by a child table but not yet registered is stub-registered now, so
          the subsequent VALIDATE has a valid parent for it. No-data-loss arm: the INSERT
          is unconditional over DISTINCT child values, so after it every non-null
-         referenced (tenant_id, collection) has a parent. topic_assignments contributes
+         referenced (tenant_id, collection) has a parent.
+
+         The Q5 "DELETE genuinely-orphaned" arm (b) is deliberately NOT implemented here,
+         and unlike the fk-003 sibling it should NOT be: fk-002 tables (chunks_*,
+         chash_index, topic_assignments) are the PRIMARY vector-serving layer, where an
+         orphan chunk is real data, not lifecycle debris — deleting it would be data loss.
+         Stub-register + defer cleanup to the deleteCollection cascade (RDR-164 P2) is the
+         correct no-data-loss choice. (Follow-up bead nexus-ht7yq tracks arm (b) for the
+         fk-003 LIFECYCLE tables only — dangling annotations/queue rows — and is NOT in
+         scope for fk-002.) topic_assignments contributes
          only non-null, non-empty source_collection values (null rows escape the FK via
          MATCH SIMPLE); an empty-string (non-null) source_collection is therefore a
          stub-unsatisfiable orphan that — by design — makes VALIDATE FAIL LOUD rather
@@ -65,9 +74,10 @@
 
     <!-- ── Changeset fk-002-6-reconcile: fresh idempotent stub-register ────────── -->
     <!--
-        Mirrors fk-002-0-backfill-stubs exactly, re-run against current data to catch
-        any collection referenced by a child table between the 2026-06-11 migration
-        and the P0.2 registration-guard deploy. ON CONFLICT DO NOTHING keeps it
+        Repeats the same five fk-002-0-backfill-stubs SQL statements (inline section
+        comments aside), re-run against current data to catch any collection referenced
+        by a child table between the 2026-06-11 migration and the P0.2 registration-guard
+        deploy. ON CONFLICT DO NOTHING keeps it
         idempotent and safe to re-apply. topic_assignments contributes only non-null,
         non-empty source_collection values (null rows escape the FK).
     -->
