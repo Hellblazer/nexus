@@ -318,18 +318,16 @@ class CollectionRegistryFkTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 2 — NOT VALID pin
+    // GROUP 2 — VALIDATED pin (RDR-156 P0.3, bead nexus-70r3c.3)
     //
-    // EXPECTED RED: all five pg_constraint rows absent until P0.2 adds them.
-    // P0.3's VALIDATE CONSTRAINT flips convalidated from false to true and must
-    // UPDATE this test to assert convalidated=true.
+    // After P0.3 (fk-002-validate.xml) the five FKs are VALIDATEd. On a fresh DB the
+    // master changelog applies fk-002-6-reconcile (no rows → no-op) then VALIDATE
+    // CONSTRAINT for each FK, so all five carry convalidated=true. (Pre-P0.3 this
+    // asserted convalidated=false; flipped by P0.3, mirroring the fk-003 sibling.)
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(20)
-    void allFiveCollectionFks_existAndAreNotValid() throws Exception {
-        // RED until P0.2 adds the NOT VALID changesets.
-        // After P0.2: all five rows exist with convalidated=false.
-        // After P0.3 (VALIDATE): update to convalidated=true.
+    void allFiveCollectionFks_existAndAreValidated() throws Exception {
         try (Connection su = pg.createConnection("")) {
             for (String fkName : ALL_FIVE_FK_NAMES) {
                 ResultSet rs = su.createStatement().executeQuery(
@@ -342,8 +340,8 @@ class CollectionRegistryFkTest {
                     .as("FK constraint " + fkName + " must exist in pg_constraint")
                     .isTrue();
                 assertThat(rs.getBoolean("convalidated"))
-                    .as("FK constraint " + fkName + " must be NOT VALID (convalidated=false) until P0.3 VALIDATE runs")
-                    .isFalse();
+                    .as("FK constraint " + fkName + " must be VALIDATED (convalidated=true) after P0.3 VALIDATE runs")
+                    .isTrue();
             }
         }
     }
@@ -1139,8 +1137,167 @@ class CollectionRegistryFkTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 13 — RDR-156 P0.3 (bead nexus-70r3c.3): the reconcile→VALIDATE flow, per FK.
+    //
+    // Proves the gap-window reconcile (fk-002-6-reconcile) is LOAD-BEARING for the
+    // VALIDATE of each of the five fk-002 FKs: a row referencing an unregistered
+    // collection makes VALIDATE FAIL; re-running that table's stub-register arm
+    // registers the collection so VALIDATE then SUCCEEDS and flips convalidated=true.
+    // Self-contained per test: drops + re-creates the FK itself and seeds the orphan
+    // while the FK is ABSENT (NOT VALID still enforces NEW inserts, so the orphan
+    // cannot be inserted under it). Distinct tenant per test keeps the not-registered-
+    // before-reconcile precondition independent.
+    //
+    // Coverage spans ALL FIVE FKs with their materially-distinct shapes: chunks_* on
+    // `collection`, chash_index on `physical_collection`, topic_assignments on
+    // `source_collection` (nullable + ON UPDATE CASCADE + the reconcile's
+    // WHERE source_collection != '' filter). Teardown is container-scoped (@AfterAll
+    // pg.stop()); a future @Order(>134) group must account for the residual re-added
+    // FKs and orphan rows these tests leave behind.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(130)
+    void reconcileThenValidate_chunks384_gapWindowOrphan() throws Exception {
+        final String T = "crfk-p03-c384";
+        final String COL = "p03-orphan-c384";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            assertReconcileLoadBearing(su, "chunks_384", FK_CHUNKS_384, "collection", "ON DELETE RESTRICT", T, COL,
+                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c384") + "', 'text', " + vectorLiteral(384) + "::vector)",
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, collection FROM nexus.chunks_384 ON CONFLICT (tenant_id, name) DO NOTHING");
+        }
+    }
+
+    @Test @Order(131)
+    void reconcileThenValidate_chunks768_gapWindowOrphan() throws Exception {
+        final String T = "crfk-p03-c768";
+        final String COL = "p03-orphan-c768";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            assertReconcileLoadBearing(su, "chunks_768", FK_CHUNKS_768, "collection", "ON DELETE RESTRICT", T, COL,
+                "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c768") + "', 'text', " + vectorLiteral(768) + "::vector)",
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, collection FROM nexus.chunks_768 ON CONFLICT (tenant_id, name) DO NOTHING");
+        }
+    }
+
+    @Test @Order(132)
+    void reconcileThenValidate_chunks1024_gapWindowOrphan() throws Exception {
+        final String T = "crfk-p03-c1024";
+        final String COL = "p03-orphan-c1024";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            assertReconcileLoadBearing(su, "chunks_1024", FK_CHUNKS_1024, "collection", "ON DELETE RESTRICT", T, COL,
+                "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c1024") + "', 'text', " + vectorLiteral(1024) + "::vector)",
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, collection FROM nexus.chunks_1024 ON CONFLICT (tenant_id, name) DO NOTHING");
+        }
+    }
+
+    @Test @Order(133)
+    void reconcileThenValidate_chashIndex_gapWindowOrphan() throws Exception {
+        final String T = "crfk-p03-ci";
+        final String COL = "p03-orphan-ci";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // chash_index FK is on physical_collection (not `collection`).
+            assertReconcileLoadBearing(su, "chash_index", FK_CHASH_INDEX, "physical_collection", "ON DELETE RESTRICT", T, COL,
+                "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) " +
+                "VALUES ('" + T + "', '" + validChash("p03ci") + "', '" + COL + "', NOW())",
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, physical_collection FROM nexus.chash_index ON CONFLICT (tenant_id, name) DO NOTHING");
+        }
+    }
+
+    @Test @Order(134)
+    void reconcileThenValidate_topicAssignments_gapWindowOrphan() throws Exception {
+        final String T = "crfk-p03-ta";
+        final String COL = "p03-orphan-ta";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // topic_assignments is multiply-rooted: seed the doc (fk-001 doc_id), the topic's
+            // home collection (topics_collection_fk), and the topic row (topic_id FK) so the
+            // ONLY remaining VALIDATE failure is the source_collection FK under test.
+            insertCatalogDocument(su, T, "p03-ta-doc");
+            insertCollection(su, T, "p03-ta-topic-home");
+            insertTopic(su, T, 90301L, "p03-ta-topic", "p03-ta-topic-home");
+            // FK on source_collection (nullable, MATCH SIMPLE) with ON UPDATE CASCADE; the
+            // reconcile arm carries WHERE source_collection != '' — the materially-distinct case.
+            assertReconcileLoadBearing(su, "topic_assignments", FK_TOPIC_ASSIGN, "source_collection",
+                "ON UPDATE CASCADE ON DELETE RESTRICT", T, COL,
+                "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) " +
+                "VALUES ('" + T + "', 'p03-ta-doc', 90301, 'hdbscan', '" + COL + "', NOW())",
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, source_collection FROM nexus.topic_assignments " +
+                "WHERE source_collection IS NOT NULL AND source_collection != '' ON CONFLICT (tenant_id, name) DO NOTHING");
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // HELPERS
     // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Drives the RDR-156 P0.3 reconcile→VALIDATE causal proof for one collection FK:
+     * the FK is dropped, an orphan row referencing an unregistered collection is seeded
+     * while absent, the FK is re-added NOT VALID, VALIDATE FAILS on the orphan, the
+     * table-specific reconcile stub-registers the collection, and VALIDATE then SUCCEEDS
+     * with convalidated=true. {@code fkColumn} is the referencing column (collection /
+     * physical_collection / source_collection); {@code extraFkClause} is the ON UPDATE/
+     * ON DELETE clause to preserve when re-adding. {@code orphanInsertSql} and
+     * {@code reconcileInsertSql} are the table-specific arms mirroring fk-002-validate.xml.
+     */
+    private void assertReconcileLoadBearing(
+            Connection su, String table, String fkName, String fkColumn, String extraFkClause,
+            String tenant, String orphanCol, String orphanInsertSql, String reconcileInsertSql) throws Exception {
+        // FK absent; seed an orphan row while it is absent.
+        su.createStatement().execute(
+            "ALTER TABLE nexus." + table + " DROP CONSTRAINT IF EXISTS " + fkName);
+        su.createStatement().execute(orphanInsertSql);
+        assertThat(countRows(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
+            "WHERE tenant_id='" + tenant + "' AND name='" + orphanCol + "'"))
+            .as(table + ": orphan collection is NOT registered before reconcile").isZero();
+
+        // Re-add the FK NOT VALID — succeeds (NOT VALID skips existing-row validation).
+        su.createStatement().execute(
+            "ALTER TABLE nexus." + table + " ADD CONSTRAINT " + fkName + " " +
+            "FOREIGN KEY (tenant_id, " + fkColumn + ") " +
+            "REFERENCES nexus.catalog_collections (tenant_id, name) " + extraFkClause + " NOT VALID");
+
+        // VALIDATE must FAIL while the orphan is unregistered — proves reconcile is load-bearing.
+        PSQLException ex = assertThrows(PSQLException.class, () ->
+            su.createStatement().execute(
+                "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName));
+        assertThat(ex.getMessage())
+            .as(table + ": VALIDATE must fail loud on a gap-window orphan before reconcile")
+            .containsIgnoringCase(fkName);
+
+        // Reconcile: re-run this table's stub-register arm (fk-002-6-reconcile).
+        su.createStatement().execute(reconcileInsertSql);
+        assertThat(countRows(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
+            "WHERE tenant_id='" + tenant + "' AND name='" + orphanCol + "'"))
+            .as(table + ": reconcile stub-registers the gap-window collection").isEqualTo(1);
+
+        // VALIDATE now SUCCEEDS and flips convalidated=true.
+        su.createStatement().execute(
+            "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName);
+        ResultSet rs = su.createStatement().executeQuery(
+            "SELECT convalidated FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace " +
+            "WHERE c.contype='f' AND c.conname='" + fkName + "' AND n.nspname='nexus'");
+        assertThat(rs.next()).isTrue();
+        assertThat(rs.getBoolean("convalidated"))
+            .as(table + ": VALIDATE succeeds after reconcile → convalidated=true").isTrue();
+    }
+
+    private static int countRows(Connection su, String sql) throws Exception {
+        ResultSet rs = su.createStatement().executeQuery(sql);
+        rs.next();
+        return rs.getInt(1);
+    }
 
     /**
      * Insert a minimal catalog_collections row. Uses ON CONFLICT DO NOTHING for idempotency.

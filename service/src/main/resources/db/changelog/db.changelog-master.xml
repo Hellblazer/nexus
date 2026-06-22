@@ -66,6 +66,14 @@
          Must come after vectors-001, chash-001, taxonomy-001, and catalog-001. -->
     <include file="db/changelog/fk-002-collection-registry.xml"/>
 
+    <!-- RDR-156 P0.3 (bead nexus-70r3c.3): gap-window stub-register reconcile +
+         VALIDATE CONSTRAINT for the five fk-002 NOT VALID collection FKs
+         (chunks_384/768/1024, chash_index, topic_assignments). World-block lifted
+         2026-06-21 (RDR-153 migrate-all total_failed==0). Separate changelog so
+         VALIDATE stays off the P0.2 critical path and runs only after the reconcile.
+         Must come after fk-002-collection-registry. -->
+    <include file="db/changelog/fk-002-validate.xml"/>
+
     <!-- Collection-registry FKs, second wave (bead nexus-dcqml, RDR-164 P1a):
          NOT VALID ON DELETE RESTRICT FKs from document_aspects, aspect_extraction_queue,
          topics, taxonomy_meta, and document_highlights to catalog_collections(tenant_id, name),
