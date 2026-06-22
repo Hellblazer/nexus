@@ -618,6 +618,14 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # mode-dependent path executes ("string-literal-as-name" class).
     "tests/migration/test_driver.py::test_two_leg_composes_collections_and_dims",
     #
+    # nexus-gilf2: the cross-model remap-target test asserts the driver derives
+    # voyage target NAMES (voyage-code-3 / voyage-context-3) in cloud mode. Mode
+    # is pinned explicitly by patching ``voyage_key_available`` (via the
+    # ``voyage_key=True`` engine patch), not the ambient cloud_mode fixture —
+    # the target resolver is a pure deployment-mode function, same rationale as
+    # the ``test_detection.py`` file exclusion ("string-literal-as-name" class).
+    "tests/migration/test_driver.py::test_cross_model_target_is_voyage_in_cloud_mode",
+    #
     # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
     # fallback. Voyage tokens appear only as realistic collection-NAME /
     # prepared-chunk-metadata fixtures (real docs collections ARE
