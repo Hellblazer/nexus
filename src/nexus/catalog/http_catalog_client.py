@@ -211,6 +211,20 @@ class HttpCatalogClient:
             return []
         return [_to_entry(d) for d in result.get("documents", []) if d.get("tumbler")]
 
+    def delete_collection(self, name: str) -> dict[str, int]:
+        """RDR-164 P2: atomically delete a collection + all its in-Postgres
+        derived state via the service's single transactional deleteCollection.
+
+        Returns the per-table deleted-row count map (``chunks_384``,
+        ``chash_index``, ``topic_assignments``, ``topics``,
+        ``taxonomy_centroids_*``, ``document_aspects``, ``document_highlights``,
+        ``aspect_extraction_queue``, ``catalog_documents``,
+        ``catalog_collections``). ``pipeline.db`` and the local-mode cascade
+        stay client-side (see ``purge_collection_cascade``).
+        """
+        result = self._post("/collections/delete", {"name": name})
+        return (result or {}).get("deleted", {}) or {}
+
     # ══════════════════════════════════════════════════════════════════════════
     # OWNERS
     # ══════════════════════════════════════════════════════════════════════════
@@ -1048,8 +1062,27 @@ class HttpCatalogClient:
         return int(result.get("updated", 0) if result else 0)
 
     def rename_collection(self, old: str, new: str) -> int:
+        # RDR-164 P3: the consolidated endpoint returns {"renamed": {per-table counts}}.
+        # The int contract reports the re-homed catalog_documents count.
+        renamed = self.rename_collection_cascade(old, new)
+        return int(renamed.get("catalog_documents", 0))
+
+    def rename_collection_cascade(self, old: str, new: str) -> dict[str, int]:
+        """RDR-164 P3: atomically re-home a collection X->Y and all its in-Postgres
+        derived state via the service's single transactional renameCollection.
+
+        Returns the per-table re-home count map (``catalog_collections_inserted``,
+        ``chunks_384/768/1024``, ``chash_index``, ``topic_assignments``, ``topics``,
+        ``taxonomy_meta``, ``taxonomy_centroids_*``, ``document_aspects``,
+        ``document_highlights``, ``aspect_extraction_queue``, ``catalog_documents``,
+        ``search_telemetry``, ``hook_failures``, ``catalog_collections_deleted``).
+        The cross-model COPY branch (target already registered) returns only
+        ``catalog_documents``. ``pipeline.db`` and the local-mode fan-out stay
+        client-side (see ``rename_collection_data_plane``).
+        """
         result = self._post("/collections/rename", {"old_name": old, "new_name": new})
-        return int(result.get("updated", 0) if result else 0)
+        renamed = (result or {}).get("renamed", {}) or {}
+        return {k: int(v) for k, v in renamed.items()}
 
     def update_document_collection(
         self, tumbler: Tumbler | str, collection: str

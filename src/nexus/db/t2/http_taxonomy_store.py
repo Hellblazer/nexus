@@ -14,19 +14,17 @@ CHROMA INTERACTION NOTE (RDR-152 P2.4):
     The taxonomy PG migration handles only the *relational* tables: topics,
     taxonomy_meta, topic_assignments, topic_links.
 
-    Chroma operations remain Python-side:
-    - The ``taxonomy__centroids`` ChromaDB collection (centroid vectors) is
-      NOT migrated to PG in this bead.  Phase 3 (Seam B) will address the
-      vector-store surface.
-    - ``delete_topic`` and ``merge_topics`` return the collection name so the
-      *caller* (CatalogTaxonomy or the orchestrator) can still call
-      ``chroma_client.get_collection(name).delete(...)`` against the centroid
-      collection locally.
-    - ``assign_topic`` never touches Chroma — centroid assignment is purely
-      relational (doc_id ↔ topic_id + similarity score).
-    - All callers that need to clean Chroma centroid rows after a delete/merge
-      must continue to do so from Python.  This store does NOT suppress the
-      Chroma half; it simply does not duplicate it.
+    Centroid vectors live in the service-backed centroid store (the pgvector
+    ``/v1/taxonomy/centroids`` routes, RDR-156 nexus-t1hnc), reached lazily via
+    ``self._centroid``:
+    - ``delete_topic`` and ``merge_topics`` self-clean the affected topic's
+      centroid via ``self._centroid.delete_ids(collection, [topic_id])`` after
+      the relational write (nexus-cugrk). This replaces the earlier "return the
+      collection name so the caller removes the centroid" contract, which leaked
+      orphan centroids that kept attracting chunks (ghost assignments to deleted
+      topics). The collection name is still returned for compatibility.
+    - ``assign_topic`` never touches the centroid store — centroid assignment is
+      purely relational (doc_id ↔ topic_id + similarity score).
 
 Interface parity (bead nexus-gmiaf.14, RDR-152 P2.4):
     get_topics, get_all_topics, get_topic_by_id, resolve_label,
@@ -283,29 +281,60 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         """Update review_status."""
         self._post("/topics/mark_reviewed", {"topic_id": topic_id, "status": status})
 
+    def _delete_centroid(self, collection: str, topic_id: int) -> None:
+        """Best-effort removal of a topic's centroid from the service-backed
+        centroid store (nexus-cugrk).
+
+        Leaving the orphan centroid behind keeps it attracting chunks in
+        ``project_against`` / ``assign_single`` until the next full rebuild —
+        persistent ghost assignments to a topic the user just deleted/merged.
+        Self-cleaning here closes that leak for every caller, replacing the
+        Chroma-era "caller removes the centroid" contract.
+
+        Failures are logged, never raised: the relational delete/merge has
+        already committed, and raising post-commit would surface a confusing
+        error for a non-authoritative side effect. The trade-off is that a
+        centroid-store outage during this window silently leaks the orphan —
+        it is cleared only by a subsequent full rebuild that purges-then-
+        recomputes the collection's centroids (not guaranteed to run soon), so
+        the failure is logged at WARNING with a traceback to keep the leak
+        detectable via log scraping.
+        """
+        try:
+            deleted = self._centroid.delete_ids(collection, [topic_id])
+            _log.debug(
+                "http_taxonomy_store.centroid_cleanup",
+                collection=collection, topic_id=topic_id, deleted=deleted,
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort side effect
+            _log.warning(
+                "http_taxonomy_store.centroid_cleanup_failed",
+                collection=collection, topic_id=topic_id, error=str(exc),
+                exc_info=True,
+            )
+
     def delete_topic(self, topic_id: int, *, chroma_client: Any = None) -> str | None:
-        """Delete a topic (relational tables only).
+        """Delete a topic, its assignments, and its centroid.
 
-        Returns the collection name for chroma centroid cleanup.
+        Deletes the relational rows via the service, then removes the topic's
+        centroid from the service-backed centroid store (nexus-cugrk) so it
+        stops attracting chunks. Returns the collection name.
 
-        CHROMA BOUNDARY: the caller is responsible for removing centroid
-        vectors from the ``taxonomy__centroids`` ChromaDB collection using
-        the returned collection name.  This store only handles the PG side.
+        The ``chroma_client`` parameter is retained for signature parity with
+        :class:`CatalogTaxonomy` but is unused on the service path — the
+        centroid lives in the pgvector centroid store, not Chroma.
         """
         try:
             r = self._post("/topics/delete", {"topic_id": topic_id})
             collection = r.get("collection")
-            _log.debug(
-                "http_taxonomy_store.delete_topic",
-                topic_id=topic_id,
-                collection=collection,
-                chroma_cleanup_required=chroma_client is not None,
-            )
-            return collection
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return None
             raise
+        _log.debug("http_taxonomy_store.delete_topic", topic_id=topic_id, collection=collection)
+        if collection:
+            self._delete_centroid(collection, topic_id)
+        return collection
 
     def merge_topics(
         self,
@@ -314,19 +343,32 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         *,
         chroma_client: Any = None,
     ) -> str | None:
-        """Merge source topic into target (relational tables only).
+        """Merge source topic into target, deleting the source and its centroid.
 
-        Returns the source topic's collection name for chroma centroid cleanup.
+        Reassigns the source's docs to the target via the service, then removes
+        the SOURCE topic's centroid from the service-backed centroid store
+        (nexus-cugrk) — the source no longer exists, so its centroid must not
+        keep attracting chunks. The target's centroid is left untouched,
+        matching the local-store behaviour: it still reflects the target's
+        pre-merge doc set and is only recomputed on the next full rebuild, so
+        the merged target is in a stale attract-state until then. Not
+        recomputing here is the accepted trade-off (cheap, consistent with the
+        existing design) — an immediate recompute would need the merged
+        embeddings this relational-only path does not have.
 
-        CHROMA BOUNDARY: same as ``delete_topic``.
+        Returns the source topic's collection name. ``chroma_client`` is unused
+        on the service path (see :meth:`delete_topic`).
         """
         try:
             r = self._post("/topics/merge", {"source_id": source_id, "target_id": target_id})
-            return r.get("collection")
+            collection = r.get("collection")
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return None
             raise
+        if collection:
+            self._delete_centroid(collection, source_id)
+        return collection
 
     # ── Assignments ────────────────────────────────────────────────────────────
 

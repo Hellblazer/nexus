@@ -137,6 +137,10 @@ class ReadShapeViewsTest {
 
 
     private static void seedTopic(Connection su, String tenant, String label, String coll) throws Exception {
+        // RDR-164 P1a: register the collection (topics_collection_fk).
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '"
+            + coll + "') ON CONFLICT (tenant_id, name) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) "
             + "VALUES ('" + tenant + "', '" + label + "', '" + coll + "', 0, now(), 'pending')");
@@ -174,9 +178,10 @@ class ReadShapeViewsTest {
     }
 
     private static void seedColl(Connection su, String tenant, String name) throws Exception {
+        // Idempotent: seedTopic (RDR-164 P1a) may have already stub-registered this collection.
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-            + tenant + "', '" + name + "')");
+            + tenant + "', '" + name + "') ON CONFLICT (tenant_id, name) DO NOTHING");
     }
 
     private static void seedChunk(Connection su, String tenant, String docId, int pos, String chash) throws Exception {

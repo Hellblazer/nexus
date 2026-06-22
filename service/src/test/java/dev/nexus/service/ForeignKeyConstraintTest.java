@@ -124,6 +124,25 @@ class ForeignKeyConstraintTest {
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
 
+        // Phase 3.5 (RDR-164 P1a): register the collections these fixtures reference so the
+        // new fk-003 collection FKs on document_aspects / aspect_extraction_queue / topics
+        // are satisfied. These tests exercise the fk-001 document-rooted FKs, not collection
+        // registration, so the collections are pre-seeded here rather than per-insert.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            String[][] seeds = {
+                {TENANT_A, "knowledge__a"}, {TENANT_A, "knowledge__b"}, {TENANT_A, "knowledge__c"},
+                {TENANT_A, "knowledge__d"}, {TENANT_A, "knowledge__q"}, {TENANT_A, "knowledge__qq"},
+                {TENANT_A, "knowledge__rls"}, {TENANT_A, "col-a"}, {TENANT_A, "col-rls"},
+                {TENANT_B, "knowledge__x"}, {TENANT_B, "knowledge__y"},
+            };
+            for (String[] s : seeds) {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                    + s[0] + "', '" + s[1] + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+            }
+        }
+
         // HikariCP as svc role (non-superuser, subject to RLS)
         var config = new com.zaxxer.hikari.HikariConfig();
         config.setJdbcUrl(pg.getJdbcUrl());
@@ -751,6 +770,10 @@ class ForeignKeyConstraintTest {
      */
     private static void insertTopic(Connection su, String tenantId, long id, String label, String collection)
             throws Exception {
+        // RDR-164 P1a: register the topic's collection (topics_collection_fk).
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenantId + "', '"
+            + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
         // Insert by id using the sequence; supply literal id via nextval override
         su.createStatement().execute(
             "INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) " +

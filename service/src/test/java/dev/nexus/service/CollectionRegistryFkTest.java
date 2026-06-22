@@ -172,6 +172,10 @@ class CollectionRegistryFkTest {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
+            // RDR-164 P3: renameCollection re-homes every denorm-collection table in one txn
+            // (taxonomy_meta/centroids, aspects, highlights, queue, telemetry). Grant broadly.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.topics_id_seq TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -358,8 +362,12 @@ class CollectionRegistryFkTest {
 
             // Fixture: catalog_documents row (required by fk-001 (tenant_id,doc_id) FK)
             insertCatalogDocument(su, TENANT_A, "casc-doc-1");
-            // Fixture: topics row (required by topic_id FK)
-            insertTopic(su, TENANT_A, 8001L, "casc-topic", "casc__old");
+            // Fixture: topics row (required only for the topic_id FK). Its OWN collection must
+            // NOT be the collection under rename — RDR-164 P1a's topics_collection_fk is
+            // ON UPDATE NO ACTION, so a topic sitting on 'casc__old' would block the parent
+            // rename. The topic's home collection is incidental to this test, which targets
+            // topic_assignments.source_collection's ON UPDATE CASCADE specifically.
+            insertTopic(su, TENANT_A, 8001L, "casc-topic", "casc__topic_home");
             // Fixture: registered collection 'casc__old'
             insertCollection(su, TENANT_A, "casc__old");
             // Fixture: topic_assignment with source_collection='casc__old'
@@ -419,12 +427,15 @@ class CollectionRegistryFkTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "unreg-src-doc");
-            insertTopic(su, TENANT_A, 8003L, "unreg-src-topic", "unreg-src-col");
+            // insertTopic registers the topic's own collection (RDR-164 P1a topics_collection_fk),
+            // so the assignment must reference a DISTINCT, still-unregistered source_collection to
+            // preserve this test's intent (non-null source_collection absent from catalog_collections).
+            insertTopic(su, TENANT_A, 8003L, "unreg-src-topic", "unreg-src-topic-col");
             PSQLException ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.topic_assignments " +
                     "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', 'unreg-src-doc', 8003, 'hdbscan', 'unreg-src-col', NOW())")
+                    "('" + TENANT_A + "', 'unreg-src-doc', 8003, 'hdbscan', 'truly-unreg-src-col', NOW())")
             );
             assertThat(ex.getMessage())
                 .as("topic_assignments_collection_fk must reject non-null source_collection not in catalog_collections")
@@ -1052,29 +1063,24 @@ class CollectionRegistryFkTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 12 — CatalogRepository.renameCollection FK violation
+    // GROUP 12 — CatalogRepository.renameCollection coherent re-home (RDR-164 P3)
     //
-    // Position: nothing in the service renames pgvector chunk rows today.
-    // Pre-FK, a catalog rename produced SILENT data incoherence: chunks
-    // remained stranded under the old collection name while the catalog
-    // row moved to the new name.  The FK (chunks_384_collection_fk etc.)
-    // converts that silent incoherence into a loud FK violation, which is
-    // an improvement.  The coherent multi-step rename flow (rename chunks
-    // first, then rename the catalog row) is follow-on bead work — see
-    // 'pgvector-coherent collection rename follow-on'.
+    // Position: the chunks FK is ON UPDATE NO ACTION, so a bare
+    // `UPDATE catalog_collections SET name=Y` is blocked while a chunks_384
+    // row still references the old name. Pre-P3 the rename did exactly that
+    // bare UPDATE and this test asserted the resulting FK violation. RDR-164
+    // P3 (bead nexus-77vve) replaced it with the coherent re-home
+    // (INSERT new registry Y → re-home children X→Y → DELETE old registry X),
+    // which never touches catalog_collections.name. The chunks-present case
+    // that used to fail now SUCCEEDS and re-homes the chunk row — this test
+    // now pins that coherent success.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(120)
-    void renameCollection_withChunkRows_violatesChunks384Fk() throws Exception {
-        // Register a collection, insert a chunk row, then attempt to rename the catalog row.
-        // The rename updates catalog_collections.name; the existing chunks_384 row still
-        // references the OLD name.  The FK enforces ON DELETE RESTRICT / ON UPDATE RESTRICT
-        // (no CASCADE on the chunks FK), so updating catalog_collections.name from under a
-        // referenced chunks row must fail with chunks_384_collection_fk.
-        //
-        // This demonstrates the FK converts pre-existing silent data incoherence into a loud
-        // failure.  The coherent rename flow (move chunk rows first, then rename catalog row)
-        // is tracked as follow-on work: 'pgvector-coherent collection rename follow-on'.
+    void renameCollection_withChunkRows_reHomesCoherently() throws Exception {
+        // Register a collection, insert a chunk row, then rename the collection. Under the
+        // coherent re-home the chunk row must move from the old name to the new name and the
+        // registry row must move with it — no FK violation, no orphan under the old name.
         String tenant  = "grp12-rename-tenant";
         String oldName = "code__nexus__minilm-l6-v2-384__v1";
         String newName = "code__nexus__minilm-l6-v2-384__v2";
@@ -1092,7 +1098,6 @@ class CollectionRegistryFkTest {
         }
 
         // TenantScope / CatalogRepository via svc role.
-        // jOOQ wraps PSQLException in IntegrityConstraintViolationException — unwrap the cause.
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(SVC_ROLE);
@@ -1103,22 +1108,33 @@ class CollectionRegistryFkTest {
             TenantScope scope = new TenantScope(ds);
             var repo = new dev.nexus.service.db.CatalogRepository(scope);
 
-            // renameCollection updates catalog_collections.name — the FK must block this
-            // because chunks_384 still references the old name.
-            Exception thrown = assertThrows(Exception.class, () ->
-                repo.renameCollection(tenant, oldName, newName));
-            // jOOQ wraps the PSQL FK violation in IntegrityConstraintViolationException;
-            // walk the cause chain to find the PSQLException carrying the constraint name.
-            Throwable cause = thrown;
-            while (cause != null && !(cause instanceof PSQLException)) {
-                cause = cause.getCause();
-            }
-            assertThat(cause)
-                .as("FK violation must be present in exception chain")
-                .isInstanceOf(PSQLException.class);
-            assertThat(cause.getMessage())
-                .as("renameCollection with stranded chunk rows must violate chunks_384_collection_fk")
-                .containsIgnoringCase(FK_CHUNKS_384);
+            // The coherent re-home succeeds (no FK violation) and reports the moved chunk.
+            var counts = repo.renameCollection(tenant, oldName, newName);
+            assertThat(counts.get("chunks_384"))
+                .as("the chunks-present case re-homes the chunk row").isEqualTo(1);
+            assertThat(counts.get("catalog_collections_inserted")).as("registry Y inserted").isEqualTo(1);
+            assertThat(counts.get("catalog_collections_deleted")).as("registry X deleted").isEqualTo(1);
+        }
+
+        // Verify the move at the SQL layer: chunk + registry under NEW, nothing under OLD.
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs;
+            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='"
+                + tenant + "' AND collection='" + oldName + "'");
+            rs.next();
+            assertThat(rs.getInt(1)).as("no chunk orphan under old name").isZero();
+            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='"
+                + tenant + "' AND collection='" + newName + "'");
+            rs.next();
+            assertThat(rs.getInt(1)).as("chunk re-homed under new name").isEqualTo(1);
+            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='"
+                + tenant + "' AND name='" + oldName + "'");
+            rs.next();
+            assertThat(rs.getInt(1)).as("old registry row gone").isZero();
+            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='"
+                + tenant + "' AND name='" + newName + "'");
+            rs.next();
+            assertThat(rs.getInt(1)).as("new registry row present").isEqualTo(1);
         }
     }
 
@@ -1160,6 +1176,12 @@ class CollectionRegistryFkTest {
      */
     private static void insertTopic(Connection su, String tenantId, long id, String label, String collection)
             throws Exception {
+        // RDR-164 P1a: topics now carries topics_collection_fk → catalog_collections.
+        // Register the topic's collection first so the fixture satisfies the NOT VALID FK.
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+            "VALUES ('" + tenantId + "', '" + collection + "') " +
+            "ON CONFLICT (tenant_id, name) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) " +
             "VALUES (" + id + ", '" + tenantId + "', '" + label + "', '" + collection + "', 0, NOW(), 'pending') " +

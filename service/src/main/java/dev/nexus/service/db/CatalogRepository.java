@@ -2,6 +2,25 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_INDEX;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_384;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_768;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Condition;
@@ -1132,11 +1151,67 @@ public final class CatalogRepository {
         );
     }
 
-    /** Delete a collection projection row. */
-    public int deleteCollection(String tenant, String name) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(T_COLLS).where(F_COL_NAME.eq(name)).execute()
-        );
+    /**
+     * Atomically delete a collection and ALL its derived in-Postgres state in ONE
+     * tenant-scoped transaction (RDR-164 P2). Replaces the SQLite-era client-side
+     * {@code purge_collection_cascade} fan-out for the service path: the explicit
+     * ordered DELETE removes every lifecycle table's rows in dependency order, with
+     * the {@code catalog_collections} registry row LAST so the {@code ON DELETE
+     * RESTRICT} child FKs (fk-002 / fk-003) act as a safety net rather than a blocker.
+     *
+     * <p>Order (children → registry): chunks_* → chash_index → topic_assignments →
+     * topics → taxonomy_centroids_* → document_aspects → document_highlights →
+     * aspect_extraction_queue → catalog_documents (fk-001 cascades any doc-rooted
+     * aspect/highlight/queue/manifest remainder) → catalog_collections.
+     *
+     * <p>This is where RDR-164 closes <strong>nexus-tquoj</strong> (the client cascade
+     * never purged {@code aspect_extraction_queue}; the explicit DELETE here catches it,
+     * including doc-less {@code doc_id=''} rows the fk-001 document cascade cannot reach)
+     * and the service-mode <strong>nexus-cugrk</strong> centroid leak ({@code
+     * taxonomy_centroids_*} have no FK to {@code topics}, CA-6 — purged by explicit
+     * {@code DELETE WHERE collection=?} in the same txn).
+     *
+     * <p>RLS scopes every DELETE to the caller's tenant via the {@code nexus.tenant}
+     * GUC, so a same-named collection under another tenant is untouched. Returns a
+     * per-table deleted-row count map (preserves the {@code CascadeCounts} / CLI-render
+     * + telemetry contract); no {@code failures} list — the operation is all-or-nothing.
+     *
+     * <p>Out of scope (stays client-side, RDR-164 CA-4/CA-5): the {@code pipeline.db}
+     * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
+     */
+    public Map<String, Integer> deleteCollection(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            // 1. T3 chunk vectors (registry children, fk-002 RESTRICT).
+            counts.put("chunks_384",  ctx.deleteFrom(CHUNKS_384).where(CHUNKS_384.COLLECTION.eq(name)).execute());
+            counts.put("chunks_768",  ctx.deleteFrom(CHUNKS_768).where(CHUNKS_768.COLLECTION.eq(name)).execute());
+            counts.put("chunks_1024", ctx.deleteFrom(CHUNKS_1024).where(CHUNKS_1024.COLLECTION.eq(name)).execute());
+            // 2. chash index (physical_collection; fk-002-4 RESTRICT).
+            counts.put("chash_index", ctx.deleteFrom(CHASH_INDEX).where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(name)).execute());
+            // 3. taxonomy: projection assignments by source_collection (fk-002-5 RESTRICT),
+            //    then topics (fk-003 RESTRICT) — deleting topics cascades any remaining
+            //    assignments via topic_assignments.topic_id -> topics(id) ON DELETE CASCADE.
+            counts.put("topic_assignments", ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(name)).execute());
+            counts.put("topics", ctx.deleteFrom(TOPICS).where(TOPICS.COLLECTION.eq(name)).execute());
+            // 3b. taxonomy_meta (fk-003-4 RESTRICT; PK (tenant_id, collection) — explicit DELETE).
+            //     topic_links clears via topics(id) ON DELETE CASCADE in step 3, so it needs no row here.
+            counts.put("taxonomy_meta", ctx.deleteFrom(TAXONOMY_META).where(TAXONOMY_META.COLLECTION.eq(name)).execute());
+            // 4. centroids (CA-6: no FK to topics — explicit DELETE; the cugrk fix).
+            counts.put("taxonomy_centroids_384",  ctx.deleteFrom(TAXONOMY_CENTROIDS_384).where(TAXONOMY_CENTROIDS_384.COLLECTION.eq(name)).execute());
+            counts.put("taxonomy_centroids_768",  ctx.deleteFrom(TAXONOMY_CENTROIDS_768).where(TAXONOMY_CENTROIDS_768.COLLECTION.eq(name)).execute());
+            counts.put("taxonomy_centroids_1024", ctx.deleteFrom(TAXONOMY_CENTROIDS_1024).where(TAXONOMY_CENTROIDS_1024.COLLECTION.eq(name)).execute());
+            // 5. aspect family (fk-003 RESTRICT). Explicit collection delete catches
+            //    doc-less (doc_id='') rows fk-001's document cascade cannot reach — the tquoj fix.
+            counts.put("document_aspects",        ctx.deleteFrom(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.COLLECTION.eq(name)).execute());
+            counts.put("document_highlights",     ctx.deleteFrom(DOCUMENT_HIGHLIGHTS).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(name)).execute());
+            counts.put("aspect_extraction_queue", ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(name)).execute());
+            // 6. catalog documents for this physical collection; fk-001 cascades any
+            //    doc-rooted aspect/highlight/queue/manifest rows still present.
+            counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
+            // 7. registry row LAST (RESTRICT children are now gone).
+            counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
+            return counts;
+        });
     }
 
     /**
@@ -1171,28 +1246,94 @@ public final class CatalogRepository {
         });
     }
 
-    /** Rename a collection across documents + collections. */
-    public int renameCollection(String tenant, String oldName, String newName) {
+    /**
+     * Rename a collection X-&gt;Y, re-homing every in-Postgres denorm-collection table in
+     * one RLS-scoped transaction (RDR-164 P3, bead nexus-77vve). Returns per-table re-home
+     * counts.
+     *
+     * <p><b>Mechanism (canonical rename, target absent).</b> The fk-002/fk-003 collection
+     * FKs are {@code ON UPDATE NO ACTION}, so a bare {@code UPDATE catalog_collections SET
+     * name=Y} is BLOCKED by any child row (proven: CollectionRegistryFkTest group-12). The
+     * coherent re-home therefore never touches {@code catalog_collections.name}; instead it:
+     * <ol>
+     *   <li>INSERTs a new registry row Y, copying X's metadata;</li>
+     *   <li>UPDATEs every child denorm collection X-&gt;Y (Y now exists, FK satisfied);</li>
+     *   <li>DELETEs the old registry row X (no child references X now, RESTRICT satisfied).</li>
+     * </ol>
+     * Telemetry tables (search_telemetry, hook_failures) have no FK but ARE re-homed — a
+     * rename is not a delete, audit rows follow the new name.
+     *
+     * <p><b>Cross-model COPY branch (RDR-162, target already exists).</b> When Y is already
+     * registered (the bge-768 cross-model migrate registers the target via its chunk upsert),
+     * renaming the source registry row would collide on the (tenant_id, name) PK. In that case
+     * we repoint {@code catalog_documents.physical_collection} ONLY and leave both registry
+     * rows untouched — preserving pre-RDR-164 RDR-162 behavior.
+     */
+    public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // RDR-162: the cross-model migrate is COPY-not-move — the bge-768 target
-            // is ALREADY registered in catalog_collections by the vector upsert (its
-            // chunks' FK requires the registry row to exist). Renaming the SOURCE
-            // registry row into that name would collide on the (tenant_id, name) PK
-            // (the 500 the cross-model ref-remap hit). So branch on whether the target
-            // row already exists:
-            //   - cross-model copy (target exists): repoint catalog documents only;
-            //     leave the registry alone (renaming it would collide, and the target
-            //     row is already correct).
-            //   - canonical rename (target absent): also rename the registry row
-            //     (unchanged pre-RDR-162 behavior).
+            Map<String, Integer> counts = new LinkedHashMap<>();
             boolean targetExists = ctx.fetchExists(
-                ctx.selectOne().from(T_COLLS).where(F_COL_NAME.eq(newName)));
-            int docs = ctx.update(T_DOCS).set(F_DOC_PCOLL, newName)
-                          .where(F_DOC_PCOLL.eq(oldName)).execute();
-            if (!targetExists) {
-                ctx.update(T_COLLS).set(F_COL_NAME, newName).where(F_COL_NAME.eq(oldName)).execute();
+                ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(newName)));
+
+            if (targetExists) {
+                // RDR-162 cross-model COPY branch: repoint catalog_documents only; leave
+                // both registry rows (renaming the source would collide on the name PK).
+                counts.put("catalog_documents",
+                    ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName)
+                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());
+                return counts;
             }
-            return docs;
+
+            // 1. New registry row Y, copying X's metadata (so children can re-home onto it).
+            counts.put("catalog_collections_inserted",
+                ctx.insertInto(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                        CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                        CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                        CATALOG_COLLECTIONS.CREATED_AT)
+                    .select(ctx.select(
+                            CATALOG_COLLECTIONS.TENANT_ID, DSL.val(newName),
+                            CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                            CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                            CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                            CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                            CATALOG_COLLECTIONS.CREATED_AT)
+                        .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)))
+                    .execute());
+
+            // 2. Re-home every child denorm-collection table X->Y (Y now exists, FK satisfied).
+            //    T3 chunk vectors (fk-002 RESTRICT).
+            counts.put("chunks_384",  ctx.update(CHUNKS_384).set(CHUNKS_384.COLLECTION, newName).where(CHUNKS_384.COLLECTION.eq(oldName)).execute());
+            counts.put("chunks_768",  ctx.update(CHUNKS_768).set(CHUNKS_768.COLLECTION, newName).where(CHUNKS_768.COLLECTION.eq(oldName)).execute());
+            counts.put("chunks_1024", ctx.update(CHUNKS_1024).set(CHUNKS_1024.COLLECTION, newName).where(CHUNKS_1024.COLLECTION.eq(oldName)).execute());
+            //    chash index (physical_collection; fk-002-4 RESTRICT).
+            counts.put("chash_index", ctx.update(CHASH_INDEX).set(CHASH_INDEX.PHYSICAL_COLLECTION, newName).where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(oldName)).execute());
+            //    taxonomy: assignments (source_collection, fk-002-5 RESTRICT), topics (fk-003 RESTRICT), meta (fk-003-4 RESTRICT).
+            counts.put("topic_assignments", ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, newName).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldName)).execute());
+            counts.put("topics", ctx.update(TOPICS).set(TOPICS.COLLECTION, newName).where(TOPICS.COLLECTION.eq(oldName)).execute());
+            counts.put("taxonomy_meta", ctx.update(TAXONOMY_META).set(TAXONOMY_META.COLLECTION, newName).where(TAXONOMY_META.COLLECTION.eq(oldName)).execute());
+            //    centroids (no FK to topics — explicit re-home).
+            counts.put("taxonomy_centroids_384",  ctx.update(TAXONOMY_CENTROIDS_384).set(TAXONOMY_CENTROIDS_384.COLLECTION, newName).where(TAXONOMY_CENTROIDS_384.COLLECTION.eq(oldName)).execute());
+            counts.put("taxonomy_centroids_768",  ctx.update(TAXONOMY_CENTROIDS_768).set(TAXONOMY_CENTROIDS_768.COLLECTION, newName).where(TAXONOMY_CENTROIDS_768.COLLECTION.eq(oldName)).execute());
+            counts.put("taxonomy_centroids_1024", ctx.update(TAXONOMY_CENTROIDS_1024).set(TAXONOMY_CENTROIDS_1024.COLLECTION, newName).where(TAXONOMY_CENTROIDS_1024.COLLECTION.eq(oldName)).execute());
+            //    aspect family (fk-003 RESTRICT; incl. doc-less rows).
+            counts.put("document_aspects",        ctx.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.COLLECTION, newName).where(DOCUMENT_ASPECTS.COLLECTION.eq(oldName)).execute());
+            counts.put("document_highlights",     ctx.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.COLLECTION, newName).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldName)).execute());
+            counts.put("aspect_extraction_queue", ctx.update(ASPECT_EXTRACTION_QUEUE).set(ASPECT_EXTRACTION_QUEUE.COLLECTION, newName).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(oldName)).execute());
+            //    catalog documents (physical_collection).
+            counts.put("catalog_documents", ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());
+            //    audit tables (no FK, but re-homed: audit rows follow the new name — RDR-164
+            //    §Approach Phase 3: relevance_log + search_telemetry + hook_failures).
+            counts.put("relevance_log",     ctx.update(RELEVANCE_LOG).set(RELEVANCE_LOG.COLLECTION, newName).where(RELEVANCE_LOG.COLLECTION.eq(oldName)).execute());
+            counts.put("search_telemetry", ctx.update(SEARCH_TELEMETRY).set(SEARCH_TELEMETRY.COLLECTION, newName).where(SEARCH_TELEMETRY.COLLECTION.eq(oldName)).execute());
+            counts.put("hook_failures",     ctx.update(HOOK_FAILURES).set(HOOK_FAILURES.COLLECTION, newName).where(HOOK_FAILURES.COLLECTION.eq(oldName)).execute());
+
+            // 3. Delete the old registry row X (RESTRICT children are now re-homed onto Y).
+            counts.put("catalog_collections_deleted",
+                ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)).execute());
+            return counts;
         });
     }
 
