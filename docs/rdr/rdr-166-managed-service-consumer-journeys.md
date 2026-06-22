@@ -35,24 +35,40 @@ two journeys that connect a user to the **managed** service at
    tenant-onboarding handoff, no E2E rehearsal/regression coverage, and an
    un-validated cross-model→voyage leg against a live tenant.**
 
-Gaps identified 2026-06-22:
-- **Tenant onboarding.** No path to obtain a tenant + `NX_SERVICE_TOKEN`;
-  account/token issuance is conexus-owned (RDR-001) and not tracked as an
-  end-to-end journey in the `nexus-w5v8j` consumer epic.
-- **No E2E validation.** Rehearsal harnesses cover local→*local*-service and
-  cold-acquire; `--guided --with-cloud` is explicitly rejected as incoherent.
-  Nothing exercises local→hosted, so gilf2's cross-model→voyage leg is
-  unvalidated against a live tenant.
-- **TLS/443 endpoint.** Migration legs resolve via HOST/PORT (the `nexus-qvemn`
-  contract), not `NX_SERVICE_URL`; an `https://…:443` managed endpoint flowing
-  through `resolve_service_config` needs confirming.
-- **Cost / idempotency.** A full voyage re-embed of every chunk's text is
-  network-bound and billed to the operator key (`nexus-jioh1`); re-runs re-copy
-  at full cost (`nexus-1sx01`).
-- **pgvector→managed (out of scope).** A user already on the *local* PG service
-  has no Chroma source; cross-deployment pgvector→managed migration is **not**
-  built. Per the 2026-06-22 scope decision this is **documented as a known
-  limitation** with a follow-on bead, not built here.
+Gaps identified 2026-06-22 (research-refined — see §Research Findings):
+
+#### Gap 1: Tenant onboarding has no path
+
+No way to obtain a tenant + `NX_SERVICE_TOKEN`; account/token issuance is
+conexus-owned (RDR-001) and was not tracked as an end-to-end journey in the
+`nexus-w5v8j` consumer epic.
+
+#### Gap 2: No E2E validation of the local→managed path
+
+Rehearsal harnesses cover local→*local*-service and cold-acquire;
+`--guided --with-cloud` is explicitly rejected as incoherent. Nothing exercises
+local→hosted, so gilf2's cross-model→voyage leg is unvalidated against a live
+tenant.
+
+#### Gap 3: The guided-upgrade pre-gate breaks on an https managed endpoint
+
+The pre-gate / version-pin legs resolve via `resolve_service_config` → `(host,
+port)` and build `http://{host}:{port}`; an `https://…:443` managed endpoint
+becomes `http://…:443` → TLS break. (A correctness defect, not just a confirm —
+see Research Finding 2.)
+
+#### Gap 4: Cost / idempotency UX is undefended
+
+A full voyage re-embed of every chunk's text is network-bound and billed to the
+operator key (`nexus-jioh1`); re-runs re-copy at full cost (`nexus-1sx01`), with
+no estimate-and-confirm guardrail.
+
+#### Gap 5: pgvector→managed is unbuilt (intentionally out of scope)
+
+A user already on the *local* PG service has no Chroma source; cross-deployment
+pgvector→managed migration is **not** built. Per the 2026-06-22 scope decision
+this is **documented as a known limitation** with a follow-on tracker, not built
+here.
 
 ## Decision
 

@@ -17,22 +17,36 @@ There is no single operator-facing account of what the "nexus agent" *is*, what
 states it moves through, and how a user installs, uninstalls, or upgrades it.
 The knowledge exists but is scattered across the RDR record and code:
 
-- **What the agent is** — the engine-service daemon (PG16 + pgvector + native
-  Java service), the `nx` CLI, the service-registry/lease lifecycle (RDR-149),
-  and the three storage tiers — has no consolidated description. A user reads
-  `docs/architecture.md` for tiers, RDR-152 for the service, RDR-149 for daemon
-  lifecycle, and infers the rest.
-- **Install** — split across RDR-157 (distribution model), RDR-161 (native-only
-  install), RDR-144 (`nx init` embedder onboarding), and the `nx init --service`
-  / `nx daemon service install-binary` commands, with no end-to-end walkthrough.
-- **Uninstall** — exists only as the `daemon_uninstall` **MCP tool** (removes the
-  OS autostart unit, stops the daemon, clears the first-run marker, optionally
-  deletes the data dir). Whether there is a coherent, discoverable **CLI**
-  uninstall with the same completeness is unverified — a likely small gap.
-- **Upgrade** — RDR-002 / RDR-159 (`nx guided-upgrade`) and RDR-162 (cross-model
-  upgrade chain) cover the Chroma→service migration, but the *operational*
-  framing (when do I upgrade, what does it touch, how do I roll back) is buried
-  in migration-engine RDRs.
+#### Gap 1: No consolidated "what the agent is" description
+
+The engine-service daemon (PG16 + pgvector + native Java service), the `nx` CLI,
+the service-registry/lease lifecycle (RDR-149), and the three storage tiers have
+no single description. A user reads `docs/architecture.md` for tiers, RDR-152 for
+the service, RDR-149 for daemon lifecycle, and infers the rest. There is no
+state model (uninstalled → installed → provisioned → running → upgrading →
+uninstalled) anywhere.
+
+#### Gap 2: Install is scattered with no end-to-end walkthrough
+
+Install is split across RDR-157 (distribution model), RDR-161 (native-only
+install), RDR-144 (`nx init` embedder onboarding), and the `nx init --service`
+/ `nx daemon service install-binary` commands, with no consolidated walkthrough.
+
+#### Gap 3: Uninstall is MCP-only and incomplete (no CLI, doesn't stop the service)
+
+A complete teardown exists only as the `daemon_uninstall` **MCP tool**; there is
+no `nx` CLI equivalent (the CLI's `daemon t3/t2 uninstall` is autostart-unit-only).
+Worse, the canonical `installer.uninstall_daemon` only runs `nx daemon t2 stop`
+— it does **not** stop the engine-service/PG. So in the 6.0.0 service-stack world
+there is no complete, discoverable teardown at all. (Verified in research; see
+§Research Findings.)
+
+#### Gap 4: Upgrade has no operational framing
+
+RDR-002 / RDR-159 (`nx guided-upgrade`) and RDR-162 (cross-model upgrade chain)
+cover the Chroma→service migration as engineering, but the *operational* framing
+(when do I upgrade, what does it touch, how do I roll back) is buried in
+migration-engine RDRs.
 
 The result: the lifecycle is implemented but not legible. As the 6.0.0
 migration-capable release approaches (`nexus-y5avl`), the absence of an
