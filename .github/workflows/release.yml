@@ -28,18 +28,18 @@ jobs:
         python-version: ["3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
           # nexus-2ivn: see ci.yml. Bundled enable-cache caches metadata
           # only; the wheel cache lives at ${{ runner.temp }}/setup-uv-
-          # cache and needs an explicit actions/cache@v4 step.
+          # cache and needs an explicit actions/cache@v5 step.
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
@@ -47,14 +47,14 @@ jobs:
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Cache ChromaDB ONNX model
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/chroma
           # nexus-8g79.33: same lockfile-bound key as ci.yml.
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
       - name: Cache HuggingFace models (docling, cross-encoder, MinerU)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           # nexus-cxsbs: see ci.yml. Cache the whole HF hub dir so docling's
           # layout + TableFormer models persist across runs instead of being
@@ -95,18 +95,18 @@ jobs:
       contents: write   # required to create GitHub release
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
           # nexus-2ivn: see ci.yml. Bundled enable-cache caches metadata
-          # only; explicit actions/cache@v4 step below targets the
+          # only; explicit actions/cache@v5 step below targets the
           # wheel-cache directory setup-uv actually uses.
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
@@ -188,7 +188,7 @@ jobs:
         # release sub-step failed and was created manually. Pinning to a
         # full-length SHA prevents silent action upgrades from re-introducing
         # the issue. Bump deliberately when validating a newer v2.x.
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
         with:
           body_path: /tmp/release_notes.md
           files: |
