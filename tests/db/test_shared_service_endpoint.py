@@ -45,7 +45,7 @@ def _publish_lease(*, host: str = "127.0.0.1", port: int, token: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for k in ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
+    for k in ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN", "NX_SERVICE_URL"):
         monkeypatch.delenv(k, raising=False)
     yield
 
@@ -136,6 +136,51 @@ class TestSchemeAwareEndpoint:
         monkeypatch.setenv("NX_SERVICE_PORT", "8123")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
         assert resolve_service_endpoint() == ("http://127.0.0.1:8123", "tok")
+
+    def test_service_url_wins_over_host_port(self, monkeypatch):
+        # All three set: NX_SERVICE_URL is the authoritative full endpoint and
+        # takes precedence over NX_SERVICE_HOST/PORT (review M2).
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com:443")
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", "8123")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "managed-tok")
+        assert resolve_service_endpoint() == (
+            "https://api.conexus-nexus.com:443",
+            "managed-tok",
+        )
+
+    def test_service_url_set_but_no_token_fails_loud(self, monkeypatch):
+        # NX_SERVICE_URL with no token (env or lease) → RuntimeError, not a
+        # silent token-less request.
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com:443")
+        with pytest.raises(RuntimeError, match="no NX_SERVICE_TOKEN"):
+            resolve_service_endpoint()
+
+
+class TestRecoverEndpointFromLease:
+    """nexus-n3bwh review H1 — lease recovery must never override an explicitly
+    pinned NX_SERVICE_URL with a discovered (always-local-http) lease."""
+
+    def test_pinned_service_url_is_never_rebound_to_lease(self, monkeypatch):
+        from nexus.db.service_endpoint import recover_endpoint_from_lease
+
+        _publish_lease(port=4242, token="lease-token")
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com:443")
+        # current endpoint is the managed https one; a local lease exists and
+        # would compare unequal — but the pin must suppress the rebind.
+        assert (
+            recover_endpoint_from_lease("https://api.conexus-nexus.com:443") is None
+        )
+
+    def test_lease_recovery_still_works_without_service_url(self):
+        from nexus.db.service_endpoint import recover_endpoint_from_lease
+
+        _publish_lease(port=4242, token="lease-token")
+        # No NX_SERVICE_URL: a stale current endpoint rebinds to the fresh lease.
+        assert recover_endpoint_from_lease("http://127.0.0.1:9999") == (
+            "http://127.0.0.1:4242",
+            "lease-token",
+        )
 
 
 class TestDiscoverLease:

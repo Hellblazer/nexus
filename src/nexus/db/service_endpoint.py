@@ -88,6 +88,14 @@ def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None]
       long-lived service-backed stores (memory/taxonomy/plan/aspect/chash/…) share
       the resolve-once pattern and remain unguarded — tracked for a sweep follow-on.
     """
+    # An explicitly-pinned NX_SERVICE_URL (a managed TLS endpoint, or any URL the
+    # user named) is authoritative — never silently rebind it to a discovered
+    # supervisor lease, which is ALWAYS local http (nexus-n3bwh review H1): the
+    # https managed base_url would compare unequal to the http lease and rebind
+    # every time, routing managed traffic to the wrong (local) service. Lease
+    # recovery is for the lease-discovered path only.
+    if os.environ.get("NX_SERVICE_URL", "").strip():
+        return None
     lease_url, lease_token = discover_lease()
     if lease_url is not None and lease_url.rstrip("/") != (current_base_url or "").rstrip("/"):
         return lease_url.rstrip("/"), lease_token
@@ -97,8 +105,13 @@ def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None]
 def resolve_service_config() -> tuple[str, int, str]:
     """``(host, port, token)`` — env halves, then the lease, then fail loud.
 
-    The shape the T2 domain stores and the catalog client consume (they build
-    ``http://{host}:{port}`` themselves). Restart-safety note: these clients
+    The local-supervisor 3-tuple — ALWAYS ``http`` (env ``NX_SERVICE_HOST``/
+    ``NX_SERVICE_PORT`` carry no scheme; the lease is local http). New HTTP
+    storage clients must NOT build ``http://{host}:{port}`` from this: call
+    :func:`resolve_service_endpoint` instead, which is scheme-correct and also
+    serves managed TLS endpoints (nexus-n3bwh). This function now backs only the
+    non-``NX_SERVICE_URL`` fallback leg of :func:`resolve_service_endpoint`.
+    Restart-safety note: service-backed clients
     resolve ONCE at construction and hold a long-lived ``httpx.Client`` — they
     ride a supervisor restart only because callers construct a fresh client per
     operation (the ``get_catalog()`` / ``t2_ctx()`` pattern). Do not cache a

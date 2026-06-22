@@ -10,7 +10,7 @@ the oracle (:class:`~nexus.db.t2.catalog_taxonomy.CatalogTaxonomy`) reached via 
 
 Talks to the RDR-156 ``/v1/taxonomy/centroids/*`` endpoints (bead nexus-t1hnc.3).
 Endpoint discovery is the SAME centralized resolver
-(:func:`nexus.db.service_endpoint.resolve_service_config`) that HttpTaxonomyStore
+(:func:`nexus.db.service_endpoint.resolve_service_endpoint`) that HttpTaxonomyStore
 uses — no per-store env handling.
 
 ERROR-TRANSLATION CONTRACT (Phase-1 gate O2):
