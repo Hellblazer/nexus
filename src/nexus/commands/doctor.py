@@ -571,7 +571,11 @@ def _run_check_plan_library() -> None:
 
 
 def _run_trim_telemetry(days: int) -> None:
-    """Delete search_telemetry rows older than *days* (RDR-087 Phase 2.4)."""
+    """Delete aged audit-log rows older than *days* (RDR-087 P2.4; nexus-7365x).
+
+    Trims both ``search_telemetry`` (RDR-087) and ``hook_failures`` (RDR-164 P0
+    audit-table TTL parity) — the two age-reaped, no-cascade audit tables.
+    """
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2.telemetry import Telemetry
 
@@ -581,13 +585,16 @@ def _run_trim_telemetry(days: int) -> None:
         return
     telemetry = Telemetry(db_path)
     try:
-        deleted = telemetry.trim_search_telemetry(days=days)
+        deleted_search = telemetry.trim_search_telemetry(days=days)
+        deleted_hooks = telemetry.trim_hook_failures(days=days)
     finally:
         telemetry.close()
-    noun = "row" if deleted == 1 else "rows"
-    click.echo(
-        f"Trimmed {deleted} search_telemetry {noun} older than {days} days."
-    )
+    for table, deleted in (
+        ("search_telemetry", deleted_search),
+        ("hook_failures", deleted_hooks),
+    ):
+        noun = "row" if deleted == 1 else "rows"
+        click.echo(f"Trimmed {deleted} {table} {noun} older than {days} days.")
 
 
 # ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────

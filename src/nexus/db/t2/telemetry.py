@@ -268,9 +268,18 @@ class Telemetry:
                     "batch_doc_ids", "is_batch", "chain"]
             vals: list[Any] = [doc_id, collection, hook_name, error,
                                batch_doc_ids, 1 if is_batch else 0, chain]
-            if occurred_at is not None:
-                cols.append("occurred_at")
-                vals.append(occurred_at)
+            # Always stamp occurred_at in ISO-8601 (T separator). When the caller
+            # omits it, use isoformat() rather than letting the DDL DEFAULT
+            # CURRENT_TIMESTAMP fill a space-separated value — the age reaper
+            # (trim_hook_failures, nexus-7365x) compares occurred_at as TEXT
+            # against an isoformat() cutoff, and a space (0x20) sorts before
+            # 'T' (0x54), which would skew the cutoff-day boundary. Matches the
+            # search_telemetry convention (ts is always isoformat()).
+            cols.append("occurred_at")
+            vals.append(
+                occurred_at if occurred_at is not None
+                else datetime.now(UTC).isoformat()
+            )
             placeholders = ", ".join(["?"] * len(vals))
             self.conn.execute(
                 f"INSERT INTO hook_failures ({', '.join(cols)}) "
@@ -447,6 +456,31 @@ class Telemetry:
         with self._lock:
             cur = self.conn.execute(
                 "DELETE FROM search_telemetry WHERE ts < ?",
+                (cutoff,),
+            )
+            self.conn.commit()
+        return cur.rowcount
+
+    def trim_hook_failures(self, days: int = 30) -> int:
+        """Delete ``hook_failures`` rows older than *days* days (nexus-7365x).
+
+        Audit-table TTL parity with :meth:`trim_search_telemetry`: hook_failures
+        is a no-cascade audit table (RDR-164 P0) reaped by age. Filters on the
+        ``occurred_at`` timestamp. Default 30d, matching the search-telemetry
+        reaper. Safe on an empty or not-yet-migrated table. Returns rows deleted.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._lock:
+            # hook_failures is created by migration; tolerate its absence.
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_failures'"
+            ).fetchone()
+            if not exists:
+                return 0
+            cur = self.conn.execute(
+                "DELETE FROM hook_failures WHERE occurred_at < ?",
                 (cutoff,),
             )
             self.conn.commit()
