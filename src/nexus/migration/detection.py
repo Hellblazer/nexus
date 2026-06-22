@@ -538,10 +538,20 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
         migratable_chunks += chunk_count
         total_est_tokens += tokens
         est_seconds += seconds
-        # Billed iff the re-embed runs through a Voyage model (cross-model→voyage).
-        # Byte-for-byte voyage copies (support == supported-voyage-1024, not
-        # cross_model) reuse stored embeddings — no API call, no bill.
-        if is_cross_model and target_model in _VOYAGE_MODELS:
+        # Billed iff the chunk's effective TARGET embedder is a Voyage model.
+        # Seam B re-embeds EVERY migrated chunk server-side (iter_collection_chunks
+        # deliberately discards stored vectors; upsert_chunks ignores any
+        # embeddings arg), so there is no free "byte-for-byte" copy — what
+        # determines the bill is which model the service re-embeds with:
+        #   * cross-model→voyage  → target_model is a Voyage model → BILLED.
+        #   * supported-voyage-1024 → re-embedded with the SAME voyage model → BILLED.
+        #   * supported-onnx / cross-model→bge → local ONNX (bge-768) → free.
+        billed = (
+            target_model in _VOYAGE_MODELS
+            if is_cross_model
+            else support == "supported-voyage-1024"
+        )
+        if billed:
             billed_voyage_tokens += tokens
 
     # Stable order: leg, support, model, then target — deterministic preview text.
@@ -620,6 +630,14 @@ def render_dry_run_preview(preview: DryRunPreview) -> str:
         f"~{preview.total_est_tokens:,} tokens; ~{preview.est_seconds:.1f}s "
         "re-embed time."
     )
+    if preview.billed_voyage_tokens > 0:
+        lines.append(
+            f"Voyage re-embed cost (billed to the operator key): "
+            f"~{preview.billed_voyage_tokens:,} tokens, est. "
+            f"~${preview.est_voyage_cost_usd:.2f} "
+            f"(~${_VOYAGE_COST_USD_PER_1M_TOKENS:.2f}/1M tokens; a re-run re-embeds "
+            "at full cost — not deduplicated)."
+        )
     lines.append(
         "Estimates are coarse planning figures, not a binding commitment; the "
         "live run reports exact counts."
@@ -641,7 +659,7 @@ def render_cost_confirmation(preview: DryRunPreview) -> str | None:
     if preview.billed_voyage_tokens <= 0:
         return None
     return (
-        f"⚠  This migration will RE-EMBED ~{preview.billed_voyage_tokens:,} tokens "
+        f"WARNING: this migration will RE-EMBED ~{preview.billed_voyage_tokens:,} tokens "
         f"through a Voyage model, billed to the operator's Voyage key — an "
         f"estimated ${preview.est_voyage_cost_usd:.2f} (coarse planning figure at "
         f"~${_VOYAGE_COST_USD_PER_1M_TOKENS:.2f}/1M tokens; the real invoice "

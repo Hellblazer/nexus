@@ -531,16 +531,17 @@ class TestVoyageCostEstimate:
         assert preview.billed_voyage_tokens == 0
         assert preview.est_voyage_cost_usd == 0.0
 
-    def test_byte_for_byte_voyage_copy_is_not_billed(self) -> None:
-        # A collection ALREADY on a wired voyage model is migrated by copying its
-        # stored embeddings — no re-embed, no Voyage API call, no bill.
+    def test_supported_voyage_collection_is_billed_server_side_reembed(self) -> None:
+        # Seam B discards stored vectors and re-embeds server-side, so a
+        # collection ALREADY on a voyage model is re-embedded with that same
+        # voyage model on migration → a billed Voyage API call, NOT a free copy.
         cloud = _FakeChromaClient({VOYAGE_CTX_1024: 500})
         report = classify_collections(
             local_client=None, cloud_client=cloud, voyage_key_present=True
         )
         preview = build_dry_run_preview(report)
-        assert preview.billed_voyage_tokens == 0
-        assert preview.est_voyage_cost_usd == 0.0
+        assert preview.billed_voyage_tokens == 500 * 512
+        assert preview.est_voyage_cost_usd == pytest.approx(500 * 512 / 1_000_000 * 0.12)
 
     def test_cross_model_to_voyage_is_billed_and_scales(self) -> None:
         # minilm-384 in cloud mode → voyage-context-3 re-embed → BILLED.
@@ -563,6 +564,25 @@ class TestVoyageCostEstimate:
         preview = build_dry_run_preview(report)
         assert preview.billed_voyage_tokens == 1000 * 512  # bge excluded
         assert preview.est_voyage_cost_usd == pytest.approx(512_000 / 1_000_000 * 0.12)
+
+    def test_dry_run_render_surfaces_voyage_cost(self) -> None:
+        # The --dry-run pre-flight (render_dry_run_preview) must show the billed
+        # cost, not only the live-run confirm path (code-review H1).
+        local = _FakeChromaClient({ONNX_384: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        text = render_dry_run_preview(build_dry_run_preview(report))
+        assert "Voyage re-embed cost" in text
+        assert "512,000" in text
+
+    def test_dry_run_render_omits_cost_when_free(self) -> None:
+        local = _FakeChromaClient({BGE_768: 10})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=False
+        )
+        text = render_dry_run_preview(build_dry_run_preview(report))
+        assert "Voyage re-embed cost" not in text
 
     def test_render_cost_confirmation_none_when_free(self) -> None:
         local = _FakeChromaClient({BGE_768: 10})
@@ -782,6 +802,12 @@ class TestMigrateToServiceRun:
             factory, "make_catalog_client_for_migration", lambda **k: object()
         )
         monkeypatch.setattr(driver, "run_guided_upgrade", _fake_run_guided_upgrade)
+        # Isolate the cost-guardrail pre-flight from the real local Chroma store:
+        # these tests exercise result rendering, not the cost gate (covered in
+        # test_migrate_cost_guardrail). A no-data classify → zero billed cost →
+        # no prompt, so --yes below is belt-and-suspenders.
+        monkeypatch.setattr(migrate_cmd, "open_read_legs", lambda p: (None, None))
+        monkeypatch.setattr(migrate_cmd, "_close_quietly", lambda c: None)
         if token is None:
             monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
         else:
@@ -793,7 +819,9 @@ class TestMigrateToServiceRun:
         cat.write_text("")
         cli = CliRunner().invoke(
             migrate_cmd.migrate_to_service_cmd,
-            ["--db", str(db), "--catalog-db", str(cat)],
+            # --yes: these exercise post-confirm result rendering, not the cost
+            # gate (which has dedicated coverage in test_migrate_cost_guardrail).
+            ["--db", str(db), "--catalog-db", str(cat), "--yes"],
         )
         return cli, captured
 
