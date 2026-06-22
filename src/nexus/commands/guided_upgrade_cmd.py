@@ -222,18 +222,39 @@ def guided_upgrade_cmd(
     #    block (sentinel migrated-failed + rollback offer), exits 0 on success.
     from nexus.commands.migrate_cmd import _run_migration  # noqa: PLC0415
 
-    # _run_migration sets os.environ["NX_SERVICE_URL"] as a process-level side
-    # effect (its own contract assumes subprocess-exit cleanup). We call it as a
-    # library function in-process, so save/restore to avoid leaking the url into
-    # anything that runs after this command in the same process (code-review M1).
+    # nexus-qvemn: _run_migration sets NX_SERVICE_URL, but the migration's legs
+    # (the 8 T2 store ETLs + the service count-source) resolve the endpoint via
+    # resolve_service_config(), which reads NX_SERVICE_HOST/PORT-or-lease and
+    # NEVER NX_SERVICE_URL. The just-provisioned port is allocated AFTER
+    # pg_credentials is written, so load_service_credentials_into_env (2b) leaves
+    # HOST/PORT unset and those legs fall back to lease discovery — which races
+    # the 15s lease TTL and intermittently fails ("endpoint is not resolvable")
+    # mid-migration. Pin HOST/PORT from the VERIFIED url (health-gated +
+    # version-pinned above, so authoritative) so every leg resolves through env
+    # priority-1 with no lease dependency. Save/restore to avoid leaking into the
+    # process after this command (mirrors the NX_SERVICE_URL handling, code-review M1).
+    from urllib.parse import urlsplit  # noqa: PLC0415
+
+    _verified = urlsplit(readiness.service_url)
     _prev_url = os.environ.get("NX_SERVICE_URL")
+    _prev_host = os.environ.get("NX_SERVICE_HOST")
+    _prev_port = os.environ.get("NX_SERVICE_PORT")
+    if _verified.hostname:
+        os.environ["NX_SERVICE_HOST"] = _verified.hostname
+    if _verified.port is not None:
+        os.environ["NX_SERVICE_PORT"] = str(_verified.port)
     try:
         _run_migration(local_path, db_path, catalog_db_path, readiness.service_url)
     finally:
-        if _prev_url is None:
-            os.environ.pop("NX_SERVICE_URL", None)
-        else:
-            os.environ["NX_SERVICE_URL"] = _prev_url
+        for _var, _prev in (
+            ("NX_SERVICE_URL", _prev_url),
+            ("NX_SERVICE_HOST", _prev_host),
+            ("NX_SERVICE_PORT", _prev_port),
+        ):
+            if _prev is None:
+                os.environ.pop(_var, None)
+            else:
+                os.environ[_var] = _prev
 
     # 4. ADVISORY post-step — verify the migrated stack end-to-end.
     click.echo("")

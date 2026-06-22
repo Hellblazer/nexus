@@ -102,6 +102,43 @@ class TestGuidedUpgradeCmd:
         # wiring: the VERIFIED url + path overrides are handed to _run_migration.
         mig.assert_called_once_with(None, None, None, "http://127.0.0.1:8099")
 
+    def test_pins_verified_endpoint_into_env_for_migration_legs(self) -> None:
+        # nexus-qvemn: the migration's T2 store ETLs + count-source resolve the
+        # endpoint via resolve_service_config() (NX_SERVICE_HOST/PORT-or-lease,
+        # NEVER NX_SERVICE_URL). guided-upgrade must pin HOST/PORT from the VERIFIED
+        # url so those legs resolve from env alone — no lease dependency, no 15s-TTL
+        # race. Use a distinctive port to prove it derives from service_url.
+        import os as _os
+        from nexus.db.service_endpoint import resolve_service_config
+
+        captured: dict[str, object] = {}
+
+        def _capture(*_a, **_k) -> None:
+            # At migration time the verified endpoint must resolve from env with NO
+            # lease available (the failure mode was a reaped/expired lease).
+            with patch("nexus.db.service_endpoint.discover_lease",
+                       return_value=(None, None)), \
+                 patch.dict(_os.environ, {"NX_SERVICE_TOKEN": "tok"}, clear=False):
+                captured["host"] = _os.environ.get("NX_SERVICE_HOST")
+                captured["port"] = _os.environ.get("NX_SERVICE_PORT")
+                captured["resolved"] = resolve_service_config()
+
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 2)), \
+             patch(f"{_MOD}.establish_verified_service",
+                   return_value=_ready("http://127.0.0.1:52203")), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration", side_effect=_capture):
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 0, result.output
+        assert captured["host"] == "127.0.0.1"
+        assert captured["port"] == "52203"
+        # resolve_service_config() resolves the verified endpoint from env, no lease.
+        assert captured["resolved"] == ("127.0.0.1", 52203, "tok")
+        # restored after the command — no leak of the pinned port into the process.
+        assert _os.environ.get("NX_SERVICE_PORT") != "52203"
+
     def test_abort_at_confirm_does_not_provision(self) -> None:
         with patch(f"{_MOD}.detect_pending_migration",
                    return_value=_preflight(True, 1)), \
