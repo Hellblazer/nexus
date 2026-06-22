@@ -50,7 +50,7 @@ from nexus.corpus import (
     embedding_model_for_collection_name,
     voyage_model_for_collection,
 )
-from nexus.migration.vector_etl import _dim_for_collection
+from nexus.migration.vector_etl import _VOYAGE_MODELS, _dim_for_collection
 
 _log = structlog.get_logger(__name__)
 
@@ -61,11 +61,9 @@ _log = structlog.get_logger(__name__)
 #: service cannot serve it — such collections are UNSUPPORTED until re-indexed).
 _ONNX_MODEL: str = "bge-base-en-v15-768"
 
-#: The voyage models wired only in cloud mode (``NX_VOYAGE_API_KEY`` present).
-#: Mirrors ``EmbedderRouter``'s cloud-mode ``modelEmbedders`` keys.
-_VOYAGE_MODELS: frozenset[str] = frozenset(
-    {"voyage-code-3", "voyage-context-3", "voyage-3"}
-)
+#: The voyage models (``_VOYAGE_MODELS``) are imported from ``vector_etl`` (single
+#: source) so this module's billing decision and vector_etl's passthrough
+#: eligibility can never silently diverge on a new Voyage model (review).
 
 Leg = Literal["local", "cloud"]
 Support = Literal["supported-onnx", "supported-voyage-1024", "unsupported"]
@@ -469,6 +467,12 @@ class DryRunPreview:
     #: Coarse USD estimate for ``billed_voyage_tokens`` at
     #: :data:`_VOYAGE_COST_USD_PER_1M_TOKENS`. ``0.0`` when nothing is billed.
     est_voyage_cost_usd: float = 0.0
+    #: nexus-hxry2: same-model voyage token volume that migrates FREE via vector
+    #: passthrough (stored vectors copied, not re-embedded). It is NOT billed —
+    #: but the dry-run can't see per-chunk vector presence, and any source chunk
+    #: lacking a stored vector re-embeds that batch (and bills). Surfaced as a
+    #: caveat so the ``$0`` estimate is honest about that fallback (review).
+    passthrough_voyage_tokens: int = 0
 
 
 def _throughput_for_support(support: Support) -> float:
@@ -509,6 +513,7 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     total_est_tokens = 0
     est_seconds = 0.0
     billed_voyage_tokens = 0
+    passthrough_voyage_tokens = 0
     for (leg, model, support, target_model), members in buckets.items():
         chunk_count = sum(m.source_count for m in members)
         is_cross_model = target_model is not None
@@ -551,6 +556,10 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
         billed = is_cross_model and target_model in _VOYAGE_MODELS
         if billed:
             billed_voyage_tokens += tokens
+        elif not is_cross_model and support == "supported-voyage-1024":
+            # Same-model voyage → vector passthrough (free), barring missing-vector
+            # batch fallback. Tracked so the estimate can caveat the $0 (review).
+            passthrough_voyage_tokens += tokens
 
     # Stable order: leg, support, model, then target — deterministic preview text.
     groups.sort(key=lambda g: (g.leg, g.support, g.model or "", g.target_model or ""))
@@ -568,6 +577,7 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
         est_seconds=round(est_seconds, 1),
         billed_voyage_tokens=billed_voyage_tokens,
         est_voyage_cost_usd=billed_voyage_tokens / 1_000_000 * _VOYAGE_COST_USD_PER_1M_TOKENS,
+        passthrough_voyage_tokens=passthrough_voyage_tokens,
     )
 
 
@@ -635,6 +645,14 @@ def render_dry_run_preview(preview: DryRunPreview) -> str:
             f"~${preview.est_voyage_cost_usd:.2f} "
             f"(~${_VOYAGE_COST_USD_PER_1M_TOKENS:.2f}/1M tokens; a re-run re-embeds "
             "at full cost — not deduplicated)."
+        )
+    if preview.passthrough_voyage_tokens > 0:
+        lines.append(
+            f"Voyage passthrough (free): ~{preview.passthrough_voyage_tokens:,} "
+            "tokens migrate same-model by copying stored vectors — no re-embed, "
+            "no charge. Caveat: any source chunk missing its stored vector "
+            "re-embeds that batch (and bills); the estimate assumes all vectors "
+            "are present."
         )
     lines.append(
         "Estimates are coarse planning figures, not a binding commitment; the "

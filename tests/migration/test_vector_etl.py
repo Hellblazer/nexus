@@ -368,6 +368,9 @@ class TestMigrateCollectionsUnit:
         forwarded = fake.upsert_embeddings[0]
         assert forwarded is not None
         assert len(forwarded) == len(ids) == 3
+        # The VALUES round-trip verbatim — _seed_source stored [float(i), 1.0].
+        # (chroma get order is not the seed order, so compare as a set.)
+        assert sorted(map(list, forwarded)) == [[0.0, 1.0], [1.0, 1.0], [2.0, 1.0]]
 
     def test_cross_model_to_voyage_does_not_passthrough(self, source_client) -> None:
         """A cross-model migration (target != name) MUST re-embed, never copy the

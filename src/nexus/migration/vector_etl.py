@@ -20,10 +20,21 @@ half-migration):
 VECTOR-IDENTITY DECISION (a) (recorded on bead nexus-unp61, 2026-06-10):
 chunk TEXT transfers byte-verbatim and the chash (chunk natural ID,
 ``sha256(text)[:32]``) is preserved verbatim; the pgvector side re-embeds
-server-side. NO source embedding vectors cross the ETL —
-``iter_collection_chunks`` deliberately omits them (RDR-109
-cross-model-contamination guard). Recall equivalence with identical
-embedders was established by the Phase 3 dual-run harness.
+server-side. By default NO source embedding vectors cross the ETL —
+``iter_collection_chunks`` omits them (RDR-109 cross-model-contamination
+guard). Recall equivalence with identical embedders was established by the
+Phase 3 dual-run harness.
+
+SAME-MODEL PASSTHROUGH EXCEPTION (nexus-hxry2): when a collection migrates
+SAME-model into a WIRED model (:data:`_PASSTHROUGH_MODELS` — bge / voyage;
+see :func:`_is_same_model_passthrough`), the stored vectors ARE fetched
+(``include_embeddings=True``) and forwarded so the service stores them
+verbatim, skipping a needless re-embed (a billed Voyage call for a managed
+user, a wasted ONNX recompute for a local user). The contamination guard
+still holds: passthrough fires only when the source model equals the
+target's wired model, and the service rejects any vector whose dimension
+disagrees with the dispatched table. A batch with any missing source vector
+falls back to the server-side re-embed (logged), never a null vector.
 
 COPY-NOT-MOVE: the Chroma source is opened read-only by convention and is
 never modified — not by migration, not by rollback. The source is also the
@@ -337,8 +348,22 @@ def _migrate_one(
             # vectors verbatim. chash (sha256(text)[:32]) is identical either way,
             # so re-runs stay idempotent on (tenant, target, chash).
             embeddings = None
-            if passthrough and all(c.get("embedding") is not None for c in batch):
-                embeddings = [c["embedding"] for c in batch]
+            if passthrough:
+                if all(c.get("embedding") is not None for c in batch):
+                    embeddings = [c["embedding"] for c in batch]
+                else:
+                    # Fallback: a batch with any missing source vector re-embeds
+                    # server-side (never store a null vector) — and that re-embed
+                    # bills. Logged so a mixed passthrough/re-embed run is auditable
+                    # (the dry-run cost caveat warns this is possible).
+                    missing = sum(1 for c in batch if c.get("embedding") is None)
+                    _log.warning(
+                        "vector_etl_passthrough_fallback_reembed",
+                        collection=name,
+                        target=target,
+                        batch_size=len(batch),
+                        missing_vectors=missing,
+                    )
             vector_client.upsert_chunks(
                 target,
                 [c["id"] for c in batch],

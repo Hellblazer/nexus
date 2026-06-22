@@ -542,6 +542,11 @@ class TestVoyageCostEstimate:
         preview = build_dry_run_preview(report)
         assert preview.billed_voyage_tokens == 0
         assert preview.est_voyage_cost_usd == 0.0
+        # …but tracked as passthrough volume so the $0 can be caveated.
+        assert preview.passthrough_voyage_tokens == 500 * 512
+        text = render_dry_run_preview(preview)
+        assert "Voyage passthrough (free)" in text
+        assert "missing its stored vector" in text
 
     def test_cross_model_to_voyage_is_billed_and_scales(self) -> None:
         # minilm-384 in cloud mode → voyage-context-3 re-embed → BILLED.
