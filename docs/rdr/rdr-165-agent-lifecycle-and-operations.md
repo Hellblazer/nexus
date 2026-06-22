@@ -104,25 +104,44 @@ out as its own tracked bead/RDR rather than expanding this one.
 
 ## Open Questions
 
-1. **Doc home & shape** — `docs/operations.md` vs `docs/lifecycle.md` vs a
-   section in an existing doc? One page or a small set?
-2. **Uninstall CLI gap** — does a complete `nx` uninstall already exist, or only
-   the `daemon_uninstall` MCP tool? (Audit in Phase 1.) If a gap, is the fix in
-   scope here or a separate bead?
-3. **Where does the agent state diagram live** — inline in the doc, or a shared
-   asset referenced by both this doc and `docs/architecture.md`?
-4. **Relationship to RDR-149** — the service-registry lifecycle is the
-   authoritative mechanism; how much to restate vs link?
+1. ~~**Doc home & shape**~~ — **ANSWERED (research):** `docs/operations/agent-lifecycle.md`
+   (the `docs/operations/` dir already exists). One page, state diagram inline.
+2. ~~**Uninstall CLI gap**~~ — **ANSWERED (research):** gap is real and deeper than
+   stated — the complete teardown is MCP-only, and the canonical `uninstall_daemon`
+   does not stop the engine-service/PG. In scope here as a tracked code phase
+   (service-aware `nx` uninstall wrapping `uninstall_daemon` + `service stop
+   --with-pg`).
+3. ~~**Agent state diagram home**~~ — **ANSWERED (research):** inline in
+   `docs/operations/agent-lifecycle.md`.
+4. ~~**Relationship to RDR-149**~~ — **ANSWERED (research):** link, don't restate;
+   RDR-149 is the authoritative lease/registry mechanism.
+
+_All Open Questions resolved by the 2026-06-22 gap audit; ready for `/conexus:rdr-gate`._
 
 ## Research Findings
 
-_(to be populated via `/conexus:rdr-research`)_
+Gap audit, 2026-06-22 (full detail: T2 `nexus_rdr/165-research-1`):
 
-Initial grounding (2026-06-22, pre-research):
-- `nx guided-upgrade --service-url` verifies an already-running service instead
-  of provisioning (`src/nexus/commands/guided_upgrade_cmd.py:51,127`).
-- Uninstall is currently the `daemon_uninstall` MCP tool: removes the OS
-  autostart unit (LaunchAgent/systemd user unit), stops the daemon, clears the
-  first-run marker; `--remove-data` also deletes `~/.config/nexus/`.
-- Install surfaces: `nx init --service`, `nx daemon service install-binary <tag>`
-  (cold-acquire + cosign-verify the native binary + relocatable PG bundle).
+1. **Uninstall CLI gap — CONFIRMED.** The complete teardown logic exists as
+   `nexus.daemon.installer.uninstall_daemon(confirm, remove_data)` (autostart
+   unit + best-effort daemon stop + first-run marker; `remove_data` wipes
+   `nexus_config_dir()`), but is reachable **only** via the MCP `daemon_uninstall`
+   tool. There is no `nx` CLI wrapper. The CLI's `nx daemon t3 uninstall
+   --autostart` / `nx daemon t2 … uninstall` are **autostart-unit-only**, and the
+   `nx daemon service` group has `start`/`stop`/`install-binary` but **no
+   uninstall**. → Fix = a first-class `nx` uninstall wrapping `uninstall_daemon`.
+2. **Service-era teardown depth — NEW.** `uninstall_daemon`'s
+   `_stop_daemon_best_effort` runs only `nx daemon t2 stop`
+   (`installer.py:241`); it does **not** stop the engine-service/PG (that is
+   `nx daemon service stop --with-pg`). The canonical teardown predates the
+   RDR-152/155 service stack. A complete 6.0.0-era uninstall must orchestrate
+   `service stop --with-pg` + autostart removal + marker clear + optional data
+   wipe. This bumps the code portion from "small" to a tracked phase.
+3. **Install/uninstall asymmetry.** Install is rich (`nx init --service`
+   provisions PG + fetches bge-768 ONNX + starts the service; `nx daemon service
+   install-binary <tag>` cold-acquires + cosign-verifies binary + PG bundle);
+   there is no matching complete teardown verb. RDR-165 closes the asymmetry.
+4. **Doc home (Q1 ANSWERED).** `docs/operations/` already exists
+   (`audit-membership-interpretation.md`, `t3-health.md`); the lifecycle doc
+   lands as `docs/operations/agent-lifecycle.md` with the state diagram inline.
+   No existing lifecycle/install/upgrade doc.

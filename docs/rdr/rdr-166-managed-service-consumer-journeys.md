@@ -118,33 +118,59 @@ to the conexus instance (the T2 bus is passive; Hal relays).
 
 ## Open Questions
 
-1. **Token issuance UX** — how does an operator-provisioned `NX_SERVICE_TOKEN`
-   reach the user, and what's the `nx`-side config surface (env vs `nx config`)?
-2. **Managed `nx init`** — is there a distinct managed-only init, or does
-   greenfield reuse `--service-url`-style config without provisioning?
+1. **Token issuance UX** — `NX_SERVICE_TOKEN` env is the consume point
+   (research). **Remaining:** the `nx config` ergonomics for setting
+   `NX_SERVICE_URL` + `NX_SERVICE_TOKEN` cleanly, and how the operator delivers
+   the token. (Cross-repo: conexus issuance side.)
+2. ~~**Managed `nx init`**~~ — **ANSWERED (research):** greenfield reuses the
+   `NX_SERVICE_URL`/`_resolve_endpoint` (https-capable) client + the vwvv5.12
+   probe; no provisioning. Remaining work is the journey + config ergonomics,
+   not a distinct init.
 3. **E2E managed-tenant test fixture** — how to exercise local→managed against a
    throwaway managed tenant without touching the real `nexus` tenant (mirror the
-   RDR-164 throwaway-tenant probe discipline)?
-4. **TLS/443 resolution** — does `resolve_service_config` (HOST/PORT, the qvemn
-   contract) cleanly handle an https managed endpoint, or is a URL-aware path
-   needed?
+   RDR-164 throwaway-tenant probe discipline). Open.
+4. ~~**TLS/443 resolution**~~ — **ANSWERED (research):** the pre-gate /
+   version-pin legs (`resolve_service_config`, http-only host/port) break on an
+   https managed endpoint; the data path (`NX_SERVICE_URL`) does not. Fix =
+   scheme-aware resolution for the pre-gate. (See Research Finding 2.)
 5. **Cost guardrails** — should a managed migration estimate + confirm the
-   voyage re-embed cost before proceeding (ties to `nexus-jioh1`)?
+   voyage re-embed cost before proceeding (ties to `nexus-jioh1`)? Open
+   (design choice for the gate).
 
 ## Research Findings
 
-_(to be populated via `/conexus:rdr-research`)_
+Endpoint + journey audit, 2026-06-22 (full detail: T2 `nexus_rdr/166-research-1`):
 
-Initial grounding (2026-06-22, pre-research):
-- `guided-upgrade --service-url` verifies a remote service + requires
-  `NX_SERVICE_TOKEN` (`src/nexus/commands/guided_upgrade_cmd.py:51,127,207`).
-- Cloud-mode client (managed-endpoint config + HTTP capability probe) shipped:
-  `nexus-vwvv5.12`.
-- Cross-model→voyage target derivation: `nexus-gilf2` (mode-aware
-  `cross_model_target_model`); flagged "validate before any real-tenant
-  minilm-384 cutover."
-- ETL source is always Chroma (driver opens local Chroma + Chroma Cloud read
-  legs) → no pgvector→managed path today.
-- `api.conexus-nexus.com` is live multitenant; real tenant `nexus` = 0 vectors
-  (pre-cutover); per-tenant `NX_SERVICE_TOKEN`, server-side voyage with the
-  operator key.
+1. **Two endpoint-resolution paths; one is https-capable.**
+   `http_vector_client._resolve_endpoint()` reads `NX_SERVICE_URL` (a **full URL,
+   used verbatim — https-capable**) or the lease. The ETL data client
+   (`migrate_cmd.py:153,170` `HttpVectorClient()`) and the steady-state managed
+   client both use this. So the **migration data/upsert path and greenfield
+   search/store are https-capable** via `NX_SERVICE_URL`.
+   `service_endpoint.resolve_service_config()` returns `(host, port, token)` and
+   callers build **`http://{host}:{port}` (hardcoded http)**; the guided-upgrade
+   pre-gate / version-pin legs use this.
+2. **Q4 (TLS/443) — narrow, precise gap.** The guided-upgrade **pre-gate /
+   version-pin legs are http-only.** qvemn (#1284) pins HOST/PORT from the
+   verified `--service-url`; for `https://api.conexus-nexus.com:443` that yields
+   `http://api.conexus-nexus.com:443` → TLS break. So a managed-https migration's
+   *data* path works but its *pre-gate* breaks. Fix = scheme-aware
+   `resolve_service_config` (carry https) or route the managed pre-gate through
+   the URL path. Bounded, not a rewrite.
+3. **Q1 (token surface).** `NX_SERVICE_TOKEN` env is the consume point for both
+   paths; operator-provisioned = user sets `NX_SERVICE_URL` + `NX_SERVICE_TOKEN`.
+   `health._check_managed_service_probe` runs **only** when `NX_SERVICE_URL` is
+   explicitly set — never default-probes the public endpoint (good isolation);
+   vwvv5.12 = `nexus.db.managed_endpoint.probe_managed_service(base_url)`.
+4. **Q2 (greenfield) — largely plumbed.** Steady-state client (https-ok) +
+   capability probe + fail-loud already exist (vwvv5.12). The gap is the
+   documented first-run **journey** + `nx` config ergonomics, not transport —
+   **lower code risk than migration.**
+5. **Readiness asymmetry.** Greenfield ≈ plumbed (needs journey + docs + config
+   ergonomics). Local→managed migration: data path https-ready, but needs the
+   pre-gate scheme fix (#2) + E2E validation of the gilf2 cross-model→voyage leg
+   against a throwaway managed tenant (Q3, mirror the RDR-164 throwaway-tenant
+   discipline) + a cost guardrail (Q5, ties `nexus-jioh1`).
+6. **pgvector→managed.** ETL source is always Chroma (driver opens local Chroma +
+   Chroma Cloud read legs) → no pgvector→managed path; stays a documented
+   limitation per the scope decision.
