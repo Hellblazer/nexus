@@ -12,6 +12,17 @@
     on the engine-service-v0.1.7 cloud test-deploy (2026-06-22) — low impact
     (rename is rare) but a cheap, durable fix.
 
+    topic_assignments has the same gap on its `source_collection` column: both the
+    rename re-home (UPDATE ... SET source_collection=:new WHERE source_collection=
+    :old, CatalogRepository.java:1320) and the deleteCollection cascade (DELETE ...
+    WHERE source_collection=:name, :1194) filter on it, but its only covering index
+    is idx_ta_tenant_by_source (tenant_id, assigned_by, source_collection) — with
+    assigned_by in the middle it cannot prefix-scan (tenant_id, source_collection),
+    so both paths Seq Scan. (Found by the stacked-review coverage audit, not the
+    probe — the probe only exercised relevance_log/document_highlights.) The other
+    rename/delete-touched tables already have a usable (tenant_id, collection[, ...])
+    leading index or PK and need no change.
+
     IF NOT EXISTS keeps this idempotent / re-runnable against any environment that
     may already carry a hand-added equivalent index.
 -->
@@ -40,6 +51,17 @@ CREATE INDEX IF NOT EXISTS idx_doc_highlights_collection
         </sql>
         <rollback>
 DROP INDEX IF EXISTS nexus.idx_doc_highlights_collection;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="perf-001-3" author="nexus-wk3s9">
+        <comment>Index topic_assignments (tenant_id, source_collection) for the rename re-home + delete cascade</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE INDEX IF NOT EXISTS idx_topic_assignments_source_collection
+    ON nexus.topic_assignments (tenant_id, source_collection);
+        </sql>
+        <rollback>
+DROP INDEX IF EXISTS nexus.idx_topic_assignments_source_collection;
         </rollback>
     </changeSet>
 
