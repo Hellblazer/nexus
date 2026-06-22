@@ -237,12 +237,14 @@ class CollectionRegistryFkExtraTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP C — NOT VALID pin: all five FK rows exist with convalidated=false.
-    // P1b's VALIDATE CONSTRAINT will flip these to true and update this assertion.
+    // GROUP C — VALIDATED pin: after RDR-164 P1b (fk-003-validate.xml) the five FKs
+    // are convalidated=true. The full master changelog applied by this test includes
+    // P1b's gap-window reconcile + VALIDATE CONSTRAINT, so on a freshly-migrated DB
+    // (no orphan rows) all five validate cleanly.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(30)
-    void allFiveExtraCollectionFks_existAndAreNotValid() throws Exception {
+    void allFiveExtraCollectionFks_existAndAreValidated() throws Exception {
         try (Connection su = pg.createConnection("")) {
             for (String fkName : ALL_FIVE_FK_NAMES) {
                 ResultSet rs = su.createStatement().executeQuery(
@@ -252,8 +254,8 @@ class CollectionRegistryFkExtraTest {
                 assertThat(rs.next())
                     .as("FK constraint " + fkName + " must exist in pg_constraint").isTrue();
                 assertThat(rs.getBoolean("convalidated"))
-                    .as("FK " + fkName + " must be NOT VALID (convalidated=false) until P1b VALIDATE runs")
-                    .isFalse();
+                    .as("FK " + fkName + " must be VALIDATED (convalidated=true) after P1b VALIDATE runs")
+                    .isTrue();
             }
         }
     }
@@ -410,6 +412,72 @@ class CollectionRegistryFkExtraTest {
                 "AND name IN ('bf-colA','bf-colB','bf-colC','bf-colD','bf-colE')"))
                 .as("the 5 expected collection names must each be registered exactly once")
                 .isEqualTo(5);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GROUP G — RDR-164 P1b (nexus-p9aw6): the reconcile→VALIDATE flow.
+    //
+    // Proves the gap-window reconcile is LOAD-BEARING for VALIDATE: a row referencing
+    // an unregistered collection (the gap-window orphan class) makes VALIDATE FAIL;
+    // re-running the stub-register reconcile registers the collection so VALIDATE then
+    // SUCCEEDS and flips convalidated=true. Self-contained: re-creates the FK itself
+    // (GROUP F @Order(60) dropped it) and seeds the orphan while the FK is ABSENT
+    // (NOT VALID still enforces NEW inserts, so the orphan cannot be inserted under it).
+    // The SQL mirrors fk-003-validate.xml changesets fk-003-6-reconcile + fk-003-7.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(70)
+    void reconcileThenValidate_registersGapWindowOrphan_soValidateSucceeds() throws Exception {
+        final String T = "crfkx-p1b-tenant";
+        final String ORPHAN_COL = "p1b-orphan-col";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+
+            // FK absent (dropped by GROUP F); seed an orphan row while it is absent.
+            su.createStatement().execute(
+                "ALTER TABLE nexus.document_aspects DROP CONSTRAINT IF EXISTS document_aspects_collection_fk");
+            su.createStatement().execute(
+                "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name) " +
+                "VALUES ('" + T + "', '" + ORPHAN_COL + "', '/p1b/o.md', NOW(), 'v1', 'test')");
+            assertThat(count(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
+                "WHERE tenant_id='" + T + "' AND name='" + ORPHAN_COL + "'"))
+                .as("orphan collection is NOT registered before reconcile").isZero();
+
+            // Re-add the FK as NOT VALID — succeeds (NOT VALID skips existing-row validation).
+            su.createStatement().execute(
+                "ALTER TABLE nexus.document_aspects " +
+                "ADD CONSTRAINT document_aspects_collection_fk " +
+                "FOREIGN KEY (tenant_id, collection) " +
+                "REFERENCES nexus.catalog_collections (tenant_id, name) " +
+                "ON DELETE RESTRICT NOT VALID");
+
+            // VALIDATE must FAIL while the orphan is unregistered — proves it is load-bearing.
+            PSQLException ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "ALTER TABLE nexus.document_aspects VALIDATE CONSTRAINT document_aspects_collection_fk"));
+            assertThat(ex.getMessage())
+                .as("VALIDATE must fail loud on a gap-window orphan before reconcile")
+                .containsIgnoringCase("document_aspects_collection_fk");
+
+            // Reconcile: re-run the document_aspects stub-register (fk-003-6-reconcile arm).
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                "SELECT DISTINCT tenant_id, collection FROM nexus.document_aspects " +
+                "ON CONFLICT (tenant_id, name) DO NOTHING");
+            assertThat(count(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
+                "WHERE tenant_id='" + T + "' AND name='" + ORPHAN_COL + "'"))
+                .as("reconcile stub-registers the gap-window collection").isEqualTo(1);
+
+            // VALIDATE now SUCCEEDS and flips convalidated=true.
+            su.createStatement().execute(
+                "ALTER TABLE nexus.document_aspects VALIDATE CONSTRAINT document_aspects_collection_fk");
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT convalidated FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace " +
+                "WHERE c.contype='f' AND c.conname='document_aspects_collection_fk' AND n.nspname='nexus'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getBoolean("convalidated"))
+                .as("VALIDATE succeeds after reconcile → convalidated=true").isTrue();
         }
     }
 
