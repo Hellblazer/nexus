@@ -46,7 +46,10 @@ from typing import Any, Literal
 
 import structlog
 
-from nexus.corpus import embedding_model_for_collection_name
+from nexus.corpus import (
+    embedding_model_for_collection_name,
+    voyage_model_for_collection,
+)
 from nexus.migration.vector_etl import _dim_for_collection
 
 _log = structlog.get_logger(__name__)
@@ -170,6 +173,35 @@ def cross_model_remappable(c: "CollectionClassification") -> bool:
     return c.support == "unsupported"
 
 
+def cross_model_target_model(source: str, *, voyage_key_present: bool) -> str:
+    """The embedding model a cross-model remap should re-embed *source* into.
+
+    nexus-gilf2: the target must be a model the live deployment actually WIRES,
+    else the upsert hits the ``nexus-pebfx.2`` fail-loud guard (HTTP 422, no
+    embedder for the named model) and the migration blocks 0/N. The old
+    unconditional bge-768 target was correct for local mode but wrong for the
+    MIXED migrant — a deployment that ran local (minilm-384 collections) then
+    migrates onto a voyage-mode (cloud) service, where bge-768 is not wired.
+
+    Mode + content-type aware:
+
+    * cloud mode (``voyage_key_present``) → the content-type-appropriate voyage
+      model (prose ``docs__`` / ``rdr__`` / ``knowledge__`` → ``voyage-context-3``;
+      ``code__`` and any other prefix → ``voyage-code-3``), so the re-embedded
+      chunks land under a served model;
+    * local mode → ONNX (``bge-base-en-v15-768``), the only wired embedder.
+
+    The content-type dispatch reuses the READ-side
+    :func:`nexus.corpus.voyage_model_for_collection`. The remap only swaps the
+    model segment, leaving the content_type prefix intact, so the target's
+    served model equals what the read path will later dispatch for it — no
+    model/recall mismatch (RDR-059).
+    """
+    if voyage_key_present:
+        return voyage_model_for_collection(source)
+    return _ONNX_MODEL
+
+
 @dataclass(frozen=True)
 class CollectionClassification:
     """Per-collection detection result along both axes (RF-2).
@@ -195,6 +227,12 @@ class DetectionReport:
     """The classified Chroma footprint across all detected legs."""
 
     classifications: tuple[CollectionClassification, ...]
+    #: Whether the deployment wires the voyage embedders (cloud mode). Carried
+    #: so the dry-run preview can resolve the cross-model re-embed TARGET and its
+    #: throughput the same way the driver will (nexus-gilf2): voyage models in
+    #: cloud mode, bge-768 in local. Defaults False (local) for the many test
+    #: doubles that construct a report without a live mode signal.
+    voyage_key_present: bool = False
 
     @property
     def legs_with_data(self) -> frozenset[str]:
@@ -272,7 +310,10 @@ def classify_collections(
                 cloud_client, "cloud", voyage_key_present=voyage_key_present
             )
         )
-    report = DetectionReport(classifications=tuple(classifications))
+    report = DetectionReport(
+        classifications=tuple(classifications),
+        voyage_key_present=voyage_key_present,
+    )
     _log.info(
         "migration_detect_classified",
         total=len(report.classifications),
@@ -389,10 +430,15 @@ class ModelGroup:
     est_tokens: int
     est_seconds: float
     #: RDR-162 P2: True when this is an ``unsupported`` group the migrate will
-    #: CROSS-MODEL re-embed into bge-768 (legacy minilm, etc.) rather than block.
-    #: It counts toward the migratable totals; ``support`` stays ``unsupported``
-    #: (its current name is unservable) but it is NOT in ``DryRunPreview.unsupported``.
+    #: CROSS-MODEL re-embed (legacy minilm, etc.) rather than block. It counts
+    #: toward the migratable totals; ``support`` stays ``unsupported`` (its
+    #: current name is unservable) but it is NOT in ``DryRunPreview.unsupported``.
     cross_model: bool = False
+    #: nexus-gilf2: the model the cross-model re-embed targets, resolved from the
+    #: deployment mode + content_type (voyage models in cloud, bge-768 in local).
+    #: ``None`` for non-cross-model groups. Carried so the preview names the
+    #: ACTUAL target (not a hard-coded bge-768) and estimates the right rate.
+    target_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -421,25 +467,32 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     contribute nothing to the migratable totals — they would be BLOCKED, not
     migrated.
     """
-    buckets: dict[tuple[Leg, str | None, Support], list[CollectionClassification]] = {}
-    for c in report.classifications:
-        buckets.setdefault((c.leg, c.model, c.support), []).append(c)
+    # RDR-162 P2: a cross-model-remappable collection is migratable (re-embed),
+    # not blocked. nexus-gilf2: bucket cross-model groups by their RESOLVED
+    # target too — in cloud mode a single source model (minilm-384) splits into
+    # voyage-code-3 (code__) and voyage-context-3 (prose) targets, so one bucket
+    # would otherwise name only one of them. ``target`` is None for non-cross-
+    # model classifications, keeping supported/blocked buckets unchanged.
+    def _cross_target(c: CollectionClassification) -> str | None:
+        if not cross_model_remappable(c):
+            return None
+        return cross_model_target_model(
+            c.collection, voyage_key_present=report.voyage_key_present
+        )
 
-    # RDR-162 P2: a cross-model-remappable collection is migratable (re-embed to
-    # bge-768), not blocked. Decide per classification so a bucket is consistent.
-    remappable = {
-        id(c) for c in report.classifications if cross_model_remappable(c)
-    }
+    buckets: dict[
+        tuple[Leg, str | None, Support, str | None], list[CollectionClassification]
+    ] = {}
+    for c in report.classifications:
+        buckets.setdefault((c.leg, c.model, c.support, _cross_target(c)), []).append(c)
 
     groups: list[ModelGroup] = []
     migratable_chunks = 0
     total_est_tokens = 0
     est_seconds = 0.0
-    for (leg, model, support), members in buckets.items():
+    for (leg, model, support, target_model), members in buckets.items():
         chunk_count = sum(m.source_count for m in members)
-        is_cross_model = support == "unsupported" and all(
-            id(m) in remappable for m in members
-        )
+        is_cross_model = target_model is not None
         if support == "unsupported" and not is_cross_model:
             # Genuinely blocked (voyage-no-key, non-conformant) — zero estimate.
             groups.append(
@@ -447,22 +500,31 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
             )
             continue
         # Supported byte-for-byte OR cross-model re-embed: both migratable. The
-        # cross-model re-embed runs through the local ONNX (bge-768) path.
+        # cross-model re-embed runs through whatever embedder serves the TARGET
+        # name (voyage in cloud mode, ONNX in local) — estimate that rate.
         tokens = chunk_count * _EST_TOKENS_PER_CHUNK
-        rate = _EST_ONNX_CHUNKS_PER_SEC if is_cross_model else _throughput_for_support(support)
+        if is_cross_model:
+            rate = (
+                _EST_VOYAGE_CHUNKS_PER_SEC
+                if target_model in _VOYAGE_MODELS
+                else _EST_ONNX_CHUNKS_PER_SEC
+            )
+        else:
+            rate = _throughput_for_support(support)
         seconds = chunk_count / rate
         groups.append(
             ModelGroup(
                 leg, model, support, len(members), chunk_count, tokens, seconds,
                 cross_model=is_cross_model,
+                target_model=target_model,
             )
         )
         migratable_chunks += chunk_count
         total_est_tokens += tokens
         est_seconds += seconds
 
-    # Stable order: leg, then support, then model — deterministic preview text.
-    groups.sort(key=lambda g: (g.leg, g.support, g.model or ""))
+    # Stable order: leg, support, model, then target — deterministic preview text.
+    groups.sort(key=lambda g: (g.leg, g.support, g.model or "", g.target_model or ""))
     # Only GENUINELY-blocked collections remain in unsupported — cross-model
     # collections are migratable and must not gate the dry-run exit.
     blocked = tuple(
@@ -501,7 +563,7 @@ def render_dry_run_preview(preview: DryRunPreview) -> str:
         lines.append("Would migrate (per leg / model):")
         for g in migratable:
             kind = (
-                f"{g.model} -> bge-768 cross-model re-embed"
+                f"{g.model} -> {g.target_model} cross-model re-embed"
                 if g.cross_model
                 else f"{g.model} ({g.support})"
             )

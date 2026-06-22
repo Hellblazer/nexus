@@ -55,6 +55,11 @@ _guided_restore() {
 trap '_guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
+# nexus-gilf2: --guided seeds local-ONNX (bge-768) cross-model targets, while
+# --with-cloud boots a voyage-only service. The combination is incoherent: the
+# bge-768 targets have no embedder in voyage mode and the pebfx.2 guard 422s the
+# leg. Use --guided alone for the local bge-768 MVV.
+[ "$GUIDED" = 1 ] && [ "$WITH_CLOUD" = 1 ] && { echo "--guided and --with-cloud are incoherent (guided seeds local bge-768 targets; cloud is voyage-only); run --guided alone" >&2; exit 2; }
 [ "$COLD" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--cold always rebuilds the wheel + cold-acquires the binary; --no-build is irrelevant" >&2; exit 2; }
 
 if [ "$GUIDED" = 1 ]; then
