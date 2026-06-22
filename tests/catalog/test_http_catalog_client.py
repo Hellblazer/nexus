@@ -166,7 +166,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/collections/supersede":
             self._send_json({"updated": 5})
         elif op == "/collections/rename":
-            self._send_json({"updated": 3})
+            # RDR-164 P3: consolidated endpoint returns per-table re-home counts.
+            self._send_json({"renamed": {"catalog_documents": 3,
+                                         "catalog_collections_inserted": 1,
+                                         "catalog_collections_deleted": 1}})
         elif op == "/import/owner":
             self._send_json({"imported": 1})
         elif op == "/import/document":

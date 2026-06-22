@@ -77,14 +77,62 @@ def rename_collection_data_plane(
         "tax_topics": 0,
         "tax_assignments": 0,
         "tax_meta": 0,
+        "tax_centroids": 0,
         "chash": 0,
         "aspects": 0,
         "aspect_queue": 0,
+        "highlights": 0,
+        "relevance_log": 0,
         "search_telemetry": 0,
         "hook_failures": 0,
         "catalog_docs": 0,
     }
 
+    # ── Service mode: ONE atomic server-side re-home (RDR-164 P3) ─────────────
+    # In service mode the entire in-Postgres cascade — T3 pgvector chunks, chash
+    # index, taxonomy topics/assignments/meta/centroids, the aspect family,
+    # telemetry, AND the catalog documents + registry row — is a single
+    # transactional CatalogRepository.renameCollection on the Java service. Fold
+    # it into one call instead of the SQLite-era fan-out (T2 cascade + separate
+    # T3 Chroma rename + catalog cascade). The atomic txn means a failure leaves
+    # the collection fully unchanged, so it raises (not fail-open) just like the
+    # T2-cascade-failure contract below. No separate t3_db.rename_collection:
+    # the pgvector chunks were re-homed inside the same transaction.
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415
+
+    if storage_backend_for("catalog") == StorageBackend.SERVICE:
+        client = catalog
+        if client is None or not hasattr(client, "rename_collection_cascade"):
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
+            client = make_catalog_reader()
+        if client is None:  # service mode always returns a client; guard for a clear error
+            raise click.ClickException("catalog service client unavailable")
+        try:
+            renamed = client.rename_collection_cascade(old, new)
+        except Exception as exc:
+            raise click.ClickException(
+                f"service rename failed -- collection {old!r} is unchanged "
+                f"(the re-home is atomic). Fix the error and retry:\n  {exc}"
+            ) from exc
+        counts["tax_topics"] = renamed.get("topics", 0)
+        counts["tax_assignments"] = renamed.get("topic_assignments", 0)
+        counts["tax_meta"] = renamed.get("taxonomy_meta", 0)
+        counts["tax_centroids"] = (
+            renamed.get("taxonomy_centroids_384", 0)
+            + renamed.get("taxonomy_centroids_768", 0)
+            + renamed.get("taxonomy_centroids_1024", 0)
+        )
+        counts["chash"] = renamed.get("chash_index", 0)
+        counts["aspects"] = renamed.get("document_aspects", 0)
+        counts["aspect_queue"] = renamed.get("aspect_extraction_queue", 0)
+        counts["highlights"] = renamed.get("document_highlights", 0)
+        counts["relevance_log"] = renamed.get("relevance_log", 0)
+        counts["search_telemetry"] = renamed.get("search_telemetry", 0)
+        counts["hook_failures"] = renamed.get("hook_failures", 0)
+        counts["catalog_docs"] = renamed.get("catalog_documents", 0)
+        return counts
+
+    # ── Local (sqlite/Chroma) mode: client-side fan-out ──────────────────────
     # ── T2 cascade FIRST (reversible) ────────────────────────────────────────
     # Failure here raises ClickException -- T3 rename has not yet run so the
     # system remains fully consistent. Operator can diagnose and retry.
@@ -105,8 +153,12 @@ def rename_collection_data_plane(
         counts["chash"] = cascade.get("chash", 0)
         counts["aspects"] = cascade.get("aspects", 0)
         counts["aspect_queue"] = cascade.get("aspect_queue", 0)
+        counts["highlights"] = cascade.get("highlights", 0)
         counts["search_telemetry"] = cascade.get("search_telemetry", 0)
         counts["hook_failures"] = cascade.get("hook_failures", 0)
+        # tax_centroids stays 0 in local mode: the sqlite taxonomy cascade
+        # re-homes centroids internally without a separate per-table count.
+        # Service mode surfaces them from the server response above.
     except Exception as exc:
         raise click.ClickException(
             f"T2 cascade failed before T3 rename -- collection {old!r} is "
