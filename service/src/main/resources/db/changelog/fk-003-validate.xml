@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    fk-003-validate.xml — RDR-164 P1b (bead nexus-p9aw6)
+
+    Completes the fk-003 collection-registry FK spine by VALIDATEing the five
+    NOT VALID FKs that fk-003-collection-registry-extra.xml (P1a, nexus-dcqml)
+    added in the deliberately-deferred-validation shape:
+
+      document_aspects_collection_fk
+      aspect_extraction_queue_collection_fk
+      topics_collection_fk
+      taxonomy_meta_collection_fk
+      document_highlights_collection_fk
+
+    Why this is a SEPARATE changelog from P1a (RDR-164 plan-audit finding S1, and
+    the fk-002 sibling nexus-70r3c.3): VALIDATE CONSTRAINT must not sit on the
+    P2->P5 critical path, and it has a hard data prerequisite that P1a does not —
+    the P1a mandatory-registration guard for these five tables only takes effect
+    once P1a DEPLOYS. Any production write to these tables between the RDR-153
+    migrate-all run (2026-06-11, migration-c67ae289, total_failed==0) and the P1a
+    deploy had NO registration guard, so it may have created rows referencing an
+    unregistered collection. NOT VALID skipped retroactive validation of those
+    rows; VALIDATE CONSTRAINT does NOT — it would error loudly on any such orphan.
+
+    Therefore this changelog does TWO things, in order:
+
+      1. fk-003-6-reconcile: re-run the idempotent STUB-REGISTER backfill (the same
+         five INSERT ... ON CONFLICT DO NOTHING statements fk-003-0 ran) against
+         CURRENT data. This catches the gap-window rows: every collection name
+         still referenced by a child table but not yet registered is stub-registered
+         now, so the subsequent VALIDATE has a valid parent for it. This is the
+         no-data-loss arm of the Q5 reconcile (stub-register live references).
+
+         The Q5 "DELETE genuinely-orphaned / FAIL-LOUD on ambiguous" arm is NOT a
+         blind DELETE here: after the stub-register every non-null collection has a
+         parent row, so VALIDATE cannot see an orphan to fail on. If a future schema
+         state somehow leaves a row whose (tenant_id, collection) the stub-register
+         cannot satisfy (it can, for any non-null value — the INSERT is unconditional
+         over DISTINCT child values), VALIDATE FAILS LOUD by design rather than
+         silently dropping data. document_highlights null-collection rows escape the
+         FK (MATCH SIMPLE) and are validated by the fk-001 catalog_documents cascade
+         instead, exactly as in P1a.
+
+      2. fk-003-7..11: VALIDATE CONSTRAINT for each of the five FKs. Each takes a
+         SHARE UPDATE EXCLUSIVE lock on its table (concurrent reads/writes proceed),
+         scans existing rows once, and on success flips pg_constraint.convalidated
+         to true. Idempotent: VALIDATE on an already-validated constraint is a no-op.
+
+    Deploy note (NOT a release gate — the luxe6 freeze gates user-facing PyPI/plugin
+    distribution, not applying liquibase migrations to the engine's own PG): this
+    changelog is safe to ship to develop now. It runs on the next migration of any
+    service. On a fresh DB (CI / testcontainers) there are no rows, so reconcile is
+    a no-op and VALIDATE trivially passes. On live prod it should be applied
+    deliberately with the migration report in hand, because a genuinely-orphaned,
+    stub-unsatisfiable row would (correctly) fail the migration loudly.
+
+    Must come after fk-003-collection-registry-extra.xml (the NOT VALID FKs it
+    validates) in db.changelog-master.xml.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset fk-003-6-reconcile: fresh idempotent stub-register ────────── -->
+    <!--
+        Mirrors fk-003-0-backfill-stubs exactly, re-run against current data to catch
+        any collection referenced by a child table between the 2026-06-11 migration
+        and the P1a registration-guard deploy. ON CONFLICT DO NOTHING keeps it
+        idempotent and safe to re-apply. document_highlights contributes only
+        non-null, non-empty collection values (null rows escape the FK).
+    -->
+    <changeSet id="fk-003-6-reconcile" author="nexus-p9aw6">
+        <comment>
+            Re-stub-register catalog_collections rows for every collection referenced by
+            document_aspects, aspect_extraction_queue, topics, taxonomy_meta, and
+            document_highlights (non-null) that is not already registered — the gap-window
+            reconcile that precedes VALIDATE. Idempotent (ON CONFLICT DO NOTHING).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.document_aspects
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.aspect_extraction_queue
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.topics
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.taxonomy_meta
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.document_highlights
+WHERE collection IS NOT NULL AND collection != ''
+ON CONFLICT (tenant_id, name) DO NOTHING;
+        </sql>
+        <rollback>
+            <!-- No rollback: stub rows are inert and may now be referenced. The FKs being
+                 validated next own their own DROP CONSTRAINT rollbacks in fk-003. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-7: VALIDATE document_aspects_collection_fk ──────────── -->
+    <changeSet id="fk-003-7" author="nexus-p9aw6">
+        <comment>
+            VALIDATE document_aspects_collection_fk — retroactively check pre-existing rows
+            now that the gap-window reconcile has registered their collections.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_aspects VALIDATE CONSTRAINT document_aspects_collection_fk;
+        </sql>
+        <rollback>
+            <!-- VALIDATE cannot be un-done (no INVALIDATE in PG); the constraint itself is
+                 dropped by fk-003-1's rollback. No-op here. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-8: VALIDATE aspect_extraction_queue_collection_fk ───── -->
+    <changeSet id="fk-003-8" author="nexus-p9aw6">
+        <comment>VALIDATE aspect_extraction_queue_collection_fk.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_queue_collection_fk;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-9: VALIDATE topics_collection_fk ────────────────────── -->
+    <changeSet id="fk-003-9" author="nexus-p9aw6">
+        <comment>VALIDATE topics_collection_fk.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topics VALIDATE CONSTRAINT topics_collection_fk;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-10: VALIDATE taxonomy_meta_collection_fk ────────────── -->
+    <changeSet id="fk-003-10" author="nexus-p9aw6">
+        <comment>VALIDATE taxonomy_meta_collection_fk.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.taxonomy_meta VALIDATE CONSTRAINT taxonomy_meta_collection_fk;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <!-- ── Changeset fk-003-11: VALIDATE document_highlights_collection_fk ──────── -->
+    <changeSet id="fk-003-11" author="nexus-p9aw6">
+        <comment>
+            VALIDATE document_highlights_collection_fk. Null-collection rows are skipped by
+            MATCH SIMPLE and remain governed by the fk-001 catalog_documents cascade.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_highlights VALIDATE CONSTRAINT document_highlights_collection_fk;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

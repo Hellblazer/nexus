@@ -73,6 +73,12 @@
          Must come after aspects-001, taxonomy-001, and catalog-001. -->
     <include file="db/changelog/fk-003-collection-registry-extra.xml"/>
 
+    <!-- RDR-164 P1b (bead nexus-p9aw6): gap-window stub-register reconcile +
+         VALIDATE CONSTRAINT for the five fk-003 NOT VALID collection FKs.
+         Separate changelog so VALIDATE stays off the P2->P5 critical path and
+         runs only after the reconcile. Must come after fk-003-collection-registry-extra. -->
+    <include file="db/changelog/fk-003-validate.xml"/>
+
     <!-- Catalog hygiene (bead nexus-70r3c.2, RDR-156 P0.2):
          temporal typing for catalog_collections.created_at/superseded_at (TEXT→timestamptz NULL),
          and CHECK constraints for chash length = 32 and position >= 0. -->
