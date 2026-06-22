@@ -1070,6 +1070,17 @@ class T2Database:
         the row's project and title first so the cascade can scope
         correctly.
 
+        RDR-164 P4 (nexus-jcx6w): this memory→taxonomy cascade is
+        ORTHOGONAL to the catalog ``fk-001`` document cascade and is NOT
+        made redundant by it. ``fk-001`` is rooted at
+        ``catalog_documents(tenant_id, tumbler)``; this path deletes a
+        ``memory`` row keyed by ``(project, title)`` and purges its
+        ``topic_assignments`` — a relationship no FK covers in either
+        backend (``topic_assignments.doc_id`` is a chunk content-hash,
+        not a tumbler; see fk-001 changeset 1). Do NOT retire
+        ``purge_assignments_for_doc`` here on the assumption that fk-001
+        covers it — it does not.
+
         Lock ordering (storage review I-4): this is the ONLY cross-domain
         cascade in the facade. The order is:
 
