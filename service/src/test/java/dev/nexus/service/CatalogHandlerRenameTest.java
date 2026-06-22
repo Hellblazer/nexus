@@ -152,6 +152,50 @@ class CatalogHandlerRenameTest {
     }
 
     @Test
+    void post_renameOntoExistingCollection_returns409() throws Exception {
+        // nexus-gaou3: a plain rename onto an already-registered collection is a collision —
+        // it must 409, not silently take the RDR-162 cross-model COPY branch (repoint-only).
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT + "', 'hren__c409-src') ON CONFLICT DO NOTHING");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT + "', 'hren__c409-tgt') ON CONFLICT DO NOTHING");
+        }
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__c409-src\",\"new_name\":\"hren__c409-tgt\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("target collection already exists");
+    }
+
+    @Test
+    void post_crossModelTrue_ontoExistingTarget_returns200Repoint() throws Exception {
+        // nexus-gaou3: cross_model:true opts into the RDR-162 repoint branch — target already
+        // exists (ETL populated it), only catalog_documents.physical_collection moves.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT + "', 'hren__xm-src') ON CONFLICT DO NOTHING");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT + "', 'hren__xm-tgt') ON CONFLICT DO NOTHING");
+            su.createStatement().execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES ('" + TENANT + "', 'xm-doc-1', 'XM', 'hren__xm-src') ON CONFLICT DO NOTHING");
+        }
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__xm-src\",\"new_name\":\"hren__xm-tgt\",\"cross_model\":true}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> renamed = (Map<String, Object>) body.get("renamed");
+        // cross-model COPY branch returns ONLY catalog_documents (repoint, not full re-home).
+        assertThat(((Number) renamed.get("catalog_documents")).intValue())
+            .as("the doc under the source repoints to the target").isEqualTo(1);
+        assertThat(renamed).as("no full re-home in the cross-model branch")
+            .doesNotContainKey("catalog_collections_inserted");
+    }
+
+    @Test
     void get_returns405() throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/rename"))

@@ -261,7 +261,19 @@ def remap_collection_references(
         if catalog is None:
             from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415
             catalog = make_catalog_writer()
-        counts["catalog_docs"] = catalog.rename_collection(source, target)
+        # nexus-gaou3: this IS the legitimate cross-model repoint (target already
+        # populated by the ETL). In service mode the Java endpoint 409s a rename onto
+        # an existing target UNLESS cross_model=True, so signal it. Only pass the kwarg
+        # in service mode — the local catalog writer's rename_collection has no such
+        # parameter (and local mode has no 409 to bypass).
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415
+
+        if storage_backend_for("catalog") == StorageBackend.SERVICE:
+            counts["catalog_docs"] = catalog.rename_collection(
+                source, target, cross_model=True
+            )
+        else:
+            counts["catalog_docs"] = catalog.rename_collection(source, target)
     except Exception as exc:
         on_warn(
             f"warn: T2 reference remap succeeded but catalog cascade failed: {exc}"
