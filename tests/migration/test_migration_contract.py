@@ -90,7 +90,7 @@ def test_detection_surface():
     assert _params(d.voyage_key_available) == set()
     assert _params(d.build_dry_run_preview) == {"report"}
     assert _params(d.render_dry_run_preview) == {"preview"}
-    assert _fields(d.DetectionReport) == {"classifications"}
+    assert _fields(d.DetectionReport) == {"classifications", "voyage_key_present"}
     assert _fields(d.CollectionClassification) == {
         "collection",
         "leg",

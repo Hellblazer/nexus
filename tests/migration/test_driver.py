@@ -120,6 +120,8 @@ def _patch_engine(
     order: list[str],
     validation: ValidationOutcome | None = None,
     compose_capture: dict | None = None,
+    seq_capture: dict | None = None,
+    voyage_key: bool = False,
 ):
     """Patch the driver's engine globals; record the detect→sequence ordering."""
     local = _FakeClient("detect-local", closables=closables)
@@ -139,6 +141,8 @@ def _patch_engine(
         order.append("sequence")
         # The detection legs MUST be closed before the ETL sequence runs.
         assert "detect-local" in closables and "detect-cloud" in closables
+        if seq_capture is not None:
+            seq_capture["cross_model_targets"] = cross_model_targets
         return sequence
 
     def _compose(*, t2_db_path, read_client, vector_client, catalog_client, collections, dims, target_names=None):
@@ -162,7 +166,7 @@ def _patch_engine(
     monkeypatch.setattr(driver, "run_sequenced_migration", _run_sequenced)
     monkeypatch.setattr(driver, "compose_validation_checks", _compose)
     monkeypatch.setattr(driver, "validate_migration", _validate)
-    monkeypatch.setattr(driver, "voyage_key_available", lambda: False)
+    monkeypatch.setattr(driver, "voyage_key_available", lambda: voyage_key)
 
 
 def test_fresh_user_noop_clean_success(monkeypatch, _sources):
@@ -311,6 +315,75 @@ def test_two_leg_composes_collections_and_dims(monkeypatch, _sources):
     assert composite._by_collection["docs__o__voyage-context-3__v1"] is legs_clients["cloud"]
     # Both reopened legs closed.
     assert {"reopen-local", "reopen-cloud"} <= set(closables)
+
+
+def _cross_model_cls(collection: str, leg: str) -> CollectionClassification:
+    """A legacy minilm-384 (unsupported) collection — cross-model-remappable."""
+    return CollectionClassification(
+        collection=collection,
+        leg=leg,  # type: ignore[arg-type]
+        model="minilm-l6-v2-384",
+        dim=384,
+        support="unsupported",
+        source_count=10,
+        has_data=True,
+        reason="wired by no service embedder",
+    )
+
+
+def test_cross_model_target_is_bge_in_local_mode(monkeypatch, _sources):
+    """nexus-gilf2: local mode (no voyage key) remaps minilm-384 → bge-768."""
+    capture: dict = {}
+    _patch_engine(
+        monkeypatch,
+        detection=_detection(
+            _cross_model_cls("knowledge__o__minilm-l6-v2-384__v1", "local"),
+            _cross_model_cls("code__o__minilm-l6-v2-384__v1", "local"),
+        ),
+        sequence=_sequence(ok=False, phase="migrated-failed"),
+        closables=[],
+        order=[],
+        seq_capture=capture,
+        voyage_key=False,
+    )
+    driver.run_guided_upgrade(
+        sources=_sources,
+        vector_client=object(),
+        catalog_client=object(),
+        t2_db_path=_sources.sqlite_path,
+    )
+    assert capture["cross_model_targets"] == {
+        "knowledge__o__minilm-l6-v2-384__v1": "knowledge__o__bge-base-en-v15-768__v1",
+        "code__o__minilm-l6-v2-384__v1": "code__o__bge-base-en-v15-768__v1",
+    }
+
+
+def test_cross_model_target_is_voyage_in_cloud_mode(monkeypatch, _sources):
+    """nexus-gilf2: cloud mode (voyage key) remaps minilm-384 to the
+    content-type-appropriate voyage model — the mixed-migrant fix."""
+    capture: dict = {}
+    _patch_engine(
+        monkeypatch,
+        detection=_detection(
+            _cross_model_cls("knowledge__o__minilm-l6-v2-384__v1", "local"),
+            _cross_model_cls("code__o__minilm-l6-v2-384__v1", "local"),
+        ),
+        sequence=_sequence(ok=False, phase="migrated-failed"),
+        closables=[],
+        order=[],
+        seq_capture=capture,
+        voyage_key=True,
+    )
+    driver.run_guided_upgrade(
+        sources=_sources,
+        vector_client=object(),
+        catalog_client=object(),
+        t2_db_path=_sources.sqlite_path,
+    )
+    assert capture["cross_model_targets"] == {
+        "knowledge__o__minilm-l6-v2-384__v1": "knowledge__o__voyage-context-3__v1",
+        "code__o__minilm-l6-v2-384__v1": "code__o__voyage-code-3__v1",
+    }
 
 
 def test_reopened_legs_closed_when_validation_raises(monkeypatch, _sources):

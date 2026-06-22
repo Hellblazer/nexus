@@ -451,9 +451,43 @@ class TestDryRunPreview:
         assert len(cross) == 1
         assert cross[0].model == "minilm-l6-v2-384"
         assert cross[0].chunk_count == 7
+        # nexus-gilf2: cloud mode (voyage key) → the prose source targets
+        # voyage-context-3, and the preview names that ACTUAL target (not a
+        # hard-coded bge-768) so the operator sees what the migrate will produce.
+        assert cross[0].target_model == "voyage-context-3"
         text = render_dry_run_preview(preview)
-        assert "cross-model re-embed" in text
+        assert "minilm-l6-v2-384 -> voyage-context-3 cross-model re-embed" in text
+        assert "bge-768" not in text
         assert "BLOCKED" not in text
+
+    def test_cross_model_preview_local_mode_targets_bge_768(self) -> None:
+        # nexus-gilf2: local mode (no voyage key) → bge-768 target, named honestly.
+        local = _FakeChromaClient({ONNX_384: 7})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=False
+        )
+        preview = build_dry_run_preview(report)
+        cross = [g for g in preview.groups if g.cross_model]
+        assert len(cross) == 1
+        assert cross[0].target_model == "bge-base-en-v15-768"
+        text = render_dry_run_preview(preview)
+        assert "minilm-l6-v2-384 -> bge-base-en-v15-768 cross-model re-embed" in text
+
+    def test_cross_model_preview_cloud_splits_code_and_prose_targets(self) -> None:
+        # nexus-gilf2: a single source model (minilm-384) spanning code + prose
+        # splits into TWO target buckets in cloud mode — voyage-code-3 for code,
+        # voyage-context-3 for prose — each named in the preview.
+        code_src = "code__acme__minilm-l6-v2-384__v1"
+        local = _FakeChromaClient({ONNX_384: 7, code_src: 3})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        preview = build_dry_run_preview(report)
+        targets = {g.target_model for g in preview.groups if g.cross_model}
+        assert targets == {"voyage-context-3", "voyage-code-3"}
+        text = render_dry_run_preview(preview)
+        assert "minilm-l6-v2-384 -> voyage-code-3 cross-model re-embed" in text
+        assert "minilm-l6-v2-384 -> voyage-context-3 cross-model re-embed" in text
 
     def test_all_blocked_render_has_no_dangling_migrate_section(self) -> None:
         # Every collection GENUINELY blocked (voyage, no key) → the "Would
@@ -477,6 +511,51 @@ class TestDryRunPreview:
         assert "[local]" in text
         assert "[cloud]" in text
         assert "rough estimate" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Cross-model remap TARGET derivation (nexus-gilf2): mode-aware, content-type-aware
+# ---------------------------------------------------------------------------
+class TestCrossModelTargetModel:
+    """The cross-model remap target must be a model the live deployment WIRES.
+
+    nexus-gilf2: a flat bge-768 target blocks the mixed migrant (ran local,
+    migrates onto a voyage-mode service) — the service has no bge-768 embedder
+    in cloud mode and the pebfx.2 guard 422s the upsert. The target is
+    derived from the deployment mode and the source's content_type.
+    """
+
+    def test_local_mode_targets_bge_768_regardless_of_content_type(self) -> None:
+        from nexus.migration.detection import cross_model_target_model
+
+        for src in (ONNX_384, "code__acme__minilm-l6-v2-384__v1"):
+            assert (
+                cross_model_target_model(src, voyage_key_present=False)
+                == "bge-base-en-v15-768"
+            )
+
+    def test_cloud_mode_prose_targets_voyage_context_3(self) -> None:
+        from nexus.migration.detection import cross_model_target_model
+
+        for src in (
+            "knowledge__acme__minilm-l6-v2-384__v1",
+            "docs__acme__minilm-l6-v2-384__v1",
+            "rdr__acme__minilm-l6-v2-384__v1",
+        ):
+            assert (
+                cross_model_target_model(src, voyage_key_present=True)
+                == "voyage-context-3"
+            )
+
+    def test_cloud_mode_code_targets_voyage_code_3(self) -> None:
+        from nexus.migration.detection import cross_model_target_model
+
+        assert (
+            cross_model_target_model(
+                "code__acme__minilm-l6-v2-384__v1", voyage_key_present=True
+            )
+            == "voyage-code-3"
+        )
 
 
 # ---------------------------------------------------------------------------

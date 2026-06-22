@@ -34,11 +34,11 @@ from typing import Any, Callable
 import structlog
 
 from nexus.migration.detection import (
-    _ONNX_MODEL,
     DetectionReport,
     classify_collections,
     close_read_client,
     cross_model_remappable,
+    cross_model_target_model,
     open_read_legs,
     voyage_key_available,
 )
@@ -173,12 +173,19 @@ def run_guided_upgrade(
 
     # RDR-162 P2: a legacy collection the service cannot serve under its current
     # name (e.g. minilm-384 after RDR-160) is auto-migrated by re-embedding its
-    # STORED chunk text into a model-remapped target (bge-768) — not blocked with
-    # the re-index diagnostic. Policy lives here (the orchestrator), not in the
-    # ETL: build the source→target map, pass it down, and the sequencer exempts
-    # these from the pre-gate and re-points their references after they verify.
+    # STORED chunk text into a model-remapped target — not blocked with the
+    # re-index diagnostic. Policy lives here (the orchestrator), not in the ETL:
+    # build the source→target map, pass it down, and the sequencer exempts these
+    # from the pre-gate and re-points their references after they verify.
+    # nexus-gilf2: the target model is mode + content-type aware (voyage models
+    # in cloud mode, bge-768 in local) so the MIXED migrant (ran local, migrates
+    # onto a voyage-mode service) re-embeds into a WIRED model instead of hitting
+    # the pebfx.2 fail-loud guard.
     target_names = {
-        c.collection: cross_model_target_name(c.collection, _ONNX_MODEL)
+        c.collection: cross_model_target_name(
+            c.collection,
+            cross_model_target_model(c.collection, voyage_key_present=key_present),
+        )
         for c in detection.classifications
         if cross_model_remappable(c)
     }
