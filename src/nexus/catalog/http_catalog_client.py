@@ -70,7 +70,7 @@ DEFAULT_TENANT: str = "default"
 
 # RDR-152 nexus-fjwxh: delegate to the centralized resolver (was an inline
 # copy of the env->lease->fail-loud logic now shared across all clients).
-from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
 
 
 def _to_entry(d: dict) -> CatalogEntry:
@@ -138,8 +138,7 @@ class HttpCatalogClient:
                     )
             self._base_url = base_url.rstrip("/")
         else:
-            host, port, token = _resolve_config()
-            self._base_url = f"http://{host}:{port}"
+            self._base_url, token = _resolve_endpoint()
             _token = token
 
         self._tenant = tenant

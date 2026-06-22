@@ -70,14 +70,27 @@ def read_installed_provenance(config_dir: Path) -> dict | None:
         return None
 
 
-def fetch_service_version(host: str, port: int, timeout: float = 3.0) -> dict | None:
+def fetch_service_version(
+    host: str,
+    port: int | None,
+    timeout: float = 3.0,
+    *,
+    scheme: str = "http",
+) -> dict | None:
     """GET the running service's /version handshake, or ``None`` when
-    unreachable (older service without the endpoint, service down)."""
+    unreachable (older service without the endpoint, service down).
+
+    ``scheme`` defaults to ``http`` (the local-supervisor path). A managed TLS
+    endpoint passes ``scheme="https"`` so the pre-gate handshake reaches the
+    service instead of failing the TLS negotiation (nexus-n3bwh). ``port`` may
+    be ``None`` (scheme-default port, e.g. an ``https://host`` URL with no
+    explicit ``:443``), in which case it is omitted from the authority."""
     import urllib.request
 
+    authority = f"{host}:{port}" if port is not None else host
     try:
         with urllib.request.urlopen(
-            f"http://{host}:{port}/version", timeout=timeout,
+            f"{scheme}://{authority}/version", timeout=timeout,
         ) as resp:
             data = json.loads(resp.read())
             return data if isinstance(data, dict) else None

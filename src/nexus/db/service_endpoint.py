@@ -141,11 +141,34 @@ def resolve_service_config() -> tuple[str, int, str]:
 
 
 def resolve_service_endpoint() -> tuple[str, str]:
-    """``(base_url, token)`` — the shape the T3 vector client consumes.
+    """``(base_url, token)`` — the scheme-correct base-url authority.
 
-    Thin adapter over :func:`resolve_service_config` so the vector client and
-    the T2/catalog stores share one resolution path despite their differing
-    return shapes.
+    Every HTTP storage client that builds a base URL (the T2 domain stores, the
+    catalog client, the T1 scratch store, the migration pre-gate) routes through
+    here so a managed TLS endpoint survives end-to-end. Resolution order mirrors
+    the T3 data path (:func:`nexus.db.http_vector_client._resolve_endpoint`):
+
+      1. ``NX_SERVICE_URL`` — the authoritative FULL endpoint, used VERBATIM
+         (scheme + host + port preserved). This is the ONLY scheme source:
+         ``https://api.conexus-nexus.com:443`` stays ``https``; flattening it to
+         ``http://…:443`` (the pre-RDR-166 bug, nexus-n3bwh) broke every managed
+         migration leg. The token half still falls back to lease/env independently.
+      2. Otherwise ``http://{host}:{port}`` from :func:`resolve_service_config`
+         (env halves → lease → fail loud) — the local-supervisor path, always
+         ``http``.
     """
+    env_url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/") or None
+    if env_url is not None:
+        env_token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+        token = env_token
+        if token is None:
+            _, token = discover_lease()
+        if not token:
+            raise RuntimeError(
+                "NX_SERVICE_URL is set but no NX_SERVICE_TOKEN is resolvable "
+                "(neither env nor supervisor lease): export NX_SERVICE_TOKEN "
+                "(the service's bearer token) and re-run."
+            )
+        return env_url, token
     host, port, token = resolve_service_config()
     return f"http://{host}:{port}", token

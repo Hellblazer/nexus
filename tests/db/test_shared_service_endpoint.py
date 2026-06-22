@@ -96,6 +96,48 @@ class TestResolveServiceEndpoint:
         assert token == "lease-tok"
 
 
+class TestSchemeAwareEndpoint:
+    """RDR-166 nexus-n3bwh — a managed ``https://…:443`` endpoint must survive.
+
+    ``resolve_service_endpoint`` is the ONE base-url authority the T2 stores,
+    the catalog client, and the migration pre-gate build their URLs from. When
+    ``NX_SERVICE_URL`` names a managed TLS endpoint it MUST be honoured verbatim
+    (scheme + host + port), not flattened to ``http://host:port`` — the old
+    behaviour turned ``https://api.conexus-nexus.com:443`` into
+    ``http://…:443`` and broke every managed-TLS migration leg before the data
+    path (already https-capable) ever ran.
+    """
+
+    def test_service_url_https_used_verbatim(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com:443")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "managed-tok")
+        assert resolve_service_endpoint() == (
+            "https://api.conexus-nexus.com:443",
+            "managed-tok",
+        )
+
+    def test_service_url_trailing_slash_stripped(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com:443/")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "managed-tok")
+        base_url, _ = resolve_service_endpoint()
+        assert base_url == "https://api.conexus-nexus.com:443"
+
+    def test_service_url_token_falls_back_to_lease(self, monkeypatch):
+        # URL from env, token from the lease — each half independent.
+        _publish_lease(port=4242, token="lease-token")
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com:443")
+        base_url, token = resolve_service_endpoint()
+        assert base_url == "https://api.conexus-nexus.com:443"
+        assert token == "lease-token"
+
+    def test_no_service_url_preserves_http_from_env(self, monkeypatch):
+        # Regression: the local supervisor path is unchanged (http).
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", "8123")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+        assert resolve_service_endpoint() == ("http://127.0.0.1:8123", "tok")
+
+
 class TestDiscoverLease:
     def test_absent_lease_returns_none(self):
         assert discover_lease() == (None, None)

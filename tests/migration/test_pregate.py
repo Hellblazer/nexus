@@ -249,11 +249,11 @@ def test_all_supported_mixed_proceeds() -> None:
 def test_live_source_returns_none_when_service_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _boom() -> tuple[str, int, str]:
+    def _boom() -> tuple[str, str]:
         raise RuntimeError("no service lease")
 
     monkeypatch.setattr(
-        "nexus.db.service_endpoint.resolve_service_config", _boom
+        "nexus.db.service_endpoint.resolve_service_endpoint", _boom
     )
     assert LiveServiceWiredModels().wired_models() is None
 
@@ -262,14 +262,43 @@ def test_live_source_parses_version_handshake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "nexus.db.service_endpoint.resolve_service_config",
-        lambda: ("127.0.0.1", 9999, "tok"),
+        "nexus.db.service_endpoint.resolve_service_endpoint",
+        lambda: ("http://127.0.0.1:9999", "tok"),
     )
     monkeypatch.setattr(
         "nexus.daemon.binary_lifecycle.fetch_service_version",
-        lambda host, port: {"embedding_mode": "cloud", "embedding_models": [_ONNX, _VOYAGE]},
+        lambda host, port, scheme="http": {
+            "embedding_mode": "cloud",
+            "embedding_models": [_ONNX, _VOYAGE],
+        },
     )
     assert LiveServiceWiredModels().wired_models() == frozenset({_ONNX, _VOYAGE})
+
+
+def test_live_source_handshake_over_https_managed_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-n3bwh — a managed https endpoint must hand off scheme=https,
+    host, and the explicit :443 port to the version handshake (not http)."""
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "nexus.db.service_endpoint.resolve_service_endpoint",
+        lambda: ("https://api.conexus-nexus.com:443", "managed-tok"),
+    )
+
+    def _fetch(host, port, scheme="http"):
+        seen.update(host=host, port=port, scheme=scheme)
+        return {"embedding_mode": "cloud", "embedding_models": [_ONNX, _VOYAGE]}
+
+    monkeypatch.setattr(
+        "nexus.daemon.binary_lifecycle.fetch_service_version", _fetch
+    )
+    assert LiveServiceWiredModels().wired_models() == frozenset({_ONNX, _VOYAGE})
+    assert seen == {
+        "host": "api.conexus-nexus.com",
+        "port": 443,
+        "scheme": "https",
+    }
 
 
 # --------------------------------------------------------------------------

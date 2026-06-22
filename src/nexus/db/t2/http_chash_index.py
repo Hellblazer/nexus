@@ -55,7 +55,7 @@ _BATCH_SIZE: int = 200
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
 from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 
 
@@ -95,8 +95,7 @@ class HttpChashIndex(RawHandleGuardMixin):
                       resolved from NX_SERVICE_TOKEN env var.
         """
         if base_url is None:
-            host, port, resolved_token = _resolve_config()
-            base_url = f"http://{host}:{port}"
+            base_url, resolved_token = _resolve_endpoint()
         else:
             resolved_token = _token or os.environ.get("NX_SERVICE_TOKEN", "")
             if not resolved_token:

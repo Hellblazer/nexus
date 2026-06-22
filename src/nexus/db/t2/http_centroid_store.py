@@ -37,7 +37,7 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
 from nexus.db.t2.catalog_taxonomy import AssignResult
 from nexus.db.t2.http_taxonomy_store import DEFAULT_TENANT
 
@@ -74,8 +74,7 @@ class HttpCentroidStore:
                     )
             self._base_url = base_url.rstrip("/")
         else:
-            host, port, token = _resolve_config()
-            self._base_url = f"http://{host}:{port}"
+            self._base_url, token = _resolve_endpoint()
             _token = token
 
         self._tenant = tenant
