@@ -1246,6 +1246,12 @@ public final class CatalogRepository {
         });
     }
 
+    /** True if a (tenant, name) collection registry row exists. RLS-scoped. */
+    public boolean collectionExists(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> ctx.fetchExists(
+            ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name))));
+    }
+
     /**
      * Rename a collection X-&gt;Y, re-homing every in-Postgres denorm-collection table in
      * one RLS-scoped transaction (RDR-164 P3, bead nexus-77vve). Returns per-table re-home

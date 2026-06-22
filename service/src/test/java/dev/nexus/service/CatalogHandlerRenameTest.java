@@ -142,6 +142,16 @@ class CatalogHandlerRenameTest {
     }
 
     @Test
+    void post_renameMissingCollection_returns404() throws Exception {
+        // nexus-hz785: renaming an unregistered collection must fail loud with 404, not
+        // silently return 200 with all-zero counts.
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__never-registered-xyz\",\"new_name\":\"hren__missing-target\"}");
+        assertThat(resp.statusCode()).isEqualTo(404);
+        assertThat(resp.body()).contains("collection not found");
+    }
+
+    @Test
     void get_returns405() throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/rename"))
