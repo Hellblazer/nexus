@@ -106,7 +106,9 @@ to the conexus instance (the T2 bus is passive; Hal relays).
 2. **Greenfield onboarding journey.** Document + test the no-prior-install path
    against the managed endpoint (config, capability probe fail-loud, first
    search/store). The transport is already plumbed (vwvv5.12); this phase is the
-   journey + `nx config` ergonomics. Depends on Phase 1 (token).
+   journey + `nx config` ergonomics. Depends on Phase 1 (token). Co-ships with
+   the managed-client teardown (bead **nexus-wigzi**, owned by RDR-165 Phase 3.a)
+   so a documented onboarding has a documented un-onboarding.
 3. **Local→managed migration hardening.** Land the **scheme-aware
    `resolve_service_config`** fix (bead **nexus-n3bwh**, a correctness
    prerequisite — see Research Finding 2); validate the cross-model→voyage ETL
@@ -167,8 +169,10 @@ demand warrants).
 _Critical/Significant findings from the 2026-06-22 pair critique
 (`nexus/rdr-165-166-pair-critique`) are closed: the managed-client teardown seam
 is owned by RDR-165 (nexus-wigzi), every deferred item has a filed bead, and the
-TLS defect is reclassified + tracked. One action remains before gate: relay the
-conexus asks (nexus-i67t3 / nexus-hm389)._
+TLS defect is reclassified + tracked. The conexus relay (nexus-i67t3 /
+nexus-hm389) is **owner-deferred (hold)** — not a gate blocker; it must be
+carried to the conexus instance before RDR-166 §Approach Phase 1 executes, not
+before the gate._
 
 ## Research Findings
 

@@ -60,8 +60,8 @@ journeys: greenfield onboarding and local→managed migration.
 ## Decision
 
 Produce one authoritative, operator-facing **Agent Lifecycle & Operations**
-document (target: `docs/operations.md` or `docs/lifecycle.md`, TBD in research)
-that is the single source of truth for:
+document (`docs/operations/agent-lifecycle.md` — resolved in research) that is
+the single source of truth for:
 
 1. **The agent model** — engine-service daemon + `nx` CLI + storage tiers +
    service-registry/lease lifecycle, with a state diagram (uninstalled →
