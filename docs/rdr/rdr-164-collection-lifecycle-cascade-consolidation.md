@@ -2,7 +2,8 @@
 title: "RDR-164: Collection- and Document-Lifecycle Cascade Consolidation — Replace SQLite-Era Client-Side Cross-Store Orchestration with Postgres-Native Atomic Cascades"
 id: RDR-164
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-06-21
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -137,3 +138,24 @@ The alternative of leaving everything client-side is rejected: it is the proven 
 4. ~~**RLS in the function:** `SECURITY DEFINER` vs invoker?~~ **RESOLVED by CA-3:** Java method in `TenantScope.withTenant` (preferred), or a `SECURITY INVOKER` PG function. Never `SECURITY DEFINER` (FORCE-RLS bypass, RDR-154 Gap 3).
 5. ~~**Backfill collision policy?**~~ **RESOLVED — register-then-reconcile, fail-loud on ambiguity** (reuses the RDR-153 migration-data-quality discipline: structured issue reporting, no silent corruption). For each distinct `(tenant_id, collection)` referenced by a lifecycle table but absent from `catalog_collections`: (a) if it maps to live data (chunks exist / catalog projection exists) → **stub-register** it (mirror `fk-002-0-backfill-stubs`); (b) if genuinely orphaned (no chunks, no projection, no live collection) → **DELETE the rows with a logged count** (these are the exact orphans the RDR exists to remove — no silent drop); (c) if **ambiguous** (a renamed/tombstoned name that could map to >1 registry entry) → **FAIL LOUD** with a structured migration issue, require operator resolution, never guess. The per-store collision-defense DELETE is the precedent for case (b).
 6. ~~**RESTRICT→CASCADE vs explicit ordered DELETE?**~~ **RESOLVED — keep RESTRICT + explicit ordered DELETE for the collection-level op; keep CASCADE only for document-level.** Collection delete is a rare, irreversible admin op: `ON DELETE RESTRICT` on the registry child FKs is a *safety net* (a stray `catalog_collections` delete errors instead of silently destroying derived state), the explicit ordered DELETE preserves per-table counts (the `CascadeCounts`/CLI-render + telemetry contract) and is testable with exact-count assertions. The `catalog_documents`-rooted FKs stay `ON DELETE CASCADE` — a document delete is a routine fine-grained op where cascade is correct and already working. Policy: **CASCADE where the parent delete is routine (document); RESTRICT + explicit method where it is destructive-admin (collection).**
+
+## Outcome (closed 2026-06-21)
+
+Implemented across PRs #1273–#1279 to `develop`; epic `nexus-y07vh` (13/13 children) and all phase gates closed.
+
+- **P0** (`nexus-nfjve`): cross-store cascade inventory + per-table cascade policy ratified.
+- **P1a/P1** (`nexus-dcqml`): collection-registry FK spine — five `NOT VALID ON DELETE RESTRICT` collection FKs (`document_aspects`, `aspect_extraction_queue`, `topics`, `taxonomy_meta`, `document_highlights`) + stub-register backfill (`fk-003-0`).
+- **P1b** (`nexus-p9aw6`, PR #1279): `VALIDATE CONSTRAINT` for the five FKs + gap-window reconcile (`fk-003-validate.xml`).
+- **P2** (`nexus-ybdoc`, PR #1274): server-side `deleteCollection(tenant,name)` — explicit ordered DELETE in one `TenantScope.withTenant` transaction (closes nexus-tquoj + service-mode cugrk).
+- **P3** (`nexus-77vve`, PR #1275): server-side `renameCollection(tenant,old,new)` — 8 per-store renames consolidated into one transactional re-home.
+- **P4** (`nexus-jcx6w`, PR #1276): document-level cascade verified (already correct via `catalog_documents`-rooted CASCADE); stale comments corrected; **no new schema**. Filed follow-on `nexus-7n553` (documented-open per-document hard-purge gap for `topic_assignments`).
+- **P5** (`nexus-c6vze`, PR #1277): retired redundant client orchestration; `nexus-5kl1b` (cugrk local-mode leg) closed obsolete. First P5 attempt — a lazy `make_t3()` centroid handle — was a verified no-op (since RDR-155 P4a.2 `make_t3()` always returns `HttpVectorClient`, no `_client`); reviewers caught it and it was reverted before merge.
+
+### Deliberate divergences from the design (recorded, not hidden)
+
+1. **Q5 reconcile shipped arm (a)+(c) only — arm (b) DELETE-genuinely-orphaned was NOT implemented.** The Q5 resolution named three arms: (a) stub-register rows that map to live data, (b) DELETE genuinely-orphaned rows (no chunks/projection) with a logged count, (c) fail-loud on ambiguity. The deployed `fk-003-6-reconcile` stub-registers **every** referenced `(tenant_id, collection)` unconditionally (it does not distinguish case (a) from case (b)), and relies on `VALIDATE CONSTRAINT` (arm c) to fail loud on any row a stub cannot satisfy. Rationale (substantive-critic-reviewed, PR #1279): a collection referenced by a live child row has derived state by construction, so case-(b) "genuinely orphaned" child rows are vanishingly rare in practice, and stub-register is strictly no-data-loss — the inert stub is later swept by P2's `deleteCollection` cascade. **Residual risk:** a genuinely-orphaned child row (e.g. an `aspect_extraction_queue` row whose collection has no chunks/projection) is stub-registered rather than deleted, so it survives under a stub collection until that stub is explicitly deleted — it is not auto-purged. The engine-side production migration already ran with `summary.total_failed==0` (2026-06-10, 115,716 chunks), so the gap-window reconcile is expected to register ~zero rows in current prod. **Follow-up candidate (not yet filed): if arm (b) DELETE-with-logged-count is wanted as a distinct migrate-time step, file a bead.**
+2. **Empty-string collection is a stub-unsatisfiable orphan that fails VALIDATE loud by design.** Surfaced by the P1b per-FK test: a `document_highlights` row with `collection=''` (non-null) is enforced by the FK (MATCH SIMPLE; only NULL escapes) but the reconcile's `WHERE collection IS NOT NULL AND collection != ''` filter never registers it — so `fk-003-11` VALIDATE fails loud on it. This is the intended arm-(c) fail-loud safety property. **Ops note for the live-prod apply:** if real `document_highlights` data contains empty-string (non-null) collection rows, NULL-normalize or delete them before running the VALIDATE migration.
+
+### Process note
+
+Beads in this epic were repeatedly mis-specified relative to the actual code (P4's bead claimed an fk-001 `topic_assignments` cascade that does not exist; P5's bead premised a `make_t3()._client` handle that does not exist in service mode). Each phase verified the resolver's actual return type / the actual SQL before building on the bead's claim. The stacked review (code-review-expert + substantive-critic) caught a real Critical or Significant on every phase (P4 silent-scope framing, P5 no-op, P1b single-FK coverage, the reaper's occurred_at + daemon-whitelist gaps).
