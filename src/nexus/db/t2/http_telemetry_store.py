@@ -308,6 +308,16 @@ class HttpTelemetryStore(RawHandleGuardMixin):
         resp = self._post("/v1/telemetry/search/trim", {"days": days})
         return int(resp.get("deleted", 0))
 
+    def trim_hook_failures(self, days: int = 30) -> int:
+        """Delete ``hook_failures`` rows older than *days* days (nexus-7365x).
+
+        Calls ``POST /v1/telemetry/hook_failures/trim``.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        resp = self._post("/v1/telemetry/hook_failures/trim", {"days": days})
+        return int(resp.get("deleted", 0))
+
     def rename_collection(self, *, old: str, new: str) -> dict[str, int]:
         """Re-point collection columns from ``old`` to ``new`` in all telemetry tables.
 

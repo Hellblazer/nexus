@@ -35,6 +35,7 @@ import java.util.Map;
  *   POST /v1/telemetry/tier_writes/record      record a tier-write event
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
  *   POST /v1/telemetry/hook_failures/record    record a hook failure
+ *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries
  *   POST /v1/telemetry/frecency/upsert         upsert frecency record
  *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
  *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
@@ -86,6 +87,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/tier_writes/record"     -> handleTierWriteRecord(exchange, tenant, method);
                 case "/nx_answer_runs/record"  -> handleNxAnswerRunRecord(exchange, tenant, method);
                 case "/hook_failures/record"   -> handleHookFailureRecord(exchange, tenant, method);
+                case "/hook_failures/trim"     -> handleHookFailureTrim(exchange, tenant, method);
                 case "/frecency/upsert"        -> handleFrecencyUpsert(exchange, tenant, method);
                 case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
                 case "/import"                 -> handleImport(exchange, tenant, method);
@@ -237,6 +239,14 @@ public final class TelemetryHandler implements HttpHandler {
         repo.recordHookFailure(tenant, docId, collection, hookName, error, occurredAt,
             batchDocIds, isBatch, chain);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    private void handleHookFailureTrim(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        int days = optInt(body, "days", 30);
+        int deleted = repo.trimHookFailures(tenant, days);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
     }
 
     // ── frecency ───────────────────────────────────────────────────────────────

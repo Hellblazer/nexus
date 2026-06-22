@@ -81,6 +81,7 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
                               'project', 'target_title'],
         'rename_collection': ['old', 'new'],
         'trim_search_telemetry': ['days'],
+        'trim_hook_failures': ['days'],
     },
     'chash_index': {
         'count_for_collection': ['collection'],

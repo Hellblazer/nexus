@@ -348,6 +348,22 @@ public final class TelemetryRepository {
     }
 
     /**
+     * Delete hook_failures rows older than {@code days} days (RDR-164 P0 nexus-7365x).
+     *
+     * <p>Audit-table TTL parity with {@link #trimSearchTelemetry}: hook_failures is a
+     * no-cascade audit table reaped by age. Filters on the occurred_at timestamp;
+     * RLS-scoped via {@code withTenant}.
+     */
+    public int trimHookFailures(String tenant, int days) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+            return ctx.deleteFrom(HOOK_FAILURES)
+                .where(HOOK_FAILURES.OCCURRED_AT.lt(cutoff))
+                .execute();
+        });
+    }
+
+    /**
      * Rename collection in search_telemetry (and hook_failures).
      * Returns a map of {tableName -> rowCount}.
      */
