@@ -226,7 +226,7 @@ public final class PgVectorRepository {
                                                     List<String> documents,
                                                     List<Map<String, Object>> metadatas) {
         long[] tokensOut = {0L};
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut, null);
         return new Tokened<>(ids.size(), tokensOut[0]);
     }
 
@@ -235,14 +235,42 @@ public final class PgVectorRepository {
                              List<String> ids,
                              List<String> documents,
                              List<Map<String, Object>> metadatas) {
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null);
+    }
+
+    /**
+     * Same-model vector PASSTHROUGH (nexus-hxry2, RDR-166): store caller-supplied
+     * embeddings VERBATIM, skipping the server-side embedder.
+     *
+     * <p>The migration uses this when the source collection's embedding model
+     * equals the target's wired model: the stored Chroma vectors were produced by
+     * exactly the model the target collection is searched against, so re-embedding
+     * would only re-bill the operator's Voyage key for identical vectors. Each
+     * vector's dimension MUST match the dispatched {@code chunks_<dim>} table — a
+     * mismatch fails loud (the contamination guard; never a silent embed fallback).
+     * No embedder is invoked, so the token count is always 0.
+     *
+     * @param embeddings one vector per id (length must equal {@code ids})
+     */
+    public void upsertChunksWithVectors(String tenant, String collection,
+                                        List<String> ids,
+                                        List<String> documents,
+                                        List<float[]> embeddings,
+                                        List<Map<String, Object>> metadatas) {
+        if (embeddings == null || embeddings.size() != ids.size()) {
+            throw new IllegalArgumentException(
+                "upsertChunksWithVectors requires one embedding per id: ids="
+                + ids.size() + " embeddings=" + (embeddings == null ? "null" : embeddings.size()));
+        }
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, embeddings);
     }
 
     private void upsertChunksInternal(String tenant, String collection,
                                       List<String> ids,
                                       List<String> documents,
                                       List<Map<String, Object>> metadatas,
-                                      long[] tokensOut) {
+                                      long[] tokensOut,
+                                      List<float[]> providedEmbeddings) {
         if (ids.isEmpty()) return;
         int dim = dimForCollection(collection);
 
@@ -259,6 +287,7 @@ public final class PgVectorRepository {
         List<String> dedupIds  = new ArrayList<>();
         List<String> dedupDocs = new ArrayList<>();
         List<Map<String, Object>> dedupMetas = new ArrayList<>();
+        List<float[]> dedupProvided = providedEmbeddings != null ? new ArrayList<>() : null;
         List<String> nulSanitized = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (int i = 0; i < ids.size(); i++) {
@@ -271,6 +300,7 @@ public final class PgVectorRepository {
                 dedupIds.add(ids.get(i));
                 dedupDocs.add(clean);
                 dedupMetas.add(sanitizeNulDeep(metadatas.get(i)));
+                if (dedupProvided != null) dedupProvided.add(providedEmbeddings.get(i));
             }
         }
         if (!nulSanitized.isEmpty()) {
@@ -283,19 +313,30 @@ public final class PgVectorRepository {
                     collection, ids.size(), dedupIds.size(), collapsed);
         }
 
-        // Server-side embed - collection-aware routing when wired with the router
-        // (production / Seam B path), identical to the Chroma VectorRepository flow.
-        // Uses *WithUsage variant to capture the token count (bead nexus-ehc4q);
-        // the count is surfaced to VectorHandler via the Tokened<T> return value of
-        // upsertChunksWithTokens (not a ThreadLocal side-channel).
-        EmbedResult embedResult = (docRouter != null)
-                ? docRouter.embedForCollectionWithUsage(collection, dedupDocs)
-                : docEmbedder.embedWithUsage(dedupDocs);
-        if (tokensOut != null) tokensOut[0] = embedResult.tokens();
-        List<float[]> embeddings = embedResult.embeddings();
+        // Embeddings: either caller-supplied (same-model PASSTHROUGH, nexus-hxry2)
+        // or computed server-side (the default Seam B path). When the caller
+        // supplies vectors we skip the embedder entirely — no Voyage call, token
+        // count stays 0 — because the source model equals the target's wired model
+        // (validated client-side) and re-embedding would re-bill for identical
+        // vectors. Collection-aware routing when wired with the router (production /
+        // Seam B path), identical to the Chroma VectorRepository flow. Uses
+        // *WithUsage to capture the token count (bead nexus-ehc4q), surfaced to
+        // VectorHandler via the Tokened<T> return value (not a ThreadLocal).
+        List<float[]> embeddings;
+        if (dedupProvided != null) {
+            embeddings = dedupProvided;  // passthrough — no embed, tokensOut stays 0
+        } else {
+            EmbedResult embedResult = (docRouter != null)
+                    ? docRouter.embedForCollectionWithUsage(collection, dedupDocs)
+                    : docEmbedder.embedWithUsage(dedupDocs);
+            if (tokensOut != null) tokensOut[0] = embedResult.tokens();
+            embeddings = embedResult.embeddings();
+        }
 
-        // Fail loud BEFORE any SQL if the embedder's output does not match the
-        // dispatched table dimension (no truncation, no padding).
+        // Fail loud BEFORE any SQL if a vector's dimension does not match the
+        // dispatched table dimension (no truncation, no padding). For the
+        // passthrough path this is ALSO the contamination guard: a supplied vector
+        // whose dim disagrees with the target table is rejected, never stored.
         for (float[] vec : embeddings) {
             if (vec.length != dim) {
                 throw new IllegalArgumentException(

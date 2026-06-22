@@ -473,8 +473,14 @@ class HttpVectorClient:
         """Embed + quota-check + write via the Java service.
 
         CHUNKING STAYS PYTHON — this method is called with pre-chunked text.
-        Embeddings are computed server-side; any ``embeddings`` argument is
-        ignored (Seam B contract).
+        Embeddings are computed server-side by default (Seam B). The ONE
+        exception is the same-model migration PASSTHROUGH (nexus-hxry2): when
+        ``embeddings`` is supplied, the vectors are sent and stored verbatim and
+        the server skips the (billed) re-embed — used only when the source
+        collection's model equals the target's wired model, so the vectors are
+        already correct. Every non-migration caller leaves ``embeddings`` None.
+        (Note: :meth:`upsert_chunks_with_embeddings` deliberately still DISCARDS
+        its vectors — indexers re-embed server-side as the single authority.)
 
         ``skip_existing`` (or env ``NX_UPSERT_SKIP_EXISTING=1``): pre-filter
         ids through :meth:`existing_ids` and embed/upsert only the chunks
@@ -507,12 +513,21 @@ class HttpVectorClient:
                 ids = [ids[i] for i in keep]
                 documents = [documents[i] for i in keep]
                 metadatas = [metas[i] for i in keep]
+                if embeddings is not None:
+                    embeddings = [embeddings[i] for i in keep]
         body: dict[str, Any] = {
             "collection": collection,
             "ids": ids,
             "documents": documents,
             "metadatas": metadatas or [{}] * len(ids),
         }
+        # Same-model vector PASSTHROUGH (nexus-hxry2): when the caller supplies
+        # precomputed vectors (source model == target wired model), send them so
+        # the service stores them verbatim and skips the billed re-embed. Absent →
+        # the default Seam B server-side embed. This is the ONE path where
+        # ``embeddings`` is honoured; every other caller leaves it None.
+        if embeddings is not None:
+            body["embeddings"] = embeddings
         _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
         _log.debug(
             "http_vector_upsert_chunks",

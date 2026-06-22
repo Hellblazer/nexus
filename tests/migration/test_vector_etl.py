@@ -138,9 +138,10 @@ class _FakeCollectionHandle:
 class FakeVectorClient:
     """Hermetic stand-in for ``HttpVectorClient`` (same surface subset).
 
-    ``upsert_chunks`` deliberately has NO ``embeddings`` parameter: the
-    vector-identity decision (a) pins that no source vectors cross the ETL
-    — an implementation that forwards embeddings TypeErrors here.
+    ``upsert_chunks`` accepts the optional ``embeddings`` kwarg and RECORDS it
+    (``upsert_embeddings``): post-nexus-hxry2, source vectors cross the ETL ONLY
+    for the same-model voyage passthrough; every other path leaves it None. Tests
+    assert the recorded value to pin which path ran.
 
     ``count_delta`` simulates a lossy target (service wrote fewer rows than
     sent) so the ETL's post-write count verification can be proven
@@ -152,6 +153,8 @@ class FakeVectorClient:
         self.store: dict[str, dict[str, tuple[str, dict]]] = {}
         # (collection, [ids]) per upsert call, in call order
         self.upsert_calls: list[tuple[str, list[str]]] = []
+        # embeddings arg per upsert call, in call order (None = re-embed path)
+        self.upsert_embeddings: list[list[list[float]] | None] = []
         self._count_delta = count_delta or {}
 
     def upsert_chunks(
@@ -160,9 +163,12 @@ class FakeVectorClient:
         ids: list[str],
         documents: list[str],
         metadatas: list[dict] | None = None,
+        *,
+        embeddings: list[list[float]] | None = None,
     ) -> None:
         metas = metadatas or [{}] * len(ids)
         self.upsert_calls.append((collection, list(ids)))
+        self.upsert_embeddings.append(embeddings)
         col = self.store.setdefault(collection, {})
         for chunk_id, doc, meta in zip(ids, documents, metas):
             col[chunk_id] = (doc, dict(meta or {}))
@@ -205,7 +211,7 @@ class FailingUpsertClient(FakeVectorClient):
         super().__init__()
         self._fail_for = fail_for
 
-    def upsert_chunks(self, collection, ids, documents, metadatas=None):  # type: ignore[override]
+    def upsert_chunks(self, collection, ids, documents, metadatas=None, *, embeddings=None):  # type: ignore[override]
         if collection == self._fail_for:
             raise VectorServiceError(
                 f"POST /v1/vectors/upsert-chunks → HTTP 400: injected for {collection}"
@@ -308,21 +314,94 @@ class TestMigrateCollectionsUnit:
 
         assert [len(batch) for _, batch in fake.upsert_calls] == [3, 3, 1]
 
-    def test_no_embeddings_cross_the_etl(self, source_client) -> None:
-        """Decision (a) pin: the fake's ``upsert_chunks`` has no
-        ``embeddings`` parameter — an ETL forwarding source vectors would
-        TypeError. The target store holds (text, metadata) only."""
-        name = _coll("etlunit-noemb")
+    def test_cross_model_migration_forwards_no_embeddings(self, source_client) -> None:
+        """A cross-model collection (minilm, remapped) re-embeds server-side: NO
+        source vectors cross the ETL (embeddings stay None on every upsert) — the
+        source vectors are the wrong model. Same-model PASSTHROUGH (nexus-hxry2)
+        is the only path that forwards vectors — pinned separately below."""
+        name = _coll("etlunit-noemb")  # minilm-384 default → cross-model remapped
         _seed_source(source_client, name, 3)
         fake = FakeVectorClient()
 
         report = migrate_collections(source_client, fake, leg="local")
 
         assert report.ok is True
-        assert all(
-            isinstance(doc, str) and isinstance(meta, dict)
-            for doc, meta in fake.store[name].values()
+        assert all(emb is None for emb in fake.upsert_embeddings)
+
+    def test_same_model_bge_passthrough_forwards_vectors(self, source_client) -> None:
+        """nexus-hxry2 (LOCAL user): a bge-768 collection migrating same-model
+        copies its stored vectors instead of a wasted local ONNX recompute —
+        the ETL forwards them on the upsert, exactly like the voyage case."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("ptbge", model=_MODEL_768)
+        ids = _seed_source(source_client, name, 3)
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
         )
+
+        assert result.status == "migrated"
+        assert len(fake.upsert_embeddings) == 1
+        assert fake.upsert_embeddings[0] is not None
+        assert len(fake.upsert_embeddings[0]) == len(ids) == 3
+
+    def test_same_model_voyage_passthrough_forwards_vectors(self, source_client) -> None:
+        """nexus-hxry2: a voyage collection migrating SAME-model (target == name)
+        copies its stored vectors verbatim — the ETL fetches them and forwards
+        them on the upsert (so the service skips the billed re-embed)."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("ptvoyage", model="voyage-context-3")
+        ids = _seed_source(source_client, name, 3)
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+
+        assert result.status == "migrated"
+        # Exactly one batch; its embeddings were forwarded (passthrough), aligned
+        # 1:1 with the ids, NOT None (which would be the re-embed path).
+        assert len(fake.upsert_embeddings) == 1
+        forwarded = fake.upsert_embeddings[0]
+        assert forwarded is not None
+        assert len(forwarded) == len(ids) == 3
+
+    def test_cross_model_to_voyage_does_not_passthrough(self, source_client) -> None:
+        """A cross-model migration (target != name) MUST re-embed, never copy the
+        source vectors — they were produced by the wrong model. embeddings=None."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        source = _coll("xmvoyage", model=_MODEL_384)  # minilm source
+        target = _coll("xmvoyage", model="voyage-context-3")  # remapped target
+        _seed_source(source_client, source, 2)
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, source, dry_run=False, page=100, target_name=target
+        )
+
+        assert result.status == "migrated"
+        assert fake.upsert_calls[0][0] == target  # upserted into the TARGET
+        assert all(emb is None for emb in fake.upsert_embeddings)  # re-embed, no copy
+
+    def test_is_same_model_passthrough_helper(self) -> None:
+        from nexus.migration.vector_etl import _is_same_model_passthrough
+
+        v = "knowledge__acme__voyage-context-3__v1"
+        bge = "knowledge__acme__bge-base-en-v15-768__v1"
+        minilm = "knowledge__acme__minilm-l6-v2-384__v1"
+        # same-model voyage → passthrough (avoids the billed re-embed)
+        assert _is_same_model_passthrough(v, v) is True
+        # same-model bge → passthrough too (avoids a wasted local ONNX recompute)
+        assert _is_same_model_passthrough(bge, bge) is True
+        # cross-model (target differs) → re-embed, never copy wrong-model vectors
+        assert _is_same_model_passthrough(minilm, v) is False
+        # minilm "same-model" → NOT passthrough: the service wires no minilm
+        # embedder, so it must be remapped; copying would leave it unqueryable.
+        assert _is_same_model_passthrough(minilm, minilm) is False
 
     def test_nonconformant_collection_skipped_loud(self, source_client) -> None:
         """A non-four-segment name cannot dim-dispatch

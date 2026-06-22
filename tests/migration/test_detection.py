@@ -515,10 +515,10 @@ class TestDryRunPreview:
 
 
 # ---------------------------------------------------------------------------
-# Voyage re-embed COST estimate (nexus-cewad / RDR-166 Gap 4) — billed whenever
-# the effective target embedder is a Voyage model: cross-model→voyage AND
-# supported-voyage-1024 (Seam B re-embeds server-side for every chunk, so a
-# same-model voyage migration is billed too). ONNX/bge local re-embeds are free.
+# Voyage re-embed COST estimate (nexus-cewad / RDR-166 Gap 4) — billed only for a
+# cross-model→voyage RE-EMBED. Same-model voyage migrations use vector passthrough
+# (nexus-hxry2: stored vectors copied, not re-embedded) → free. ONNX/bge local
+# re-embeds are free.
 # ---------------------------------------------------------------------------
 class TestVoyageCostEstimate:
     def test_onnx_only_is_free(self) -> None:
@@ -531,17 +531,17 @@ class TestVoyageCostEstimate:
         assert preview.billed_voyage_tokens == 0
         assert preview.est_voyage_cost_usd == 0.0
 
-    def test_supported_voyage_collection_is_billed_server_side_reembed(self) -> None:
-        # Seam B discards stored vectors and re-embeds server-side, so a
-        # collection ALREADY on a voyage model is re-embedded with that same
-        # voyage model on migration → a billed Voyage API call, NOT a free copy.
+    def test_same_model_voyage_is_free_via_passthrough(self) -> None:
+        # A collection ALREADY on a voyage model migrates SAME-model: the stored
+        # vectors are copied verbatim (vector passthrough, nexus-hxry2), not
+        # re-embedded → no Voyage bill.
         cloud = _FakeChromaClient({VOYAGE_CTX_1024: 500})
         report = classify_collections(
             local_client=None, cloud_client=cloud, voyage_key_present=True
         )
         preview = build_dry_run_preview(report)
-        assert preview.billed_voyage_tokens == 500 * 512
-        assert preview.est_voyage_cost_usd == pytest.approx(500 * 512 / 1_000_000 * 0.12)
+        assert preview.billed_voyage_tokens == 0
+        assert preview.est_voyage_cost_usd == 0.0
 
     def test_cross_model_to_voyage_is_billed_and_scales(self) -> None:
         # minilm-384 in cloud mode → voyage-context-3 re-embed → BILLED.

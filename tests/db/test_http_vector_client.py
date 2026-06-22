@@ -162,6 +162,50 @@ class TestUpsertChunks:
         )
         assert "embeddings" not in calls[0]
 
+    def test_upsert_chunks_without_embeddings_omits_key(self, monkeypatch):
+        """Default Seam B path: no embeddings field → server embeds."""
+        client = HttpVectorClient()
+        calls = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: calls.append(body) or {"upserted": 1},
+        )
+        client.upsert_chunks("col", ["id1"], ["text1"])
+        assert "embeddings" not in calls[0]
+
+    def test_upsert_chunks_passthrough_sends_embeddings(self, monkeypatch):
+        """nexus-hxry2 same-model passthrough: supplied vectors ARE sent so the
+        service stores them verbatim and skips the re-embed."""
+        client = HttpVectorClient()
+        calls = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: calls.append(body) or {"upserted": 2},
+        )
+        vecs = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+        client.upsert_chunks(
+            "col", ["id1", "id2"], ["t1", "t2"], embeddings=vecs
+        )
+        assert calls[0]["embeddings"] == vecs
+
+    def test_skip_existing_prunes_embeddings_in_lockstep(self, monkeypatch):
+        """When skip_existing drops already-present ids, the supplied embeddings
+        must be pruned to match — never misaligned to the kept ids."""
+        client = HttpVectorClient()
+        calls = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: calls.append(body) or {"upserted": 1},
+        )
+        # id1 already present → only id2 survives; its embedding must be vecs[1].
+        monkeypatch.setattr(client, "existing_ids", lambda col, ids: {"id1"})
+        vecs = [[0.1], [0.2]]
+        client.upsert_chunks(
+            "col", ["id1", "id2"], ["t1", "t2"], embeddings=vecs, skip_existing=True
+        )
+        assert calls[0]["ids"] == ["id2"]
+        assert calls[0]["embeddings"] == [[0.2]]
+
 
 class TestSearch:
     def test_returns_list_flat(self, monkeypatch):

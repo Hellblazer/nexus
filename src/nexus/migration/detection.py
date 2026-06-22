@@ -418,11 +418,10 @@ _EST_ONNX_CHUNKS_PER_SEC: float = 100.0
 #: Coarse Voyage re-embed price (USD per 1M tokens), for the cost guardrail
 #: (nexus-cewad / RDR-166 Gap 4). Order-of-magnitude planning figure across the
 #: voyage-context-3 / voyage-code-3 family — NOT a billing-accurate quote; the
-#: operator's actual invoice is set by Voyage's current pricing. Billed whenever
-#: the effective TARGET embedder is a Voyage model — both cross-model→voyage AND
-#: same-model supported-voyage-1024 (Seam B discards stored vectors;
-#: upsert_chunks re-embeds server-side for every migrated chunk). ONNX/bge
-#: re-embeds run locally and are not billed.
+#: operator's actual invoice is set by Voyage's current pricing. Billed only for
+#: a cross-model→voyage RE-EMBED. Same-model voyage migrations use vector
+#: passthrough (nexus-hxry2) — stored vectors are copied, not re-embedded, so
+#: they do not bill. ONNX/bge re-embeds run locally and never bill.
 _VOYAGE_COST_USD_PER_1M_TOKENS: float = 0.12
 
 
@@ -462,10 +461,10 @@ class DryRunPreview:
     total_est_tokens: int
     est_seconds: float
     #: nexus-cewad: token volume that will be RE-EMBEDDED through a Voyage model
-    #: and therefore billed to the operator key — includes BOTH cross-model→voyage
-    #: AND supported-voyage-1024 (same-model) groups. Seam B discards stored
-    #: vectors and re-embeds server-side for every migrated chunk, so there is no
-    #: free byte-for-byte copy. ONNX/bge re-embeds run locally and contribute zero.
+    #: and therefore billed to the operator key — counts cross-model→voyage
+    #: re-embed groups only. Same-model voyage migrations use vector passthrough
+    #: (nexus-hxry2: stored vectors copied, not re-embedded) and contribute zero,
+    #: as do ONNX/bge re-embeds (local).
     billed_voyage_tokens: int = 0
     #: Coarse USD estimate for ``billed_voyage_tokens`` at
     #: :data:`_VOYAGE_COST_USD_PER_1M_TOKENS`. ``0.0`` when nothing is billed.
@@ -542,19 +541,14 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
         migratable_chunks += chunk_count
         total_est_tokens += tokens
         est_seconds += seconds
-        # Billed iff the chunk's effective TARGET embedder is a Voyage model.
-        # Seam B re-embeds EVERY migrated chunk server-side (iter_collection_chunks
-        # deliberately discards stored vectors; upsert_chunks ignores any
-        # embeddings arg), so there is no free "byte-for-byte" copy — what
-        # determines the bill is which model the service re-embeds with:
-        #   * cross-model→voyage  → target_model is a Voyage model → BILLED.
-        #   * supported-voyage-1024 → re-embedded with the SAME voyage model → BILLED.
+        # Billed iff the migration RE-EMBEDS through a Voyage model:
+        #   * cross-model→voyage → re-embedded with the target voyage model → BILLED.
+        #   * same-model voyage (supported-voyage-1024) → vector PASSTHROUGH
+        #     (nexus-hxry2): the stored vectors are copied verbatim, NOT
+        #     re-embedded, so it no longer bills. (Best case: a same-model chunk
+        #     missing its source vector falls back to a billed re-embed per batch.)
         #   * supported-onnx / cross-model→bge → local ONNX (bge-768) → free.
-        billed = (
-            target_model in _VOYAGE_MODELS
-            if is_cross_model
-            else support == "supported-voyage-1024"
-        )
+        billed = is_cross_model and target_model in _VOYAGE_MODELS
         if billed:
             billed_voyage_tokens += tokens
 
