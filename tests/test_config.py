@@ -17,6 +17,12 @@ from nexus.config import (
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Clear ambient credential env so get_credential reads config.yml, not a
+    # value CI exports (NX_SERVICE_TOKEN=test-token is set on the runners and
+    # overrides config.yml — env-first precedence). Without this, the
+    # service_url/service_token credential tests pass locally and fail in CI.
+    for _ev in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+        monkeypatch.delenv(_ev, raising=False)
     return tmp_path
 
 
@@ -112,6 +118,38 @@ def test_set_credential_unknown_name_raises(home: Path) -> None:
     from nexus.config import set_credential
     with pytest.raises(ValueError, match="Unknown credential"):
         set_credential("totally_unknown_credential", "some-value")
+
+
+# ── unset_credential (RDR-165 nexus-a11ge: nx uninstall managed-config clear) ──
+
+
+def test_unset_credential_removes_from_config(home: Path) -> None:
+    from nexus.config import get_credential, set_credential, unset_credential
+
+    set_credential("service_url", "https://api.conexus-nexus.com")
+    set_credential("service_token", "tok-abc")
+    # unset one → it's gone; the other survives.
+    assert unset_credential("service_url") is True  # was present
+    assert get_credential("service_url") == ""
+    assert get_credential("service_token") == "tok-abc"
+    # config.yml no longer carries the removed key.
+    import yaml
+    data = yaml.safe_load((home / ".config" / "nexus" / "config.yml").read_text())
+    assert "service_url" not in data.get("credentials", {})
+    assert data["credentials"]["service_token"] == "tok-abc"
+
+
+def test_unset_credential_absent_is_noop(home: Path) -> None:
+    from nexus.config import unset_credential
+
+    # Never set → unset reports not-present, raises nothing (idempotent teardown).
+    assert unset_credential("service_token") is False
+
+
+def test_unset_credential_unknown_name_raises(home: Path) -> None:
+    from nexus.config import unset_credential
+    with pytest.raises(ValueError, match="Unknown credential"):
+        unset_credential("totally_unknown_credential")
 
 
 # ── Indexing config ──────────────────────────────────────────────────────────

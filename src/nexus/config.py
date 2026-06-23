@@ -786,6 +786,52 @@ def set_credential(name: str, value: str) -> None:
             raise
 
 
+def unset_credential(name: str) -> bool:
+    """Remove credential *name* from ``~/.config/nexus/config.yml``.
+
+    The teardown counterpart of :func:`set_credential` (RDR-165 nexus-a11ge —
+    the managed-config clear in ``nx uninstall``). Returns ``True`` when the key
+    was present and removed, ``False`` when it was already absent (idempotent —
+    a teardown must not error on an already-clean config). Raises ``ValueError``
+    for an unknown credential name, mirroring :func:`set_credential`.
+
+    NOTE: this clears only the persisted ``config.yml`` value. An environment
+    variable (e.g. ``NX_SERVICE_TOKEN``) overrides config.yml in
+    :func:`get_credential` and CANNOT be unset from the parent shell here — the
+    caller is responsible for warning the user to unset the export.
+    """
+    if name not in CREDENTIALS:
+        known = ", ".join(sorted(CREDENTIALS))
+        raise ValueError(f"Unknown credential '{name}'. Known: {known}")
+    path = _global_config_path()
+    if not path.exists():
+        return False
+    with _config_lock:
+        data: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
+        creds = data.get("credentials")
+        if not isinstance(creds, dict) or name not in creds:
+            return False
+        del creds[name]
+        if not creds:
+            data.pop("credentials", None)
+        content = yaml.dump(data, default_flow_style=False)
+        # Atomic write: unique temp file → os.replace() (0o600), mirroring
+        # set_credential so a torn write never leaves a half-cleared config.
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
+        try:
+            with os.fdopen(tmp_fd, "w") as fh:
+                fh.write(content)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass  # intentional: cleanup after re-raise
+            raise
+    return True
+
+
 def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     """Load and merge configuration.
 
