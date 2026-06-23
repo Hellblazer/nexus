@@ -1733,6 +1733,35 @@ nx upgrade --auto                 # Quiet mode for hook invocation (T2 only, exi
 
 ---
 
+## nx uninstall
+
+First-class agent teardown (RDR-165). Cleanly removes nexus, auto-detecting and
+handling BOTH install shapes — each branch is a no-op when its target is absent:
+
+- **Local service**: stops the engine-service + Postgres stack
+  (`nx daemon service stop --with-pg`), stops the T2 daemon, removes the OS
+  autostart unit, and clears the first-run marker.
+- **Managed-only client**: clears the managed endpoint config
+  (`service_url` + `service_token`) from `config.yml`. Skips service-stop (no
+  local service) and never touches the remote tenant's data.
+
+```
+nx uninstall                  # DRY RUN (default): preview what would be removed
+nx uninstall --yes            # Perform the teardown
+nx uninstall --yes --remove-data   # ALSO wipe the local data dir (notes + index)
+```
+
+| Flag | Description |
+|------|-------------|
+| `--yes` | Perform the teardown. Without it, `nx uninstall` only previews (dry-run default). |
+| `--remove-data` | Also wipe the local nexus data dir (notes + search index). Irreversible; only acts with `--yes`. **Does NOT touch a managed/remote tenant's data.** |
+
+**Managed env override:** if `NX_SERVICE_URL` / `NX_SERVICE_TOKEN` are exported in
+your shell (not just `config.yml`), `nx uninstall` clears `config.yml` and warns
+you to `unset` the shell export — it cannot unset the parent shell itself.
+
+---
+
 ## nx console
 
 Embedded web UI for monitoring agentic Nexus activity.

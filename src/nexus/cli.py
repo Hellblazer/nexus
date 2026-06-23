@@ -42,6 +42,7 @@ from nexus.commands.command_context import command_context
 from nexus.commands.console import console
 from nexus.commands.context_cmd import context
 from nexus.commands.config_cmd import config_group
+from nexus.commands.uninstall import uninstall_cmd
 from nexus.commands.daemon import daemon_group
 from nexus.commands.doc import doc
 from nexus.commands.doctor import doctor_cmd
@@ -127,6 +128,7 @@ main.add_command(tenant, name="tenant")
 main.add_command(tier_status_cmd, name="tier-status")
 main.add_command(aspects_group, name="aspects")
 main.add_command(upgrade)
+main.add_command(uninstall_cmd, name="uninstall")
 
 
 if __name__ == "__main__":

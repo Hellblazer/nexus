@@ -225,6 +225,10 @@ class DaemonUninstallReport:
     daemon_stopped: bool
     warnings: tuple[str, ...]
     message: str
+    #: RDR-165 eu4u4: whether the engine-service/PG stack was stopped
+    #: (`nx daemon service stop --with-pg`). Best-effort, like ``daemon_stopped``.
+    #: Defaulted so the MCP daemon_uninstall dry-run path needn't set it.
+    service_stopped: bool = False
 
 
 def _stop_daemon_best_effort() -> tuple[bool, str | None]:
@@ -249,6 +253,31 @@ def _stop_daemon_best_effort() -> tuple[bool, str | None]:
     return True, None
 
 
+def _stop_service_stack_best_effort() -> tuple[bool, str | None]:
+    """Best-effort ``nx daemon service stop --with-pg``. Returns (stopped, warning).
+
+    RDR-165 eu4u4: the complete teardown must stop the engine-service + embedded
+    Postgres, not only the T2 daemon (the installer.py gap where uninstall only
+    ran ``nx daemon t2 stop``). Same shell-out rationale as
+    :func:`_stop_daemon_best_effort` (lifecycle is daemon-command territory, not
+    installer logic; RDR-126 §2) and routes through the existing service-stop
+    command, which relinquishes the storage_service lease via the shared
+    ``service_registry.py`` primitive (RDR-149 — no duplicated lifecycle here).
+    A no-running-service exit is reported as a warning, never raised.
+    """
+    from nexus.commands import daemon as _daemon
+
+    cmd = [*_daemon._resolve_nx_bin(), "daemon", "service", "stop", "--with-pg"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+    except Exception as exc:  # noqa: BLE001 — stop is best-effort
+        return False, f"service stop failed: {type(exc).__name__}: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        return False, f"service stop exited {result.returncode}: {detail}"
+    return True, None
+
+
 def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> DaemonUninstallReport:
     """Orchestrate full daemon removal for the ``daemon_uninstall`` MCP tool.
 
@@ -267,7 +296,11 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     marker = _first_run_marker_path()
 
     if not confirm:
-        parts = [f"the autostart unit at {unit_dest}", "stop the running daemon"]
+        parts = [
+            f"the autostart unit at {unit_dest}",
+            "stop the engine-service + Postgres stack (service stop --with-pg)",
+            "stop the running T2 daemon",
+        ]
         if marker.exists():
             parts.append(f"the first-run marker at {marker}")
         if remove_data:
@@ -296,7 +329,14 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     unit_result = uninstall_autostart()
     warnings.extend(unit_result.warnings)
 
-    # 2. Stop the running daemon (best-effort).
+    # 2. Stop the engine-service + Postgres stack (best-effort) — RDR-165 eu4u4.
+    #    Stop the service BEFORE the T2 daemon so a complete teardown leaves no
+    #    running storage backend; both are best-effort and never raise.
+    service_stopped, service_warning = _stop_service_stack_best_effort()
+    if service_warning:
+        warnings.append(service_warning)
+
+    # 3. Stop the running T2 daemon (best-effort).
     daemon_stopped, stop_warning = _stop_daemon_best_effort()
     if stop_warning:
         warnings.append(stop_warning)
@@ -338,6 +378,7 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
                 warnings.append(f"could not remove data dir {data_dir}: {exc}")
 
     summary = [f"autostart unit: {unit_result.status.value}"]
+    summary.append("service stack stopped" if service_stopped else "service stop not confirmed")
     summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
     if marker_removed:
         summary.append("first-run marker removed")
@@ -351,6 +392,7 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         data_removed=data_removed,
         data_dir=data_dir,
         daemon_stopped=daemon_stopped,
+        service_stopped=service_stopped,
         warnings=tuple(warnings),
         message="Daemon uninstall complete: " + "; ".join(summary) + ".",
     )

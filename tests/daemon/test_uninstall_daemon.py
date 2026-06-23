@@ -97,6 +97,25 @@ class TestConfirmedUninstall:
         stop_cmds = [c.args[0] for c in mock_run.call_args_list]
         assert ["/opt/conexus/bin/nx", "daemon", "t2", "stop"] in stop_cmds
 
+    def test_stops_engine_service_stack_with_pg(self, _env: Path) -> None:
+        # RDR-165 eu4u4: uninstall_daemon must tear down the engine-service/PG
+        # stack, not only `nx daemon t2 stop` (the installer.py:241 gap). Assert
+        # the exact `service stop --with-pg` argv is issued AND reported.
+        with patch.object(installer.subprocess, "run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stderr = ""
+            mock_run.return_value.stdout = ""
+            report = installer.uninstall_daemon(confirm=True)
+
+        stop_cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert ["/opt/conexus/bin/nx", "daemon", "service", "stop", "--with-pg"] in stop_cmds
+        assert report.service_stopped is True
+
+    def test_dry_run_plan_mentions_service_stack(self, _env: Path) -> None:
+        report = installer.uninstall_daemon(confirm=False)
+        assert report.confirmed is False
+        assert "service" in report.message.lower()
+
     def test_remove_data_wipes_config_dir(self, _env: Path) -> None:
         config_dir = _env / "cfg"
         assert config_dir.exists()
