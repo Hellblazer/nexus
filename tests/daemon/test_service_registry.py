@@ -437,6 +437,17 @@ class TestDiscoverReapToctou:
         assert survived.owner_token == "B"
         assert survived.endpoint["port"] == 6000
 
+    def test_reap_removes_shutdown_marked_record(
+        self, registry: ServiceRegistry, clock: _FakeClock
+    ) -> None:
+        # A shutting_down record is never fresh (status check) even within TTL —
+        # the primary signal a stopping daemon sends before relinquish(). The
+        # reap must remove it so discoverers don't skip a dead marker forever.
+        record = registry.publish("42", endpoint=_endpoint(), version="1", owner_token="A")
+        registry.mark_shutting_down(record)
+        assert registry.discover("42") is None
+        assert not registry._record_path("42").exists(), "shutdown-marked record must be reaped"
+
     def test_reap_no_op_when_record_re_stamped_fresh_by_same_owner(
         self, registry: ServiceRegistry, clock: _FakeClock
     ) -> None:

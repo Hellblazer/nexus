@@ -128,9 +128,8 @@ def test_flock_acquire_sites_are_allowlisted() -> None:
         rel = path.relative_to(SRC_ROOT).as_posix()
         if rel in _FLOCK_ALLOWED_MODULES:
             continue
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            stripped = line.lstrip()
-            if stripped.startswith("fcntl.flock(") and _ALLOW_TOKEN not in line:
+        for lineno, line in _flock_acquire_lines(path.read_text(encoding="utf-8")):
+            if _ALLOW_TOKEN not in line:
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
     assert not offenders, (
         "RDR-149 lifecycle gate (nexus-9nv1d): a flock acquire appeared in a "
@@ -139,6 +138,32 @@ def test_flock_acquire_sites_are_allowlisted() -> None:
         "a different, legitimate lock, add the module to the allowlist with a "
         "reason. Offenders:\n  " + "\n  ".join(offenders)
     )
+
+
+def _flock_acquire_lines(text: str) -> list[tuple[int, str]]:
+    """Yield (lineno, line) for every flock ACQUIRE in *text*.
+
+    Matches ``fcntl.flock(`` anywhere on the line (not just at line start, so an
+    assignment form ``x = fcntl.flock(...)`` is caught — HIGH-2) and excludes
+    ``LOCK_UN`` release calls. Gate tests prefer over-matching (a false positive
+    is a visible review prompt) to under-matching (a silent miss)."""
+    out: list[tuple[int, str]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if "fcntl.flock(" in line and "LOCK_UN" not in line:
+            out.append((lineno, line))
+    return out
+
+
+def test_flock_acquire_allowlist_is_non_vacuous(tmp_path: pathlib.Path) -> None:
+    """Prove the scan actually FIRES on a bespoke flock acquire under a novel
+    name (the bead's explicit non-vacuity requirement). A synthetic offender in
+    a non-allowlisted module must be detected by the scan logic."""
+    synthetic = "import fcntl\n\ndef _my_bespoke_election(fd):\n    fcntl.flock(fd, fcntl.LOCK_EX)\n"
+    hits = _flock_acquire_lines(synthetic)
+    assert len(hits) == 1, "the scan must detect a bespoke flock acquire"
+    assert "LOCK_EX" in hits[0][1]
+    # And the release form must NOT be flagged.
+    assert _flock_acquire_lines("    fcntl.flock(fd, fcntl.LOCK_UN)\n") == []
 
 
 def test_gate_doc_exists() -> None:
