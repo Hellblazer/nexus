@@ -746,6 +746,30 @@ class HttpCatalogClient:
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         return self.resolve(doc_id)
 
+    def resolve_many(self, doc_ids: list[str]) -> "dict[str, CatalogEntry]":
+        """Batch-resolve multiple doc_ids to CatalogEntry objects.
+
+        nexus-7lm3q: replaces the N per-doc ``by_doc_id()`` loop in
+        ``_attach_display_paths`` (search_engine.py) so a single search
+        with M distinct docs pays ONE catalog round-trip instead of M.
+        Mirrors ``POST /v1/catalog/resolve_many`` → Java
+        ``CatalogHandler.handleResolveMany`` /
+        ``CatalogRepository.resolveMany``.
+
+        Returns a dict keyed by doc_id; each value is a CatalogEntry.
+        Missing or unresolvable doc_ids are absent from the result.
+        """
+        if not doc_ids:
+            return {}
+        result = self._post("/resolve_many", {"doc_ids": doc_ids})
+        if not result:
+            return {}
+        entries: dict[str, CatalogEntry] = {}
+        for doc_id, raw in result.get("entries", {}).items():
+            if raw and raw.get("tumbler"):
+                entries[doc_id] = _to_entry(raw)
+        return entries
+
     def lookup_doc_id_by_collection_and_path(
         self, collection: str, file_path: str
     ) -> str | None:
@@ -1125,6 +1149,25 @@ class HttpCatalogClient:
     def get_manifest(self, doc_id: str) -> list[Any]:
         result = self._get("/manifest/get", doc_id=doc_id)
         return result.get("rows", []) if result else []
+
+    def get_manifests(self, doc_ids: list[str]) -> dict[str, list[Any]]:
+        """Batch-fetch manifests for multiple doc_ids in one round-trip.
+
+        nexus-7lm3q: replaces the N per-doc ``get_manifest()`` loop in
+        ``_attach_doc_ids_from_catalog`` (search_engine.py) so a single
+        search with M distinct docs pays ONE catalog round-trip instead
+        of M. Mirrors ``POST /v1/catalog/manifest/get_many`` → Java
+        ``CatalogHandler.handleManifestGetMany`` /
+        ``CatalogRepository.getManifestMany``.
+
+        Returns a dict keyed by doc_id; each value is the ordered list
+        of manifest rows (same shape as ``get_manifest()``). Missing
+        doc_ids are absent from the result (not keyed to empty list).
+        """
+        if not doc_ids:
+            return {}
+        result = self._post("/manifest/get_many", {"doc_ids": doc_ids})
+        return result.get("manifests", {}) if result else {}
 
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
         """Return chashes for all chunks of doc_id.

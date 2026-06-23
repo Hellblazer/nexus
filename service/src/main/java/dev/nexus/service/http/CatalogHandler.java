@@ -44,9 +44,11 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/write     replace manifest
  *   POST  /v1/catalog/manifest/append    append chunks
  *   GET   /v1/catalog/manifest/get       get manifest for doc_id
+ *   POST  /v1/catalog/manifest/get_many  batch-fetch manifests for multiple doc_ids (nexus-7lm3q)
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
+ *   POST  /v1/catalog/resolve_many       batch-resolve multiple doc_ids to entries (nexus-7lm3q)
  *   POST  /v1/catalog/owners/upsert      upsert owner
  *   GET   /v1/catalog/owners/list        list all owners
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
@@ -81,6 +83,13 @@ public final class CatalogHandler implements HttpHandler {
             .setSerializationInclusion(JsonInclude.Include.ALWAYS);
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+
+    /**
+     * Upper bound on doc_ids accepted by the batch endpoints
+     * ({@code /manifest/get_many}, {@code /resolve_many}). Well under
+     * PostgreSQL's 32767-parameter Bind-message hard limit. nexus-7lm3q review.
+     */
+    private static final int MAX_BATCH_DOC_IDS = 1000;
 
     private final CatalogRepository repo;
 
@@ -123,6 +132,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/write"        -> handleManifestWrite(exchange, tenant, method);
                 case "/manifest/append"       -> handleManifestAppend(exchange, tenant, method);
                 case "/manifest/get"          -> handleManifestGet(exchange, tenant, method);
+                case "/manifest/get_many"     -> handleManifestGetMany(exchange, tenant, method);
                 case "/manifest/purge"        -> handleManifestPurge(exchange, tenant, method);
                 case "/manifest/chashes"      -> handleManifestChashes(exchange, tenant, method);
                 case "/manifest/docs_for_chashes" -> handleDocsForChashes(exchange, tenant, method);
@@ -170,6 +180,9 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Scoring hot-path batch endpoints (nexus-qnp5s) ───────────
                 case "/docs/chunk-counts"     -> handleDocChunkCounts(exchange, tenant, method);
                 case "/links/from-batch"      -> handleLinksFromBatch(exchange, tenant, method);
+
+                // ── Batch resolve endpoints (nexus-7lm3q) ────────────────────
+                case "/resolve_many"          -> handleResolveMany(exchange, tenant, method);
 
                 // ── Server-side tumbler assignment ────────────────────────────
                 case "/doc/register"          -> handleDocRegister(exchange, tenant, method);
@@ -514,6 +527,75 @@ public final class CatalogHandler implements HttpHandler {
             : List.of();
         var docs = repo.docsForChashes(tenant, chashes);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("tumblers", docs)));
+    }
+
+    /**
+     * POST /v1/catalog/manifest/get_many (nexus-7lm3q)
+     *
+     * <p>Batch-fetch manifest rows for multiple doc_ids in a single round-trip,
+     * replacing the N per-doc {@code /manifest/get} loop issued by
+     * {@code _attach_doc_ids_from_catalog} in {@code search_engine.py}.
+     *
+     * <p>Request body:  {@code {"doc_ids": ["tumbler1", "tumbler2", ...]}}
+     * Response body:   {@code {"manifests": {"tumbler1": [rows...], "tumbler2": [rows...]}}}
+     *
+     * <p>Doc_ids with no manifest rows are absent from the response map.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleManifestGetMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("doc_ids");
+        List<String> docIds = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (docIds.isEmpty()) {
+            HttpUtil.send(exchange, 200, "{\"manifests\":{}}"); return;
+        }
+        // nexus-7lm3q review (CR High-2 / critic Sig-1): cap the IN-list well
+        // under PostgreSQL's 32767-parameter Bind limit. The sole production
+        // caller (search_engine fan-out) is bounded by the 300-result cap and
+        // the Python client batches at 500, but the endpoint must not trust the
+        // caller — admin tooling / future consumers could submit a larger list.
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var manifests = repo.getManifestMany(tenant, docIds);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("manifests", manifests)));
+    }
+
+    /**
+     * POST /v1/catalog/resolve_many (nexus-7lm3q)
+     *
+     * <p>Batch-resolve multiple doc_ids to full document entries in a single
+     * round-trip, replacing the N per-doc {@code /show?tumbler=X} calls issued
+     * by {@code _attach_display_paths} in {@code search_engine.py}.
+     *
+     * <p>Request body:  {@code {"doc_ids": ["tumbler1", "tumbler2", ...]}}
+     * Response body:   {@code {"entries": {"tumbler1": {doc...}, "tumbler2": {doc...}}}}
+     *
+     * <p>Doc_ids with no matching document are absent from the response map.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleResolveMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("doc_ids");
+        List<String> docIds = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (docIds.isEmpty()) {
+            HttpUtil.send(exchange, 200, "{\"entries\":{}}"); return;
+        }
+        // nexus-7lm3q review (CR High-2 / critic Sig-1): see handleManifestGetMany —
+        // cap the IN-list under PostgreSQL's 32767-parameter Bind limit.
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var entries = repo.resolveMany(tenant, docIds);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("entries", entries)));
     }
 
     /**

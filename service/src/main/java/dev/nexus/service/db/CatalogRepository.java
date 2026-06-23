@@ -1090,6 +1090,70 @@ public final class CatalogRepository {
         );
     }
 
+    /**
+     * Batch-fetch manifest rows for multiple doc_ids (nexus-7lm3q).
+     *
+     * <p>Executes {@code SELECT ... FROM catalog_document_chunks WHERE doc_id IN (?)}
+     * once for all requested doc_ids, returning a per-doc-id map of manifest rows.
+     * Doc_ids with no rows are absent from the result map. Mirrors the shape of
+     * {@link #getManifest} but for N docs in one DB round-trip instead of N round-trips.
+     *
+     * @return {@code {docId -> [manifest rows ordered by position]}}
+     */
+    public Map<String, List<Map<String, Object>>> getManifestMany(String tenant, List<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) return Map.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
+                                  F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN)
+                          .from(T_CHUNKS)
+                          .where(F_CHK_DOC.in(docIds))
+                          .orderBy(F_CHK_DOC, F_CHK_POS)
+                          .fetch();
+            Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                String docId = r.value1();
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("doc_id",      docId);
+                m.put("position",    r.value2());
+                m.put("chash",       r.value3());
+                m.put("chunk_index", r.value4());
+                m.put("line_start",  r.value5());
+                m.put("line_end",    r.value6());
+                m.put("char_start",  r.value7());
+                m.put("char_end",    r.value8());
+                result.computeIfAbsent(docId, k -> new ArrayList<>()).add(m);
+            }
+            return result;
+        });
+    }
+
+    /**
+     * Batch-resolve multiple doc_ids to full document entries (nexus-7lm3q).
+     *
+     * <p>Executes {@code SELECT ... FROM catalog_documents WHERE tumbler IN (?)}
+     * once for all requested doc_ids, returning a per-doc-id map of document rows
+     * (same shape as {@link #getDocument}). Doc_ids with no matching document are
+     * absent from the result map.
+     *
+     * @return {@code {docId -> document row dict}}
+     */
+    public Map<String, Map<String, Object>> resolveMany(String tenant, List<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) return Map.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(documentFields())
+                          .from(T_DOCS)
+                          .where(F_DOC_TUMBLER.in(docIds).and(F_DOC_DELETED_AT.isNull()))
+                          .fetch();
+            Map<String, Map<String, Object>> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                Map<String, Object> doc = docRowFromRecord(r.intoMap());
+                String tumbler = (String) doc.get("tumbler");
+                if (tumbler != null) result.put(tumbler, doc);
+            }
+            return result;
+        });
+    }
+
     /** Resync chunk_count on catalog_documents from manifest row count. */
     public int resyncChunkCount(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx -> {

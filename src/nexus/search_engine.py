@@ -136,8 +136,48 @@ def _attach_doc_ids_from_catalog(
             r.metadata["doc_id"] = docs[0]
             resolved_doc_ids[chash] = docs[0]
 
-    # Per-doc manifest cache so multi-chunk docs only fetch once.
+    # Batch-fetch manifests for all resolved doc_ids in one call when the
+    # catalog backend supports get_manifests() (nexus-7lm3q).  Falls back
+    # to the per-doc loop for older/local catalogs that lack that method.
+    distinct_doc_ids = list({
+        did
+        for chash in chashes
+        if chash
+        for did in [resolved_doc_ids.get(chash) or ""]
+        if did
+    })
     manifest_cache: dict[str, list[Any]] = {}
+    _get_manifests_batch = getattr(catalog, "get_manifests", None)
+    if _get_manifests_batch is not None and distinct_doc_ids:
+        try:
+            batch_result = _get_manifests_batch(distinct_doc_ids)
+            # nexus-7lm3q review (CR Low-1): ``update(... or {})`` makes an
+            # empty/None response a clean no-op instead of routing it through a
+            # falsy guard, so "all doc_ids genuinely absent" and "skipped" are
+            # not conflated at the call site.
+            manifest_cache.update(batch_result or {})
+        except Exception:
+            _log.debug(
+                "attach_chunk_count_batch_failed",
+                doc_ids=distinct_doc_ids, exc_info=True,
+            )
+            # Degradation granularity (CR Med-2 / critic obs): a single batch
+            # failure leaves manifest_cache empty, so chunk_count/chunk_index
+            # are dropped for the WHOLE result set, not per-doc. This is a
+            # deliberate trade (one round-trip vs N) — the batch call replaces
+            # the per-doc loop wholesale; we do not re-fan-out on failure.
+    else:
+        # Legacy per-doc loop for catalogs without get_manifests().
+        for doc_id in distinct_doc_ids:
+            try:
+                manifest_cache[doc_id] = catalog.get_manifest(doc_id)
+            except Exception:
+                _log.debug(
+                    "attach_chunk_count_lookup_failed",
+                    doc_id=doc_id, exc_info=True,
+                )
+                manifest_cache[doc_id] = []
+
     for r, chash in zip(results, chashes):
         if not chash:
             continue
@@ -145,16 +185,6 @@ def _attach_doc_ids_from_catalog(
         if not doc_id:
             continue
         manifest = manifest_cache.get(doc_id)
-        if manifest is None:
-            try:
-                manifest = catalog.get_manifest(doc_id)
-            except Exception:
-                _log.debug(
-                    "attach_chunk_count_lookup_failed",
-                    doc_id=doc_id, exc_info=True,
-                )
-                manifest = []
-            manifest_cache[doc_id] = manifest
         if not manifest:
             continue
         # Only inject when absent (legacy chunks may have these).
@@ -162,8 +192,16 @@ def _attach_doc_ids_from_catalog(
             r.metadata["chunk_count"] = len(manifest)
         if "chunk_index" not in r.metadata:
             for row in manifest:
-                if getattr(row, "chash", "") == chash:
-                    r.metadata["chunk_index"] = int(getattr(row, "position", 0))
+                row_chash = (
+                    row.get("chash", "") if isinstance(row, dict)
+                    else getattr(row, "chash", "")
+                )
+                if row_chash == chash:
+                    pos = (
+                        row.get("position", 0) if isinstance(row, dict)
+                        else getattr(row, "position", 0)
+                    )
+                    r.metadata["chunk_index"] = int(pos)
                     break
 
 
@@ -196,16 +234,33 @@ def _attach_display_paths(
     }
     if not doc_ids:
         return
-    # Single-pass cache so repeated doc_ids (multi-chunk results) only
-    # hit the catalog once.
+    # Batch-resolve all doc_ids in one call when the catalog backend
+    # supports resolve_many() (nexus-7lm3q).  Falls back to the per-doc
+    # by_doc_id() loop for older/local catalogs that lack the method.
     cache: dict[str, str] = {}
-    for did in doc_ids:
+    _resolve_many = getattr(catalog, "resolve_many", None)
+    if _resolve_many is not None:
         try:
-            entry = catalog.by_doc_id(did)
+            batch = _resolve_many(list(doc_ids))
+            for did, entry in (batch or {}).items():
+                if entry is not None and entry.file_path:
+                    cache[did] = entry.file_path
         except Exception:
-            continue
-        if entry is not None and entry.file_path:
-            cache[did] = entry.file_path
+            _log.debug("attach_display_paths_batch_failed", exc_info=True)
+            # Degradation granularity (CR Med-1 / critic obs): a single
+            # resolve_many failure leaves the cache empty, so _display_path is
+            # dropped for the WHOLE result set, not per-doc. Deliberate trade
+            # (one round-trip vs N) — the batch replaces the per-doc loop
+            # wholesale; we do not re-fan-out on failure.
+    else:
+        # Legacy per-doc loop for catalogs without resolve_many().
+        for did in doc_ids:
+            try:
+                entry = catalog.by_doc_id(did)
+            except Exception:
+                continue
+            if entry is not None and entry.file_path:
+                cache[did] = entry.file_path
     if not cache:
         return
     for r in results:

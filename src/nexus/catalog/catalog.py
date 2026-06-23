@@ -1987,6 +1987,15 @@ class Catalog:
         """Return ordered manifest rows for ``doc_id`` (nexus-572g K6)."""
         return self._writes.get_manifest(doc_id)
 
+    def get_manifests(self, doc_ids: list[str]) -> "dict[str, list[_ManifestRow]]":
+        """Batch-fetch manifest rows for multiple doc_ids (nexus-7lm3q).
+
+        Returns a dict keyed by doc_id; each value is the ordered list of
+        ManifestRow objects. Doc_ids with no rows are absent from the result.
+        Delegates to ``_CatalogWrites.get_manifests``.
+        """
+        return self._writes.get_manifests(doc_ids)
+
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
         """Return the ordered list of chashes for ``doc_id`` (RDR-108
         Phase 4b / nexus-kosc). Convenience wrapper over ``get_manifest``
@@ -2061,6 +2070,15 @@ class Catalog:
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         """Delegates to ``_DocumentOps.by_doc_id`` (nexus-mbm)."""
         return self._docs.by_doc_id(doc_id)
+
+    def resolve_many(self, doc_ids: list[str]) -> "dict[str, CatalogEntry]":
+        """Batch-resolve multiple doc_ids to CatalogEntry objects (nexus-7lm3q).
+
+        Returns a dict keyed by doc_id; each value is the matching
+        CatalogEntry. Doc_ids with no matching document are absent from
+        the result. Delegates to ``_DocumentOps.resolve_many``.
+        """
+        return self._docs.resolve_many(doc_ids)
 
     def lookup_doc_id_by_collection_and_path(
         self, collection: str, source_path: str,

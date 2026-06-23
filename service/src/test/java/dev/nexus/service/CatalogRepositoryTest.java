@@ -639,6 +639,88 @@ class CatalogRepositoryTest {
         assertThat(doc.get("chunk_count")).isEqualTo(3);
     }
 
+    // ── nexus-7lm3q: batch manifest/resolve endpoints ────────────────────────
+
+    @Test @Order(55)
+    void manifest_getManifestMany_batchFetchesAllDocs() {
+        // Seed two docs each with two chunks
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.1", "title", "GMM Doc1",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.writeManifest(TENANT_A, "gmm.1", List.of(
+            Map.<String, Object>of("position", 0, "chash", "gmm1aa00000000000000000000000000", "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", "gmm1bb00000000000000000000000000", "chunk_index", 1)
+        ));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.2", "title", "GMM Doc2",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.writeManifest(TENANT_A, "gmm.2", List.of(
+            Map.<String, Object>of("position", 0, "chash", "gmm2cc00000000000000000000000000", "chunk_index", 0)
+        ));
+
+        var result = repo.getManifestMany(TENANT_A, List.of("gmm.1", "gmm.2", "gmm.nonexistent"));
+
+        // Two docs found, one absent (not keyed to empty list)
+        assertThat(result).containsOnlyKeys("gmm.1", "gmm.2");
+        assertThat(result.get("gmm.1")).hasSize(2);
+        assertThat(result.get("gmm.2")).hasSize(1);
+        // Ordered by position within each doc
+        assertThat(result.get("gmm.1").get(0).get("chash")).isEqualTo("gmm1aa00000000000000000000000000");
+        assertThat(result.get("gmm.1").get(1).get("chash")).isEqualTo("gmm1bb00000000000000000000000000");
+        assertThat(result.get("gmm.2").get(0).get("chash")).isEqualTo("gmm2cc00000000000000000000000000");
+    }
+
+    @Test @Order(56)
+    void manifest_getManifestMany_emptyInput_returnsEmptyMap() {
+        var result = repo.getManifestMany(TENANT_A, List.of());
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(56)
+    void manifest_getManifestMany_tenantIsolation() {
+        // nexus-7lm3q review (CR High-1): getManifestMany routes through
+        // withTenant + RLS just like resolveMany; assert a TENANT_B manifest
+        // never leaks into a TENANT_A batch query (mirrors
+        // resolveMany_tenantIsolation @Order 59).
+        repo.upsertDocument(TENANT_B, Map.of("tumbler", "gmmiso.1", "title", "Tenant B Doc",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.writeManifest(TENANT_B, "gmmiso.1", List.of(
+            Map.<String, Object>of("position", 0, "chash", "gmmisob000000000000000000000000a", "chunk_index", 0)
+        ));
+        var result = repo.getManifestMany(TENANT_A, List.of("gmmiso.1"));
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(57)
+    void resolveMany_batchFetchesDocuments() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "rmany.1", "title", "Resolve Many 1",
+            "content_type", "code", "corpus", "code",
+            "file_path", "/src/nexus/search_engine.py"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "rmany.2", "title", "Resolve Many 2",
+            "content_type", "paper", "corpus", "knowledge",
+            "file_path", "/papers/test.pdf"));
+
+        var result = repo.resolveMany(TENANT_A, List.of("rmany.1", "rmany.2", "rmany.absent"));
+
+        assertThat(result).containsOnlyKeys("rmany.1", "rmany.2");
+        assertThat(result.get("rmany.1").get("file_path")).isEqualTo("/src/nexus/search_engine.py");
+        assertThat(result.get("rmany.1").get("content_type")).isEqualTo("code");
+        assertThat(result.get("rmany.2").get("file_path")).isEqualTo("/papers/test.pdf");
+    }
+
+    @Test @Order(58)
+    void resolveMany_emptyInput_returnsEmptyMap() {
+        var result = repo.resolveMany(TENANT_A, List.of());
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(59)
+    void resolveMany_tenantIsolation() {
+        // A doc in TENANT_B must not appear when querying TENANT_A
+        repo.upsertDocument(TENANT_B, Map.of("tumbler", "rmiso.1", "title", "Tenant B Doc",
+            "content_type", "paper", "corpus", "knowledge"));
+        var result = repo.resolveMany(TENANT_A, List.of("rmiso.1"));
+        assertThat(result).isEmpty();
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // COLLECTIONS
     // ══════════════════════════════════════════════════════════════════════════

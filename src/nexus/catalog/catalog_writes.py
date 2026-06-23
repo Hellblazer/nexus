@@ -1021,6 +1021,49 @@ class _WriteOps:
             for row in rows
         ]
 
+    def get_manifests(self, doc_ids: list[str]) -> "dict[str, list[ManifestRow]]":
+        """Batch-fetch manifest rows for multiple doc_ids (nexus-7lm3q).
+
+        Executes a single ``SELECT ... WHERE doc_id IN (?)`` instead of
+        N per-doc ``get_manifest()`` calls. Returns a dict keyed by doc_id;
+        each value is the ordered list of ManifestRow objects (same shape
+        as ``get_manifest()``). Doc_ids with no rows are absent from the
+        result. Batched at 500 doc_ids per query to stay safely under
+        SQLite's ``SQLITE_LIMIT_VARIABLE_NUMBER``.
+        """
+        if not doc_ids:
+            return {}
+        cat = self._cat
+        result: dict[str, list[ManifestRow]] = {}
+        _BATCH = 500
+        for i in range(0, len(doc_ids), _BATCH):
+            batch = doc_ids[i : i + _BATCH]
+            placeholders = ", ".join(["?"] * len(batch))
+            rows = cat._db.execute(
+                f"SELECT doc_id, position, chash, chunk_index, "
+                f"line_start, line_end, char_start, char_end "
+                f"FROM document_chunks "
+                f"WHERE doc_id IN ({placeholders}) "
+                f"ORDER BY doc_id, position",
+                batch,
+            ).fetchall()
+            for row in rows:
+                doc_id = row[0]
+                if doc_id not in result:
+                    result[doc_id] = []
+                result[doc_id].append(
+                    ManifestRow(
+                        position=row[1],
+                        chash=row[2],
+                        chunk_index=row[3],
+                        line_start=row[4],
+                        line_end=row[5],
+                        char_start=row[6],
+                        char_end=row[7],
+                    )
+                )
+        return result
+
     def chashes_for_collection(self, physical_collection: str) -> set[str]:
         """Return the set of chunk natural IDs (chash[:32]) referenced by
         the manifest for documents in ``physical_collection`` (RDR-108
