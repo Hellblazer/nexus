@@ -744,7 +744,7 @@ Returns non-zero on any check failure. `--json` emits the per-check result for C
 
 ## nx t3
 
-T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 16 + pgvector behind the native nexus-service; these commands operate on that store through the vector client. (`nx t3 reidentify` was the RDR-108 ChromaDB natural-ID migration and is retained for legacy collections.) Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
+T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 17 + pgvector behind the native nexus-service; these commands operate on that store through the vector client. (`nx t3 reidentify` was the RDR-108 ChromaDB natural-ID migration and is retained for legacy collections.) Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
 
 ### nx t3 prune-stale
 

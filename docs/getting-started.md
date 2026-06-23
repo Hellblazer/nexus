@@ -122,7 +122,7 @@ users still get a working substrate. The autostart path is recommended
 if you also use `nx` directly from the shell.
 
 **T3 (the permanent vector store)** is served by the native nexus-service over
-Postgres 16 + pgvector — in **both** local and cloud mode. Provision and start
+Postgres 17 + pgvector — in **both** local and cloud mode. Provision and start
 it with:
 
 ```bash

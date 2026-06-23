@@ -4,16 +4,55 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 **Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_conexus_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [conexus/README.md](../conexus/README.md#mcp-servers) for MCP tool details.
 
-**One arbitrator per tier**: Since conexus 4.34.0 (RDR-120), T2 is wrapped in a dedicated daemon process; since RDR-155, T3 serving routes through the native nexus-service (Postgres 16 + pgvector). Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers — routes through the same arbitrator, so the underlying SQLite instance has exactly one writer and all vector traffic goes through one service. Start the T2 daemon once via `nx daemon t2 install --autostart`, and the storage service via `nx daemon service start`; the Claude Code plugin's SessionStart hook also auto-spawns the T2 daemon on each session start.
+**One arbitrator per tier**: Since conexus 4.34.0 (RDR-120), T2 is wrapped in a dedicated daemon process; since RDR-155, T3 serving routes through the native nexus-service (Postgres 17 + pgvector). Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers — routes through the same arbitrator, so the underlying SQLite instance has exactly one writer and all vector traffic goes through one service. Start the T2 daemon once via `nx daemon t2 install --autostart`, and the storage service via `nx daemon service start`; the Claude Code plugin's SessionStart hook also auto-spawns the T2 daemon on each session start.
 
 | Tier | Storage | Arbitrator | Transport | Durability | Use |
 |------|---------|------------|-----------|------------|-----|
 | T1 -- scratch | ChromaDB EphemeralClient / per-session HTTP server | none | Process-local | Session only | Working notes, hypotheses |
 | T2 -- memory | SQLite + FTS5 (WAL) | T2 daemon (`nx daemon t2`) | UDS + 127.0.0.1 loopback | Survives restarts | Per-project notes, session context |
-| T3 -- knowledge | Postgres 16 + pgvector behind the native nexus-service (both modes); embedding server-side (bge-768 local / Voyage managed-cloud) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
-| Catalog | T2-store-backed (eighth domain store; RDR-120 P5.A) + events.jsonl (canonical) | shared with T2 daemon | UDS + 127.0.0.1 loopback | Permanent | Document registry, typed link graph, provenance |
+| T3 -- knowledge | Postgres 17 + pgvector behind the native nexus-service (both modes); embedding server-side (bge-768 local / Voyage managed-cloud) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
+| Catalog | T2-store-backed (ninth domain store, separate `.catalog.db`; RDR-120 P5.A) + events.jsonl (canonical) | shared with T2 daemon | UDS + 127.0.0.1 loopback | Permanent | Document registry, typed link graph, provenance |
 
 The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
+
+### Storage / service-stack architecture
+
+How the access paths reach each substrate today (post-RDR-155). Both T3 and (by hard default) T2 serve through the one native `nexus-service`; SQLite is the T2 opt-out; ChromaDB survives only as the read-only migration source.
+
+```mermaid
+flowchart TD
+  CLI["nx CLI"]
+  MCP["MCP tools<br/>(mcp__plugin_conexus_nexus__*)"]
+
+  CLI --> T1[("T1 scratch<br/>ephemeral · per-session")]
+  MCP --> T1
+  CLI --> T3OPS
+  MCP --> T3OPS
+  CLI --> T2OPS
+  MCP --> T2OPS
+
+  T3OPS["T3 vector ops<br/>(search · store · index)"]
+  T2OPS["T2 store ops<br/>(memory · plans · taxonomy · …)"]
+
+  T3OPS -->|"always service"| REG
+  T2OPS -->|"service backend<br/>HARD DEFAULT (RDR-152)"| REG
+  T2OPS -.->|"NX_STORAGE_BACKEND=sqlite<br/>(T2 opt-out)"| T2D
+
+  REG["ServiceRegistry lease<br/>storage_service_addr.&lt;uid&gt;<br/>(host · port · token)"]
+  REG --> SVC
+
+  SVC["native nexus-service<br/>(one binary · both tiers)"]
+  SVC -->|"server-side embed<br/>bge-768 ONNX (local) / Voyage (cloud)<br/>+ ANN search"| PG[("Postgres 17 + pgvector<br/>T3 vectors")]
+  SVC --> PGT2[("Postgres<br/>T2 domain stores")]
+
+  T2D["T2 daemon<br/>SQLite single-writer"]
+  T2D --> SQL[("nexus.db (SQLite + FTS5, WAL)<br/>+ .catalog.db")]
+
+  CHROMA[("legacy ChromaDB<br/>migration source · read-only")]
+  CHROMA -.->|"nx guided-upgrade<br/>one-time ETL"| SVC
+```
+
+(The [reference architecture diagram](architecture-diagram.svg) covers the *retrieval / planning* layer — query decomposition, the operator DAG, taxonomy, the knowledge graph — which is substrate-agnostic; the diagram above is its storage-plane complement.)
 
 ## Progressive Formalization (RDR-057)
 
@@ -116,9 +155,9 @@ Merges use SQLite's write lock via `with self.conn:` to ensure UPDATE and DELETE
 
 **Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry — not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
 
-**Domain split (RDR-063)**: T2 is implemented as four domain stores under `src/nexus/db/t2/` — `MemoryStore` (memory table), `PlanLibrary` (plans table), `CatalogTaxonomy` (topics + topic_assignments + taxonomy_meta + topic_links), and `Telemetry` (relevance_log). Each store opens its own `sqlite3.Connection` against the shared SQLite file in WAL mode with `busy_timeout=30000` (raised from 5000 in RDR-129 B1), so reads in one domain are never blocked by writes in another. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls continue to work via method delegation, and new code can reach the domain stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
+**Domain split (RDR-063)**: T2 is implemented as **eight** domain stores under `src/nexus/db/t2/`, all sharing the one `nexus.db` — `MemoryStore` (memory), `PlanLibrary` (plans), `CatalogTaxonomy` (topics + topic_assignments + taxonomy_meta + topic_links), `Telemetry` (relevance_log), `ChashIndex` (RDR-086), `DocumentAspects` (RDR-089), `AspectExtractionQueue`, and `DocumentHighlights` (RDR-139 Layer E) — plus `CatalogStore`, a ninth store that uniquely opens its own separate `.catalog.db`. Each store opens its own `sqlite3.Connection` in WAL mode with `busy_timeout=30000` (raised from 5000 in RDR-129 B1), so reads in one domain are never blocked by writes in another. **Backend routing (RDR-152):** each store hard-defaults to the **service backend** (the `nexus-service` over Postgres); `NX_STORAGE_BACKEND[_<store>]=sqlite` is the opt-out. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls work via delegation, and new code reaches the stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`, `db.chash_index`, `db.document_aspects`, `db.aspect_queue`, `db.document_highlights`, `db.catalog`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
 
-**Topic taxonomy**: `CatalogTaxonomy` discovers topics from T3 collection embeddings using HDBSCAN, labels them automatically with Claude Haiku, and uses them for search grouping and relevance boosting. Topics are discovered automatically after `nx index repo`. Operator-curated labels are preserved across re-discovery runs. See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set and [taxonomy.md](taxonomy.md) for architecture details.
+**Topic taxonomy**: `CatalogTaxonomy` discovers topics from T3 collection embeddings using HDBSCAN, labels them automatically with Claude Haiku, and uses them for search grouping and relevance boosting. Topics are discovered automatically after `nx index repo`. Operator-curated labels are preserved across re-discovery runs. See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set and [Architecture — Taxonomy](architecture.md#taxonomy) for architecture details.
 
 The taxonomy spans two storage tiers:
 
@@ -131,9 +170,9 @@ The taxonomy spans two storage tiers:
 | `taxonomy_meta` | Per-collection watermark used to decide whether re-discovery is needed |
 | `topic_links` | Aggregated link counts between topics, derived from the catalog link graph |
 
-*T3 centroid collection* — `taxonomy__centroids` holds one embedding per live topic (cosine space). The vector is the cluster centroid computed during `discover_topics`. `discover_topics` creates the collection, `rebuild_taxonomy` clears and rebuilds it wholesale, and `split_topic` replaces one centroid with two.
+*T3 centroids* — `taxonomy_centroids_{384,768,1024}` (one table per embedding dimension) hold one vector per live topic (cosine space), the cluster centroid computed during `discover_topics`. **Served through pgvector via `nexus-service` (`HttpCentroidStore`) since RDR-155 P4a.2.** Note the transition asymmetry until RDR-155 P4b: centroid **reads** (ANN assignment) go through pgvector, but the discover/rebuild centroid-**write** helpers still use a raw-Chroma client for injected-client / legacy-ETL paths. `discover_topics` populates the centroids, `rebuild_taxonomy` clears and rebuilds wholesale, `split_topic` replaces one with two.
 
-*Tier interaction*: Discovery reads embeddings from T3, clusters in memory, then writes topics to T2 and centroids back to T3. Incremental assignment (for new documents) queries centroids via ANN and writes a `topic_assignments` row to T2, without re-running the full clustering algorithm.
+*Tier interaction*: Discovery reads embeddings from T3, clusters in memory, then writes topics to T2 and centroids to T3 (pgvector). Incremental assignment (for new documents) queries centroids via ANN and writes a `topic_assignments` row to T2, without re-running the full clustering algorithm.
 
 ## T3 -- Permanent Knowledge
 
@@ -184,6 +223,13 @@ A collection is indexed and queried under the same embedding model — mixing mo
 **Use for**: semantic search across sessions, institutional knowledge.
 
 ## T3 Backup and Migration (Export/Import)
+
+> **Scope: legacy ChromaDB only.** `nx store export` / `import` operate on the
+> **ChromaDB migration source** (pre-6.0 data), not the live pgvector T3 store.
+> On a migrated 6.0 install they will read/write the Chroma source (which may be
+> empty or stale after migration), **not** your live knowledge. To back up live
+> 6.0 T3 data, use a Postgres `pg_dump` of the `nexus` database; the `.nxexp`
+> format is not compatible with the pgvector serving path.
 
 Collections can be exported to portable `.nxexp` files that preserve all documents, metadata, and embeddings. Importing restores the collection without re-embedding — saving Voyage AI API costs and time.
 

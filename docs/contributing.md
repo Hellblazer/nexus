@@ -58,7 +58,7 @@ uv run pytest -m integration
 
 The HTTP storage-tier suites (`tests/db/test_http_*_integration.py` and the Java
 serving contract tests) run entirely in-sandbox: each spins up its own ephemeral
-PG16 + a fresh service JAR with an isolated bearer — no production data, no live
+PG17 + a fresh service JAR with an isolated bearer — no production data, no live
 daemon, no API keys. Because they are `@pytest.mark.integration` (excluded from the
 default CI/unit run), storage-stack regressions can rot unseen. One button-press
 runs the whole tier stack:
@@ -71,7 +71,7 @@ scripts/validate/integration-stack.sh --java-only   # T3 + repo-layer Java tests
 ```
 
 Run it after any change to the HTTP stores, the Java service handlers/schema, or
-the token/RLS model. Prereqs (dev box): a JDK/GraalVM and pg16 binaries. When the
+the token/RLS model. Prereqs (dev box): a JDK/GraalVM and pg17 binaries. When the
 prereqs are absent the suites self-skip and the gate reports **inconclusive**
 (non-zero exit), never a false green.
 
