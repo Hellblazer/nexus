@@ -103,8 +103,13 @@ class ManagedCapabilities:
 def resolve_managed_endpoint(*, require_token: bool = True) -> tuple[str, str | None]:
     """Return ``(base_url, token)`` for the managed service.
 
-    ``base_url`` is ``NX_SERVICE_URL`` (trailing slash stripped) or
-    :data:`DEFAULT_MANAGED_SERVICE_URL`. ``token`` is ``NX_SERVICE_TOKEN``.
+    ``base_url`` is the resolved ``service_url`` (trailing slash stripped) or
+    :data:`DEFAULT_MANAGED_SERVICE_URL`. ``token`` is the resolved
+    ``service_token``. Both resolve via :func:`nexus.config.get_credential` —
+    env (``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN``) FIRST, then the persisted
+    ``config.yml`` credential a greenfield user set with ``nx config set``
+    (RDR-166 nexus-v3p0x). Without this the probe would ignore a config.yml-only
+    user's endpoint and silently target the default.
 
     Fails loud (:class:`ManagedServiceIncompatible`) when ``require_token`` and no
     token is configured — a cloud-mode client with no bearer cannot call any
@@ -112,8 +117,10 @@ def resolve_managed_endpoint(*, require_token: bool = True) -> tuple[str, str | 
     opaque 401 later. The unauthenticated ``/version`` probe itself does not need
     the token; ``require_token=False`` supports probe-only callers.
     """
-    base = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/") or DEFAULT_MANAGED_SERVICE_URL
-    token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+    from nexus.config import get_credential
+
+    base = (get_credential("service_url") or "").strip().rstrip("/") or DEFAULT_MANAGED_SERVICE_URL
+    token = (get_credential("service_token") or "").strip() or None
     if require_token and not token:
         raise ManagedServiceIncompatible(
             "cloud mode is configured but NX_SERVICE_TOKEN is not set — the "

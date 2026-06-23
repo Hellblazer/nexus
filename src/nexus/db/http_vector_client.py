@@ -105,13 +105,15 @@ def _resolve_endpoint() -> tuple[str, str]:
             lease_url, lease_token = _lease_cache or (None, None)
         url = url or lease_url
         token = token or lease_token
+        # "credential" = env-or-config.yml (get_credential precedence); the
+        # source here is "configured" vs "lease", not specifically env.
         if env_url is not None and token is lease_token and token is not None:
             _log.debug(
-                "vector_endpoint_mixed_source", url_source="env", token_source="lease"
+                "vector_endpoint_mixed_source", url_source="credential", token_source="lease"
             )
         elif env_token is not None and url is lease_url and url is not None:
             _log.debug(
-                "vector_endpoint_mixed_source", url_source="lease", token_source="env"
+                "vector_endpoint_mixed_source", url_source="lease", token_source="credential"
             )
     if url is None or token is None:
         raise RuntimeError(
@@ -119,7 +121,8 @@ def _resolve_endpoint() -> tuple[str, str]:
             "routes through the nexus-service HTTP API (RDR-155 Phase 4a — "
             "the direct Chroma serving paths are retired). Either start the "
             "supervisor with 'nx daemon service start' (publishes the "
-            "endpoint lease this client auto-discovers), or export "
+            "endpoint lease this client auto-discovers), set the managed "
+            "endpoint with 'nx config set service_url/service_token', or export "
             "NX_SERVICE_URL / NX_SERVICE_TOKEN explicitly."
         )
     return url, token
@@ -238,7 +241,12 @@ def _managed_remedy() -> str | None:
     — callers that classify transient failures by raw type should catch
     ``VectorServiceError`` for the managed path. Local callers are unaffected.
     """
-    base = os.environ.get("NX_SERVICE_URL", "").strip()
+    from nexus.config import get_credential
+
+    # env FIRST, then config.yml — so a config.yml-only greenfield user gets the
+    # actionable managed remedy on a 401/connection error, not a bare error
+    # (RDR-166 nexus-v3p0x).
+    base = (get_credential("service_url") or "").strip()
     if not base:
         return None
     return (

@@ -212,6 +212,19 @@ class TestRecoverEndpointFromLease:
             "lease-token",
         )
 
+    def test_config_yml_service_url_also_suppresses_rebind(self):
+        # nexus-v3p0x: the guard reads service_url via get_credential, so a
+        # config.yml-pinned managed endpoint (no env) is ALSO never rebound to a
+        # discovered local lease — same protection as the env-pinned case.
+        from nexus.config import set_credential
+        from nexus.db.service_endpoint import recover_endpoint_from_lease
+
+        _publish_lease(port=4242, token="lease-token")
+        set_credential("service_url", "https://api.conexus-nexus.com")
+        assert (
+            recover_endpoint_from_lease("https://api.conexus-nexus.com") is None
+        )
+
 
 class TestDiscoverLease:
     def test_absent_lease_returns_none(self):
