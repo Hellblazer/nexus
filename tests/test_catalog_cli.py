@@ -1681,3 +1681,35 @@ class TestSeam3OwnersCarve:
         assert result.exit_code == 0, result.output
         assert "sentinel-owner" in result.output
         fake.list_owners.assert_called_once()
+
+
+class TestKgyozBackfillCarve:
+    """Contract pins for the nexus-kgyoz backfill-owner-id command carve.
+
+    Non-vacuous: fails if the command is re-inlined into ``commands.catalog``,
+    if the ``register`` wiring is dropped, or if the carved module's lazy
+    service-mode guard / module-routed access regresses.
+    """
+
+    def test_backfill_command_registered_on_group(self):
+        from nexus.cli import main
+        assert "backfill-owner-id" in main.commands["catalog"].commands
+
+    def test_backfill_command_defined_in_carved_module(self):
+        from nexus.cli import main
+        from nexus.commands.catalog_cmds import backfill as backfill_mod
+        cmd = main.commands["catalog"].commands["backfill-owner-id"]
+        assert cmd.callback is backfill_mod.backfill_owner_id_cmd.callback
+
+    def test_backfill_service_mode_guard_fires_through_carved_module(self):
+        """End-to-end through the group: service mode is refused with a clear
+        error. Exercises the carved command's lazy imports and guard before
+        any catalog access — no real catalog needed."""
+        from unittest.mock import patch
+
+        from nexus.cli import main
+
+        with patch("nexus.catalog.factory._is_catalog_service_mode", return_value=True):
+            result = CliRunner().invoke(main, ["catalog", "backfill-owner-id"])
+        assert result.exit_code != 0
+        assert "not supported in service mode" in result.output
