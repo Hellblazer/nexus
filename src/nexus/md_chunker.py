@@ -169,7 +169,7 @@ class SemanticMarkdownChunker:
             try:
                 chunks = self._semantic_chunking(text, metadata)
             except Exception as exc:
-                _log.warning("Semantic chunking failed (%s); falling back to naive.", exc)
+                _log.warning("semantic_chunking_failed_fallback_naive", error=str(exc), exc_info=exc)
                 chunks = self._naive_chunking(text, metadata)
         else:
             chunks = self._naive_chunking(text, metadata)
