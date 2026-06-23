@@ -484,7 +484,14 @@ class HttpVectorClient:
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
     ) -> None:
-        """Embed + quota-check + write via the Java service.
+        """Embed + write via the Java service.
+
+        Dedup + conflict-merge are SERVER-ENFORCED (nexus-57dh4): the service's
+        ``PgVectorRepository.upsertChunksInternal`` does first-wins in-batch dedup
+        and ``ON CONFLICT (tenant_id, collection, chash) DO UPDATE``. There is no
+        client-side quota check or 300-record cap on this path — the whole id set
+        is sent in one POST. (The old "quota-check" framing was a ChromaDB-Cloud
+        leftover; Postgres has no such limit.)
 
         CHUNKING STAYS PYTHON — this method is called with pre-chunked text.
         Embeddings are computed server-side by default (Seam B). The ONE
@@ -1012,12 +1019,18 @@ class HttpVectorClient:
         ``/v1/vectors/update-metadata`` endpoint so the frecency_score lands
         in the service's Chroma (the one search reads) — not daemon-Chroma.
 
-        Batches at MAX_RECORDS_PER_WRITE (300) to match the service's quota
-        validator and to mirror :meth:`T3Database.update_chunks` parity.
+        Sends in request-sized batches of 300 ids. NOTE (nexus-57dh4): this is a
+        pragmatic HTTP request-size chunk, NOT a backend quota — the pgvector
+        service has no 300-record limit (300 was a ChromaDB-Cloud free-tier quota,
+        inapplicable to Postgres). Dedup + conflict-merge are server-enforced in
+        ``PgVectorRepository.upsertChunksInternal`` (first-wins in-batch dedup +
+        ``ON CONFLICT DO UPDATE``); clients need not pre-dedup or quota-check.
+        The constant is reused only to keep a sane per-request size.
         """
         if not ids:
             return
         from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        # Request-size chunk only (see docstring) — not a backend quota.
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         for start in range(0, len(ids), size):
             batch_ids  = ids[start : start + size]
@@ -1179,14 +1192,6 @@ class HttpVectorClient:
             )
             deleted += int(result.get("deleted", 0))
         return deleted
-
-    # ── Utility ──────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def chunk_id(text: str) -> str:
-        """Compute the canonical chunk natural ID: sha256(text)[:32]."""
-        return hashlib.sha256(text.encode()).hexdigest()[:32]
-
 
 # ── Module-level routing helper ───────────────────────────────────────────────
 

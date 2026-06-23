@@ -58,8 +58,11 @@ public final class ScratchRepository {
      * GUC name for T1 tenant isolation.
      * Distinct from {@code nexus.tenant} (T2) to avoid conflating contexts
      * when T1 and T2 connections share a pool or sequential transactions.
+     * Aliases {@link TenantScope#T1_TENANT_GUC} so the allowlist (nexus-utnjt)
+     * stays the single source of truth — this must be a member of
+     * {@code TenantScope.PERMITTED_GUCS}.
      */
-    public static final String T1_TENANT_GUC = "nexus.t1_tenant";
+    public static final String T1_TENANT_GUC = TenantScope.T1_TENANT_GUC;
 
     private final TenantScope tenantScope;
 

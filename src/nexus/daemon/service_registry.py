@@ -356,10 +356,34 @@ class ServiceRegistry:
         if record is None:
             return None
         if not record.is_fresh(self._clock()):
-            with contextlib.suppress(OSError):
-                self._record_path(scope_key).unlink()
+            self._reap_if_still_stale(record)
             return None
         return record
+
+    def _reap_if_still_stale(self, stale: LeaseRecord) -> None:
+        """Reap an expired record, but only under the election flock and only
+        if the SAME record is still present and still stale (nexus-2mpns).
+
+        The naive ``unlink`` after an unguarded ``is_fresh`` check is a TOCTOU:
+        a concurrent ``publish``/``heartbeat`` can take the election flock and
+        ``os.replace`` a fresh, higher-generation live record into the window
+        between the freshness check and the unlink — the blind unlink would then
+        delete the *successor's* just-published live record by path. Mirror
+        ``relinquish``: re-read under the lock and only unlink when the record we
+        still see is the same stale lease (owner_token match) AND is still not
+        fresh. If a successor has published, leave it alone — it stays a
+        resolvable endpoint with no transient gap.
+        """
+        with self._elect(stale.scope_key):
+            current = self._read_record(stale.scope_key)
+            if current is None:
+                return
+            if current.owner_token != stale.owner_token:
+                return  # a successor owns it now; not ours to reap
+            if current.is_fresh(self._clock()):
+                return  # re-stamped fresh under the lock; leave the live record
+            with contextlib.suppress(OSError):
+                self._record_path(stale.scope_key).unlink()
 
     def mark_shutting_down(self, record: LeaseRecord) -> None:
         """Publish a shutdown marker so discoverers stop resolving us

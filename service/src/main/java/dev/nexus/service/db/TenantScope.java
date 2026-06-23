@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -40,6 +41,28 @@ public final class TenantScope {
 
     private static final Logger log = LoggerFactory.getLogger(TenantScope.class);
 
+    /**
+     * Default tenant GUC (T2 / catalog RLS context). Derived from
+     * {@link TenantConstants#GUC_NAME} so the allowlist and the RLS policies can
+     * never drift to different literals (a drift is a silent RLS miss — see the
+     * class comment on {@link TenantConstants}).
+     */
+    public static final String DEFAULT_TENANT_GUC = TenantConstants.GUC_NAME;
+
+    /** T1-scratch tenant GUC (kept distinct so T1 and T2 RLS contexts never conflate). */
+    public static final String T1_TENANT_GUC = "nexus.t1_tenant";
+
+    /**
+     * Allowlist of GUC names {@link #withTenant(String, String, Function)} may stamp
+     * (nexus-utnjt). The GUC name is interpolated into the {@code set_config(...)} SQL
+     * (PostgreSQL does not accept a bind parameter for the setting name), so it is NOT
+     * injection-safe by parameterization the way the tenant VALUE is. Today every caller
+     * passes a {@code static final} literal, but an allowlist is the only durable guard
+     * against a future caller passing a request-derived name. This set is the single
+     * source of truth — the two literals above are members of it.
+     */
+    private static final Set<String> PERMITTED_GUCS = Set.of(DEFAULT_TENANT_GUC, T1_TENANT_GUC);
+
     private final DataSource dataSource;
 
     public TenantScope(DataSource dataSource) {
@@ -47,7 +70,8 @@ public final class TenantScope {
     }
 
     /**
-     * Execute {@code work} within a transaction stamped with {@code tenant}.
+     * Execute {@code work} within a transaction stamped with {@code tenant} using the
+     * default {@code nexus.tenant} GUC.
      *
      * <p>EAGER COMPLETION: the transaction is committed and the connection returned to the
      * pool before this method returns. Callers that need to stream results across the txn
@@ -66,15 +90,10 @@ public final class TenantScope {
      * @throws IllegalArgumentException if {@code tenant} is null or blank
      * @throws RuntimeException         if a {@link SQLException} occurs (wraps it) or
      *                                  if {@code work} throws (propagated after rollback)
-     */
-    /**
-     * Execute {@code work} within a transaction stamped with {@code tenant} using the
-     * default {@code nexus.tenant} GUC.
-     *
      * @see #withTenant(String, String, Function) for an overload with a custom GUC name
      */
     public <T> T withTenant(String tenant, Function<DSLContext, T> work) {
-        return withTenant(tenant, "nexus.tenant", work);
+        return withTenant(tenant, DEFAULT_TENANT_GUC, work);
     }
 
     /**
@@ -97,6 +116,13 @@ public final class TenantScope {
         if (gucName == null || gucName.isBlank()) {
             throw new IllegalArgumentException("gucName must not be null or blank");
         }
+        // nexus-utnjt: the GUC name is interpolated into the set_config SQL (PG takes no
+        // bind parameter for the setting name), so reject anything not on the allowlist
+        // BEFORE borrowing a connection. Blocks SQL injection into the session-GUC namespace.
+        if (!PERMITTED_GUCS.contains(gucName)) {
+            throw new IllegalArgumentException(
+                    "gucName not permitted: " + gucName + " (allowed: " + PERMITTED_GUCS + ")");
+        }
 
         Connection conn = null;
         try {
@@ -106,8 +132,9 @@ public final class TenantScope {
             conn.setAutoCommit(false);
 
             // Stamp the GUC — bind-safe parameterized call (S0.1 pattern verbatim).
-            // Use string concatenation only for the GUC name (a validated internal
-            // constant from code, not user input); value is always parameterized.
+            // The GUC name is concatenated (PG takes no bind param for the setting name)
+            // but has been validated against PERMITTED_GUCS above (nexus-utnjt), so it is
+            // an allowlisted name, not arbitrary input; the value is always parameterized.
             try (var ps = conn.prepareStatement("SELECT set_config('" + gucName + "', ?, true)")) {
                 ps.setString(1, tenant);
                 ps.execute();

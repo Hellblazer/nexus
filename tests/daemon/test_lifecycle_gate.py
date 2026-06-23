@@ -94,6 +94,78 @@ def test_election_flock_only_in_primitive() -> None:
     )
 
 
+# nexus-9nv1d Part B: behaviour-based companion to the name-based bans above.
+# The name-bans catch the SPECIFIC dead shapes P5 deleted; this catches a NEW
+# bespoke election lock under ANY name by allowlisting the modules that may
+# acquire an advisory flock and tripping on any new one.
+#
+# Why a MODULE allowlist and not "flock only in the primitive": fcntl.flock is
+# used legitimately across the tree for distinct, non-election purposes — the
+# general _locking primitive, per-tier SPAWN locks (t2/t3/storage daemons), the
+# migration serializer, the daemon CLI lock. A "flock => election" test would be
+# false-positive-ridden (the vacuous-gate trap nexus-9nv1d itself warns of).
+# The defensible signal is: a flock acquire in a module NOT on this vetted list
+# is an unreviewed lock — possibly a bespoke election — and must be justified
+# (route election through ServiceRegistry._elect, or add the module here with a
+# reason). Acquires WITHIN an allowed module are already vetted.
+_FLOCK_ALLOWED_MODULES = frozenset({
+    "_locking.py",                       # the general advisory-lock primitive
+    "daemon/service_registry.py",        # the ONLY election flock (_elect)
+    "daemon/storage_service_daemon.py",  # storage-daemon spawn lock
+    "daemon/t2_daemon.py",               # T2 spawn / heartbeat locks
+    "daemon/t3_daemon.py",               # T3 spawn lock
+    "db/migrations.py",                  # migration serialization lock
+    "commands/daemon.py",                # daemon CLI single-instance lock
+})
+
+
+def test_flock_acquire_sites_are_allowlisted() -> None:
+    """A flock acquire in a module not on the vetted list is an unreviewed lock
+    (possibly a bespoke election) — route election through the primitive or
+    justify the lock by adding the module to ``_FLOCK_ALLOWED_MODULES``."""
+    offenders: list[str] = []
+    for path in _py_files():
+        rel = path.relative_to(SRC_ROOT).as_posix()
+        if rel in _FLOCK_ALLOWED_MODULES:
+            continue
+        for lineno, line in _flock_acquire_lines(path.read_text(encoding="utf-8")):
+            if _ALLOW_TOKEN not in line:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
+    assert not offenders, (
+        "RDR-149 lifecycle gate (nexus-9nv1d): a flock acquire appeared in a "
+        "module not on _FLOCK_ALLOWED_MODULES. If this is daemon-scope election, "
+        "it MUST go through ServiceRegistry._elect, not a bespoke lock. If it is "
+        "a different, legitimate lock, add the module to the allowlist with a "
+        "reason. Offenders:\n  " + "\n  ".join(offenders)
+    )
+
+
+def _flock_acquire_lines(text: str) -> list[tuple[int, str]]:
+    """Yield (lineno, line) for every flock ACQUIRE in *text*.
+
+    Matches ``fcntl.flock(`` anywhere on the line (not just at line start, so an
+    assignment form ``x = fcntl.flock(...)`` is caught — HIGH-2) and excludes
+    ``LOCK_UN`` release calls. Gate tests prefer over-matching (a false positive
+    is a visible review prompt) to under-matching (a silent miss)."""
+    out: list[tuple[int, str]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if "fcntl.flock(" in line and "LOCK_UN" not in line:
+            out.append((lineno, line))
+    return out
+
+
+def test_flock_acquire_allowlist_is_non_vacuous(tmp_path: pathlib.Path) -> None:
+    """Prove the scan actually FIRES on a bespoke flock acquire under a novel
+    name (the bead's explicit non-vacuity requirement). A synthetic offender in
+    a non-allowlisted module must be detected by the scan logic."""
+    synthetic = "import fcntl\n\ndef _my_bespoke_election(fd):\n    fcntl.flock(fd, fcntl.LOCK_EX)\n"
+    hits = _flock_acquire_lines(synthetic)
+    assert len(hits) == 1, "the scan must detect a bespoke flock acquire"
+    assert "LOCK_EX" in hits[0][1]
+    # And the release form must NOT be flagged.
+    assert _flock_acquire_lines("    fcntl.flock(fd, fcntl.LOCK_UN)\n") == []
+
+
 def test_gate_doc_exists() -> None:
     """The standing-gate doc itself must exist and name the primitive + the
     conformance suite -- the two artifacts every lifecycle fix must touch."""

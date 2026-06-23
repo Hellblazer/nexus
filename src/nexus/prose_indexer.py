@@ -13,6 +13,8 @@ doc_indexer._embed_with_fallback for CCE-aware embedding.
 from __future__ import annotations
 
 import hashlib as _hl
+
+from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
 from pathlib import Path
 
 import structlog
@@ -98,7 +100,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
             # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
             chunk_text_hash_full = _hl.sha256(chunk.text.encode()).hexdigest()
-            chunk_chroma_id = chunk_text_hash_full[:32]
+            chunk_chroma_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
             # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
             # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
             # catalog manifest is authoritative.
@@ -162,7 +164,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
             # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
             chunk_text_hash_full = _hl.sha256(text.encode()).hexdigest()
-            chunk_chroma_id = chunk_text_hash_full[:32]
+            chunk_chroma_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
             chunk_start_char = _line_offsets[ls - 1] if 0 < ls <= len(_line_offsets) else 0
             chunk_end_char = (
                 _line_offsets[le] if le < len(_line_offsets) else len(content)

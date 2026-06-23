@@ -141,6 +141,19 @@ public final class Main {
         var pgVectorRepo = new PgVectorRepository(new TenantScope(ds), docEmbedRouter,
                                                   qryEmbedRouter);
 
+        // Pooler-mode backstop (nexus-bhzuv): if a PgBouncer is interposed
+        // (NX_PGBOUNCER_ADMIN_URL set), refuse to bind unless it reports
+        // pool_mode=transaction. SET LOCAL tenant GUCs leak across borrows under
+        // session-mode pooling → cross-tenant read. No-op on the direct-PG path.
+        // Runs BEFORE service.start(), mirroring the schema-migration fail-fast ordering.
+        try {
+            dev.nexus.service.db.PoolerModeCheck.verifyAtStartup();
+        } catch (dev.nexus.service.db.PoolerModeCheck.PoolerModeException e) {
+            ds.close();
+            log.error("event=pooler_mode_check_failed error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+        }
+
         var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo);
         service.start();
 

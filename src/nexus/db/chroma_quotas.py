@@ -2,7 +2,14 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """ChromaDB Cloud quota constants, error hierarchy, and validator (RDR-005).
 
-Single source of truth for all ChromaDB Cloud limits.
+Single source of truth for the ChromaDB-Cloud limits that govern the RETIRED
+Chroma backend — scoped to the migration READ source (``nexus.migration``).
+These are ChromaDB-Cloud free-tier quotas and DO NOT apply to the
+pgvector/Postgres service that serves T3 today (RDR-152/155): the service
+enforces dedup + conflict-merge server-side and has no 300-record / 16 KB write
+cap (nexus-57dh4). Do not reintroduce ``QUOTAS`` as a write-path validator on
+the service path; the only legitimate reuse there is a pragmatic request-size
+chunk, clearly labelled as such.
 Source: https://docs.trychroma.com/cloud/quotas-limits
 """
 from __future__ import annotations

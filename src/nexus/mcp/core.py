@@ -2,13 +2,14 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-16 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+35 registered tools + 3 demoted (plain functions, no @mcp.tool()).
 """
 from __future__ import annotations
 
 import json
 from typing import Any
 
+import structlog
 from mcp.server.fastmcp import FastMCP
 
 from nexus.corpus import (
@@ -37,6 +38,52 @@ from nexus.mcp_infra import (
     t2_index_write as _t2_index_write,
 )
 from nexus.ttl import parse_ttl
+
+#: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
+#: string to the agent rather than raising; before returning an error they must
+#: ALSO emit a structured server-side log so a dead backing service is diagnosable.
+_log = structlog.get_logger(__name__)
+
+#: Substrings that mark a backing-service-unreachable failure. When an MCP tool
+#: error matches, the agent-facing return carries an actionable remediation hint
+#: instead of a bare exception repr. Kept narrow (no bare "connect") to avoid
+#: false-positive hints on unrelated errors that merely mention connecting
+#: (review 2026-06-23): ``ConnectionError``/``TimeoutError`` instances are matched
+#: by type below; these markers catch string-only wrappers (e.g. httpx).
+_CONNECTION_ERROR_MARKERS = (
+    "connection refused", "cannot connect", "broken pipe", "connection reset",
+    "max retries", "timed out", "no route to host", "connection aborted",
+)
+
+
+def _mcp_tool_error(tool: str, e: Exception) -> str:
+    """Log an MCP tool-handler exception structured, return an agent-facing string.
+
+    nexus-yttqr: the ~22 handlers in this module historically ended with
+    ``return f"Error: {e}"`` and emitted NO server-side log — a dead service gave
+    the agent a bare repr and left nothing to diagnose. This helper logs the
+    exception with ``exc_info`` (traceback stays server-side, never leaks into the
+    return string) and enriches the returned message with a remediation hint when
+    the failure looks like the backing service is unreachable.
+
+    The unreachable-service hint is gated narrowly: ``ConnectionError`` /
+    ``TimeoutError`` instances, or a marker substring. Bare ``OSError`` (which
+    includes ``PermissionError`` / ``FileNotFoundError`` — realistic on a locked
+    SQLite file, NOT a daemon-down condition) is deliberately NOT treated as a
+    connection failure, to avoid a misleading "restart the daemon" hint.
+    """
+    _log.error(f"mcp_{tool}_failed", error=str(e), exc_info=True)
+    text = str(e)
+    if isinstance(e, (ConnectionError, TimeoutError)) or any(
+        m in text.lower() for m in _CONNECTION_ERROR_MARKERS
+    ):
+        return (
+            f"Error: {text}\n"
+            "The nexus backing service may be unreachable — check the daemon is "
+            "running with `nx doctor` (and `nx daemon status`)."
+        )
+    return f"Error: {text}"
+
 
 #: Process-local HookRegistry constructed at MCP-server startup.
 #: The MCP server is a long-running entry point — the registry's
@@ -984,7 +1031,7 @@ def search(
 
         return "\n\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("search", e)
 
 
 def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
@@ -1136,7 +1183,7 @@ def search_metadata_scoped(
             for r in rows
         )
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("search_metadata_scoped", e)
 
 
 @mcp.tool(
@@ -1206,7 +1253,7 @@ def search_topic_scoped(
             for r in merged
         )
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("search_topic_scoped", e)
 
 
 @mcp.tool(
@@ -1305,7 +1352,7 @@ def search_graph_hop(
             for r in rows
         )
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("search_graph_hop", e)
 
 
 @mcp.tool(
@@ -1840,7 +1887,7 @@ def query(
 
         return "\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("query", e)
 
 
 @mcp.tool(
@@ -1985,7 +2032,7 @@ def store_put(
         )
         return f"Stored: {doc_id} -> {col_name}"
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("store_put", e)
 
 
 @mcp.tool(
@@ -2042,7 +2089,7 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         lines.append(entry.get("content", ""))
         return "\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("store_get", e)
 
 
 @mcp.tool(
@@ -2224,8 +2271,12 @@ def store_get_many(
         return "\n".join(lines)
     except Exception as e:
         if structured:
+            # Structured callers (plan-runner hydration) get a dict, not a string —
+            # but the failure must still be logged server-side (nexus-yttqr): a silent
+            # swallow here is exactly the diagnostic hole this bead closes.
+            _log.error("mcp_store_get_many_failed", error=str(e), exc_info=True)
             return {"contents": [], "missing": [], "error": f"store_get_many failed: {e}"}
-        return f"Error: {e}"
+        return _mcp_tool_error("store_get_many", e)
 
 
 @mcp.tool(
@@ -2294,7 +2345,7 @@ def store_list(
             lines.append(f"--- showing {offset + 1}-{shown_end} of {total} (end)")
         return "\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("store_list", e)
 
 
 def _store_list_docs(t3, col_name: str, total: int) -> str:
@@ -2401,7 +2452,7 @@ def memory_put(
         )
         return f"Stored: [{row_id}] {project}/{title}"
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("memory_put", e)
 
 
 @mcp.tool(
@@ -2461,7 +2512,7 @@ def memory_get(project: str, title: str = "") -> str:
                     lines.append(f"  [{e['id']}] {e['title']}  ({e.get('timestamp', '')[:10]})")
                 return "\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("memory_get", e)
 
 
 @mcp.tool(
@@ -2484,7 +2535,7 @@ def memory_delete(project: str, title: str) -> str:
             return f"Deleted: {project}/{title}"
         return f"Not found: {project}/{title}"
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("memory_delete", e)
 
 
 @mcp.tool(
@@ -2523,7 +2574,7 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
         return "\n\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("memory_search", e)
 
 
 @mcp.tool(
@@ -2628,7 +2679,7 @@ def memory_consolidate(
         else:
             return f"Error: unknown action {action!r}. Use: find-overlaps, merge, flag-stale"
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("memory_consolidate", e)
 
 
 @mcp.tool(
@@ -2746,7 +2797,7 @@ def scratch(
         else:
             return f"Error: unknown action {action!r}. Use: put, search, list, get, delete"
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("scratch", e)
 
 
 @mcp.tool(
@@ -2785,7 +2836,7 @@ def scratch_manage(
         else:
             return f"Error: unknown action {action!r}. Use: flag, promote"
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("scratch_manage", e)
 
 
 @mcp.tool(
@@ -2804,7 +2855,7 @@ def collection_list() -> str:
             lines.append(f"{c['name']}  {c['count']:>6} docs  ({model})")
         return "\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("collection_list", e)
 
 
 @mcp.tool(
@@ -2861,7 +2912,7 @@ def plan_save(
         )
         return f"Saved plan: [{row_id}] {query[:80]}"
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("plan_save", e)
 
 
 @mcp.tool(
@@ -2904,7 +2955,7 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
         return "\n\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("plan_search", e)
 
 
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────
@@ -2927,7 +2978,7 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
             return f"Deleted: {doc_id} from {col_name}"
         return f"Not found: {doc_id!r} in {col_name}"
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("store_delete", e)
 
 
 def collection_info(name: str) -> str:
@@ -2967,7 +3018,7 @@ def collection_info(name: str) -> str:
 
         return "\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("collection_info", e)
 
 
 def collection_verify(name: str) -> str:
@@ -2995,7 +3046,7 @@ def collection_verify(name: str) -> str:
             lines.append(f"Probe doc: {result.probe_doc_id}")
         return "\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return _mcp_tool_error("collection_verify", e)
 
 
 # ── Operator tools ───────────────────────────────────────────────────────────
