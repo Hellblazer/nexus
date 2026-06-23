@@ -548,6 +548,12 @@ def build_doc_id_resolver(
     chunk-write time. Files absent from the map resolve to ``""`` — the legacy
     / no-doc_id signal that ``metadata_schema.normalize`` Step 4c then drops.
 
+    The returned callable closes over *file_to_doc_id* by reference (no
+    snapshot): later mutations to the passed mapping are visible through the
+    resolver. The orchestrator builds it once from a finalised registration
+    map and does not mutate afterward, so this is a non-issue at the call
+    site; callers needing a frozen view should pass a copy.
+
     Args:
         file_to_doc_id: Mapping of indexed file path to catalog ``doc_id``.
 

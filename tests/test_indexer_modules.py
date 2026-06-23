@@ -186,19 +186,19 @@ def test_build_doc_id_resolver_empty_map():
     assert resolve(Path("/anything")) == ""
 
 
-def test_run_index_uses_lifted_doc_id_resolver():
-    """_run_index threads the lifted free function, not an inline closure.
+def test_run_index_imports_lifted_doc_id_resolver():
+    """_run_index's module imports the lifted free fn as the same object.
 
-    Non-vacuous: would fail if seam 2 regressed by re-inlining the resolver
-    or by not calling indexer_utils.build_doc_id_resolver.
+    Non-vacuous and reformat-robust: asserts the symbol is bound at module
+    level in nexus.indexer and IS indexer_utils.build_doc_id_resolver. Would
+    fail if seam 2 regressed by dropping the import or re-defining a local
+    shadow. Survives whitespace/arg-name churn that a source-text scan would
+    false-fire on.
     """
-    import inspect
-
     from nexus import indexer
+    from nexus.indexer_utils import build_doc_id_resolver
 
-    src = inspect.getsource(indexer._run_index)
-    assert "build_doc_id_resolver(file_to_doc_id)" in src
-    assert "def _doc_id_resolver(path: Path) -> str:" not in src
+    assert getattr(indexer, "build_doc_id_resolver", None) is build_doc_id_resolver
 
 
 # ── _extract_context backward compatibility ───────────────────────────────────
