@@ -519,7 +519,7 @@ def migrate_catalog(
         try:
             client._post("/import/chunk", {"doc_id": doc_id, "rows": chunk_rows_payload})
             chunk_written += len(doc_chunks)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-doc resilience; logged, one bad group must not abort ETL
             _log.error(
                 "catalog_etl.chunk_group_failed",
                 doc_id=doc_id,
@@ -629,7 +629,7 @@ def _import_table(
             payload = transform(row)
             import_fn(payload)
             written_count += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort table
             # Log the key for the failing row; continue so one bad row
             # doesn't abort the whole table.
             key_hint = (
@@ -695,7 +695,7 @@ def _read_owner_high_water(catalog_db_path: Path) -> dict[str, int]:
                    "if no documents were ever deleted from this catalog",
         )
         return {}
-    from nexus.catalog.tumbler import read_owners  # noqa: PLC0415
+    from nexus.catalog.tumbler import read_owners  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.tumbler)
 
     records = read_owners(jsonl_path)
     return {owner: rec.next_seq for owner, rec in records.items()}
@@ -760,7 +760,7 @@ def _reconcile_next_seq(
                 next_seq=floor,
                 source="jsonl" if jsonl_floor >= max_doc_seq else "max_doc_seq",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-owner resilience; logged, one failure must not abort reconcile
             failed += 1
             _log.error(
                 "catalog_etl.next_seq_reconcile_failed",

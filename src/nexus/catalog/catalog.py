@@ -103,7 +103,7 @@ def _rebuild_heartbeat(label: str, summary_builder=None):
             if summary_builder is not None:
                 try:
                     line = summary_builder(elapsed)
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort summary render; a builder bug must not mask the real work, falls back to plain message
                     # Never let a summary-rendering bug mask the real
                     # work — fall back to the plain message.
                     line = f"  Catalog: {label} done ({elapsed:.1f}s)"
@@ -124,7 +124,7 @@ def _count_lines(path: Path) -> int:
     try:
         with path.open("rb") as f:
             return sum(1 for _ in f)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort line count for heartbeat; any read error degrades to 0 (see docstring)
         return 0
 
 
@@ -315,7 +315,7 @@ _log = structlog.get_logger()
 
 def _default_registry_path() -> Path:
     """Return the default path to the repo registry JSON file."""
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance; config imports catalog helpers
 
     return nexus_config_dir() / "repos.json"
 
@@ -585,7 +585,7 @@ class Catalog:
         # means a future change to the projector's constructor (e.g.
         # taking a Phase-5 schema version flag) only has to be
         # threaded once.
-        from nexus.catalog.projector import Projector as _Projector
+        from nexus.catalog.projector import Projector as _Projector  # noqa: PLC0415 — circular-dep avoidance; projector imports catalog
         self._projector = _Projector(self._db)
         self.degraded: bool = False
         # RDR-101 Phase 3 follow-up B (nexus-o6aa.9.7): set when
@@ -630,10 +630,10 @@ class Catalog:
         # bootstrap. _read_consistency_marker / _ensure_consistent both
         # delegate through self._sync, so the composition has to be in
         # place when those calls fire.
-        from nexus.catalog.catalog_links import _LinkOps
-        from nexus.catalog.catalog_docs import _DocumentOps
-        from nexus.catalog.catalog_sync import _SyncOps
-        from nexus.catalog.catalog_writes import _WriteOps
+        from nexus.catalog.catalog_links import _LinkOps  # noqa: PLC0415 — circular-dep avoidance; _Ops facades import catalog
+        from nexus.catalog.catalog_docs import _DocumentOps  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.catalog.catalog_sync import _SyncOps  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.catalog.catalog_writes import _WriteOps  # noqa: PLC0415 — circular-dep avoidance
         self._links = _LinkOps(self)
         self._docs = _DocumentOps(self)
         self._sync = _SyncOps(self)
@@ -717,7 +717,7 @@ class Catalog:
                 )
                 try:
                     self._write_to_event_log(event)
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort backfill event write; failure logged, backfill continues
                     _log.warning(
                         "catalog_backfill_event_write_failed",
                         collection_name=name,
@@ -847,7 +847,7 @@ class Catalog:
                 ).fetchone()[0]
                 if live_count > 0 and total_lines / live_count >= ratio:
                     return True
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort compaction check; failure surfaced at WARNING, returns False (see comment)
             # nexus-8g79.5: pre-fix the bare ``except: pass`` silently
             # disabled JSONL compaction whenever an exception fired
             # (transient read error, permissions hiccup). The next call
@@ -953,7 +953,7 @@ class Catalog:
             return
         try:
             self._write_to_event_log(event)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort shadow emit; failure logged, primary write path unaffected
             event_type = getattr(event, "type", "?")
             _log.warning(
                 "shadow_emit_failed",
@@ -1207,7 +1207,7 @@ class Catalog:
         :func:`nexus.registry._repo_identity`; ``description`` defaults
         to ``"Git repository: {repo_name}"``.
         """
-        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
         # nexus-zr2ie (RDR-137 gate critique 2026-05-28): use the
         # 3-tuple variant so ``repo_root`` is the canonical main-repo
@@ -1292,7 +1292,7 @@ class Catalog:
                 (owner_str,),
             ).fetchone()
             if row is not None:
-                from nexus.catalog.tumbler import OwnerRecord, read_owners  # noqa: PLC0415
+                from nexus.catalog.tumbler import OwnerRecord, read_owners  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.tumbler)
 
                 # Read current JSONL state to recover next_seq.
                 if self._owners_path.exists():
@@ -1383,7 +1383,7 @@ class Catalog:
         # Realpath both sides so symlinked roots (notably macOS's
         # /private/var ↔ /var) and ``..`` segments don't trigger
         # false positives. realpath() tolerates non-existent paths.
-        from urllib.parse import unquote
+        from urllib.parse import unquote  # noqa: PLC0415 — branch-local; only on file:// URI normalization path
 
         file_abs = unquote(parsed.path)
         real_file = os.path.realpath(file_abs)
@@ -1610,8 +1610,8 @@ class Catalog:
         canonical and the projector writes SQLite; in legacy mode SQLite
         is written directly and the event is shadow-emitted.
         """
-        from datetime import UTC, datetime  # noqa: PLC0415
-        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+        from datetime import UTC, datetime  # noqa: PLC0415  — stdlib deferred to call site (datetime)
+        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
 
         if not name:
             raise ValueError("register_collection: name must be non-empty")
@@ -1707,7 +1707,7 @@ class Catalog:
         forbid catalog writes outside the projector module. Cascade
         callers stay clean by routing through this verb.
         """
-        from nexus.catalog.events import CollectionDeletedPayload  # noqa: PLC0415
+        from nexus.catalog.events import CollectionDeletedPayload  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.events)
 
         dir_fd = self._acquire_lock()
         try:
@@ -1918,7 +1918,7 @@ class Catalog:
         Thin delegate to :func:`nexus.catalog.catalog_spans.resolve_span_in_t3`
         (nexus-mbm). See that function for the full contract.
         """
-        from nexus.catalog import catalog_spans
+        from nexus.catalog import catalog_spans  # noqa: PLC0415 — circular-dep avoidance; catalog_spans imports catalog
         return catalog_spans.resolve_span_in_t3(span, physical_collection, t3)
 
     def resolve_chash(
@@ -1935,7 +1935,7 @@ class Catalog:
         :func:`nexus.catalog.catalog_spans.resolve_chash_globally`
         (nexus-mbm). See that function for the full contract.
         """
-        from nexus.catalog import catalog_spans
+        from nexus.catalog import catalog_spans  # noqa: PLC0415 — circular-dep avoidance; catalog_spans imports catalog
         return catalog_spans.resolve_chash_globally(
             chash, t3, chash_index, prefer_collection=prefer_collection,
         )
@@ -2033,7 +2033,7 @@ class Catalog:
         ).fetchone()
         if row is None:
             return None
-        from nexus.catalog.tumbler import Tumbler as _T  # noqa: PLC0415
+        from nexus.catalog.tumbler import Tumbler as _T  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.tumbler)
         return self._docs.resolve(_T.parse(row[0]))
 
     def by_source_uri(self, uri: str) -> "CatalogEntry | None":
@@ -2105,7 +2105,7 @@ class Catalog:
                 "LIMIT 1",
                 (collection, source_path, source_path),
             ).fetchone()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort source-path lookup; any query error degrades to empty string
             return ""
         if not row:
             return ""
@@ -2138,7 +2138,7 @@ class Catalog:
     # would propagate (c) but breaks ``Catalog._MAX_GRAPH_NODES``
     # class-level reads (returns the property descriptor instead of
     # an int). The class-attribute alias is the simpler contract.
-    from nexus.catalog import catalog_links as _links_mod
+    from nexus.catalog import catalog_links as _links_mod  # noqa: PLC0415 — circular-dep avoidance; class-attribute alias (see comment)
     _MAX_GRAPH_DEPTH = _links_mod._MAX_GRAPH_DEPTH
     _MAX_GRAPH_NODES = _links_mod._MAX_GRAPH_NODES
     del _links_mod
@@ -2259,7 +2259,7 @@ class Catalog:
         entry = self.resolve(tumbler)
         if entry is None:
             return None
-        from nexus.catalog import catalog_spans
+        from nexus.catalog import catalog_spans  # noqa: PLC0415 — circular-dep avoidance; catalog_spans imports catalog
         # nexus-hjd6: pass self so the chunk:char branch can use the
         # document_chunks manifest (RDR-108 Phase 3 removed the
         # chunk_index/doc_id metadata that the legacy where-filter

@@ -23,7 +23,7 @@ def _collect_health_data() -> dict[str, Any]:
 
     # Health checks from nexus.health
     try:
-        from nexus.health import run_health_checks, HealthResult
+        from nexus.health import run_health_checks, HealthResult  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         results, is_local = run_health_checks()
         checks = []
@@ -37,7 +37,7 @@ def _collect_health_data() -> dict[str, Any]:
         data["health_checks"] = checks
         data["is_local"] = is_local
         data["health_ok"] = all(not (r.fatal and not r.ok) for r in results)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort health probe; degrades to unhealthy default for the route
         data["health_checks"] = []
         data["is_local"] = True
         data["health_ok"] = False
@@ -58,7 +58,7 @@ def _collect_health_data() -> dict[str, Any]:
     data["active_sessions"] = sum(1 for s in data["sessions"] if s["pid_alive"])
 
     # MinerU status
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     mineru_pid_path = nexus_config_dir() / "mineru.pid"
     if mineru_pid_path.exists():
@@ -119,9 +119,9 @@ def _collect_aspect_queue_data() -> dict[str, Any]:
     "by_status": {status: count, ...}, "oldest_pending": iso_str|None,
     "failed_count": N}`` otherwise.
     """
-    import sqlite3 as _sqlite3
+    import sqlite3 as _sqlite3  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
-    from nexus.config import default_db_path
+    from nexus.config import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     db_path = default_db_path()
     if not db_path.exists():

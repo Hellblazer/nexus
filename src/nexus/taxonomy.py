@@ -65,7 +65,7 @@ def cluster_and_persist(
     by HDBSCAN on T3 collection embeddings. Run ``nx taxonomy discover``
     or ``nx taxonomy discover --all`` to discover topics.
     """
-    import warnings
+    import warnings  # noqa: PLC0415 - branch-local; deferred to call time
     warnings.warn(
         "cluster_and_persist() removed in 4.0. "
         "Use db.taxonomy.discover_topics() or `nx taxonomy discover --all`.",
@@ -87,7 +87,7 @@ def rebuild_taxonomy(
     collection embeddings with a merge strategy that preserves
     operator-curated labels.
     """
-    import warnings
+    import warnings  # noqa: PLC0415 - branch-local; deferred to call time
     warnings.warn(
         "rebuild_taxonomy() signature changed in 4.0. "
         "Use db.taxonomy.rebuild_taxonomy(collection, doc_ids, embeddings, texts, chroma_client) "

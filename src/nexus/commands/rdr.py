@@ -101,7 +101,7 @@ def _preamble_resolve_repo() -> tuple[str, str]:
             stderr=subprocess.DEVNULL, text=True,
         ).strip()
         repo_name = Path(repo_root).name
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort cwd derivation; falls back to working dir on failure
         repo_root = str(Path.cwd())
         repo_name = Path(repo_root).name
     return repo_root, repo_name
@@ -117,7 +117,7 @@ def _preamble_rdr_dir(repo_root: str) -> str:
             d = yaml.safe_load(content) or {}
             paths = (d.get("indexing") or {}).get("rdr_paths", ["docs/rdr"])
             rdr_dir = paths[0] if paths else "docs/rdr"
-        except Exception:
+        except Exception:  # noqa: BLE001 — fallback parse path; tries alternate regex extraction on failure
             m_yml = (
                 re.search(r"rdr_paths[^\[]*\[([^\]]+)\]", content)
                 or re.search(r"rdr_paths:\s*\n\s+-\s*(.+)", content)
@@ -139,7 +139,7 @@ def _preamble_parse_frontmatter(filepath: Path) -> tuple[dict, str]:
             block = parts[1]
             try:
                 meta = yaml.safe_load(block) or {}
-            except Exception:
+            except Exception:  # noqa: BLE001 — fallback parse path; degrades to line-by-line parsing
                 for line in block.splitlines():
                     if ":" in line:
                         k, _, v = line.partition(":")
@@ -212,8 +212,8 @@ def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
     """Read RDR list from T2; return [] if T2 is unavailable or empty."""
     rdrs: list[dict] = []
     try:
-        from nexus.commands._helpers import default_db_path
-        from nexus.db.t2 import T2Database
+        from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         with T2Database(default_db_path()) as db:  # epsilon-allow: short-lived read-only preamble CLI
             entries = db.get_all(project=f"{repo_name}_rdr")
             for entry in entries:
@@ -232,7 +232,7 @@ def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
                         or f"{rdr_dir}/{title}-*.md"
                     ),
                 })
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort RDR scan; returns whatever was collected
         pass
     return rdrs
 
@@ -432,7 +432,7 @@ def preamble_rdr_create(args: tuple[str, ...]) -> None:
         )
         bd_out = (result.stdout or "").strip()
         print(bd_out if bd_out else "No in-progress beads")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — optional beads integration; absence reported, command continues
         print(f"Beads not available: {exc}")
     print()
 
@@ -508,7 +508,7 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
                 )
                 t2_out = (t2_result.stdout or "").strip()
                 print(t2_out if t2_out else f"No T2 record for RDR {t2_key}")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — optional T2 lookup; absence reported, command continues
                 print(f"T2 not available: {exc}")
             print()
 
@@ -526,7 +526,7 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
                 ]
                 print("\n".join(research_lines) if research_lines
                       else "No research findings recorded")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — optional T2 lookup; absence reported, command continues
                 print(f"T2 not available: {exc}")
             print()
 
@@ -544,7 +544,7 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
                 ]
                 print("\n".join(matching) if matching
                       else "No beads linked (check epic_bead in T2)")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — optional beads integration; absence reported, command continues
                 print(f"Beads not available: {exc}")
         else:
             print(f"> RDR not found for: `{args_str}`")
@@ -1079,7 +1079,7 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
                      "--tags", f"rdr-close-active,rdr-{t2_key}"],
                     capture_output=True, timeout=5,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort optional lookup; ignored if unavailable
                 pass
 
     # T2 metadata
@@ -1112,7 +1112,7 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
             print(bd_out)
         else:
             print("No open or in-progress beads.")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — optional beads integration; absence reported, command continues
         print(f"Beads not available: {exc}")
 
     # S3: WARNING block — required by feedback_rdr_close_protocol (original rdr_close.py:335-341)
@@ -1191,7 +1191,7 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
                     "\n".join(research_lines) if research_lines
                     else "No research findings recorded yet"
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — optional T2 lookup; absence reported, command continues
                 print(f"T2 not available: {exc}")
         else:
             print(f"> RDR not found for ID: `{id_match.group(0)}`")
@@ -1248,7 +1248,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
                     name = name[:-4]
                 if name:
                     return name
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort git lookup; falls back to next strategy
             pass
         try:
             root = subprocess.check_output(
@@ -1257,7 +1257,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             ).strip()
             if root:
                 return Path(root).name
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort git lookup; falls back to cwd name
             pass
         return Path.cwd().name
 
@@ -1684,12 +1684,12 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
             ],
             capture_output=True, timeout=5,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort sentinel write (RDR-121 P2); ignored on failure
         pass
 
     # Write phase_review_sentinel (best-effort, RDR-121 P2 co-requirement)
     try:
-        from nexus.phase_review_sentinel import write_sentinel
+        from nexus.phase_review_sentinel import write_sentinel  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         write_sentinel(rdr_id_label, str(phase_arg or "1"))
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort sentinel write (RDR-121 P2); ignored on failure
         pass

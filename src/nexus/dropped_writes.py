@@ -34,7 +34,7 @@ def default_log_path() -> Path:
     override = os.environ.get("NX_DROPPED_WRITES_LOG_PATH")
     if override:
         return Path(override)
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     return nexus_config_dir() / "dropped_writes.jsonl"
 
@@ -73,7 +73,7 @@ def record_drop(*, hook: str, collection: str, rows: int, error: str) -> None:
             os.write(fd, line.encode("utf-8"))
         finally:
             os.close(fd)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         # The meter is itself best-effort; a metering failure must not break
         # the enclosing best-effort hook (RDR-129 B4).
         _log.debug("dropped_write_meter_record_failed", exc_info=True)

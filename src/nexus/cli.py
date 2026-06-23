@@ -77,7 +77,7 @@ from nexus.commands.upgrade import upgrade
 @click.pass_context
 def main(ctx: click.Context, verbose: bool) -> None:
     """Nexus — self-hosted semantic search and knowledge management."""
-    from nexus.logging_setup import configure_logging
+    from nexus.logging_setup import configure_logging  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
@@ -90,7 +90,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
     # (CI / cron / MCP / scripted runs) and via NEXUS_NO_PROMPTS=1.
     # Hook is here, at the top-level Click group, so it fires once per
     # CLI invocation rather than per Catalog construction.
-    from nexus.commands._migration_prompt import maybe_emit_bootstrap_prompt
+    from nexus.commands._migration_prompt import maybe_emit_bootstrap_prompt  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     maybe_emit_bootstrap_prompt()
 
 

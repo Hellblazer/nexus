@@ -71,7 +71,7 @@ def repair() -> None:
 def _open_plans_db():
     """Open memory.db with WAL pragmas. Returns the connection, or
     None when the database does not exist."""
-    from nexus.commands._helpers import default_db_path
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -96,7 +96,7 @@ def repair_scope_tags_cmd() -> None:
     Combines the substantive work of the pre-RDR-120 4.8.0 and 4.8.1
     migrations into one idempotent pass.
     """
-    from nexus.plans.repair import repair_scope_tags
+    from nexus.plans.repair import repair_scope_tags  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -116,7 +116,7 @@ def repair_dimensions_cmd() -> None:
     tagged ``backfill-low-conf`` for operator review. Re-runs report
     "0 backfilled" once every row carries dimensions.
     """
-    from nexus.plans.repair import repair_dimensions
+    from nexus.plans.repair import repair_dimensions  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -153,7 +153,7 @@ def repair_match_text_cmd() -> None:
     triggers) was created by ``apply_pending``; this verb fills in
     the content the legacy migration used to populate.
     """
-    from nexus.plans.repair import repair_match_text
+    from nexus.plans.repair import repair_match_text  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -171,7 +171,7 @@ def repair_retire_legacy_cmd() -> None:
     ``operation`` shape. Such rows cannot be dispatched by ``plan_run``
     and only pollute plan-match results.
     """
-    from nexus.plans.repair import repair_retire_legacy
+    from nexus.plans.repair import repair_retire_legacy  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -189,7 +189,7 @@ def repair_builtin_bindings_cmd() -> None:
     plan rows whose stored ``plan_json`` predates the 4.10.1 seed
     loader fix.
     """
-    from nexus.plans.repair import repair_builtin_bindings
+    from nexus.plans.repair import repair_builtin_bindings  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -204,7 +204,7 @@ def repair_builtin_bindings_cmd() -> None:
 @repair.command("all")
 def repair_all_cmd() -> None:
     """Run every repair pass in dependency order."""
-    from nexus.plans.repair import repair_all
+    from nexus.plans.repair import repair_all  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -281,8 +281,8 @@ def list_cmd(
       nx plan list --scope=global --origin=builtin
       nx plan list --name=hybrid
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -375,8 +375,8 @@ def show_cmd(id_or_name: str, as_json: bool) -> None:
     \b
     Argument may be a numeric id or a name substring (first match wins).
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -444,8 +444,8 @@ def delete_cmd(plan_id: int, yes: bool) -> None:
     destructive and a name-substring lookup is fuzzy. Use ``nx plan
     list`` or ``nx plan show <name>`` to find the id first.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -493,8 +493,8 @@ def disable_cmd(plan_id: int, reason: str) -> None:
     Both matcher lanes (T1 cosine via list_active_plans, T2 FTS5 via
     search_plans) skip rows with disabled_at set.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -528,8 +528,8 @@ def enable_cmd(plan_id: int) -> None:
     Clears the ``disabled_at`` column. The ``disable-reason:`` tag, if
     present, is preserved as a historical record.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -589,8 +589,8 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
       nx plan set-scope 21 --from-project
       nx plan set-scope 43 rdr__arcaneum,knowledge__delos
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
 
     if from_project and tags:
         raise click.UsageError(
@@ -615,7 +615,7 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
 
         if from_project:
             project = row.get("project") or ""
-            from nexus.plans.scope import (  # noqa: PLC0415
+            from nexus.plans.scope import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.plans.scope)
                 _SCOPE_AGNOSTIC_SENTINELS,
                 _normalize_scope_string,
             )
@@ -671,8 +671,8 @@ def reseed_cmd(force: bool) -> None:
     dimensions, so a description tweak on an existing dimension is
     invisible to the idempotent path.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -693,6 +693,6 @@ def reseed_cmd(force: bool) -> None:
             lib.close()
         click.echo(f"--force: removed {removed} builtin row(s).")
 
-    from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415
+    from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands.catalog)
     seeded = _seed_plan_templates()
     click.echo(f"Seeded {seeded} new builtin row(s).")

@@ -53,7 +53,7 @@ def open_local_read_client(local_path: str | Path) -> Any:
             f"local Chroma store not found at {p} — nothing to migrate, or the "
             "path is wrong (default: ~/.config/nexus/chroma)"
         )
-    import chromadb  # noqa: PLC0415
+    import chromadb  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
 
     client = chromadb.PersistentClient(path=str(p))  # epsilon-allow: RDR-155 P5 ETL local read leg — the ONE surviving local Chroma constructor (P4a.1 contract)
     _log.info("chroma_read_local_opened", path=str(p))
@@ -72,7 +72,7 @@ def open_cloud_read_client(
     constructor's behaviour so existing deployments migrate without
     re-plumbing credentials.
     """
-    from nexus.config import get_credential  # noqa: PLC0415
+    from nexus.config import get_credential  # noqa: PLC0415  — command-local import (nexus.config)
 
     tenant = tenant or get_credential("chroma_tenant")
     database = database or get_credential("chroma_database")
@@ -83,14 +83,14 @@ def open_cloud_read_client(
             "(nx config set chroma_database/chroma_api_key) — refusing a "
             "half-configured cloud read"
         )
-    import chromadb  # noqa: PLC0415
+    import chromadb  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
 
     client = chromadb.CloudClient(  # epsilon-allow: RDR-155 P5 ETL cloud read leg — the ONE surviving CloudClient constructor (P4a.1 contract)
         tenant=tenant or None, database=database, api_key=api_key
     )
     # The serving path's stalled-read hazard applies to the ETL too:
     # chromadb hardcodes httpx.Client(timeout=None).
-    from nexus.db.t3 import _apply_chroma_http_timeout  # noqa: PLC0415
+    from nexus.db.t3 import _apply_chroma_http_timeout  # noqa: PLC0415  — command-local import (nexus.db.t3)
 
     _apply_chroma_http_timeout(client)
     _log.info("chroma_read_cloud_opened", tenant=tenant, database=database)

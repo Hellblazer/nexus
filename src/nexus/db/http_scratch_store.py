@@ -160,7 +160,7 @@ class HttpScratchStore:
         port; our env port is stale), re-resolve the endpoint from the
         ServiceRegistry lease and rebuild the client. Returns True if rebound to
         a NEW endpoint, False otherwise (genuine outage — let the error stand)."""
-        from nexus.db.service_endpoint import recover_endpoint_from_lease
+        from nexus.db.service_endpoint import recover_endpoint_from_lease  # noqa: PLC0415 — deferred to avoid circular import
 
         recovered = recover_endpoint_from_lease(self._base_url)
         if recovered is None:
@@ -172,7 +172,7 @@ class HttpScratchStore:
             self._headers["Authorization"] = f"Bearer {new_token}"
         try:
             self._client.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             pass
         self._client = self._build_client()
         return True
@@ -209,7 +209,7 @@ class HttpScratchStore:
         flush.  Auto-destination when no explicit project/title:
         ``scratch_sessions`` / ``{session_id}_{id}``.
         """
-        import uuid as _uuid_mod
+        import uuid as _uuid_mod  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
         doc_id = str(_uuid_mod.uuid4())
         if persist:
             flush_project = flush_project or "scratch_sessions"
@@ -343,8 +343,8 @@ class HttpScratchStore:
 
         Raises ``KeyError`` when the entry is not found in this session.
         """
-        from nexus.db.t1 import _find_promote_overlap_candidates
-        from nexus.types import PromotionReport
+        from nexus.db.t1 import _find_promote_overlap_candidates  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.types import PromotionReport  # noqa: PLC0415 — deferred to avoid circular import
 
         entry = self.get(id)
         if entry is None:

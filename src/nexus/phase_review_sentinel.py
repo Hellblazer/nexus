@@ -55,10 +55,10 @@ def find_claude_pid() -> int:
     running outside a real Claude shell during tests).
     """
     try:
-        from nexus.session import find_immediate_claude_pid
+        from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — optional dep deferred: nexus.session may be unavailable outside a real Claude shell
 
         return find_immediate_claude_pid()
-    except Exception:
+    except Exception:  # noqa: BLE001 — fallback path: any import/resolution failure falls back to os.getppid()
         return os.getppid()
 
 

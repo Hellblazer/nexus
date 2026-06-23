@@ -171,8 +171,8 @@ def _run_migration(
     sentinel ``migrated-failed`` (reads stay degraded-LOUD) and exits non-zero;
     rollback is offered, never auto-invoked (RF-5, copy-not-move).
     """
-    from nexus.migration.driver import run_guided_upgrade
-    from nexus.migration.orchestrator import EtlSources
+    from nexus.migration.driver import run_guided_upgrade  # noqa: PLC0415 — heavy migration dep deferred to subcommand scope
+    from nexus.migration.orchestrator import EtlSources  # noqa: PLC0415 — heavy migration dep deferred to subcommand scope
 
     # Process-level for this one-shot CLI invocation; HttpVectorClient +
     # make_catalog_client_for_migration below resolve the endpoint from it.
@@ -193,7 +193,7 @@ def _run_migration(
     # Pre-flight the service endpoint so an unresolvable service is a clean
     # early error BEFORE the (potentially long) detect+ETL, mirroring
     # `storage migrate vectors`.
-    from nexus.db.http_vector_client import HttpVectorClient, _resolve_endpoint
+    from nexus.db.http_vector_client import HttpVectorClient, _resolve_endpoint  # noqa: PLC0415 — deferred import; http_vector_client only needed in this branch
 
     try:
         _resolve_endpoint()
@@ -227,7 +227,7 @@ def _run_migration(
     if not _confirm_voyage_cost(cost_preview, assume_yes=assume_yes):
         raise click.Abort()
 
-    from nexus.catalog.factory import make_catalog_client_for_migration
+    from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred import; catalog factory only needed in this branch
 
     vector_client = HttpVectorClient()
     try:
@@ -339,7 +339,7 @@ def _resolve_db_path(explicit: str | None) -> Path:
     env_path = os.environ.get("NX_DB_PATH", "")
     if env_path:
         return Path(env_path)
-    from nexus.config import default_db_path  # noqa: PLC0415
+    from nexus.config import default_db_path  # noqa: PLC0415 — command-local import (config)
 
     return default_db_path()
 
@@ -352,7 +352,7 @@ def _resolve_catalog_db_path(explicit: str | None) -> Path:
     env_path = os.environ.get("NX_CATALOG_DB_PATH", "")
     if env_path:
         return Path(env_path)
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — command-local import (config)
 
     return nexus_config_dir() / "catalog" / ".catalog.db"
 

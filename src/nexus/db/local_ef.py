@@ -88,7 +88,7 @@ def _resolve_local_model(*, warn: bool) -> str:
     it to the user. ``warn`` is False on the write-path token derivation to
     avoid emitting the same warning once per collection-name lookup.
     """
-    from nexus.config import local_embed_model_choice
+    from nexus.config import local_embed_model_choice  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     configured = local_embed_model_choice()
     if configured in _MODEL_DIMS:
@@ -173,7 +173,7 @@ class LocalEmbeddingFunction:
     def _init_ef(self) -> None:
         """Lazy-initialise the underlying embedding function."""
         if self._model_name == _TIER0_MODEL:
-            from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+            from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2  # noqa: PLC0415 — heavy/optional dep (chromadb) deferred to call time to keep module import cheap
 
             self._ef = ONNXMiniLM_L6_V2()
         else:
@@ -183,9 +183,9 @@ class LocalEmbeddingFunction:
             # here — the sole EF-construction chokepoint — so launchd-spawned
             # daemon/MCP processes that never see the nx-init shell env still
             # land on the stable dir.
-            from fastembed import TextEmbedding
+            from fastembed import TextEmbedding  # noqa: PLC0415 — heavy/optional dep (fastembed) deferred to call time to keep module import cheap
 
-            from nexus.config import fastembed_cache_dir
+            from nexus.config import fastembed_cache_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
             cache_dir = fastembed_cache_dir()
             cache_dir.mkdir(parents=True, exist_ok=True)

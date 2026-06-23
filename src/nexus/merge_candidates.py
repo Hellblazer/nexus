@@ -139,8 +139,8 @@ def compute_merge_candidates(
 
 
 def _open_t2():
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -160,7 +160,7 @@ def run_merge_candidates(
     limit: int,
     fmt: str,
 ) -> str:
-    from nexus.db.storage_mode import has_raw_access
+    from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     t2 = _open_t2()
     if t2 is None:
         return "T2 database not initialised."

@@ -198,7 +198,7 @@ def _find_service_binary(config_dir: Path) -> Path | None:
             "to use the installed binary."
         )
 
-    from nexus.daemon.binary_lifecycle import well_known_binary_path
+    from nexus.daemon.binary_lifecycle import well_known_binary_path  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
     well_known = well_known_binary_path(config_dir)
     if well_known.is_file():
         return _require_executable(well_known, "nexus-service")
@@ -348,9 +348,9 @@ def _pid_is_alive(pid: int) -> bool:
 def _daemon_version() -> str:
     """Return the conexus package version for the lease."""
     try:
-        from importlib.metadata import version
+        from importlib.metadata import version  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         return version("conexus")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort version probe; falls back to 0.0.0
         return "0.0.0"
 
 
@@ -515,7 +515,7 @@ class StorageServiceSupervisor:
         # credentials) so `nx daemon service start` works without manual env
         # plumbing. An explicit NX_VOYAGE_API_KEY in the caller's env wins.
         if not env.get("NX_VOYAGE_API_KEY"):
-            from nexus.config import get_credential
+            from nexus.config import get_credential  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             voyage_key = get_credential("voyage_api_key")
             if voyage_key:
                 env["NX_VOYAGE_API_KEY"] = voyage_key
@@ -564,7 +564,7 @@ class StorageServiceSupervisor:
         # its order; O_APPEND means a respawn never truncates the previous
         # process's final (crash) output. The native binary writes to
         # storage_service_native.log.
-        from nexus.logging_setup import open_child_log_or_devnull
+        from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         svc_log = open_child_log_or_devnull(self._svc_log_name, self._config_dir)
         try:
@@ -598,11 +598,11 @@ class StorageServiceSupervisor:
             return False
         url = f"http://{_SERVICE_HOST}:{_port}/health"
         try:
-            import urllib.request
+            import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=_HEALTH_TIMEOUT) as resp:
                 return resp.status == 200
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort reachability probe; returns False on any error
             return False
 
     def _pg_reachable(self) -> bool:
@@ -643,7 +643,7 @@ class StorageServiceSupervisor:
             pid=proc.pid,
         )
         with contextlib.suppress(Exception):
-            from nexus.util.process_group import safe_killpg
+            from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             safe_killpg(proc.pid, signal.SIGTERM)
             kill_deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
             while time.monotonic() < kill_deadline and _pid_is_alive(proc.pid):
@@ -699,7 +699,7 @@ class StorageServiceSupervisor:
         """
         if self._proc is None:
             return
-        from nexus.util.process_group import safe_killpg
+        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         pid = self._proc.pid
         if _pid_is_alive(pid):
@@ -776,7 +776,7 @@ class StorageServiceSupervisor:
         Idempotent: a live lease short-circuits without a duplicate spawn.
         Raises :class:`StorageServiceStartError` on failure (LOUD).
         """
-        import fcntl
+        import fcntl  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         self._config_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._config_dir / _SPAWN_LOCK_FILE
@@ -874,7 +874,7 @@ class StorageServiceSupervisor:
 
         _log.info("storage_service_starting_pg", port=self._pg_port)
         try:
-            from nexus.db.pg_provision import discover_pg_binaries, _start_cluster
+            from nexus.db.pg_provision import discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             pg_data_str = self._creds.get("PG_DATA", "")
             if not pg_data_str:
                 raise StorageServiceStartError(
@@ -1016,7 +1016,7 @@ class StorageServiceSupervisor:
 
 def _load_credentials(config_dir: Path) -> dict[str, str]:
     """Read pg_credentials; raise StorageServiceStartError if absent."""
-    from nexus.db.pg_provision import CREDENTIALS_FILENAME
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
     creds_path = config_dir / CREDENTIALS_FILENAME
     if not creds_path.exists():
         raise StorageServiceStartError(
@@ -1029,8 +1029,8 @@ def _load_credentials(config_dir: Path) -> dict[str, str]:
     # one here so the supervisor starts cleanly on upgrade rather than hard-failing in
     # _resolve_service_token. Idempotent (no-op if already present).
     if not creds.get("NX_SERVICE_TOKEN"):
-        import secrets
-        from nexus.db.pg_provision import _persist_service_token
+        import secrets  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        from nexus.db.pg_provision import _persist_service_token  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         _persist_service_token(creds_path, secrets.token_hex(32))
         creds = _read_pg_credentials(creds_path)
     return creds
@@ -1051,7 +1051,7 @@ def start_storage_service(
     Raises :class:`StorageServiceStartError` loudly on any failure.
     """
     if config_dir is None:
-        from nexus.config import nexus_config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         config_dir = nexus_config_dir()
 
     creds = _load_credentials(config_dir)
@@ -1103,7 +1103,7 @@ def run_storage_supervisor(
     Returns the intended process exit code.
     """
     if config_dir is None:
-        from nexus.config import nexus_config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         config_dir = nexus_config_dir()
 
     # nexus-ovbr7: route structlog to <config_dir>/logs/storage_service.log
@@ -1111,7 +1111,7 @@ def run_storage_supervisor(
     # stderr, so without this file sink every lifecycle event below —
     # including the restart-exhausted and crash paths — was invisible and
     # four supervisor deaths went undiagnosed.
-    from nexus.logging_setup import configure_logging, flush_logging
+    from nexus.logging_setup import configure_logging, flush_logging  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     configure_logging("storage_service", config_dir=config_dir)
 
@@ -1274,7 +1274,7 @@ def stop_storage_service(*, config_dir: Path | None = None) -> int | None:
     None for stale ones), a non-None return is the freshness proxy.
     """
     if config_dir is None:
-        from nexus.config import nexus_config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         config_dir = nexus_config_dir()
 
     registry = ServiceRegistry(dir=config_dir, tier=_REGISTRY_TIER)
@@ -1310,7 +1310,7 @@ def stop_storage_service(*, config_dir: Path | None = None) -> int | None:
 
     # No live supervisor: signal the service process group directly.
     if isinstance(pid_to_signal, int) and pid_to_signal > 0:
-        from nexus.util.process_group import safe_killpg
+        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         safe_killpg(pid_to_signal, signal.SIGTERM)
         # Clean up the lease record.
         with contextlib.suppress(Exception):

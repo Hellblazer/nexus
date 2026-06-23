@@ -246,7 +246,7 @@ def _list_collection_names(t3: Any) -> set[str]:
     """Return the set of live collection names from *t3*."""
     try:
         result = t3.list_collections()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog list; returns empty set on any error
         return set()
     # Accept both ``list[str]`` and ``list[{"name": ...}]`` shapes.
     names: set[str] = set()
@@ -264,11 +264,11 @@ def _count_collection(t3: Any, name: str) -> int | None:
     """Return the chunk count for *name*, or ``None`` if unavailable."""
     try:
         col = t3.get_or_create_collection(name)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort collection handle; returns None on any error
         return None
     try:
         return int(col.count())
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort count; returns None on any error
         return None
 
 

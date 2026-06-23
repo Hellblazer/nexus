@@ -26,13 +26,13 @@ def _default_db_path() -> Path:
     # writes through the daemon via mcp_infra.t2_index_write). Retained as
     # the config-dir-isolation canary asserted by
     # test_config_dir_isolation.TestT2IsolatedUnderOverride.
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     return nexus_config_dir() / "memory.db"
 
 
 def _open_t1():
-    from nexus.db.t1 import get_t1_database
+    from nexus.db.t1 import get_t1_database  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     return get_t1_database()
 
 
@@ -44,7 +44,7 @@ def _infer_repo() -> str:
             capture_output=True, text=True, check=True, timeout=10,
         )
         return Path(result.stdout.strip()).name
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         _log.debug("infer_repo_git_failed", error=str(exc))
         return Path.cwd().name
 
@@ -119,7 +119,7 @@ def session_end_flush() -> str:
     try:
         try:
             t1 = _open_t1()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
             _log.warning(
                 "session_end_flush_t1_unavailable",
                 error=str(exc),
@@ -151,7 +151,7 @@ def session_end_flush() -> str:
         # memory.db directly and contend on its single WAL writer lock.
         # t2_index_write falls back to a direct T2Database when the daemon
         # is unreachable (the grandchild can outlive the MCP lifespan).
-        from nexus.mcp_infra import t2_index_write
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         flushed, expired = t2_index_write(_flush_and_expire)
         if t1 is not None:
             t1.clear()

@@ -266,7 +266,7 @@ class PlanLibrary:
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_plan_project
+        from nexus.db.migrations import migrate_plan_project  # noqa: PLC0415 — migration helper deferred to call site
 
         migrate_plan_project(self.conn)
 
@@ -276,7 +276,7 @@ class PlanLibrary:
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_plan_ttl
+        from nexus.db.migrations import migrate_plan_ttl  # noqa: PLC0415 — migration helper deferred to call site
 
         migrate_plan_ttl(self.conn)
 
@@ -288,7 +288,7 @@ class PlanLibrary:
         the 4.8.1 critic-follow-up
         :func:`nexus.db.migrations._rewash_plan_scope_tags_all_sentinel`.
         """
-        from nexus.db.migrations import (
+        from nexus.db.migrations import (  # noqa: PLC0415 — migration helper deferred to call site
             _add_plan_scope_tags,
             _rewash_plan_scope_tags_all_sentinel,
         )
@@ -302,7 +302,7 @@ class PlanLibrary:
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
         Delegates to :func:`nexus.db.migrations._add_plan_disabled_at`.
         """
-        from nexus.db.migrations import _add_plan_disabled_at
+        from nexus.db.migrations import _add_plan_disabled_at  # noqa: PLC0415 — migration helper deferred to call site
 
         _add_plan_disabled_at(self.conn)
 
@@ -455,7 +455,7 @@ class PlanLibrary:
         Returns True when the row was updated (1 row affected), False
         when the id does not exist. nexus-mrzp.
         """
-        from datetime import UTC, datetime  # noqa: PLC0415
+        from datetime import UTC, datetime  # noqa: PLC0415  — stdlib deferred to call site (datetime)
 
         now_iso = datetime.now(UTC).isoformat()
         reason_tag = (

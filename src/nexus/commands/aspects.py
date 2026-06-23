@@ -83,8 +83,8 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
       0  Queue is drained (or was already empty).
       1  Timeout: queue still has active rows after --timeout seconds.
     """
-    from nexus.aspect_worker import DrainTimeoutError, drain_worker
-    from nexus.commands._helpers import default_db_path
+    from nexus.aspect_worker import DrainTimeoutError, drain_worker  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     mem_path = default_db_path()
     click.echo(f"Draining aspect queue at {mem_path} (timeout={timeout}s)...")
@@ -140,9 +140,9 @@ def aspects_gc(apply: bool) -> None:
     \b
     Filed under nexus-urj4 (RDR-108 Phase 5 follow-up).
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.config import catalog_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     mem_path = default_db_path()
     cat_db = catalog_path() / ".catalog.db"
@@ -210,8 +210,8 @@ def aspects_gc_fixtures(yes: bool) -> None:
     high-volume unmapped collection that matches one of the fixture
     patterns. RDR-120 §A8 / nexus-yulol.
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     mem_path = default_db_path()
     if not mem_path.exists():
@@ -220,7 +220,7 @@ def aspects_gc_fixtures(yes: bool) -> None:
 
     verb = "deleted" if yes else "would delete"
     any_rows = False
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
         raise click.UsageError(
             "gc-fixtures requires sqlite mode "
@@ -320,9 +320,9 @@ def aspects_backfill_source_uri(apply: bool) -> None:
     ``migrate_document_aspects_source_uri`` and
     ``migrate_document_aspects_source_uri_backfill_empty``.
     """
-    import sqlite3
-    from nexus.aspect_readers import uri_for
-    from nexus.commands._helpers import default_db_path
+    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     mem_path = default_db_path()
     if not mem_path.exists():
@@ -472,8 +472,8 @@ def aspects_gc_pre_rdr096(apply: bool) -> None:
     RDR-120 §A8 / nexus-6y2a9: carved out of
     ``migrate_drop_null_aspect_rows``.
     """
-    import sqlite3
-    from nexus.commands._helpers import default_db_path
+    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     mem_path = default_db_path()
     if not mem_path.exists():

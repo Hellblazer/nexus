@@ -34,7 +34,7 @@ def merge_corpus(
     # strict-naming guard. The owner segment is the corpus tag with
     # underscores rewritten to hyphens (the conformant grammar's owner
     # segment disallows ``_``).
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
 
     owner_segment = corpus.replace("_", "-")
     target_col_name = (
@@ -96,7 +96,7 @@ def merge_corpus(
                 cat.update(entry.tumbler, physical_collection=target_col_name)
                 try:
                     t3.delete_collection(entry.physical_collection)
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort source-collection delete; failure logged, merge continues
                     _log.warning("consolidation_delete_failed", collection=entry.physical_collection, exc_info=True)
                 merged += 1
                 continue
@@ -133,7 +133,7 @@ def merge_corpus(
             # Delete source collection
             try:
                 t3.delete_collection(entry.physical_collection)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort source-collection delete; failure logged, merge continues
                 _log.warning("consolidation_delete_failed", collection=entry.physical_collection, exc_info=True)
 
             merged += 1
@@ -144,7 +144,7 @@ def merge_corpus(
                 chunks=actual_count,
             )
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-entry boundary catch; error surfaced via errors list + log.error, loop continues
             errors.append(f"{entry.physical_collection}: {exc}")
             _log.error(
                 "consolidation_failed",

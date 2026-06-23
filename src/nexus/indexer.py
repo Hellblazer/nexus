@@ -202,8 +202,8 @@ def _set_owner_head_hash(repo: Path, head_hash: str, *, cat=None) -> None:
     """
     writer = None
     try:
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-        from nexus.repo_identity import _repo_identity
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
         # RDR-146 P1.2 strict split: read the owner via the reader (an
         # explicit ``cat`` is reused as the reader), write via the
@@ -231,7 +231,7 @@ def _set_owner_head_hash(repo: Path, head_hash: str, *, cat=None) -> None:
                 repo_hash=repo_hash,
                 hint="owner row deleted between lookup and update — re-index will heal",
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         _log.warning(
             "set_owner_head_hash_failed",
             repo=str(repo), error=str(exc),
@@ -247,8 +247,8 @@ def _repo_lock_path(repo: Path) -> Path:
     Uses the same worktree-stable identity as the registry so two worktrees
     of the same repo map to a single lock.
     """
-    from nexus.config import nexus_config_dir
-    from nexus.repo_identity import _repo_identity
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     _, path_hash = _repo_identity(repo)
     return nexus_config_dir() / "locks" / f"{path_hash}.lock"
@@ -320,9 +320,9 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
     no-catalog ad-hoc workflow (tests, single-shot CLI runs on a fresh
     repo) continues to satisfy ``T3Database``'s strict-naming guard.
     """
-    from nexus.catalog import Catalog  # noqa: PLC0415
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
-    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.catalog import Catalog  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog)
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.factory)
+    from nexus.config import catalog_path  # noqa: PLC0415  — circular-dep avoidance (nexus.config)
 
     try:
         cat_path = catalog_path()
@@ -336,7 +336,7 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
                 # callers that bypass the ``_catalog_hook`` upfront
                 # flow (e.g. ad-hoc CLI invocations on a fresh repo).
                 pass
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         _log.debug(
             "repo_collection_catalog_lookup_failed",
             repo=str(repo),
@@ -355,8 +355,8 @@ def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
     canonical model for ``content_type``; version is always v1 for
     ad-hoc fallbacks.
     """
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -391,7 +391,7 @@ def _legacy_collection_name(repo: "Path", content_type: str) -> str:
     in place to the conformant 4-segment shape on the first index after
     the catalog upgrade.
     """
-    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -431,8 +431,8 @@ def _migration_source_candidates(
     already crossed the Phase-5 strict-flip and accumulated synth-shape
     collections.
     """
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -498,17 +498,17 @@ def _migrate_legacy_collections(
     collection name. Sidesteps unknown legacy models like ``voyage-3``
     that pre-date :data:`CANONICAL_EMBEDDING_MODELS`.
     """
-    from typing import cast  # noqa: PLC0415
+    from typing import cast  # noqa: PLC0415  — stdlib deferred to call site (typing)
 
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.catalog)
     # nexus-8g79.10 (V5): import from peer module instead of reaching
     # up into commands/. The CLI wrapper in commands/collection.py
     # adds the ``t3_db=_t3()`` default; we pass ``t3_db`` explicitly.
-    from nexus.collection_rename import (  # noqa: PLC0415
+    from nexus.collection_rename import (  # noqa: PLC0415  — circular-dep avoidance (nexus.collection_rename)
         rename_collection_data_plane,
     )
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.repo_identity import _repo_identity  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     result: dict[str, str] = {}
 
@@ -584,7 +584,7 @@ def _migrate_legacy_collections(
                     ),
                 )
                 data_plane_succeeded = True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning(
                     "phase4_migration_data_plane_failed",
                     repo=str(repo), ct=ct, legacy=legacy,
@@ -599,7 +599,7 @@ def _migrate_legacy_collections(
             # this point onward any failure is non-fatal for the caller's
             # write path: ``conformant`` is the right name to use.
             try:
-                from nexus.corpus import (  # noqa: PLC0415
+                from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
                     is_conformant_collection_name,
                     parse_conformant_collection_name,
                 )
@@ -614,7 +614,7 @@ def _migrate_legacy_collections(
                     )
                 else:
                     w.register_collection(conformant)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning(
                     "phase4_register_collection_failed_after_rename",
                     old=legacy, new=conformant, exc_info=True,
@@ -623,7 +623,7 @@ def _migrate_legacy_collections(
                 w.supersede_collection(
                     legacy, conformant, reason="rdr-103-phase4-migration",
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # Old name may not be in the collections projection
                 # for legacy-shape collections that pre-date Phase 6
                 # backfill. Non-fatal: the data-plane rename has
@@ -642,7 +642,7 @@ def _migrate_legacy_collections(
             key = f"{ct}_collection"
             try:
                 registry.update(repo, **{key: conformant})  # type: ignore[attr-defined]
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.debug(
                     "phase4_registry_update_failed",
                     repo=str(repo), ct=ct, exc_info=True,
@@ -696,13 +696,13 @@ def _catalog_hook(
     starve the batch). The per-repo advisory lock keeps its orthogonal job
     (two ``nx index repo`` on the same repo) up in ``index_repository``.
     """
-    from nexus.catalog.write_priority import await_fair_window
+    from nexus.catalog.write_priority import await_fair_window  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     file_to_doc_id: dict[Path, str] = {}
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
@@ -711,7 +711,7 @@ def _catalog_hook(
 
         # RDR-146 P1.2 strict split: reads via ``cat`` (read-only reader),
         # writes via ``writer`` (write-only daemon proxy).
-        from nexus.catalog.factory import (  # noqa: PLC0415
+        from nexus.catalog.factory import (  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
             make_catalog_writer,
         )
@@ -740,7 +740,7 @@ def _catalog_hook(
             # paths for every relative-path document under this owner
             # once the worktree was deleted. ``_repo_identity_with_main``
             # uses ``git rev-parse --git-common-dir`` to resolve.
-            from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
+            from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
             _name, _hash, main_repo = _repo_identity_with_main(repo)
             owner = writer.register_owner(
                 name=repo_name,
@@ -751,7 +751,7 @@ def _catalog_hook(
             )
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
 
-        import sys
+        import sys  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         _progress = sys.stderr.write
         _progress(f"  Catalog: registering {len(indexed_files)} files…\r")
         new_tumblers = []
@@ -813,7 +813,7 @@ def _catalog_hook(
                 source_mtime = 0.0
 
             # Per-file content hash for rename detection (RDR-060 E7)
-            import hashlib as _hl
+            import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             try:
                 file_hash = _hl.sha256(abs_path.read_bytes()).hexdigest()
             except OSError:
@@ -843,7 +843,7 @@ def _catalog_hook(
                         source_mtime=source_mtime,
                     )
                     file_to_doc_id[abs_path] = str(existing.tumbler)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # Per-file failure must NOT abort the rest of the loop.
                 # The previous behaviour swallowed every subsequent
                 # registration too, leaving the entire repo's chunks
@@ -873,7 +873,7 @@ def _catalog_hook(
         if new_tumblers:
             _progress(f"  Catalog: linking {len(new_tumblers)} new entries…\r")
         try:
-            from nexus.catalog.link_generator import (
+            from nexus.catalog.link_generator import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
                 generate_pdf_corpus_links,
                 generate_prose_filepath_links,
                 generate_rdr_filepath_links,
@@ -895,7 +895,7 @@ def _catalog_hook(
                     filepath=fp_count, prose=prose_count, pdf=pdf_count,
                     repo=repo_name,
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
             _log.debug("catalog_link_generation_failed", exc_info=True)
 
         # Housekeeping: detect and evict orphaned catalog entries
@@ -903,7 +903,7 @@ def _catalog_hook(
         indexed_set = _indexed_relpaths(indexed_files, repo)
         _run_housekeeping(cat, owner, indexed_set, writer=writer)
         _progress(f"  Catalog: done ({len(new_tumblers)} new, {links_created} links)\n")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         _log.debug("catalog_hook_failed", exc_info=True)
     finally:
         if writer is not None:
@@ -1087,7 +1087,7 @@ def index_repository(
             return {}
 
     if hooks is None:
-        from nexus.hook_registry import HookRegistry, install_default_hooks
+        from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         hooks = HookRegistry()
         install_default_hooks(hooks)
 
@@ -1132,10 +1132,10 @@ def _build_frecency_doc_id_map(
     """
     file_to_doc_id: dict[Path, str] = {}
     try:
-        from nexus.catalog import Catalog
-        from nexus.catalog.factory import make_catalog_reader
-        from nexus.config import catalog_path
-        from nexus.repo_identity import _repo_identity
+        from nexus.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
@@ -1152,11 +1152,11 @@ def _build_frecency_doc_id_map(
                 rel_path = abs_path.name
             try:
                 entry = cat.by_file_path(owner, rel_path)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
                 continue
             if entry is not None:
                 file_to_doc_id[abs_path] = str(entry.tumbler)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         _log.debug("frecency_doc_id_map_failed", exc_info=True)
     return file_to_doc_id
 
@@ -1178,9 +1178,9 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     - Local/cloud mode: checks credentials, then obtains a
       :class:`T3Database` via ``make_t3()`` and updates directly.
     """
-    from nexus.config import get_credential
-    from nexus.frecency import batch_frecency
-    from nexus.db import make_t3
+    from nexus.config import get_credential  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     info = registry.get(repo)
     if info is None:
@@ -1192,12 +1192,12 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     code_collection = info.get("code_collection", info["collection"])
     docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
 
-    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415
+    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
     if _is_svc():
         # nexus-enehl: service mode — route frecency metadata updates through
         # the Java service's /v1/vectors/update-metadata endpoint.
         # No credential check needed: the service handles its own Chroma/Voyage.
-        from nexus.db.http_vector_client import get_http_vector_client as _get_svc  # noqa: PLC0415
+        from nexus.db.http_vector_client import get_http_vector_client as _get_svc  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
         db = _get_svc()
         _log.info(
             "frecency_service_mode",
@@ -1206,7 +1206,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                    "through Java service /v1/vectors/update-metadata endpoint.",
         )
     else:
-        from nexus.config import is_local_mode
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         if not is_local_mode():
             voyage_key = get_credential("voyage_api_key")
             chroma_key = get_credential("chroma_api_key")
@@ -1231,7 +1231,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     # nexus-ks40: frecency_only is a read-update flow; if the
     # collection has not yet been written, skip rather than mint an
     # empty zombie via get_or_create_collection.
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
 
     # nexus-7zcv (RDR-108 Phase 4 review D-H4): the legacy
     # ``where={"doc_id": <id>}`` lookup matches nothing for Phase-3
@@ -1242,9 +1242,9 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     # chunks).
     _cat = None
     try:
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         _cat = make_catalog_reader()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         _log.debug("frecency_only_catalog_lookup_failed", exc_info=True)
 
     for collection_name in collection_names:
@@ -1260,7 +1260,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                 # Manifest-based path: resolve chashes for this doc.
                 try:
                     manifest = _cat.get_manifest(doc_id)
-                except Exception:
+                except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                     manifest = []
                 natural_ids = [r.chash[:32] for r in manifest if r.chash]
                 if natural_ids:
@@ -1268,7 +1268,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                         present = col.get(
                             ids=natural_ids, include=["metadatas"],
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                         present = None
                     if present and present.get("ids"):
                         existing = present
@@ -1344,8 +1344,8 @@ def _index_code_file(
     staleness map. When supplied, the per-file ``check_staleness`` is
     a dict lookup instead of a Chroma roundtrip.
     """
-    from nexus.code_indexer import index_code_file
-    from nexus.index_context import IndexContext
+    from nexus.code_indexer import index_code_file  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.index_context import IndexContext  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     ctx = IndexContext(
         col=col,
@@ -1403,8 +1403,8 @@ def _index_prose_file(
     with a back-reference to the catalog. ``None`` is the legacy /
     no-catalog path.
     """
-    from nexus.prose_indexer import index_prose_file
-    from nexus.index_context import IndexContext
+    from nexus.prose_indexer import index_prose_file  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.index_context import IndexContext  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     ctx = IndexContext(
         col=col,
@@ -1466,8 +1466,8 @@ def _index_pdf_file(
     a back-reference to the catalog. ``None`` is the legacy /
     no-catalog path.
     """
-    import hashlib as _hl
-    from nexus.doc_indexer import _embed_with_fallback, _pdf_chunks
+    import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.doc_indexer import _embed_with_fallback, _pdf_chunks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     content_hash = _hl.sha256()
     with file.open("rb") as f:
@@ -1493,7 +1493,7 @@ def _index_pdf_file(
     if stage_timers is not None:
         _stage = stage_timers.stage
     else:
-        from contextlib import nullcontext
+        from contextlib import nullcontext  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         def _stage(_name: str):  # type: ignore[misc]
             return nullcontext()
 
@@ -1580,7 +1580,7 @@ def _index_pdf_file(
         # aspect extraction) cover CLI ingest the same way they cover
         # MCP store_put.
         if hooks is None:
-            from nexus.hook_registry import HookRegistry, install_default_hooks
+            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             hooks = HookRegistry()
             install_default_hooks(hooks)
         hooks.fire_batch(
@@ -1625,7 +1625,7 @@ def _discover_and_index_rdrs(
     standalone RDR progress reporting, call ``batch_index_markdowns`` directly
     with an ``on_file`` callback (Path B in the progress reporting design).
     """
-    from nexus.doc_indexer import batch_index_markdowns
+    from nexus.doc_indexer import batch_index_markdowns  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     if not rdr_abs_paths:
         _log.debug("RDR indexing skipped — no rdr_paths configured")
@@ -1647,7 +1647,7 @@ def _discover_and_index_rdrs(
     # catalog for a conformant ``rdr__<owner>__voyage-context-3__v<n>``,
     # falling back to the legacy ``rdr__<basename>-<hash8>`` shape when
     # the catalog is not initialized or the owner is not yet registered.
-    from nexus.repo_identity import _repo_identity
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     basename, _ = _repo_identity(repo)
     collection = _repo_collection_or_legacy(repo, "rdr")
 
@@ -1773,7 +1773,7 @@ def _prune_misclassified_in_collection(
         for did in doc_ids:
             try:
                 manifest = catalog.get_manifest(did)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 skipped_doc_ids[did] = f"{type(exc).__name__}: {exc}"
                 _log.warning(
                     "prune_misclassified_manifest_lookup_failed",
@@ -1795,7 +1795,7 @@ def _prune_misclassified_in_collection(
                 continue
             try:
                 present = col.get(ids=batch_ids, include=[])
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # nexus-8g79.4: same class — log so a recurring chroma
                 # outage during prune doesn't hide silently behind a
                 # bare ``continue``.
@@ -1836,7 +1836,7 @@ def _prune_misclassified_in_collection(
                 existing = _paginated_get(
                     col, include=[], where={"doc_id": {"$in": batch}},
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                 # Some Chroma deployments reject ``$in`` on absent keys;
                 # treat as empty result.
                 continue
@@ -1897,8 +1897,8 @@ def _prune_misclassified(
     ~ceil(N / _CHROMA_PAGE_SIZE) queries per direction (~34 total for
     ART) — about a 300x reduction in roundtrips.
     """
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
-    from tqdm import tqdm
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
+    from tqdm import tqdm  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     # nexus-ks40: read-only sweeps must NOT speculatively create T3
     # collections. ``get_or_create_collection`` would mint an empty
@@ -2008,7 +2008,7 @@ def _prune_deleted_files(
     # T3 collection is a clean skip, not a speculative empty creation
     # (the latter is the leak that fed the doctor's "T3 collections
     # without projection rows" zombie list).
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
     for collection_name in (code_collection, docs_collection):
         referenced = catalog.chashes_for_collection(collection_name)
         try:
@@ -2099,10 +2099,10 @@ def _run_index(
 
     Returns a stats dict with ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
-    from nexus.classifier import ContentClass, classify_file
-    from nexus.config import get_credential, load_config
-    from nexus.frecency import batch_frecency
-    from nexus.ripgrep_cache import build_cache
+    from nexus.classifier import ContentClass, classify_file  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.config import get_credential, load_config  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.ripgrep_cache import build_cache  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     info = registry.get(repo)
     if info is None:
@@ -2125,7 +2125,7 @@ def _run_index(
     # non-conformant value through the path-derived conformant synth, which
     # builds ``code__<owner>__<model>__v1`` without needing a registered
     # owner (model segment self-adjusts to local/cloud mode).
-    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
     if not is_conformant_collection_name(code_collection):
         code_collection = _repo_collection_or_legacy(repo, "code")
     if not is_conformant_collection_name(docs_collection):
@@ -2141,7 +2141,7 @@ def _run_index(
     read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)
 
     # Load tuning config and use its chunk_lines if not overridden by caller
-    from nexus.config import _tuning_from_dict
+    from nexus.config import _tuning_from_dict  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     tuning = _tuning_from_dict(cfg.get("tuning", {}))
     effective_chunk_lines: int | None = chunk_lines if chunk_lines is not None else tuning.code_chunk_lines
 
@@ -2277,16 +2277,16 @@ def _run_index(
         on_start(len(code_files) + len(prose_files) + len(pdf_files))
 
     # Update ripgrep cache (code + prose text files, not PDFs)
-    from nexus.config import nexus_config_dir
-    from nexus.repo_identity import _repo_identity
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     _repo_basename, _repo_hash = _repo_identity(repo)
     cache_path = nexus_config_dir() / f"{_repo_basename}-{_repo_hash}.cache"
     build_cache(repo, cache_path, all_text_scored)
 
     # Credential check and T3 setup
-    from nexus.config import is_local_mode as _is_local
-    from datetime import UTC, datetime as _dt
-    from nexus.db import make_t3
+    from nexus.config import is_local_mode as _is_local  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from datetime import UTC, datetime as _dt  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     _local_mode = _is_local()
     _embed_fn = None
@@ -2294,7 +2294,7 @@ def _run_index(
 
     if _local_mode:
         check_local_path_writable()
-        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         _local_ef = LocalEmbeddingFunction()
         local_model = _local_ef.model_name
 
@@ -2330,7 +2330,7 @@ def _run_index(
             )
     else:
         _embed_fn_doc = None
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
         _service_mode = is_vector_service_mode()  # captured here; reused for T3 routing below
         if _service_mode:
             # RDR-152 Seam B (nexus-gmiaf.22): in service mode, embedding
@@ -2358,7 +2358,7 @@ def _run_index(
             voyage_key = get_credential("voyage_api_key")
             chroma_key = get_credential("chroma_api_key")
             check_credentials(voyage_key, chroma_key)
-            import voyageai  # noqa: PLC0415
+            import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
             code_model = index_model_for_collection(code_collection)
             docs_model = index_model_for_collection(docs_collection)
             voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
@@ -2369,7 +2369,7 @@ def _run_index(
     # use make_t3() to preserve the existing daemon-backed path.
     # Reuse _service_mode computed above to avoid a second module-import round-trip.
     if _service_mode:
-        from nexus.mcp_infra import get_t3 as _get_t3  # noqa: PLC0415
+        from nexus.mcp_infra import get_t3 as _get_t3  # noqa: PLC0415  — circular-dep avoidance (nexus.mcp_infra)
         db = _get_t3()
     else:
         db = make_t3()
@@ -2384,7 +2384,7 @@ def _run_index(
     _cat: object | None = None
     _migrate_writer = None
     try:
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
         _cat = make_catalog_reader()
         if _cat is not None:
@@ -2407,7 +2407,7 @@ def _run_index(
             code_collection = _migrated_names["code"]
         if _migrated_names.get("docs"):
             docs_collection = _migrated_names["docs"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         # Unexpected failure outside _migrate_legacy_collections's own
         # exception handling (which catches per-content-type rename
         # errors and returns legacy names). This catch is the safety
@@ -2541,7 +2541,7 @@ def _run_index(
     # created (no files of that content_type). Caller-side
     # ``check_staleness(cache=…)`` falls through to the per-file path,
     # which itself short-circuits on a missing collection.
-    from nexus.indexer_utils import StalenessCache  # noqa: PLC0415
+    from nexus.indexer_utils import StalenessCache  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
     code_staleness = (
         build_staleness_cache(code_col) if code_col is not None
         else StalenessCache()
@@ -2578,7 +2578,7 @@ def _run_index(
         # every instrumented block inside the indexer to a no-op.
         timers = None
         if on_stage_timers is not None:
-            from nexus.stage_timers import StageTimers
+            from nexus.stage_timers import StageTimers  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             timers = StageTimers()
         chunks = _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
@@ -2605,7 +2605,7 @@ def _run_index(
         # nexus-7niu: per-file StageTimers when the caller subscribed.
         timers = None
         if on_stage_timers is not None:
-            from nexus.stage_timers import StageTimers
+            from nexus.stage_timers import StageTimers  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             timers = StageTimers()
         chunks = _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
@@ -2631,7 +2631,7 @@ def _run_index(
         # nexus-7niu: per-file StageTimers when the caller subscribed.
         timers = None
         if on_stage_timers is not None:
-            from nexus.stage_timers import StageTimers
+            from nexus.stage_timers import StageTimers  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             timers = StageTimers()
         chunks = _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
@@ -2733,7 +2733,7 @@ def _run_index(
             try:
                 rdr_col = db.get_or_create_collection(rdr_col_name)
                 stamp_collection_version(rdr_col)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
         _phase(f"Pipeline version stamped ({time.monotonic() - _t:.1f}s)")
 

@@ -522,7 +522,7 @@ class HttpTelemetryStore(RawHandleGuardMixin):
             return
         try:
             detail = resp.json().get("error", resp.text)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort detail extraction; falls back to raw response text on any parse failure
             detail = resp.text
         raise httpx.HTTPStatusError(
             f"HttpTelemetryStore.{op} failed: HTTP {resp.status_code}: {detail}",

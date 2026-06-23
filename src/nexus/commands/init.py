@@ -123,8 +123,8 @@ def _offer_stale_migration(assume_yes: bool) -> None:
     from = deleting is pure loss). Any detection failure is non-fatal:
     ``nx init`` must still complete.
     """
-    from nexus.db.embed_migrate import detect_stale_local_collections
-    from nexus.db.local_ef import (
+    from nexus.db.embed_migrate import detect_stale_local_collections  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.local_ef import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         _MODEL_DIMS,
         _MODEL_TOKENS,
         _resolve_local_model,
@@ -138,7 +138,7 @@ def _offer_stale_migration(assume_yes: bool) -> None:
     active_dim = _MODEL_DIMS.get(active_model, 768)
 
     try:
-        from nexus.commands.store import _t3
+        from nexus.commands.store import _t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         db = _t3()
         stale = detect_stale_local_collections(
@@ -235,7 +235,7 @@ def _offer_stale_migration(assume_yes: bool) -> None:
 
 def _run_migration(db, stale, *, allow_sourceless_loss: bool) -> None:
     """Run one migration and report the outcome (RDR-144 P4)."""
-    from nexus.db.embed_migrate import migrate_collection_safe
+    from nexus.db.embed_migrate import migrate_collection_safe  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     click.echo(f"\nReindexing {stale.name} -> {stale.target_name} …")
     outcome = migrate_collection_safe(
@@ -262,7 +262,7 @@ def _warmup_bge() -> None:
     otherwise None-deref (CA-1 Refinement B). Convert any failure into an
     actionable message naming the cache path.
     """
-    from nexus.db.local_ef import LocalEmbeddingFunction
+    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     click.echo(f"\nFetching bge-768 ({_BGE_DOWNLOAD_HINT}) — one-time download …")
     try:
@@ -300,7 +300,7 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
       Java-read path; the service only reads the file. Offline failure is loud
       (no silent fallback), mirroring :func:`_warmup_bge`.
     """
-    from nexus.db.service_bge_model import (
+    from nexus.db.service_bge_model import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         SERVICE_BGE_DOWNLOAD_HINT,
         fetch_service_bge_onnx,
     )
@@ -359,16 +359,16 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
     Hard failures (broken ``NEXUS_SERVICE_BIN`` override, a configured tag that
     fails verification) raise ``SystemExit``.
     """
-    import os
+    import os  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    from nexus.daemon.binary_install import (
+    from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         BinaryVerificationError,
         install_binary,
         resolve_service_tag,
     )
-    from nexus.daemon.storage_service_daemon import (
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         StorageServiceStartError,
         _find_service_binary,
     )
@@ -441,9 +441,9 @@ def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import
     Idempotent — a live lease short-circuits, so re-running ``nx init`` is safe.
     Any failure surfaces as an actionable error with a remedy, never a traceback.
     """
-    from nexus.commands.daemon import ensure_storage_supervisor
-    from nexus.config import nexus_config_dir
-    from nexus.daemon.storage_service_daemon import StorageServiceStartError
+    from nexus.commands.daemon import ensure_storage_supervisor  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     click.echo("\nStarting the storage service …")
     try:
@@ -487,8 +487,8 @@ def _select_bundled_pg(
     """
     if os.environ.get("NEXUS_PG_BIN", "").strip():
         return None
-    from nexus.daemon.binary_lifecycle import well_known_binary_path
-    from nexus.db.pg_bundle import ensure_pg_bundle
+    from nexus.daemon.binary_lifecycle import well_known_binary_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.pg_bundle import ensure_pg_bundle  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     if search_dirs is None:
         # RF-161-3: default to <config_dir>/service/ — where the P2 acquire seam
@@ -514,7 +514,7 @@ def _provision_postgres_step() -> None:
     error rather than a traceback — the user needs an install hint, not a
     Python exception.
     """
-    from nexus.db.pg_provision import PgBinaryNotFoundError, provision
+    from nexus.db.pg_provision import PgBinaryNotFoundError, provision  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     config_dir = _config.nexus_config_dir()
     click.echo("\nProvisioning local Postgres cluster for the service backend …")
@@ -579,7 +579,7 @@ def provision_and_start_service(embedder: str | None = None):  # noqa: ANN201
     embedder/model fetch, so the service crashed on a missing bge ONNX. Raises
     :class:`StorageServiceStartError` when no native binary is available.
     """
-    from nexus.daemon.storage_service_daemon import StorageServiceStartError
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     _provision_postgres_step()
     if not _config.is_local_mode():
@@ -643,7 +643,7 @@ def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) ->
         and "service" in os.environ.get("NX_STORAGE_BACKEND", "").lower()
     )
     if provision_service or _auto_service:
-        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         try:
             lease = provision_and_start_service(embedder)
         except StorageServiceStartError:

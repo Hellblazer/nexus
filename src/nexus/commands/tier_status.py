@@ -146,7 +146,7 @@ def tier_status_cmd(
             "--session, --last, and --since are mutually exclusive"
         )
 
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 - deferred to avoid circular import at module load
     if storage_backend_for("telemetry") == StorageBackend.SERVICE:
         # nexus-wyu1g: in service mode tier_writes are recorded in the
         # service-backed telemetry store (Postgres), not local SQLite. Reading

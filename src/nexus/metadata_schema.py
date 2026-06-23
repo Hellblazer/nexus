@@ -362,7 +362,7 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
     indexed_at = metadata.get("indexed_at", "")
     if not indexed_at:
         return False
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta  # noqa: PLC0415 — branch-local; only reached on TTL-bearing metadata
     try:
         idx_dt = datetime.fromisoformat(indexed_at)
         now_dt = datetime.fromisoformat(now_iso)

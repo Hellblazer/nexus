@@ -99,7 +99,7 @@ class _SyncOps:
             ).fetchone()
             return (int(doc_row[0]) if doc_row else 0,
                     int(link_row[0]) if link_row else 0)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort count probe; any query error degrades to (0, 0)
             return (0, 0)
 
     def _write_consistency_marker(self, mtime: float) -> None:
@@ -371,7 +371,7 @@ class _SyncOps:
                 # writes are bounded by the delta size (typically <100
                 # events) so the per-row trigger overhead is
                 # unmeasurable.
-                from nexus.catalog.event_log import EventLog
+                from nexus.catalog.event_log import EventLog  # noqa: PLC0415 — circular-dep avoidance; event_log imports catalog
                 _log.debug(
                     "catalog_consistency_rebuild_event_sourced",
                     mtime=current_mtime,
@@ -616,7 +616,7 @@ class _SyncOps:
             # in-process construction short-circuits without a SELECT.
             cat._last_consistency_mtime = current_mtime
             cat.degraded = False
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort rebuild; any failure logged and catalog marked degraded rather than crashing
             _log.warning("catalog_consistency_rebuild_failed", error=str(exc), exc_info=True)
             cat.degraded = True
 
@@ -665,7 +665,7 @@ class _SyncOps:
             if legacy_doc_count == 0:
                 return True
 
-            from nexus.catalog import events as _ev
+            from nexus.catalog import events as _ev  # noqa: PLC0415 — circular-dep avoidance; events imports catalog
             # Net document registrations: DocumentRegistered − DocumentDeleted.
             # Can go negative (a dedupe-only event stream against a
             # legacy catalog produces only DocumentDeleted), which the
@@ -702,7 +702,7 @@ class _SyncOps:
             # sizes.
             threshold = max(1, int(legacy_doc_count * 0.95))
             return net_registered >= threshold
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort ES-coverage check; failure surfaced at WARNING, refuses ES rebuild (safer fall-through to legacy)
             # On any unexpected failure, refuse the event-sourced
             # rebuild (safer to fall through to legacy than to wipe).
             # nexus-8g79.6: surface at WARNING — pre-fix this returned

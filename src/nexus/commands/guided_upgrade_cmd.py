@@ -48,7 +48,7 @@ def _resolve_service_token() -> str:
     """The managed service token — env (NX_SERVICE_TOKEN) FIRST, then config.yml
     (`nx config set service_token`), so a config.yml-only managed user is not
     told to export what they already configured (RDR-166 nexus-v3p0x)."""
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     return get_credential("service_token") or ""
 
@@ -129,7 +129,7 @@ def guided_upgrade_cmd(
 
     # 2. PROVISION + VERIFY — stand up (or gate) the service and confirm it is
     #    healthy AND version-pinned. Never migrate a not-ready/wrong service.
-    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415  — command-local import (nexus.daemon.storage_service_daemon)
         StorageServiceStartError,
     )
 
@@ -200,8 +200,8 @@ def guided_upgrade_cmd(
     #     the --service-url path: that targets an external service whose token the
     #     user supplies via NX_SERVICE_TOKEN directly.
     if not service_url:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415
-        from nexus.db.pg_provision import (  # noqa: PLC0415
+        from nexus.config import nexus_config_dir  # noqa: PLC0415  — command-local import (nexus.config)
+        from nexus.db.pg_provision import (  # noqa: PLC0415  — command-local import (nexus.db.pg_provision)
             load_service_credentials_into_env,
         )
 
@@ -232,7 +232,7 @@ def guided_upgrade_cmd(
     # 3. HAND OFF — drive the existing migrate-to-service against the VERIFIED
     #    url. _run_migration renders the verdict and raises SystemExit(1) on any
     #    block (sentinel migrated-failed + rollback offer), exits 0 on success.
-    from nexus.commands.migrate_cmd import _run_migration  # noqa: PLC0415
+    from nexus.commands.migrate_cmd import _run_migration  # noqa: PLC0415  — command-local import (nexus.commands.migrate_cmd)
 
     # nexus-qvemn: _run_migration sets NX_SERVICE_URL, but the migration's legs
     # (the 8 T2 store ETLs + the service count-source) resolve the endpoint via

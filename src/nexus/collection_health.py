@@ -67,7 +67,7 @@ class CollectionHealthRow:
 
 
 def _default_enumerate_collections() -> list[str]:
-    from nexus.db import make_t3
+    from nexus.db import make_t3  # noqa: PLC0415 — function-local import defers heavy db/T3 init until called
 
     return [c["name"] for c in make_t3().list_collections()]
 
@@ -79,7 +79,7 @@ def _open_catalog():
     means the collection has no documents on record yet — health rows
     for such collections show zero chunks / no links / no orphans.
     """
-    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — function-local import avoids catalog<->health circular dependency
 
     return make_catalog_reader()
 
@@ -110,7 +110,7 @@ def _default_catalog_stats_fn(col: str) -> dict[str, Any]:
         return {"last_indexed": None, "orphan_count": 0}
     try:
         return cat.collection_health_meta(col)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort diagnostic stat; degrade to safe defaults rather than crash the health report
         return {"last_indexed": None, "orphan_count": 0}
 
 
@@ -130,22 +130,22 @@ def _default_chunk_count_fn(col: str) -> int:
     cascading errors elsewhere in the report.
     """
     try:
-        from nexus.db import make_t3
+        from nexus.db import make_t3  # noqa: PLC0415 — function-local import defers heavy db/T3 init until called
         t3 = make_t3()
         try:
             coll = t3.get_or_create_collection(col)
             return int(coll.count())
-        except Exception:
+        except Exception:  # noqa: BLE001 — collection missing/transient T3 error; docstring mandates 0 fallback, not propagation
             return 0
-    except Exception:
+    except Exception:  # noqa: BLE001 — T3 unreachable; docstring mandates 0 fallback so the report renders without cascading errors
         return 0
 
 
 def _open_t2():
     """Open a ``T2Database`` rooted at the default path, or ``None``
     when the DB file doesn't exist yet."""
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.config import default_db_path  # noqa: PLC0415 — function-local import avoids config/db import cost at module load
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — function-local import defers T2 db init until called
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -174,7 +174,7 @@ def _default_projection_rank_fn(cols: list[str]) -> dict[str, int]:
     if t2 is None:
         return {}
     try:
-        from nexus.db.storage_mode import has_raw_access
+        from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — branch-local import only needed on the raw-access service-mode check
         # nexus-9613q.4: this is a diagnostic ENRICHMENT column, so silent
         # degrade-to-empty in service mode is the right contract (the display
         # renders absence). Contrast merge_candidates, whose raw-taxonomy read
@@ -197,7 +197,7 @@ def _default_projection_rank_fn(cols: list[str]) -> dict[str, int]:
             cols,
         ).fetchall()
         return {row[0]: idx + 1 for idx, row in enumerate(rows)}
-    except Exception:
+    except Exception:  # noqa: BLE001 — diagnostic enrichment column; degrade to empty rank map rather than fail the report
         return {}
     finally:
         t2.close()
@@ -213,7 +213,7 @@ def _default_hub_score_fn(col: str) -> float | None:
     if t2 is None:
         return None
     try:
-        from nexus.db.storage_mode import has_raw_access
+        from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — branch-local import only needed on the raw-access service-mode check
         if not has_raw_access(t2.taxonomy):
             return None  # service mode: hub-score display unavailable
         conn = t2.taxonomy.conn  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
@@ -245,7 +245,7 @@ def _default_hub_score_fn(col: str) -> float | None:
             (col, *hub_ids),
         ).fetchone()[0] or 0
         return in_hubs / total
-    except Exception:
+    except Exception:  # noqa: BLE001 — diagnostic hub-score column; degrade to None rather than fail the report
         return None
     finally:
         t2.close()
@@ -262,9 +262,9 @@ def _default_chash_coverage_fn(col: str) -> float | None:
     Introduced in RDR-087 Phase 4.6 (nexus-c2op) after RDR-086 added
     the chash_index surface. Pure SQL composition — no new primitives.
     """
-    from nexus.config import default_db_path
-    from nexus.db import make_t3
-    from nexus.db.t2.chash_index import ChashIndex
+    from nexus.config import default_db_path  # noqa: PLC0415 — function-local import avoids config/db import cost at module load
+    from nexus.db import make_t3  # noqa: PLC0415 — function-local import defers heavy db/T3 init until called
+    from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — function-local import defers T2 chash-index init until called
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -281,9 +281,9 @@ def _default_chash_coverage_fn(col: str) -> float | None:
         try:
             coll = t3.get_or_create_collection(col)
             chunk_count = coll.count()
-        except Exception:
+        except Exception:  # noqa: BLE001 — collection missing/transient T3 error; coverage ratio undefined, return None
             return None
-    except Exception:
+    except Exception:  # noqa: BLE001 — T3 unreachable; coverage ratio undefined, return None rather than propagate
         return None
 
     if chunk_count == 0:

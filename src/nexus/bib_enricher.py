@@ -38,7 +38,7 @@ def enrich(title: str) -> dict[str, Any]:
     Retries up to 3 times with exponential backoff on 429 rate-limit.
     Set ``S2_API_KEY`` env var for higher rate limits (100 req/s).
     """
-    import time
+    import time  # noqa: PLC0415 — deferred import — branch-local / circular-dep avoidance
 
     for attempt in range(_MAX_RETRIES + 1):
         try:

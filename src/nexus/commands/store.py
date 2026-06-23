@@ -15,7 +15,7 @@ from nexus.ttl import parse_ttl
 
 
 def _t3() -> T3Database:
-    from nexus.config import get_credential, is_local_mode
+    from nexus.config import get_credential, is_local_mode  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if not is_local_mode():
         database = get_credential("chroma_database")
@@ -133,7 +133,7 @@ def put_cmd(
     # store-put events. RDR-095 symmetric-fire; this path was missed by
     # the original commit. doc_id is the source identity here (no
     # on-disk file at the CLI boundary, mirroring MCP store_put).
-    from nexus.hook_registry import HookRegistry, install_default_hooks
+    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     hooks = HookRegistry()
     install_default_hooks(hooks)
     # nexus-lf8f: pass catalog_doc_id through to HookRegistry.fire_store_chains
@@ -181,13 +181,13 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     # Get total count for page info
     try:
         total = db.collection_info(col_name)["count"]
-    except (KeyError, Exception):
+    except (KeyError, Exception):  # noqa: BLE001 — best-effort total count for display; '?' on any backend failure
         total = "?"
 
     shown_start = offset + 1
     shown_end = offset + len(entries)
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end} of {total})\n")
-    from datetime import datetime, timedelta  # noqa: PLC0415
+    from datetime import datetime, timedelta  # noqa: PLC0415  — stdlib deferred to call site (datetime)
     for e in entries:
         doc_id = e.get("id", "")[:32]
         title = (e.get("title") or "")[:40]
@@ -217,7 +217,7 @@ def _list_documents(db: T3Database, col_name: str) -> None:
     """List unique documents (deduplicated by content_hash) in a collection."""
     try:
         total_chunks = db.collection_info(col_name)["count"]
-    except (KeyError, Exception):
+    except (KeyError, Exception):  # noqa: BLE001 — collection-open failure surfaced to user via click.echo, returns
         click.echo(f"Collection not found: {col_name}")
         return
 
@@ -275,7 +275,7 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
         raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
 
     if json_out:
-        import json
+        import json  # noqa: PLC0415 — stdlib import kept branch-local
         click.echo(json.dumps(entry, indent=2))
     else:
         title = entry.get("title", "")
@@ -300,9 +300,9 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
     Eventual consistency surprised users who expected delete to be atomic.
     Skipped silently when the catalog is uninitialised.
     """
-    from nexus.catalog import Catalog
-    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-    from nexus.config import catalog_path
+    from nexus.catalog import Catalog  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
@@ -316,7 +316,7 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
             entry = reader.by_doc_id(doc_id)
             if entry is not None:
                 writer.delete_document(entry.tumbler)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog reap; failure logged at debug, cleanup in finally
         _log.debug("catalog_reap_failed", exc_info=True, doc_ids=doc_ids)
     finally:
         if writer is not None:
@@ -408,11 +408,11 @@ def export_cmd(
       nx store export --all
       nx store export --all -o /path/to/backup-dir/
     """
-    from datetime import date
+    from datetime import date  # noqa: PLC0415 — stdlib import kept branch-local
 
-    from nexus.corpus import t3_collection_name as _t3col
-    from nexus.errors import EmbeddingModelMismatch, FormatVersionError
-    from nexus.exporter import export_collection
+    from nexus.corpus import t3_collection_name as _t3col  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.errors import EmbeddingModelMismatch, FormatVersionError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.exporter import export_collection  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if export_all and collection:
         raise click.UsageError("Cannot specify COLLECTION together with --all.")
@@ -449,7 +449,7 @@ def export_cmd(
                     f"{col_name}  ->  {out_path.name}"
                 )
                 total_exported += result["exported_count"]
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — per-collection export failure surfaced via click.echo, loop continues
                 click.echo(f"ERROR exporting {col_name}: {exc}", err=True)
         click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
     else:
@@ -498,8 +498,8 @@ def import_cmd(
       nx store import myrepo-backup.nxexp --remap "/old/path:/new/path"
       nx store import myrepo-backup.nxexp --collection code__newname
     """
-    from nexus.errors import EmbeddingModelMismatch, FormatVersionError
-    from nexus.exporter import import_collection
+    from nexus.errors import EmbeddingModelMismatch, FormatVersionError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.exporter import import_collection  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     # Parse --remap options (format: old:new).
     parsed_remaps: list[tuple[str, str]] = []

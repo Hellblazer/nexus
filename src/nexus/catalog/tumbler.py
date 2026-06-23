@@ -126,7 +126,7 @@ class Tumbler:
 
 def _filter_fields(cls: type, obj: dict) -> dict:
     """Filter dict to only include fields declared on the dataclass."""
-    import dataclasses
+    import dataclasses  # noqa: PLC0415 — stdlib dataclasses deferred to function scope
     valid = {f.name for f in dataclasses.fields(cls)}
     return {k: v for k, v in obj.items() if k in valid}
 

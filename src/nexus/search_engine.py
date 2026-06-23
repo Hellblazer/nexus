@@ -102,7 +102,7 @@ def _attach_doc_ids_from_catalog(
         return
     try:
         chash_to_docs = catalog.docs_for_chashes(nonempty)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog lookup; failure logged at debug, doc_id attach skipped
         _log.debug("attach_doc_ids_lookup_failed", exc_info=True)
         return
     if not chash_to_docs:
@@ -156,7 +156,7 @@ def _attach_doc_ids_from_catalog(
             # falsy guard, so "all doc_ids genuinely absent" and "skipped" are
             # not conflated at the call site.
             manifest_cache.update(batch_result or {})
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort batch manifest lookup; failure logged at debug, chunk_count dropped for set (see comment)
             _log.debug(
                 "attach_chunk_count_batch_failed",
                 doc_ids=distinct_doc_ids, exc_info=True,
@@ -171,7 +171,7 @@ def _attach_doc_ids_from_catalog(
         for doc_id in distinct_doc_ids:
             try:
                 manifest_cache[doc_id] = catalog.get_manifest(doc_id)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort per-doc manifest lookup; failure logged at debug, this doc degrades to empty manifest
                 _log.debug(
                     "attach_chunk_count_lookup_failed",
                     doc_id=doc_id, exc_info=True,
@@ -245,7 +245,7 @@ def _attach_display_paths(
             for did, entry in (batch or {}).items():
                 if entry is not None and entry.file_path:
                     cache[did] = entry.file_path
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort batch resolve; failure logged at debug, display path dropped for set (see comment)
             _log.debug("attach_display_paths_batch_failed", exc_info=True)
             # Degradation granularity (CR Med-1 / critic obs): a single
             # resolve_many failure leaves the cache empty, so _display_path is
@@ -257,7 +257,7 @@ def _attach_display_paths(
         for did in doc_ids:
             try:
                 entry = catalog.by_doc_id(did)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort per-doc resolve; any failure skips this doc's display path
                 continue
             if entry is not None and entry.file_path:
                 cache[did] = entry.file_path
@@ -393,7 +393,7 @@ def _prefilter_from_catalog(
         # Get the raw sqlite3 connection from CatalogDB wrapper
         conn = getattr(db, "_conn", db)
         doc_ids = _catalog_doc_ids_for_predicates(conn, mappable)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort prefilter; failure logged at debug, returns None to skip prefilter
         _log.debug("catalog_prefilter_failed", exc_info=True)
         return None
 
@@ -495,7 +495,7 @@ def search_cross_corpus(
                 # Too many — post-filter after search
                 topic_doc_ids = set(ids)
                 _log.debug("topic_prefilter_post_filter", topic=topic, n_ids=len(ids))
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort topic prefilter; failure logged at debug, falls through to unfiltered search
             _log.debug("topic_prefilter_failed", exc_info=True)
 
     # Thresholds are calibrated for Voyage AI embeddings.
@@ -543,9 +543,9 @@ def search_cross_corpus(
     # collection's result processing runs inside the worker; the merge below
     # walks the deterministic ``collections`` order so result ordering and the
     # diagnostic/telemetry accumulators are independent of completion order.
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — branch-local; only when fan-out search runs
 
-    from nexus.db.chroma_quotas import QUOTAS
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local search helper import
 
     def _search_one(col: str) -> dict:
         mult = _overfetch_multiplier(col)
@@ -662,8 +662,8 @@ def search_cross_corpus(
     # ``.nexus.yml`` values surface a structured warning instead of
     # silently coercing to a truthy string.
     if telemetry is not None and get_telemetry_config(cfg=cfg).search_enabled:
-        import hashlib
-        from datetime import UTC, datetime
+        import hashlib  # noqa: PLC0415 — branch-local; only on telemetry-enabled path
+        from datetime import UTC, datetime  # noqa: PLC0415 — branch-local; only on telemetry-enabled path
 
         ts = datetime.now(UTC).isoformat()
         query_hash = hashlib.sha256(query.encode()).hexdigest()[:64]
@@ -677,7 +677,7 @@ def search_cross_corpus(
         ]
         try:
             telemetry.log_search_batch(rows)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort telemetry write; must not crash the search; failure logged at debug
             _log.debug("search_telemetry_write_failed", exc_info=True)
 
     # Topic post-filter: keep only results in the requested topic
@@ -694,7 +694,7 @@ def search_cross_corpus(
 
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:
-        from nexus.scoring import apply_link_boost
+        from nexus.scoring import apply_link_boost  # noqa: PLC0415 — branch-local; only when link_boost enabled
         all_results = apply_link_boost(all_results, catalog)
 
     # Compute topic assignments once for both boost and grouping (RDR-070)
@@ -703,7 +703,7 @@ def search_cross_corpus(
         try:
             result_ids = [r.id for r in all_results]
             _topic_assignments = taxonomy.get_assignments_for_docs(result_ids)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort topic assignment; failure logged at debug, boost/grouping skipped
             _log.debug("topic_assignments_failed", exc_info=True)
 
     # Fetch embeddings once if either contradiction detection OR clustering
@@ -739,7 +739,7 @@ def search_cross_corpus(
                         assigned=len(assignments),
                         total=len(all_results),
                     )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort topic grouping; failure logged at debug, falls back to Ward clustering
                 _log.debug("topic_grouping_failed", exc_info=True)
 
         # Fall back to Ward clustering if topic grouping didn't fire
@@ -758,7 +758,7 @@ def search_cross_corpus(
     # distance-based group ordering is not contaminated by the boost.
     if _topic_assignments and all_results:
         try:
-            from nexus.scoring import apply_topic_boost
+            from nexus.scoring import apply_topic_boost  # noqa: PLC0415 — branch-local; only when topic assignments present
 
             # Read cached topic links for linked-topic boost
             topic_links: dict[tuple[int, int], int] | None = None
@@ -769,7 +769,7 @@ def search_cross_corpus(
             all_results = apply_topic_boost(
                 all_results, _topic_assignments, topic_links=topic_links,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort topic boost; failure logged at debug, results returned unboosted
             _log.debug("topic_boost_failed", exc_info=True)
 
     # RDR-109 Phase 5: salience boost. Opt-in via .nexus.yml flag
@@ -785,7 +785,7 @@ def search_cross_corpus(
                 query=query,
                 weight=float(ag_cfg.get("weight", 0.025)),
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort salience boost; failure logged at debug, results returned unboosted
             _log.debug("salience_boost_failed", exc_info=True)
 
     # nexus-1qed: catalog-resolved display path attached as metadata
@@ -814,7 +814,7 @@ def _fetch_embeddings_for_results(
     (contradiction check, clustering) continues for successfully-fetched
     collections rather than being suppressed entirely (R3-1 fix).
     """
-    import numpy as np
+    import numpy as np  # noqa: PLC0415 — deferred heavy dep; only when embeddings actually fetched
 
     col_groups: dict[str, list[int]] = {}
     for idx, r in enumerate(results):
@@ -831,7 +831,7 @@ def _fetch_embeddings_for_results(
         ids = [results[i].id for i in indices]
         try:
             col_emb = t3.get_embeddings(col, ids)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-collection isolation; failure logged, indices marked failed, other collections proceed
             _log.warning(
                 "embedding_fetch_failed",
                 collection=col,
@@ -901,7 +901,7 @@ def _flag_contradictions(
     zero-filled placeholders from the shared fetch helper and must not be
     compared against valid rows.
     """
-    import numpy as np
+    import numpy as np  # noqa: PLC0415 — deferred heavy dep; branch-local to feature processing
 
     failed_indices = failed_indices or set()
     col_groups: dict[str, list[int]] = {}
@@ -985,9 +985,9 @@ def _apply_salience_boost(
     Results without ``doc_id`` or whose document has no salient
     sentences fall through unchanged.
     """
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
-    from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415
-    from nexus.salience import token_overlap_boost  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+    from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415 — circular-dep avoidance (nexus.db.t2.document_aspects)
+    from nexus.salience import token_overlap_boost  # noqa: PLC0415 — circular-dep avoidance (nexus.salience)
 
     targeted = [
         r for r in results
@@ -1029,7 +1029,7 @@ def _apply_clustering(
     Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
     duplicate ChromaDB round-trips when contradiction detection also runs.
     """
-    from nexus.search_clusterer import cluster_results
+    from nexus.search_clusterer import cluster_results  # noqa: PLC0415 — branch-local; only when clustering applied
 
     # Convert SearchResults to dicts for cluster_results API
     result_dicts = [

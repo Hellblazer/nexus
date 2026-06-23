@@ -62,7 +62,7 @@ class PlanSessionCache:
                 PLANS_COLLECTION,
                 embedding_function=LocalEmbeddingFunction(),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
             _log.warning(
                 "plan_session_cache_unavailable",
                 error=str(exc), error_type=type(exc).__name__,
@@ -105,7 +105,7 @@ class PlanSessionCache:
                 where={"session_id": self._session_id},
                 include=["metadatas", "distances"],
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
             _log.warning("plan_session_cache_query_failed", exc_info=True)
             return []
 
@@ -158,7 +158,7 @@ class PlanSessionCache:
             ids = existing.get("ids") or []
             if ids:
                 self._col.delete(ids=ids)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
             _log.warning("plan_session_cache_reset_failed", exc_info=True)
 
         rows = library.list_active_plans(project=project)
@@ -188,7 +188,7 @@ class PlanSessionCache:
         try:
             self._col.delete(ids=[doc_id])
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
             _log.warning(
                 "plan_session_cache_remove_failed",
                 plan_id=plan_id, exc_info=True,
@@ -215,7 +215,7 @@ class PlanSessionCache:
             self._col.upsert(
                 ids=[doc_id], documents=[match_text], metadatas=[meta],
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
             _log.warning("plan_session_cache_upsert_failed",
                          plan_id=plan_id, exc_info=True)
             return False

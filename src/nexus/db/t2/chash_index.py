@@ -427,7 +427,7 @@ def dual_write_chash_index(
     # T2 failure logs but never aborts the successful T3 write.
     try:
         chash_index.upsert_many(chashes=chashes, collection=collection)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — dual-write is best-effort; failure logged via log.warning
         _log.warning(
             "chash_index_dual_write_failed",
             collection=collection,

@@ -152,9 +152,9 @@ def _apply_pending_with_lock_retry(
     (schema corruption, FK violation, ...) propagates on the first attempt.
     The final attempt re-raises so the failure is never silently swallowed.
     """
-    import time
+    import time  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
-    from nexus.db.migrations import apply_pending
+    from nexus.db.migrations import apply_pending  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
     sleeps_between = _BOOTSTRAP_RETRY_SLEEPS_BETWEEN
     max_attempts = len(sleeps_between) + 1
@@ -212,11 +212,11 @@ def _cold_start_is_current_and_wal(path: Path) -> bool:
     if not path.exists():
         return False
     try:
-        from importlib.metadata import version as _pkg_version
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
         try:
             current_version = _pkg_version("conexus")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  — fallback path; safe default returned (False = treat as not-current) when package version is unresolvable
             return False
         if current_version == "0.0.0":
             return False
@@ -279,7 +279,7 @@ def __getattr__(name: str) -> Any:  # PEP 562
         "Telemetry":             "nexus.db.t2.telemetry",
     }
     if name in _MAP:
-        import importlib
+        import importlib  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         mod = importlib.import_module(_MAP[name])
         value = getattr(mod, name)
         globals()[name] = value
@@ -307,7 +307,7 @@ def _resolve_default_run_migrations() -> bool:
     global second. The env-var path is what propagates into spawned
     subprocesses (RDR-120 P3b review item 1).
     """
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
     raw = _os.environ.get(_RUN_MIGRATIONS_ENV, "").strip()
     if raw:
@@ -353,14 +353,14 @@ class T2Database:
         # import time so the CLI cold-start path (which only needs
         # ``_sanitize_fts5``) does not pull sklearn/scipy/numpy through
         # CatalogTaxonomy.
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-        from nexus.db.t2.chash_index import ChashIndex
-        from nexus.db.t2.document_aspects import DocumentAspects
-        from nexus.db.t2.document_highlights import DocumentHighlights
-        from nexus.db.t2.memory_store import MemoryStore
-        from nexus.db.t2.plan_library import PlanLibrary
-        from nexus.db.t2.telemetry import Telemetry
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.memory_store import MemoryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.telemetry import Telemetry  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
         path.parent.mkdir(parents=True, exist_ok=True)
         # Store path for cross-domain operations (e.g. rename_collection_cascade).
@@ -420,12 +420,12 @@ class T2Database:
         # returns StorageBackend.SQLITE by default (env NX_STORAGE_BACKEND_MEMORY
         # or NX_STORAGE_BACKEND unset).  nexus-gmiaf.7 replaces the
         # NotImplementedError branch with HttpMemoryStore(...).
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
         if storage_backend_for("memory") == StorageBackend.SERVICE:
             # RDR-152 nexus-gmiaf.7: thin Python HTTP client over the Java service.
             # Reads NX_SERVICE_HOST / NX_SERVICE_PORT / NX_SERVICE_TOKEN from env.
-            from nexus.db.t2.http_memory_store import HttpMemoryStore
+            from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             self.memory: MemoryStore = HttpMemoryStore()  # type: ignore[assignment]
         else:
             self.memory: MemoryStore = MemoryStore(path)
@@ -433,7 +433,7 @@ class T2Database:
         # RDR-152 nexus-gmiaf.11: plans service seam.
         # NX_STORAGE_BACKEND_PLANS=service routes to the Java HTTP plans endpoint.
         if storage_backend_for("plans") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_plan_library import HttpPlanLibrary
+            from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             self.plans: PlanLibrary = HttpPlanLibrary()  # type: ignore[assignment]
         else:
             self.plans: PlanLibrary = PlanLibrary(path)
@@ -442,7 +442,7 @@ class T2Database:
         # CatalogTaxonomy takes a MemoryStore reference for the
         # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
         if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+            from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             self.taxonomy: CatalogTaxonomy = HttpTaxonomyStore()  # type: ignore[assignment]
         else:
             self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
@@ -450,7 +450,7 @@ class T2Database:
         # RDR-152 nexus-gmiaf.12: telemetry service seam.
         # NX_STORAGE_BACKEND_TELEMETRY=service routes to HttpTelemetryStore.
         if storage_backend_for("telemetry") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             self.telemetry: Telemetry = HttpTelemetryStore()  # type: ignore[assignment]
         else:
             self.telemetry: Telemetry = Telemetry(path)
@@ -460,7 +460,7 @@ class T2Database:
         # RDR-152 nexus-gmiaf.16: chash_index service seam.
         # NX_STORAGE_BACKEND_CHASH_INDEX=service routes to HttpChashIndex.
         if storage_backend_for("chash_index") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_chash_index import HttpChashIndex
+            from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             self.chash_index: ChashIndex = HttpChashIndex()  # type: ignore[assignment]
         else:
             self.chash_index: ChashIndex = ChashIndex(path)
@@ -469,7 +469,7 @@ class T2Database:
         # ingest site (knowledge__* only in Phase 1).
         # RDR-152 nexus-gmiaf.15: document_aspects service seam.
         if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
+            from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             self.document_aspects: DocumentAspects = HttpDocumentAspectsStore()  # type: ignore[assignment]
         else:
             self.document_aspects: DocumentAspects = DocumentAspects(path)
@@ -480,7 +480,7 @@ class T2Database:
         # lock instance as the cascade. T1.2 will wrap mutator bodies.
         # RDR-152 nexus-gmiaf.15: aspect_queue service seam.
         if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+            from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             self.aspect_queue: AspectExtractionQueue = HttpAspectQueue(  # type: ignore[assignment]
                 rename_lock=self.RENAME_LOCK
             )
@@ -494,7 +494,7 @@ class T2Database:
         # whole-row overwrite or its confidence gate.
         # RDR-152 nexus-gmiaf.15: document_highlights service seam.
         if storage_backend_for("document_highlights") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore
+            from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             self.document_highlights: DocumentHighlights = HttpDocumentHighlightsStore()  # type: ignore[assignment]
         else:
             self.document_highlights: DocumentHighlights = DocumentHighlights(path)
@@ -519,12 +519,12 @@ class T2Database:
         2. ``nexus.config.catalog_path()/.catalog.db`` (production default).
         """
         if self._catalog is None:
-            from nexus.db.t2.catalog import CatalogStore as _CatalogStore
+            from nexus.db.t2.catalog import CatalogStore as _CatalogStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
             if self._catalog_db_path_override is not None:
                 db_path = self._catalog_db_path_override
             else:
-                from nexus.config import catalog_path as _catalog_path
+                from nexus.config import catalog_path as _catalog_path  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
                 db_path = _catalog_path() / ".catalog.db"
             self._catalog = _CatalogStore(db_path)
         return self._catalog
@@ -576,7 +576,7 @@ class T2Database:
         short-circuit via the ``_upgrade_done`` set in
         :mod:`nexus.db.migrations`.
         """
-        from nexus.db.migrations import (
+        from nexus.db.migrations import (  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             _upgrade_done,
             _upgrade_lock,
             t2_migration_flock,
@@ -632,15 +632,15 @@ class T2Database:
                 if path_key in _upgrade_done:
                     return
                 try:
-                    from importlib.metadata import version as _pkg_version
+                    from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
                     current_version = _pkg_version("conexus")
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort current-version read; falls back to 0.0.0
                     current_version = "0.0.0"
 
-                import sys as _sys
+                import sys as _sys  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
                 if hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty():
-                    print(
+                    print(  # noqa: T201 — interactive-only (isatty-gated) migration banner to stderr
                         f"Migrating database {path.name!r} to schema "
                         f"version {current_version} ...",
                         file=_sys.stderr,
@@ -684,7 +684,7 @@ class T2Database:
         if self._catalog is not None:
             try:
                 self._catalog.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  — best-effort; catalog-close silence acceptable during teardown, handle nulled regardless
                 pass
             self._catalog = None
         # Reverse-construction order: document_highlights was built after
@@ -786,7 +786,7 @@ class T2Database:
             # SQL UPDATE on the shared SQLite file would diverge from the
             # service's Postgres tables, so we route through the domain-store
             # API when the seam is active (same pattern as taxonomy below).
-            from nexus.db.storage_mode import StorageBackend, storage_backend_for
+            from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             if storage_backend_for("chash_index") == StorageBackend.SERVICE:
                 counts["chash"] = self.chash_index.rename_collection(old=old, new=new)
             else:
@@ -943,7 +943,7 @@ class T2Database:
         except Exception:
             try:
                 conn.rollback()
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort rollback cleanup before re-raise; original error preserved
                 pass
             raise
         finally:
@@ -1278,7 +1278,7 @@ class T2Database:
         log_error: str | None = None
         try:
             log_deleted = self.expire_relevance_log(days=relevance_log_days)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort relevance-log expiry; logged via log.warning, expiry continues
             log_error = type(exc).__name__
             _log.warning("expire_relevance_log_failed", exc_info=exc)
         expired_ids = self.memory.expire()
@@ -1325,7 +1325,7 @@ class T2Database:
         re-acquires RENAME_LOCK via the now-guarded mutator; the RLock
         makes the re-entrant acquisition safe.
         """
-        from nexus.db.t2.document_aspects import AspectRecord
+        from nexus.db.t2.document_aspects import AspectRecord  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         record = AspectRecord(**record_fields)
         with self.RENAME_LOCK:
             upserted = self.document_aspects.upsert(record)

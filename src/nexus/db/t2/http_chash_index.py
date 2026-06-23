@@ -279,6 +279,6 @@ def _raise_for_status(resp: httpx.Response, op: str) -> None:
     try:
         body = resp.json()
         msg = body.get("error", resp.text)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort response-body parse before raising RuntimeError
         msg = resp.text
     raise RuntimeError(f"HttpChashIndex.{op} failed (HTTP {resp.status_code}): {msg}")

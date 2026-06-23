@@ -133,7 +133,7 @@ class HttpPlanLibrary(RawHandleGuardMixin):
         verb/name/scope in Python), this client sends ``match_text`` built
         here so the service stores the correct FTS payload.
         """
-        from nexus.db.t2.plan_library import (
+        from nexus.db.t2.plan_library import (  # noqa: PLC0415 — deferred to avoid circular import (plan_library)
             _synthesize_match_text,
             _infer_scope_tags,
             _normalize_scope_string,
@@ -400,7 +400,7 @@ class HttpPlanLibrary(RawHandleGuardMixin):
             return
         try:
             detail = resp.json().get("error", resp.text)
-        except Exception:
+        except Exception:  # noqa: BLE001 — error-body decode best-effort; fall back to resp.text before re-raise
             detail = resp.text
         raise httpx.HTTPStatusError(
             f"HttpPlanLibrary.{op} failed: HTTP {resp.status_code}: {detail}",

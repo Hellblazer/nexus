@@ -80,7 +80,7 @@ def backfill_owner_id(
     ``dry_run`` suppresses the UPDATE statements but still emits the
     result counters so an operator can preview the change set.
     """
-    from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415
+    from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
 
     rows: list[tuple[str]] = conn.execute(
         "SELECT name FROM collections WHERE owner_id = ''"

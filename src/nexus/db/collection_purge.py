@@ -49,12 +49,12 @@ def _purge_pipeline_db(name: str, counts: CascadeCounts) -> CascadeCounts:
     pipeline buffer is local SQLite per RDR-164 CA-4). Best-effort; records the
     count on success and a failure message otherwise. Returns *counts*."""
     try:
-        from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB
+        from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         counts.pipeline_rows_deleted = PipelineDB(
             PIPELINE_DB_PATH
         ).delete_pipeline_data_for_collection(name)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort; failure logged via _log.warning and recorded in counts.failures, cascade continues
         _log.warning("purge_cascade_pipeline_failed", collection=name, error=str(exc))
         counts.failures.append(f"pipeline-state cleanup failed: {exc}")
     return counts
@@ -70,7 +70,7 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
     """
     counts = CascadeCounts()
 
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if storage_backend_for("catalog") == StorageBackend.SERVICE:
         # RDR-164 P2: in service mode the entire in-Postgres cascade (T3 chunks,
@@ -80,7 +80,7 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         # per-store endpoints (which left orphans — nexus-tquoj/cugrk). Only
         # pipeline.db (below) stays client-side (CA-4).
         try:
-            from nexus.catalog.factory import make_catalog_reader
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
             client = make_catalog_reader()
             if client is None:  # service mode always returns a client; guard for a clear error
@@ -109,7 +109,7 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         return _purge_pipeline_db(name, counts)
 
     # ── Local (sqlite/Chroma) mode: client-side fan-out (CA-5) ───────────────
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415 — heavy/optional dep deferred
 
     try:
         db.delete_collection(name)  # type: ignore[attr-defined]
@@ -118,7 +118,7 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
 
     # Taxonomy + chash index, routed through the T2 daemon (single-writer).
     try:
-        from nexus.mcp_infra import t2_index_write
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         def _cascade(store):
             return (
@@ -136,8 +136,8 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
 
     # Catalog: document rows pointing at the gone collection + projection row.
     try:
-        from nexus.catalog.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
@@ -153,13 +153,13 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
                 try:
                     if cat.delete_document(tumbler):
                         counts.catalog_docs_deleted += 1
-                except Exception:
+                except Exception:  # noqa: BLE001 — per-document purge failure logged at debug, cascade continues
                     _log.debug(
                         "purge_cascade_document_failed", tumbler=tumbler, exc_info=True
                     )
             if cat.delete_collection_projection(name, reason="collection purge"):
                 counts.catalog_projection_deleted = 1
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort; failure logged via _log.warning and recorded in counts.failures, cascade continues
         _log.warning("purge_cascade_catalog_failed", collection=name, error=str(exc))
         counts.failures.append(f"catalog cascade failed: {exc}")
 

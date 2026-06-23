@@ -126,8 +126,8 @@ class _LinkOps:
     # ── Internal helpers ────────────────────────────────────────────────────
 
     def _row_to_link(self, row: tuple) -> "CatalogLink":
-        from nexus.catalog.catalog import CatalogLink
-        from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.catalog import CatalogLink  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         return CatalogLink(
             from_tumbler=Tumbler.parse(row[0]),
             to_tumbler=Tumbler.parse(row[1]),
@@ -156,7 +156,7 @@ class _LinkOps:
         Returns ``True`` if a new row was inserted, ``False`` if an
         existing row was merged (metadata + co_discovered_by fold).
         """
-        from nexus.catalog.catalog import LinkRecord, _LinkCreatedPayload
+        from nexus.catalog.catalog import LinkRecord, _LinkCreatedPayload  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         cat = self._cat
 
         # Validate span format (Xanadu transclusion addressing)
@@ -183,7 +183,7 @@ class _LinkOps:
             ]:
                 if span.startswith("chash:") and entry and entry.physical_collection:
                     try:
-                        from nexus.db import make_t3
+                        from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
                         t3 = make_t3()
                         result = cat.resolve_span(
                             span, entry.physical_collection, t3._client,
@@ -193,7 +193,7 @@ class _LinkOps:
                                 f"{label} {span!r} does not resolve in "
                                 f"collection {entry.physical_collection}"
                             )
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
                         pass  # T3 unavailable — skip validation
             if errors:
                 raise ValueError(f"unresolvable span: {'; '.join(errors)}")
@@ -334,7 +334,7 @@ class _LinkOps:
         Raises ``ValueError`` on dangling endpoints (unless
         ``allow_dangling=True``) or malformed spans.
         """
-        from nexus.catalog.catalog import LinkRecord, _LinkCreatedPayload
+        from nexus.catalog.catalog import LinkRecord, _LinkCreatedPayload  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         cat = self._cat
 
         for span, label in [(from_span, "from_span"), (to_span, "to_span")]:
@@ -369,7 +369,7 @@ class _LinkOps:
                 ]:
                     if span.startswith("chash:") and entry and entry.physical_collection:
                         try:
-                            from nexus.db import make_t3
+                            from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
                             t3 = make_t3()
                             result = cat.resolve_span(
                                 span, entry.physical_collection, t3._client,
@@ -379,7 +379,7 @@ class _LinkOps:
                                     f"{label} {span!r} does not resolve in "
                                     f"collection {entry.physical_collection}"
                                 )
-                        except Exception:
+                        except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
                             pass
                 if errors:
                     raise ValueError(f"unresolvable span: {'; '.join(errors)}")
@@ -436,7 +436,7 @@ class _LinkOps:
         Returns the count removed. Tombstones are appended to the
         JSONL audit trail before SQLite commits.
         """
-        from nexus.catalog.catalog import _LinkDeletedPayload
+        from nexus.catalog.catalog import _LinkDeletedPayload  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         cat = self._cat
 
         dir_fd = cat._acquire_lock()
@@ -626,7 +626,7 @@ class _LinkOps:
         the count removed (or, with ``dry_run=True``, the count
         that *would* be removed).
         """
-        from nexus.catalog.catalog import _LinkDeletedPayload
+        from nexus.catalog.catalog import _LinkDeletedPayload  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         cat = self._cat
 
         has_filter = any((
@@ -737,7 +737,7 @@ class _LinkOps:
         ``orphaned``, ``duplicates``, ``stale_spans``, and
         ``stale_chash`` lists plus their counts.
         """
-        from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         cat = self._cat
 
         total = cat._db.execute(
@@ -838,7 +838,7 @@ class _LinkOps:
                                 "from": from_t, "to": to_t, "type": lt,
                                 "span": span, "reason": "missing",
                             })
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                         _log.warning(
                             "link_audit_chash_error",
                             tumbler=tumbler_str, span=span,
@@ -920,7 +920,7 @@ class _LinkOps:
         every row in the working table.  The outer GROUP BY +
         MIN(depth) collapses to the BFS-minimum depth per tumbler.
         """
-        from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         cat = self._cat
         max_depth = getattr(cat, "_MAX_GRAPH_DEPTH", _MAX_GRAPH_DEPTH)
         max_nodes = getattr(cat, "_MAX_GRAPH_NODES", _MAX_GRAPH_NODES)

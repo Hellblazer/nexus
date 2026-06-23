@@ -85,7 +85,7 @@ def t3_discovery_path(config_dir: Path) -> Path:
     the daemon's WRITE side and the client's READ side derive the path
     from the same single source.
     """
-    from nexus.daemon.discovery import discovery_path as _disc_path
+    from nexus.daemon.discovery import discovery_path as _disc_path  # noqa: PLC0415 — circular-dep avoidance; discovery imports daemon base
     return _disc_path(config_dir, tier="t3")
 
 
@@ -167,7 +167,7 @@ def _find_chroma() -> str:
     candidate = Path(sys.executable).parent / "chroma"
     if candidate.is_file():
         return str(candidate)
-    import shutil
+    import shutil  # noqa: PLC0415 — branch-local; only on PATH-fallback resolution path
     found = shutil.which("chroma")
     if not found:
         raise T3StartError(
@@ -180,9 +180,9 @@ def _find_chroma() -> str:
 def _daemon_version() -> str:
     """Return the conexus package version embedded in discovery payloads."""
     try:
-        from importlib.metadata import version
+        from importlib.metadata import version  # noqa: PLC0415 — branch-local; deferred metadata lookup
         return version("conexus")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort version probe; any metadata failure degrades to sentinel "0.0.0"
         return "0.0.0"
 
 
@@ -311,7 +311,7 @@ class T3Supervisor:
         # only record of WHY it died; DEVNULL discarded them (same silent-
         # death class as the storage-service jar). O_APPEND: a respawn never
         # truncates the previous incarnation's final output.
-        from nexus.logging_setup import open_child_log_or_devnull
+        from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — branch-local; only when spawning chroma child
 
         chroma_log = open_child_log_or_devnull("t3_chroma", self._config_dir)
         try:
@@ -358,9 +358,9 @@ class T3Supervisor:
         """Acquire the spawn lock, spawn chroma, publish the lease. Returns
         the flat discovery payload. Idempotent: a live lease short-circuits
         to the existing payload without a duplicate spawn."""
-        import fcntl
+        import fcntl  # noqa: PLC0415 — branch-local; only on spawn path
 
-        from nexus.config import is_local_mode
+        from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance; config imports daemon helpers
 
         if not is_local_mode():
             raise T3CloudModeError(
@@ -369,7 +369,7 @@ class T3Supervisor:
                 "Set NX_LOCAL=1 to opt into local mode."
             )
 
-        from nexus.daemon.discovery import find_t3_daemon
+        from nexus.daemon.discovery import find_t3_daemon  # noqa: PLC0415 — circular-dep avoidance; discovery imports daemon base
 
         self._config_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._config_dir / _T3_SPAWN_LOCK_FILE
@@ -450,7 +450,7 @@ class T3Supervisor:
     def _stop_chroma(self) -> None:
         if self._proc is None:
             return
-        from nexus.util.process_group import safe_killpg
+        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — branch-local; only on stop/kill path
 
         pid = self._proc.pid
         if _pid_is_alive(pid):
@@ -517,7 +517,7 @@ def run_t3_supervisor(*, config_dir: Path, local_path: Path) -> int:
     # (mirrors run_t2_daemon / nexus-n8sbw). The detached spawn DEVNULLs
     # stderr, so without this sink the supervisor's lifecycle — including
     # the chroma-exited path below — left no record.
-    from nexus.logging_setup import configure_logging, flush_logging
+    from nexus.logging_setup import configure_logging, flush_logging  # noqa: PLC0415 — branch-local; supervisor entry-point setup
 
     configure_logging("t3_daemon", config_dir=config_dir)
 
@@ -582,9 +582,9 @@ def stop_t3_daemon(*, config_dir: Path) -> int | None:
     file exists. Process-group SIGTERM ensures chroma's multiprocessing
     workers + resource_tracker are signalled too.
     """
-    from nexus.util.process_group import safe_killpg
+    from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — branch-local; teardown helper
 
-    from nexus.daemon.discovery import (
+    from nexus.daemon.discovery import (  # noqa: PLC0415 — circular-dep avoidance; discovery imports daemon base
         find_t3_daemon,
         is_lease_record,
         normalize_discovery_view,

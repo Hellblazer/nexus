@@ -99,7 +99,7 @@ def _httpx_stream(url: str, dest: Path) -> None:
     On any failure the ``.part`` file is removed, so a stalled/aborted download
     never accumulates 400 MB of litter and never leaves a partial at ``dest``.
     """
-    import httpx
+    import httpx  # noqa: PLC0415 — deferred import — heavy ONNX/model dep loaded lazily
 
     tmp = dest.with_suffix(dest.suffix + ".part")
     # read=None: no per-chunk read timeout — a 416 MB transfer on a slow link

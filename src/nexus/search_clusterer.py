@@ -36,7 +36,7 @@ def cluster_results(
     k = min(k, n)
 
     try:
-        from scipy.cluster.hierarchy import fcluster, linkage
+        from scipy.cluster.hierarchy import fcluster, linkage  # noqa: PLC0415 — scipy heavy/optional dep deferred to function scope
 
         Z = linkage(embeddings, method="ward")
         labels = fcluster(Z, k, criterion="maxclust") - 1  # 0-indexed

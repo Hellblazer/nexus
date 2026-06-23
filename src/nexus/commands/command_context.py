@@ -156,7 +156,7 @@ def git_branch_block(root: Path) -> list[str]:
             text=True,
         ).strip()
         return [f"**Branch:** {branch}"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return []
 
 
@@ -188,7 +188,7 @@ def beads_block(root: Path, args: list[str], heading: str | None) -> list[str]:
         if output:
             return prefix + output.splitlines()
         return prefix + ["- (no beads found)"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return prefix + ["- (bd unavailable or no results)"]
 
 
@@ -319,7 +319,7 @@ def modified_files_block(root: Path) -> list[str]:
         if lines:
             return [header] + lines
         return [header, "No uncommitted changes"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return [header, "No uncommitted changes"]
 
 
@@ -346,7 +346,7 @@ def diff_stat_block(root: Path) -> list[str]:
         if lines:
             return [header] + lines
         return [header, "No diff available"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return [header, "No diff available"]
 
 
@@ -444,7 +444,7 @@ def tool_check_block(tool: str, section_heading: str, fail_message: str) -> list
             text=True,
         ).strip().splitlines()[0]
         lines += ["Status: PASS", f"Version: {version}"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         lines += ["Status: FAIL"] + fail_message.splitlines()
     lines.append("")
     return lines
@@ -477,7 +477,7 @@ def nx_doctor_block() -> list[str]:
             lines.append("Status: FAIL - run 'nx doctor' for details")
     except FileNotFoundError:
         lines.append("Status: SKIP - nx not installed")
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         # TimeoutExpired (wedged daemon) or any other failure: degrade rather
         # than hang or crash the preflight preamble.
         lines.append("Status: SKIP - nx doctor unavailable")
@@ -701,7 +701,7 @@ def _git_working_state(cwd: Path) -> list[str]:
             stderr=subprocess.DEVNULL,
             text=True,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         lines.append("- **branch:** (not a git repo)")
         return lines
 
@@ -712,7 +712,7 @@ def _git_working_state(cwd: Path) -> list[str]:
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         branch = "(unknown)"
     lines.append(f"- **branch:** `{branch}`")
 
@@ -724,7 +724,7 @@ def _git_working_state(cwd: Path) -> list[str]:
             text=True,
         ).strip()
         lines.append(f"- **HEAD:** `{head}`")
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         lines.append("- **HEAD:** (no commits)")
 
     # Upstream
@@ -734,7 +734,7 @@ def _git_working_state(cwd: Path) -> list[str]:
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         upstream = "(no upstream)"
     lines.append(f"- **upstream:** {upstream}")
 
@@ -751,7 +751,7 @@ def _git_working_state(cwd: Path) -> list[str]:
             text=True,
         ).strip()
         lines.append(f"- **ahead/behind:** {ahead} / {behind}")
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         lines.append("- **ahead/behind:** ? / ?")
 
     return lines
@@ -776,7 +776,7 @@ def _git_uncommitted_block(cwd: Path) -> list[str]:
         ).strip()
         lines = output.splitlines()[:20] if output else []
         return [header] + lines if lines else [header, "(clean)"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return [header, "(no git status)"]
 
 
@@ -799,7 +799,7 @@ def _git_recent_commits_block(cwd: Path) -> list[str]:
         ).strip()
         lines = output.splitlines() if output else []
         return [header] + lines if lines else [header, "(no log)"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return [header, "(no log)"]
 
 
@@ -818,7 +818,7 @@ def _git_open_prs_block(cwd: Path, branch: str) -> list[str]:
     header = "### Open PRs from this branch"
     try:
         _check_output(["gh", "--version"], stderr=subprocess.DEVNULL, text=True)
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return [header, "(gh not installed)"]
 
     try:
@@ -836,7 +836,7 @@ def _git_open_prs_block(cwd: Path, branch: str) -> list[str]:
         ).strip()
         lines = output.splitlines()[:5] if output else []
         return [header] + lines if lines else [header, "(none)"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return [header, "(none)"]
 
 
@@ -859,7 +859,7 @@ def _ready_beads_block(cwd: Path) -> list[str]:
         ).strip()
         lines = output.splitlines()[:25] if output else []
         return [header] + lines if lines else [header, "- (none)"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return [header, "- (bd unavailable or no results)"]
 
 
@@ -890,7 +890,7 @@ def _nx_memory_titles_block(repo: str) -> list[str]:
         ).strip()
         lines = output.splitlines()[:15] if output else []
         return [header] + lines if lines else [header, "(no active-project memory)"]
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return [header, "(no active-project memory)"]
 
 
@@ -941,7 +941,7 @@ def _current_branch(cwd: Path) -> str:
             text=True,
         ).strip()
         return branch if branch else "no-branch"
-    except Exception:
+    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
         return "no-branch"
 
 
@@ -1356,7 +1356,7 @@ def test_validate(args: tuple[str, ...]) -> None:
                 parts.extend(src_lines)
             else:
                 parts.append("No recent source changes")
-        except Exception:
+        except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
             parts.append("No recent source changes")
         parts.append("")
     parts.extend(beads_block(cwd, ["--status=in_progress", "--limit=3"], "### Active Beads"))

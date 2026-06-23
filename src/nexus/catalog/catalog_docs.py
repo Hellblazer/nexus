@@ -130,7 +130,7 @@ class _DocumentOps:
         graph itself).
         """
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         target = cat.resolve_alias(tumbler) if follow_alias else tumbler
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
@@ -185,7 +185,7 @@ class _DocumentOps:
         ``--re-extract`` re-sweeps.
         """
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         sql = (
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
@@ -380,7 +380,7 @@ class _DocumentOps:
         replaced was removed in Phase 5.
         """
         cat = self._cat
-        from nexus.repo_identity import _repo_identity  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
         _, repo_hash = _repo_identity(repo)
         owner = cat.owner_for_repo(repo_hash)
@@ -536,7 +536,7 @@ class _DocumentOps:
 
     def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.search(query, content_type=content_type)
         return [
             CatalogEntry(
@@ -559,7 +559,7 @@ class _DocumentOps:
 
     def by_file_path(self, owner: Tumbler, file_path: str) -> CatalogEntry | None:
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -596,7 +596,7 @@ class _DocumentOps:
         if not uri:
             return None
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -624,7 +624,7 @@ class _DocumentOps:
 
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -654,7 +654,7 @@ class _DocumentOps:
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
         """List all entries with the given content type (code, paper, rdr, knowledge)."""
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -676,7 +676,7 @@ class _DocumentOps:
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
         """List all entries with the given corpus tag."""
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -720,7 +720,7 @@ class _DocumentOps:
         HttpCatalogClient (which already supported offset).
         """
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         # alias_of at position 13 — required so verify_cmd's alias filter is non-vacuous.
         # Without alias_of in the SELECT, CatalogEntry.alias_of defaults to "" for every
         # row and the `not e.alias_of` guard in verify_cmd is vacuously True (nexus-xnz0o).
@@ -755,7 +755,7 @@ class _DocumentOps:
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         """Look up catalog entry by T3 doc_id stored in meta.doc_id."""
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -807,7 +807,7 @@ class _DocumentOps:
         if not doc_ids:
             return {}
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         result: dict[str, CatalogEntry] = {}
         _BATCH = 200
         for i in range(0, len(doc_ids), _BATCH):

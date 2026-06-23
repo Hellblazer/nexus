@@ -134,16 +134,16 @@ def _check_python() -> list[HealthResult]:
 def _check_cli_version() -> list[HealthResult]:
     """Check whether a newer conexus version is available on PyPI."""
     try:
-        from importlib.metadata import version as _pkg_version
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
         current = _pkg_version("conexus")
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return []  # silent — installed version unknown
 
     # Check PyPI for latest (3-second timeout, network-tolerant)
-    import json
-    import urllib.error
-    import urllib.request
+    import json  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+    import urllib.request  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     try:
         req = urllib.request.Request(
@@ -212,7 +212,7 @@ def local_embedder_advisory(
     ``HealthResult`` (never fatal — search still works, just sub-optimally) or
     ``None`` when the active model already matches the user's intent.
     """
-    from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
+    from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL  # noqa: PLC0415 — deferred to avoid circular import
 
     if choice == _TIER1_MODEL and active_model == _TIER0_MODEL:
         # State 2: chose bge, but the extra is missing -> silent 384 fallback.
@@ -250,7 +250,7 @@ def local_embedder_advisory(
 
 
 def _check_t3_local() -> list[HealthResult]:
-    from nexus.config import _default_local_path
+    from nexus.config import _default_local_path  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="local (no API keys needed)"))
@@ -289,13 +289,13 @@ def _check_t3_local() -> list[HealthResult]:
     # serves T1/local-Python paths, NOT T3 — so we qualify its label and suppress
     # the T3-framed upgrade advisory, which would otherwise contradict the
     # service-embedder result on the very next line.
-    from nexus.config import local_embed_model_choice, nexus_config_dir
-    from nexus.db.pg_provision import CREDENTIALS_FILENAME
+    from nexus.config import local_embed_model_choice, nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
 
     _service_mode = (nexus_config_dir() / CREDENTIALS_FILENAME).exists()
 
     # Embedding model
-    from nexus.db.local_ef import LocalEmbeddingFunction
+    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid circular import
     ef = LocalEmbeddingFunction()
     if _service_mode:
         results.append(HealthResult(
@@ -334,7 +334,7 @@ def _check_t3_local() -> list[HealthResult]:
     # at write time (PgVectorRepository.dimForCollection) — the hazard class
     # the probe existed for cannot occur silently anymore.
     try:
-        from nexus.db import make_t3
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
 
         # Graceful-degrade contract (RDR-156 P3): list_collections() swallows
         # transport errors and returns [] — a down service reads as "0
@@ -355,7 +355,7 @@ def _check_t3_local() -> list[HealthResult]:
             label="T3 collections", ok=True,
             detail=detail,
         ))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("doctor_t3_collections_failed", error=str(exc))
         results.append(HealthResult(label="T3 collections", ok=True, detail="could not query"))
 
@@ -380,13 +380,13 @@ def _check_service_bge_model() -> list[HealthResult]:
     so a truncated download or a quantized/fused substitute reads as "incomplete"
     and is flagged, not silently accepted.
     """
-    from nexus.config import nexus_config_dir
-    from nexus.db.pg_provision import CREDENTIALS_FILENAME
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
 
     if not (nexus_config_dir() / CREDENTIALS_FILENAME).exists():
         return []  # not a service install — the Java service is what reads this model
 
-    from nexus.db.service_bge_model import (
+    from nexus.db.service_bge_model import (  # noqa: PLC0415 — deferred to avoid circular import
         service_bge_model_dir,
         service_bge_model_present,
     )
@@ -433,12 +433,12 @@ def _check_vector_service() -> HealthResult:
     try:
         # Raw GET so failures surface (HttpVectorClient.list_collections
         # deliberately swallows errors for its callers).
-        from nexus.db.http_vector_client import _get
+        from nexus.db.http_vector_client import _get  # noqa: PLC0415 — deferred to avoid circular import
         _get("/v1/vectors/collections")
         return HealthResult(
             label="Vector service (/v1/vectors)", ok=True, detail="reachable",
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("vector_service_not_reachable", error=str(exc))
         return HealthResult(
             label="Vector service (/v1/vectors)",
@@ -468,7 +468,7 @@ def _check_managed_service_probe() -> list[HealthResult]:
     warn only — reachability fatals are ``_check_vector_service``'s domain, so this
     surfaces the version/remedy signal without a duplicate fatal on a down service.
     """
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     # env (NX_SERVICE_URL) FIRST, then config.yml — so a greenfield user who set
     # the endpoint with `nx config set service_url` (no shell export) still gets
@@ -478,7 +478,7 @@ def _check_managed_service_probe() -> list[HealthResult]:
     if not base:
         return []
 
-    from nexus.db.managed_endpoint import (
+    from nexus.db.managed_endpoint import (  # noqa: PLC0415 — deferred to avoid circular import
         ManagedServiceError,
         ManagedServiceIncompatible,
         probe_managed_service,
@@ -515,7 +515,7 @@ def _check_managed_service_probe() -> list[HealthResult]:
 
 
 def _check_t3_cloud() -> list[HealthResult]:
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="cloud"))
@@ -588,15 +588,15 @@ def _check_t3_cloud() -> list[HealthResult]:
 
     # Pipeline version check
     if chroma_key and chroma_database and voyage_key:
-        from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
+        from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version  # noqa: PLC0415 — deferred to avoid circular import
 
         # RDR-155 P4a.2 (nexus-1k8s1): the sweep reads Chroma COLLECTION
         # metadata (the pipeline_version stamp), which has no pgvector
         # equivalent — collection is a column, not an object with metadata.
         # On the service-backed handle the sweep is retired, not "failed";
         # pgvector-side staleness tracking is a P5 ETL concern.
-        from nexus.db import make_t3
-        from nexus.db.http_vector_client import is_service_backed
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid circular import
 
         t3_handle = make_t3()
         if is_service_backed(t3_handle):
@@ -632,7 +632,7 @@ def _check_t3_cloud() -> list[HealthResult]:
                     pipeline_results.append(HealthResult(
                         label=f"pipeline ({col.name})", ok=True, detail=f"v{stored}",
                     ))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
             _log.debug("doctor_pipeline_check_failed", db=chroma_database, error=str(exc))
             pipeline_results.append(HealthResult(
                 label=f"pipeline ({chroma_database})", ok=False, detail="check failed",
@@ -737,13 +737,13 @@ def _check_git_hooks() -> list[HealthResult]:
     # reaching up into commands/. Use module-attribute access so test
     # monkeypatches on ``nexus._git_hooks_meta.effective_hooks_dir``
     # reach the live binding at call time.
-    import re
-    from nexus import _git_hooks_meta as _ghm
-    from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END
+    import re  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+    from nexus import _git_hooks_meta as _ghm  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END  # noqa: PLC0415 — deferred to avoid circular import
     _effective_hooks_dir = _ghm.effective_hooks_dir
-    from nexus.catalog.catalog import Catalog
-    from nexus.config import catalog_path, nexus_config_dir
-    from nexus.repos import list_repos_dual
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import catalog_path, nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
     hook_names = ("post-commit", "post-merge", "post-rewrite")
@@ -757,8 +757,8 @@ def _check_git_hooks() -> list[HealthResult]:
     # repos are registered.
     def _canonical_stanza_body() -> str | None:
         try:
-            from nexus.commands.hooks import _STANZA
-        except Exception:
+            from nexus.commands.hooks import _STANZA  # noqa: PLC0415 — deferred to avoid circular import
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return None
         m = re.search(
             rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
@@ -780,10 +780,10 @@ def _check_git_hooks() -> list[HealthResult]:
     # paths come from ``owners WHERE owner_type='repo'``; the registry
     # provides legacy installs that have not yet been re-indexed.
     try:
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
         cat = make_catalog_reader()
         repos = list_repos_dual(cat=cat, registry_path=registry_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         # RDR-137 followup IMP-20 (nexus-43qgm.20): exc_info=True so
         # the operator sees the traceback alongside the error message
         # (NameError / AttributeError otherwise appear only as the
@@ -844,7 +844,7 @@ def _check_git_hooks() -> list[HealthResult]:
                         detail=f"{repo_path} — not installed",
                         fix_suggestions=[f"nx hooks install {repo_path}"],
                     ))
-            except Exception:
+            except Exception:  # noqa: BLE001 — git-hook probe is best-effort; degrade to 'could not check'
                 results.append(HealthResult(
                     label="git hooks", ok=True,
                     detail=f"{repo_path} — could not check",
@@ -854,7 +854,7 @@ def _check_git_hooks() -> list[HealthResult]:
 
 
 def _check_index_log() -> list[HealthResult]:
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
 
     log_path = nexus_config_dir() / "index.log"
     if log_path.exists():
@@ -887,8 +887,8 @@ def _check_orphan_t1() -> list[HealthResult]:
     stale (expired) lease record still on disk; such records are inert
     (readers reap them on discovery), so removal is cosmetic.
     """
-    from nexus.config import nexus_config_dir
-    from nexus.daemon.service_registry import LeaseRecord
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.daemon.service_registry import LeaseRecord  # noqa: PLC0415 — deferred to avoid circular import
 
     config_dir = nexus_config_dir()
     if not config_dir.exists():
@@ -956,13 +956,13 @@ def _check_t3_daemon_version() -> list[HealthResult]:
     structural fix: it surfaces the mismatch as a soft warning (the daemon
     still works, it is merely stale). Local mode only; cloud T3 has no daemon.
     """
-    from importlib.metadata import version as _pkg_version
+    from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
-    from nexus.daemon.discovery import find_t3_daemon
+    from nexus.daemon.discovery import find_t3_daemon  # noqa: PLC0415 — deferred to avoid circular import
 
     try:
         cli_version = _pkg_version("conexus")
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return []  # installed version unknown — nothing to compare against
 
     daemon = find_t3_daemon()
@@ -997,14 +997,14 @@ def _check_t3_daemon_version() -> list[HealthResult]:
 
 
 def _check_orphan_checkpoints() -> list[HealthResult]:
-    from nexus.checkpoint import CHECKPOINT_DIR, scan_orphaned_checkpoints
+    from nexus.checkpoint import CHECKPOINT_DIR, scan_orphaned_checkpoints  # noqa: PLC0415 — deferred to avoid circular import
 
     if not CHECKPOINT_DIR.exists():
         return [HealthResult(label="PDF checkpoints", ok=True, detail="no checkpoint directory")]
 
     try:
         orphans = scan_orphaned_checkpoints(delete=False)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("orphan_checkpoint_scan_failed", error=str(exc))
         return [HealthResult(label="PDF checkpoints", ok=True, detail="scan failed — skipping")]
 
@@ -1024,7 +1024,7 @@ def _check_orphan_checkpoints() -> list[HealthResult]:
 
 
 def _check_orphan_pipelines() -> list[HealthResult]:
-    from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB
+    from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB  # noqa: PLC0415 — deferred to avoid circular import
 
     if not PIPELINE_DB_PATH.exists():
         return [HealthResult(label="PDF pipeline buffer", ok=True, detail="no pipeline database")]
@@ -1032,7 +1032,7 @@ def _check_orphan_pipelines() -> list[HealthResult]:
     try:
         db = PipelineDB(PIPELINE_DB_PATH)
         orphans = db.scan_orphaned_pipelines(delete=False)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("orphan_pipeline_scan_failed", error=str(exc))
         return [HealthResult(label="PDF pipeline buffer", ok=True, detail="scan failed — skipping")]
 
@@ -1066,12 +1066,12 @@ def _check_mineru_server() -> list[HealthResult]:
     subsequent session. ``nx doctor`` is the natural place to surface
     that drift.
     """
-    from nexus.config import get_mineru_server_url
-    import httpx as _httpx
+    from nexus.config import get_mineru_server_url  # noqa: PLC0415 — heavy/optional dependency deferred to call time
+    import httpx as _httpx  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
     try:
         url = get_mineru_server_url()
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return []
     if not url:
         return []
@@ -1132,7 +1132,7 @@ def _is_lock_error(exc: BaseException) -> bool:
 
 
 def _check_t2_integrity() -> list[HealthResult]:
-    import time
+    import time  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -1190,7 +1190,7 @@ def _check_t2_integrity() -> list[HealthResult]:
                     time.sleep(sleeps[attempt - 1])
         finally:
             conn.close()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return [HealthResult(label="T2 integrity", ok=False, detail=f"could not open: {exc}")]
 
     if pragma_ok and fts_ok:
@@ -1207,11 +1207,11 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
     than lose it to a red X. Post-enforcement a growing count complements the
     A3 daemon-census hard error (it means a writer is bypassing the daemon).
     """
-    from nexus.dropped_writes import count_drops
+    from nexus.dropped_writes import count_drops  # noqa: PLC0415 — deferred to avoid circular import
 
     try:
         summary = count_drops()
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # pragma: no cover — defensive  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return [HealthResult(
             label="T2 best-effort writes", ok=True, detail=f"meter unavailable: {exc}",
         )]
@@ -1256,10 +1256,10 @@ def _check_t2_daemon_singleton() -> list[HealthResult]:
             label="T2 daemon singleton", ok=True, detail="no T2 database yet",
         )]
     try:
-        from nexus.daemon.t2_daemon import _enumerate_t2_daemon_pids_for_db
+        from nexus.daemon.t2_daemon import _enumerate_t2_daemon_pids_for_db  # noqa: PLC0415 — deferred to avoid circular import
 
         pids = sorted(set(_enumerate_t2_daemon_pids_for_db(db_path)))
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # pragma: no cover — defensive  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         # Absence of evidence is not evidence of multiplicity: a failed probe
         # must not flip doctor red.
         return [HealthResult(
@@ -1290,7 +1290,7 @@ def _check_t2_daemon_singleton() -> list[HealthResult]:
 def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]:
     try:
         cols = client.list_collections()  # type: ignore[union-attr]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return [HealthResult(
             label=f"ChromaDB pagination ({db_name})", ok=False, detail=f"list failed: {exc}",
         )]
@@ -1301,7 +1301,7 @@ def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]
             if col.count() > 0:
                 target_col = col
                 break
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             continue
 
     if target_col is None:
@@ -1326,7 +1326,7 @@ def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]
         ok = retrieved == expected
         detail = f"{target_col.name}: count={expected}, paginated={retrieved}"
         return [HealthResult(label=f"ChromaDB pagination ({db_name})", ok=ok, detail=detail)]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return [HealthResult(
             label=f"ChromaDB pagination ({db_name})", ok=False, detail=f"audit failed: {exc}",
         )]
@@ -1348,7 +1348,7 @@ def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult
             label="Catalog", ok=True,
             detail="not initialized (optional — run: nx catalog setup)",
         )]
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return [HealthResult(label="Catalog", ok=True, detail="check failed (non-critical)")]
 
 
@@ -1387,7 +1387,7 @@ def _check_plugin_name() -> list[HealthResult]:
     if not plugin_name:
         return []
 
-    from nexus.mcp_infra import EXPECTED_PLUGIN_NAME
+    from nexus.mcp_infra import EXPECTED_PLUGIN_NAME  # noqa: PLC0415 — deferred to avoid circular import
     if plugin_name == EXPECTED_PLUGIN_NAME:
         return []
 
@@ -1427,7 +1427,7 @@ def _check_credential_persistence() -> list[HealthResult]:
     Returns an empty list when the configuration is consistent (both
     persisted, neither set, or no env exports).
     """
-    from nexus.config import _global_config_path
+    from nexus.config import _global_config_path  # noqa: PLC0415 — deferred to avoid circular import
 
     cloud_keys = ("chroma_api_key", "voyage_api_key", "chroma_tenant", "chroma_database")
     env_names = {
@@ -1442,10 +1442,10 @@ def _check_credential_persistence() -> list[HealthResult]:
     cfg_path = _global_config_path()
     if cfg_path.exists():
         try:
-            import yaml
+            import yaml  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
             data = yaml.safe_load(cfg_path.read_text()) or {}
             file_creds = data.get("credentials", {}) or {}
-        except Exception:
+        except Exception:  # noqa: BLE001 — creds-file read is best-effort; fall back to empty mapping
             file_creds = {}
 
     env_only: list[str] = []
@@ -1550,7 +1550,7 @@ def _resolve_service_endpoint(
     # this used tier="t2" + scope_key="storage_service" (t2_addr.storage_service),
     # which never matched the supervisor's storage_service_addr.<uid> file.
     try:
-        from nexus.daemon.service_registry import ServiceRegistry
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred to avoid circular import
         registry = ServiceRegistry(dir=config_dir, tier="storage_service")
         scope = str(os.getuid())
         lease = registry.discover(scope)
@@ -1564,7 +1564,7 @@ def _resolve_service_endpoint(
                     host=host, port=port,
                 )
                 return host, port
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("storage_service_registry_discover_failed", error=str(exc))
 
     # 2. Env var fallback.
@@ -1598,12 +1598,12 @@ def _check_storage_service_health(
 
     Down service -> fatal (no direct-mode fallback per RDR-152).
     """
-    import httpx as _httpx
+    import httpx as _httpx  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
     # Resolve creds_path default.
     if creds_path is None:
-        from nexus.config import nexus_config_dir
-        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
         creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
 
     # Gate: service/PG mode configured?
@@ -1621,7 +1621,7 @@ def _check_storage_service_health(
     # explicit None -> endpoint not available, soft-warn.
     resolved_endpoint: tuple[str, int] | None
     if endpoint is _ENDPOINT_AUTO:
-        from nexus.config import nexus_config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
         resolved_endpoint = _resolve_service_endpoint(nexus_config_dir())
     else:
         resolved_endpoint = endpoint  # type: ignore[assignment]
@@ -1665,7 +1665,7 @@ def _check_storage_service_health(
             ],
             fatal=True,
         )]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return [HealthResult(
             label="Storage service health",
             ok=False,
@@ -1675,7 +1675,7 @@ def _check_storage_service_health(
 
     try:
         body = resp.json()
-    except Exception:
+    except Exception:  # noqa: BLE001 — health-body parse is best-effort; fall back to empty dict
         body = {}
 
     db_field = body.get("db", "")
@@ -1770,8 +1770,8 @@ def _check_migration_state(
     """
     # Resolve creds_path default.
     if creds_path is None:
-        from nexus.config import nexus_config_dir
-        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
         creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
 
     if not creds_path.exists():
@@ -1782,7 +1782,7 @@ def _check_migration_state(
             warn=True,
         )]
 
-    from nexus.db.pg_provision import (
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
         _read_credentials,
         discover_pg_binaries,
         PgBinaryNotFoundError,
@@ -1993,8 +1993,8 @@ def _check_rls_present(
 
     # Resolve creds_path default.
     if creds_path is None:
-        from nexus.config import nexus_config_dir
-        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
         creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
 
     if not creds_path.exists():
@@ -2005,7 +2005,7 @@ def _check_rls_present(
             warn=True,
         )]
 
-    from nexus.db.pg_provision import (
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
         _read_credentials,
         discover_pg_binaries,
         PgBinaryNotFoundError,
@@ -2167,7 +2167,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
 
     Returns (results, is_local_mode).
     """
-    from nexus.config import is_local_mode, get_credential
+    from nexus.config import is_local_mode, get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
 
@@ -2204,10 +2204,10 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
             try:
                 # RDR-120 P2: route through make_t3. Cloud-only branch
                 # (gated by ``not _local``); daemon does not apply.
-                from nexus.db import make_t3
+                from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
                 client = make_t3()._client
                 results.extend(_check_chroma_pagination(client, chroma_database))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 _log.debug(
                     "doctor_pagination_check_client_failed",
                     db=chroma_database, error=str(exc),
@@ -2217,8 +2217,8 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
                     detail="skipped (client unavailable)",
                 ))
 
-    from nexus.catalog.factory import make_catalog_reader
-    from nexus.config import catalog_path
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid circular import
     _cat_path = catalog_path()
     _cat = make_catalog_reader()
     results.extend(_check_catalog(_cat, _cat_path))

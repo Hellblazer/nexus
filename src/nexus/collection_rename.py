@@ -98,12 +98,12 @@ def rename_collection_data_plane(
     # the collection fully unchanged, so it raises (not fail-open) just like the
     # T2-cascade-failure contract below. No separate t3_db.rename_collection:
     # the pgvector chunks were re-homed inside the same transaction.
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance (nexus.db.storage_mode)
 
     if storage_backend_for("catalog") == StorageBackend.SERVICE:
         client = catalog
         if client is None or not hasattr(client, "rename_collection_cascade"):
-            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             client = make_catalog_reader()
         if client is None:  # service mode always returns a client; guard for a clear error
             raise click.ClickException("catalog service client unavailable")
@@ -141,7 +141,7 @@ def rename_collection_data_plane(
     # the daemon's database-pseudo-store allowlist and its dict return
     # round-trips framed JSON; T2Client's facade passthrough makes the
     # write_fn body work whether routed or degraded to a direct T2Database.
-    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
 
     try:
         cascade = t2_index_write(
@@ -176,10 +176,10 @@ def rename_collection_data_plane(
             # RDR-146 P1.2: rename_collection is a write; route through the
             # write-only daemon proxy. A caller-supplied ``catalog`` is used
             # as-is (it is expected to be write-capable).
-            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             catalog = make_catalog_writer()
         counts["catalog_docs"] = catalog.rename_collection(old, new)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — catalog cascade is best-effort after T2+T3 succeeded; surfaced via on_warn
         on_warn(f"warn: T2+T3 rename succeeded but catalog cascade failed: {exc}")
 
     return counts
@@ -238,7 +238,7 @@ def remap_collection_references(
     }
 
     # ── T2 reference cascade (raises on failure) ─────────────────────────────
-    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
 
     try:
         cascade = t2_index_write(
@@ -259,14 +259,14 @@ def remap_collection_references(
     # ── Catalog reference cascade (fail-open) ────────────────────────────────
     try:
         if catalog is None:
-            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             catalog = make_catalog_writer()
         # nexus-gaou3: this IS the legitimate cross-model repoint (target already
         # populated by the ETL). In service mode the Java endpoint 409s a rename onto
         # an existing target UNLESS cross_model=True, so signal it. Only pass the kwarg
         # in service mode — the local catalog writer's rename_collection has no such
         # parameter (and local mode has no 409 to bypass).
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance (nexus.db.storage_mode)
 
         if storage_backend_for("catalog") == StorageBackend.SERVICE:
             counts["catalog_docs"] = catalog.rename_collection(
@@ -274,7 +274,7 @@ def remap_collection_references(
             )
         else:
             counts["catalog_docs"] = catalog.rename_collection(source, target)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — catalog cascade is best-effort after T2 remap; surfaced via on_warn
         on_warn(
             f"warn: T2 reference remap succeeded but catalog cascade failed: {exc}"
         )

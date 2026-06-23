@@ -243,7 +243,7 @@ def open_child_log_or_devnull(
     Callers must only ``close()`` the result when it is not the DEVNULL
     sentinel (an ``int``).
     """
-    import subprocess
+    import subprocess  # noqa: PLC0415 — stdlib subprocess deferred to function scope
 
     try:
         return open_child_log(name, config_dir, **kwargs)

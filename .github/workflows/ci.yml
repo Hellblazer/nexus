@@ -13,6 +13,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  lint:
+    # nexus-ls88v (epic nexus-whh61 F7): the structlog-only / no-print-in-library
+    # / audited-broad-except discipline was previously convention-only — 73
+    # BLE001 + 284 PLC0415 noqa were version-controlled but unenforced because no
+    # CI lint job existed. This job runs the committed [tool.ruff] ruleset so a
+    # NEW print()/blind-except/lazy-import that lacks a justified per-line noqa
+    # fails the PR. Ruff is pinned to the version the F7 audit was performed with
+    # so local `uv run ruff` (>=0.15.18) and CI agree on rule behaviour.
+    name: ruff lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Lint src/ with ruff
+        # uvx fetches the standalone ruff (no project build / heavy-dep sync).
+        # Pinned exact for determinism; the [tool.ruff] config in pyproject.toml
+        # is read automatically.
+        run: uvx ruff@0.15.18 check src/
+
   test:
     name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

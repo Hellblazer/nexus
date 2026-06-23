@@ -25,7 +25,7 @@ _log = structlog.get_logger()
 
 
 def _db_path() -> "Path":  # noqa: F821 — lazy import
-    from nexus.commands._helpers import default_db_path
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     return default_db_path()
 
@@ -52,9 +52,9 @@ def _check_deferred_migrations(conn: sqlite3.Connection) -> list[dict]:
     one entry per affected table.  An empty list means no known deferred/gated
     work was detected.
     """
-    import os
+    import os  # noqa: PLC0415 — stdlib import kept branch-local
 
-    from nexus.db.migrations import _catalog_db_path_from_conn, _HIGH_VOLUME_ORPHAN_THRESHOLD
+    from nexus.db.migrations import _catalog_db_path_from_conn, _HIGH_VOLUME_ORPHAN_THRESHOLD  # noqa: PLC0415 — migration helper deferred to call site
 
     deferred: list[dict] = []
 
@@ -67,7 +67,7 @@ def _check_deferred_migrations(conn: sqlite3.Connection) -> list[dict]:
 
     try:
         catalog_db_path = _catalog_db_path_from_conn(conn)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog-path probe; None when unavailable
         catalog_db_path = None
 
     catalog_present = catalog_db_path is not None and catalog_db_path.exists()
@@ -130,7 +130,7 @@ def _check_deferred_migrations(conn: sqlite3.Connection) -> list[dict]:
                 """.format(table_name),  # noqa: S608 — table_name is a literal constant
                 (threshold,),
             ).fetchall()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort deferred-migration row count; empty on failure
             rows = []
 
         if rows:
@@ -155,10 +155,10 @@ def _check_deferred_migrations(conn: sqlite3.Connection) -> list[dict]:
 
 def _current_version() -> str:
     try:
-        from importlib.metadata import version as _pkg_version
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — stdlib import kept branch-local
 
         return _pkg_version("conexus")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort version read; '0.0.0' fallback
         return "0.0.0"
 
 
@@ -204,17 +204,17 @@ def _quiesce_daemon() -> None:
     never raises — the migration flock + busy_timeout still protect
     correctness if a straggler connection lingers.
     """
-    import json
-    import os
-    import subprocess
-    import time as _time
+    import json  # noqa: PLC0415 — stdlib import kept branch-local
+    import os  # noqa: PLC0415 — stdlib import kept branch-local
+    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
+    import time as _time  # noqa: PLC0415 — stdlib import kept branch-local
 
     try:
-        from nexus.commands.daemon import _resolve_nx_bin
-        from nexus.config import nexus_config_dir
-        from nexus.daemon.t2_daemon import t2_discovery_path
+        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.daemon.t2_daemon import t2_discovery_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-        from nexus.commands.daemon import _discovery_record_pid
+        from nexus.commands.daemon import _discovery_record_pid  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         disc = t2_discovery_path(nexus_config_dir())
         pid: int | None = None
@@ -244,7 +244,7 @@ def _quiesce_daemon() -> None:
                 except (ProcessLookupError, PermissionError):
                     break  # gone
                 _time.sleep(0.1)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort daemon quiesce; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_daemon_quiesce_failed", error=str(exc))
 
 
@@ -255,10 +255,10 @@ def _cycle_daemon_to_current() -> None:
     version-aware primitive the plugin/mcpb session-start hooks use. Never
     raises: a daemon nudge must not fail the upgrade.
     """
-    import subprocess
+    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
 
     try:
-        from nexus.commands.daemon import _resolve_nx_bin
+        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         subprocess.run(
             [*_resolve_nx_bin(), "daemon", "t2", "ensure-running", "--quiet"],
@@ -267,7 +267,7 @@ def _cycle_daemon_to_current() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort daemon cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_daemon_cycle_failed", error=str(exc))
 
 
@@ -281,16 +281,16 @@ def _cycle_t3_daemon_to_current() -> None:
     mode only; a no-op when no T3 daemon is running or in cloud mode.
     Never raises.
     """
-    import subprocess
+    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
 
     try:
-        from nexus.config import is_local_mode
-        from nexus.daemon.discovery import find_t3_daemon
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.daemon.discovery import find_t3_daemon  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         if not is_local_mode() or find_t3_daemon() is None:
             return  # nothing running to cycle (or cloud mode)
 
-        from nexus.commands.daemon import _resolve_nx_bin
+        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         nx = _resolve_nx_bin()
         for verb in ("stop", "start"):
@@ -301,7 +301,7 @@ def _cycle_t3_daemon_to_current() -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort T3 daemon cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_t3_daemon_cycle_failed", error=str(exc))
 
 
@@ -324,12 +324,12 @@ def _cycle_storage_service_to_current(
     seams for unit tests (avoids patching local imports deep in try blocks).
     Default values reproduce production behaviour exactly.
     """
-    import os
-    import subprocess
+    import os  # noqa: PLC0415 — stdlib import kept branch-local
+    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
 
     try:
-        from nexus.config import nexus_config_dir
-        from nexus.daemon.service_registry import ServiceRegistry
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         # Discover via the storage_service tier (matches what the supervisor
         # publishes and health._resolve_service_endpoint reads).
@@ -343,7 +343,7 @@ def _cycle_storage_service_to_current(
         if live is None:
             return  # nothing running to cycle
 
-        from nexus.commands.daemon import _resolve_nx_bin as _real_nx_bin
+        from nexus.commands.daemon import _resolve_nx_bin as _real_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         nx = _nx_bin_fn() if _nx_bin_fn is not None else _real_nx_bin()
         _run = _run_fn if _run_fn is not None else subprocess.run
         for verb in ("stop", "start"):
@@ -354,7 +354,7 @@ def _cycle_storage_service_to_current(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort storage-service cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_storage_service_cycle_failed", error=str(exc))
 
 
@@ -381,7 +381,7 @@ def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
 
 
 def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool = False) -> None:
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
     db_path = _db_path()
     current = _current_version()
@@ -512,9 +512,9 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
         # advanced ``_nexus_version.cli_version`` to ``current``, the
         # next run computed ``pending_t3 = []`` and never re-tried.
         if not auto_mode and pending_t3:
-            from nexus.commands._helpers import default_db_path
-            from nexus.db import make_t3
-            from nexus.db.t2 import T2Database
+            from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS _nexus_t3_steps ("
@@ -550,7 +550,7 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                             click.echo(f"  T3: [{step.introduced}] {step.name}")
                             try:
                                 step.fn(t3_db, t2_db.taxonomy)
-                            except Exception as step_exc:
+                            except Exception as step_exc:  # noqa: BLE001 — per-step T3 upgrade failure logged + flagged, remaining steps continue
                                 any_failed = True
                                 _log.warning(
                                     "t3_upgrade_step_failed",
@@ -614,7 +614,7 @@ def _refresh_all_git_hooks() -> None:
     upgrade. Silent when no managed hooks exist anywhere.
     """
     try:
-        from nexus.commands.hooks import refresh_all_managed_hooks
+        from nexus.commands.hooks import refresh_all_managed_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         summary = refresh_all_managed_hooks(echo=False)
         if summary["refreshed"]:
@@ -628,7 +628,7 @@ def _refresh_all_git_hooks() -> None:
                     else "."
                 )
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort git-hook refresh; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_git_hook_refresh_failed", error=str(exc))
 
 
@@ -645,19 +645,19 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
     can run ``nx catalog migrate-repos --force`` once that verb lands;
     until then they delete the file manually after reading the log.
     """
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     reg_path = nexus_config_dir() / "repos.json"
     if not reg_path.exists():
         return  # idempotent — no-op when already absent
 
     try:
-        from nexus.catalog.factory import make_catalog_reader
-        from nexus.config import catalog_path
-        from nexus.repo_identity import _repo_identity
-        from nexus.repos import _read_repos_json, _repos_json_is_parseable
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.repos import _read_repos_json, _repos_json_is_parseable  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         # RDR-137 followup CRITICAL-4 (nexus-43qgm.4): refuse to delete
         # a malformed/truncated repos.json. _read_repos_json returns
@@ -723,7 +723,7 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
             f"\nRepos.json migration: catalog parity confirmed; "
             f"{reg_path} deleted."
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort repos.json migration; failure logged at warning
         _log.warning("repos_json_migration_failed", error=str(exc))
 
 
@@ -732,9 +732,9 @@ def _emit_name_vs_embed_dim_advisory() -> None:
     if any collections are mislabeled. Silent on PASS, error-tolerant
     (T3 may be unavailable on a freshly-migrated install)."""
     try:
-        from nexus.commands.catalog import _run_name_vs_embed_dim
+        from nexus.commands.catalog import _run_name_vs_embed_dim  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         report = _run_name_vs_embed_dim()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort doctor advisory; silent return when T3 unavailable
         return
     if report.get("error"):
         return

@@ -80,7 +80,7 @@ def _build_dispatch_env(
     base = dict(os.environ)
 
     if share_t1:
-        from nexus.mcp import _t1_state
+        from nexus.mcp import _t1_state  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         if _t1_state.T1_ADDR is None:
             raise RuntimeError(
@@ -127,13 +127,13 @@ async def _drain_pipe(pipe: asyncio.StreamReader | None) -> bytes:
         return b""
     try:
         return await pipe.read()
-    except Exception:
+    except Exception:  # noqa: BLE001 - subprocess pipe failure; logged DEBUG with exc_info, returns empty bytes
         # nexus-8g79.8: empty bytes is the right return shape (caller
         # treats it as "no output"), but the silent swallow hides
         # subprocess pipe failures (OOM kill, fd exhaustion, broken
         # pipe). DEBUG-with-exc_info preserves the API contract while
         # making the cause discoverable.
-        import structlog
+        import structlog  # noqa: PLC0415 - deferred to call time
         structlog.get_logger(__name__).debug(
             "operator_pipe_read_failed", exc_info=True,
         )
@@ -150,8 +150,8 @@ def _persist_timeout_log(
     that the timeout exception (the load-bearing signal) always
     surfaces; the absent log is a soft loss.
     """
-    from datetime import datetime, timezone
-    from nexus.config import nexus_config_dir
+    from datetime import datetime, timezone  # noqa: PLC0415 - branch-local; deferred to call time
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     try:
         logs_dir = nexus_config_dir() / "logs"
@@ -164,7 +164,7 @@ def _persist_timeout_log(
             + b"--- stderr ---\n" + stderr + b"\n"
         )
         return str(path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - best-effort timeout-log write; logged via log.warning
         _log.warning("operator_timeout_log_failed", error=str(exc))
         return "(log write failed)"
 
@@ -242,7 +242,7 @@ async def claude_dispatch(
     # back to EphemeralClient for the rest of the parent conversation.
     # ``read_claude_session_id`` reads the parent's UUID at dispatch time —
     # the parent's SessionStart populated it before any operator runs.
-    from nexus.session import read_claude_session_id
+    from nexus.session import read_claude_session_id  # noqa: PLC0415 - deferred to avoid circular import at module load
     parent_session_id = read_claude_session_id()
     # RDR-105 P2.5 (nexus-4gby): build the subprocess env via the
     # three-mode helper. The operator-dispatch caller is the
@@ -290,18 +290,18 @@ async def claude_dispatch(
         # subprocess tests deterministically fall through to proc.kill()
         # — the pgid=1 deadlock on GitHub ubuntu-latest is covered by
         # tests/test_process_group_safety.py.
-        from nexus.util.process_group import safe_killpg
-        import signal
+        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 - deferred to avoid circular import at module load
+        import signal  # noqa: PLC0415 - branch-local; deferred to call time
 
         if not safe_killpg(proc, signal.SIGKILL):
             try:
                 proc.kill()
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal
                 pass
         # Reap the leader so the asyncio transport closes cleanly.
         try:
             await proc.wait()
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort cancel cleanup before drain-and-raise; non-fatal
             pass
         # nexus-1at5: drain whatever bytes already landed in the pipe
         # buffers BEFORE raising. ``communicate()`` was cancelled mid-

@@ -92,7 +92,7 @@ def _load_tier(
 
         try:
             template = yaml.safe_load(path.read_text()) or {}
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort template parse; skips malformed entry
             continue
         if not isinstance(template, dict):
             continue
@@ -138,7 +138,7 @@ def _rdr_status(rdr_md: Path) -> str | None:
         return None
     try:
         meta = yaml.safe_load(match.group(1)) or {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort metadata read; degrades to None
         return None
     if isinstance(meta, dict):
         return str(meta.get("status") or "").strip() or None
@@ -244,7 +244,7 @@ def _load_registered_dimensions(plugin_root: Path) -> set[str] | None:
         return None
     try:
         doc = yaml.safe_load(path.read_text()) or {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort doc parse; degrades to None
         return None
     if not isinstance(doc, dict):
         return None
@@ -266,7 +266,7 @@ def ci_validate_plan_tree(
     loaded from ``conexus/plans/dimensions.yml`` so SC-19 (unknown dimension
     rejected at CI) is actually enforced.
     """
-    import sys
+    import sys  # noqa: PLC0415 - branch-local; deferred to call time
 
     errors: list[_CIError] = []
     registered = _load_registered_dimensions(plugin_root)
@@ -296,7 +296,7 @@ def ci_validate_plan_tree(
                 continue
             try:
                 template = yaml.safe_load(path.read_text()) or {}
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - per-file YAML error collected; loading continues
                 errors.append(_CIError(str(path), f"YAML error: {exc}"))
                 continue
             try:
@@ -309,8 +309,8 @@ def ci_validate_plan_tree(
                 errors.append(_CIError(str(path), str(exc)))
 
     if errors:
-        print("Plan schema validation failed:", file=sys.stderr)
+        print("Plan schema validation failed:", file=sys.stderr)  # noqa: T201 — CI validation entry point reporting to stderr before nonzero return
         for err in errors:
-            print(f"  {err.path}: {err.message}", file=sys.stderr)
+            print(f"  {err.path}: {err.message}", file=sys.stderr)  # noqa: T201 — CI validation entry point reporting to stderr before nonzero return
         return 1
     return 0

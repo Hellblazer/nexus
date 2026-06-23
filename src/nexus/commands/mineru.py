@@ -30,7 +30,7 @@ _STOP_TIMEOUT_SECONDS = 10
 
 
 def _pid_file_path() -> Path:
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     return nexus_config_dir() / "mineru.pid"
 
@@ -79,7 +79,7 @@ def _mineru_output_root() -> Path:
 
 def _server_env(output_root: Path) -> dict[str, str]:
     """Build environment variables for the mineru-api subprocess."""
-    from nexus.config import get_mineru_table_enable
+    from nexus.config import get_mineru_table_enable  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     env = os.environ.copy()
     env.update({
@@ -286,7 +286,7 @@ def stop() -> None:
     # killable pgid.
     # Both signals go through safe_killpg for mock-guard + error-swallow
     # consistency with every other subprocess cleanup site.
-    from nexus.util.process_group import safe_killpg
+    from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     if not safe_killpg(pid, signal.SIGTERM):
         # Process group already gone — nothing to do.
@@ -319,10 +319,10 @@ def stop() -> None:
     output_root = info.get("output_root") if info else None
     if output_root:
         try:
-            import shutil
+            import shutil  # noqa: PLC0415 — deferred to keep CLI startup fast
 
             shutil.rmtree(output_root, ignore_errors=True)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort output cleanup; logged at debug
             _log.debug("mineru_output_cleanup_failed", path=output_root, exc_info=True)
 
     _log.info("mineru_stopped", pid=pid)

@@ -125,7 +125,7 @@ def promote_extras_field(
             f"got {sql_type!r}",
         )
 
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
         raise NotImplementedError(
             "promote_extras_field not yet supported on the service backend "
@@ -204,7 +204,7 @@ def list_promotions(db) -> list[dict]:
     aspects-promote-field --history`` flag and by anyone
     auditing the schema's evolution.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
         raise NotImplementedError(
             "list_promotions not yet supported on the service backend "
@@ -336,5 +336,5 @@ def _record_promotion_audit(db, result: PromotionResult) -> None:
                 ),
             )
             conn.commit()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         _log.warning("aspect_promotion_audit_failed", exc_info=True)

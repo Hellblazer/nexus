@@ -100,7 +100,7 @@ def _maybe_emit_silent_zero_note(
 # Directory where ripgrep cache files are stored (overridable in tests via monkeypatch).
 # Resolved at import time via NEXUS_CONFIG_DIR helper for sandbox isolation.
 def _resolve_config_dir_at_import() -> Path:
-    import os as _os
+    import os as _os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     override = _os.environ.get("NEXUS_CONFIG_DIR", "").strip()
     if override:
@@ -239,7 +239,7 @@ def search_cmd(
     # RDR-159 P1b: degrade LOUD while a guided upgrade migration is in
     # flight. The banner goes to stderr so it never corrupts --json/--vimgrep
     # stdout, but is emitted FIRST so results are never mistaken for complete.
-    from nexus.migration.banner import migration_banner
+    from nexus.migration.banner import migration_banner  # noqa: PLC0415 — deferred import; migration.banner only needed on this branch
 
     _migration_banner = migration_banner()
     if _migration_banner:
@@ -326,8 +326,8 @@ def search_cmd(
 
     def _retrieve(q: str) -> list[SearchResult]:
         # Pass taxonomy for topic grouping + topic boost (RDR-070)
-        from nexus.commands._helpers import default_db_path as _db_path
-        from nexus.db.t2 import T2Database
+        from nexus.commands._helpers import default_db_path as _db_path  # noqa: PLC0415 — deferred import; only needed in this branch
+        from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
         with T2Database(_db_path()) as _t2:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             raw = search_cross_corpus(
                 q, target_collections, n_results=n, t3=db,
@@ -383,7 +383,7 @@ def search_cmd(
     # Pre-Phase-3 chunks that still carry chunk_count fall back to
     # the metadata read so the legacy contract still works.
     if max_file_chunks is not None:
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; catalog factory only needed in this branch
         _cat = make_catalog_reader()
         chunk_count_cache: dict[str, int] = {}
 
@@ -393,7 +393,7 @@ def search_cmd(
                 if doc_id not in chunk_count_cache:
                     try:
                         chunk_count_cache[doc_id] = len(_cat.get_manifest(doc_id))
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — chunk-count lookup best-effort; fall back to cached 0
                         chunk_count_cache[doc_id] = 0
                 if chunk_count_cache[doc_id] > 0:
                     return chunk_count_cache[doc_id]
@@ -429,11 +429,11 @@ def search_cmd(
     # nexus-dxly: pass catalog so the code__ file-size penalty can
     # resolve chunk_count via documents.chunk_count for Phase-3 chunks
     # (RDR-108 dropped chunk_count from chunk metadata).
-    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; catalog factory only needed in this branch
     _scoring_cat = None
     try:
         _scoring_cat = make_catalog_reader()
-    except Exception:
+    except Exception:  # noqa: BLE001 — scoring catalog optional; degrade to None on any failure
         _scoring_cat = None
     results = apply_hybrid_scoring(
         results,
@@ -445,15 +445,15 @@ def search_cmd(
     )
 
     # RDR-055 E2: quality boost from bibliographic metadata (no-op when unenriched)
-    from nexus.scoring import apply_quality_boost
+    from nexus.scoring import apply_quality_boost  # noqa: PLC0415 — deferred import; scoring only needed in this branch
     results = apply_quality_boost(results)
 
     # Reranking (skipped in local mode — no Voyage AI reranker available)
-    from nexus.config import is_local_mode
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred import; config only needed in this branch
     if not no_rerank and not is_local_mode() and len(set(r.collection for r in results)) > 1:
         try:
             results = rerank_results(results, query=query, model=reranker_model, top_k=n, t3=db)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — reranking optional; failure surfaced to user via stderr, raw order kept
             click.echo(f"Warning: reranking failed ({exc}), using raw order", err=True)
     else:
         # Group by collection and interleave round-robin for even distribution

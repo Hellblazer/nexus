@@ -109,7 +109,7 @@ def from_catalog(repo: Path, *, cat: Catalog) -> RepoRecord | None:
     ``docs__*`` name — the user's ``--corpus knowledge`` opt-in is
     the canonical intent.
     """
-    from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — circular-dep avoidance (repo_identity)
 
     name, repo_hash, _main_repo = _repo_identity_with_main(repo)
     owner = cat.owner_for_repo(repo_hash)
@@ -191,7 +191,7 @@ def _read_repos_json(registry_path: Path) -> dict[str, dict]:
     already cut over to the catalog. Keeping this as a stdlib helper
     means deleting :class:`RepoRegistry` does not break the migration.
     """
-    import json
+    import json  # noqa: PLC0415 — deferred import — branch-local / circular-dep avoidance
 
     if not registry_path.exists():
         return {}
@@ -219,7 +219,7 @@ def _repos_json_is_parseable(registry_path: Path) -> bool:
     Parseable file → True (proceed to the parity check).
     Malformed file → False (refuse to delete; surface to operator).
     """
-    import json
+    import json  # noqa: PLC0415 — deferred import — branch-local / circular-dep avoidance
     if not registry_path.exists():
         return True
     try:

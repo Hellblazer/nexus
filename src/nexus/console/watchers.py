@@ -113,7 +113,7 @@ def scan_sessions_sync(config_dir: Path) -> list[SessionInfo]:
     if not config_dir.exists():
         return []
 
-    from nexus.daemon.service_registry import LeaseRecord
+    from nexus.daemon.service_registry import LeaseRecord  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     now = time.time()
     results: list[SessionInfo] = []

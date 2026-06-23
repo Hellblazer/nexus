@@ -59,8 +59,8 @@ def catalog_search(
     if err:
         return [{"error": err}]
     try:
-        from nexus.catalog.tumbler import Tumbler
-        import json as _json
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
+        import json as _json  # noqa: PLC0415 — deliberate function-local import
 
         # Structured filters via SQL when there's NO free-text query. The
         # SQL path filters by exact-match structural fields (owner, corpus,
@@ -106,7 +106,7 @@ def catalog_search(
             else:
                 # No major filter — fetch paged chunk and apply remaining Python filters.
                 # HttpCatalogClient.all_documents() supports offset; SQLite Catalog does not.
-                import inspect as _inspect
+                import inspect as _inspect  # noqa: PLC0415 — branch-local import, only needed on the no-major-filter path
                 sig = _inspect.signature(cat.all_documents)
                 if "offset" in sig.parameters:
                     batch = cat.all_documents(limit=limit + offset + 1, offset=0)
@@ -136,7 +136,7 @@ def catalog_search(
         if offset + limit < len(all_results):
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return [{"error": str(e)}]
 
 
@@ -158,7 +158,7 @@ def catalog_show(
     if err:
         return {"error": err}
     try:
-        from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deliberate function-local import
 
         entry = None
         if tumbler:
@@ -175,7 +175,7 @@ def catalog_show(
         d["links_from"] = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_from(entry.tumbler)]
         d["links_to"] = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_to(entry.tumbler)]
         return d
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}
 
 
@@ -198,7 +198,7 @@ def catalog_list(
     if err:
         return [{"error": err}]
     try:
-        from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deliberate function-local import
 
         if owner:
             entries = cat.by_owner(Tumbler.parse(owner))
@@ -214,7 +214,7 @@ def catalog_list(
             else:
                 # HttpCatalogClient.all_documents() supports offset; SQLite Catalog does not.
                 # Detect by signature to stay backward-compatible.
-                import inspect as _inspect
+                import inspect as _inspect  # noqa: PLC0415 — branch-local import, only needed when no owner filter is set
                 sig = _inspect.signature(cat.all_documents)
                 if "offset" in sig.parameters:
                     entries = cat.all_documents(limit=limit + 1, offset=offset)
@@ -228,7 +228,7 @@ def catalog_list(
         if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return [{"error": str(e)}]
 
 
@@ -261,11 +261,11 @@ def catalog_register(
         return {"error": err}
     writer = _get_catalog_writer()
     try:
-        import json as _json
-        from pathlib import Path as _Path
+        import json as _json  # noqa: PLC0415 — deliberate function-local import
+        from pathlib import Path as _Path  # noqa: PLC0415 — deliberate function-local import
 
-        from nexus.catalog.catalog import make_relative
-        from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — function-local import avoids catalog import at module load
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
         # Relativize absolute file_path if it falls under a known repo
         # (RDR-060). RDR-137 Phase 3.2 (nexus-tts0d.7): use the catalog-
@@ -273,8 +273,8 @@ def catalog_register(
         # canonical repo_root; registry fills in pre-catalog installs.
         fp = file_path
         if fp and _Path(fp).is_absolute():
-            from nexus.catalog.catalog import _default_registry_path
-            from nexus.repos import list_repos_dual
+            from nexus.catalog.catalog import _default_registry_path  # noqa: PLC0415 — branch-local import, only needed for absolute file_path relativization
+            from nexus.repos import list_repos_dual  # noqa: PLC0415 — branch-local import, only needed for absolute file_path relativization
 
             reg_path = _default_registry_path()
             # RDR-137 followup IMP-19 (nexus-43qgm.19): prefer the
@@ -300,7 +300,7 @@ def catalog_register(
             source_uri=source_uri,
         )
         return {"tumbler": str(tumbler), "title": title}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}
     finally:
         writer.close()
@@ -326,9 +326,9 @@ def catalog_update(
         return {"error": err}
     writer = _get_catalog_writer()
     try:
-        import json as _json
+        import json as _json  # noqa: PLC0415 — deliberate function-local import
 
-        from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
         fields: dict = {}
         if title:
@@ -347,7 +347,7 @@ def catalog_update(
             return {"error": "No fields to update"}
         writer.update(Tumbler.parse(tumbler), **fields)
         return {"tumbler": tumbler, "updated": list(fields.keys())}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}
     finally:
         writer.close()
@@ -405,11 +405,11 @@ def catalog_link(
                     if rows:
                         with _t2_ctx() as db:
                             db.log_relevance_batch(rows)
-        except Exception:
-            import structlog
+        except Exception:  # noqa: BLE001 — best-effort relevance telemetry must not crash the link op; surfaced via log.debug
+            import structlog  # noqa: PLC0415 — branch-local import, only needed on the telemetry-failure path
             structlog.get_logger().debug("relevance_log_link_failed", exc_info=True)
         return {"from": str(ft), "to": str(tt), "type": link_type, "created": created}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}
     finally:
         writer.close()
@@ -452,7 +452,7 @@ def catalog_links(
             "nodes": [n if isinstance(n, dict) else n.to_dict() for n in result["nodes"]],
             "edges": [e if isinstance(e, dict) else e.to_dict() for e in result["edges"]],
         }
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}
 
 
@@ -500,7 +500,7 @@ def catalog_link_query(
         if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return [{"error": str(e)}]
 
 
@@ -520,7 +520,7 @@ def catalog_resolve(
     if err:
         return [f"Error: {err}"]
     try:
-        from nexus.catalog.tumbler import Tumbler
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
         # nexus-blk2 Part 2: dotted-tumbler form is required (e.g. "1.2.3"
         # for a document, "1.2" for an owner). The dashed format produced
@@ -555,7 +555,7 @@ def catalog_resolve(
                 if e.physical_collection:
                     collections.add(e.physical_collection)
         return sorted(collections)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error so the tool call never crashes the client
         return [f"Error: {e}"]
 
 
@@ -585,7 +585,7 @@ def catalog_stats() -> dict:
             "chunks":       s.get("chunk_count",      s.get("chunks",    0)),  # nexus-aeceu
             "by_link_type": s.get("links_by_type",    s.get("by_link_type", {})),
         }
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}
 
 
@@ -614,7 +614,7 @@ def catalog_unlink(
             return {"error": err}
         removed = writer.unlink(ft, tt, link_type)
         return {"removed": removed, "from": str(ft), "to": str(tt)}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — demoted tool handler: catch-and-return-error-dict so the call never crashes the caller
         return {"error": str(e)}
     finally:
         writer.close()
@@ -636,7 +636,7 @@ def catalog_link_audit() -> dict:
     try:
         t3 = _get_t3()
         return cat.link_audit(t3=t3._client)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — demoted tool handler: catch-and-return-error-dict so the call never crashes the caller
         return {"error": str(e)}
 
 
@@ -678,7 +678,7 @@ def catalog_link_bulk(
             created_by=created_by, created_at_before=created_at_before,
         )
         return {"removed": count}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — demoted tool handler: catch-and-return-error-dict so the call never crashes the caller
         return {"error": str(e)}
     finally:
         writer.close()
@@ -695,13 +695,13 @@ def main():
     ``<config>/logs/mcp.log`` (shared file with the core server; the
     ``server`` field discriminates).
     """
-    import os
+    import os  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
 
-    import structlog
+    import structlog  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
 
-    from nexus.logging_setup import configure_logging
-    from nexus.mcp._first_run import ensure_installed_and_running
-    from nexus.mcp_infra import check_version_compatibility
+    from nexus.logging_setup import configure_logging  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
+    from nexus.mcp._first_run import ensure_installed_and_running  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
+    from nexus.mcp_infra import check_version_compatibility  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
 
     configure_logging("mcp")
     log = structlog.get_logger("nexus.mcp.catalog")

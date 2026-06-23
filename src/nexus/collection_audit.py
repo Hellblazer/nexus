@@ -163,7 +163,7 @@ def sample_live_distances(
     col = t3.get_or_create_collection(collection)
     try:
         got = col.get(limit=n, include=["embeddings"])
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         # Review remediation (Reviewer B/S-1 + C/S-2): log at DEBUG so a
         # quota-exceeded or timeout during sampling is recoverable via
         # logs, rather than producing an "empty histogram" that looks
@@ -192,7 +192,7 @@ def sample_live_distances(
             res = col.query(
                 query_embeddings=[emb], n_results=2, include=["distances"],
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
             failed += 1
             _log.debug(
                 "sample_live_distances_query_failed",
@@ -346,8 +346,8 @@ def compute_hub_assignments(
 
 
 def _open_t2():
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.config import default_db_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -361,8 +361,8 @@ def _open_catalog_conn() -> sqlite3.Connection | None:
     Tests monkeypatch this module-level function to point at a seeded
     fixture; production reaches to ``~/.config/nexus`` by default.
     """
-    from nexus.catalog.catalog import Catalog
-    from nexus.config import catalog_path
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     path = catalog_path()
     if not Catalog.is_initialized(path):
@@ -387,17 +387,17 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
     (T2 file missing, T3 unavailable); calling code treats this
     the same as ratio=None (schema absent vs backfill needed).
     """
-    from nexus.config import default_db_path
-    from nexus.db import make_t3
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.config import default_db_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     # RDR-152 nexus-gmiaf.16 seam: route through HttpChashIndex when the
     # chash_index backend is the service, avoiding SQLite direct-open.
     if storage_backend_for("chash_index") == StorageBackend.SERVICE:
-        from nexus.db.t2.http_chash_index import HttpChashIndex
+        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         idx = HttpChashIndex()
     else:
-        from nexus.db.t2.chash_index import ChashIndex
+        from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         db_path = default_db_path()
         if not db_path.exists():
             return None
@@ -425,7 +425,7 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
             # creates the zombies it then reports.
             col = t3.get_collection(collection)
             total_chunks = col.count()
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch of undocumented errors; degrades to safe fallback return
             return ChashCoverage(
                 total_chunks=None,
                 indexed_rows=indexed_rows,
@@ -458,7 +458,7 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
                             missing.append(cid)
                         if len(missing) >= 5:
                             break
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.debug(
                     "chash_coverage_missing_sample_failed",
                     collection=collection, exc_info=True,
@@ -496,7 +496,7 @@ def run_collection_audit(
     The telemetry path is always tried first so warm collections
     stay cheap. Budget: ~10 s for N=25 probes against cloud T3.
     """
-    from nexus.db.storage_mode import has_raw_access
+    from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     t2 = _open_t2()
     cat_conn = _open_catalog_conn()
     try:
@@ -529,10 +529,10 @@ def run_collection_audit(
     if live and hist.source == "empty":
         try:
             if t3 is None:
-                from nexus.db import make_t3
+                from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
                 t3 = make_t3()
             hist = compute_live_distance_histogram(collection, t3, n=live_n)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
             # Review remediation (Reviewer B/S-1): log so a missing `hist`
             # on a --live run isn't invisible. DEBUG keeps normal runs
             # quiet; the operator can re-run with verbose logging.
@@ -546,7 +546,7 @@ def run_collection_audit(
     # other sections.
     try:
         chash = compute_chash_coverage(collection)
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
         chash = None
     return AuditReport(
         collection=collection,

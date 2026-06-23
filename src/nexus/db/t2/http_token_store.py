@@ -83,7 +83,7 @@ class HttpTokenStore:
         """nexus-om64x: on connection-refused, re-resolve the endpoint from the
         ServiceRegistry lease (bypassing the stale env port) and rebuild the
         client. Returns True if rebound to a NEW endpoint, False otherwise."""
-        from nexus.db.service_endpoint import recover_endpoint_from_lease
+        from nexus.db.service_endpoint import recover_endpoint_from_lease  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         recovered = recover_endpoint_from_lease(self._base_url)
         if recovered is None:
@@ -95,7 +95,7 @@ class HttpTokenStore:
             self._auth_token = new_token
         try:
             self._client.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort close of stale client during reset
             pass
         self._client = self._build_client()
         return True

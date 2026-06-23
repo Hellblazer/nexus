@@ -76,7 +76,7 @@ def _discover_lease() -> tuple[str | None, str | None]:
     module-local name because the catalog client and the discovery tests
     import ``_discover_lease`` from here.
     """
-    from nexus.db.service_endpoint import discover_lease
+    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred to avoid circular import
 
     return discover_lease()
 
@@ -88,7 +88,7 @@ def _resolve_endpoint() -> tuple[str, str]:
     # a greenfield managed user who ran `nx config set service_url/service_token`
     # must reach a resolvable endpoint with no env exported). get_credential
     # encodes env>config.yml precedence, so an exported env var still wins.
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     env_url = (get_credential("service_url") or "").strip().rstrip("/") or None
     env_token = (get_credential("service_token") or "").strip() or None
@@ -147,7 +147,7 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
       (tenant, collection, chash) ON CONFLICT; deletes; reads), so a
       single retry after a mid-flight reset is safe.
     """
-    import urllib.error
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code == 401
@@ -169,7 +169,7 @@ def _request_once(
     classifies them; the public ``_post``/``_get`` wrap HTTP errors into
     :class:`VectorServiceError`.
     """
-    import urllib.request
+    import urllib.request  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     base_url, token = _resolve_endpoint()
     headers = {
@@ -198,7 +198,7 @@ def _request(
     (nexus-pebfx.1), not "give up". A second failure surfaces normally —
     no retry loops.
     """
-    import urllib.error
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     try:
         return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
@@ -241,7 +241,7 @@ def _managed_remedy() -> str | None:
     — callers that classify transient failures by raw type should catch
     ``VectorServiceError`` for the managed path. Local callers are unaffected.
     """
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     # env FIRST, then config.yml — so a config.yml-only greenfield user gets the
     # actionable managed remedy on a 401/connection error, not a bare error
@@ -267,7 +267,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
     Per dual-review S2 the raise is deliberately NOT global — a slow search
     should still fail fast.
     """
-    import urllib.error
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     try:
         return _request("POST", path, tenant=tenant, timeout=timeout, body=body)
@@ -275,7 +275,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         body_bytes = e.read()
         try:
             err = json.loads(body_bytes)
-        except Exception:
+        except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"POST {path} → HTTP {e.code}: {err.get('error', err)}"
         remedy = _managed_remedy() if e.code in (401, 403) else None
@@ -294,7 +294,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
 
 def _get(path: str, *, tenant: str = "default") -> Any:
     """GET from the service endpoint, return parsed response body."""
-    import urllib.error
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     try:
         return _request("GET", path, tenant=tenant, timeout=30, body=None)
@@ -302,7 +302,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         body_bytes = e.read()
         try:
             err = json.loads(body_bytes)
-        except Exception:
+        except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"GET {path} → HTTP {e.code}: {err.get('error', err)}"
         remedy = _managed_remedy() if e.code in (401, 403) else None
@@ -617,11 +617,11 @@ class HttpVectorClient:
         ``fail_on_oversized=True``; the server is responsible for rejecting
         oversized content on the HTTP path.
         """
-        from nexus.corpus import (  # noqa: PLC0415
+        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
             embedding_model_for_collection_name,
             index_model_for_collection,
         )
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         doc_id = content_hash[:32]
@@ -966,7 +966,7 @@ class HttpVectorClient:
 
     def count(self, collection: str) -> int:
         """Number of chunks in *collection* visible to this tenant."""
-        from urllib.parse import quote  # noqa: PLC0415
+        from urllib.parse import quote  # noqa: PLC0415 — stdlib deferred to call site (urllib.parse)
 
         result = _get(
             "/v1/vectors/count?collection=" + quote(collection),
@@ -1029,7 +1029,7 @@ class HttpVectorClient:
         """
         if not ids:
             return
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
         # Request-size chunk only (see docstring) — not a backend quota.
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         for start in range(0, len(ids), size):
@@ -1060,7 +1060,7 @@ class HttpVectorClient:
         creating a zombie collection (contrast with
         :meth:`get_or_create_collection`).
         """
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+        from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415 — optional dependency deferred (chromadb.errors)
         try:
             cols = self.list_collections()
             if not any(c.get("name") == name for c in cols):
@@ -1099,7 +1099,7 @@ class HttpVectorClient:
         already treats as a per-collection shape-mismatch failure —
         identical to the Chroma path's semantics.
         """
-        import numpy as np
+        import numpy as np  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
         result = _post(
             "/v1/vectors/get-embeddings",
@@ -1122,7 +1122,7 @@ class HttpVectorClient:
         returns no ids). Param name ``collection_name`` matches the oracle
         (nexus-7zuzz).
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
 
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         ids: list[str] = []
@@ -1175,7 +1175,7 @@ class HttpVectorClient:
         concurrent delete already removed some — in which case the prune-stale
         caller's ``deleted != len(ids)`` WARN correctly fires.
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
 
         ids = self.ids_for_source(collection_name, source_path)
         if not ids:

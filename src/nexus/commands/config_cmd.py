@@ -70,7 +70,7 @@ def config_set(key_value: str, value: str | None) -> None:
 
     key = key.strip().lower().replace("-", "_")
     if "." in key:
-        from nexus.config import set_config_value
+        from nexus.config import set_config_value  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         set_config_value(key, value.strip())
     else:
         set_credential(key, value.strip())
@@ -219,14 +219,14 @@ def config_init() -> None:
     if api_key and database:
         click.echo(f"\nProvisioning ChromaDB Cloud database '{database}'…")
         try:
-            from nexus.commands._provision import _cloud_admin_client, ensure_databases
+            from nexus.commands._provision import _cloud_admin_client, ensure_databases  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             admin = _cloud_admin_client(api_key)
             created = ensure_databases(admin, base=database)
             for db_name, was_created in sorted(created.items()):
                 icon = "+" if was_created else "·"
                 status = "created" if was_created else "already exists"
                 click.echo(f"  {icon} {db_name}: {status}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
             click.echo(f"\n  Warning: could not auto-provision database ({exc}).")
             click.echo(f"  Create '{database}' manually in the ChromaDB Cloud dashboard.")
 

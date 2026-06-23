@@ -38,7 +38,7 @@ def probe(url: str | None) -> None:
     incompatible. Performs no Postgres connection — this is the HTTPS client
     contract only.
     """
-    from nexus.db.managed_endpoint import (
+    from nexus.db.managed_endpoint import (  # noqa: PLC0415 — circular-dep avoidance; managed_endpoint imports config
         ManagedServiceError,
         probe_managed_service,
         resolve_managed_endpoint,

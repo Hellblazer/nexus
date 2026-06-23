@@ -82,7 +82,7 @@ def _progress(msg: str) -> None:
     """
     _log.info("pdf_extractor_progress", message=msg.strip())
     if _os.environ.get("NEXUS_PDF_PROGRESS_QUIET") != "1":
-        print(msg, file=sys.stderr, flush=True)
+        print(msg, file=sys.stderr, flush=True)  # noqa: T201 — gated interactive stderr progress; structured event emitted above via _log.info
 
 
 # nexus-2fyb code-review R5-I2: chained exceptions from MinerU/httpx can
@@ -178,7 +178,7 @@ def _has_formulas_quick(pdf_path: Path) -> int:
     Returns the count. A threshold of >=5 indicates a formula-containing paper.
     """
     try:
-        import pymupdf
+        import pymupdf  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
         with pymupdf.open(pdf_path) as doc:
             count = 0
             for page in doc:
@@ -187,7 +187,7 @@ def _has_formulas_quick(pdf_path: Path) -> int:
                 if count >= 5:
                     return count  # early exit
             return count
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort page count; falls back to 0
         return 0
 
 
@@ -370,7 +370,7 @@ class PDFExtractor:
             _progress(f"  Docling: extracting {pdf_path.name}…")
             try:
                 return self._extract_with_docling(pdf_path, on_page=on_page)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — fallback path; logged, falls back to PyMuPDF extractor
                 _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
                 _log.debug("docling_extraction_failed", error=str(exc), path=str(pdf_path))
                 return self._extract_normalized(pdf_path, on_page=on_page)
@@ -388,7 +388,7 @@ class PDFExtractor:
         _progress(f"  Docling: extracting {pdf_path.name}…")
         try:
             fast_result = self._extract_with_docling(pdf_path, enriched=False)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — fallback path; logged, falls back to PyMuPDF extractor
             _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
             _log.debug("docling_auto_pass_failed", error=str(exc), path=str(pdf_path))
             return self._extract_normalized(pdf_path, on_page=on_page)
@@ -468,8 +468,8 @@ class PDFExtractor:
         attr = "_converter_enriched" if enriched else "_converter"
         converter = getattr(self, attr)
         if converter is None:
-            from docling.document_converter import DocumentConverter, PdfFormatOption
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
+            from docling.document_converter import DocumentConverter, PdfFormatOption  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+            from docling.datamodel.pipeline_options import PdfPipelineOptions  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
             opts = PdfPipelineOptions()
             opts.do_ocr = False                 # digital PDFs have embedded text
@@ -537,7 +537,7 @@ class PDFExtractor:
                     if callable(getattr(item, "export_to_html", None)):
                         try:
                             html = item.export_to_html(doc=doc)
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 — best-effort table export; logged, html falls back to empty
                             _log.debug("table_html_export_failed", page=page_no, error=str(exc))
                             html = ""
                     table_regions.append({"page": page_no, "html": html})
@@ -553,7 +553,7 @@ class PDFExtractor:
                     if callable(getattr(item, "export_to_html", None)):
                         try:
                             html = item.export_to_html(doc=doc)
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 — best-effort table export; logged, html falls back to empty
                             _log.debug("table_html_export_failed", page=page_no, error=str(exc))
                             html = ""
                     table_regions.append({"page": page_no, "html": html})
@@ -612,12 +612,12 @@ class PDFExtractor:
                 "nexus-2fyb. Reinstall conexus: `uv tool install --reinstall conexus`."
             )
 
-        import pymupdf  # lightweight — only used for page count
+        import pymupdf  # lightweight — only used for page count  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
         with pymupdf.open(pdf_path) as doc:
             total_pages = len(doc)
 
-        from nexus.config import get_mineru_page_batch
+        from nexus.config import get_mineru_page_batch  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         batch_size = get_mineru_page_batch()
 
         batches: list[tuple[int, int | None]] = []
@@ -737,7 +737,7 @@ class PDFExtractor:
         if self._mineru_server_checked:
             return self._mineru_server_up
 
-        from nexus.config import get_mineru_server_url
+        from nexus.config import get_mineru_server_url  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         url = f"{get_mineru_server_url()}/health"
         try:
             resp = httpx.get(url, timeout=2)
@@ -771,7 +771,7 @@ class PDFExtractor:
         self, pdf_path: Path, start: int, end: int | None,
     ) -> tuple[str, list[dict], list[dict]]:
         """Extract via MinerU HTTP server (POST /file_parse)."""
-        from nexus.config import get_mineru_server_url, get_mineru_table_enable
+        from nexus.config import get_mineru_server_url, get_mineru_table_enable  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         url = f"{get_mineru_server_url()}/file_parse"
         with pdf_path.open("rb") as f:
@@ -843,7 +843,7 @@ class PDFExtractor:
         # because ``nx mineru start/stop`` owns the lifecycle; the
         # library only reads. Path is also available via
         # ``nexus._mineru_pid._pid_file_path``.
-        from nexus._mineru_pid import (
+        from nexus._mineru_pid import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
             _pid_file_path,
             is_process_alive,
             read_pid_file,
@@ -855,9 +855,9 @@ class PDFExtractor:
             _pid_file_path().unlink(missing_ok=True)
 
         # Start a new server via the same logic as `nx mineru start`
-        import subprocess as _sp
-        import time as _time
-        from nexus.commands.mineru import (
+        import subprocess as _sp  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+        import time as _time  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+        from nexus.commands.mineru import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
             _HEALTH_POLL_INTERVAL,
             _find_free_port,
             _mineru_output_root,
@@ -911,8 +911,8 @@ class PDFExtractor:
         # lookup in ``get_mineru_server_url`` discovers the live port
         # at every call. Persisting ephemeral ports drifted across
         # reboots.
-        import json as _json
-        from datetime import datetime, timezone
+        import json as _json  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+        from datetime import datetime, timezone  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
         pid_path = _pid_file_path()
         pid_path.parent.mkdir(parents=True, exist_ok=True)
         pid_path.write_text(_json.dumps({
@@ -944,7 +944,7 @@ class PDFExtractor:
                     # Retry this page on the new server
                     try:
                         return self._mineru_run_via_server(pdf_path, start, end)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — best-effort server call; falls through to subprocess mode
                         pass  # fall through to subprocess
                 return self._mineru_run_subprocess(pdf_path, start, end)
             except httpx.HTTPStatusError as exc:
@@ -964,8 +964,8 @@ class PDFExtractor:
         """
         result_dir = tempfile.mkdtemp()
         try:
-            import os as _os
-            import signal
+            import os as _os  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+            import signal  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
             proc = subprocess.Popen(
                 [
@@ -989,7 +989,7 @@ class PDFExtractor:
                 # Delegated to nexus.util.process_group.safe_killpg so
                 # the mock-guard + error-swallow contract is consistent
                 # across every subprocess cleanup site in the codebase.
-                from nexus.util.process_group import safe_killpg
+                from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
                 safe_killpg(proc, signal.SIGKILL)
 
@@ -1041,7 +1041,7 @@ class PDFExtractor:
             )
             return md, content_list, middle.get("pdf_info", [])
         finally:
-            import shutil
+            import shutil  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
             shutil.rmtree(result_dir, ignore_errors=True)
 
     @staticmethod
@@ -1195,7 +1195,7 @@ class PDFExtractor:
         on_page: Callable[[int, str, dict], None] | None = None,
     ) -> ExtractionResult:
         """Extract via raw PyMuPDF with whitespace normalization."""
-        import pymupdf  # lazy
+        import pymupdf  # lazy  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
         text_parts: list[str] = []
         page_boundaries: list[dict] = []

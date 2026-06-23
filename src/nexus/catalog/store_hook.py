@@ -49,9 +49,9 @@ def catalog_store_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 - deferred to avoid circular import at module load
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
+        from nexus.config import catalog_path  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
@@ -77,7 +77,7 @@ def catalog_store_hook(
         # interactive so they take fairness priority over a background index.
         writer = make_catalog_writer(priority="interactive")
         if rows:
-            from nexus.catalog.tumbler import Tumbler
+            from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 - deferred to avoid circular import at module load
             owner = Tumbler.parse(rows[0])
         else:
             owner = writer.register_owner("knowledge", "curator")
@@ -88,7 +88,7 @@ def catalog_store_hook(
             meta={"doc_id": doc_id},
         )
         return str(tumbler)
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged via log.debug
         _log.debug("catalog_store_hook_failed", exc_info=True)
         return ""
     finally:
@@ -97,5 +97,5 @@ def catalog_store_hook(
         if reader is not None:
             try:
                 reader._db.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally; close failure is non-critical and intentionally silent
                 pass

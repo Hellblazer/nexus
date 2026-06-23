@@ -100,7 +100,7 @@ class IndexContext:
 
     def __post_init__(self) -> None:
         if self.hooks is None:
-            from nexus.hook_registry import HookRegistry
+            from nexus.hook_registry import HookRegistry  # noqa: PLC0415 — circular-dep avoidance: hook_registry imports this module
             self.hooks = HookRegistry()
 
 

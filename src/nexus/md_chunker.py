@@ -168,7 +168,7 @@ class SemanticMarkdownChunker:
         if MARKDOWN_IT_AVAILABLE and self.md:
             try:
                 chunks = self._semantic_chunking(text, metadata)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning("semantic_chunking_failed_fallback_naive", error=str(exc), exc_info=exc)
                 chunks = self._naive_chunking(text, metadata)
         else:
