@@ -31,6 +31,7 @@ from nexus.corpus import index_model_for_collection
 from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 from nexus.indexer_utils import (
+    build_doc_id_resolver,
     build_staleness_cache,
     check_credentials,
     check_local_path_writable,
@@ -2522,8 +2523,10 @@ def _run_index(
             f"Catalog registration done ({time.monotonic() - _catalog_t0:.1f}s)"
         )
 
-    def _doc_id_resolver(path: Path) -> str:
-        return file_to_doc_id.get(path, "")
+    # nexus-kgyoz seam 2: the resolver closure is lifted to
+    # indexer_utils.build_doc_id_resolver so _run_index stays a thin
+    # orchestrator. Behaviour identical — missing files resolve to "".
+    _doc_id_resolver = build_doc_id_resolver(file_to_doc_id)
 
     # Pre-build the per-collection staleness cache (nexus-rr0u follow-up).
     # One paginated sweep per collection up front replaces N per-file
