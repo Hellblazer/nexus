@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Document / owner / collection lookup ops (nexus-mbm extraction 4/5).
+"""Document / collection lookup ops (nexus-mbm extraction 4/5).
 
 Read-only catalog queries: tumbler resolution, file-path / owner /
 content-type / corpus filters, collection registry lookups, and
-the BFS-like ``descendants`` walk. Writes (``register_owner``,
+the BFS-like ``descendants`` walk. The owner-table lookups
+(``owner_for_repo`` / ``owner_tumblers_by_name``) moved to
+``_OwnerOps`` (nexus-kgyoz); ``register_document`` reaches them via
+the facade. Writes (``register_owner``,
 ``register``, ``register_collection``, ``update``,
 ``delete_document``, alias/collection mutations) stay on
 ``Catalog`` — they touch the event-sourcing + JSONL append
@@ -88,37 +91,6 @@ class _DocumentOps:
 
     def __init__(self, catalog: "Catalog") -> None:
         self._cat = catalog
-
-    def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
-        cat = self._cat
-        row = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?", (repo_hash,)
-        ).fetchone()
-        return Tumbler.parse(row[0]) if row else None
-
-    def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
-        """Return tumblers of all owners with this name.
-
-        UNIQUE constraint is ``(name, owner_type)`` per nexus-7vuw, so
-        a single name can map to multiple owners across types (e.g.
-        a repo and a curator both named ``nexus``). Callers that need
-        a unique answer should disambiguate on the returned list
-        (typical CLI flow: error when ``len(...) > 1`` and surface
-        the candidates).
-
-        Returns ``[]`` if no owner has this name. Used by the
-        ``--owner`` CLI flags on ``nx catalog list`` (and friends)
-        to resolve operator-typed names to tumblers without leaking
-        the ``Tumbler.parse → int()`` ``ValueError`` (#537,
-        nexus-1lx7).
-        """
-        cat = self._cat
-        rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "ORDER BY tumbler_prefix",
-            (name,),
-        ).fetchall()
-        return [Tumbler.parse(r[0]) for r in rows]
 
     def resolve(self, tumbler: Tumbler, *, follow_alias: bool = True) -> CatalogEntry | None:
         """Return the document entry for ``tumbler``.

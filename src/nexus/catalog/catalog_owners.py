@@ -3,9 +3,10 @@
 
 Owns the owner write path (``register_owner`` /
 ``ensure_owner_for_repo`` / ``set_owner_head_hash``) and the
-owner-table read surface (``list_owners`` / ``list_owners_by_type``
-/ ``get_owner_by_prefix`` / ``owners_with_roots`` /
-``curator_owner_tumbler_by_name``).
+owner-table read surface (``owner_for_repo`` /
+``owner_tumblers_by_name`` / ``list_owners`` /
+``list_owners_by_type`` / ``get_owner_by_prefix`` /
+``owners_with_roots`` / ``curator_owner_tumbler_by_name``).
 
 Composed onto ``Catalog`` as ``self._owners`` (T2Database-style
 facade pattern, mirroring ``catalog_links._LinkOps`` /
@@ -21,13 +22,14 @@ state duplication — every operation reads ``self._cat.<...>`` so
 the within-process owner-register lock and the directory flock
 both stay single-instance.
 
-Note: ``owner_for_repo`` / ``owner_tumblers_by_name`` are
-owner-table queries that deliberately remain in ``_DocumentOps``
-because ``register_document`` uses them directly via the facade;
-moving them here would introduce a ``_docs`` -> ``_owners``
-cross-_Ops dependency that the facade-routing architecture avoids
-(nexus-kgyoz deferred — a natural clean-up once the indexer and
-commands decomposition PRs land).
+``owner_for_repo`` / ``owner_tumblers_by_name`` are owner-table
+queries relocated here from ``_DocumentOps`` (nexus-kgyoz deferred
+clean-up, completed once the indexer + commands decomposition PRs
+landed). ``_DocumentOps.register_document`` still needs an owner
+lookup, but reaches it through the facade (``cat.owner_for_repo``)
+rather than calling ``_owners`` directly — the data dependency is
+mediated by ``Catalog``, keeping the ``_Ops`` modules from
+referencing each other directly (the established composition rule).
 """
 from __future__ import annotations
 
@@ -70,6 +72,37 @@ class _OwnerOps:
     def __init__(self, catalog: "Catalog") -> None:
         self._cat = catalog
 
+    def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
+        cat = self._cat
+        row = cat._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?", (repo_hash,)
+        ).fetchone()
+        return Tumbler.parse(row[0]) if row else None
+
+    def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
+        """Return tumblers of all owners with this name.
+
+        UNIQUE constraint is ``(name, owner_type)`` per nexus-7vuw, so
+        a single name can map to multiple owners across types (e.g.
+        a repo and a curator both named ``nexus``). Callers that need
+        a unique answer should disambiguate on the returned list
+        (typical CLI flow: error when ``len(...) > 1`` and surface
+        the candidates).
+
+        Returns ``[]`` if no owner has this name. Used by the
+        ``--owner`` CLI flags on ``nx catalog list`` (and friends)
+        to resolve operator-typed names to tumblers without leaking
+        the ``Tumbler.parse → int()`` ``ValueError`` (#537,
+        nexus-1lx7).
+        """
+        cat = self._cat
+        rows = cat._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE name = ? "
+            "ORDER BY tumbler_prefix",
+            (name,),
+        ).fetchall()
+        return [Tumbler.parse(r[0]) for r in rows]
+
     def register_owner(
         self, name: str, owner_type: str, *, repo_hash: str = "", description: str = "", repo_root: str = ""
     ) -> Tumbler:
@@ -109,7 +142,7 @@ class _OwnerOps:
                 # (no repo_hash) are intentionally exempt: name
                 # collisions across owner_types are allowed.
                 if owner_type == "repo" and repo_hash.strip():
-                    existing = cat._docs.owner_for_repo(repo_hash)
+                    existing = cat.owner_for_repo(repo_hash)
                     if existing is not None:
                         return existing
                 # Compute next owner number. Under event-sourced mode the
