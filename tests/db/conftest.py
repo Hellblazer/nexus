@@ -20,7 +20,13 @@ import pytest
 
 from tests.db._service_fixture import jar_freshness_skip_reason
 
-_IN_CI = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+_IN_CI = bool(
+    os.environ.get("CI")
+    or os.environ.get("GITHUB_ACTIONS")
+    # nexus-h29w1: belt-and-suspenders for local scripted / smoke runs that must
+    # not silently pass with a missing JAR (e.g. the write-seam gate job).
+    or os.environ.get("NX_REQUIRE_SERVICE_JAR")
+)
 
 
 @pytest.fixture(scope="session")
