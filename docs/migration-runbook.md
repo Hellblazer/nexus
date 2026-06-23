@@ -1,7 +1,7 @@
 # Migration-Window Operations Runbook (SQLite/Chroma to Postgres)
 
 Operational narrative for the operator running the next T2 + T3 migration
-onto the PG16 + pgvector + nexus-service stack (RDR-152/153/155). The flag
+onto the PG17 + pgvector + nexus-service stack (RDR-152/153/155). The flag
 reference lives in [`docs/cli-reference.md` § nx storage](cli-reference.md#nx-storage);
 this document is the order of operations, the failure playbook, and how to
 read the artifacts. Precedent: the 2026-06-10 production run (115,716

@@ -6,7 +6,7 @@ the authoritative RDR for rationale rather than restating it.
 
 "The agent" here is the local nexus stack: the `nx` CLI, the T2 daemon
 (notes/plans/taxonomy over SQLite), and the T3 storage service (the native
-`nexus-service` binary over Postgres 16 + pgvector). Since RDR-155 P4a, T3 serves
+`nexus-service` binary over Postgres 17 + pgvector). Since RDR-155 P4a, T3 serves
 exclusively through that service stack in both local and cloud mode.
 
 ## State model
@@ -25,7 +25,7 @@ exclusively through that service stack in both local and cloud mode.
 
 - **uninstalled** — no autostart unit, no service binary, no provisioned PG.
 - **installed** — the `nexus-service` binary is fetched + positioned; `nx` resolvable.
-- **provisioned** — Postgres 16 + pgvector provisioned, schema migrated (Liquibase), embedder wired (bge-768 local, or Voyage in cloud mode).
+- **provisioned** — Postgres 17 + pgvector provisioned, schema migrated (Liquibase), embedder wired (bge-768 local, or Voyage in cloud mode).
 - **running** — the supervisor publishes a `storage_service` lease; T2 + T3 serve.
 - **upgrading** — a transient state during `nx upgrade` (schema/T3 migrations) or `nx guided-upgrade` (Chroma → service migration).
 
@@ -40,7 +40,7 @@ discovery, version-skew) is the shared service-registry primitive
 | Stage | CLI / surface | Authority |
 |-------|---------------|-----------|
 | Install | `nx init --service`, `nx daemon service install-binary <tag>` | RDR-157 (distribution), RDR-161 (native-only), RDR-144 (`nx init` embedder onboarding) |
-| Provision | bundled PG16 + pgvector, Liquibase migrate, bge-768 ONNX fetch | RDR-155 (pgvector substrate), RDR-160 (bge-768 embedder) |
+| Provision | bundled PG17 + pgvector, Liquibase migrate, bge-768 ONNX fetch | RDR-155 (pgvector substrate), RDR-160 (bge-768 embedder) |
 | Run | T2 daemon + T3 `nexus-service`; lease lifecycle | RDR-149 (daemon lifecycle), RDR-152 (endpoint discovery) |
 | Upgrade | `nx upgrade` (migrations), `nx guided-upgrade` (Chroma→service) | RDR-159 (guided upgrade), RDR-162 (cross-model) |
 | Uninstall | `nx uninstall` (CLI), `daemon_uninstall` (MCP) | RDR-165 (this RDR) |

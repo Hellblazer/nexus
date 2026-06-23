@@ -8,7 +8,7 @@ Conexus is a self-hosted MCP server and Claude Code / Claude Desktop extension t
 
 All persistent data lives on the host machine running Conexus:
 
-- **Indexed content** — text from files you ask Conexus to index (`nx index repo`, `nx index pdf`), plus structured metadata (file paths, chunk identifiers, taxonomy assignments). As of 6.0 the T3 vector store is the native nexus-service (Postgres 16 + pgvector). Stored in:
+- **Indexed content** — text from files you ask Conexus to index (`nx index repo`, `nx index pdf`), plus structured metadata (file paths, chunk identifiers, taxonomy assignments). As of 6.0 the T3 vector store is the native nexus-service (Postgres 17 + pgvector). Stored in:
   - the local nexus-service's Postgres cluster on disk (local mode — embeddings + chunk text, embedded server-side with bge-768)
   - a managed nexus-service's Postgres (managed-cloud mode — only if you point Conexus at a hosted service)
   - `~/.local/share/nexus/chroma/` (legacy ChromaDB store, read only as the migration source for `nx guided-upgrade`)

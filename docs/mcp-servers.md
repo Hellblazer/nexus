@@ -14,7 +14,7 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
-**Substrate dependency**: since conexus 4.34.0 (RDR-120), T2 storage tools route through the T2 daemon; since RDR-155, T3 storage/retrieval tools route through the native nexus-service (`nx daemon service`, Postgres 16 + pgvector), not a ChromaDB daemon. The Claude Code plugin's SessionStart hook auto-spawns `nx daemon t2 ensure-running`; for a daemon that survives reboots independent of Claude Code, run `nx daemon t2 install --autostart` once. The T3 service is a one-time `nx init --service` + `nx daemon service start`. See [Container Integration](container-integration.md) for the multi-process / multi-host model.
+**Substrate dependency**: since conexus 4.34.0 (RDR-120), T2 storage tools route through the T2 daemon; since RDR-155, T3 storage/retrieval tools route through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. The Claude Code plugin's SessionStart hook auto-spawns `nx daemon t2 ensure-running`; for a daemon that survives reboots independent of Claude Code, run `nx daemon t2 install --autostart` once. The T3 service is a one-time `nx init --service` + `nx daemon service start`. See [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
 ## `nexus` — retrieval + storage (26 tools)
 
