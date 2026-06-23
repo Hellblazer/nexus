@@ -8,7 +8,7 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 26 | Storage tiers, retrieval, operators, orchestration |
+| `nexus` | `nx-mcp` | 35 | Storage tiers, retrieval, operators, orchestration |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 | `devonthink` | `nx-mcp-devonthink` | ~17 (DT present) / 1 (DT absent) | DEVONthink agent surface: AI/content/bib/capture tools + the `dt_incorporate` composite (RDR-139 Layer A') |
 
@@ -16,7 +16,7 @@ The `nexus` and `nexus-catalog` servers register automatically when you install 
 
 **Substrate dependency**: since conexus 4.34.0 (RDR-120), T2 storage tools route through the T2 daemon; since RDR-155, T3 storage/retrieval tools route through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. The Claude Code plugin's SessionStart hook auto-spawns `nx daemon t2 ensure-running`; for a daemon that survives reboots independent of Claude Code, run `nx daemon t2 install --autostart` once. The T3 service is a one-time `nx init --service` + `nx daemon service start`. See [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (26 tools)
+## `nexus` — retrieval + storage (35 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -73,6 +73,8 @@ Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a sing
 | `operator_filter` | Narrow items by a natural-language criterion (RDR-088 §D.4). Returns `{items, rationale[{id, reason}]}` |
 | `operator_check` | Cross-item consistency probe (RDR-088 §D.2). Returns `{ok, evidence[{item_id, quote, role}]}` |
 | `operator_verify` | Single-claim verification against one evidence source (RDR-088 §D.2). Returns `{verified, reason, citations[]}` |
+| `operator_groupby` | Partition items by a natural-language key into `[{key_value, items}]` (RDR-093 §D.4). SQL fast-path over `document_aspects` when items carry catalog identity, else `claude -p` |
+| `operator_aggregate` | Reduce each `operator_groupby` group to a per-group summary (RDR-093 §D.4). Pairs with `operator_groupby` for the `filter → groupby → aggregate` pipeline |
 
 ### Orchestration (RDR-080)
 
