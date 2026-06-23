@@ -549,3 +549,35 @@ def test_cat_mod_propagates_make_event_patch_to_owner_ops(
         "_cat_mod indirection failed to propagate the patched "
         "_make_event — _OwnerOps still bound the original factory"
     )
+
+
+def test_owner_lookups_relocated_to_owner_ops(tmp_path: Path) -> None:
+    """``owner_for_repo`` / ``owner_tumblers_by_name`` MUST live on
+    ``_OwnerOps`` and NOT on ``_DocumentOps`` (nexus-kgyoz deferred
+    clean-up). The facade delegates to ``_owners``; behaviour
+    round-trips. Trips the suite if a future change re-homes these
+    owner-table queries back onto ``_DocumentOps``.
+    """
+    from nexus.catalog.catalog_docs import _DocumentOps
+    from nexus.catalog.catalog_owners import _OwnerOps
+
+    assert hasattr(_OwnerOps, "owner_for_repo")
+    assert hasattr(_OwnerOps, "owner_tumblers_by_name")
+    assert not hasattr(_DocumentOps, "owner_for_repo")
+    assert not hasattr(_DocumentOps, "owner_tumblers_by_name")
+
+    Catalog.init(tmp_path)
+    cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+    # Facade delegates to the _OwnerOps instance, not _DocumentOps.
+    assert (
+        cat.owner_for_repo.__func__ is Catalog.owner_for_repo
+    )
+    owner = cat.register_owner(
+        name="r", owner_type="repo", repo_hash="abc123", repo_root="/tmp/r-root",
+    )
+    # owner_for_repo round-trips the just-registered repo owner.
+    assert str(cat.owner_for_repo("abc123")) == str(owner)
+    assert cat.owner_for_repo("no-such-hash") is None
+    # owner_tumblers_by_name finds it by name.
+    assert str(cat.owner_tumblers_by_name("r")[0]) == str(owner)
+    assert cat.owner_tumblers_by_name("nobody") == []

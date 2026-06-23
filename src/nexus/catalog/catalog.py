@@ -978,12 +978,12 @@ class Catalog:
         )
 
     def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
-        """Delegates to ``_DocumentOps.owner_for_repo`` (nexus-mbm)."""
-        return self._docs.owner_for_repo(repo_hash)
+        """Delegates to ``_OwnerOps.owner_for_repo`` (nexus-kgyoz)."""
+        return self._owners.owner_for_repo(repo_hash)
 
     def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
-        """Delegates to ``_DocumentOps.owner_tumblers_by_name`` (nexus-mbm)."""
-        return self._docs.owner_tumblers_by_name(name)
+        """Delegates to ``_OwnerOps.owner_tumblers_by_name`` (nexus-kgyoz)."""
+        return self._owners.owner_tumblers_by_name(name)
 
     def curator_owner_tumbler_by_name(self, name: str) -> "Tumbler | None":
         """Delegates to ``_OwnerOps.curator_owner_tumbler_by_name`` (nexus-kgyoz)."""
