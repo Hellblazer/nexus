@@ -165,6 +165,8 @@ Clients honour these env-var overrides:
 | `NX_T2_SOCK` | UDS path for the T2 daemon (Linux-only when bind-mounted from the host into a container). Mutually exclusive with `NX_T2_ADDR`. | discovery file |
 | `NX_SERVICE_URL` | Full base URL of the nexus-service (T3 vectors over `/v1/vectors`). Used by dev containers and managed-cloud clients. | `storage_service_addr.<uid>` lease, then `https://api.conexus-nexus.com` |
 | `NX_SERVICE_TOKEN` | Bearer token for the nexus-service. | local: from `pg_credentials`; managed: user-supplied |
+| `NX_STORAGE_BACKEND` | Global storage-backend switch (RDR-152). `service` routes T2 stores + T3 vectors through the Java/Postgres nexus-service; `sqlite` is the legacy local opt-out (SQLite + the T2 daemon, still supported per RDR-164 CA-5). | `service` (hard default since RDR-152/155) |
+| `NX_STORAGE_BACKEND_<STORE>` | Per-store override of `NX_STORAGE_BACKEND`, taking precedence over the global value. Known `<STORE>` suffixes: `T1`, `CATALOG`, `VECTORS`, `TAXONOMY`, `ASPECT_QUEUE` (e.g. `NX_STORAGE_BACKEND_VECTORS=service`). Each is `service` or `sqlite`. | inherits `NX_STORAGE_BACKEND` |
 | `NX_LOCAL` | Force local mode (local nexus-service, bge-768) even when cloud credentials exist. | unset (cloud mode if credentials present) |
 
 > Note: the retired `nx daemon t3` ChromaDB path and its `NX_T3_ADDR` override no longer route T3 serving; T3 traffic goes to the nexus-service via `NX_SERVICE_URL`.

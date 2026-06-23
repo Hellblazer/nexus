@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-16 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+35 registered tools + 3 demoted (plain functions, no @mcp.tool()).
 """
 from __future__ import annotations
 
