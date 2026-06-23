@@ -674,6 +674,21 @@ class CatalogRepositoryTest {
         assertThat(result).isEmpty();
     }
 
+    @Test @Order(56)
+    void manifest_getManifestMany_tenantIsolation() {
+        // nexus-7lm3q review (CR High-1): getManifestMany routes through
+        // withTenant + RLS just like resolveMany; assert a TENANT_B manifest
+        // never leaks into a TENANT_A batch query (mirrors
+        // resolveMany_tenantIsolation @Order 59).
+        repo.upsertDocument(TENANT_B, Map.of("tumbler", "gmmiso.1", "title", "Tenant B Doc",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.writeManifest(TENANT_B, "gmmiso.1", List.of(
+            Map.<String, Object>of("position", 0, "chash", "gmmisob000000000000000000000000a", "chunk_index", 0)
+        ));
+        var result = repo.getManifestMany(TENANT_A, List.of("gmmiso.1"));
+        assertThat(result).isEmpty();
+    }
+
     @Test @Order(57)
     void resolveMany_batchFetchesDocuments() {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "rmany.1", "title", "Resolve Many 1",

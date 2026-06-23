@@ -792,6 +792,17 @@ class _DocumentOps:
         no matching document are absent from the result. Batched at 200 doc_ids
         per query to stay safely below SQLite's variable limit while remaining
         within the JsonExtract overhead tolerance.
+
+        Column-divergence note (nexus-7lm3q critic Sig-2): this local path keys
+        on ``json_extract(metadata,'$.doc_id')`` (matching the single-doc
+        ``by_doc_id`` at this layer), whereas the service path
+        (``CatalogRepository.resolveMany``) keys on the ``tumbler`` column. In
+        normal operation these are the same string (``metadata.doc_id`` is set
+        to the document's tumbler), so the two backends agree. They could
+        diverge only for a document whose ``tumbler`` differs from its stored
+        ``metadata.doc_id`` (a migration / re-registration / manual-repair edge
+        case) — a pre-existing asymmetry inherited from ``by_doc_id`` vs
+        ``/show?tumbler=X``, not introduced by the batch methods.
         """
         if not doc_ids:
             return {}

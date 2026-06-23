@@ -151,15 +151,21 @@ def _attach_doc_ids_from_catalog(
     if _get_manifests_batch is not None and distinct_doc_ids:
         try:
             batch_result = _get_manifests_batch(distinct_doc_ids)
-            if batch_result:
-                manifest_cache.update(batch_result)
+            # nexus-7lm3q review (CR Low-1): ``update(... or {})`` makes an
+            # empty/None response a clean no-op instead of routing it through a
+            # falsy guard, so "all doc_ids genuinely absent" and "skipped" are
+            # not conflated at the call site.
+            manifest_cache.update(batch_result or {})
         except Exception:
             _log.debug(
                 "attach_chunk_count_batch_failed",
                 doc_ids=distinct_doc_ids, exc_info=True,
             )
-            # Degraded: manifest_cache stays empty; chunk_count/chunk_index
-            # will not be stamped on this search result set.
+            # Degradation granularity (CR Med-2 / critic obs): a single batch
+            # failure leaves manifest_cache empty, so chunk_count/chunk_index
+            # are dropped for the WHOLE result set, not per-doc. This is a
+            # deliberate trade (one round-trip vs N) — the batch call replaces
+            # the per-doc loop wholesale; we do not re-fan-out on failure.
     else:
         # Legacy per-doc loop for catalogs without get_manifests().
         for doc_id in distinct_doc_ids:
@@ -241,8 +247,11 @@ def _attach_display_paths(
                     cache[did] = entry.file_path
         except Exception:
             _log.debug("attach_display_paths_batch_failed", exc_info=True)
-            # Degraded: fall through with empty cache; no _display_path
-            # will be stamped on this search result set.
+            # Degradation granularity (CR Med-1 / critic obs): a single
+            # resolve_many failure leaves the cache empty, so _display_path is
+            # dropped for the WHOLE result set, not per-doc. Deliberate trade
+            # (one round-trip vs N) — the batch replaces the per-doc loop
+            # wholesale; we do not re-fan-out on failure.
     else:
         # Legacy per-doc loop for catalogs without resolve_many().
         for did in doc_ids:

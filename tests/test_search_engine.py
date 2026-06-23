@@ -749,14 +749,34 @@ class TestAttachDocIdsFromCatalog:
 
     def test_preserves_existing_doc_id_legacy_fallback(self):
         """Pre-Phase-3 chunks may still carry doc_id in metadata; the
-        helper must NOT overwrite the legacy field, only fill the gap."""
+        helper must NOT overwrite the legacy field, only fill the gap.
+
+        nexus-7lm3q critic Sig-3: this previously used ``MagicMock()``, whose
+        auto-created ``get_manifests`` made ``manifest_cache.update(mock)`` a
+        silent no-op — so the batch path ran but chunk_count/chunk_index were
+        never exercised. Use a concrete catalog so the batch path is genuinely
+        driven and the gap-fill is asserted (LEGACY-doc preserved, chunk_count
+        filled in from the manifest)."""
         from nexus.search_engine import _attach_doc_ids_from_catalog
         chash = "b" * 64
-        catalog = MagicMock()
-        catalog.docs_for_chashes.return_value = {chash: ["MANIFEST-doc"]}
+
+        class _Catalog:
+            """Batch-capable catalog (has get_manifests)."""
+            def docs_for_chashes(self, chashes):
+                # The chunk already carries doc_id, so this fallback resolution
+                # is not used; return a different doc to prove it's ignored.
+                return {chash: ["MANIFEST-doc"]}
+            def get_manifests(self, doc_ids):
+                # Keyed on the LEGACY doc_id (the preserved one), not MANIFEST-doc.
+                return {did: [{"chash": chash, "position": 0}] for did in doc_ids}
+
         r = self._result(chunk_text_hash=chash, doc_id="LEGACY-doc")
-        _attach_doc_ids_from_catalog([r], catalog=catalog)
+        _attach_doc_ids_from_catalog([r], catalog=_Catalog())
+        # Legacy doc_id preserved (not overwritten by MANIFEST-doc) ...
         assert r.metadata["doc_id"] == "LEGACY-doc"
+        # ... and the gap (chunk_count/chunk_index) IS filled via the batch.
+        assert r.metadata["chunk_count"] == 1
+        assert r.metadata["chunk_index"] == 0
 
     def test_chash_with_no_manifest_entry_leaves_field_unset(self):
         from nexus.search_engine import _attach_doc_ids_from_catalog
@@ -1032,6 +1052,34 @@ class TestAttachDocIdsBatchManifest:
         _attach_doc_ids_from_catalog([r], catalog=catalog)
 
         assert r.metadata["chunk_count"] == 99  # must be preserved
+
+    def test_partial_batch_response_handled(self):
+        """nexus-7lm3q critic obs: a manifest batch that returns only SOME of
+        the requested doc_ids stamps chunk_count for the present ones and
+        leaves the absent ones unstamped (no crash, no cross-contamination)."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+
+        chash_a = "a" * 64
+        chash_b = "b" * 64
+        catalog = MagicMock()
+        catalog.docs_for_chashes.return_value = {
+            chash_a: ["doc-A"],
+            chash_b: ["doc-B"],
+        }
+        # Only doc-A comes back; doc-B absent from the batch response.
+        catalog.get_manifests.return_value = {
+            "doc-A": [{"chash": chash_a, "position": 0}],
+        }
+        r_a = self._result(chunk_text_hash=chash_a)
+        r_b = self._result(chunk_text_hash=chash_b)
+        _attach_doc_ids_from_catalog([r_a, r_b], catalog=catalog)
+
+        assert r_a.metadata["chunk_count"] == 1
+        assert r_a.metadata["chunk_index"] == 0
+        # doc-B still gets its doc_id resolved, but no manifest-derived fields.
+        assert r_b.metadata["doc_id"] == "doc-B"
+        assert "chunk_count" not in r_b.metadata
+        assert "chunk_index" not in r_b.metadata
 
 
 class TestAttachDisplayPathsBatch:

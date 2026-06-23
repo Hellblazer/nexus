@@ -84,6 +84,13 @@ public final class CatalogHandler implements HttpHandler {
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
+    /**
+     * Upper bound on doc_ids accepted by the batch endpoints
+     * ({@code /manifest/get_many}, {@code /resolve_many}). Well under
+     * PostgreSQL's 32767-parameter Bind-message hard limit. nexus-7lm3q review.
+     */
+    private static final int MAX_BATCH_DOC_IDS = 1000;
+
     private final CatalogRepository repo;
 
     public CatalogHandler(CatalogRepository repo) {
@@ -545,6 +552,15 @@ public final class CatalogHandler implements HttpHandler {
         if (docIds.isEmpty()) {
             HttpUtil.send(exchange, 200, "{\"manifests\":{}}"); return;
         }
+        // nexus-7lm3q review (CR High-2 / critic Sig-1): cap the IN-list well
+        // under PostgreSQL's 32767-parameter Bind limit. The sole production
+        // caller (search_engine fan-out) is bounded by the 300-result cap and
+        // the Python client batches at 500, but the endpoint must not trust the
+        // caller — admin tooling / future consumers could submit a larger list.
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
         var manifests = repo.getManifestMany(tenant, docIds);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("manifests", manifests)));
     }
@@ -571,6 +587,12 @@ public final class CatalogHandler implements HttpHandler {
             : List.of();
         if (docIds.isEmpty()) {
             HttpUtil.send(exchange, 200, "{\"entries\":{}}"); return;
+        }
+        // nexus-7lm3q review (CR High-2 / critic Sig-1): see handleManifestGetMany —
+        // cap the IN-list under PostgreSQL's 32767-parameter Bind limit.
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }
         var entries = repo.resolveMany(tenant, docIds);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("entries", entries)));
