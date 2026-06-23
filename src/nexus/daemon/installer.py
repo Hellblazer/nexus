@@ -341,7 +341,7 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     if stop_warning:
         warnings.append(stop_warning)
 
-    # 3. Remove the first-run marker so a reinstall re-shows the banner.
+    # 4. Remove the first-run marker so a reinstall re-shows the banner.
     marker_removed = False
     if marker.exists():
         try:
@@ -350,7 +350,7 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         except OSError as exc:
             warnings.append(f"could not remove first-run marker: {exc}")
 
-    # 4. Optionally wipe all nexus data.
+    # 5. Optionally wipe all nexus data.
     data_removed = False
     if remove_data and data_dir.exists():
         import shutil

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
@@ -36,6 +37,12 @@ def _report(**kw):
 
 
 class TestUninstallCommand:
+    @pytest.fixture(autouse=True)
+    def _local_present(self):
+        # These exercise the LOCAL branch — pin local presence True.
+        with patch("nexus.commands.uninstall._local_service_present", return_value=True):
+            yield
+
     def test_dry_run_is_default_no_yes(self) -> None:
         """No --yes → confirm=False (preview only), nothing is torn down."""
         with patch("nexus.commands.uninstall.uninstall_daemon") as m:
@@ -78,18 +85,18 @@ class TestManagedBranch:
     warn on a shell-env override, never stop a (nonexistent) local service or
     touch the remote tenant's data."""
 
-    def _patch_local_noop(self):
-        # The local branch is exercised separately; here it is a clean no-op report.
-        return patch("nexus.commands.uninstall.uninstall_daemon", return_value=_report(
-            confirmed=True, service_stopped=False, daemon_stopped=False,
-            message="Daemon uninstall complete: service stop not confirmed; daemon stop not confirmed.",
-        ))
+    @pytest.fixture(autouse=True)
+    def _no_local(self):
+        # Managed-only persona: NO local service present. The local branch must
+        # be skipped entirely (Sig-1: no spurious noise; Sig-2: no stop subprocess).
+        with patch("nexus.commands.uninstall._local_service_present", return_value=False):
+            yield
 
     def test_managed_config_cleared_with_yes(self, monkeypatch) -> None:
         for k in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
             monkeypatch.delenv(k, raising=False)
         cleared: list[str] = []
-        with self._patch_local_noop(), \
+        with patch("nexus.commands.uninstall.uninstall_daemon") as m_local, \
              patch("nexus.commands.uninstall.get_credential",
                    side_effect=lambda n: "https://api.conexus-nexus.com" if n == "service_url" else "tok"), \
              patch("nexus.commands.uninstall.unset_credential",
@@ -98,12 +105,15 @@ class TestManagedBranch:
         assert res.exit_code == 0, res.output
         assert cleared == ["service_url", "service_token"]
         assert "managed" in res.output.lower()
+        # Sig-1/Sig-2: managed-only → the local teardown is NEVER invoked.
+        assert m_local.call_count == 0
+        assert "not running" not in res.output
 
     def test_managed_dry_run_does_not_clear(self, monkeypatch) -> None:
         for k in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
             monkeypatch.delenv(k, raising=False)
         cleared: list[str] = []
-        with self._patch_local_noop(), \
+        with patch("nexus.commands.uninstall.uninstall_daemon") as m_local, \
              patch("nexus.commands.uninstall.get_credential",
                    side_effect=lambda n: "https://api.conexus-nexus.com" if n == "service_url" else "tok"), \
              patch("nexus.commands.uninstall.unset_credential",
@@ -111,24 +121,27 @@ class TestManagedBranch:
             res = CliRunner().invoke(main, ["uninstall"])
         assert res.exit_code == 0, res.output
         assert cleared == []  # dry run touches nothing
+        assert m_local.call_count == 0
         assert "managed" in res.output.lower()
 
-    def test_no_managed_config_is_silent_noop(self, monkeypatch) -> None:
+    def test_no_managed_no_local_reports_nothing_to_uninstall(self, monkeypatch) -> None:
         for k in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
             monkeypatch.delenv(k, raising=False)
         cleared: list[str] = []
-        with self._patch_local_noop(), \
+        with patch("nexus.commands.uninstall.uninstall_daemon") as m_local, \
              patch("nexus.commands.uninstall.get_credential", return_value=""), \
              patch("nexus.commands.uninstall.unset_credential",
                    side_effect=lambda n: cleared.append(n) or True):
             res = CliRunner().invoke(main, ["uninstall", "--yes"])
         assert res.exit_code == 0, res.output
         assert cleared == []
+        assert m_local.call_count == 0
+        assert "nothing to uninstall" in res.output.lower()
 
     def test_env_override_warns_cannot_unset_shell(self, monkeypatch) -> None:
         monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
-        with self._patch_local_noop(), \
+        with patch("nexus.commands.uninstall.uninstall_daemon"), \
              patch("nexus.commands.uninstall.get_credential",
                    side_effect=lambda n: "https://api.conexus-nexus.com" if n == "service_url" else "tok"), \
              patch("nexus.commands.uninstall.unset_credential", return_value=False):

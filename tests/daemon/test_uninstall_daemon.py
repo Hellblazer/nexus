@@ -114,7 +114,9 @@ class TestConfirmedUninstall:
     def test_dry_run_plan_mentions_service_stack(self, _env: Path) -> None:
         report = installer.uninstall_daemon(confirm=False)
         assert report.confirmed is False
-        assert "service" in report.message.lower()
+        # Tight: the plan must name the engine-service/PG stop explicitly, not
+        # merely contain the substring "service" (which appears in unit paths).
+        assert "service stop --with-pg" in report.message
 
     def test_remove_data_wipes_config_dir(self, _env: Path) -> None:
         config_dir = _env / "cfg"

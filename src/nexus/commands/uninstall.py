@@ -31,6 +31,31 @@ from nexus.daemon.installer import uninstall_daemon
 _MANAGED_CREDENTIALS = ("service_url", "service_token")
 
 
+def _local_service_present() -> bool:
+    """True when a LOCAL nexus service/daemon footprint exists.
+
+    The design's local-presence signals (any one → run the local teardown):
+    the T2 autostart unit, an installed service-binary dir, or a discoverable
+    ``storage_service`` lease. When NONE are present (a managed-only or fresh
+    install) the local branch is skipped entirely — so a managed-only user gets
+    no spurious "service stop … not running" noise (review Sig-1), and no stop
+    subprocess is ever spawned (review Sig-2).
+    """
+    from nexus.commands import daemon as _daemon
+    from nexus.config import nexus_config_dir
+    from nexus.db.service_endpoint import discover_lease
+
+    try:
+        if (_daemon._autostart_install_dir() / _daemon._autostart_filename_t2()).exists():
+            return True
+    except Exception:  # noqa: BLE001 — detection is best-effort; absence is the safe default
+        pass
+    if (nexus_config_dir() / "service").exists():
+        return True
+    url, _ = discover_lease()
+    return url is not None
+
+
 def _teardown_managed(*, confirm: bool) -> tuple[list[str], list[str]]:
     """Clear the managed endpoint config (wigzi). Returns (lines, warnings).
 
@@ -97,11 +122,29 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
         click.echo(line)
 
     # Local branch (eu4u4) — stop the service stack + daemon, remove autostart +
-    # marker, optionally wipe local data. Idempotent: no-op when no local service.
-    report = uninstall_daemon(confirm=assume_yes, remove_data=remove_data)
-    click.echo(report.message)
+    # marker, optionally wipe local data. GATED on local presence (auto-detect):
+    # skipped entirely for a managed-only / fresh install so no spurious
+    # "not running" noise and no stop subprocess fires (review Sig-1/Sig-2).
+    warnings: tuple[str, ...] = managed_warnings
+    if _local_service_present():
+        report = uninstall_daemon(confirm=assume_yes, remove_data=remove_data)
+        click.echo(report.message)
+        warnings = (*managed_warnings, *report.warnings)
+    else:
+        click.echo(
+            "Local service: none detected — skipping local teardown "
+            "(service stop / autostart / marker / data)."
+        )
+        if remove_data:
+            click.echo(
+                "  note: --remove-data has no local data dir to wipe for a "
+                "managed-only client; the remote tenant's data is untouched."
+            )
 
-    for w in (*managed_warnings, *report.warnings):
+    if not managed_lines and not _local_service_present():
+        click.echo("Nothing to uninstall — no managed config and no local service found.")
+
+    for w in warnings:
         click.echo(f"  warning: {w}", err=True)
     if not assume_yes:
         click.echo("\nDry run — nothing was removed. Re-run with --yes to proceed.")
