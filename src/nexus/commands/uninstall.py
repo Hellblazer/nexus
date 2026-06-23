@@ -125,8 +125,11 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
     # marker, optionally wipe local data. GATED on local presence (auto-detect):
     # skipped entirely for a managed-only / fresh install so no spurious
     # "not running" noise and no stop subprocess fires (review Sig-1/Sig-2).
+    # Probe local presence ONCE — a second call could disagree under a concurrent
+    # install (lease appears mid-run) and would re-pay the stat/SQLite cost.
+    local_present = _local_service_present()
     warnings: tuple[str, ...] = managed_warnings
-    if _local_service_present():
+    if local_present:
         report = uninstall_daemon(confirm=assume_yes, remove_data=remove_data)
         click.echo(report.message)
         warnings = (*managed_warnings, *report.warnings)
@@ -141,7 +144,7 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
                 "managed-only client; the remote tenant's data is untouched."
             )
 
-    if not managed_lines and not _local_service_present():
+    if not managed_lines and not local_present:
         click.echo("Nothing to uninstall — no managed config and no local service found.")
 
     for w in warnings:
