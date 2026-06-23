@@ -17,6 +17,12 @@ from nexus.config import (
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Clear ambient credential env so get_credential reads config.yml, not a
+    # value CI exports (NX_SERVICE_TOKEN=test-token is set on the runners and
+    # overrides config.yml — env-first precedence). Without this, the
+    # service_url/service_token credential tests pass locally and fail in CI.
+    for _ev in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+        monkeypatch.delenv(_ev, raising=False)
     return tmp_path
 
 
