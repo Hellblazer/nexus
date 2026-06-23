@@ -140,6 +140,17 @@ _SHUTDOWN_IN_FLIGHT: bool = False
 #: the T2 ``_reassert_task`` discipline). ``None`` when no owned T1 is live.
 _T1_HEARTBEAT_TASK: Any = None
 
+#: nexus-zgqxm: minimum seconds between in-process orphan-sweeps driven by the
+#: heartbeat loop. The startup sweeps (lifespan Branch 3) only reap the
+#: PREVIOUS leak before spawning a new chroma; a host losing many MCPs
+#: ungracefully but spawning few new ones never re-enters the sweep and can
+#: exhaust ``kern.posix.sem.max=10000`` (2026-05-08 shakeout cleared 8,359
+#: semaphores). This periodic sweep closes that gap by reaping PPID=1 orphan
+#: resource-trackers / chromadbs WHILE a long-lived MCP runs, not only at its
+#: next startup. 600 s keeps the ``ps`` cost negligible relative to the leak
+#: timescale (orphans accrue over hours/days, not seconds).
+_PERIODIC_SWEEP_INTERVAL_S: float = 600.0
+
 
 async def _t1_heartbeat_loop(publisher: Any, interval: float) -> None:
     """Re-stamp the T1 lease every ``interval`` seconds and lazily re-key the
@@ -148,17 +159,64 @@ async def _t1_heartbeat_loop(publisher: Any, interval: float) -> None:
     RDR-149 P4: this is T1's self-heal re-assert (the #1114 fix) and its
     RF-2/CA-3 re-key driver. A tick that raises is logged at debug and the
     loop continues; only cancellation (clean shutdown) stops it.
+
+    nexus-zgqxm: the same loop also drives a periodic orphan sweep (every
+    ``_PERIODIC_SWEEP_INTERVAL_S``) so a long-lived MCP reaps PPID=1 orphan
+    resource-trackers / chromadbs continuously, not only at the next startup.
+    The live chroma's own ``server_pid`` is added to ``protected_pids`` so the
+    sweep can never target this session's own process.
     """
     import asyncio
+    import time
 
     import structlog
     _hb_log = structlog.get_logger("nexus.mcp.core")
+    last_sweep = time.monotonic()
     while True:
         await asyncio.sleep(interval)
         try:
             publisher.tick()
         except Exception as exc:  # never let a transient tick failure kill the loop
             _hb_log.debug("t1_heartbeat_tick_failed", error=str(exc))
+        now = time.monotonic()
+        if now - last_sweep >= _PERIODIC_SWEEP_INTERVAL_S:
+            last_sweep = now
+            _periodic_orphan_sweep()
+
+
+def _periodic_orphan_sweep() -> None:
+    """Reap PPID=1 orphan resource-trackers / chromadbs while an MCP is live.
+
+    nexus-zgqxm: the startup sweeps (lifespan Branch 3) run spawn-only and so
+    only ever clean the PREVIOUS leak. Driving the same sweeps from the
+    heartbeat loop closes the "many ungraceful exits, few new spawns" gap that
+    can exhaust the POSIX semaphore namespace. The live chroma's ``server_pid``
+    is protected so the sweep cannot touch this session's own tracker; the
+    parser's PPID=1 + ``min_age_seconds`` gates already exclude live children.
+    Best-effort: every failure is logged at debug and never propagates into the
+    heartbeat loop.
+    """
+    from nexus.session import (
+        sweep_orphan_resource_trackers,
+        sweep_orphan_t1_chromadbs,
+    )
+
+    server_pid = _OWNED_CHROMA.get("server_pid")
+    protected = {server_pid} if isinstance(server_pid, int) else set()
+    import structlog
+    _sweep_log = structlog.get_logger("nexus.mcp.core")
+    try:
+        n_trackers = sweep_orphan_resource_trackers(protected_pids=protected)
+        n_chromas = sweep_orphan_t1_chromadbs(protected_pids=protected)
+        if n_trackers or n_chromas:
+            _sweep_log.info(
+                "periodic_orphan_sweep",
+                trackers_reaped=n_trackers,
+                chromadbs_reaped=n_chromas,
+                protected_pid=server_pid,
+            )
+    except Exception as exc:
+        _sweep_log.debug("periodic_orphan_sweep_failed", error=str(exc))
 
 
 async def _cancel_t1_heartbeat_task() -> None:
