@@ -87,6 +87,12 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # max-parallel: 2 — the two linux builds run in parallel (they schedule
+      # cleanly), and mac-arm64 (ordered last) only starts once a linux slot
+      # frees, so it no longer competes for a runner up front. The scarce macOS
+      # runner was getting starved-then-slammed when all three launched at once;
+      # deferring it keeps linux concurrency while giving mac an uncontended slot.
+      max-parallel: 2
       matrix:
         target:
           - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true }
