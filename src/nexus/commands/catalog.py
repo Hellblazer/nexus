@@ -229,11 +229,12 @@ def catalog() -> None:
 
 # Command families carved out of this module live in catalog_cmds/ and attach
 # themselves to the group via their register() hook (nexus-kgyoz). Imported
-# here (after the group exists) so ``nx catalog owners`` / ``dedupe-owners``
-# resolve identically. catalog_cmds submodules reference this module's helpers
-# lazily, so this import stays acyclic.
-from nexus.commands.catalog_cmds import backfill as _backfill_cmds  # noqa: E402 — must follow the `catalog` group definition above
+# here (after the group exists) so every carved command (`nx catalog owners`,
+# `dedupe-owners`, `backfill-owner-id`, …) resolves identically. catalog_cmds
+# submodules reference this module's helpers lazily, so these imports stay
+# acyclic. Keep import order and register order aligned as families accumulate.
 from nexus.commands.catalog_cmds import owners as _owners_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import backfill as _backfill_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
