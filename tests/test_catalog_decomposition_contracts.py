@@ -568,13 +568,12 @@ def test_owner_lookups_relocated_to_owner_ops(tmp_path: Path) -> None:
 
     Catalog.init(tmp_path)
     cat = Catalog(tmp_path, tmp_path / ".catalog.db")
-    # Facade delegates to the _OwnerOps instance, not _DocumentOps.
-    assert (
-        cat.owner_for_repo.__func__ is Catalog.owner_for_repo
-    )
     owner = cat.register_owner(
         name="r", owner_type="repo", repo_hash="abc123", repo_root="/tmp/r-root",
     )
+    # The facade round-trips through _OwnerOps end-to-end (delegation +
+    # SQL). With the methods gone from _DocumentOps (asserted above), a
+    # passing round-trip proves the facade reaches _OwnerOps.
     # owner_for_repo round-trips the just-registered repo owner.
     assert str(cat.owner_for_repo("abc123")) == str(owner)
     assert cat.owner_for_repo("no-such-hash") is None

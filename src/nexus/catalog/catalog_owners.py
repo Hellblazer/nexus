@@ -25,10 +25,11 @@ both stay single-instance.
 ``owner_for_repo`` / ``owner_tumblers_by_name`` are owner-table
 queries relocated here from ``_DocumentOps`` (nexus-kgyoz deferred
 clean-up, completed once the indexer + commands decomposition PRs
-landed). ``_DocumentOps.register_document`` reaches them through
-the facade (``cat.owner_for_repo``), which now delegates to this
-module — no ``_docs`` -> ``_owners`` cross-_Ops dependency is
-introduced because the call routes through ``Catalog`` itself.
+landed). ``_DocumentOps.register_document`` still needs an owner
+lookup, but reaches it through the facade (``cat.owner_for_repo``)
+rather than calling ``_owners`` directly — the data dependency is
+mediated by ``Catalog``, keeping the ``_Ops`` modules from
+referencing each other directly (the established composition rule).
 """
 from __future__ import annotations
 
