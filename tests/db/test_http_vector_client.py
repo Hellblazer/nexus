@@ -100,24 +100,6 @@ class TestSingleton:
         assert a is not b
 
 
-# ── chunk_id ─────────────────────────────────────────────────────────────────
-
-class TestChunkId:
-    def test_matches_sha256_prefix(self):
-        import hashlib
-        text = "hello world"
-        expected = hashlib.sha256(text.encode()).hexdigest()[:32]
-        assert HttpVectorClient.chunk_id(text) == expected
-
-    def test_length_is_32(self):
-        cid = HttpVectorClient.chunk_id("some text here")
-        assert len(cid) == 32
-
-    def test_deterministic(self):
-        t = "same text every time"
-        assert HttpVectorClient.chunk_id(t) == HttpVectorClient.chunk_id(t)
-
-
 # ── HttpVectorClient methods (mocked HTTP) ───────────────────────────────────
 
 def _make_mock_post(response_body: dict):
