@@ -1193,14 +1193,6 @@ class HttpVectorClient:
             deleted += int(result.get("deleted", 0))
         return deleted
 
-    # ── Utility ──────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def chunk_id(text: str) -> str:
-        """Compute the canonical chunk natural ID: sha256(text)[:32]."""
-        return hashlib.sha256(text.encode()).hexdigest()[:32]
-
-
 # ── Module-level routing helper ───────────────────────────────────────────────
 
 _vector_client_lock = threading.Lock()

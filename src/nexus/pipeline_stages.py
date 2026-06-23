@@ -17,6 +17,8 @@ After all three stages complete, the orchestrator runs post-passes to:
 from __future__ import annotations
 
 import hashlib
+
+from nexus.chunk_identity import chunk_id as _chunk_id
 import json
 import struct
 import threading
@@ -234,7 +236,8 @@ def _embed_and_write_batch(
         # chunk_text_hash[:32] (matches code/prose/doc indexer write
         # paths). Identical chunk text in the same collection collapses
         # to one T3 record; the catalog manifest preserves position.
-        chunk_id = hashlib.sha256(chunk.text.encode()).hexdigest()[:32]
+        # nexus-4pvho: single source of truth in nexus.chunk_identity.
+        chunk_id = _chunk_id(chunk.text)
         meta = _build_chunk_metadata(
             chunk,
             content_hash=content_hash,

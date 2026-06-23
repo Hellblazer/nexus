@@ -12,6 +12,8 @@ language tables (_COMMENT_CHARS, DEFINITION_TYPES).
 from __future__ import annotations
 
 import hashlib as _hl
+
+from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
 from pathlib import Path
 
 import structlog
@@ -392,7 +394,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         # T3 record; the catalog manifest preserves position via
         # ``(doc_id, position)`` pointing at the shared chash.
         chunk_text_hash_full = _hl.sha256(chunk["text"].encode()).hexdigest()
-        chunk_chroma_id = chunk_text_hash_full[:32]
+        chunk_chroma_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
         class_ctx, method_ctx = _extract_context(
             source_bytes, language, chunk["line_start"] - 1, chunk["line_end"] - 1
         )
