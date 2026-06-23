@@ -94,6 +94,53 @@ def test_election_flock_only_in_primitive() -> None:
     )
 
 
+# nexus-9nv1d Part B: behaviour-based companion to the name-based bans above.
+# The name-bans catch the SPECIFIC dead shapes P5 deleted; this catches a NEW
+# bespoke election lock under ANY name by allowlisting the modules that may
+# acquire an advisory flock and tripping on any new one.
+#
+# Why a MODULE allowlist and not "flock only in the primitive": fcntl.flock is
+# used legitimately across the tree for distinct, non-election purposes — the
+# general _locking primitive, per-tier SPAWN locks (t2/t3/storage daemons), the
+# migration serializer, the daemon CLI lock. A "flock => election" test would be
+# false-positive-ridden (the vacuous-gate trap nexus-9nv1d itself warns of).
+# The defensible signal is: a flock acquire in a module NOT on this vetted list
+# is an unreviewed lock — possibly a bespoke election — and must be justified
+# (route election through ServiceRegistry._elect, or add the module here with a
+# reason). Acquires WITHIN an allowed module are already vetted.
+_FLOCK_ALLOWED_MODULES = frozenset({
+    "_locking.py",                       # the general advisory-lock primitive
+    "daemon/service_registry.py",        # the ONLY election flock (_elect)
+    "daemon/storage_service_daemon.py",  # storage-daemon spawn lock
+    "daemon/t2_daemon.py",               # T2 spawn / heartbeat locks
+    "daemon/t3_daemon.py",               # T3 spawn lock
+    "db/migrations.py",                  # migration serialization lock
+    "commands/daemon.py",                # daemon CLI single-instance lock
+})
+
+
+def test_flock_acquire_sites_are_allowlisted() -> None:
+    """A flock acquire in a module not on the vetted list is an unreviewed lock
+    (possibly a bespoke election) — route election through the primitive or
+    justify the lock by adding the module to ``_FLOCK_ALLOWED_MODULES``."""
+    offenders: list[str] = []
+    for path in _py_files():
+        rel = path.relative_to(SRC_ROOT).as_posix()
+        if rel in _FLOCK_ALLOWED_MODULES:
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.lstrip()
+            if stripped.startswith("fcntl.flock(") and _ALLOW_TOKEN not in line:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
+    assert not offenders, (
+        "RDR-149 lifecycle gate (nexus-9nv1d): a flock acquire appeared in a "
+        "module not on _FLOCK_ALLOWED_MODULES. If this is daemon-scope election, "
+        "it MUST go through ServiceRegistry._elect, not a bespoke lock. If it is "
+        "a different, legitimate lock, add the module to the allowlist with a "
+        "reason. Offenders:\n  " + "\n  ".join(offenders)
+    )
+
+
 def test_gate_doc_exists() -> None:
     """The standing-gate doc itself must exist and name the primitive + the
     conformance suite -- the two artifacts every lifecycle fix must touch."""
