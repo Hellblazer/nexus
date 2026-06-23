@@ -41,7 +41,7 @@ migration tool; the Chroma source remains the immutable migration origin
   passthrough (no billed re-embed). Docs:
   [docs/managed-onboarding.md](docs/managed-onboarding.md). pgvector→managed
   cross-deployment migration is a documented limitation (not supported).
-- **`nx guided-upgrade` (RDR-002): one command from a pre-upgrade install to a
+- **`nx guided-upgrade` (RDR-159): one command from a pre-upgrade install to a
   migrated service stack.** Detects the legacy footprint, provisions and starts
   the engine-service, version-pins it (its `/version` `release_version` must be
   present — from engine-service v0.1.6+; the code floor is v0.1.5 but earlier

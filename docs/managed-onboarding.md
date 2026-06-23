@@ -104,11 +104,13 @@ local source is the rollback origin and is never modified). Notes:
 
 Moving an *already-on-pgvector* local-service install to the managed service
 (pgvector → managed, a cross-deployment data move) is **not supported** — there
-is no `pg_dump`/restore path across deployments in `nx`. Supported migration
-origins are a legacy Chroma install or a local-service install via
-`guided-upgrade`. The pgvector→managed path is tracked as a documented follow-on
-(nexus-wm3t5); for now, a pgvector-local user who wants managed re-indexes from
-source against the managed endpoint.
+is no `pg_dump`/restore path across deployments in `nx`, and `guided-upgrade`'s
+ETL source is always Chroma. The only supported migration origin is a **legacy
+Chroma install** (a local `PersistentClient` store and/or Chroma Cloud); a
+local-service install has no Chroma footprint, so `guided-upgrade` reports
+"nothing to migrate." The pgvector→managed path is tracked as a documented
+follow-on (nexus-wm3t5); for now, a pgvector-local user who wants managed
+re-indexes from source against the managed endpoint.
 
 ## Scope note
 

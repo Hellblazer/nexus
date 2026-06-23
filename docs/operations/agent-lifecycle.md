@@ -12,15 +12,15 @@ exclusively through that service stack in both local and cloud mode.
 ## State model
 
 ```
-  uninstalled ──nx init --service──▶ installed ──(provision PG+pgvector)──▶ provisioned
+  uninstalled ──nx init --service──▶ installed ──provision PG+pgvector──▶ provisioned
        ▲                                                                        │
-       │                                                              (supervisor start)
+       │                                                                (supervisor start)
        │                                                                        ▼
-       └──────────── nx uninstall ◀──── running ◀──────────────────────────── running
-                                          │  ▲
-                                  nx upgrade / guided-upgrade
-                                          ▼  │
-                                       upgrading
+       │                                  ┌──── nx upgrade / guided-upgrade ────┐
+       │                                  ▼                                     │
+       └──────── nx uninstall ◀──────── running ───────────────────────────▶ upgrading
+                                                                                │
+                                                          (migration/migrations apply, back to running)
 ```
 
 - **uninstalled** — no autostart unit, no service binary, no provisioned PG.
@@ -32,7 +32,8 @@ exclusively through that service stack in both local and cloud mode.
 The running-state machinery (lease publish/heartbeat/relinquish, single-writer
 discovery, version-skew) is the shared service-registry primitive
 (`src/nexus/daemon/service_registry.py`); its invariants are owned by
-[RDR-149](../rdr/rdr-149-*.md) and enforced by `tests/daemon/test_lifecycle_gate.py`.
+[RDR-149](../rdr/rdr-149-unified-service-registry-substrate.md) and enforced by
+`tests/daemon/test_lifecycle_gate.py`.
 
 ## Coverage matrix (lifecycle surface → authority)
 
@@ -41,7 +42,7 @@ discovery, version-skew) is the shared service-registry primitive
 | Install | `nx init --service`, `nx daemon service install-binary <tag>` | RDR-157 (distribution), RDR-161 (native-only), RDR-144 (`nx init` embedder onboarding) |
 | Provision | bundled PG16 + pgvector, Liquibase migrate, bge-768 ONNX fetch | RDR-155 (pgvector substrate), RDR-160 (bge-768 embedder) |
 | Run | T2 daemon + T3 `nexus-service`; lease lifecycle | RDR-149 (daemon lifecycle), RDR-152 (endpoint discovery) |
-| Upgrade | `nx upgrade` (migrations), `nx guided-upgrade` (Chroma→service) | RDR-002 / RDR-159 (guided upgrade), RDR-162 (cross-model) |
+| Upgrade | `nx upgrade` (migrations), `nx guided-upgrade` (Chroma→service) | RDR-159 (guided upgrade), RDR-162 (cross-model) |
 | Uninstall | `nx uninstall` (CLI), `daemon_uninstall` (MCP) | RDR-165 (this RDR) |
 
 ## Install
@@ -75,7 +76,8 @@ at the endpoint with an operator-provisioned token; no install, no provision.
   [cli-reference.md](../cli-reference.md#nx-upgrade).
 - **`nx guided-upgrade`** — the one-shot Chroma → service migration for a
   pre-6.0 install: detect footprint, provision + version-pin the service, migrate
-  (T2 → catalog → T3), validate, unlock. Copy-not-move (the Chroma source is the
+  (T2, then each T3 leg with its catalog ref-remap), validate, unlock.
+  Copy-not-move (the Chroma source is the
   rollback manifest). See [migration-runbook.md](../migration-runbook.md) and
   RDR-002 / RDR-159. Cross-model collections (e.g. legacy minilm) are re-embedded
   into the target model (RDR-162); same-model voyage collections are copied
@@ -121,4 +123,4 @@ The `daemon_uninstall` MCP tool remains for in-chat teardown of the local daemon
 - [managed-onboarding.md](../managed-onboarding.md) — the hosted-service journey
 - [migration-runbook.md](../migration-runbook.md) — Chroma → service migration
 - [cli-reference.md](../cli-reference.md) — every command + flag
-- RDRs: 165 (this lifecycle), 155 (substrate), 157/161 (distribution), 149 (daemon lifecycle), 002/159 (guided upgrade), 166 (managed journeys)
+- RDRs: 165 (this lifecycle), 155 (substrate), 157/161 (distribution), 149 (daemon lifecycle), 159 (guided upgrade), 162 (cross-model upgrade), 166 (managed journeys)
