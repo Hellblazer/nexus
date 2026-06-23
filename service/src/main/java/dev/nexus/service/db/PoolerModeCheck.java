@@ -89,8 +89,15 @@ public final class PoolerModeCheck {
     /** Testable form of {@link #verifyAtStartup()} with explicit admin connection params. */
     public static void verifyAtStartup(String adminUrl, String adminUser, String adminPass) {
         if (adminUrl == null || adminUrl.isBlank()) {
-            log.info("event=pooler_mode_check_skipped reason=no_pgbouncer_admin_url "
-                    + "note=\"direct-PG path, no interposed pooler\"");
+            // HONEST phrasing (nexus-bhzuv review HIGH-3): absence of the admin URL means
+            // the probe is DISABLED, not that no pooler exists. If a deployment interposes
+            // PgBouncer but omits NX_PGBOUNCER_ADMIN_URL, the transaction-mode invariant
+            // goes unenforced — the env var is REQUIRED for any pooled deployment.
+            log.warn("event=pooler_mode_check_skipped reason=no_pgbouncer_admin_url "
+                    + "note=\"NX_PGBOUNCER_ADMIN_URL unset — pooler-mode probe DISABLED. "
+                    + "Safe only for the direct-PG (no pooler) path. If PgBouncer is "
+                    + "interposed you MUST set NX_PGBOUNCER_ADMIN_URL or a session-mode "
+                    + "pooler can leak the tenant GUC across borrows (nexus-bhzuv).\"");
             return;
         }
         Map<String, String> config;
@@ -109,7 +116,13 @@ public final class PoolerModeCheck {
     private static Map<String, String> fetchShowConfig(String adminUrl, String user, String pass)
             throws SQLException {
         Map<String, String> rows = new LinkedHashMap<>();
-        try (Connection conn = DriverManager.getConnection(adminUrl, user, pass);
+        // Bound the connect/socket time (nexus-bhzuv review HIGH-1): without this a dead or
+        // firewalled admin endpoint hangs the main thread at startup forever, turning a
+        // fail-fast check into fail-never. Append driver timeouts unless the URL sets its own.
+        String timedUrl = adminUrl.contains("connectTimeout=") || adminUrl.contains("socketTimeout=")
+                ? adminUrl
+                : adminUrl + (adminUrl.contains("?") ? "&" : "?") + "connectTimeout=10&socketTimeout=10";
+        try (Connection conn = DriverManager.getConnection(timedUrl, user, pass);
              Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SHOW CONFIG")) {
             // PgBouncer SHOW CONFIG returns columns: key, value, [changeable].
