@@ -28,10 +28,10 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Set up GraalVM JDK 25
-        uses: graalvm/setup-graalvm@v1
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
         with:
           java-version: '25'
           distribution: 'graalvm'
@@ -43,7 +43,7 @@ jobs:
         # all-MiniLM-L6-v2 model from ~/.cache/chroma. Mirror the SAME
         # cache key as ci.yml (the Python suite) so this Java-only runner
         # restores the model the Python workflow already downloaded.
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ~/.cache/chroma
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -73,7 +73,7 @@ jobs:
         # fp32 bge ONNX; priming it here makes the gate RUN on CI instead of
         # skipping. STABLE key (immutable upstream export) — one cold download,
         # restored thereafter, shared with the native-smoke job.
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ~/.cache/nexus/onnx_models/bge-base-en-v1.5
           key: bge-onnx-standard-${{ runner.os }}-v1
@@ -116,10 +116,10 @@ jobs:
     timeout-minutes: 40
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Set up GraalVM 25.0.3
-        uses: graalvm/setup-graalvm@v1
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
         with:
           # >= 25.0.2 REQUIRED: the bundled jOOQ 3.20.0 / liquibase reachability
           # metadata use GraalVM's unified reachability-metadata SCHEMA, which
@@ -136,7 +136,7 @@ jobs:
         # STABLE key — the model is an immutable upstream export, so it
         # downloads ONCE on a cold cache and restores on every later run; bump
         # the -v suffix only if the model SOURCE changes.
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ~/.cache/nexus/onnx_models/bge-base-en-v1.5
           key: bge-onnx-standard-${{ runner.os }}-v1
