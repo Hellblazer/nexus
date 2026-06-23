@@ -1631,3 +1631,53 @@ class TestCollectionNameCommand:
         ])
         assert result.exit_code == 0, result.output
         assert result.output.strip() == "rdr__1-1__voyage-context-3__v1"
+
+
+class TestSeam3OwnersCarve:
+    """Contract pins for the nexus-kgyoz seam 3 owners command carve.
+
+    Non-vacuous: each pin fails if the carve regresses — by re-inlining the
+    commands into ``commands.catalog``, dropping the ``register`` wiring, or
+    binding ``_get_catalog`` at import time (which would break the
+    ``patch("nexus.commands.catalog._get_catalog", …)`` test seam).
+
+    Note the two commands take different catalog-access paths: ``owners``
+    reads via ``_get_catalog()`` (defended by the patch seam below), while
+    ``dedupe-owners`` opens an admin catalog via ``make_catalog_admin()`` and
+    is NOT covered by that patch target — its behavioural coverage lives in
+    ``test_catalog_dedupe.py`` through ``NEXUS_CATALOG_PATH`` env plumbing.
+    """
+
+    def test_owner_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        assert "owners" in catalog_group.commands
+        assert "dedupe-owners" in catalog_group.commands
+
+    def test_owner_commands_defined_in_carved_module(self):
+        """The callbacks live in catalog_cmds.owners, not commands.catalog."""
+        from nexus.cli import main
+        from nexus.commands.catalog_cmds import owners as owners_mod
+        catalog_group = main.commands["catalog"]
+        assert catalog_group.commands["owners"].callback is owners_mod.owners_cmd.callback
+        assert (
+            catalog_group.commands["dedupe-owners"].callback
+            is owners_mod.dedupe_owners_cmd.callback
+        )
+
+    def test_owners_command_routes_get_catalog_through_module(self):
+        """Patching commands.catalog._get_catalog is observed by the carved
+        ``owners`` command — proves module-routed (not import-bound) access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        fake = MagicMock()
+        fake.list_owners.return_value = [
+            {"tumbler_prefix": "1.1", "owner_type": "repo", "name": "sentinel-owner"},
+        ]
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake):
+            result = CliRunner().invoke(main, ["catalog", "owners"])
+        assert result.exit_code == 0, result.output
+        assert "sentinel-owner" in result.output
+        fake.list_owners.assert_called_once()
