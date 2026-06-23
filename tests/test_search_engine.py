@@ -303,6 +303,96 @@ class TestThresholdOverride:
         )
         assert {r.id for r in results} == {"a"}
 
+
+class _ConcurrentFakeT3:
+    """T3 stand-in that records concurrency and lets per-collection latency be
+    tuned so completion order can be forced to differ from input order.
+
+    ``delays`` maps a collection name to the seconds its ``search`` sleeps.
+    ``raises`` is a set of collections that raise ``VectorServiceError``.
+    """
+
+    def __init__(self, results_by_col, delays=None, raises=None):
+        import threading
+        self._results = results_by_col
+        self._delays = delays or {}
+        self._raises = raises or set()
+        self._voyage_client = "fake-voyage"
+        self._lock = threading.Lock()
+        self._inflight = 0
+        self.max_inflight = 0
+
+    def search(self, query, collection_names, n_results=10, where=None):
+        import time
+        from nexus.db.http_vector_client import VectorServiceError
+        name = collection_names[0]
+        with self._lock:
+            self._inflight += 1
+            self.max_inflight = max(self.max_inflight, self._inflight)
+        try:
+            time.sleep(self._delays.get(name, 0.0))
+            if name in self._raises:
+                raise VectorServiceError(f"{name} unservable")
+            return self._results.get(name, [])
+        finally:
+            with self._lock:
+                self._inflight -= 1
+
+
+class TestParallelFanOut:
+    """nexus-o51et: the per-collection fan-out runs concurrently but the merge
+    is deterministic in ``collections`` order regardless of completion order,
+    and a single unservable collection does not sink the whole search.
+    """
+
+    def test_result_order_independent_of_completion_order(self):
+        # Earlier collections sleep longer, so they complete LAST. If the merge
+        # depended on completion order the per-collection blocks would be
+        # reversed; assert they follow input order instead.
+        cols = ["knowledge__a", "knowledge__b", "knowledge__c"]
+        t3 = _ConcurrentFakeT3(
+            {
+                "knowledge__a": [{"id": "a", "content": "x", "distance": 0.10}],
+                "knowledge__b": [{"id": "b", "content": "x", "distance": 0.10}],
+                "knowledge__c": [{"id": "c", "content": "x", "distance": 0.10}],
+            },
+            delays={"knowledge__a": 0.06, "knowledge__b": 0.03, "knowledge__c": 0.0},
+            raises=set(),
+        )
+        results = search_cross_corpus(
+            "test", cols, 10, t3, threshold_override=float("inf"),
+            cluster_by=None,
+        )
+        assert [r.collection for r in results] == cols
+        assert [r.id for r in results] == ["a", "b", "c"]
+
+    def test_fan_out_runs_concurrently(self):
+        cols = [f"knowledge__c{i}" for i in range(5)]
+        t3 = _ConcurrentFakeT3(
+            {c: [{"id": c, "content": "x", "distance": 0.10}] for c in cols},
+            delays={c: 0.05 for c in cols},
+        )
+        search_cross_corpus(
+            "test", cols, 10, t3, threshold_override=float("inf"),
+            cluster_by=None,
+        )
+        assert t3.max_inflight > 1  # genuinely parallel, not serialized
+
+    def test_one_failed_collection_does_not_sink_search(self):
+        cols = ["knowledge__ok", "knowledge__bad", "knowledge__ok2"]
+        t3 = _ConcurrentFakeT3(
+            {
+                "knowledge__ok": [{"id": "ok", "content": "x", "distance": 0.10}],
+                "knowledge__ok2": [{"id": "ok2", "content": "x", "distance": 0.10}],
+            },
+            raises={"knowledge__bad"},
+        )
+        results = search_cross_corpus(
+            "test", cols, 10, t3, threshold_override=float("inf"),
+            cluster_by=None,
+        )
+        assert {r.id for r in results} == {"ok", "ok2"}
+
     def test_override_applies_uniformly_across_collections(self):
         """One override replaces the per-corpus threshold for every collection."""
         t3 = _ThresholdFakeT3({

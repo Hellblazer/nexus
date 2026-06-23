@@ -479,13 +479,25 @@ def search_cross_corpus(
     # Per-collection raw min-distance accumulator for search_telemetry rows.
     # Distinct from ``min_dropped_distance`` which covers only dropped items.
     min_raw_per_collection: dict[str, float | None] = {}
-    for col in collections:
+    # nexus-o51et: parallelize the per-collection fan-out. The previous serial
+    # loop issued one blocking ``t3.search`` round-trip per collection; for
+    # ``corpus=all`` (~thousands of collections) that serialized the dominant
+    # p95 network cost. Mirror the ThreadPoolExecutor(max_workers<=8) pattern
+    # already used by ``T3Database.list_collections`` for the count fan-out,
+    # staying within the ChromaDB ``MAX_CONCURRENT_READS=10`` quota. Each
+    # collection's result processing runs inside the worker; the merge below
+    # walks the deterministic ``collections`` order so result ordering and the
+    # diagnostic/telemetry accumulators are independent of completion order.
+    from concurrent.futures import ThreadPoolExecutor
+
+    from nexus.db.chroma_quotas import QUOTAS
+
+    def _search_one(col: str) -> dict:
         mult = _overfetch_multiplier(col)
         # Search review I-3: cap per_k at MAX_QUERY_RESULTS=300. Without
         # this, a large ``offset`` fed into ``fetch_n = offset + limit``
         # upstream multiplies by ``mult`` (up to 4×) and the per-collection
         # n_results punches through the ChromaDB Cloud quota.
-        from nexus.db.chroma_quotas import QUOTAS
         per_k = min(max(5, n_results * mult), QUOTAS.MAX_QUERY_RESULTS)
         if not apply_thresholds:
             threshold = None
@@ -499,13 +511,8 @@ def search_cross_corpus(
             # nexus-pebfx.8: one unservable collection (embedding-space
             # mismatch → service-side HTTP 400) must not sink the whole
             # cross-corpus search. Skip it, keep the rest.
-            failed_collections[col] = str(exc)
-            _log.warning(
-                "collection_search_failed",
-                collection=col,
-                error=str(exc),
-            )
-            continue
+            return {"col": col, "error": str(exc)}
+        results: list[SearchResult] = []
         dropped = 0
         # Minimum distance among dropped items — best-of-dropped, used by
         # SearchDiagnostics.worst_offender() for the "threshold bump" hint.
@@ -524,7 +531,7 @@ def search_cross_corpus(
                 if min_dropped_distance is None or distance < min_dropped_distance:
                     min_dropped_distance = distance
                 continue
-            all_results.append(SearchResult(
+            results.append(SearchResult(
                 id=r["id"],
                 content=r["content"],
                 distance=distance,
@@ -532,16 +539,51 @@ def search_cross_corpus(
                 metadata={k: v for k, v in r.items()
                           if k not in {"id", "content", "distance"}},
             ))
-        diag_per_collection[col] = (len(raw), dropped, threshold, min_dropped_distance)
-        min_raw_per_collection[col] = min_raw_distance
-        total_raw += len(raw)
-        total_dropped += dropped
-        if dropped:
+        return {
+            "col": col,
+            "error": None,
+            "results": results,
+            "raw_count": len(raw),
+            "dropped": dropped,
+            "threshold": threshold,
+            "min_dropped_distance": min_dropped_distance,
+            "min_raw_distance": min_raw_distance,
+        }
+
+    # ThreadPoolExecutor.map preserves input order and re-raises any
+    # non-``VectorServiceError`` from a worker (fail-loud, matching the prior
+    # serial behaviour where such errors bubbled out of the loop).
+    workers = min(8, len(collections))
+    if workers <= 1:
+        partials = [_search_one(c) for c in collections]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            partials = list(pool.map(_search_one, collections))
+
+    for part in partials:
+        col = part["col"]
+        if part.get("error") is not None:
+            failed_collections[col] = part["error"]
+            _log.warning(
+                "collection_search_failed",
+                collection=col,
+                error=part["error"],
+            )
+            continue
+        all_results.extend(part["results"])
+        diag_per_collection[col] = (
+            part["raw_count"], part["dropped"], part["threshold"],
+            part["min_dropped_distance"],
+        )
+        min_raw_per_collection[col] = part["min_raw_distance"]
+        total_raw += part["raw_count"]
+        total_dropped += part["dropped"]
+        if part["dropped"]:
             _log.debug(
                 "threshold_filtered",
                 collection=col,
-                dropped=dropped,
-                threshold=threshold,
+                dropped=part["dropped"],
+                threshold=part["threshold"],
             )
 
     if failed_collections and len(failed_collections) == len(collections):
