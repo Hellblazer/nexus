@@ -169,8 +169,8 @@ def _resolve_doc_id(record: AspectRecord) -> str:
     # primitives for FTS5 sanitisation), but the *behaviour* is no
     # longer reaching into Catalog internals.
     try:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
             cat = Catalog(cat_path, cat_path / ".catalog.db")
@@ -179,7 +179,7 @@ def _resolve_doc_id(record: AspectRecord) -> str:
             )
             if resolved:
                 return resolved
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort identity probe; falls back to source_uri/legacy key
         pass
     if record.source_uri:
         return record.source_uri

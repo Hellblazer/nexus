@@ -149,7 +149,7 @@ def run_sequenced_migration(
     # 3. Quiesce write-lock audit (RF-6).
     try:
         quiesce_check()
-    except Exception as exc:  # MigrationQuiesceBlocked (or any audit failure)
+    except Exception as exc:  # noqa: BLE001 — MigrationQuiesceBlocked (or any audit failure); surfaced via log + _fail() to caller
         _log.warning("sequencer_quiesce_blocked", error=str(exc))
         return _fail(str(exc))
 
@@ -160,7 +160,7 @@ def run_sequenced_migration(
             voyage_key_present=voyage_key_present,
             exempt=frozenset(targets),
         )
-    except Exception as exc:  # ModelPreGateBlocked (or any gate failure)
+    except Exception as exc:  # noqa: BLE001 — ModelPreGateBlocked (or any gate failure); surfaced via log + _fail() to caller
         _log.warning("sequencer_model_gate_blocked", error=str(exc))
         return _fail(str(exc))
 

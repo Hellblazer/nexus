@@ -97,7 +97,7 @@ def _render_for_t2() -> tuple[Path, str]:
     import to avoid an import cycle, since ``daemon`` imports this module
     to back its thin CLI wrappers).
     """
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     install_dir = _daemon._autostart_install_dir()
     install_dir.mkdir(parents=True, exist_ok=True)
@@ -116,7 +116,7 @@ def _render_for_t2() -> tuple[Path, str]:
 
 
 def _activate_cmd(dest: Path) -> list[str]:
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     if _daemon._autostart_platform() == "darwin":
         uid = os.getuid()
@@ -125,7 +125,7 @@ def _activate_cmd(dest: Path) -> list[str]:
 
 
 def _deactivate_cmd(dest: Path) -> list[str]:
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     if _daemon._autostart_platform() == "darwin":
         uid = os.getuid()
@@ -240,7 +240,7 @@ def _stop_daemon_best_effort() -> tuple[bool, str | None]:
     a subprocess). Depends on ``nx`` being resolvable; failure is
     best-effort and surfaced as a warning, never raised.
     """
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     cmd = [*_daemon._resolve_nx_bin(), "daemon", "t2", "stop"]
     try:
@@ -265,7 +265,7 @@ def _stop_service_stack_best_effort() -> tuple[bool, str | None]:
     ``service_registry.py`` primitive (RDR-149 — no duplicated lifecycle here).
     A no-running-service exit is reported as a warning, never raised.
     """
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     cmd = [*_daemon._resolve_nx_bin(), "daemon", "service", "stop", "--with-pg"]
     try:
@@ -287,9 +287,9 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     first-run marker. With ``remove_data=True`` it additionally wipes the
     nexus config / data directory (``nexus_config_dir()``).
     """
-    from nexus.commands import daemon as _daemon
-    from nexus.config import nexus_config_dir
-    from nexus.mcp._first_run import _first_run_marker_path
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+    from nexus.mcp._first_run import _first_run_marker_path  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     unit_dest = _daemon._autostart_install_dir() / _daemon._autostart_filename_t2()
     data_dir = nexus_config_dir()
@@ -353,7 +353,7 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     # 5. Optionally wipe all nexus data.
     data_removed = False
     if remove_data and data_dir.exists():
-        import shutil
+        import shutil  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         # Path-safety guard (review H2): a misconfigured NEXUS_CONFIG_DIR
         # (e.g. "/", "/Users", or a bare home dir) must never let rmtree
@@ -406,7 +406,7 @@ def uninstall_autostart() -> UninstallResult:
     the original CLI: the unit file is the durable artifact). Returns
     ``NOT_INSTALLED`` when nothing is present.
     """
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     install_dir = _daemon._autostart_install_dir()
     dest = install_dir / _daemon._autostart_filename_t2()

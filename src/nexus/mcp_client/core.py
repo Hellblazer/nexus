@@ -107,7 +107,7 @@ async def call_tool(
     args = dict(arguments or {})
     try:
         result = await session.call_tool(name, args)
-    except Exception as exc:  # fail-soft: no MCP failure may propagate
+    except Exception as exc:  # noqa: BLE001 — fail-soft: no MCP failure may propagate; surfaced via log.warning, callers get None
         log.warning(
             "mcp_call_tool_failed",
             tool=name,
@@ -136,10 +136,10 @@ async def open_session(endpoint: MCPEndpoint) -> AsyncIterator[Any]:
     are local so importing this module never costs the ``mcp`` SDK transport
     machinery until a connection is actually opened.
     """
-    import httpx
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
-    from mcp.shared._httpx_utils import create_mcp_http_client
+    import httpx  # noqa: PLC0415 — deferred heavy dep; avoids mcp SDK transport cost at import time
+    from mcp import ClientSession  # noqa: PLC0415 — deferred heavy dep; only loaded when a connection opens
+    from mcp.client.streamable_http import streamable_http_client  # noqa: PLC0415 — deferred heavy dep
+    from mcp.shared._httpx_utils import create_mcp_http_client  # noqa: PLC0415 — deferred heavy dep
 
     http_client = create_mcp_http_client(
         headers=dict(endpoint.headers) or None,

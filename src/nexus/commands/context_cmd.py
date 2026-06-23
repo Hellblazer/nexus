@@ -14,9 +14,9 @@ def context() -> None:
 @click.option("--global", "global_", is_flag=True, help="Include all collections, not just current repo")
 def refresh_cmd(global_: bool) -> None:
     """Regenerate the L1 context cache from taxonomy topics."""
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — deliberate function-local import: command-local
 
-    from nexus.context import refresh_context_l1
+    from nexus.context import refresh_context_l1  # noqa: PLC0415 — deliberate function-local import: nexus.context dep deferred to command invocation
 
     repo_path = None if global_ else Path.cwd()
     result = refresh_context_l1(repo_path=repo_path)
@@ -31,9 +31,9 @@ def refresh_cmd(global_: bool) -> None:
 @context.command("show")
 def show_cmd() -> None:
     """Show the current L1 context cache content."""
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — deliberate function-local import: command-local
 
-    from nexus.context import _context_path_for_repo
+    from nexus.context import _context_path_for_repo  # noqa: PLC0415 — deliberate function-local import: nexus.context dep deferred to command invocation
 
     path = _context_path_for_repo(Path.cwd())
     if path.exists():

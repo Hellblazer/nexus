@@ -202,7 +202,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     else:
         try:
             all_colls = t3_db.list_collections()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
             click.echo(f"Failed to list collections: {exc}")
             raise click.exceptions.Exit(1)
         target_collections = [c["name"] for c in all_colls]
@@ -218,8 +218,8 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     # nexus-6ims: relative source_paths must resolve against the
     # owning catalog document's owner.repo_root, not against the
     # running process's cwd. Open the catalog so we can join.
-    from nexus.catalog.factory import make_catalog_reader
-    from nexus.config import catalog_path as _catalog_path
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.config import catalog_path as _catalog_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     cat_dir = _catalog_path()
     cat: Any = None
     owner_roots: dict[str, str] = {}
@@ -228,7 +228,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
             cat = make_catalog_reader()
             # nexus-xnz0o: use owners_with_roots() (uniform API).
             owner_roots = cat.owners_with_roots()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
             click.echo(f"WARN: catalog not available for owner lookup: {exc}")
 
     def _resolve(path_str: str) -> Path | None:
@@ -258,7 +258,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     for coll_name in target_collections:
         try:
             unique_paths = t3_db.list_unique_source_paths(coll_name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged, must not crash caller
             click.echo(f"  {coll_name}: SKIP (list failed: {exc})")
             continue
 
@@ -282,7 +282,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
         for p in stale_paths:
             try:
                 ids = t3_db.ids_for_source(coll_name, p)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged, must not crash caller
                 click.echo(f"  {p}: SKIP (ids_for_source failed: {exc})")
                 continue
             click.echo(f"  {p}  ->  {len(ids)} chunk(s)")
@@ -294,7 +294,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
                         click.echo(
                             f"    WARN: deleted {deleted}, expected {len(ids)}"
                         )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged, must not crash caller
                     click.echo(f"    delete failed: {exc}")
         total_stale_paths += len(stale_paths)
         total_stale_chunks += coll_chunks
@@ -423,7 +423,7 @@ def gc_cmd(
         # manifest row for this collection's documents. Same SQL the
         # indexer's _prune_deleted_files uses.
         referenced = cat.chashes_for_collection(collection)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
         click.echo(f"Failed to read catalog manifest: {exc}")
         raise click.exceptions.Exit(1)
 
@@ -436,7 +436,7 @@ def gc_cmd(
         chunks = list(t3_db.list_chunks_with_metadata(
             collection, fields=("chunk_text_hash", "indexed_at"),
         ))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
         click.echo(f"Failed to list chunks for {collection}: {exc}")
         raise click.exceptions.Exit(1)
 
@@ -529,7 +529,7 @@ def gc_cmd(
     delete_failed = 0
     try:
         deleted_total = t3_db.delete_by_chunk_ids(collection, pending_chunk_ids)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged, must not crash caller
         delete_failed = len(pending_chunk_ids)
         click.echo(
             f"  batch delete failed ({len(pending_chunk_ids)} chunk(s)): "
@@ -703,7 +703,7 @@ def backfill_manifest_cmd(
             )
             errors.append(str(exc))
             continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged, must not crash caller
             click.echo(
                 f"ERROR in {coll_name}: {exc}",
                 err=True,
@@ -853,7 +853,7 @@ def reidentify_cmd(
       nx t3 reidentify --all-collections --no-dry-run      # full corpus, 4 workers
       nx t3 reidentify --all-collections --max-workers 8   # higher concurrency
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
     from nexus.db.t3_reidentify import (  # noqa: PLC0415
         MissingChunkHashError,
         reidentify_collection,
@@ -903,7 +903,7 @@ def reidentify_cmd(
             res = reidentify_collection(t3_db, coll_name, dry_run=dry_run)
         except MissingChunkHashError as exc:
             return idx, coll_name, None, str(exc)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-collection worker; error returned in result tuple, not raised
             return idx, coll_name, None, f"{coll_name}: {exc}"
         return idx, coll_name, res, None
 

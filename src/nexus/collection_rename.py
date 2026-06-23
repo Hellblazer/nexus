@@ -179,7 +179,7 @@ def rename_collection_data_plane(
             from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415
             catalog = make_catalog_writer()
         counts["catalog_docs"] = catalog.rename_collection(old, new)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — catalog cascade is best-effort after T2+T3 succeeded; surfaced via on_warn
         on_warn(f"warn: T2+T3 rename succeeded but catalog cascade failed: {exc}")
 
     return counts
@@ -274,7 +274,7 @@ def remap_collection_references(
             )
         else:
             counts["catalog_docs"] = catalog.rename_collection(source, target)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — catalog cascade is best-effort after T2 remap; surfaced via on_warn
         on_warn(
             f"warn: T2 reference remap succeeded but catalog cascade failed: {exc}"
         )

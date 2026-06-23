@@ -16,7 +16,7 @@ _log = structlog.get_logger()
 
 
 def _registry_path() -> Path:
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
 
     return nexus_config_dir() / "repos.json"
 
@@ -60,7 +60,7 @@ class _CatalogBackedRegistry:
         self._registry_path = registry_path
 
     def get(self, repo: Path) -> dict | None:
-        from nexus.repos import from_registry, read_dual
+        from nexus.repos import from_registry, read_dual  # noqa: PLC0415 — deliberate function-local import (branch-local repos access)
         if self._cat is None:
             rec = from_registry(repo, registry_path=self._registry_path)
         else:
@@ -115,7 +115,7 @@ class _CatalogBackedRegistry:
                         # CollectionCreated events.
                         model_version="v1",
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — boundary catch of undocumented catalog/daemon write exceptions; surfaced via log.warning and success=False
                     _log.warning(
                         "catalog_registry_adapter_register_failed",
                         repo=str(repo), new=new_name, error=str(exc),
@@ -150,7 +150,7 @@ def _registry() -> "_CatalogBackedRegistry":
     # daemon proxy for owner/collection mutations. The writer is created
     # only when the catalog is initialised (reader non-None), matching the
     # prior gate where an uninitialised catalog meant no writes at all.
-    from nexus.catalog.factory import make_catalog_writer
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deliberate function-local import (heavy catalog dep deferred to call time)
     reader = _open_catalog_or_none()
     writer = make_catalog_writer() if reader is not None else None
     return _CatalogBackedRegistry(
@@ -165,11 +165,11 @@ def _open_catalog_or_none() -> Any:
     conformant collection names but tolerate its absence (e.g. fresh
     operator workstation, pytest temp dirs) use this helper.
     """
-    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-local import (heavy catalog dep deferred to call time)
 
     try:
         return make_catalog_reader()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog probe: absent/uninitialised catalog is tolerated, returns None fallback
         return None
 
 
@@ -182,7 +182,7 @@ def index() -> None:
     # Single sentinel read (migration_banner() is non-None iff migrating /
     # migrated-failed) — avoids a TOCTOU "None —" message if the sentinel
     # clears between two separate reads.
-    from nexus.migration.banner import migration_banner
+    from nexus.migration.banner import migration_banner  # noqa: PLC0415 — deliberate function-local import (branch-local migration sentinel check)
 
     _banner = migration_banner()
     if _banner:
@@ -198,7 +198,7 @@ def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False):
     nexus-7ydks: now takes the T3 handle (``T3Database`` raw or
     ``HttpVectorClient`` service), not the raw ``_client``.
     """
-    from nexus.commands.taxonomy_cmd import (
+    from nexus.commands.taxonomy_cmd import (  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
         _require_supported_taxonomy_backend,
         discover_for_collection,
     )
@@ -381,7 +381,7 @@ def index_repo_cmd(
     ``--corpus knowledge``), RDR documents are auto-discovered and indexed
     into rdr__.
     """
-    from nexus.indexer import index_repository
+    from nexus.indexer import index_repository  # noqa: PLC0415 — deliberate function-local import (heavy indexer dep deferred; startup-cost)
 
     if force and frecency_only:
         raise click.UsageError("--force and --frecency-only are mutually exclusive.")
@@ -406,7 +406,7 @@ def index_repo_cmd(
         if cat is not None:
             try:
                 cat.ensure_owner_for_repo(path)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort owner pre-registration; indexer's _catalog_hook registers regardless, failure only delays conformant naming
                 # ``ensure_owner_for_repo`` is best-effort here; the
                 # indexer's ``_catalog_hook`` registers the owner on
                 # this run regardless, so a failure at this point only
@@ -438,7 +438,7 @@ def index_repo_cmd(
             new_docs = "knowledge__" + existing_docs.removeprefix("docs__")
         else:
             # Synthesize from the conformant docs-collection shape.
-            from nexus.repo_identity import _resolve_repo_collection
+            from nexus.repo_identity import _resolve_repo_collection  # noqa: PLC0415 — deliberate function-local import (rare branch: --corpus knowledge first-index synthesis)
             cat_for_resolve = _open_catalog_or_none()
             synth = _resolve_repo_collection(
                 path, "docs", cat=cat_for_resolve,
@@ -475,7 +475,7 @@ def index_repo_cmd(
 
     # nexus-vatx Gap 4: zero the retry accumulators so the end-of-run
     # summary reflects only this run's backoffs.
-    from nexus.retry import get_retry_stats, reset_retry_stats
+    from nexus.retry import get_retry_stats, reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
     reset_retry_stats()
 
     bar: tqdm | None = None
@@ -575,7 +575,7 @@ def index_repo_cmd(
     def _emit_debug_timing() -> None:
         if not debug_timing:
             return
-        from nexus.stage_timers import aggregate, format_report
+        from nexus.stage_timers import aggregate, format_report  # noqa: PLC0415 — deliberate function-local import (rare branch: --debug-timing only)
         click.echo(
             format_report(aggregate(timers_collected), n_files=len(timers_collected)),
             err=True,
@@ -619,7 +619,7 @@ def index_repo_cmd(
 
     if not frecency_only:
         try:
-            from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir
+            from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
             hdir = _effective_hooks_dir(path)
             hook_names = ("post-commit", "post-merge", "post-rewrite")
             any_managed = any(
@@ -629,7 +629,7 @@ def index_repo_cmd(
             )
             if not any_managed:
                 click.echo("Tip: run `nx hooks install` to auto-index this repo on every commit.")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort hook detection must not crash indexing; logged via log.debug
             _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
 
     # Retry summary now emitted from the `finally` block around
@@ -655,9 +655,9 @@ def _collections_from_registry_info(info: dict) -> list[str]:
     the alias when the conformant ``code_collection`` is present
     silences the false warning without touching real data.
     """
-    from fnmatch import fnmatch
+    from fnmatch import fnmatch  # noqa: PLC0415 — deliberate function-local import (stdlib, branch-local use)
 
-    from nexus.config import is_local_mode, load_config as _load_cfg
+    from nexus.config import is_local_mode, load_config as _load_cfg  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
 
     cfg = _load_cfg()
     exclude_patterns = (
@@ -700,7 +700,7 @@ def _project_cross_collections(
     (the bug shipped because it was untested inline). Each collection's
     assignments are stamped with that collection as the source.
     """
-    from nexus.commands.taxonomy_cmd import _persist_assignments
+    from nexus.commands.taxonomy_cmd import _persist_assignments  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
 
     total = 0
     for col_name in collections:
@@ -743,11 +743,11 @@ def run_collection_postprocessing(
     if not collections:
         return
 
-    from nexus.config import load_config as _load_cfg
-    from nexus.db import make_t3
-    from nexus.db.t2 import T2Database
-    from nexus.mcp_infra import t2_index_write
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import load_config as _load_cfg  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-local import (heavy T3 dep deferred to call time)
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import (heavy T2 dep deferred to call time)
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deliberate function-local import (daemon write proxy deferred to call time)
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
 
     def _say(msg: str) -> None:
         if not quiet:
@@ -762,7 +762,7 @@ def run_collection_postprocessing(
                 try:
                     n = _discover_taxonomy(col_name, db.taxonomy, t3)
                     total_topics += n
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort per-collection taxonomy discovery; failure logged and chain continues
                     _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)
             if total_topics:
                 _say(f"  Taxonomy: {total_topics} topics across {len(collections)} collections.")
@@ -770,7 +770,7 @@ def run_collection_postprocessing(
                 auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
                 if auto_label:
                     try:
-                        from nexus.commands.taxonomy_cmd import _claude_available, relabel_topics
+                        from nexus.commands.taxonomy_cmd import _claude_available, relabel_topics  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
                         if _claude_available():
                             labeled = 0
                             for col_name in collections:
@@ -779,7 +779,7 @@ def run_collection_postprocessing(
                                 )
                             if labeled:
                                 _say(f"  Labels:   {labeled} topics labeled by Claude haiku.")
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — best-effort Claude auto-labelling; failure logged and chain continues
                         _log.debug("taxonomy_label_failed", exc_info=True)
 
                 # Count remaining unreviewed
@@ -798,7 +798,7 @@ def run_collection_postprocessing(
                     )
                     if proj_total:
                         _say(f"  Project:  {proj_total} cross-collection assignments.")
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort cross-collection projection pass; failure logged and chain continues
                     _log.debug("taxonomy_projection_failed", exc_info=True)
 
                 # Co-occurrence topic links from projections (RDR-075 SC-5)
@@ -807,29 +807,29 @@ def run_collection_postprocessing(
                     cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
                     if cooc:
                         _log.info("cooccurrence_links_generated", count=cooc)
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort co-occurrence link generation; failure logged and chain continues
                     _log.debug("cooccurrence_links_failed", exc_info=True)
 
                 # Auto-populate topic links if catalog available
                 # compute_topic_links routes upsert_topic_links internally.
                 try:
-                    from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links
+                    from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
                     cat = _try_load_catalog()
                     if cat:
                         for col_name in collections:
                             compute_topic_links(
                                 db.taxonomy, cat, collection=col_name, persist=True,
                             )
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort topic-link population; non-fatal trailing enrichment step in a guarded chain
                     pass  # Non-fatal
                 # Refresh L1 context cache
                 if repo_path is not None:
                     try:
-                        from nexus.context import generate_context_l1
+                        from nexus.context import generate_context_l1  # noqa: PLC0415 — deliberate function-local import (rare branch: L1 refresh only when repo_path supplied)
                         generate_context_l1(db.taxonomy, repo_path=repo_path)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — best-effort L1 context-cache refresh; non-fatal trailing enrichment step in a guarded chain
                         pass  # Non-fatal
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch wrapping the whole post-processing chain; failure logged and never crashes the index command
         _log.debug("taxonomy_discover_failed", exc_info=True)
 
 
@@ -886,16 +886,16 @@ def run_collection_postprocessing(
 )
 def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, streaming: str) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
-    import time as _time
+    import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
-    import structlog
+    import structlog  # noqa: PLC0415 — deliberate function-local import (command-local logger binding)
 
     _log = structlog.get_logger(__name__)
 
-    from nexus.config import get_pdf_extractor
-    from nexus.corpus import t3_collection_name
-    from nexus.doc_indexer import index_pdf as _index_pdf_raw
-    from nexus.errors import CredentialsMissingError
+    from nexus.config import get_pdf_extractor  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
+    from nexus.errors import CredentialsMissingError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
 
     # Local wrapper: convert the typed credential error into a Click
     # exception so the CLI shows a friendly message + exits non-zero
@@ -921,7 +921,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     # ── Batch mode (--dir) ──────────────────────────────────────────────
     if dir_path is not None:
-        from nexus.indexer_utils import (
+        from nexus.indexer_utils import (  # noqa: PLC0415 — deliberate function-local import (rare branch: --dir batch mode only)
             find_repo_root,
             is_gitignored,
             load_ignore_patterns,
@@ -978,7 +978,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         # Check if MinerU server is available for batch performance
         if extractor in ("auto", "mineru"):
-            from nexus.pdf_extractor import PDFExtractor
+            from nexus.pdf_extractor import PDFExtractor  # noqa: PLC0415 — deliberate function-local import (heavy PDF-extractor dep deferred; rare branch)
             _extractor = PDFExtractor()
             server_up = _extractor._mineru_server_available()
             if server_up:
@@ -1003,7 +1003,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 elapsed = _time.monotonic() - t0
                 total_chunks += n
                 click.echo(f" — {n} chunks, {elapsed:.1f}s")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — per-PDF batch isolation: one file's failure must not abort the batch; recorded and logged via log.warning
                 elapsed = _time.monotonic() - t0
                 failures.append((pdf, str(exc)))
                 _log.warning("batch_index_failed", path=str(pdf), error=str(exc))
@@ -1031,10 +1031,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     path = path.resolve()
 
     if dry_run:
-        import chromadb
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        import chromadb  # noqa: PLC0415 — deliberate function-local import (rare branch: --dry-run local ONNX path only)
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # noqa: PLC0415 — deliberate function-local import (rare branch: --dry-run local ONNX path only)
 
-        from nexus.db import make_t3
+        from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-local import (heavy T3 dep deferred; rare branch)
 
         click.echo("Dry-run mode — local ONNX embeddings, no cloud writes.")
         ef = DefaultEmbeddingFunction()
@@ -1169,9 +1169,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
               help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
 def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, monitor: bool) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
-    from nexus.corpus import t3_collection_name
-    from nexus.doc_indexer import index_markdown
-    from nexus.errors import CredentialsMissingError
+    from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
+    from nexus.errors import CredentialsMissingError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
 
     # Normalize --collection through t3_collection_name() so bare names like
     # "mynotes" become "knowledge__mynotes__voyage-context-3__v1", matching
@@ -1243,9 +1243,9 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     or a single `.md` file (index just that file — the preferred form when only
     one RDR changed, e.g. at rdr-close time).
     """
-    from nexus.doc_indexer import batch_index_markdowns
-    from nexus.indexer import _repo_collection_or_legacy
-    from nexus.repo_identity import _repo_identity
+    from nexus.doc_indexer import batch_index_markdowns  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
+    from nexus.indexer import _repo_collection_or_legacy  # noqa: PLC0415 — deliberate function-local import (heavy indexer dep deferred; startup-cost)
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
 
     path = path.resolve()
 
@@ -1260,7 +1260,7 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
                 ["git", "rev-parse", "--show-toplevel"],
                 cwd=path.parent, text=True, stderr=subprocess.DEVNULL,
             ).strip()).resolve()
-        except Exception:
+        except Exception:  # noqa: BLE001 — fallback path: git toplevel resolution failed (non-repo / git absent); recovers via conventional docs/rdr/ layout heuristic
             # Fallback: assume conventional docs/rdr/<file>.md layout.
             if path.parent.name == "rdr" and path.parent.parent.name == "docs":
                 repo_root = path.parent.parent.parent
@@ -1313,10 +1313,10 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     # The doc_indexer embed_fn contract is `(texts, model) → (embeddings, model)`.
     # LocalEmbeddingFunction's __call__ is a ChromaDB EF — `(input) → embeddings`.
     # We wrap it to match the indexer contract.
-    from nexus.config import is_local_mode
+    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
     _embed_fn = None
     if is_local_mode():
-        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deliberate function-local import (rare branch: local-mode embedder only)
         _local_ef = LocalEmbeddingFunction()
 
         def _embed_fn(texts: list[str], model: str) -> tuple[list[list[float]], str]:

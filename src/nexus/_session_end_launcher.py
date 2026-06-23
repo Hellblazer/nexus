@@ -59,9 +59,9 @@ def _run_session_end_synchronously() -> None:
     and was the documented source of double-stop failures.
     """
     try:
-        from nexus import hooks
+        from nexus import hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         hooks.session_end_flush()
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
         # Fully detached; nothing upstream can observe us. Swallow.
         pass
 
@@ -145,11 +145,11 @@ def _print_tier_status_summary() -> None:
     three surfaces never disagree on attribution.
     """
     try:
-        import sqlite3
-        from pathlib import Path
+        import sqlite3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from pathlib import Path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-        from nexus.config import default_db_path
-        from nexus.session import resolve_active_session_id
+        from nexus.config import default_db_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
         session_id = resolve_active_session_id()
         if not session_id:
@@ -186,7 +186,7 @@ def _print_tier_status_summary() -> None:
             f"total={total} {' '.join(parts)}\n"
         )
         sys.stderr.flush()
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
         # Telemetry must never break session close.
         pass
 

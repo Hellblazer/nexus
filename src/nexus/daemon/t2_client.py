@@ -176,7 +176,7 @@ def _open_connection(
     fail-loud-on-unreachable). When both UDS and TCP are available
     from the discovery file, UDS is preferred.
     """
-    from nexus.daemon.discovery import (
+    from nexus.daemon.discovery import (  # noqa: PLC0415 — circular-dep avoidance: discovery imports from daemon package
         DaemonNotRunningError,
         discovery_resolve,
     )
@@ -317,7 +317,7 @@ class T2Client:
         propagates transport / protocol errors unchanged so the caller
         tears down the socket the same way as any other RPC failure.
         """
-        from nexus.db.migrations import expected_t2_schema_version
+        from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — circular-dep avoidance: migrations pulls in db package
 
         client_version = expected_t2_schema_version()
         self._request_id += 1
@@ -498,7 +498,7 @@ class _CatalogWriterProxy:
         self._client = client
 
     def __getattr__(self, method_name: str) -> Any:
-        from nexus.daemon.catalog_write_shim import (
+        from nexus.daemon.catalog_write_shim import (  # noqa: PLC0415 — circular-dep avoidance: catalog_write_shim references T2Client
             CATALOG_WRITE_OPS,
             CATALOG_WRITE_PREFIX,
             decode_return,

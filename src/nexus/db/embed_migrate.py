@@ -112,7 +112,7 @@ def detect_stale_local_collections(
     collection was indexed with a different embedder. Source files are
     enumerated so the caller can preview and migrate.
     """
-    from nexus.commands.collection import _doc_id_to_file_path
+    from nexus.commands.collection import _doc_id_to_file_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     resolver = resolve_doc_id or _doc_id_to_file_path
     stale: list[StaleCollection] = []
@@ -125,12 +125,12 @@ def detect_stale_local_collections(
             continue
         try:
             col = db._client_for(name).get_collection(name)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort probe; skip collection on any failure
             continue
         try:
             col.query(query_embeddings=[dummy], n_results=1)
             continue  # active dim accepted — not stale
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — dim-probe classification; non-dim errors logged and skipped
             if "dimension" not in str(exc).lower():
                 # A non-dimension error (transient, permission) — do not
                 # misclassify it as a migration candidate.
@@ -183,13 +183,13 @@ def collection_source_paths(
 
     _cat = None
     try:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.config import catalog_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         _cp = catalog_path()
         if Catalog.is_initialized(_cp):
             _cat = Catalog(_cp, _cp / ".catalog.db")
-    except Exception:
+    except Exception:  # noqa: BLE001 — catalog is optional here; falls back to None
         _cat = None
 
     while True:
@@ -202,7 +202,7 @@ def collection_source_paths(
         if _cat is not None and page_chashes_nonempty:
             try:
                 by_chash = _cat.docs_for_chashes(page_chashes_nonempty)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort chash map; falls back to empty
                 by_chash = {}
             for c, doc_ids in by_chash.items():
                 if doc_ids:
@@ -245,9 +245,9 @@ def _default_reindex(
     ``(indexed_sources, after_count)``. ``code__`` collections never reach
     here (classified ``code`` and deferred).
     """
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
-    from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf
+    from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     def _chunks(result: object) -> int:
         # index_markdown / index_pdf return the chunk count (int) unless
@@ -410,7 +410,7 @@ def migrate_collection_safe(
     # (taxonomy, chash, pipeline, catalog docs + projection). A bare
     # db.delete_collection here orphaned the old catalog rows, surfacing as
     # doctor t3-vs-catalog / collections-drift FAILs (nexus-prgf4).
-    from nexus.db.collection_purge import purge_collection_cascade
+    from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     cascade = purge_collection_cascade(db, stale.name)
     _log.info(

@@ -289,7 +289,7 @@ def migrate_aspects(
                         imported += 1
                     else:
                         skipped += 1
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
                     errors += 1
                     _log.warning(
                         "aspects_etl.migrate_aspects.row_error",
@@ -354,7 +354,7 @@ def migrate_highlights(
                         imported += 1
                     else:
                         skipped += 1
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
                     errors += 1
                     _log.warning(
                         "aspects_etl.migrate_highlights.row_error",
@@ -456,7 +456,7 @@ def migrate_queue(
                         imported += 1
                     else:
                         skipped += 1
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
                     errors += 1
                     _log.warning(
                         "aspects_etl.migrate_queue.row_error",
@@ -497,7 +497,7 @@ def migrate_promotion_log(
     collector: Any = None,
 ) -> dict[str, int]:
     """Migrate aspect_promotion_log from SQLite to Postgres via the HTTP service."""
-    import json
+    import json  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -526,7 +526,7 @@ def migrate_promotion_log(
                 try:
                     body = _transform_promotion_row(row_dict)
                     # POST to /v1/aspects/promotion/import
-                    import httpx
+                    import httpx  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                     resp = http_aspects._client.post(
                         "/v1/aspects/promotion/import",
                         content=json.dumps(body),
@@ -537,7 +537,7 @@ def migrate_promotion_log(
                         imported += 1
                     else:
                         skipped += 1
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
                     errors += 1
                     _log.warning(
                         "aspects_etl.migrate_promotion_log.row_error",

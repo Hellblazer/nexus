@@ -203,7 +203,7 @@ def _is_t2_daemon_process(pid: int) -> bool:
             ["ps", "-p", str(pid), "-o", "command="],
             capture_output=True, text=True, timeout=5,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary catch around subprocess probe; degrades to False
         return False
     cmd = out.stdout.strip()
     return "daemon t2" in cmd or "t2_daemon" in cmd
@@ -221,7 +221,7 @@ def _lsof_holder_pids(target: str) -> list[int]:
             ["lsof", "-t", "--", target],
             capture_output=True, text=True, timeout=5,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary catch around subprocess probe; degrades to empty list
         return []
     pids: list[int] = []
     for tok in out.stdout.split():
@@ -808,7 +808,7 @@ def _build_dispatch_table(t2db: Any) -> dict[str, Any]:
 
 def t2_discovery_path(config_dir: Path) -> Path:
     """Return the canonical discovery-file path for the T2 daemon."""
-    from nexus.daemon.discovery import discovery_path as _disc
+    from nexus.daemon.discovery import discovery_path as _disc  # noqa: PLC0415 - deferred to avoid circular import at module load
     return _disc(config_dir, tier="t2")
 
 
@@ -848,9 +848,9 @@ def _write_discovery_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 def _daemon_version() -> str:
     try:
-        from importlib.metadata import version
+        from importlib.metadata import version  # noqa: PLC0415 - branch-local; deferred to call time
         return version("conexus")
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary catch around version lookup; degrades to placeholder
         return "0.0.0"
 
 
@@ -1036,7 +1036,7 @@ class T2Daemon:
         # caller. T2Database.__init__ no longer auto-runs migrations; the
         # daemon passes ``run_migrations=True`` so its construction
         # bootstraps the schema before any client connects.
-        from nexus.db.t2 import T2Database
+        from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
         self._t2db = T2Database(self._db_path, run_migrations=True)
         self._dispatch_table = _build_dispatch_table(self._t2db)
 
@@ -1048,7 +1048,7 @@ class T2Daemon:
         # inside the running loop.
         self._catalog_write_lock = asyncio.Lock()
         self._catalog = self._build_hosted_catalog()
-        from nexus.daemon.catalog_write_shim import build_catalog_write_dispatch
+        from nexus.daemon.catalog_write_shim import build_catalog_write_dispatch  # noqa: PLC0415 - deferred to avoid circular import at module load
         self._dispatch_table.update(build_catalog_write_dispatch(self._catalog))
         # RDR-146 P2 (nexus-5p2ci.12): the interactive-pending probe. A real
         # daemon method (no SQLite touch) registered under the catalog.* read
@@ -1260,7 +1260,7 @@ class T2Daemon:
         # diagnostic in production, not just flaking the observability
         # test. flush() pushes the record to the OS; a peer process
         # reading the log then sees it.
-        from nexus.logging_setup import flush_logging
+        from nexus.logging_setup import flush_logging  # noqa: PLC0415 - deferred to avoid circular import at module load
         flush_logging()
 
     async def stop(self) -> None:
@@ -1421,8 +1421,8 @@ class T2Daemon:
         (``NEXUS_CATALOG_PATH``), so daemon startup never touches the real
         user catalog.
         """
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 - deferred to avoid circular import at module load
+        from nexus.config import catalog_path  # noqa: PLC0415 - deferred to avoid circular import at module load
         path = catalog_path()
         return Catalog(path, path / ".catalog.db")
 
@@ -1751,7 +1751,7 @@ class T2Daemon:
             # a freshness filter (reap must inspect even a stale predecessor)
             # so the pid-extraction, version-aware spare, and health-ping
             # below all keep working across the upgrade window.
-            from nexus.daemon.discovery import normalize_discovery_view
+            from nexus.daemon.discovery import normalize_discovery_view  # noqa: PLC0415 - deferred to avoid circular import at module load
 
             addr_payload = normalize_discovery_view(payload)
             pid = addr_payload.get("pid")
@@ -1875,7 +1875,7 @@ class T2Daemon:
         item 2) prevents two daemons against the same data file from
         different ``config_dir``s both running ``apply_pending``.
         """
-        import fcntl
+        import fcntl  # noqa: PLC0415 - branch-local; deferred to call time
 
         # 1. Legacy config_dir-scoped lock.
         lock_path = self._config_dir / _SPAWN_LOCK_FILE
@@ -1919,7 +1919,7 @@ class T2Daemon:
         self._spawn_lock_fd_path = fd2
 
     def _release_spawn_lock(self) -> None:
-        import fcntl
+        import fcntl  # noqa: PLC0415 - branch-local; deferred to call time
 
         for attr in ("_spawn_lock_fd_path", "_spawn_lock_fd"):
             fd = getattr(self, attr, None)
@@ -1957,7 +1957,7 @@ def _poll_for_winner(config_dir: Path, timeout: float) -> bool:
     real client would (the lease-aware reader handles both the new lease
     record and a legacy payload mid-upgrade).
     """
-    from nexus.daemon.discovery import find_t2_daemon
+    from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -2096,7 +2096,7 @@ def _run_main_spin_guarded(
     watchdog that captures + self-heals on a sustained spin (RDR-151 u2vmv).
     Mirrors ``asyncio.run`` (set loop, run, cancel pending, shutdown asyncgens,
     close)."""
-    from nexus.daemon.spin_guard import SpinGuardSelector, SpinWatchdog
+    from nexus.daemon.spin_guard import SpinGuardSelector, SpinWatchdog  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     sel = SpinGuardSelector()
     loop = asyncio.SelectorEventLoop(sel)
@@ -2149,7 +2149,7 @@ def run_t2_daemon(
     log, so a crash or signal-kill left no record and the cause was
     undiagnosable.
     """
-    from nexus.logging_setup import configure_logging
+    from nexus.logging_setup import configure_logging  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     configure_logging("t2_daemon", config_dir=config_dir)
 

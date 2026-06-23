@@ -290,7 +290,7 @@ def _embedding_model_for(collection: str) -> str:
     cheap to import. Raises ``ValueError`` if the collection name is
     unrecognised — the caller's responsibility to plumb a real name.
     """
-    from nexus.corpus import index_model_for_collection
+    from nexus.corpus import index_model_for_collection  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     return index_model_for_collection(collection)
 
@@ -503,7 +503,7 @@ def _check_embedding_domain(
     for collection in _collections_in_args(args):
         try:
             actual = _embedding_model_for(collection)
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
             # Collection name didn't resolve — leave that for the
             # tool dispatcher to surface; the embedding guard is not
             # the place to enforce naming.
@@ -746,7 +746,7 @@ def _hydrate_operator_args(
       * RF-13: ``template`` dict → ``fields`` CSV for extract
       * list-valued ``content``/``context`` joined for summarize/generate
     """
-    from nexus.mcp import core as mcp_core
+    from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
 
@@ -880,7 +880,7 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     content and injects ``inputs`` (JSON array) into the args before
     dispatch. Plan YAML does NOT need explicit hydration steps.
     """
-    from nexus.mcp import core as mcp_core
+    from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     # Auto-hydration + arg normalization: shared with the bundle path.
     resolved_tool, args = _hydrate_operator_args(tool, args)
@@ -1045,7 +1045,7 @@ async def plan_run(
     to recover the per-step dispatch path for debugging or plans that
     need per-step telemetry.
     """
-    from nexus.plans.bundle import (
+    from nexus.plans.bundle import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         BUNDLED_INTERMEDIATE,
         IsolatedStep,
         MAX_BUNDLE_PROMPT_CHARS,

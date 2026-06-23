@@ -208,7 +208,7 @@ def migrate_memory_rows(
                 last_accessed=transformed["last_accessed"],
             )
             written_count += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-row ETL failure logged via log.error; migration continues
             _log.error(
                 "memory_etl.row_failed",
                 project=transformed.get("project", row_dict.get("project", "?")),

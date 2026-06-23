@@ -67,8 +67,8 @@ class LocalCrossEncoder:
 
         Raises ``RuntimeError`` if neither path exists in the repo.
         """
-        from huggingface_hub import hf_hub_download
-        from huggingface_hub.errors import EntryNotFoundError
+        from huggingface_hub import hf_hub_download  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+        from huggingface_hub.errors import EntryNotFoundError  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
         last_exc: Exception | None = None
         for candidate in _MODEL_FILENAME_CANDIDATES:
@@ -89,7 +89,7 @@ class LocalCrossEncoder:
         ) from last_exc
 
     def _resolve_tokenizer_path(self) -> Path:
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import hf_hub_download  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
         return Path(
             hf_hub_download(
@@ -111,8 +111,8 @@ class LocalCrossEncoder:
         with self._init_lock:
             if self._session is not None:
                 return
-            import onnxruntime as ort
-            from tokenizers import Tokenizer
+            import onnxruntime as ort  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+            from tokenizers import Tokenizer  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
             model_path = self._resolve_model_path()
             tokenizer_path = self._resolve_tokenizer_path()
@@ -150,7 +150,7 @@ class LocalCrossEncoder:
             [(query, doc) for doc in documents]
         )
         # Build padded numpy arrays for onnxruntime.
-        import numpy as np
+        import numpy as np  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
         max_len = max(len(e.ids) for e in encodings)
         input_ids = np.zeros((len(encodings), max_len), dtype=np.int64)

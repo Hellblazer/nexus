@@ -150,7 +150,7 @@ def _check_centroid_dimension(embedding: "np.ndarray", centroid_coll: Any) -> bo
                 stored_dim=stored_dim,
             )
             return False
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return True
     return True
 
@@ -175,7 +175,7 @@ class CatalogTaxonomy:
     """
 
     def __init__(self, path: Path, memory: "MemoryStore") -> None:
-        import math
+        import math  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
         self._memory = memory
         self._lock = threading.Lock()
@@ -227,7 +227,7 @@ class CatalogTaxonomy:
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_topics
+        from nexus.db.migrations import migrate_topics  # noqa: PLC0415 — deferred to avoid circular import
 
         migrate_topics(self.conn)
 
@@ -237,7 +237,7 @@ class CatalogTaxonomy:
         RDR-070 (nexus-9k5). Lock-naive: caller must hold both locks.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_assigned_by
+        from nexus.db.migrations import migrate_assigned_by  # noqa: PLC0415 — deferred to avoid circular import
 
         migrate_assigned_by(self.conn)
 
@@ -247,7 +247,7 @@ class CatalogTaxonomy:
         RDR-070 (nexus-lbu). Lock-naive: caller must hold both locks.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_review_columns
+        from nexus.db.migrations import migrate_review_columns  # noqa: PLC0415 — deferred to avoid circular import
 
         migrate_review_columns(self.conn)
 
@@ -509,7 +509,7 @@ class CatalogTaxonomy:
         Raw ``similarity`` column values are used; ICF is applied only for
         the receiving-hub ICF reporting, never to mutate stored rows.
         """
-        from nexus.corpus import default_projection_threshold
+        from nexus.corpus import default_projection_threshold  # noqa: PLC0415 — deferred to avoid circular import
 
         resolved_threshold = (
             threshold if threshold is not None
@@ -1393,7 +1393,7 @@ class CatalogTaxonomy:
         c-TF-IDF labels, and reassigns docs. Returns number of children
         created, or 0 if too few docs.
         """
-        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid circular import
 
         if k < 2:
             return 0
@@ -1412,7 +1412,7 @@ class CatalogTaxonomy:
             coll = chroma_client.get_collection(
                 collection_name, embedding_function=None,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
             _log.warning("split_collection_not_found", collection=collection_name)
             return 0
 
@@ -1435,7 +1435,7 @@ class CatalogTaxonomy:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         # KMeans sub-clustering
-        from sklearn.cluster import KMeans
+        from sklearn.cluster import KMeans  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
         km = KMeans(n_clusters=k, n_init=10, random_state=42)
         labels = km.fit_predict(embeddings)
@@ -1513,7 +1513,7 @@ class CatalogTaxonomy:
         parent_centroid_id = f"{collection_name}:{topic_id}"
         try:
             centroid_coll.delete(ids=[parent_centroid_id])
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             pass  # Parent centroid may not exist
         if c_ids:
             self._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
@@ -1698,7 +1698,7 @@ class CatalogTaxonomy:
                 self._discover_cross_links(
                     collection_name, c_embs, c_metas, centroid_coll,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 _log.debug("discover_cross_links_failed", exc_info=True)
 
         # Record doc count for rebalance tracking
@@ -1950,7 +1950,7 @@ class CatalogTaxonomy:
                 where={"collection": {"$ne": collection_name}},
                 include=["embeddings", "metadatas"],
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return []
 
         other_embs_raw = other.get("embeddings")
@@ -2021,7 +2021,7 @@ class CatalogTaxonomy:
                 "taxonomy__centroids",
                 embedding_function=None,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return None
 
         if centroid_coll.count() == 0:
@@ -2041,7 +2041,7 @@ class CatalogTaxonomy:
 
         try:
             results = centroid_coll.query(**query_kwargs)
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return None  # No centroids match the filter
 
         if not results["ids"] or not results["ids"][0]:
@@ -2082,7 +2082,7 @@ class CatalogTaxonomy:
                 "taxonomy__centroids",
                 embedding_function=None,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return []
 
         if centroid_coll.count() == 0:
@@ -2111,7 +2111,7 @@ class CatalogTaxonomy:
                 query_embeddings=emb_list,
                 **base_kwargs,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return []
 
         by = "projection" if cross_collection else "centroid"
@@ -2235,19 +2235,19 @@ class CatalogTaxonomy:
         (``nx taxonomy project``) sets this to True by default so long-
         running projections are observable; test callers leave it False.
         """
-        import sys
-        import time
+        import sys  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+        import time  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
         def _emit(msg: str) -> None:
             if progress:
-                print(f"  {msg}", file=sys.stderr, flush=True)
+                print(f"  {msg}", file=sys.stderr, flush=True)  # noqa: T201 — opt-in (`progress=True`) CLI projection progress to stderr
 
         # 1. Fetch source embeddings
         try:
             src_coll = chroma_client.get_collection(
                 source_collection, embedding_function=None,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return {
                 "matched_topics": [],
                 "novel_chunks": [],
@@ -2294,7 +2294,7 @@ class CatalogTaxonomy:
         # 2. Fetch target centroids
         try:
             centroid_coll = self._create_centroid_collection(chroma_client)
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return {
                 "matched_topics": [],
                 "novel_chunks": list(src_ids),
@@ -2721,7 +2721,7 @@ class CatalogTaxonomy:
                     else:
                         old_labels.append(m.get("label", ""))
                         old_review_statuses.append("pending")
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             pass
 
         with self._lock:

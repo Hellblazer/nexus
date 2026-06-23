@@ -187,7 +187,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
             dt_uri=dt_uri,
         )
         return True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — DEVONthink boundary op is best-effort; failure logged via log.warning
         _log.warning(
             "dt_stamp_failed",
             file_path=str(file_path),
@@ -229,7 +229,7 @@ def _link_semantic_record(uuid: str) -> bool:
             return False
         counts = generate_dt_links(reader, entry.tumbler, uuid, writer=writer)
         return (counts["similar"] + counts["link"]) > 0
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — DEVONthink boundary op is best-effort; failure logged via log.warning
         _log.warning("dt_link_failed", uuid=uuid, error=str(e))
         return False
     finally:
@@ -269,7 +269,7 @@ def _writeback_record(uuid: str) -> bool:
             return False
         result = writeback_record(uuid, str(entry.tumbler))
         return any(result[k] for k in ("tags", "annotation", "metadata"))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — DEVONthink boundary op is best-effort; failure logged via log.warning
         _log.warning("dt_writeback_failed", uuid=uuid, error=str(e))
         return False
     finally:
@@ -330,7 +330,7 @@ def _ingest_highlights_record(uuid: str) -> bool:
             mentions_md=mentions_md,
             ingested_at=datetime.now(timezone.utc).isoformat(),
         ))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — DEVONthink boundary op is best-effort; failure logged via log.warning
         _log.warning("dt_highlights_failed", uuid=uuid, error=str(e))
         return False
     finally:
@@ -740,7 +740,7 @@ def index_cmd(
     # just wrote to. Runs once per distinct collection (title-group oriented),
     # after all records land so a multi-record paper enriches as one group.
     if enrich and touched_collections:
-        from nexus.commands.enrich import run_bib_enrichment
+        from nexus.commands.enrich import run_bib_enrichment  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
 
         for coll in sorted(touched_collections):
             click.echo(f"\nEnriching bibliographic metadata: {coll}")
@@ -1150,7 +1150,7 @@ def _resolve_dt_script_source_dir() -> Path:
     inside the installed ``nexus/_resources/dt-scripts``. Both resolve
     via :func:`importlib.resources.files`.
     """
-    from importlib.resources import as_file, files
+    from importlib.resources import as_file, files  # noqa: PLC0415 — stdlib importlib.resources deferred to function scope
 
     resource = files("nexus") / "_resources" / "dt-scripts"
     with as_file(resource) as resolved:

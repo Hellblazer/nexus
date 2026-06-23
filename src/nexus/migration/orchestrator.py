@@ -86,7 +86,7 @@ class ServiceCountSource:
         if not relations:
             return None
         try:
-            from nexus.catalog.factory import make_catalog_client_for_migration
+            from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
             token = os.environ.get("NX_SERVICE_TOKEN", "")
             client = make_catalog_client_for_migration(base_url=None, token=token)
@@ -108,11 +108,11 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
     Each runner constructs its HTTP store lazily so a single-store failure
     surfaces inside the orchestrated run, not at registry build time.
     """
-    from nexus.migration.etl_registry import StoreEtl as _StoreEtl
+    from nexus.migration.etl_registry import StoreEtl as _StoreEtl  # noqa: PLC0415 — deferred per-store ETL import
 
     def _memory(s: EtlSources, collector: Any) -> dict:
-        from nexus.db.t2.http_memory_store import HttpMemoryStore
-        from nexus.db.t2.memory_etl import migrate_memory_rows
+        from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.db.t2.memory_etl import migrate_memory_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         store = HttpMemoryStore()
         try:
@@ -121,8 +121,8 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
             store.close()
 
     def _plans(s: EtlSources, collector: Any) -> dict:
-        from nexus.db.t2.http_plan_library import HttpPlanLibrary
-        from nexus.db.t2.plan_etl import migrate_plan_rows
+        from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.db.t2.plan_etl import migrate_plan_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         store = HttpPlanLibrary()
         try:
@@ -131,8 +131,8 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
             store.close()
 
     def _telemetry(s: EtlSources, collector: Any) -> dict:
-        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
-        from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.db.t2.telemetry_etl import migrate_telemetry_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         store = HttpTelemetryStore()
         try:
@@ -141,8 +141,8 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
             store.close()
 
     def _taxonomy(s: EtlSources, collector: Any) -> dict:
-        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
-        from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows
+        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         store = HttpTaxonomyStore()
         try:
@@ -154,11 +154,11 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
         # nexus-iy5se: run only document_aspects, highlights, and
         # promotion_log here. The queue import (aspect_extraction_queue) has
         # an FK into catalog_documents and must run AFTER catalog.
-        from nexus.db.t2.aspects_etl import migrate_without_queue
-        from nexus.db.t2.http_document_aspects_store import (
+        from nexus.db.t2.aspects_etl import migrate_without_queue  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.db.t2.http_document_aspects_store import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
             HttpDocumentAspectsStore,
         )
-        from nexus.db.t2.http_document_highlights_store import (
+        from nexus.db.t2.http_document_highlights_store import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
             HttpDocumentHighlightsStore,
         )
 
@@ -178,8 +178,8 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
         # nexus-iy5se: queue import runs AFTER catalog so catalog_documents
         # is populated and fk_aspect_queue_catalog_doc does not reject valid
         # rows.
-        from nexus.db.t2.aspects_etl import migrate_queue
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        from nexus.db.t2.aspects_etl import migrate_queue  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         queue = HttpAspectQueue()
         try:
@@ -192,8 +192,8 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
                 queue.close()
 
     def _chash(s: EtlSources, collector: Any) -> dict:
-        from nexus.db.t2.chash_etl import migrate_chash_rows
-        from nexus.db.t2.http_chash_index import HttpChashIndex
+        from nexus.db.t2.chash_etl import migrate_chash_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         store = HttpChashIndex()
         try:
@@ -203,8 +203,8 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
                 store.close()
 
     def _catalog(s: EtlSources, collector: Any) -> dict:
-        from nexus.catalog.factory import make_catalog_client_for_migration
-        from nexus.db.t2.catalog_etl import migrate_catalog
+        from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.db.t2.catalog_etl import migrate_catalog  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         token = os.environ.get("NX_SERVICE_TOKEN", "")
         client = make_catalog_client_for_migration(base_url=None, token=token)

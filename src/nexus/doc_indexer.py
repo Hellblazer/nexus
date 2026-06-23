@@ -57,7 +57,7 @@ def _sha256(path: Path) -> str:
 
 
 def _has_credentials() -> bool:
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
 
 
@@ -94,7 +94,7 @@ def _lookup_existing_doc_id(
         if existing is None:
             return ""
         return str(existing.tumbler)
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch; degrade to safe default on error
         return ""
 
 
@@ -243,7 +243,7 @@ def _register_or_lookup_doc_id(
             source_mtime=source_mtime,
         )
         return str(tumbler)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort/telemetry path; failure logged at debug, must not crash caller
         _log.debug("preflight_register_failed", exc_info=True)
         return ""
     finally:
@@ -260,7 +260,7 @@ def _missing_credentials() -> list[str]:
     user EXACTLY which key is missing rather than the generic
     "credentials not configured" form. Empty list means both are set.
     """
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     missing: list[str] = []
     if not get_credential("voyage_api_key"):
         missing.append("voyage_api_key")
@@ -418,7 +418,7 @@ def _embed_with_fallback(
             chunk_count=len(chunks),
             limit=_CCE_MAX_TOTAL_CHUNKS,
         )
-    import voyageai
+    import voyageai  # noqa: PLC0415 — heavy/optional dep (voyageai) deferred to call time to keep module import cheap
     client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
     if model == "voyage-context-3":
         # CCE API accepts single-element inputs — use it for all chunk counts.
@@ -456,7 +456,7 @@ def _embed_with_fallback(
                                 inputs=[[truncated]], model=model, input_type=input_type,
                             )
                             return r.results[0].embeddings
-                        except Exception as exc2:
+                        except Exception as exc2:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
                             _log.warning("cce_chunk_skip_after_truncate",
                                          error=str(exc2), chars=_CCE_CHAR_LIMIT)
                             # Return zero vector — chunk is indexed but with degraded embedding
@@ -498,7 +498,7 @@ def _embed_with_fallback(
                 for future in futures:
                     try:
                         future.result()
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 — gather all futures; capture first failure and re-raise after loop
                         if first_exc is None:
                             first_exc = exc
                 if first_exc is not None:
@@ -703,7 +703,7 @@ def _index_document(
             embeddings = [[]] * len(documents)
             actual_model = target_model
         else:
-            from nexus.config import get_credential, load_config
+            from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             voyage_key = get_credential("voyage_api_key")
             if not voyage_key:
                 raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
@@ -718,7 +718,7 @@ def _index_document(
     # fire from every storage event; the per-doc loop covers single-shape
     # consumers on CLI ingest.
     if hooks is None:
-        from nexus.hook_registry import HookRegistry, install_default_hooks
+        from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         hooks = HookRegistry()
         install_default_hooks(hooks)
     # nexus-zq79 F2: use _register_or_lookup_doc_id, NOT _lookup_existing_doc_id.
@@ -871,7 +871,7 @@ def _index_pdf_incremental(
                 embeddings = [[]] * len(batch_docs)
                 actual_model = target_model
             else:
-                from nexus.config import get_credential, load_config
+                from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
                 voyage_key = get_credential("voyage_api_key")
                 if not voyage_key:
                     raise RuntimeError("voyage_api_key required")
@@ -903,7 +903,7 @@ def _index_pdf_incremental(
         # chains fire from every storage event; the per-doc loop covers
         # single-shape consumers on CLI ingest.
         if hooks is None:
-            from nexus.hook_registry import HookRegistry, install_default_hooks
+            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             hooks = HookRegistry()
             install_default_hooks(hooks)
         hooks.fire_batch(
@@ -992,7 +992,7 @@ def _pdf_chunks(
     omits ``git_meta`` per the empty-set rule (nexus-2my fix #3).
     """
     if git_meta is None:
-        from nexus.indexer_utils import detect_git_metadata
+        from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         git_meta = detect_git_metadata(pdf_path)
     result = PDFExtractor().extract(pdf_path, extractor=extractor)
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
@@ -1021,7 +1021,7 @@ def _pdf_chunks(
     # Compute source_title once before the loop so bib lookup uses the same value.
     # nexus-8l6 fallback: extractor metadata wins; otherwise derive from
     # first H1 or normalised filename (preserves initialisms like RDR, API).
-    from nexus.indexer_utils import derive_title
+    from nexus.indexer_utils import derive_title  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     source_title = (
         str(result.metadata.get("docling_title") or "").strip()
         or str(result.metadata.get("pdf_title") or "").strip()
@@ -1029,7 +1029,7 @@ def _pdf_chunks(
     )
     bib: dict = {}
     if bib_enrich_enabled:
-        from nexus.bib_enricher import enrich as bib_enrich
+        from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         bib = bib_enrich(source_title)
 
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
@@ -1086,10 +1086,10 @@ def _markdown_chunks(
     :func:`nexus.indexer_utils.detect_git_metadata`. Empty dict outside
     a git repo (nexus-2my fix #3).
     """
-    from nexus.catalog.catalog import make_relative
+    from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     if git_meta is None:
-        from nexus.indexer_utils import detect_git_metadata
+        from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         git_meta = detect_git_metadata(md_path)
 
     raw_text = md_path.read_text(encoding="utf-8")
@@ -1114,7 +1114,7 @@ def _markdown_chunks(
     # nexus-8l6: source_title fallback chain. Frontmatter ``title:`` wins;
     # otherwise derive from the first H1 or the normalised filename so
     # ``nx store list`` never displays ``untitled``.
-    from nexus.indexer_utils import derive_title
+    from nexus.indexer_utils import derive_title  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     source_title = (
         str(frontmatter.get("title") or "").strip()
         or derive_title(md_path, body)
@@ -1193,7 +1193,7 @@ def index_pdf(
     to avoid network calls in offline/air-gapped environments.  Use
     ``nx enrich <collection>`` for deliberate backfill.
     """
-    from functools import partial
+    from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
     _empty_meta = {"chunks": 0, "pages": [], "title": "", "author": ""}
     # GH #336 mirror: same local-fallback semantics as ``_index_document``.
@@ -1301,14 +1301,14 @@ def index_pdf(
     # Streaming pipeline routing: check page count before full extraction.
     if streaming in ("auto", "always"):
         try:
-            import pymupdf
+            import pymupdf  # noqa: PLC0415 — heavy/optional dep (pymupdf) deferred to call time to keep module import cheap
             with pymupdf.open(str(pdf_path)) as _doc:
                 page_count = len(_doc)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort page-count probe; falls through to batch path on failure
             page_count = -1  # can't open PDF — fall through to batch path
         use_streaming = streaming == "always" or (page_count >= 0 and page_count >= _STREAMING_THRESHOLD)
         if use_streaming:
-            from nexus.pipeline_stages import pipeline_index_pdf
+            from nexus.pipeline_stages import pipeline_index_pdf  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             # Returns 0 if skipped (already running or completed by another process).
             # The staleness check above (line 638-644) handles the "unchanged" case;
             # a 0 here means a concurrent pipeline is active on this content_hash.
@@ -1350,7 +1350,7 @@ def index_pdf(
     # Catalog registration helper for batch paths (streaming has its own hook)
     def _register_in_catalog(meta_list: list[dict], chunk_count: int) -> None:
         try:
-            from nexus.pipeline_stages import _catalog_pdf_hook
+            from nexus.pipeline_stages import _catalog_pdf_hook  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             _catalog_pdf_hook(
                 pdf_path, col_name,
                 title=meta_list[0].get("title", "") if meta_list else "",
@@ -1359,7 +1359,7 @@ def index_pdf(
                 corpus=corpus,
                 chunk_count=chunk_count,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — catalog registration is non-fatal; indexing continues
             pass  # catalog registration is non-fatal
 
     # Extract and chunk the entire document
@@ -1372,7 +1372,7 @@ def index_pdf(
     # Route: incremental for large documents, original path for small ones
     if len(prepared) > _INCREMENTAL_THRESHOLD:
         if hooks is None:
-            from nexus.hook_registry import HookRegistry, install_default_hooks
+            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             hooks = HookRegistry()
             install_default_hooks(hooks)
         count = _index_pdf_incremental(
@@ -1418,7 +1418,7 @@ def index_pdf(
             embeddings = [[]] * len(documents)
             actual_model = target_model
         else:
-            from nexus.config import get_credential, load_config
+            from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             voyage_key = get_credential("voyage_api_key")
             if not voyage_key:
                 raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
@@ -1433,7 +1433,7 @@ def index_pdf(
     # fire from every storage event; the per-doc loop covers single-shape
     # consumers on CLI ingest.
     if hooks is None:
-        from nexus.hook_registry import HookRegistry, install_default_hooks
+        from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         hooks = HookRegistry()
         install_default_hooks(hooks)
     # nexus-zq79 F2: register-or-lookup (fresh indexes returned "" pre-fix).
@@ -1502,10 +1502,10 @@ def _catalog_markdown_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog
-        from nexus.catalog.catalog import make_relative
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
@@ -1520,7 +1520,7 @@ def _catalog_markdown_hook(
         try:
             text = md_path.read_text(encoding="utf-8")
             if text.startswith("---"):
-                import re
+                import re  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
                 m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
                 if m:
                     title = m.group(1).strip().strip('"').strip("'")
@@ -1532,12 +1532,12 @@ def _catalog_markdown_hook(
                         if dm:
                             year = int(dm.group(1))
                             break
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort/telemetry path; failure logged at debug, must not crash caller
             # nexus-8g79.8: silent pass leaves title/year unset for the
             # whole catalog entry — `nx catalog show` shows "" / 0.
             # DEBUG-with-exc_info + path so a recurring permissions or
             # encoding issue surfaces without aborting indexing.
-            import structlog
+            import structlog  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
             structlog.get_logger(__name__).debug(
                 "catalog_markdown_frontmatter_parse_failed",
                 path=str(md_path), exc_info=True,
@@ -1592,7 +1592,7 @@ def _catalog_markdown_hook(
                 chunk_count=chunk_count, year=year,
                 source_mtime=source_mtime,
             )
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort/telemetry path; failure logged at debug, must not crash caller
         _log.debug("catalog_markdown_hook_failed", exc_info=True)
     finally:
         if writer is not None:
@@ -1640,9 +1640,9 @@ def index_markdown(
     When *base_path* is provided, ``source_path`` in T3 chunk metadata is
     stored relative to *base_path* instead of absolute (RDR-060).
     """
-    from functools import partial
+    from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
-    from nexus.catalog.catalog import make_relative
+    from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     # Normalize to absolute so staleness checks are path-form-independent.
     md_path = md_path.resolve()
@@ -1730,7 +1730,7 @@ def batch_index_pdfs(
             raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, hooks=hooks)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
             _log.warning("batch_index_pdfs: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
         if on_file:
@@ -1781,7 +1781,7 @@ def batch_index_markdowns(
                                  base_path=base_path, embed_fn=embed_fn, hooks=hooks)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
             _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
         if on_file:

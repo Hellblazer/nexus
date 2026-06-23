@@ -27,7 +27,7 @@ def _nexus_config_dir_at_import() -> Path:
     sandbox. Tests that need to flip the dir mid-process still monkeypatch
     the module attribute (``nexus.session.CLAUDE_SESSION_FILE``).
     """
-    import os as _os
+    import os as _os  # noqa: PLC0415 - branch-local; deferred to call time
 
     override = _os.environ.get("NEXUS_CONFIG_DIR", "").strip()
     if override:
@@ -208,7 +208,7 @@ def sweep_orphan_tmpdirs(
     mtime) on a sub-24h cadence or move it outside the
     ``nx_t1_*`` namespace.
     """
-    import shutil
+    import shutil  # noqa: PLC0415 - branch-local; deferred to call time
 
     if tmpdir_root is None:
         tmpdir_root = Path(tempfile.gettempdir())
@@ -550,11 +550,11 @@ def _find_chroma() -> str | None:
     manually add it to PATH.  Falls back to a PATH search for unusual installs
     (system Python, path-only setup, etc.).
     """
-    import sys as _sys
+    import sys as _sys  # noqa: PLC0415 - branch-local; deferred to call time
     candidate = Path(_sys.executable).parent / "chroma"
     if candidate.is_file():
         return str(candidate)
-    import shutil as _shutil
+    import shutil as _shutil  # noqa: PLC0415 - branch-local; deferred to call time
     return _shutil.which("chroma")
 
 
@@ -567,7 +567,7 @@ def start_t1_server() -> tuple[str, int, int, str]:
     the server does not become ready within the timeout.  The caller is
     responsible for the fallback.
     """
-    import tempfile
+    import tempfile  # noqa: PLC0415 - branch-local; deferred to call time
 
     chroma = _find_chroma()
     if not chroma:
@@ -657,7 +657,7 @@ def stop_t1_server(server_pid: int) -> None:
     mock-guard + error-swallow contract stays consistent with every
     other subprocess cleanup site.
     """
-    from nexus.util.process_group import safe_killpg
+    from nexus.util.process_group import safe_killpg  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     if not safe_killpg(server_pid, signal.SIGTERM):
         return  # process already gone or unreachable before any signal

@@ -191,7 +191,7 @@ def _read_repos_json(registry_path: Path) -> dict[str, dict]:
     already cut over to the catalog. Keeping this as a stdlib helper
     means deleting :class:`RepoRegistry` does not break the migration.
     """
-    import json
+    import json  # noqa: PLC0415 — deferred import — branch-local / circular-dep avoidance
 
     if not registry_path.exists():
         return {}
@@ -219,7 +219,7 @@ def _repos_json_is_parseable(registry_path: Path) -> bool:
     Parseable file → True (proceed to the parity check).
     Malformed file → False (refuse to delete; surface to operator).
     """
-    import json
+    import json  # noqa: PLC0415 — deferred import — branch-local / circular-dep avoidance
     if not registry_path.exists():
         return True
     try:

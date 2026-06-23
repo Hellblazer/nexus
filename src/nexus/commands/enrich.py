@@ -35,21 +35,21 @@ def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
     insertion order, the pre-fix behaviour).
     """
     try:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
+        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return None
         cat = make_catalog_reader()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog init; any failure degrades to None (no lookup, legacy fallback)
         return None
 
     def _lookup(doc_id: str) -> list[Any]:
         try:
             return cat.get_manifest(doc_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort manifest lookup; any failure degrades to empty list
             return []
 
     return _lookup
@@ -70,15 +70,15 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
     lookups stay consistent across the Phase 4 prune.
     """
     try:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
+        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return None
         cat = make_catalog_reader()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog init; any failure degrades to None (no lookup, legacy fallback)
         return None
 
     def _lookup(collection: str, source_id: str) -> str:
@@ -101,7 +101,7 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
             for hit in hits:
                 if hit.physical_collection == collection:
                     return str(hit.tumbler)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort doc_id resolve; any failure degrades to empty string
             return ""
         return ""
 
@@ -181,8 +181,8 @@ def run_bib_enrichment(
     """Core of ``nx enrich bib``; also invoked by ``nx dt index --enrich``
     (RDR-139 Layer C) to run a DT-CrossRef gap-fill pass over a freshly
     indexed collection. ``source="dt"`` enables the gap-fill layer."""
-    from nexus.db import make_t3
-    from nexus.retry import _chroma_with_retry
+    from nexus.db import make_t3  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.retry import _chroma_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     # RDR-139 Layer C: ``--source dt`` is the ``auto`` primary backend plus a
     # lowest-precedence DT-CrossRef gap-fill pass. Resolve the primary first.
@@ -192,7 +192,7 @@ def run_bib_enrichment(
     )
     dt_available = False
     if dt_gapfill:
-        from nexus.mcp_client import devonthink as _dt
+        from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
         dt_available = _dt.available()
         click.echo(
@@ -380,13 +380,13 @@ def run_bib_enrichment(
     # Auto-generate citation links if catalog is initialized
     if enriched_titles > 0:
         try:
-            from nexus.catalog import Catalog
-            from nexus.config import catalog_path
+            from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
+            from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
             cat_path = catalog_path()
             if Catalog.is_initialized(cat_path):
-                from nexus.catalog.link_generator import generate_citation_links
-                from nexus.catalog.factory import (
+                from nexus.catalog.link_generator import generate_citation_links  # noqa: PLC0415 — circular-dep avoidance; command-local import
+                from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance; command-local import
                     make_catalog_reader,
                     make_catalog_writer,
                 )
@@ -403,7 +403,7 @@ def run_bib_enrichment(
                         reader.close()
                 if link_count > 0:
                     click.echo(f"Auto-generated {link_count} citation links in catalog.")
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort auto-link; failure logged at debug, enrich continues without citation links
             _log.debug("auto_citation_links_failed", exc_info=True)
 
 
@@ -423,8 +423,8 @@ def _extract_identifiers_for_title(
     in the first 5 chunks). Concatenating one title group is cheap — ChromaDB
     reads are free, the regex is bounded, the direct lookup is unambiguous.
     """
-    from nexus.bib_extractor import extract_identifiers
-    from nexus.retry import _chroma_with_retry
+    from nexus.bib_extractor import extract_identifiers  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.retry import _chroma_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     body_text = ""
     filename = ""
@@ -448,7 +448,7 @@ def _extract_identifiers_for_title(
                             filename = m["source_path"]
                             break
             body_text = "\n".join(collected_docs)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort chunk scan; failure logged at debug, falls back to filename
             _log.debug("enrich_chunk_scan_failed", error=str(exc))
 
     # Filename fallback when chunk metadata didn't carry source_path.
@@ -485,7 +485,7 @@ def _dt_crossref_bib(doi: str) -> dict:
     # title/books fallbacks are tracked, not silently dropped.
     if not doi:
         return {}
-    from nexus.mcp_client import devonthink as _dt
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     raw = _dt.dt_resolve_doi(doi)
     if not raw:
@@ -558,7 +558,7 @@ def _resolve_bib_for_title(
             bib["_resolved_via"] = "title"
         return bib or {}
 
-    from nexus.bib_enricher_openalex import enrich_by_arxiv_id, enrich_by_doi
+    from nexus.bib_enricher_openalex import enrich_by_arxiv_id, enrich_by_doi  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     if ids is None:
         ids = _extract_identifiers_for_title(
@@ -592,17 +592,17 @@ def _resolve_bib_backend(source: str) -> tuple[str, callable, str]:
     ``auto`` defaults to ``s2`` when ``S2_API_KEY`` is set, else
     ``openalex``.
     """
-    import os as _os
+    import os as _os  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
 
     chosen = source.lower()
     if chosen == "auto":
         chosen = "s2" if _os.environ.get("S2_API_KEY") else "openalex"
 
     if chosen == "openalex":
-        from nexus.bib_enricher_openalex import enrich as _openalex_enrich
+        from nexus.bib_enricher_openalex import enrich as _openalex_enrich  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
         return "openalex", _openalex_enrich, "bib_openalex_id"
     if chosen == "s2":
-        from nexus.bib_enricher import enrich as _s2_enrich
+        from nexus.bib_enricher import enrich as _s2_enrich  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
         return "s2", _s2_enrich, "bib_semantic_scholar_id"
     raise click.UsageError(
         f"unknown bib source {source!r}; expected one of auto/s2/openalex"
@@ -639,15 +639,15 @@ def _catalog_enrich_hook(
     row to corrupt.
     """
     try:
-        from nexus.catalog import Catalog
-        from nexus.catalog.tumbler import Tumbler
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — circular-dep avoidance; command-local import
+        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return
 
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance; command-local import
         reader = make_catalog_reader()
         writer = make_catalog_writer()
         try:
@@ -659,7 +659,7 @@ def _catalog_enrich_hook(
             writer.close()
             if reader is not None:
                 reader.close()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog enrich hook; failure logged at debug, primary enrich unaffected
         _log.debug("catalog_enrich_hook_failed", exc_info=True)
 
 
@@ -842,7 +842,7 @@ def enrich_aspects(
     (rdr-frontmatter-v1; zero API cost). Other collection prefixes
     error out at the config-selection step.
     """
-    from nexus.aspect_extractor import select_config
+    from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     config = select_config(collection)
     if config is None:
@@ -921,16 +921,16 @@ def _select_entries(
 ) -> list | None:
     """Return the catalog entries to process, or None if the catalog
     is missing (terminal error already echoed)."""
-    from nexus.catalog import Catalog
-    from nexus.commands._helpers import default_db_path
-    from nexus.config import catalog_path
-    from nexus.db.t2 import T2Database
+    from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
         click.echo("Catalog not initialized — run 'nx catalog setup' first.")
         return None
-    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
     cat = make_catalog_reader()
     entries = cat.list_by_collection(collection)
 
@@ -981,13 +981,13 @@ def _dry_run_predict_skips(
     distinct source_uri scheme+host pairs, surfacing contamination
     even when individual lines are truncated to the first 20.
     """
-    from urllib.parse import quote
+    from urllib.parse import quote  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
 
     try:
-        from nexus.aspect_readers import ReadFail, read_source
-        from nexus.mcp_infra import get_t3
+        from nexus.aspect_readers import ReadFail, read_source  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+        from nexus.mcp_infra import get_t3  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
         t3 = get_t3()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort T3 setup for dry-run; any failure surfaced to operator and prediction skipped
         click.echo(f"  (read-side prediction skipped: {exc})")
         return
 
@@ -1013,7 +1013,7 @@ def _dry_run_predict_skips(
                 doc_id_lookup=doc_id_lookup,
                 manifest_lookup=manifest_lookup,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-entry isolation; transient read failure bucketed under read_error, loop continues
             # Per-entry transient failure shouldn't abort the whole
             # prediction loop. Bucket under a synthetic ``read_error``
             # reason so the operator sees the count without losing
@@ -1089,7 +1089,7 @@ def _chroma_source_id_for_entry(entry: object) -> str:
     when the URI is missing or non-file (curator owners, legacy rows
     pre-source_uri).
     """
-    from urllib.parse import unquote, urlparse
+    from urllib.parse import unquote, urlparse  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
 
     uri = getattr(entry, "source_uri", "") or ""
     if uri:
@@ -1108,7 +1108,7 @@ def _source_uri_host_key(uri: str) -> str:
     that repo. For other schemes, returns ``<scheme>://<netloc>``
     so a mixed catalog still gets meaningful grouping.
     """
-    from urllib.parse import urlparse
+    from urllib.parse import urlparse  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
 
     p = urlparse(uri)
     if p.scheme == "file":
@@ -1140,9 +1140,9 @@ def _run_extraction(
     is the structural guarantee that closes issue #331's null-field
     symptom even before Phase 2's schema migration ships.
     """
-    from nexus.aspect_extractor import ExtractFail, extract_aspects
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.aspect_extractor import ExtractFail, extract_aspects  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     extractor_name = config.extractor_name
 
@@ -1298,10 +1298,10 @@ def _run_validation_sample(
     raw document text, and write disagreements to
     ``./validation_failures.jsonl``.
     """
-    import asyncio
-    import json
-    import random
-    from datetime import UTC, datetime
+    import asyncio  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
+    import json  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
+    import random  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
+    from datetime import UTC, datetime  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
 
     sample_count = max(1, len(extracted) * sample_pct // 100)
     sample_count = min(sample_count, len(extracted))
@@ -1347,7 +1347,7 @@ def _run_validation_sample(
 
         try:
             result = asyncio.run(_verify(claim_json, content[:50000]))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-sample isolation; verify failure counted as errored, validation loop continues
             errored += 1
             _log.warning(
                 "validate_sample_verify_failed",
@@ -1394,7 +1394,7 @@ async def _verify(claim_json: str, evidence: str) -> dict:
     invoked from inside an event loop, restructure this helper
     to run the coroutine in a dedicated thread.
     """
-    from nexus.mcp.core import operator_verify
+    from nexus.mcp.core import operator_verify  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     return await operator_verify(
         claim=claim_json,
         evidence=evidence,
@@ -1436,8 +1436,8 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
     """
     from urllib.parse import urlparse  # noqa: PLC0415
 
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         records = db.document_aspects.list_by_collection(
@@ -1481,10 +1481,10 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
 @click.argument("source_path")
 def enrich_aspects_info(collection: str, source_path: str) -> None:
     """Show the AspectRecord JSON for one document in COLLECTION."""
-    import json
+    import json  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
 
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         record = db.document_aspects.get(collection, source_path)
@@ -1539,8 +1539,8 @@ def enrich_aspects_delete(
     exits 0. Re-extraction (``nx enrich aspects --re-extract``)
     will repopulate the row when run.
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     if not yes:
         click.confirm(
@@ -1552,7 +1552,7 @@ def enrich_aspects_delete(
     # RDR-128 P3 (nexus-sbxbe.3): route the delete through the daemon.
     # document_aspects.delete (str/str args, int return) is routable —
     # distinct from document_aspects.upsert, which is RPC-denied.
-    from nexus.mcp_infra import t2_index_write
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     deleted = t2_index_write(
         lambda db: db.document_aspects.delete(collection, source_path)
     )
@@ -1618,11 +1618,11 @@ def enrich_aspects_promote_field(
     Each invocation logs to T2 ``aspect_promotion_log``; the
     promotion history is queryable via ``--history``.
     """
-    from nexus.aspect_promotion import (
+    from nexus.aspect_promotion import (  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
         list_promotions, promote_extras_field,
     )
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     if history:
         try:
@@ -1702,15 +1702,15 @@ _ASPECT_FIELDS: tuple[str, ...] = (
 def _resolve_catalog_entry(tumbler_or_title: str):
     """Resolve a tumbler or title to (catalog, entry). Raises
     ClickException on miss."""
-    from nexus.catalog import Catalog, resolve_tumbler
-    from nexus.config import catalog_path
+    from nexus.catalog import Catalog, resolve_tumbler  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first."
         )
-    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
     cat = make_catalog_reader()
     t, err = resolve_tumbler(cat, tumbler_or_title)
     if err:
@@ -1806,8 +1806,8 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
     title) via the catalog, looks up the aspect row by
     ``(physical_collection, file_path)``, and renders all fields.
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     _, entry = _resolve_catalog_entry(tumbler_or_title)
     if not entry.physical_collection or not entry.file_path:
@@ -1874,10 +1874,10 @@ def aspects_list_cmd(
     detail. With ``--missing`` the verb inverts to gap detection:
     catalog rows in COLLECTION that don't have a matching aspect row.
     """
-    from nexus.catalog import Catalog
-    from nexus.commands._helpers import default_db_path
-    from nexus.config import catalog_path
-    from nexus.db.t2 import T2Database
+    from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     if missing:
         cat_path = catalog_path()
@@ -1885,7 +1885,7 @@ def aspects_list_cmd(
             raise click.ClickException(
                 "Catalog not initialized. Run 'nx catalog setup' first."
             )
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
         cat = make_catalog_reader()
         entries = cat.list_by_collection(collection)
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)

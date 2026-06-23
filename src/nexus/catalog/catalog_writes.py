@@ -489,14 +489,14 @@ class _WriteOps:
                     ).fetchone()
                     if cnt_row is not None:
                         rec_dict["chunk_count"] = int(cnt_row[0])
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                     # nexus-zq79 F1: silent pass would invisibly revert the
                     # F4 chunk_count re-derive to the broken pre-fix
                     # behaviour. Surface failures at debug+ so they're
                     # discoverable via `nx doctor` and structured-log
                     # tooling. We still don't propagate — the public
                     # update() contract must remain best-effort here.
-                    import structlog
+                    import structlog  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
                     structlog.get_logger(__name__).debug(
                         "chunk_count_rederive_failed",
                         tumbler=rec_dict["tumbler"],
@@ -626,7 +626,7 @@ class _WriteOps:
                 "FROM documents WHERE physical_collection = ?",
                 (old,),
             ).fetchall()
-            from nexus.catalog.synthesizer import _owner_prefix_of as _opo
+            from nexus.catalog.synthesizer import _owner_prefix_of as _opo  # noqa: PLC0415 — deferred to avoid circular import
             for row in rows:
                 # Preserve source_mtime + source_uri + alias_of across
                 # the rename — JSONL is the rebuild source of truth, so
@@ -712,7 +712,7 @@ class _WriteOps:
             # already emitted + projected each event; skip the
             # shadow-emit loop to avoid duplicate writes.
             if cat._shadow_emit_enabled and not cat._event_sourced_enabled:
-                from nexus.catalog.synthesizer import _owner_prefix_of
+                from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415 — deferred to avoid circular import
                 for row in rows:
                     meta_dict = json.loads(row[11]) if row[11] else {}
                     cat._emit_shadow_event(_cat_mod._make_event(

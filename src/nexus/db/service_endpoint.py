@@ -40,8 +40,8 @@ def discover_lease() -> tuple[str | None, str | None]:
     ``_discover_lease`` and the catalog/T2 resolvers all route through here.
     """
     try:
-        from nexus.config import nexus_config_dir
-        from nexus.daemon.service_registry import ServiceRegistry
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred to avoid circular import
 
         registry = ServiceRegistry(dir=nexus_config_dir(), tier="storage_service")
         lease = registry.discover(str(os.getuid()))
@@ -52,7 +52,7 @@ def discover_lease() -> tuple[str | None, str | None]:
             token = str(ep.get("token", "")) or None
             if port > 0:
                 return f"http://{host}:{port}", token
-    except Exception as exc:  # discovery is best-effort; absence fails loud above
+    except Exception as exc:  # discovery is best-effort; absence fails loud above  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("service_endpoint_lease_discover_failed", error=str(exc))
     return None, None
 
@@ -94,7 +94,7 @@ def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None]
     # https managed base_url would compare unequal to the http lease and rebind
     # every time, routing managed traffic to the wrong (local) service. Lease
     # recovery is for the lease-discovered path only.
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     if (get_credential("service_url") or "").strip():
         return None
@@ -136,7 +136,7 @@ def resolve_service_config() -> tuple[str, int, str]:
     if port is None or token is None or host is None:
         lease_url, lease_token = discover_lease()
         if lease_url is not None:
-            from urllib.parse import urlsplit
+            from urllib.parse import urlsplit  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
             parsed = urlsplit(lease_url)
             host = host or parsed.hostname
@@ -176,7 +176,7 @@ def resolve_service_endpoint() -> tuple[str, str]:
          (env halves → lease → fail loud) — the local-supervisor path, always
          ``http``.
     """
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     url = (get_credential("service_url") or "").strip().rstrip("/") or None
     if url is not None:

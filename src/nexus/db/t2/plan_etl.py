@@ -244,7 +244,7 @@ def migrate_plan_rows(
             transformed = _transform_row(row_dict)
             store.import_plan(**transformed)
             written_count += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
             _log.error(
                 "plan_etl.row_failed",
                 project=transformed.get("project", ""),

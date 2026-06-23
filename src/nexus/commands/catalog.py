@@ -40,7 +40,7 @@ def _resolve_plugin_root(repo_root: Path) -> Path:
     the caller's fail-loud guard surfaces a helpful error naming the
     package-data location.
     """
-    from importlib.resources import as_file, files
+    from importlib.resources import as_file, files  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     candidates: list[Path] = []
     try:
@@ -78,15 +78,15 @@ def _seed_plan_templates() -> int:
 
     Returns the total number of newly-inserted rows.
     """
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     seeded = 0
     with T2Database(default_db_path()) as db:  # epsilon-allow: one-shot `nx catalog setup` plan-seed loader passes Plan dataclasses not in the daemon RPC wire allowlist; not a contention hot path (RDR-128 P3 documented-irreducible)
-        from nexus.indexer_utils import find_repo_root
-        from nexus.plans.loader import load_all_tiers
+        from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+        from nexus.plans.loader import load_all_tiers  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         repo_root = find_repo_root(Path.cwd()) or Path.cwd()
         # Plugin root resolution (RDR-092 nexus-b9f3). The conexus/ plan
@@ -159,7 +159,7 @@ def _get_catalog() -> Catalog:
     use this; write commands additionally open :func:`_get_catalog_writer`
     and route their mutations through the daemon.
     """
-    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat = make_catalog_reader()
     if cat is None:
@@ -176,8 +176,8 @@ def _get_catalog_writer():
     .catalog.db writer) when reachable, else a direct in-process Catalog.
     Callers ``.close()`` it when done.
     """
-    from nexus.catalog.factory import make_catalog_writer
-    from nexus.config import catalog_path
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     if not Catalog.is_initialized(catalog_path()):
         raise click.ClickException(
@@ -188,7 +188,7 @@ def _get_catalog_writer():
 
 def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
     """Resolve a tumbler string OR title/filename. Raises ClickException on failure."""
-    from nexus.catalog import resolve_tumbler
+    from nexus.catalog import resolve_tumbler  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     t, err = resolve_tumbler(cat, value)
     if err:
         raise click.ClickException(err)
@@ -231,7 +231,7 @@ def catalog() -> None:
 @click.option("--remote", default="", help="Optional git remote URL")
 def init_cmd(remote: str) -> None:
     """Initialize catalog git repository."""
-    from nexus.config import catalog_path
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     path = catalog_path()
     Catalog.init(path, remote=remote or None)
@@ -247,7 +247,7 @@ def setup_cmd(remote: str) -> None:
     repos, then generates citation and code-RDR links from metadata. After
     this, 'nx catalog search' and 'nx catalog links' work immediately.
     """
-    from nexus.config import catalog_path
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     path = catalog_path()
     if not Catalog.is_initialized(path):
@@ -256,7 +256,7 @@ def setup_cmd(remote: str) -> None:
     else:
         click.echo(f"Catalog already initialized at {path}")
 
-    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     cat = make_catalog_reader()
     writer = make_catalog_writer()
 
@@ -264,7 +264,7 @@ def setup_cmd(remote: str) -> None:
         registry = _make_registry()
         t3 = _make_t3()
 
-        import signal
+        import signal  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         def _timeout_handler(signum, frame):
             raise TimeoutError("T3 cloud call timed out — try again later or check connectivity")
@@ -300,23 +300,23 @@ def setup_cmd(remote: str) -> None:
             click.echo(f"  Timed out ({exc}). Partial results saved — rerun setup to continue.")
         finally:
             signal.signal(signal.SIGALRM, old_handler)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         click.echo(f"  Backfill incomplete ({type(exc).__name__}: {exc})")
 
     click.echo("Backfilling chunk_text_hash...")
-    from nexus.commands.collection import _backfill_chunk_text_hash
+    from nexus.commands.collection import _backfill_chunk_text_hash  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     hash_updated = 0
     try:
         for col_info in t3.list_collections():
             col = t3._client.get_collection(col_info["name"])
             updated, _, _ = _backfill_chunk_text_hash(col)
             hash_updated += updated
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         click.echo(f"  Hash backfill partial ({type(exc).__name__}: {exc})")
     click.echo(f"  {hash_updated} chunks updated")
 
     click.echo("Generating links...")
-    from nexus.catalog.link_generator import generate_citation_links
+    from nexus.catalog.link_generator import generate_citation_links  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     cites = generate_citation_links(cat, writer=writer)
     click.echo(f"  Citations: {cites}")
     writer.close()
@@ -326,7 +326,7 @@ def setup_cmd(remote: str) -> None:
     click.echo(f"  {seeded} templates seeded")
 
     # Check if a remote is configured for durability
-    import subprocess
+    import subprocess  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     result = subprocess.run(
         ["git", "remote"], cwd=str(path), capture_output=True, text=True, timeout=5,
     )
@@ -1122,7 +1122,7 @@ def register_cmd(
     content_type: str, file_path: str, source_uri: str, corpus: str,
 ) -> None:
     """Register a document in the catalog."""
-    from nexus.catalog.catalog import make_relative
+    from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -1130,8 +1130,8 @@ def register_cmd(
     # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed enumeration.
     fp = file_path
     if fp and Path(fp).is_absolute():
-        from nexus.catalog.catalog import _default_registry_path
-        from nexus.repos import list_repos_dual
+        from nexus.catalog.catalog import _default_registry_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+        from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         reg_path = _default_registry_path()
         for repo_path_str in list_repos_dual(
@@ -1264,7 +1264,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
         )
 
     # Backup snapshot before delete (RDR-106 Option A).
-    from nexus.catalog.catalog_backup import snapshot_documents
+    from nexus.catalog.catalog_backup import snapshot_documents  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     backup_path = snapshot_documents(
         cat, [str(t)], verb="delete",
         reason=f"single-document delete: {entry.title}",
@@ -1346,7 +1346,7 @@ def _endpoint_label(cat: Any, tumbler: Any) -> str:
     """
     try:
         entry = cat.resolve(tumbler)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return str(tumbler)
     if entry is None:
         return str(tumbler)
@@ -1375,7 +1375,7 @@ def _unique_edges_by_target(cat: Any, edges: list) -> list:
             target_key = (
                 target.file_path if target and target.file_path else str(edge.to_tumbler)
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
             target_key = str(edge.to_tumbler)
         key = (str(edge.from_tumbler), edge.link_type, target_key)
         if key in seen:
@@ -1536,7 +1536,7 @@ def link_bulk_delete_cmd(
         return
 
     # Backup snapshot before delete (RDR-106 Option A).
-    from nexus.catalog.catalog_backup import snapshot_links
+    from nexus.catalog.catalog_backup import snapshot_links  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     backup_path = snapshot_links(
         cat,
         [
@@ -1667,7 +1667,7 @@ def dedupe_owners_cmd(apply: bool, as_json: bool) -> None:
     # low-level event log / _db transactions, not the 22 daemon write ops
     # (RDR-146). Use the full admin Catalog for both the plan read and the
     # apply write.
-    from nexus.catalog.factory import (
+    from nexus.catalog.factory import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         CatalogAdminDaemonLiveError,
         make_catalog_admin,
     )
@@ -1679,7 +1679,7 @@ def dedupe_owners_cmd(apply: bool, as_json: bool) -> None:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first."
         )
-    from nexus.catalog import dedupe as _dedupe
+    from nexus.catalog import dedupe as _dedupe  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     plan = _dedupe.plan_dedupe(cat)
     summary = plan.summary()
@@ -1759,12 +1759,12 @@ def _taxonomy_stats() -> dict | None:
     for users who have not run discover / project yet. bead nexus-iojz
     (formerly nexus-1n0t).
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     try:
         db_path = default_db_path()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return None
     if not db_path.exists():
         return None
@@ -1799,7 +1799,7 @@ def _taxonomy_stats() -> dict | None:
                     "GROUP BY source_collection "
                     "ORDER BY count(*) DESC"
                 ).fetchall()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return None
 
     return {
@@ -2081,7 +2081,7 @@ def audit_membership_cmd(
     for t_str in purge_targets:
         try:
             t = Tumbler.parse(t_str)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — best-effort per-item; logged and skipped, must not abort batch
             click.echo(f"  skip {t_str}: parse error {e}")
             continue
         if writer.delete_document(t):
@@ -2137,7 +2137,7 @@ def _audit_membership_all(*, as_json: bool) -> None:
         try:
             owner_prefix = str(Tumbler.parse(tumbler_str).owner_address())
             collection_owners.setdefault(collection, set()).add(owner_prefix)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             pass
 
     records: list[dict] = []
@@ -2284,7 +2284,7 @@ def _source_uri_home_key(uri: str) -> str:
     exposed so consumers (audit-membership, doctor checks, tests)
     can pattern-match on them without re-implementing the literals.
     """
-    from urllib.parse import urlparse
+    from urllib.parse import urlparse  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     if not uri:
         return _EMPTY_HOME_KEY
@@ -2372,7 +2372,7 @@ def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
       nx catalog verify --heal                           # interactive fix
       nx catalog verify --json                           # CI-friendly output
     """
-    import json as _json
+    import json as _json  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat = _get_catalog()
     # nexus-xnz0o: replaced raw SQL with catalog API.
@@ -2575,7 +2575,7 @@ def session_summary_cmd(since: int) -> None:
       nx catalog session-summary            # files modified in last 24 hours
       nx catalog session-summary --since 48 # last 48 hours
     """
-    import subprocess
+    import subprocess  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     try:
         cat = _get_catalog()
@@ -2595,7 +2595,7 @@ def session_summary_cmd(since: int) -> None:
             capture_output=True, text=True, timeout=5,
         )
         files = {f.strip() for f in result.stdout.splitlines() if f.strip()}
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         click.echo("Could not determine recent file changes.")
         return
 
@@ -2711,7 +2711,7 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
         return
 
     # Backup before delete (RDR-106 Option A).
-    from nexus.catalog.catalog_backup import snapshot_documents
+    from nexus.catalog.catalog_backup import snapshot_documents  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     backup_path = snapshot_documents(
         cat,
         [t for t, _, _ in orphans],
@@ -2841,7 +2841,7 @@ def link_density_cmd(
         for e in seed_entries:
             try:
                 seeds.append(Tumbler.parse(str(e.tumbler)))
-            except Exception:
+            except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
                 continue
 
         if not seeds:
@@ -2856,7 +2856,7 @@ def link_density_cmd(
         for seed in seeds:
             try:
                 result = cat.graph(seed, depth=depth, direction="both")
-            except Exception:
+            except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
                 continue
             nodes = result.get("nodes") or []
             edges = result.get("edges") or []
@@ -2907,7 +2907,7 @@ def suggest_links_cmd(limit: int, threshold: float) -> None:
       nx catalog suggest-links
       nx catalog suggest-links --limit 20
     """
-    from pathlib import Path as _Path
+    from pathlib import Path as _Path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat = _get_catalog()
     entries = cat.all_documents(limit=10_000)
@@ -2991,8 +2991,8 @@ def _backfill_repos(
     Returns (count, claimed_collections) — claimed_collections is the set of
     docs__* collection names owned by repos, so Pass 2 can exclude them.
     """
-    from hashlib import sha256
-    from pathlib import Path
+    from hashlib import sha256  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from pathlib import Path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     w = writer if writer is not None else cat
     count = 0
@@ -3156,13 +3156,13 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = 
             repo_root: Path | None = None
             owner: Tumbler | None = None
             try:
-                import hashlib
+                import hashlib  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-                from nexus.catalog.catalog import (
+                from nexus.catalog.catalog import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                     _default_registry_path,
                     make_relative,
                 )
-                from nexus.repos import list_repos_dual
+                from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
                 # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed
                 # enumeration. Iterate every known repo_root, hash it,
@@ -3179,7 +3179,7 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = 
                         repo_root = Path(repo_path_str)
                         owner = cat.owner_for_repo(h)
                         break
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
                 _log.warning(
                     "backfill_rdrs_repo_lookup_failed",
                     col=col_name, exc_info=True,
@@ -3210,7 +3210,7 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = 
                         file_path=fp, physical_collection=col_name,
                     )
                     count += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
             click.echo(f"  warning: {col_name} — {exc}")
             _log.debug("backfill_rdrs_error", col=col_name, exc_info=True)
 
@@ -3249,7 +3249,7 @@ def _backfill_papers(
                 title = meta.get("title", "") or title
                 author = meta.get("bib_authors", "") or meta.get("author", "")
                 year = int(meta.get("bib_year", 0) or 0)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
             _log.debug("backfill_papers_metadata_error", col=col_name, exc_info=True)
 
         if dry_run:
@@ -3279,7 +3279,7 @@ def _backfill_papers(
 def consolidate_cmd(corpus: str, dry_run: bool) -> None:
     """Merge per-paper collections into a corpus-level collection."""
     cat = _get_catalog()
-    from nexus.catalog.consolidation import merge_corpus
+    from nexus.catalog.consolidation import merge_corpus  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     if dry_run:
         result = merge_corpus(cat, None, corpus, dry_run=True)
@@ -3316,7 +3316,7 @@ def consolidate_cmd(corpus: str, dry_run: bool) -> None:
 def generate_links_cmd(citations: bool, filepath: bool, dry_run: bool) -> None:
     """Auto-generate typed links from metadata cross-matching."""
     cat = _get_catalog()
-    from nexus.catalog.link_generator import (
+    from nexus.catalog.link_generator import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         generate_citation_links,
         generate_rdr_filepath_links,
     )
@@ -3377,7 +3377,7 @@ def link_generate_cmd(ctx: click.Context, dry_run: bool) -> None:
 
 
 def _make_t3():
-    from nexus.db import make_t3
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     return make_t3()
 
 
@@ -3388,8 +3388,8 @@ def _make_registry():
     verb keeps working without depending on the deleted RepoRegistry
     class.
     """
-    from nexus.config import nexus_config_dir
-    from nexus.repos import _read_repos_json
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.repos import _read_repos_json  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     class _LegacyRegistryReader:
         def __init__(self, path):
@@ -3654,7 +3654,7 @@ def backfill_cmd(
     hash_updated = 0
     if not dry_run:
         click.echo("Pass 4: chunk_text_hash backfill...")
-        from nexus.commands.collection import _backfill_chunk_text_hash
+        from nexus.commands.collection import _backfill_chunk_text_hash  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         for col_info in t3.list_collections():
             col = t3._client.get_collection(col_info["name"])
             updated, _, _ = _backfill_chunk_text_hash(col)
@@ -3692,7 +3692,7 @@ def _build_basename_index(
     would dominate the walk on large repos. ``extensions=None`` matches
     every file regardless of suffix (used by ``--extensions *``).
     """
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     index: dict[str, list[Path]] = {}
     for root, dirs, files in _os.walk(
         str(source_dir.resolve()), followlinks=True,
@@ -3818,7 +3818,7 @@ def _build_rdr_prefix_index(
     lookup in ``--rdr-prefix-mode`` (basename first, prefix second) only
     walks the source tree once.
     """
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     index: dict[str, list[Path]] = {}
     for root, dirs, files in _os.walk(
         str(source_dir.resolve()), followlinks=True,
@@ -4232,7 +4232,7 @@ def prune_stale_cmd(
         return
 
     # Backup snapshot before delete (RDR-106 Option A).
-    from nexus.catalog.catalog_backup import snapshot_documents
+    from nexus.catalog.catalog_backup import snapshot_documents  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     backup_path = snapshot_documents(
         cat,
         [str(e.tumbler) for e in stale],
@@ -4305,14 +4305,14 @@ def synthesize_log_cmd(
     discards user-authored typed links and owner registrations because
     those are not reconstructible from T3 alone.
     """
-    import dataclasses
-    import shutil
-    import time
-    from datetime import datetime, timezone
+    import dataclasses  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    import shutil  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    import time  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from datetime import datetime, timezone  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-    from nexus.config import catalog_path
-    from nexus.catalog import events as ev
-    from nexus.catalog.synthesizer import synthesize_from_jsonl
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog import events as ev  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog.synthesizer import synthesize_from_jsonl  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
@@ -4750,7 +4750,7 @@ def _run_collections_drift() -> dict:
             c["name"] for c in t3_db.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
             "t3_not_in_projection": [],
@@ -4885,7 +4885,7 @@ def _run_chunk_size_distribution() -> dict:
             c["name"] for c in t3.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
         ]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
             "error": f"Failed to list T3 collections: {exc}",
@@ -4899,7 +4899,7 @@ def _run_chunk_size_distribution() -> dict:
     for name in collections:
         try:
             col = t3._client.get_collection(name=name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             tables[name] = {"error": f"open: {exc}"}
             overall_pass = False
             continue
@@ -4910,7 +4910,7 @@ def _run_chunk_size_distribution() -> dict:
                 got = col.get(
                     limit=page, offset=offset, include=["documents"],
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
                 tables[name] = {"error": f"get: {exc}"}
                 overall_pass = False
                 break
@@ -5000,7 +5000,7 @@ def _run_chunk_text_dedup() -> dict:
             c["name"] for c in t3.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
         ]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
             "error": f"Failed to list T3 collections: {exc}",
@@ -5015,7 +5015,7 @@ def _run_chunk_text_dedup() -> dict:
     for name in collections:
         try:
             col = t3._client.get_collection(name=name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             within_summary[name] = {"error": f"open: {exc}"}
             overall_pass = False
             continue
@@ -5026,7 +5026,7 @@ def _run_chunk_text_dedup() -> dict:
                 got = col.get(
                     limit=page, offset=offset, include=["metadatas"],
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
                 within_summary[name] = {"error": f"get: {exc}"}
                 overall_pass = False
                 break
@@ -5125,7 +5125,7 @@ def _run_t3_vs_catalog() -> dict:
             c["name"]: c for c in t3_db.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
             "error": f"Failed to list T3 collections: {exc}",
@@ -5147,7 +5147,7 @@ def _run_t3_vs_catalog() -> dict:
         try:
             col = t3_db._client.get_collection(name=name)
             count = col.count()
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
             count = 0
         if count > 0:
             t3_orphans.append({"name": name, "chunk_count": count})
@@ -5162,7 +5162,7 @@ def _run_t3_vs_catalog() -> dict:
         try:
             col = t3_db._client.get_collection(name=name)
             count = col.count()
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
             continue
         if count == 0:
             zombies.append(name)
@@ -5277,7 +5277,7 @@ def _run_name_vs_embed_dim() -> dict:
             c["name"] for c in t3_db.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
         ]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
             "checked": 0,
@@ -5302,7 +5302,7 @@ def _run_name_vs_embed_dim() -> dict:
         try:
             coll = client.get_collection(name)
             sample = coll.get(limit=1, include=["embeddings"])
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
             unknown_token.append(
                 {"collection": name, "token": token, "error": str(exc)}
             )
@@ -5387,9 +5387,9 @@ def _check_bootstrap_status() -> dict:
     silently overwrite any operator-injected drift the downstream
     doctor checks (e.g. ``--replay-equality``) are meant to detect.
     """
-    from nexus.config import catalog_path
-    from nexus.catalog.catalog import _read_event_sourced_gate
-    from nexus.catalog import events as _ev
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog.catalog import _read_event_sourced_gate  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog import events as _ev  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
@@ -5464,7 +5464,7 @@ def _check_bootstrap_status() -> dict:
 
         threshold = max(1, int(legacy_doc_count * 0.95))
         fallback_active = event_doc_count < threshold
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
         fallback_active = False
 
     return {
@@ -5505,13 +5505,13 @@ def _run_replay_equality() -> dict:
     projected SQLite is ephemeral and discarded with the
     TemporaryDirectory.
     """
-    import tempfile
+    import tempfile  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-    from nexus.catalog.catalog import Catalog
-    from nexus.catalog.catalog_db import CatalogDB
-    from nexus.catalog.projector import Projector
-    from nexus.catalog.synthesizer import synthesize_from_jsonl
-    from nexus.config import catalog_path
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog.catalog_db import CatalogDB  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog.projector import Projector  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog.synthesizer import synthesize_from_jsonl  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat_dir = catalog_path()
     if not Catalog.is_initialized(cat_dir):
@@ -5577,7 +5577,7 @@ def _run_replay_equality() -> dict:
     # T2 ``CatalogStore`` in read-only mode (``mode=ro`` URI) rather
     # than a direct ``sqlite3.connect`` so all catalog SQLite traffic
     # flows through the substrate-allowlisted path.
-    from nexus.db.t2.catalog import CatalogStore as _CatalogStore
+    from nexus.db.t2.catalog import CatalogStore as _CatalogStore  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     live_store = _CatalogStore(live_db_path, read_only=True)
     try:
@@ -5603,7 +5603,7 @@ def _run_replay_equality() -> dict:
             if event_source == "events.jsonl":
                 # Local import: deferring to call-time avoids module-load
                 # side effects in environments that never need this path.
-                from nexus.catalog.event_log import EventLog
+                from nexus.catalog.event_log import EventLog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                 applied = Projector(proj_db).apply_all(
                     EventLog(cat_dir).replay()
                 )
@@ -5767,11 +5767,11 @@ def _run_t3_doc_id_coverage(
 
     Read-only against T3 (col.get only, no col.update).
     """
-    from nexus.catalog.catalog import Catalog
-    from nexus.catalog.event_log import EventLog
-    from nexus.catalog import events as ev
-    from nexus.config import catalog_path
-    from nexus.db import make_t3
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog.event_log import EventLog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog import events as ev  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat_dir = catalog_path()
     if not Catalog.is_initialized(cat_dir):
@@ -5818,7 +5818,7 @@ def _run_t3_doc_id_coverage(
 
     try:
         t3 = make_t3()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — re-raises after cleanup/translation
         raise click.ClickException(
             f"Failed to open T3 client: {exc}. Check ChromaDB credentials."
         )
@@ -5830,7 +5830,7 @@ def _run_t3_doc_id_coverage(
     # returns "" for every Phase-3 chunk. Without manifest
     # resolution the audit unconditionally reports near-100%
     # ``missing_doc_id``, masking real coverage problems.
-    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     cat = make_catalog_reader()
 
     # nexus-yrka: collections renamed via ``nx catalog rename-collection``
@@ -5847,14 +5847,14 @@ def _run_t3_doc_id_coverage(
             for r in cat.list_collections()
             if r.get("superseded_by")
         }
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         pass
 
     per_coll: dict[str, dict] = {}
     overall_pass = True
     skipped_superseded = 0
     coll_count = len(expected)
-    import time as _time
+    import time as _time  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     for coll_idx, (coll_name, expected_chunks) in enumerate(
         expected.items(), start=1,
@@ -5875,7 +5875,7 @@ def _run_t3_doc_id_coverage(
         _tc = _time.monotonic()
         try:
             col = t3._client.get_collection(name=coll_name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             per_coll[coll_name] = {
                 "error": f"open: {exc}",
                 "expected_chunks": len(expected_chunks),
@@ -5894,7 +5894,7 @@ def _run_t3_doc_id_coverage(
                 page = col.get(
                     limit=300, offset=offset, include=["metadatas"],
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
                 per_coll[coll_name] = {
                     "error": f"get: {exc}",
                     "expected_chunks": len(expected_chunks),
@@ -5918,7 +5918,7 @@ def _run_t3_doc_id_coverage(
             if page_chashes_nonempty:
                 try:
                     by_chash = cat.docs_for_chashes(page_chashes_nonempty)
-                except Exception:
+                except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
                     by_chash = {}
                 for c, doc_ids in by_chash.items():
                     if doc_ids:
@@ -6183,7 +6183,7 @@ def list_backups_cmd() -> None:
     BEFORE the actual delete. This verb shows what's recoverable
     without inspecting the files manually.
     """
-    from nexus.catalog.catalog_backup import list_backups
+    from nexus.catalog.catalog_backup import list_backups  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     cat = _get_catalog()
     records = list_backups(cat)
     if not records:
@@ -6215,8 +6215,8 @@ def undelete_cmd(backup: str) -> None:
     backup is a no-op (DocumentRegistered on existing tumbler is
     idempotent via INSERT OR REPLACE).
     """
-    from nexus.catalog.catalog_backup import restore_documents
-    from nexus.catalog.factory import (
+    from nexus.catalog.catalog_backup import restore_documents  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog.factory import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         CatalogAdminDaemonLiveError,
         make_catalog_admin,
     )
@@ -6260,7 +6260,7 @@ def vacuum_backups_cmd(older_than_days: int, dry_run: bool) -> None:
     after vacuum, the rows in those backups are no longer recoverable
     via ``nx catalog undelete``.
     """
-    from nexus.catalog.catalog_backup import vacuum_old_backups
+    from nexus.catalog.catalog_backup import vacuum_old_backups  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     cat = _get_catalog()
     removed, kept = vacuum_old_backups(
         cat, older_than_days=older_than_days, dry_run=dry_run,
@@ -6314,9 +6314,9 @@ def chash_reconcile_cmd(apply: bool) -> None:
     \b
     Filed under nexus-w9vq (RDR-108 Phase 5 follow-up).
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.db import make_t3
-    from nexus.db.t2.chash_index import ChashIndex
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -6337,7 +6337,7 @@ def chash_reconcile_cmd(apply: bool) -> None:
             (c if isinstance(c, str) else c.name)
             for c in t3._client.list_collections()
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — re-raises after cleanup/translation
         click.echo(f"Failed to list T3 collections: {exc}", err=True)
         raise SystemExit(1)
 
@@ -6459,14 +6459,14 @@ def collection_gc_cmd(apply: bool) -> None:
     \b
     Filed under nexus-ks40 (catalog/T3 hygiene).
     """
-    from nexus.db import make_t3
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat = _get_catalog()
     try:
         t3_db = make_t3()
         t3_collections = t3_db.list_collections()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — re-raises after cleanup/translation
         click.echo(f"Failed to list T3 collections: {exc}", err=True)
         raise SystemExit(1)
 
@@ -6478,7 +6478,7 @@ def collection_gc_cmd(apply: bool) -> None:
         projection_names = {r["name"] for r in cat.list_collections()}
         # nexus-xnz0o: use distinct_doc_collections() (uniform API).
         doc_collection_names = set(cat.distinct_doc_collections())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — re-raises after cleanup/translation
         click.echo(f"Failed to query catalog: {exc}", err=True)
         raise SystemExit(1)
 
@@ -6545,7 +6545,7 @@ def collection_gc_cmd(apply: bool) -> None:
             try:
                 t3_db.delete_collection(name)
                 actually_deleted += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
                 failures.append((name, str(exc)))
         click.echo(
             f"\nSummary: deleted {actually_deleted} zombie collection(s) "

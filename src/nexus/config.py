@@ -219,7 +219,7 @@ def _read_live_mineru_port() -> int | None:
             is_process_alive,
             read_pid_file,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort PID probe; any import/read failure degrades to None
         return None
     info = read_pid_file()
     if not info:
@@ -503,7 +503,7 @@ def storage_mode() -> str:
     if not normalized or normalized == "daemon":
         return "daemon"
     if normalized == "direct":
-        import warnings
+        import warnings  # noqa: PLC0415 — branch-local; only on decommissioned-mode path
 
         warnings.warn(
             "NX_STORAGE_MODE=direct is decommissioned (RDR-120 P6). "

@@ -147,7 +147,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
     def _centroid(self) -> Any:
         """The service-backed centroid port (lazy; shares this store's config)."""
         if self._centroid_store is None:
-            from nexus.db.t2.http_centroid_store import HttpCentroidStore
+            from nexus.db.t2.http_centroid_store import HttpCentroidStore  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
             self._centroid_store = HttpCentroidStore(
                 base_url=self._base_url, tenant=self._tenant, _token=self._token,
@@ -904,7 +904,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
                 self.persist_cross_links(
                     self.compute_cross_links(collection_name, new_centroids, new_metas)
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
                 _log.debug("discover_cross_links_failed", exc_info=True)
 
         self.record_discover_count(collection_name, len(doc_ids))
@@ -1011,7 +1011,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         """
         try:
             n = t3.count(collection)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             return [], None
         if n == 0:
             return [], np.empty((0, 0), dtype=np.float32)
@@ -1053,7 +1053,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         HYBRID: chunk text reads stay on chroma_client (T3); centroids via port.
         Returns the number of children created (0 on any short-circuit).
         """
-        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         if k < 2:
             return 0
@@ -1071,7 +1071,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         # via the service — NOT a MiniLM-384 re-embed, because parent and child
         # centroids must share the collection's bge-768 / voyage space for ANN
         # assignment to work. Raw chroma handles keep the legacy re-embed path.
-        from nexus.db.http_vector_client import is_service_backed
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         if is_service_backed(chroma_client):
             fetched_ids, texts, embeddings = self._svc_fetch_by_ids(
@@ -1082,7 +1082,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         else:
             try:
                 coll = chroma_client.get_collection(collection_name, embedding_function=None)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
                 _log.warning("split_collection_not_found", collection=collection_name)
                 return 0
 
@@ -1153,7 +1153,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         # 1. Source chunk embeddings. nexus-9pqoj: via the service when the
         # handle is the HttpVectorClient (the stub's get() drops embeddings, so
         # we must use get_embeddings); raw chroma keeps the legacy include path.
-        from nexus.db.http_vector_client import is_service_backed
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         if is_service_backed(chroma_client):
             src_ids, src_embs = self._svc_fetch_all_embeddings(
@@ -1170,7 +1170,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         else:
             try:
                 src_coll = chroma_client.get_collection(source_collection, embedding_function=None)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
                 return dict(_empty)
             _PAGE = 300
             src_ids = []
@@ -1510,7 +1510,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         computes quantiles and stopword matching Python-side for exact parity
         with CatalogTaxonomy.audit_collection.
         """
-        from nexus.corpus import default_projection_threshold
+        from nexus.corpus import default_projection_threshold  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         resolved_threshold = (
             threshold if threshold is not None

@@ -20,7 +20,7 @@ _log = structlog.get_logger(__name__)
 
 def _ctx_nexus_config_dir() -> Path:
     """Resolve the config dir at import time, honouring NEXUS_CONFIG_DIR."""
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
 
     override = _os.environ.get("NEXUS_CONFIG_DIR", "").strip()
     if override:
@@ -37,7 +37,7 @@ def _context_path_for_repo(repo_path: Path | None) -> Path:
     """Return per-repo cache file path, or global fallback."""
     if repo_path is None:
         return CONTEXT_L1_PATH
-    import hashlib
+    import hashlib  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     repo_hash = hashlib.sha1(str(repo_path.resolve()).encode()).hexdigest()[:8]
     return CONTEXT_L1_DIR / f"{repo_path.name}-{repo_hash}.txt"
 _TOPICS_PER_PREFIX = 5
@@ -88,7 +88,7 @@ def _repo_collections(repo_path: Path | None) -> set[str] | None:
         # suffix. If the repo has no rdr content, the allowed set
         # simply omits rdr; downstream code handles that cleanly.
         return colls if colls else None
-    except Exception:
+    except Exception:  # noqa: BLE001 — outer L1-context degrade boundary; logged via log.warning (see inline comment)
         # Outer — degrades the entire L1 context (taxonomy +
         # collections) silently. WARNING because a recurring failure
         # produces wrong LLM prompts with no signal.
@@ -200,8 +200,8 @@ def refresh_context_l1(
     repo_path: Path | None = None,
 ) -> Path | None:
     """Open T2, generate L1 context cache, close. Convenience wrapper."""
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.config import default_db_path  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
 
     path = db_path or default_db_path()
     with T2Database(path) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)

@@ -48,7 +48,7 @@ def _resolve_service_token() -> str:
     """The managed service token — env (NX_SERVICE_TOKEN) FIRST, then config.yml
     (`nx config set service_token`), so a config.yml-only managed user is not
     told to export what they already configured (RDR-166 nexus-v3p0x)."""
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     return get_credential("service_token") or ""
 

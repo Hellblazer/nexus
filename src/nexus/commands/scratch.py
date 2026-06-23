@@ -159,7 +159,7 @@ def unflag_cmd(entry_id: str) -> None:
 @click.option("--title", "-t", required=True, help="Target T2 title")
 def promote_cmd(entry_id: str, project: str, title: str) -> None:
     """Copy a scratch entry to T2 immediately."""
-    from nexus.mcp_infra import t2_index_write
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     t1 = _t1()
     try:

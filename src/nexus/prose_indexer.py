@@ -36,10 +36,10 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     Returns the post-filter chunk count (chunks upserted), or 0 if
     skipped (current) or failed.
     """
-    from nexus.chunker import _line_chunk
-    from nexus.doc_indexer import _embed_with_fallback
-    from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter
-    from nexus.pdf_chunker import _extract_headings
+    from nexus.chunker import _line_chunk  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+    from nexus.doc_indexer import _embed_with_fallback  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+    from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+    from nexus.pdf_chunker import _extract_headings  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
 
     try:
         content = file_path.read_text(encoding="utf-8")
@@ -143,7 +143,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         # chunk can carry section_type / section_title (matches PDF and
         # markdown paths so prose-fallback chunks aren't second-class
         # citizens for section-scoped retrieval).
-        from bisect import bisect_right
+        from bisect import bisect_right  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
         _line_offsets = [0]
         for _i, _ch in enumerate(content):
             if _ch == "\n":

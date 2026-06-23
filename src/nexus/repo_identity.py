@@ -169,7 +169,7 @@ def _resolve_repo_collection(
         except LookupError:
             # Owner not registered; fall through to synthesis.
             pass
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort catalog resolve; logged then falls through to synthesis
             _log.debug(
                 "registry_resolve_catalog_failed",
                 repo=str(repo),
@@ -236,7 +236,7 @@ def list_sibling_collections(
 
     try:
         all_colls = t3_client.list_collections()
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch of T3 client errors; degrade to empty sibling list
         return []
 
     siblings = []

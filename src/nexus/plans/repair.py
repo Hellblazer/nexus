@@ -148,7 +148,7 @@ _NAME_STOP_WORDS: frozenset[str] = frozenset({
 
 
 def _infer_plan_verb_from_query(query: str) -> tuple[str, bool]:
-    import re
+    import re  # noqa: PLC0415 - branch-local; deferred to call time
     tokens = re.findall(r"[a-z][a-z-]+", (query or "").lower())
     for token in tokens:
         if token in _VERB_STEMS:
@@ -160,7 +160,7 @@ def _infer_plan_verb_from_query(query: str) -> tuple[str, bool]:
 
 
 def _derive_plan_name_from_query(query: str, *, max_words: int = 5) -> str:
-    import re
+    import re  # noqa: PLC0415 - branch-local; deferred to call time
     tokens = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_]*", (query or "").lower())
     content = [t for t in tokens if t not in _NAME_STOP_WORDS]
     take = content[:max_words] if content else tokens[:max_words]
@@ -188,7 +188,7 @@ def repair_dimensions(conn: sqlite3.Connection) -> dict[str, Any]:
     if not rows:
         return {"backfilled": 0, "low_conf": 0, "collisions": 0, "total_rows": 0}
 
-    from nexus.plans.schema import canonical_dimensions_json
+    from nexus.plans.schema import canonical_dimensions_json  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     backfilled = 0
     low_conf = 0
@@ -266,7 +266,7 @@ def repair_match_text(conn: sqlite3.Connection) -> dict[str, Any]:
     if "match_text" not in _plan_columns(conn):
         return {"skipped": "match_text column missing"}
 
-    from nexus.db.t2.plan_library import _synthesize_match_text
+    from nexus.db.t2.plan_library import _synthesize_match_text  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     rows = conn.execute(
         "SELECT id, query, verb, name, scope FROM plans WHERE match_text = ''"
@@ -353,8 +353,8 @@ def repair_builtin_bindings(conn: sqlite3.Connection) -> dict[str, Any]:
         return {"skipped": "no plans table"}
 
     try:
-        import yaml as _yaml
-        from importlib.resources import as_file, files
+        import yaml as _yaml  # noqa: PLC0415 - deferred to call time
+        from importlib.resources import as_file, files  # noqa: PLC0415 - branch-local; deferred to call time
     except ModuleNotFoundError:
         return {"skipped": "PyYAML missing"}
 
@@ -370,13 +370,13 @@ def repair_builtin_bindings(conn: sqlite3.Connection) -> dict[str, Any]:
     try:
         resource = files("nexus") / "_resources" / "plans" / "builtin"
         with as_file(resource) as resolved:
-            from pathlib import Path as _Path
+            from pathlib import Path as _Path  # noqa: PLC0415 - branch-local; deferred to call time
             if _Path(resolved).is_dir():
                 yaml_dir = _Path(resolved)
     except (ModuleNotFoundError, FileNotFoundError, TypeError):
         pass
     if yaml_dir is None:
-        from pathlib import Path as _Path
+        from pathlib import Path as _Path  # noqa: PLC0415 - branch-local; deferred to call time
         repo_candidate = _Path(__file__).resolve().parents[3] / "conexus" / "plans" / "builtin"
         if repo_candidate.is_dir():
             yaml_dir = repo_candidate
@@ -389,7 +389,7 @@ def repair_builtin_bindings(conn: sqlite3.Connection) -> dict[str, Any]:
             continue
         try:
             template = _yaml.safe_load(entry.read_text()) or {}
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort template parse; skips malformed entry
             continue
         dims = template.get("dimensions") or {}
         key = (

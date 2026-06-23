@@ -265,15 +265,15 @@ def _extract_context(
         return ("", "")
 
     try:
-        from tree_sitter_language_pack import get_parser  # lazy import
+        from tree_sitter_language_pack import get_parser  # lazy import  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         parser = get_parser(language)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         _log.warning("get_parser_failed", language=language, error=str(exc), exc_info=True)
         return ("", "")
 
     try:
         tree = parser.parse(source)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         _log.debug("tree_parse_failed", language=language, error=str(exc))
         return ("", "")
 
@@ -318,7 +318,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     Returns the post-filter chunk count (chunks upserted), or 0 if
     skipped (current) or failed.
     """
-    from nexus.chunker import chunk_file
+    from nexus.chunker import chunk_file  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     try:
         content = file_path.read_text(encoding="utf-8")

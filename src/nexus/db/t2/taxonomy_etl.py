@@ -525,7 +525,7 @@ def _migrate_table(
                     skipped_ids.append(str(doc_id))
             else:
                 written_count += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort per-item; logged and skipped, must not abort batch
             _log.error(
                 "taxonomy_etl.row_failed",
                 table=table,

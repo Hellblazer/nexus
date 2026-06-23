@@ -43,7 +43,7 @@ _log = structlog.get_logger(__name__)
 
 def _is_catalog_service_mode() -> bool:
     """Return True when NX_STORAGE_BACKEND_CATALOG=service (or global NX_STORAGE_BACKEND=service)."""
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     return storage_backend_for("catalog") == StorageBackend.SERVICE
 
@@ -73,12 +73,12 @@ def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Any]:
     read-only.
     """
     if _is_catalog_service_mode():
-        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
         _log.debug("catalog_reader_service_mode")
         return HttpCatalogClient()
 
-    from nexus.config import catalog_path
+    from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     path = catalog_path()
     if not Catalog.is_initialized(path):
@@ -120,7 +120,7 @@ def make_catalog_admin(*, config_dir: Optional[Path] = None) -> Optional[Catalog
     is uninitialised. Constructed here (the ``catalog/`` allowlist) so the
     boundary lint stays satisfied; callers must NOT bare-construct Catalog.
     """
-    from nexus.config import catalog_path
+    from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     path = catalog_path()
     if not Catalog.is_initialized(path):
@@ -131,7 +131,7 @@ def make_catalog_admin(*, config_dir: Optional[Path] = None) -> Optional[Catalog
     # loudly with the recovery action rather than silently racing. The probe
     # is read-only discovery (no spawn/reap).
     try:
-        from nexus.daemon.discovery import find_t2_daemon
+        from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         if find_t2_daemon() is not None:
             raise CatalogAdminDaemonLiveError(
                 "A T2 daemon is running; deep-maintenance catalog commands "
@@ -175,12 +175,12 @@ class CatalogWriter:
         # routed write so the daemon opens its fairness window; batch writers
         # send no priority field (daemon defaults batch). Resolution honours
         # NX_WRITE_PRIORITY, then the explicit ``priority`` arg, then isatty.
-        from nexus.catalog.write_priority import resolve_write_priority
+        from nexus.catalog.write_priority import resolve_write_priority  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         self._priority = resolve_write_priority(priority)
         self._connect()
 
     def _connect(self) -> None:
-        from nexus.daemon.t2_client import (
+        from nexus.daemon.t2_client import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             T2DaemonNotReachableError,
             T2SchemaVersionMismatchError,
             make_t2_client,
@@ -205,7 +205,7 @@ class CatalogWriter:
                 error=str(exc),
                 hint="start the T2 daemon (`nx daemon t2 start`) to route catalog writes",
             )
-            from nexus.config import catalog_path
+            from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
             path = catalog_path()
             self._direct = Catalog(path, path / ".catalog.db")
@@ -298,7 +298,7 @@ def make_catalog_writer(
     ``None`` resolves via ``NX_WRITE_PRIORITY`` env then ``isatty()``.
     """
     if _is_catalog_service_mode():
-        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
         _log.debug("catalog_writer_service_mode")
         return _ServiceCatalogWriter(HttpCatalogClient())
@@ -368,7 +368,7 @@ def make_catalog_client_for_migration(
         A live ``HttpCatalogClient`` configured for *base_url* / *token*.
         Callers must call ``.close()`` or use it as a context manager.
     """
-    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     _log.debug("catalog_client_for_migration", base_url=base_url)
     if base_url:

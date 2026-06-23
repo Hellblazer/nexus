@@ -199,8 +199,8 @@ def discover_pg_binaries() -> PgBinaries:
     #      the bundle on a local-distribution machine, in particular the
     #      storage-service daemon's PG-restart path (`_ensure_pg_running`).
     #      Lazy import avoids a pg_bundle <-> pg_provision import cycle.
-    from nexus.config import nexus_config_dir  # local import to avoid circular
-    from nexus.db.pg_bundle import extracted_bin_dir
+    from nexus.config import nexus_config_dir  # local import to avoid circular  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs
+    from nexus.db.pg_bundle import extracted_bin_dir  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs
 
     bundle_bin = extracted_bin_dir(nexus_config_dir())
     if bundle_bin is not None:
@@ -881,7 +881,7 @@ def provision(
         When any provisioning subprocess exits non-zero.
     """
     if config_dir is None:
-        from nexus.config import nexus_config_dir  # local import to avoid circular
+        from nexus.config import nexus_config_dir  # local import to avoid circular  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs
         config_dir = nexus_config_dir()
 
     pgdata = config_dir / "postgres"
@@ -1023,7 +1023,7 @@ def is_provisioned(config_dir: Path | None = None) -> bool:
     Does NOT start the cluster — purely a state check.
     """
     if config_dir is None:
-        from nexus.config import nexus_config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs
         config_dir = nexus_config_dir()
 
     pgdata = config_dir / "postgres"

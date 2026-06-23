@@ -285,7 +285,7 @@ def restore_documents(
     INSERT OR REPLACE. Re-emitting an already-existing link merges
     into the existing row's metadata.
     """
-    from nexus.catalog.tumbler import Tumbler
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     if not backup_path.exists():
         raise FileNotFoundError(f"backup not found: {backup_path}")
@@ -328,10 +328,10 @@ def restore_documents(
                 # tumbler back, which means using the lower-level
                 # event-emit path. Use Catalog._write_to_event_log
                 # directly with a DocumentRegistered payload.
-                from nexus.catalog.events import (
+                from nexus.catalog.events import (  # noqa: PLC0415 - deferred to avoid circular import at module load
                     DocumentRegisteredPayload as _DocPayload,
                 )
-                from nexus.catalog.catalog import _make_event
+                from nexus.catalog.catalog import _make_event  # noqa: PLC0415 - deferred to avoid circular import at module load
                 payload = _DocPayload(
                     doc_id=t_str,
                     owner_id=str(owner),
@@ -385,7 +385,7 @@ def restore_documents(
                 **link.get("meta", {}),
             )
             restored_links += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - best-effort per-link restore; failure logged via log.warning, restore continues
             _log.warning(
                 "catalog_backup_link_restore_failed",
                 from_t=link.get("from", ""),

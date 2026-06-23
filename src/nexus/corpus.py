@@ -341,7 +341,7 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
                 for c in t3.list_collections()  # type: ignore[attr-defined]
                 if c["name"].startswith(f"{user_arg}__")
             ]
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort collection-listing probe; empty match list on any backend failure
             matches = []
         if len(matches) == 1:
             return matches[0]
@@ -429,7 +429,7 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
                 and t3.collection_exists(legacy_two_segment)  # type: ignore[attr-defined]
             ):
                 return legacy_two_segment
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort collection_exists probe; falls through to auto-promoted shape on any backend failure
         # collection_exists probe is best-effort. On failure (cloud
         # quota error, transient network) fall through to the
         # auto-promoted shape; legacy reads still work via T3's

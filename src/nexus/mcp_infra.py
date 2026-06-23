@@ -64,7 +64,7 @@ def _emit_unreachable_warn(event: str, **fields) -> None:
         else:
             _warn_state[event] = (last, suppressed + 1)
     if payload is not None:
-        import structlog
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
         ev, kw = payload
         structlog.get_logger().warning(ev, **kw)
 
@@ -167,7 +167,7 @@ def get_t1():
             if _t1_instance is None:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    from nexus.db.t1 import get_t1_database
+                    from nexus.db.t1 import get_t1_database  # noqa: PLC0415 — deferred to avoid circular import (db.t1)
                     _t1_instance = get_t1_database()
                     _t1_isolated = any("EphemeralClient" in str(w.message) for w in caught)
     return _t1_instance, _t1_isolated
@@ -188,7 +188,7 @@ def get_t3():
     if _t3_instance is None:
         with _t3_lock:
             if _t3_instance is None:
-                from nexus.db import make_t3
+                from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import (db make_t3)
                 _t3_instance = make_t3()
     return _t3_instance
 
@@ -228,7 +228,7 @@ def t2_ctx():
       route through db.telemetry.record_* (backend-blind: SQLite raw OR the
       service's /v1/telemetry/*/record endpoint), not a raw db.telemetry.conn.
     """
-    from nexus.db.t2 import T2Database
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
     return T2Database(default_db_path())  # epsilon-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
 
 
@@ -253,10 +253,10 @@ def _reassert_t2_daemon() -> bool:
     (CA-3) so a future regression in the supervisor cannot terminate the
     calling MCP process.
     """
-    import structlog
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
     log = structlog.get_logger()
     try:
-        from nexus.commands.daemon import (
+        from nexus.commands.daemon import (  # noqa: PLC0415 — deferred to avoid circular import (commands.daemon)
             T2EnsureOutcome,
             _t2_ensure_running_inner,
         )
@@ -345,21 +345,21 @@ def t2_index_write(write_fn):
     # daemon probe so service mode does not emit the misleading "start the T2
     # daemon" degraded-fallback warning on every write (the probe + warning
     # below are the SQLite-mode arbiter path only).
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
 
     if storage_backend_for("memory") == StorageBackend.SERVICE:
-        from nexus.db.t2 import T2Database
+        from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
 
         with T2Database(default_db_path(), run_migrations=False) as db:  # epsilon-allow: service mode, PG is the arbiter
             return write_fn(db)
 
-    from nexus.daemon.t2_client import (
+    from nexus.daemon.t2_client import (  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
         T2DaemonNotReachableError,
         T2SchemaVersionMismatchError,
         make_t2_client,
     )
 
-    import structlog
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
 
     client = None
     # True once a degraded arm has emitted its OWN distinct, accurate event,
@@ -383,7 +383,7 @@ def t2_index_write(write_fn):
         # state transition is classified accurately each time; the cost is one
         # stat + os.kill(pid, 0), negligible against the direct DB write this
         # path is already doing (review M-1/S-3 — accepted by design).
-        from nexus.daemon.discovery import find_t2_daemon
+        from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 — deferred to avoid circular import (daemon.discovery)
 
         if find_t2_daemon() is not None:
             # A live daemon IS registered but did not answer hello() — likely
@@ -457,7 +457,7 @@ def t2_index_write(write_fn):
             "t2_index_write_daemon_unreachable_fallback",
             hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
         )
-    from nexus.db.t2 import T2Database
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
     with T2Database(default_db_path()) as db:  # epsilon-allow: by-design daemon-unreachable fallback so writes degrade to direct rather than failing (RDR-128 P3 documented-irreducible)
         return write_fn(db)
 
@@ -489,7 +489,7 @@ def get_t1_plan_cache(*, populate_from=None):
 
     Backed by :class:`nexus.mcp.plan_cache_registry.PlanCacheRegistry`.
     """
-    from nexus.mcp.plan_cache_registry import get_plan_cache_registry
+    from nexus.mcp.plan_cache_registry import get_plan_cache_registry  # noqa: PLC0415 — deferred to avoid circular import (mcp.plan_cache_registry)
     return get_plan_cache_registry().get(populate_from=populate_from)
 
 
@@ -499,7 +499,7 @@ def reset_plan_cache_for_tests() -> None:
     Backed by
     :func:`nexus.mcp.plan_cache_registry.reset_plan_cache_registry_for_tests`.
     """
-    from nexus.mcp.plan_cache_registry import reset_plan_cache_registry_for_tests
+    from nexus.mcp.plan_cache_registry import reset_plan_cache_registry_for_tests  # noqa: PLC0415 — deferred to avoid circular import (mcp.plan_cache_registry)
     reset_plan_cache_registry_for_tests()
 
 
@@ -525,7 +525,7 @@ def get_catalog():
     # RDR-146 P1.2: get_catalog() is the READ funnel — it returns a
     # read-only local Catalog (or None when uninitialised). Writers must
     # use get_catalog_writer(); the boundary lint bans bare Catalog(...).
-    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
     return make_catalog_reader()
 
 
@@ -543,7 +543,7 @@ def get_catalog_writer():
     to (or be deferred behind) a background index burst. Tag interactive so
     they take fairness priority, same as the foreground ``nx dt`` writes.
     """
-    from nexus.catalog.factory import make_catalog_writer
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
     return make_catalog_writer(priority="interactive")
 
 
@@ -565,7 +565,7 @@ def catalog_auto_link(doc_id: str) -> int:
     the prior all-DEBUG behaviour silently swallowed every recipe-
     compliant call that produced zero links.
     """
-    import structlog
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
     _log = structlog.get_logger()
 
     # RDR-146 P1.2: fires on every store_put with T1 link-context entries in
@@ -592,7 +592,7 @@ def catalog_auto_link(doc_id: str) -> int:
             cat.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
         except Exception:  # noqa: BLE001
             pass
-    from nexus.catalog.auto_linker import auto_link, read_link_contexts
+    from nexus.catalog.auto_linker import auto_link, read_link_contexts  # noqa: PLC0415 — deferred to avoid circular import (catalog.auto_linker)
     contexts = read_link_contexts(link_entries)
     # RDR-146 P1.2: auto_link writes (link_if_absent) — route through the
     # write-only daemon proxy, not the read-only get_catalog() handle.
@@ -625,7 +625,7 @@ def catalog_auto_link(doc_id: str) -> int:
 
 def resolve_tumbler_mcp(cat, value):
     """Resolve tumbler string OR title/filename. Returns (tumbler, None) or (None, error)."""
-    from nexus.catalog import resolve_tumbler
+    from nexus.catalog import resolve_tumbler  # noqa: PLC0415 — deferred to avoid circular import (catalog)
     return resolve_tumbler(cat, value)
 
 
@@ -665,9 +665,9 @@ def taxonomy_assign_batch_hook(
     Wired by :func:`nexus.hook_registry.install_default_hooks` onto every
     runtime-constructed registry.
     """
-    from fnmatch import fnmatch
+    from fnmatch import fnmatch  # noqa: PLC0415 — stdlib fnmatch deferred to function scope
 
-    from nexus.config import is_local_mode, load_config
+    from nexus.config import is_local_mode, load_config  # noqa: PLC0415 — deferred to avoid circular import (config)
 
     if not doc_ids:
         return
@@ -680,7 +680,7 @@ def taxonomy_assign_batch_hook(
     # RDR-155 P4a.2 (nexus-1k8s1): guard is INSTANCE-based — the env flag and
     # the handle type diverge now that make_t3() returns the service client
     # unconditionally while tests inject chroma-backed T3Database fixtures.
-    from nexus.db.http_vector_client import is_service_backed
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client)
     if is_service_backed(get_t3()):
         # nexus-7ydks: service-backed incremental assignment. Mirrors the raw
         # path below (compute same + cross, one persist) but persists through
@@ -701,12 +701,12 @@ def taxonomy_assign_batch_hook(
         if not svc_embeddings or not any(svc_embeddings):
             try:
                 arr = get_t3().get_embeddings(collection, doc_ids)
-            except Exception:
+            except Exception:  # noqa: BLE001 — embedding fetch best-effort; None triggers safe skip on count skew
                 arr = None
             # get_embeddings drops ids it cannot resolve; a count skew would
             # mis-pair vectors to docs, so skip rather than assign misaligned.
             if arr is None or len(arr) != len(doc_ids):
-                import structlog
+                import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
                 structlog.get_logger().debug(
                     "taxonomy_assign_service_embed_unavailable",
                     collection=collection,
@@ -730,8 +730,8 @@ def taxonomy_assign_batch_hook(
                     )
                 )
             )
-        except Exception:
-            import structlog
+        except Exception:  # noqa: BLE001 — taxonomy service path best-effort; logged at debug, returns
+            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
             structlog.get_logger().debug(
                 "taxonomy_assign_batch_service_failed", exc_info=True,
             )
@@ -752,7 +752,7 @@ def taxonomy_assign_batch_hook(
         # ChromaDB client can't cross the RPC boundary), then persist the
         # serializable result through the daemon so the indexer does not
         # open memory.db directly.
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 — deferred to avoid circular import (db.t2.catalog_taxonomy)
 
         chroma_client = get_t3()._client
         same = CatalogTaxonomy.compute_assignments(
@@ -769,14 +769,14 @@ def taxonomy_assign_batch_hook(
                 lambda db: db.taxonomy.persist_assignments(assignments)
             )
         if cross:
-            import structlog
+            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
             structlog.get_logger().debug(
                 "taxonomy_cross_collection_batch",
                 collection=collection,
                 cross_assigned=len(cross),
             )
-    except Exception:
-        import structlog
+    except Exception:  # noqa: BLE001 — taxonomy assign best-effort; logged at debug
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
         structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
 
 
@@ -798,11 +798,11 @@ def _fetch_or_embed(
     """
     # RDR-152 Seam B guard — see taxonomy_assign_batch_hook for rationale.
     # RDR-155 P4a.2: instance-based (env flag no longer tracks the handle type).
-    from nexus.db.http_vector_client import is_service_backed
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client)
     if is_service_backed(get_t3()):
         return None
 
-    import numpy as np
+    import numpy as np  # noqa: PLC0415 — numpy heavy dep deferred to function scope
 
     fetched: list[list[float] | None] = [None] * len(doc_ids)
     try:
@@ -820,8 +820,8 @@ def _fetch_or_embed(
                 emb = result_embs[j]
                 if emb is not None and len(emb) > 0:
                     fetched[idx] = list(emb)
-    except Exception:
-        import structlog
+    except Exception:  # noqa: BLE001 — T3 embedding fetch best-effort; logged at debug, falls back
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
         structlog.get_logger().debug(
             "taxonomy_t3_embedding_fetch_failed",
             collection=collection,
@@ -831,15 +831,15 @@ def _fetch_or_embed(
     missing = [i for i, e in enumerate(fetched) if e is None]
     if missing and contents:
         try:
-            from nexus.db.local_ef import LocalEmbeddingFunction
+            from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid circular import (db.local_ef)
             ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
             local_inputs = [contents[i] for i in missing if i < len(contents)]
             local_embs = ef(local_inputs)
             for k, i in enumerate(missing):
                 if i < len(contents) and k < len(local_embs):
                     fetched[i] = list(np.array(local_embs[k], dtype=np.float32))
-        except Exception:
-            import structlog
+        except Exception:  # noqa: BLE001 — local-embed fallback best-effort; logged at debug
+            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
             structlog.get_logger().debug(
                 "taxonomy_local_embed_fallback_failed", exc_info=True,
             )
@@ -879,7 +879,7 @@ def chash_dual_write_batch_hook(
     if not doc_ids or not metadatas:
         return
     try:
-        from nexus.db.t2.chash_index import dual_write_chash_index
+        from nexus.db.t2.chash_index import dual_write_chash_index  # noqa: PLC0415 — deferred to avoid circular import (db.t2.chash_index)
 
         # RDR-128 P1 (kg8sj): route through the daemon so the indexer does
         # not hold memory.db's writer lock; dual_write batches to one RPC.
@@ -888,8 +888,8 @@ def chash_dual_write_batch_hook(
                 db.chash_index, collection, doc_ids, metadatas
             )
         )
-    except Exception as exc:
-        import structlog
+    except Exception as exc:  # noqa: BLE001 — chash dual-write hook best-effort; logged + metered, never propagates
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
 
         # RDR-129 B4 (nexus-uq8a4): a ``database is locked`` / ``busy`` failure
         # here is an *unrecovered* best-effort write — the daemon could not
@@ -902,7 +902,7 @@ def chash_dual_write_batch_hook(
         msg = str(exc).lower()
         if "locked" in msg or "busy" in msg:
             try:
-                from nexus.dropped_writes import record_drop
+                from nexus.dropped_writes import record_drop  # noqa: PLC0415 — deferred to avoid circular import (dropped_writes)
 
                 record_drop(
                     hook="chash_dual_write_batch_hook",
@@ -910,7 +910,7 @@ def chash_dual_write_batch_hook(
                     rows=len(doc_ids),
                     error=str(exc),
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — drop metering must never break the best-effort hook
                 pass  # metering must never break the best-effort hook
         structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)
 
@@ -962,7 +962,7 @@ def manifest_write_batch_hook(
     """
     if not metadatas:
         return
-    from collections import defaultdict
+    from collections import defaultdict  # noqa: PLC0415 — stdlib collections deferred to function scope
 
     by_doc: dict[str, list[tuple[int, dict]]] = defaultdict(list)
     for i, meta in enumerate(metadatas):
@@ -988,8 +988,8 @@ def manifest_write_batch_hook(
                 _gclose.close()
             except Exception:  # noqa: BLE001
                 pass
-    except Exception:
-        import structlog
+    except Exception:  # noqa: BLE001 — no-catalog path best-effort; logged at debug, returns
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
         structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
         return
     # RDR-146 P1.2: this hook fires per T3 batch in the long-lived MCP
@@ -1046,14 +1046,14 @@ def _manifest_write_loop(cat, by_doc) -> None:
                 # indexers post-Phase-3. Routed via Catalog public API to satisfy
                 # the projector-only-writes invariant (RDR-101 Phase 3 ε).
                 cat.resync_chunk_count_cache(doc_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 — manifest hook non-propagating by contract; logged at WARNING for discoverability
             # Post-Phase-3 the manifest hook is load-bearing: a failure
             # leaves the catalog manifest empty and chunk_count=0 for
             # this doc (silent data-correctness bug). The contract still
             # requires non-propagation (best-effort hook) but the log
             # severity is WARNING so failures are discoverable in
             # production log streams without DEBUG enabled. nexus-zq79.
-            import structlog
+            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
             structlog.get_logger().warning(
                 "manifest_write_hook_failed", doc_id=doc_id, exc_info=True
             )
@@ -1089,15 +1089,15 @@ def check_version_compatibility() -> None:
 
     Never blocks startup — both checks log warnings only.
     """
-    import json
-    from pathlib import Path
+    import json  # noqa: PLC0415 — stdlib json deferred to function scope
+    from pathlib import Path  # noqa: PLC0415 — stdlib pathlib deferred to function scope
 
-    import structlog
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
 
     log = structlog.get_logger()
     try:
-        from importlib.metadata import version as _pkg_version
-        from nexus.db.migrations import _parse_version
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — stdlib importlib.metadata deferred to function scope
+        from nexus.db.migrations import _parse_version  # noqa: PLC0415 — deferred to avoid circular import (db.migrations)
 
         cli_ver = _pkg_version("conexus")
 
@@ -1110,7 +1110,7 @@ def check_version_compatibility() -> None:
         stored_ver: str | None = None
         if db_path.exists():
             try:
-                from nexus.daemon.t2_client import (
+                from nexus.daemon.t2_client import (  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
                     T2DaemonNotReachableError,
                     make_t2_client,
                 )
@@ -1122,7 +1122,7 @@ def check_version_compatibility() -> None:
                     stored_ver = raw if raw and raw != "0.0.0" else None
                 finally:
                     client.close()
-            except (T2DaemonNotReachableError, Exception):
+            except (T2DaemonNotReachableError, Exception):  # noqa: BLE001 — drift check best-effort; daemon-unreachable/RPC-fail degrades stored_ver to None
                 # Daemon unreachable or RPC failed — drift check is
                 # best-effort. Operator can run `nx doctor` for the
                 # full diagnostic.
@@ -1202,7 +1202,7 @@ def check_version_compatibility() -> None:
                         plugin_version=plugin_ver,
                         hint=hint,
                     )
-    except Exception:
+    except Exception:  # noqa: BLE001 — version-skew warning must never block MCP startup
         pass  # never block MCP startup
 
 
@@ -1239,7 +1239,7 @@ def reset_singletons():
     reset_plan_cache_for_tests()
     # RDR-152 Seam B: also reset the http_vector_client singleton
     try:
-        from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+        from nexus.db.http_vector_client import reset_http_vector_client_for_tests  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client)
         reset_http_vector_client_for_tests()
     except ImportError:
         pass

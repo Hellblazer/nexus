@@ -257,9 +257,9 @@ class AspectExtractionWorker:
         All exceptions inside the loop are caught and recorded; the
         worker thread itself never dies from a row's failure.
         """
-        from nexus.db.t2.aspect_extraction_queue import QueueRow
-        from nexus.mcp_infra import t2_index_write
-        from nexus.migration.state import is_migrating as _migration_in_progress
+        from nexus.db.t2.aspect_extraction_queue import QueueRow  # noqa: PLC0415 — deferred to avoid circular import (db.t2 <-> aspect_worker)
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra <-> aspect_worker)
+        from nexus.migration.state import is_migrating as _migration_in_progress  # noqa: PLC0415 — deferred to avoid circular import (migration.state)
         while not self._stop_event.is_set():
             # RDR-159 P1c (S2 quiesce): while a guided upgrade migration holds
             # the migration.state sentinel, SUSPEND the claim/extract cycle.
@@ -300,7 +300,7 @@ class AspectExtractionWorker:
                     r if isinstance(r, QueueRow) else QueueRow(**r)
                     for r in rows
                 ]
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort claim loop: must not crash worker thread, logged + retried
                 _log.warning("aspect_worker_claim_failed", exc_info=True)
                 self._stop_event.wait(self._poll_interval)
                 continue
@@ -324,10 +324,10 @@ class AspectExtractionWorker:
         P5.1 / nexus-8g79.34 — the batch path now mirrors the
         single-doc extractor's read contract).
         """
-        import dataclasses
+        import dataclasses  # noqa: PLC0415 — stdlib import deferred to method scope (rare branch)
 
-        from nexus.aspect_extractor import select_config
-        from nexus.mcp_infra import t2_index_write
+        from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
 
         # extract_aspects_batch requires every input to share a single
         # ExtractorConfig. claim_batch grabs FIFO across collections, so
@@ -351,9 +351,9 @@ class AspectExtractionWorker:
         # _process_row's pattern at lines 406-411).
         manifest_lookup = None
         try:
-            from nexus.commands.enrich import _build_catalog_manifest_lookup
+            from nexus.commands.enrich import _build_catalog_manifest_lookup  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
             manifest_lookup = _build_catalog_manifest_lookup()
-        except Exception:
+        except Exception:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
             pass
 
         items: list[tuple[str, str, str, str]] = [
@@ -364,7 +364,7 @@ class AspectExtractionWorker:
 
         try:
             records = _extract_aspects_batch(items, manifest_lookup=manifest_lookup)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — batch extract is best-effort; failure logged and rows re-queued
             _log.warning(
                 "aspect_worker_batch_extract_raised",
                 row_count=len(rows),
@@ -378,7 +378,7 @@ class AspectExtractionWorker:
                     )
             try:
                 t2_index_write(_fail_all)
-            except Exception:
+            except Exception:  # noqa: BLE001 — persist of mark-failed is best-effort; logged via log.warning
                 _log.warning(
                     "aspect_worker_batch_mark_failed_persist_failed",
                     exc_info=True,
@@ -415,7 +415,7 @@ class AspectExtractionWorker:
                 db.complete_aspect(dataclasses.asdict(record))
         try:
             t2_index_write(_persist_all)
-        except Exception:
+        except Exception:  # noqa: BLE001 — batch persist best-effort; failure logged via log.warning
             _log.warning(
                 "aspect_worker_batch_persist_failed",
                 exc_info=True,
@@ -431,14 +431,14 @@ class AspectExtractionWorker:
         contended), ``reclaim_stale`` recovers the row; we log and move on
         without killing the worker thread.
         """
-        from nexus.mcp_infra import t2_index_write
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
         try:
             t2_index_write(
                 lambda db: db.aspect_queue.mark_failed(
                     row.collection, row.source_path, error=error,
                 )
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — mark-failed persist best-effort; logged via log.warning
             _log.warning(
                 "aspect_worker_mark_failed_persist_failed",
                 collection=row.collection,
@@ -454,9 +454,9 @@ class AspectExtractionWorker:
         never opens ``memory.db`` directly and cannot contend with the
         daemon for the single WAL writer lock.
         """
-        import dataclasses
+        import dataclasses  # noqa: PLC0415 — stdlib import deferred to method scope (rare branch)
 
-        from nexus.mcp_infra import t2_index_write
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
         try:
             # Content was captured at enqueue time when in scope (MCP
             # store_put). For CLI rows where content was not in scope
@@ -477,9 +477,9 @@ class AspectExtractionWorker:
             # dropped chunk_index metadata field.
             manifest_lookup = None
             try:
-                from nexus.commands.enrich import _build_catalog_manifest_lookup
+                from nexus.commands.enrich import _build_catalog_manifest_lookup  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
                 manifest_lookup = _build_catalog_manifest_lookup()
-            except Exception:
+            except Exception:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
                 pass
             record = _extract_aspects(
                 content=row.content,
@@ -488,7 +488,7 @@ class AspectExtractionWorker:
                 doc_id_lookup=doc_id_lookup,
                 manifest_lookup=manifest_lookup,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — extract is best-effort; failure logged via log.warning
             _log.warning(
                 "aspect_worker_extract_raised",
                 collection=row.collection,
@@ -535,7 +535,7 @@ class AspectExtractionWorker:
             t2_index_write(
                 lambda db: db.complete_aspect(dataclasses.asdict(record))
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — persist is best-effort; failure logged via log.warning
             _log.warning(
                 "aspect_worker_persist_failed",
                 collection=row.collection,
@@ -565,7 +565,7 @@ def _worker_lock_path(locks_dir: Path | None = None) -> Path:
     SIG-5 (nexus-1091): the MCP server writes this file when its worker
     starts so that CLI-side ``drain_worker`` can detect the conflict.
     """
-    import os
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     base = locks_dir if locks_dir is not None else (
         nexus_config_dir() / "locks"
@@ -583,7 +583,7 @@ def _sweep_dead_worker_locks(locks_dir: Path) -> None:
     pileup. Live locks (including this process's own) are left intact;
     non-PID-shaped files are ignored. Best-effort — never raises.
     """
-    import os
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     if not locks_dir.exists():
         return
@@ -601,7 +601,7 @@ def _sweep_dead_worker_locks(locks_dir: Path) -> None:
             try:
                 lock_file.unlink(missing_ok=True)
                 _log.info("aspect_worker_stale_lock_swept", pid=pid)
-            except Exception:
+            except Exception:  # noqa: BLE001 — liveness probe of foreign pid is best-effort; treat unknown as stale
                 pass
         except PermissionError:
             # Alive under another user — leave it.
@@ -617,14 +617,14 @@ def _write_worker_lock(locks_dir: Path | None = None) -> None:
     is advisory; a missing file merely means ``drain_worker`` from another
     process will not detect this worker.
     """
-    import os
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     try:
         lock = _worker_lock_path(locks_dir)
         lock.parent.mkdir(parents=True, exist_ok=True)
         _sweep_dead_worker_locks(lock.parent)
         lock.write_text(str(os.getpid()))
-    except Exception:
+    except Exception:  # noqa: BLE001 — lock-file write is best-effort; failure logged via log.warning
         _log.warning("aspect_worker_lock_write_failed", exc_info=True)
 
 
@@ -635,7 +635,7 @@ def _remove_worker_lock(locks_dir: Path | None = None) -> None:
     """
     try:
         _worker_lock_path(locks_dir).unlink(missing_ok=True)
-    except Exception:
+    except Exception:  # noqa: BLE001 — lock-file remove is best-effort; failure logged via log.warning
         _log.warning("aspect_worker_lock_remove_failed", exc_info=True)
 
 
@@ -710,7 +710,7 @@ def live_foreign_worker_pids(locks_dir: Path) -> list[int]:
     RDR-159 migration quiesce pre-gate (which needs the FULL offending-pid set).
     Returns an empty list when ``locks_dir`` does not exist.
     """
-    import os
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     if not locks_dir.exists():
         return []
@@ -840,7 +840,7 @@ def drain_worker(
         for.  This handles the quiescent case (e.g., the caller's process
         never ran the worker, or the worker finished and was reset).
     """
-    from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+    from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred to avoid circular import (db.t2 queue)
 
     # SIG-5: detect active MCP-process workers before stopping the local
     # singleton.  A live MCP worker in another process drains its own
@@ -944,10 +944,10 @@ def aspect_extraction_enqueue_hook(
         carries the empty string; worker falls back to
         ``Path(source_path).read_text()``.
     """
-    from nexus.aspect_extractor import select_config
+    from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
     if select_config(collection) is None:
         return  # No extractor for this collection — nothing to enqueue.
-    from nexus.mcp_infra import t2_index_write
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
     try:
         # RDR-128 P1 (kg8sj): route the enqueue through the daemon so the
         # indexer process does not open memory.db directly to write it.
@@ -957,7 +957,7 @@ def aspect_extraction_enqueue_hook(
                 doc_id=doc_id,
             )
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — enqueue is best-effort; failure logged via log.warning
         _log.warning(
             "aspect_extraction_enqueue_failed",
             source_path=source_path,

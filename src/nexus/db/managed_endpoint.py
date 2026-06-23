@@ -117,7 +117,7 @@ def resolve_managed_endpoint(*, require_token: bool = True) -> tuple[str, str | 
     opaque 401 later. The unauthenticated ``/version`` probe itself does not need
     the token; ``require_token=False`` supports probe-only callers.
     """
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     base = (get_credential("service_url") or "").strip().rstrip("/") or DEFAULT_MANAGED_SERVICE_URL
     token = (get_credential("service_token") or "").strip() or None

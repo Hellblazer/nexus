@@ -297,12 +297,12 @@ def plan_match(
                 # the stale row stops skewing future top-N fetches.
                 try:
                     cache.remove(plan_id)
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort cache eviction; logged at debug
                     # nexus-8g79.8: a recurring removal failure causes
                     # the stale row to be re-evicted on every match
                     # call. DEBUG-with-exc_info + plan_id so the
                     # repeat-offender is identifiable.
-                    import structlog
+                    import structlog  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
                     structlog.get_logger(__name__).debug(
                         "plan_cache_eviction_failed",
                         plan_id=plan_id, exc_info=True,

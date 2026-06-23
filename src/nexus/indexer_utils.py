@@ -42,7 +42,7 @@ def find_repo_root(path: Path) -> Path | None:
         )
         if result.returncode == 0 and result.stdout.strip():
             return Path(result.stdout.strip())
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         pass
     return None
 
@@ -129,7 +129,7 @@ def detect_git_metadata(path: Path) -> dict[str, str]:
             r = subprocess.run(
                 args, cwd=repo, capture_output=True, text=True, timeout=10,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             return ""
         return r.stdout.strip() if r.returncode == 0 else ""
 
@@ -214,7 +214,7 @@ def load_ignore_patterns(repo_root: Path | None = None) -> list[str]:
 
     When *repo_root* is provided, picks up the per-repo config.
     """
-    from nexus.config import load_config
+    from nexus.config import load_config  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     cfg = load_config(repo_root=repo_root)
     cfg_patterns: list[str] = cfg.get("server", {}).get("ignorePatterns", [])
     return list(dict.fromkeys(_DEFAULT_IGNORE + cfg_patterns))
@@ -232,7 +232,7 @@ def is_gitignored(path: Path, repo_root: Path) -> bool:
             cwd=repo_root, capture_output=True, timeout=10,
         )
         return result.returncode == 0  # 0 = ignored, 1 = not ignored
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return False
 
 
@@ -294,10 +294,10 @@ def build_staleness_cache(col: object) -> StalenessCache:
         # Local import to avoid a circular dependency at module-load
         # time. ``_paginated_get`` lives in nexus.indexer (the
         # orchestrator), which itself imports from this module.
-        from nexus.indexer import _paginated_get
+        from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         all_chunks = _paginated_get(col, include=["metadatas"])
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         # nexus-lrhg (RDR-108 audit finding 6): pre-fix this swallowed
         # ``_paginated_get`` failures with a bare ``except: pass`` and
         # returned an empty cache. The caller fell back to the per-file
@@ -307,7 +307,7 @@ def build_staleness_cache(col: object) -> StalenessCache:
         # the collection identity so a recurring outage (network blip,
         # cloud throttle) surfaces in production logs instead of
         # silently melting the embedder budget.
-        import structlog
+        import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         structlog.get_logger(__name__).warning(
             "build_staleness_cache_paginated_get_failed",
             collection=getattr(col, "name", "<unknown>"),
@@ -330,20 +330,20 @@ def build_staleness_cache(col: object) -> StalenessCache:
     ]
     if needed_chashes:
         try:
-            from nexus.catalog.factory import make_catalog_reader
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
             _cat = make_catalog_reader()
             if _cat is not None:
                 by_chash = _cat.docs_for_chashes(list(set(needed_chashes)))
                 for c, doc_ids in by_chash.items():
                     if doc_ids:
                         chash_to_doc[c] = sorted(doc_ids)[0]
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
             # nexus-8g79.8: pre-fix this swallowed the whole chash→doc_id
             # resolution silently, leaving every result without doc_id
             # in metadata (catalog-aware retrieval gated on doc_id then
             # no-ops). WARNING with the chash count so a recurring
             # catalog outage surfaces in production logs.
-            import structlog
+            import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
             structlog.get_logger(__name__).warning(
                 "docs_for_chashes_failed",
                 chash_count=len(needed_chashes),
@@ -488,7 +488,7 @@ def check_local_path_writable() -> None:
     Raises:
         CredentialsMissingError: When the local path cannot be written to.
     """
-    from nexus.config import _default_local_path
+    from nexus.config import _default_local_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     local_path = _default_local_path()
     try:
         local_path.mkdir(parents=True, exist_ok=True)

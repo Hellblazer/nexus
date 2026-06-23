@@ -71,7 +71,7 @@ def repair() -> None:
 def _open_plans_db():
     """Open memory.db with WAL pragmas. Returns the connection, or
     None when the database does not exist."""
-    from nexus.commands._helpers import default_db_path
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -96,7 +96,7 @@ def repair_scope_tags_cmd() -> None:
     Combines the substantive work of the pre-RDR-120 4.8.0 and 4.8.1
     migrations into one idempotent pass.
     """
-    from nexus.plans.repair import repair_scope_tags
+    from nexus.plans.repair import repair_scope_tags  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -116,7 +116,7 @@ def repair_dimensions_cmd() -> None:
     tagged ``backfill-low-conf`` for operator review. Re-runs report
     "0 backfilled" once every row carries dimensions.
     """
-    from nexus.plans.repair import repair_dimensions
+    from nexus.plans.repair import repair_dimensions  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -153,7 +153,7 @@ def repair_match_text_cmd() -> None:
     triggers) was created by ``apply_pending``; this verb fills in
     the content the legacy migration used to populate.
     """
-    from nexus.plans.repair import repair_match_text
+    from nexus.plans.repair import repair_match_text  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -171,7 +171,7 @@ def repair_retire_legacy_cmd() -> None:
     ``operation`` shape. Such rows cannot be dispatched by ``plan_run``
     and only pollute plan-match results.
     """
-    from nexus.plans.repair import repair_retire_legacy
+    from nexus.plans.repair import repair_retire_legacy  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -189,7 +189,7 @@ def repair_builtin_bindings_cmd() -> None:
     plan rows whose stored ``plan_json`` predates the 4.10.1 seed
     loader fix.
     """
-    from nexus.plans.repair import repair_builtin_bindings
+    from nexus.plans.repair import repair_builtin_bindings  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:
@@ -204,7 +204,7 @@ def repair_builtin_bindings_cmd() -> None:
 @repair.command("all")
 def repair_all_cmd() -> None:
     """Run every repair pass in dependency order."""
-    from nexus.plans.repair import repair_all
+    from nexus.plans.repair import repair_all  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
     conn = _open_plans_db()
     if conn is None:

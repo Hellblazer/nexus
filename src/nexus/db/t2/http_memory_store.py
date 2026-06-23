@@ -505,7 +505,7 @@ class HttpMemoryStore(RawHandleGuardMixin):
             return
         try:
             detail = resp.json().get("error", resp.text)
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
             detail = resp.text
         raise httpx.HTTPStatusError(
             f"HttpMemoryStore.{op} failed: HTTP {resp.status_code}: {detail}",

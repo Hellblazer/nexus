@@ -158,7 +158,7 @@ def _cluster(
         centroids = getattr(clusterer, "centroids_", np.empty((0, embeddings.shape[1])))
         return labels, centroids
 
-    from sklearn.cluster import MiniBatchKMeans
+    from sklearn.cluster import MiniBatchKMeans  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
     k = max(10, int(n ** 0.5 / 3))
     _log.info(
@@ -193,7 +193,7 @@ def _merge_labels(
     centroids match the same old centroid above threshold, the
     higher-similarity claimant wins.
     """
-    from sklearn.metrics.pairwise import cosine_similarity
+    from sklearn.metrics.pairwise import cosine_similarity  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
     n_new = new_centroids.shape[0]
     result: list[dict[str, Any]] = [
@@ -270,7 +270,7 @@ def compute_split(
     - ``collection_name``: passed through for the caller
     - ``topic_id``: passed through for the caller
     """
-    from sklearn.cluster import KMeans
+    from sklearn.cluster import KMeans  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -495,7 +495,7 @@ def compute_rebuild_plan(
                 continue
             # Route 2: doc in the current corpus — cosine to new centroids.
             if manual_doc in doc_id_to_idx:
-                from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+                from sklearn.metrics.pairwise import cosine_similarity as _cos_sim  # noqa: PLC0415 — heavy/optional dependency deferred to call time
                 j = doc_id_to_idx[manual_doc]
                 sims = _cos_sim(embeddings[j : j + 1], new_centroids_arr)[0]
                 best_idx = int(sims.argmax())

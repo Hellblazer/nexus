@@ -768,7 +768,7 @@ def extract_aspects(
         uri = f"chroma://{collection}/{quote(uri_identity, safe='/')}"
         try:
             t3 = get_t3()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
             _log.warning(
                 "aspect_extractor_t3_unavailable",
                 uri=uri,
@@ -807,7 +807,7 @@ def extract_aspects(
         # surface as null-fields records.
         try:
             parsed = config.parser_fn(content, source_path, collection)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
             _log.warning(
                 "aspect_extractor_parser_fn_raised",
                 extractor=config.extractor_name,
@@ -956,7 +956,7 @@ def extract_aspects_batch(
             if t3_handle is None:
                 try:
                     t3_handle = get_t3()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                     _log.warning(
                         "aspect_extractor_batch_t3_unavailable",
                         uri=uri,

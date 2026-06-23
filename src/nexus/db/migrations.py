@@ -1521,7 +1521,7 @@ def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
     SIG-4: The error message includes a ``nx catalog rename-collection`` command
     template per orphan collection so operators have an actionable next step.
     """
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     threshold = int(
         _os.environ.get(
@@ -1912,7 +1912,7 @@ def _catalog_db_path_from_conn(conn: sqlite3.Connection) -> Path:
             return config_dir / "catalog" / ".catalog.db"
 
     # Fallback: use NEXUS_CONFIG_DIR env or default
-    import os
+    import os  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
     override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
     if override:
         return Path(override) / "catalog" / ".catalog.db"
@@ -2252,10 +2252,10 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
 
     RDR-075 RF-11.  Idempotent via ``INSERT OR IGNORE`` in ``assign_topic``.
     """
-    import sys
-    import time
+    import sys  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
+    import time  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
-    import structlog
+    import structlog  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     log = structlog.get_logger()
 
@@ -2265,7 +2265,7 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
         return
 
     n = len(collections)
-    print(
+    print(  # noqa: T201 — long-running upgrade progress to stderr; structured event emitted via log.info below
         f"  Backfilling projection across {n} collections "
         f"(~{n * (n - 1)} projection calls).",
         file=sys.stderr,
@@ -2295,27 +2295,27 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
                 )
             total_assigned += len(assignments)
             elapsed = time.monotonic() - t0
-            print(
+            print(  # noqa: T201 — long-running upgrade progress to stderr (per-collection tick)
                 f"  [{i}/{n}] {src}: "
                 f"{result.get('total_chunks', 0)} chunks, "
                 f"{len(result.get('matched_topics', []))} matches, "
                 f"{len(assignments)} attempted ({elapsed:.1f}s)",
                 file=sys.stderr,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — per-collection backfill must not abort migration; logged via log.warning
             log.warning("backfill_projection_collection_failed",
                         collection=src, exc_info=True)
-            print(f"  [{i}/{n}] {src}: SKIPPED ({type(e).__name__})",
+            print(f"  [{i}/{n}] {src}: SKIPPED ({type(e).__name__})",  # noqa: T201 — upgrade progress to stderr; structured event via log.warning above
                   file=sys.stderr)
 
     # Generate co-occurrence links from the new projection assignments
-    print("  Generating co-occurrence topic links...", file=sys.stderr)
+    print("  Generating co-occurrence topic links...", file=sys.stderr)  # noqa: T201 — long-running upgrade progress to stderr
     try:
         link_count = taxonomy.generate_cooccurrence_links()
-        print(f"  Generated {link_count} co-occurrence links.", file=sys.stderr)
-    except Exception:
+        print(f"  Generated {link_count} co-occurrence links.", file=sys.stderr)  # noqa: T201 — long-running upgrade progress to stderr
+    except Exception:  # noqa: BLE001 — co-occurrence link gen is best-effort; logged via log.warning
         log.warning("backfill_cooccurrence_failed", exc_info=True)
-        print("  Co-occurrence link generation: SKIPPED", file=sys.stderr)
+        print("  Co-occurrence link generation: SKIPPED", file=sys.stderr)  # noqa: T201 — upgrade progress to stderr; structured event via log.warning above
 
     total_elapsed = time.monotonic() - total_start
     # Count actual rows written (INSERT OR IGNORE deduplicates; the per-call
@@ -2326,7 +2326,7 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
         actual_written = taxonomy.conn.execute(
             "SELECT COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'"
         ).fetchone()[0]
-    print(
+    print(  # noqa: T201 — long-running upgrade progress to stderr; structured event emitted via log.info below
         f"  Backfill complete: {actual_written} projection assignments stored "
         f"({total_assigned} attempted) in {total_elapsed:.1f}s across {n} collections.",
         file=sys.stderr,
@@ -2354,10 +2354,10 @@ def expected_t2_schema_version() -> str:
     when running the same wheel.
     """
     try:
-        from importlib.metadata import version as _pkg_version
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
         return _pkg_version("conexus")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort version read; falls back to 0.0.0
         return "0.0.0"
 
 
@@ -2498,7 +2498,7 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     entered under the released lock would see the path as "done" and
     proceed against a half-initialised schema (storage review C-1).
     """
-    import time as _time
+    import time as _time  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     path_key = _connection_path_key(conn)
     with _upgrade_lock:
@@ -2597,7 +2597,7 @@ def _connection_path_key(conn: sqlite3.Connection) -> str:
     ``Path.resolve()`` to match the canonicalisation used by
     ``T2Database.__init__()`` and ``_run_upgrade()``.
     """
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     row = conn.execute("PRAGMA database_list").fetchone()
     if row and row[2]:
@@ -2627,10 +2627,10 @@ def _create_base_tables(conn: sqlite3.Connection) -> None:
     Lazy imports avoid circular dependencies between migrations.py and
     domain store modules.
     """
-    from nexus.db.t2.catalog_taxonomy import _TAXONOMY_SCHEMA_SQL
-    from nexus.db.t2.memory_store import _MEMORY_SCHEMA_SQL
-    from nexus.db.t2.plan_library import _PLANS_SCHEMA_SQL
-    from nexus.db.t2.telemetry import _TELEMETRY_SCHEMA_SQL
+    from nexus.db.t2.catalog_taxonomy import _TAXONOMY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
+    from nexus.db.t2.memory_store import _MEMORY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
+    from nexus.db.t2.plan_library import _PLANS_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
+    from nexus.db.t2.telemetry import _TELEMETRY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     conn.executescript(_MEMORY_SCHEMA_SQL)
     conn.executescript(_PLANS_SCHEMA_SQL)

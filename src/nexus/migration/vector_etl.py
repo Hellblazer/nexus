@@ -297,7 +297,7 @@ def _migrate_one(
         # Unreadable counts as data (conservative: stays red).
         try:
             nc_count = int(read_client.get_collection(name).count())
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort count probe; degrades to -1 sentinel
             nc_count = -1
         if nc_count == 0:
             _log.info(

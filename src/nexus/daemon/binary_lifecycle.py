@@ -57,7 +57,7 @@ def read_installed_provenance(config_dir: Path) -> dict | None:
     Reads the sidecar written by ``install_binary`` (version, tag, sha256,
     install metadata). Returns ``None`` when no binary has been installed.
     """
-    from nexus.daemon.binary_install import binary_sidecar_path
+    from nexus.daemon.binary_install import binary_sidecar_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     path = binary_sidecar_path(config_dir)
     if not path.is_file():
@@ -85,7 +85,7 @@ def fetch_service_version(
     service instead of failing the TLS negotiation (nexus-n3bwh). ``port`` may
     be ``None`` (scheme-default port, e.g. an ``https://host`` URL with no
     explicit ``:443``), in which case it is omitted from the authority."""
-    import urllib.request
+    import urllib.request  # noqa: PLC0415 — heavy/optional dep deferred
 
     authority = f"{host}:{port}" if port is not None else host
     try:
@@ -94,7 +94,7 @@ def fetch_service_version(
         ) as resp:
             data = json.loads(resp.read())
             return data if isinstance(data, dict) else None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — service version probe; unreachable logged at debug, returns None
         _log.debug("service_version_unreachable", host=host, port=port, error=str(exc))
         return None
 
@@ -105,11 +105,11 @@ def fetch_service_version(
 def _psql_bin() -> str | None:
     """psql from the same discovery the supervisor uses for pg_ctl."""
     try:
-        from nexus.db.pg_provision import discover_pg_binaries
+        from nexus.db.pg_provision import discover_pg_binaries  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         # discover_pg_binaries validates all four binaries incl. psql.
         return str(discover_pg_binaries().psql)
-    except Exception:
-        import shutil
+    except Exception:  # noqa: BLE001 — psql-path resolution fallback to shutil.which
+        import shutil  # noqa: PLC0415 — stdlib import kept branch-local
         return shutil.which("psql")
 
 

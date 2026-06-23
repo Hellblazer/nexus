@@ -48,9 +48,9 @@ def _cloud_admin_client(api_key: str) -> "chromadb.AdminClient":
     real tenant UUID (via :func:`_resolve_cloud_tenant`) when calling admin
     methods such as ``create_database`` or ``get_database``.
     """
-    import chromadb
-    from chromadb import Settings
-    from chromadb.auth.token_authn import TokenTransportHeader
+    import chromadb  # noqa: PLC0415 — deliberate function-local import: heavy chromadb dep deferred to provision path
+    from chromadb import Settings  # noqa: PLC0415 — deliberate function-local import: heavy chromadb dep deferred to provision path
+    from chromadb.auth.token_authn import TokenTransportHeader  # noqa: PLC0415 — deliberate function-local import: heavy chromadb dep deferred to provision path
 
     # nexus-8g79.22: constructor kwargs instead of attribute mutation —
     # the attribute-set form was deprecated in chromadb 0.4.x and the
@@ -94,13 +94,13 @@ def ensure_databases(
     before re-raising — this correctly handles cases where Chroma Cloud returns
     a non-409 error for create-on-existing.
     """
-    from chromadb.errors import ChromaError, UniqueConstraintError
+    from chromadb.errors import ChromaError, UniqueConstraintError  # noqa: PLC0415 — deliberate function-local import: heavy chromadb dep deferred to provision path
 
     # Resolve the real tenant UUID so all admin operations use the correct path.
     try:
         api_key = admin.get_chroma_cloud_api_key_from_clients()
         tenant = _resolve_cloud_tenant(api_key)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort tenant resolution: token-truncated warning logged, falls through to provided tenant for self-hosted
         # nexus-8g79.33: ChromaDB error bodies sometimes echo the
         # offending token in the message (e.g. "invalid token: sk-...").
         # Truncate to 120 chars matching retry.py's safety bound so
@@ -121,5 +121,5 @@ def ensure_databases(
         try:
             admin.get_database(base, tenant=tenant)
             return {base: False}
-        except Exception:
+        except Exception:  # noqa: BLE001 — existence-verify probe failed; re-raise the original create error
             raise exc

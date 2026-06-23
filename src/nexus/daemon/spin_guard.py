@@ -139,7 +139,7 @@ class SpinWatchdog:
     def start(self, loop: Any = None) -> None:
         """Launch the watchdog on a daemon thread. ``loop`` is accepted for
         symmetry/future use; detection reads the selector counters directly."""
-        import time
+        import time  # noqa: PLC0415 — stdlib import kept branch-local
 
         self._last_time = time.monotonic()
         self._last_count = int(getattr(self._counter, "zero_to_ready", 0))

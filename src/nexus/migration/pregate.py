@@ -76,10 +76,10 @@ class LiveServiceWiredModels:
 
     def wired_models(self) -> frozenset[str] | None:
         try:
-            from urllib.parse import urlsplit
+            from urllib.parse import urlsplit  # noqa: PLC0415 — branch-local; only on wired-model probe
 
-            from nexus.daemon.binary_lifecycle import fetch_service_version
-            from nexus.db.service_endpoint import resolve_service_endpoint
+            from nexus.daemon.binary_lifecycle import fetch_service_version  # noqa: PLC0415 — circular-dep avoidance; daemon pulls heavy deps
+            from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — branch-local probe helper
 
             # Scheme-aware: a managed TLS endpoint (NX_SERVICE_URL=https://…:443)
             # must reach the service over https; the old (host, port) path

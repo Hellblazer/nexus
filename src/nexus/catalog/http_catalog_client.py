@@ -1266,7 +1266,7 @@ class HttpCatalogClient:
         try:
             self._get("/stats")
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 — probe: any failure to reach /stats means not-initialized
             return False
 
     # ══════════════════════════════════════════════════════════════════════════

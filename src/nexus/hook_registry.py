@@ -106,7 +106,7 @@ class HookRegistry:
         for hook in self._single:
             try:
                 hook(doc_id, collection, content)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
                     "post_store_hook_failed",
@@ -182,7 +182,7 @@ class HookRegistry:
                     )
                 else:
                     hook(doc_ids, collection, contents, embeddings, metadatas)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
                     "post_store_batch_hook_failed",
@@ -249,7 +249,7 @@ class HookRegistry:
                     hook(source_path, collection, content, doc_id=doc_id)
                 else:
                     hook(source_path, collection, content)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
                     "post_document_hook_failed",
@@ -329,7 +329,7 @@ def install_default_hooks(registry: HookRegistry) -> None:
     Idempotent: re-registering the same callable on the same registry
     is a no-op (duplicate-registration detection by identity).
     """
-    from nexus.mcp_infra import (
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
         chash_dual_write_batch_hook,
         manifest_write_batch_hook,
         taxonomy_assign_batch_hook,
@@ -343,7 +343,7 @@ def install_default_hooks(registry: HookRegistry) -> None:
         if hook not in registry._batch:
             registry.register_batch(hook)
 
-    from nexus.aspect_worker import aspect_extraction_enqueue_hook
+    from nexus.aspect_worker import aspect_extraction_enqueue_hook  # noqa: PLC0415 — deferred to avoid circular import
     if aspect_extraction_enqueue_hook not in registry._document:
         registry.register_document(aspect_extraction_enqueue_hook)
 
@@ -381,7 +381,7 @@ def _persist_hook_failure(
     The store owns the column-set migration, so there is no per-caller
     INSERT fallback ladder anymore.
     """
-    from nexus.mcp_infra import t2_ctx
+    from nexus.mcp_infra import t2_ctx  # noqa: PLC0415 — deferred to avoid circular import
 
     try:
         with t2_ctx() as t2:
@@ -394,7 +394,7 @@ def _persist_hook_failure(
                 batch_doc_ids=batch_doc_ids,
                 is_batch=is_batch,
             )
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         key = (chain, hook_name)
         if key not in _hook_failure_drop_warned:
             _hook_failure_drop_warned.add(key)

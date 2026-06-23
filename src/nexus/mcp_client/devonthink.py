@@ -88,7 +88,7 @@ def dt_call(tool: str, args: dict[str, Any] | None = None) -> dict[str, Any] | N
 
     try:
         return asyncio.run(_run())
-    except Exception as exc:  # connect/transport failure → fail-soft
+    except Exception as exc:  # connect/transport failure → fail-soft  # noqa: BLE001 — transport boundary; fail-soft to None, logged at warning
         log.warning("dt_call_failed", tool=tool, error=str(exc), error_type=type(exc).__name__)
         return None
 

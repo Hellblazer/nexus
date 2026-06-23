@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 def _pid_file_path() -> Path:
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: config imports this module's siblings
 
     return nexus_config_dir() / "mineru.pid"
 

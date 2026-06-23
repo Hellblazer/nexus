@@ -80,7 +80,7 @@ def uri_for(collection: str, source_path: str) -> str | None:
     backfill site and going-forward writers if those run from
     different CWDs.
     """
-    import os.path
+    import os.path  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
     if not source_path:
         return None
@@ -262,7 +262,7 @@ def _gather_chroma_chunks_by_field(
     if manifest_lookup is not None and identity_field == "doc_id":
         try:
             rows = manifest_lookup(match_value)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort row fetch; degrades to empty list
             rows = []
         for row in rows or []:
             chash = getattr(row, "chash", None) or (
@@ -334,7 +334,7 @@ def _gather_chroma_chunks_by_field(
                 if len(docs) < page_limit:
                     break
                 offset += page_limit
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — boundary catch; error surfaced to caller as a ReadFail result
         return ReadFail(
             reason="unreachable",
             detail=(
@@ -438,7 +438,7 @@ def _read_chroma_uri(
         )
     try:
         coll = t3.get_collection(collection)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — boundary catch; error surfaced to caller as a ReadFail result
         return ReadFail(
             reason="unreachable",
             detail=f"get_collection({collection!r}) failed: {type(e).__name__}: {e}",
@@ -455,7 +455,7 @@ def _read_chroma_uri(
     if doc_id_lookup is not None:
         try:
             doc_id = doc_id_lookup(collection, source_id) or ""
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary catch; error surfaced to caller as a ReadFail result
             return ReadFail(
                 reason="unreachable",
                 detail=(
@@ -567,7 +567,7 @@ def _read_scratch_uri(uri: str, *, scratch: Any = None, **_kw: Any) -> ReadResul
     session_id, entry_id = parts
     try:
         entry = scratch.get(entry_id)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — boundary catch; error surfaced to caller as a ReadFail result
         return ReadFail(
             reason="unreachable",
             detail=f"scratch.get({entry_id!r}) failed: {type(e).__name__}: {e}",
@@ -667,7 +667,7 @@ def _read_https_uri(
     try:
         try:
             response = http_client.get(uri)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary catch; error surfaced to caller as a ReadFail result
             return ReadFail(
                 reason="unreachable",
                 detail=f"http fetch failed: {type(e).__name__}: {e}",

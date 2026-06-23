@@ -41,9 +41,9 @@ def _local_service_present() -> bool:
     no spurious "service stop … not running" noise (review Sig-1), and no stop
     subprocess is ever spawned (review Sig-2).
     """
-    from nexus.commands import daemon as _daemon
-    from nexus.config import nexus_config_dir
-    from nexus.db.service_endpoint import discover_lease
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — circular-dep avoidance; daemon command module pulls heavy deps
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — branch-local helper import
+    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — branch-local helper import
 
     try:
         if (_daemon._autostart_install_dir() / _daemon._autostart_filename_t2()).exists():
