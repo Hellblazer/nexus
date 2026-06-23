@@ -491,3 +491,127 @@ jobs:
         # and lowers peak memory while preserving the gate's purpose. The RELEASE build
         # (engine-service-release.yml) keeps the default -O2 full optimization.
         run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob package
+
+  write-seam-gate:
+    # nexus-h29w1 — Behavioural cross-boundary write-seam CI gate (F1 closure).
+    #
+    # Audit finding F1: no single CI gate exercises BOTH halves of a write-seam
+    # diff. The Python suite (ci.yml) deselects integration tests; service-ci.yml
+    # fires only on service/** paths — so a Python-only change to
+    # http_vector_client.py:upsert_chunks cannot trigger the Java
+    # VectorHandler/PgVectorRepository tenant/dedup/quota suite.
+    #
+    # This job boots the real service JAR (pre-built shaded jar) against a
+    # throwaway pgvector/pgvector:pg17 Docker container and feeds >300-record,
+    # duplicate-chash, and oversized inputs through the REAL HttpVectorClient,
+    # asserting server-side enforcement: dedup collapse, ON CONFLICT idempotency,
+    # and oversize behaviour.  The new value is the Python-client -> real-server
+    # WIRE CROSSING — this does NOT duplicate existing in-JVM Java coverage
+    # (VectorHandlerEmbeddingModeTest, VectorIntegrationTest,
+    # PgVectorRepositoryContractTest).
+    #
+    # PATH GATE: the job ALWAYS runs (so the required status check always
+    # reports), but the expensive build/test steps run only when the write-seam
+    # surface changes (Python client OR Java handler).  A diff touching either
+    # half triggers this job, closing the gap where neither existing workflow
+    # fires.
+    #
+    # FAIL-NOT-SKIP ON MISSING JAR: NX_REQUIRE_SERVICE_JAR=1 is set so that
+    # a missing/stale JAR causes the conftest.py autouse fixture to FAIL (not
+    # skip) — the gate cannot pass vacuously on a missing JAR in CI.
+    # scripts/assert_write_seam_ran.py then enforces that the load-bearing
+    # dedup-collapse test actually ran and passed (no all-skip vacuous green).
+    #
+    # Part of epic nexus-whh61. Related: nexus-57dh4.
+    name: write-seam behavioural gate (nexus-h29w1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # SHA-pinned (not @v4): this filter's `seam` output gates whether EVERY
+      # expensive step in a REQUIRED check runs. A floating tag compromised to
+      # always emit seam='false' would skip the JAR build + test while the job
+      # still reports green — the exact vacuous gate this gate exists to prevent.
+      # fbd0ab8 == v4.0.1 (same SHA used by the CA-3 jobs above).
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+        id: changes
+        with:
+          filters: |
+            seam:
+              - 'src/nexus/db/http_vector_client.py'
+              - 'service/src/main/java/dev/nexus/service/vectors/VectorHandler.java'
+              - 'service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java'
+              - 'tests/db/test_write_seam_gate_integration.py'
+              - 'scripts/assert_write_seam_ran.py'
+              - '.github/workflows/ci.yml'
+              # Dep bump can change the Python env or service contract without
+              # touching the above paths; gate on lockfile + manifest so such a
+              # change re-runs the gate (same rationale as CA-3 jobs above).
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'service/pom.xml'
+
+      - name: Set up Java 25 (GraalVM)
+        if: steps.changes.outputs.seam == 'true'
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+
+      - uses: astral-sh/setup-uv@v7
+        if: steps.changes.outputs.seam == 'true'
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        if: steps.changes.outputs.seam == 'true'
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-write-seam-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-write-seam-3.12-
+
+      - name: Cache ChromaDB ONNX model
+        if: steps.changes.outputs.seam == 'true'
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Install project + dev deps
+        if: steps.changes.outputs.seam == 'true'
+        run: uv sync --group dev
+
+      - name: Build service JAR (shaded, -DskipTests)
+        # Build the JAR that upsert_chunks posts to. Uses the standard Maven
+        # shaded package (NOT native) — we need the JVM jar, not a native binary,
+        # so the build is ~30s vs ~5m for native.
+        if: steps.changes.outputs.seam == 'true'
+        working-directory: service
+        run: ./mvnw -q package -DskipTests
+
+      - name: Run write-seam gate (>300-record, dup-chash, ON CONFLICT, oversize)
+        if: steps.changes.outputs.seam == 'true'
+        env:
+          # FAIL (not skip) on missing/stale JAR in CI — the conftest.py autouse
+          # _service_jar_freshness fixture checks CI=true (already set by GitHub
+          # Actions) and calls pytest.fail() instead of pytest.skip(). Setting
+          # NX_REQUIRE_SERVICE_JAR=1 is belt-and-suspenders for local scripted runs
+          # that set neither CI nor GITHUB_ACTIONS.
+          NX_REQUIRE_SERVICE_JAR: "1"
+          CI: "true"
+        run: |
+          set -euo pipefail
+          # -o addopts="" clears the repo default -m 'not integration' so the
+          # integration-marked test module is collected (same pattern as CA-3 jobs).
+          uv run pytest tests/db/test_write_seam_gate_integration.py \
+            -o addopts="" -m integration -q -rs --junit-xml=write-seam.xml
+          # Non-vacuity gate: asserts the dedup-collapse test actually ran+passed
+          # and no prereq-skip vacuously cleared the run.
+          uv run python scripts/assert_write_seam_ran.py write-seam.xml
