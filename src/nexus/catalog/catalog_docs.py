@@ -781,3 +781,55 @@ class _DocumentOps:
             source_uri=row[13] or "",
         )
 
+    def resolve_many(
+        self, doc_ids: list[str],
+    ) -> "dict[str, CatalogEntry]":
+        """Batch-resolve multiple doc_ids to CatalogEntry objects (nexus-7lm3q).
+
+        Executes a single ``SELECT ... WHERE json_extract(metadata,'$.doc_id')
+        IN (?)`` instead of N per-doc ``by_doc_id()`` calls. Returns a dict
+        keyed by doc_id; each value is the matching CatalogEntry. Doc_ids with
+        no matching document are absent from the result. Batched at 200 doc_ids
+        per query to stay safely below SQLite's variable limit while remaining
+        within the JsonExtract overhead tolerance.
+        """
+        if not doc_ids:
+            return {}
+        cat = self._cat
+        from nexus.catalog.catalog import CatalogEntry
+        result: dict[str, CatalogEntry] = {}
+        _BATCH = 200
+        for i in range(0, len(doc_ids), _BATCH):
+            batch = doc_ids[i : i + _BATCH]
+            placeholders = ", ".join(["?"] * len(batch))
+            rows = cat._db.execute(
+                f"SELECT json_extract(metadata, '$.doc_id'), "
+                f"tumbler, title, author, year, content_type, file_path, "
+                f"corpus, physical_collection, chunk_count, head_hash, "
+                f"indexed_at, metadata, source_mtime, source_uri "
+                f"FROM documents "
+                f"WHERE json_extract(metadata, '$.doc_id') IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                queried_doc_id = row[0]
+                if not queried_doc_id:
+                    continue
+                result[queried_doc_id] = CatalogEntry(
+                    tumbler=Tumbler.parse(row[1]),
+                    title=row[2],
+                    author=row[3],
+                    year=row[4],
+                    content_type=row[5],
+                    file_path=row[6],
+                    corpus=row[7],
+                    physical_collection=row[8],
+                    chunk_count=row[9],
+                    head_hash=row[10],
+                    indexed_at=row[11],
+                    meta=json.loads(row[12]) if row[12] else {},
+                    source_mtime=row[13] or 0.0,
+                    source_uri=row[14] or "",
+                )
+        return result
+
