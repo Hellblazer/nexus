@@ -1735,8 +1735,10 @@ nx upgrade --auto                 # Quiet mode for hook invocation (T2 only, exi
 
 ## nx uninstall
 
-First-class agent teardown (RDR-165). Cleanly removes nexus, auto-detecting and
-handling BOTH install shapes — each branch is a no-op when its target is absent:
+First-class agent teardown (RDR-165). See
+[docs/operations/agent-lifecycle.md](operations/agent-lifecycle.md) for the full
+install → upgrade → uninstall lifecycle map. Cleanly removes nexus, auto-detecting
+and handling BOTH install shapes — each branch is a no-op when its target is absent:
 
 - **Local service**: stops the engine-service + Postgres stack
   (`nx daemon service stop --with-pg`), stops the T2 daemon, removes the OS

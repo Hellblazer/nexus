@@ -76,6 +76,8 @@ When you update the **Claude Code plugin** (`/plugin update`), upgrade the CLI t
 | If you want to... | Read |
 |---|---|
 | Understand the architecture | [Storage Tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md), [Architecture](https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md) |
+| Install, upgrade, or uninstall the agent | [Agent Lifecycle & Operations](https://github.com/Hellblazer/nexus/blob/main/docs/operations/agent-lifecycle.md) |
+| Use the hosted managed service | [Managed Onboarding](https://github.com/Hellblazer/nexus/blob/main/docs/managed-onboarding.md) |
 | Write an RDR | [RDR: Research-Design-Review](https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md) |
 | Index a repo or PDFs | [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) |
 | Configure or tune | [Configuration](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md) |

@@ -25,7 +25,23 @@ migration tool; the Chroma source remains the immutable migration origin
 
 ### Added
 
-- **`nx guided-upgrade` (RDR-002): one command from a pre-upgrade install to a
+- **`nx uninstall` (RDR-165): first-class, service-aware teardown.** Dry-run by
+  default (`--yes` to act); auto-detects both install shapes. A local install
+  stops the engine-service + Postgres stack (`service stop --with-pg`) + the T2
+  daemon, removes the autostart unit and first-run marker, with an opt-in
+  `--remove-data`; a managed-only client clears `service_url`/`service_token`
+  from config.yml and never touches the remote tenant. See
+  [docs/operations/agent-lifecycle.md](docs/operations/agent-lifecycle.md).
+- **Agent Lifecycle & Operations doc (RDR-165).** One operator-facing map of
+  install → provision → run → upgrade → uninstall with a state model and the
+  three operational walkthroughs (`docs/operations/agent-lifecycle.md`).
+- **Managed-service consumer journeys (RDR-166).** Greenfield onboarding
+  (`nx config set service_url/service_token` → probe → first store) and the
+  local→managed migration; same-model voyage collections migrate by vector
+  passthrough (no billed re-embed). Docs:
+  [docs/managed-onboarding.md](docs/managed-onboarding.md). pgvector→managed
+  cross-deployment migration is a documented limitation (not supported).
+- **`nx guided-upgrade` (RDR-159): one command from a pre-upgrade install to a
   migrated service stack.** Detects the legacy footprint, provisions and starts
   the engine-service, version-pins it (its `/version` `release_version` must be
   present — from engine-service v0.1.6+; the code floor is v0.1.5 but earlier
