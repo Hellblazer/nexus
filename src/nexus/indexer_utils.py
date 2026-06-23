@@ -12,6 +12,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -533,3 +534,27 @@ def build_context_prefix(
         f"  Class: {class_name}  Method: {method_name}"
         f"  Lines: {line_start}-{line_end}"
     )
+
+
+def build_doc_id_resolver(
+    file_to_doc_id: Mapping[Path, str],
+) -> Callable[[Path], str]:
+    """Return a resolver mapping an indexed file path to its catalog doc_id.
+
+    Lifted from ``indexer._run_index`` (nexus-kgyoz seam 2). The orchestrator
+    builds *file_to_doc_id* from the pre-index catalog registration map, then
+    wires the returned callable into :attr:`IndexContext.doc_id_resolver` so
+    per-file indexers stamp the catalog cross-reference into chunk metadata at
+    chunk-write time. Files absent from the map resolve to ``""`` — the legacy
+    / no-doc_id signal that ``metadata_schema.normalize`` Step 4c then drops.
+
+    Args:
+        file_to_doc_id: Mapping of indexed file path to catalog ``doc_id``.
+
+    Returns:
+        A callable ``(path) -> doc_id`` closing over *file_to_doc_id*.
+    """
+    def _resolver(path: Path) -> str:
+        return file_to_doc_id.get(path, "")
+
+    return _resolver

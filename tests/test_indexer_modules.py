@@ -166,6 +166,41 @@ def test_build_context_prefix(path, comment, cls, method, ls, le, expected):
     assert build_context_prefix(path, comment, cls, method, ls, le) == expected
 
 
+# ── build_doc_id_resolver (nexus-kgyoz seam 2 contract pins) ──────────────────
+
+def test_build_doc_id_resolver_hit_and_miss():
+    """Resolver returns the mapped doc_id on a hit and "" on a miss."""
+    from nexus.indexer_utils import build_doc_id_resolver
+
+    hit = Path("/repo/src/foo.py")
+    resolve = build_doc_id_resolver({hit: "1.2.3"})
+    assert resolve(hit) == "1.2.3"
+    assert resolve(Path("/repo/src/unregistered.py")) == ""
+
+
+def test_build_doc_id_resolver_empty_map():
+    """An empty registration map resolves every path to "" (legacy signal)."""
+    from nexus.indexer_utils import build_doc_id_resolver
+
+    resolve = build_doc_id_resolver({})
+    assert resolve(Path("/anything")) == ""
+
+
+def test_run_index_uses_lifted_doc_id_resolver():
+    """_run_index threads the lifted free function, not an inline closure.
+
+    Non-vacuous: would fail if seam 2 regressed by re-inlining the resolver
+    or by not calling indexer_utils.build_doc_id_resolver.
+    """
+    import inspect
+
+    from nexus import indexer
+
+    src = inspect.getsource(indexer._run_index)
+    assert "build_doc_id_resolver(file_to_doc_id)" in src
+    assert "def _doc_id_resolver(path: Path) -> str:" not in src
+
+
 # ── _extract_context backward compatibility ───────────────────────────────────
 
 def test_extract_context_importable_from_nexus_indexer():
