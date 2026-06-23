@@ -215,6 +215,12 @@ class TestRdr155P4bDeprecationWindowGate:
     a file can exist but be half-deleted / broken. ``chroma_read`` imports
     ``chromadb`` lazily (inside its functions), so importing the module is
     lightweight and has no heavyweight client side effects.
+
+    Incidental coverage (do NOT "simplify" away): ``chroma_read`` keeps a
+    TOP-LEVEL ``from nexus.db.chroma_quotas import QUOTAS``, so a mis-sequenced
+    partial P4b that deletes ``chroma_quotas.py`` before ``chroma_read.py``
+    makes the import below raise and trips this gate too (substantive-critic
+    O2, 2026-06-23).
     """
 
     def test_migration_package_importable(self) -> None:
