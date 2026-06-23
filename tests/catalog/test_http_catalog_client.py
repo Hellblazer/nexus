@@ -24,7 +24,8 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from nexus.catalog.http_catalog_client import HttpCatalogClient, _resolve_config
+from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 
 

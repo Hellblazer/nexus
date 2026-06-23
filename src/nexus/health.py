@@ -468,11 +468,15 @@ def _check_managed_service_probe() -> list[HealthResult]:
     warn only — reachability fatals are ``_check_vector_service``'s domain, so this
     surfaces the version/remedy signal without a duplicate fatal on a down service.
     """
-    import os
+    from nexus.config import get_credential
 
-    base = os.environ.get("NX_SERVICE_URL", "").strip()
+    # env (NX_SERVICE_URL) FIRST, then config.yml — so a greenfield user who set
+    # the endpoint with `nx config set service_url` (no shell export) still gets
+    # the probe (RDR-166 nexus-v3p0x). Empty in BOTH → no explicit managed
+    # endpoint, never default-probe the public one.
+    base = (get_credential("service_url") or "").strip()
     if not base:
-        return []  # no explicit managed endpoint — never default-probe the public one
+        return []
 
     from nexus.db.managed_endpoint import (
         ManagedServiceError,

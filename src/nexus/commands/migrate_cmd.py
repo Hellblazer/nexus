@@ -35,11 +35,40 @@ from nexus.migration.detection import (
     build_dry_run_preview,
     classify_collections,
     open_read_legs,
+    render_cost_confirmation,
     render_dry_run_preview,
     voyage_key_available,
 )
 
 _log = structlog.get_logger(__name__)
+
+
+def _confirm_voyage_cost(
+    preview: Any,
+    *,
+    assume_yes: bool,
+    confirm: Any = None,
+) -> bool:
+    """Estimate-and-confirm gate for a billed Voyage re-embed (nexus-cewad).
+
+    Returns ``True`` when the caller may proceed with the billed migration,
+    ``False`` when the operator declined. A migration that bills nothing
+    proceeds silently; ``assume_yes`` proceeds without prompting (the scripted
+    / CI path). Otherwise the cost + re-run foot-gun is shown and an interactive
+    confirmation gates the call. ``confirm`` is injectable for tests; production
+    uses :func:`click.confirm` (which aborts on a non-interactive stream, so a
+    billed run without ``--yes`` never proceeds unattended).
+    """
+    warning = render_cost_confirmation(preview)
+    if warning is None:
+        return True  # nothing billed — no prompt
+    if assume_yes:
+        click.echo(warning)
+        click.echo("Proceeding (--yes): the operator's Voyage key will be billed.")
+        return True
+    click.echo(warning)
+    _confirm = confirm if confirm is not None else click.confirm
+    return bool(_confirm("Proceed with the billed re-embed?"))
 
 
 @click.command(name="migrate-to-service")
@@ -77,12 +106,22 @@ _log = structlog.get_logger(__name__)
     default=None,
     help="Override the nexus-service base URL (default: the supervisor lease).",
 )
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    default=False,
+    help="Skip the Voyage re-embed cost confirmation (scripted / non-interactive "
+    "runs). The operator's Voyage key is billed without a prompt.",
+)
 def migrate_to_service_cmd(
     dry_run: bool,
     local_path: str | None,
     db_path: str | None,
     catalog_db_path: str | None,
     service_url: str | None,
+    assume_yes: bool,
 ) -> None:
     """Guided Chroma-to-service upgrade migration (RDR-159).
 
@@ -92,7 +131,9 @@ def migrate_to_service_cmd(
     if dry_run:
         _run_dry_run(local_path)
         return
-    _run_migration(local_path, db_path, catalog_db_path, service_url)
+    _run_migration(
+        local_path, db_path, catalog_db_path, service_url, assume_yes=assume_yes
+    )
 
 
 def _run_dry_run(local_path: str | None) -> None:
@@ -120,6 +161,8 @@ def _run_migration(
     db_path: str | None,
     catalog_db_path: str | None,
     service_url: str | None,
+    *,
+    assume_yes: bool = False,
 ) -> None:
     """Drive the full guided migration through the nexus engine.
 
@@ -164,6 +207,25 @@ def _run_migration(
             "catalog ETL + manifest validation call the service).\n"
             "Set it to the bearer token configured in the nexus-service."
         )
+
+    # COST GUARDRAIL (nexus-cewad) — a cross-model→voyage re-embed is billed to
+    # the operator's Voyage key. Estimate it from a read-only classify pass and
+    # gate the billed run behind an explicit confirmation. A migration that
+    # bills nothing (byte-for-byte copy / local ONNX re-embed) proceeds silently.
+    local_read, cloud_read = open_read_legs(local_path)
+    try:
+        cost_preview = build_dry_run_preview(
+            classify_collections(
+                local_client=local_read,
+                cloud_client=cloud_read,
+                voyage_key_present=voyage_key_available(),
+            )
+        )
+    finally:
+        for client in (local_read, cloud_read):
+            _close_quietly(client)
+    if not _confirm_voyage_cost(cost_preview, assume_yes=assume_yes):
+        raise click.Abort()
 
     from nexus.catalog.factory import make_catalog_client_for_migration
 

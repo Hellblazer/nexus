@@ -1241,6 +1241,16 @@ nx config init
 |------|-------------|
 | `--show` | Reveal the full value instead of masking |
 
+**Managed-service credentials** (RDR-166 greenfield onboarding):
+
+| Key | Env var | Purpose |
+|-----|---------|---------|
+| `service_url` | `NX_SERVICE_URL` | Managed endpoint base URL (e.g. `https://api.conexus-nexus.com`) |
+| `service_token` | `NX_SERVICE_TOKEN` | Per-tenant bearer token (operator-provisioned) |
+
+Resolution is env first, then `config.yml`, for both. See
+[managed-onboarding.md](managed-onboarding.md) for the full greenfield journey.
+
 ---
 
 ## nx doc

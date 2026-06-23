@@ -43,6 +43,16 @@ from nexus.migration.guided_upgrade import (
 
 _log = structlog.get_logger(__name__)
 
+
+def _resolve_service_token() -> str:
+    """The managed service token — env (NX_SERVICE_TOKEN) FIRST, then config.yml
+    (`nx config set service_token`), so a config.yml-only managed user is not
+    told to export what they already configured (RDR-166 nexus-v3p0x)."""
+    from nexus.config import get_credential
+
+    return get_credential("service_token") or ""
+
+
 #: Default health-gate deadline. Generous: a cold service (PG provision +
 #: supervisor spawn + migration apply) can take a while to answer /health.
 _DEFAULT_TIMEOUT_S = 120.0
@@ -204,15 +214,17 @@ def guided_upgrade_cmd(
                 err=True,
             )
             raise SystemExit(1)
-    elif not os.environ.get("NX_SERVICE_TOKEN", "").strip():
+    elif not (_resolve_service_token() or "").strip():
         # --service-url path: the external service's token is the user's to
         # supply. Gate here (not deep inside _run_migration's HTTP layer) so the
         # remedy is a guided-upgrade checkpoint, not an opaque auth error
-        # (substantive-critic Sig-2).
+        # (substantive-critic Sig-2). env FIRST, then config.yml — a config.yml-
+        # only managed user (RDR-166 nexus-v3p0x) is already configured.
         click.echo("", err=True)
         click.echo(
-            f"--service-url {service_url} requires NX_SERVICE_TOKEN to be set "
-            "(the managed service's bearer token) — export it and re-run.",
+            f"--service-url {service_url} requires a service token (the managed "
+            "service's bearer) — set it with `nx config set service_token` or "
+            "export NX_SERVICE_TOKEN, then re-run.",
             err=True,
         )
         raise SystemExit(1)

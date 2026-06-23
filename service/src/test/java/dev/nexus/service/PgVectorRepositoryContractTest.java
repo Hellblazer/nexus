@@ -223,6 +223,56 @@ class PgVectorRepositoryContractTest {
         assertThat(superuserCount(384,  col)).as("nothing in chunks_384").isEqualTo(0L);
     }
 
+    // ---------------------------------------------------------------------------
+    // Contract: same-model vector PASSTHROUGH (nexus-hxry2) — supplied vectors are
+    // stored verbatim, the embedder is NOT invoked, and a dim mismatch fails loud.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void upsertChunksWithVectors_storesSuppliedVectorsVerbatim_skipsEmbedder() throws Exception {
+        String col = COL_CTX_1024;
+        String chash = "ptvc1024c10000000000000000000000";
+        // A distinctive vector the FakeEmbedder would never produce (its default
+        // is [1,0,...]); proves the stored vector is the SUPPLIED one, not embedded.
+        float[] supplied = new float[1024];
+        supplied[0] = 0.25f;
+        supplied[1] = 0.75f;
+
+        repo1024.upsertChunksWithVectors(TENANT_A, col,
+            List.of(chash), List.of("passthrough text"),
+            List.of(supplied), List.of(Map.of("kind", "pt")));
+
+        assertThat(superuserCount(1024, col)).as("row landed in chunks_1024").isEqualTo(1L);
+        String stored = superuserChunkEmbedding(1024, col, chash);
+        assertThat(stored)
+            .as("the SUPPLIED vector is stored verbatim, not the embedder's [1,0,...] default")
+            .startsWith("[0.25,0.75,");
+    }
+
+    @Test
+    void upsertChunksWithVectors_dimMismatch_failsLoud() {
+        String col = COL_CTX_1024;  // dispatches to chunks_1024
+        float[] wrongDim = new float[768];  // a 768-dim vector for a 1024 collection
+        wrongDim[0] = 1.0f;
+        // The contamination guard: a supplied vector whose dim disagrees with the
+        // target table is rejected before any SQL — never silently stored or embedded.
+        assertThatThrownBy(() -> repo1024.upsertChunksWithVectors(TENANT_A, col,
+            List.of("ptbaddim10240000000000000000000000"), List.of("bad dim text"),
+            List.of(wrongDim), List.of(Map.of())))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void upsertChunksWithVectors_lengthMismatch_failsLoud() {
+        String col = COL_CTX_1024;
+        float[] one = new float[1024];
+        // Two ids, one embedding → fail loud (never misalign vectors to ids).
+        assertThatThrownBy(() -> repo1024.upsertChunksWithVectors(TENANT_A, col,
+            List.of("ptlen1id1000000000000000000000000", "ptlen1id2000000000000000000000000"),
+            List.of("t1", "t2"), List.of(one), List.of(Map.of(), Map.of())))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
     @Test
     void upsert_voyage3_landsInChunks1024Only() throws Exception {
         String col = "knowledge__v3disp__voyage-3__v1";
@@ -1056,6 +1106,21 @@ class PgVectorRepositoryContractTest {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
                  "SELECT metadata::text FROM nexus.chunks_" + dim
+                 + " WHERE collection = ? AND chash = ?")) {
+            ps.setString(1, collection);
+            ps.setString(2, chash);
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).as("row %s/%s must exist in chunks_%d", collection, chash, dim).isTrue();
+                return rs.getString(1);
+            }
+        }
+    }
+
+    /** Superuser fetch of one chunk's embedding as pgvector text (bypasses RLS). */
+    private String superuserChunkEmbedding(int dim, String collection, String chash) throws SQLException {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "SELECT embedding::text FROM nexus.chunks_" + dim
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, collection);
             ps.setString(2, chash);

@@ -159,6 +159,44 @@ class VectorHandlerEmbeddingModeTest {
     }
 
     @Test
+    void upsertChunks_withEmbeddings_passthroughStoresVerbatim_tokensZero() throws Exception {
+        // nexus-hxry2 HTTP-boundary contract: a Python client posting the
+        // `embeddings` field is the same-model passthrough — the service parses
+        // the JSON number vectors, stores them verbatim, and skips the embedder
+        // (tokens:0). Proves the Python→JSON→Java parse seam end-to-end. minilm-384
+        // wired here → a 384-dim supplied vector.
+        var vec = new java.util.ArrayList<Float>(384);
+        for (int i = 0; i < 384; i++) vec.add(0.0f);
+        vec.set(0, 0.25f);
+        vec.set(1, 0.75f);
+        var resp = post("/v1/vectors/upsert-chunks", Map.of(
+            "collection", "knowledge__pebfx2__minilm-l6-v2-384__v1",
+            "ids",        List.of("pthttp3840000000000000000000000a"),
+            "documents",  List.of("passthrough over http"),
+            "metadatas",  List.of(Map.of()),
+            "embeddings", List.of(vec)));
+        assertThat(resp.statusCode())
+            .as("passthrough upsert must succeed (body: %s)", resp.body())
+            .isEqualTo(200);
+        assertThat(resp.body()).contains("\"tokens\":0");
+    }
+
+    @Test
+    void upsertChunks_withEmbeddings_wrongDim_failsLoud() throws Exception {
+        // A supplied vector whose dim != the dispatched table (384) must fail
+        // loud at the HTTP boundary — never silently stored or re-embedded.
+        var resp = post("/v1/vectors/upsert-chunks", Map.of(
+            "collection", "knowledge__pebfx2__minilm-l6-v2-384__v1",
+            "ids",        List.of("ptbaddimhttp00000000000000000000"),
+            "documents",  List.of("bad dim over http"),
+            "metadatas",  List.of(Map.of()),
+            "embeddings", List.of(List.of(1.0f, 0.0f))));  // 2-dim, not 384
+        assertThat(resp.statusCode())
+            .as("dim mismatch must be a 4xx, not a silent 200 (body: %s)", resp.body())
+            .isIn(400, 422);
+    }
+
+    @Test
     void search_voyageCollectionInOnnxMode_is422() throws Exception {
         var resp = post("/v1/vectors/search", Map.of(
             "query",       "anything",

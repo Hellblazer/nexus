@@ -243,7 +243,7 @@ def _find_dead_port() -> int:
 class TestCatalogClientResolution:
     def test_catalog_resolve_config_falls_back_to_lease(self):
         _publish_lease(port=4243, token="lease-token")
-        from nexus.catalog.http_catalog_client import _resolve_config
+        from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
         host, port, token = _resolve_config()
         assert (host, port, token) == ("127.0.0.1", 4243, "lease-token")
@@ -251,14 +251,14 @@ class TestCatalogClientResolution:
     def test_catalog_env_halves_override_individually(self, monkeypatch):
         monkeypatch.setenv("NX_SERVICE_PORT", "9999")
         _publish_lease(port=4243, token="lease-token")
-        from nexus.catalog.http_catalog_client import _resolve_config
+        from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
         host, port, token = _resolve_config()
         assert port == 9999          # env wins
         assert token == "lease-token"  # lease fills the missing half
 
     def test_catalog_fail_loud_when_neither(self):
-        from nexus.catalog.http_catalog_client import _resolve_config
+        from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
         with pytest.raises(RuntimeError) as exc_info:
             _resolve_config()

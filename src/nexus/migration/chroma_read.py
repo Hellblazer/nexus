@@ -107,14 +107,22 @@ def iter_collection_chunks(
     collection_name: str,
     *,
     page_size: int | None = None,
+    include_embeddings: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Yield every chunk of *collection_name* as ``{id, document, metadata}``.
 
     Pages at ``QUOTAS.MAX_QUERY_RESULTS`` (300) per call — the ChromaCloud
-    free-tier cap that ``chroma_quotas`` still governs for this leg. The
-    embedding vectors are deliberately NOT fetched: the pgvector side
-    re-embeds server-side (Seam B), so dragging legacy vectors through the
-    ETL would only invite cross-model contamination (RDR-109 hazard class).
+    free-tier cap that ``chroma_quotas`` still governs for this leg.
+
+    By default the embedding vectors are NOT fetched: the pgvector side
+    re-embeds server-side (Seam B), so dragging legacy vectors through a
+    cross-model migration would invite contamination (RDR-109 hazard class).
+    The SAME-MODEL passthrough (nexus-hxry2) is the deliberate exception: when
+    the source model equals the target's wired model the stored vectors are
+    already correct, so ``include_embeddings=True`` fetches them and each yielded
+    chunk additionally carries ``"embedding"`` (a ``list[float]``, or ``None`` if
+    the source row has no vector). The caller is responsible for only enabling
+    this on the verified same-model branch.
     """
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
     if page > QUOTAS.MAX_QUERY_RESULTS:
@@ -122,19 +130,26 @@ def iter_collection_chunks(
             f"page_size {page} exceeds the Chroma per-call cap "
             f"{QUOTAS.MAX_QUERY_RESULTS} (chroma_quotas governs this read leg)"
         )
+    include = ["documents", "metadatas"]
+    if include_embeddings:
+        include.append("embeddings")
     col = client.get_collection(collection_name)
     offset = 0
     while True:
-        batch = col.get(
-            include=["documents", "metadatas"], limit=page, offset=offset
-        )
+        batch = col.get(include=include, limit=page, offset=offset)
         ids = batch.get("ids") or []
         if not ids:
             return
         docs = batch.get("documents") or [None] * len(ids)
         metas = batch.get("metadatas") or [None] * len(ids)
-        for chunk_id, doc, meta in zip(ids, docs, metas):
-            yield {"id": chunk_id, "document": doc, "metadata": dict(meta or {})}
+        embs = batch.get("embeddings") if include_embeddings else None
+        if embs is None:
+            embs = [None] * len(ids)
+        for chunk_id, doc, meta, emb in zip(ids, docs, metas, embs):
+            chunk = {"id": chunk_id, "document": doc, "metadata": dict(meta or {})}
+            if include_embeddings:
+                chunk["embedding"] = list(emb) if emb is not None else None
+            yield chunk
         if len(ids) < page:
             return
         offset += len(ids)

@@ -84,8 +84,14 @@ def _discover_lease() -> tuple[str | None, str | None]:
 def _resolve_endpoint() -> tuple[str, str]:
     """Return ``(base_url, token)`` per the resolution order above."""
     global _lease_cache
-    env_url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/") or None
-    env_token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+    # env FIRST, then the persisted config.yml credential (RDR-166 nexus-v3p0x:
+    # a greenfield managed user who ran `nx config set service_url/service_token`
+    # must reach a resolvable endpoint with no env exported). get_credential
+    # encodes env>config.yml precedence, so an exported env var still wins.
+    from nexus.config import get_credential
+
+    env_url = (get_credential("service_url") or "").strip().rstrip("/") or None
+    env_token = (get_credential("service_token") or "").strip() or None
     url, token = env_url, env_token
     if url is None or token is None:
         with _endpoint_lock:
@@ -99,13 +105,15 @@ def _resolve_endpoint() -> tuple[str, str]:
             lease_url, lease_token = _lease_cache or (None, None)
         url = url or lease_url
         token = token or lease_token
+        # "credential" = env-or-config.yml (get_credential precedence); the
+        # source here is "configured" vs "lease", not specifically env.
         if env_url is not None and token is lease_token and token is not None:
             _log.debug(
-                "vector_endpoint_mixed_source", url_source="env", token_source="lease"
+                "vector_endpoint_mixed_source", url_source="credential", token_source="lease"
             )
         elif env_token is not None and url is lease_url and url is not None:
             _log.debug(
-                "vector_endpoint_mixed_source", url_source="lease", token_source="env"
+                "vector_endpoint_mixed_source", url_source="lease", token_source="credential"
             )
     if url is None or token is None:
         raise RuntimeError(
@@ -113,7 +121,8 @@ def _resolve_endpoint() -> tuple[str, str]:
             "routes through the nexus-service HTTP API (RDR-155 Phase 4a — "
             "the direct Chroma serving paths are retired). Either start the "
             "supervisor with 'nx daemon service start' (publishes the "
-            "endpoint lease this client auto-discovers), or export "
+            "endpoint lease this client auto-discovers), set the managed "
+            "endpoint with 'nx config set service_url/service_token', or export "
             "NX_SERVICE_URL / NX_SERVICE_TOKEN explicitly."
         )
     return url, token
@@ -232,7 +241,12 @@ def _managed_remedy() -> str | None:
     — callers that classify transient failures by raw type should catch
     ``VectorServiceError`` for the managed path. Local callers are unaffected.
     """
-    base = os.environ.get("NX_SERVICE_URL", "").strip()
+    from nexus.config import get_credential
+
+    # env FIRST, then config.yml — so a config.yml-only greenfield user gets the
+    # actionable managed remedy on a 401/connection error, not a bare error
+    # (RDR-166 nexus-v3p0x).
+    base = (get_credential("service_url") or "").strip()
     if not base:
         return None
     return (
@@ -473,8 +487,14 @@ class HttpVectorClient:
         """Embed + quota-check + write via the Java service.
 
         CHUNKING STAYS PYTHON — this method is called with pre-chunked text.
-        Embeddings are computed server-side; any ``embeddings`` argument is
-        ignored (Seam B contract).
+        Embeddings are computed server-side by default (Seam B). The ONE
+        exception is the same-model migration PASSTHROUGH (nexus-hxry2): when
+        ``embeddings`` is supplied, the vectors are sent and stored verbatim and
+        the server skips the (billed) re-embed — used only when the source
+        collection's model equals the target's wired model, so the vectors are
+        already correct. Every non-migration caller leaves ``embeddings`` None.
+        (Note: :meth:`upsert_chunks_with_embeddings` deliberately still DISCARDS
+        its vectors — indexers re-embed server-side as the single authority.)
 
         ``skip_existing`` (or env ``NX_UPSERT_SKIP_EXISTING=1``): pre-filter
         ids through :meth:`existing_ids` and embed/upsert only the chunks
@@ -507,12 +527,21 @@ class HttpVectorClient:
                 ids = [ids[i] for i in keep]
                 documents = [documents[i] for i in keep]
                 metadatas = [metas[i] for i in keep]
+                if embeddings is not None:
+                    embeddings = [embeddings[i] for i in keep]
         body: dict[str, Any] = {
             "collection": collection,
             "ids": ids,
             "documents": documents,
             "metadatas": metadatas or [{}] * len(ids),
         }
+        # Same-model vector PASSTHROUGH (nexus-hxry2): when the caller supplies
+        # precomputed vectors (source model == target wired model), send them so
+        # the service stores them verbatim and skips the billed re-embed. Absent →
+        # the default Seam B server-side embed. This is the ONE path where
+        # ``embeddings`` is honoured; every other caller leaves it None.
+        if embeddings is not None:
+            body["embeddings"] = embeddings
         _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
         _log.debug(
             "http_vector_upsert_chunks",

@@ -88,6 +88,16 @@ def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None]
       long-lived service-backed stores (memory/taxonomy/plan/aspect/chash/…) share
       the resolve-once pattern and remain unguarded — tracked for a sweep follow-on.
     """
+    # An explicitly-pinned NX_SERVICE_URL (a managed TLS endpoint, or any URL the
+    # user named) is authoritative — never silently rebind it to a discovered
+    # supervisor lease, which is ALWAYS local http (nexus-n3bwh review H1): the
+    # https managed base_url would compare unequal to the http lease and rebind
+    # every time, routing managed traffic to the wrong (local) service. Lease
+    # recovery is for the lease-discovered path only.
+    from nexus.config import get_credential
+
+    if (get_credential("service_url") or "").strip():
+        return None
     lease_url, lease_token = discover_lease()
     if lease_url is not None and lease_url.rstrip("/") != (current_base_url or "").rstrip("/"):
         return lease_url.rstrip("/"), lease_token
@@ -97,8 +107,13 @@ def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None]
 def resolve_service_config() -> tuple[str, int, str]:
     """``(host, port, token)`` — env halves, then the lease, then fail loud.
 
-    The shape the T2 domain stores and the catalog client consume (they build
-    ``http://{host}:{port}`` themselves). Restart-safety note: these clients
+    The local-supervisor 3-tuple — ALWAYS ``http`` (env ``NX_SERVICE_HOST``/
+    ``NX_SERVICE_PORT`` carry no scheme; the lease is local http). New HTTP
+    storage clients must NOT build ``http://{host}:{port}`` from this: call
+    :func:`resolve_service_endpoint` instead, which is scheme-correct and also
+    serves managed TLS endpoints (nexus-n3bwh). This function now backs only the
+    non-``NX_SERVICE_URL`` fallback leg of :func:`resolve_service_endpoint`.
+    Restart-safety note: service-backed clients
     resolve ONCE at construction and hold a long-lived ``httpx.Client`` — they
     ride a supervisor restart only because callers construct a fresh client per
     operation (the ``get_catalog()`` / ``t2_ctx()`` pattern). Do not cache a
@@ -141,11 +156,40 @@ def resolve_service_config() -> tuple[str, int, str]:
 
 
 def resolve_service_endpoint() -> tuple[str, str]:
-    """``(base_url, token)`` — the shape the T3 vector client consumes.
+    """``(base_url, token)`` — the scheme-correct base-url authority.
 
-    Thin adapter over :func:`resolve_service_config` so the vector client and
-    the T2/catalog stores share one resolution path despite their differing
-    return shapes.
+    Every HTTP storage client that builds a base URL (the T2 domain stores, the
+    catalog client, the T1 scratch store, the migration pre-gate) routes through
+    here so a managed TLS endpoint survives end-to-end. Resolution order mirrors
+    the T3 data path (:func:`nexus.db.http_vector_client._resolve_endpoint`):
+
+      1. ``service_url`` — the authoritative FULL endpoint, used VERBATIM
+         (scheme + host + port preserved). Resolved via
+         :func:`nexus.config.get_credential`, i.e. ``NX_SERVICE_URL`` env FIRST,
+         then the persisted ``config.yml`` credential a greenfield user set with
+         ``nx config set service_url`` (RDR-166 nexus-v3p0x). This is the ONLY
+         scheme source: ``https://api.conexus-nexus.com:443`` stays ``https``;
+         flattening it to ``http://…:443`` (the pre-RDR-166 bug, nexus-n3bwh)
+         broke every managed migration leg. The token half (``service_token``)
+         resolves the same way, then falls back to the lease independently.
+      2. Otherwise ``http://{host}:{port}`` from :func:`resolve_service_config`
+         (env halves → lease → fail loud) — the local-supervisor path, always
+         ``http``.
     """
+    from nexus.config import get_credential
+
+    url = (get_credential("service_url") or "").strip().rstrip("/") or None
+    if url is not None:
+        token = (get_credential("service_token") or "").strip() or None
+        if token is None:
+            _, token = discover_lease()
+        if not token:
+            raise RuntimeError(
+                "service_url is set but no service_token is resolvable (neither "
+                "NX_SERVICE_TOKEN env, config.yml, nor supervisor lease): set it "
+                "with `nx config set service_token <bearer>` (or export "
+                "NX_SERVICE_TOKEN) and re-run."
+            )
+        return url, token
     host, port, token = resolve_service_config()
     return f"http://{host}:{port}", token

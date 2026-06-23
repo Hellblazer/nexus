@@ -213,10 +213,25 @@ public final class VectorHandler implements HttpHandler {
         List<String> ids            = requireStringList(body, "ids");
         List<String> documents      = requireStringList(body, "documents");
         List<Map<String, Object>> metadatas = optMetadataList(body, "metadatas", ids.size());
+        List<float[]> embeddings = optEmbeddingsList(body, "embeddings");
 
         if (ids.size() != documents.size()) {
             throw new IllegalArgumentException(
                     "ids length " + ids.size() + " != documents length " + documents.size());
+        }
+
+        if (embeddings != null) {
+            // Same-model vector PASSTHROUGH (nexus-hxry2): store the supplied vectors
+            // verbatim, no embedder call (token usage 0). Dimension is validated
+            // against the dispatched table inside the repository (fail loud).
+            if (embeddings.size() != ids.size()) {
+                throw new IllegalArgumentException(
+                        "embeddings length " + embeddings.size() + " != ids length " + ids.size());
+            }
+            repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas);
+            emitTokenUsage(ex, 0L);
+            HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size(), "tokens", 0)));
+            return;
         }
 
         var upsertResult = repo.upsertChunksWithTokens(tenant, collection, ids, documents, metadatas);
@@ -720,6 +735,37 @@ public final class VectorHandler implements HttpHandler {
         if (!(val instanceof List<?> list)) return null;
         List<String> result = new ArrayList<>(list.size());
         for (Object item : list) result.add(item == null ? "" : item.toString());
+        return result;
+    }
+
+    /**
+     * Optional {@code embeddings} field: a list of numeric vectors (one per id),
+     * for the same-model vector-passthrough path (nexus-hxry2). Returns null when
+     * absent (the default server-side-embed path). Malformed shapes fail loud —
+     * a claimed passthrough that cannot be parsed must NOT silently fall back to
+     * re-embed (that would mask a client bug and re-bill).
+     */
+    private List<float[]> optEmbeddingsList(Map<String, Object> body, String key) {
+        Object val = body.get(key);
+        if (val == null) return null;
+        if (!(val instanceof List<?> rows)) {
+            throw new IllegalArgumentException("field '" + key + "' must be an array of vectors");
+        }
+        List<float[]> result = new ArrayList<>(rows.size());
+        for (Object row : rows) {
+            if (!(row instanceof List<?> nums)) {
+                throw new IllegalArgumentException("field '" + key + "' must be an array of numeric vectors");
+            }
+            float[] vec = new float[nums.size()];
+            for (int i = 0; i < nums.size(); i++) {
+                Object n = nums.get(i);
+                if (!(n instanceof Number num)) {
+                    throw new IllegalArgumentException("field '" + key + "' contains a non-numeric component");
+                }
+                vec[i] = num.floatValue();
+            }
+            result.add(vec);
+        }
         return result;
     }
 

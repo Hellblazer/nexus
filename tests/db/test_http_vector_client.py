@@ -15,6 +15,29 @@ from nexus.db.http_vector_client import (
 )
 
 
+class TestDataPathConfigYmlFallback:
+    """RDR-166 nexus-v3p0x — the T3 data path (_resolve_endpoint) must consume
+    config.yml service creds so greenfield store/search works after `nx config
+    set service_url/service_token` (no env, no lease)."""
+
+    def test_resolve_endpoint_reads_config_yml_when_env_absent(self, monkeypatch, tmp_path):
+        import nexus.db.http_vector_client as hvc
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        for k in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+            monkeypatch.delenv(k, raising=False)
+        hvc._invalidate_endpoint()  # clear any cached lease
+        from nexus.config import set_credential
+        set_credential("service_url", "https://api.conexus-nexus.com")
+        set_credential("service_token", "data-tok")
+        try:
+            assert hvc._resolve_endpoint() == (
+                "https://api.conexus-nexus.com", "data-tok",
+            )
+        finally:
+            hvc._invalidate_endpoint()
+
+
 # ── is_vector_service_mode ────────────────────────────────────────────────────
 
 class TestIsVectorServiceMode:
@@ -161,6 +184,50 @@ class TestUpsertChunks:
             "col", ["id1"], ["text1"], [[0.1, 0.2]]
         )
         assert "embeddings" not in calls[0]
+
+    def test_upsert_chunks_without_embeddings_omits_key(self, monkeypatch):
+        """Default Seam B path: no embeddings field → server embeds."""
+        client = HttpVectorClient()
+        calls = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: calls.append(body) or {"upserted": 1},
+        )
+        client.upsert_chunks("col", ["id1"], ["text1"])
+        assert "embeddings" not in calls[0]
+
+    def test_upsert_chunks_passthrough_sends_embeddings(self, monkeypatch):
+        """nexus-hxry2 same-model passthrough: supplied vectors ARE sent so the
+        service stores them verbatim and skips the re-embed."""
+        client = HttpVectorClient()
+        calls = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: calls.append(body) or {"upserted": 2},
+        )
+        vecs = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+        client.upsert_chunks(
+            "col", ["id1", "id2"], ["t1", "t2"], embeddings=vecs
+        )
+        assert calls[0]["embeddings"] == vecs
+
+    def test_skip_existing_prunes_embeddings_in_lockstep(self, monkeypatch):
+        """When skip_existing drops already-present ids, the supplied embeddings
+        must be pruned to match — never misaligned to the kept ids."""
+        client = HttpVectorClient()
+        calls = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: calls.append(body) or {"upserted": 1},
+        )
+        # id1 already present → only id2 survives; its embedding must be vecs[1].
+        monkeypatch.setattr(client, "existing_ids", lambda col, ids: {"id1"})
+        vecs = [[0.1], [0.2]]
+        client.upsert_chunks(
+            "col", ["id1", "id2"], ["t1", "t2"], embeddings=vecs, skip_existing=True
+        )
+        assert calls[0]["ids"] == ["id2"]
+        assert calls[0]["embeddings"] == [[0.2]]
 
 
 class TestSearch:
