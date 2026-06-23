@@ -8,20 +8,23 @@ on ``service/**`` paths — so a Python-only change to
 ``VectorHandler``/``PgVectorRepository`` tenant/dedup/quota suite.
 
 This test closes that gap by booting the real service JAR and feeding
->300-record, duplicate-chash, and oversized inputs through the REAL
+>300-record, duplicate-chash, and NUL-bearing inputs through the REAL
 ``HttpVectorClient.upsert_chunks``, asserting server-side enforcement:
 
 - **Dedup collapse** — in-batch duplicate chash ids collapse server-side
   (``PgVectorRepository.upsertChunksInternal`` seen-HashSet, lines 292-313).
   Result: kept count == unique chash count.
 - **ON CONFLICT idempotency** — re-upsert the same chash in a second call
-  updates, not duplicates (``ON CONFLICT (tenant_id,collection,chash) DO UPDATE``).
+  updates, not duplicates (``ON CONFLICT (tenant_id,collection,chash) DO UPDATE``),
+  verified by asserting the refreshed metadata persisted.
 - **>300-record round-trip** — a single logical ``upsert_chunks`` call with
   >300 ids traverses whatever client-side batching + server enforcement exists
   without error, and all ids are retrievable.
-- **Oversize (>MAX_DOCUMENT_BYTES) rejection** — a chunk whose byte length
-  exceeds ``QUOTAS.MAX_DOCUMENT_BYTES`` (16 384 bytes) is rejected by the server
-  with a 4xx; the client surfaces it as ``VectorServiceError`` (not a silent drop).
+- **NUL sanitization** — a chunk carrying raw NUL bytes is stored with the NULs
+  stripped server-side (``PgVectorRepository.stripNul``), a real pgvector
+  write-path transform. (This replaces an earlier oversize test that pinned on
+  ``QUOTAS.MAX_DOCUMENT_BYTES``, a ChromaDB-Cloud quota inapplicable to the
+  pgvector path — see nexus-57dh4.)
 
 Fixture strategy: Docker pgvector/pgvector:pg17 (works on ubuntu-latest CI and
 on any local machine with Docker).  Homebrew PG fallback is intentionally NOT
@@ -448,27 +451,40 @@ def test_on_conflict_idempotency(
     assert "conflict_gate" in entry.get("content", ""), (
         f"get_by_id returned unexpected content: {entry}"
     )
+    # S2 (nexus-h29w1 critic): assert the metadata was actually UPDATED, not
+    # merely left intact. get_by_id returns a FLAT dict (id + content + all
+    # metadata fields top-level — see http_vector_client.get_by_id docstring),
+    # so the version key is top-level, not nested under "metadata". Without
+    # this, ON CONFLICT DO NOTHING would satisfy the test identically to
+    # DO UPDATE — the assertion below is what proves the UPDATE branch fired.
+    assert entry.get("version") == "v2", (
+        "ON CONFLICT did not refresh metadata: expected version='v2' after "
+        f"re-upsert, got {entry.get('version')!r}. The DO UPDATE SET metadata "
+        "branch did not fire (or behaved as DO NOTHING)."
+    )
 
 
-def test_oversize_chunk_rejected_by_server(
+def test_nul_bytes_sanitized_server_side(
     local_service: tuple[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A chunk whose byte length exceeds MAX_DOCUMENT_BYTES (16 384) is rejected.
+    """A chunk containing NUL bytes is stored with the NULs stripped by the server.
 
-    The server enforces NUL sanitization and dim-guard fail-loud paths; oversize
-    is the adjacent quota boundary.  This test sends a single chunk of exactly
-    MAX_DOCUMENT_BYTES + 1 bytes and asserts the server returns a 4xx, surfaced
-    as ``VectorServiceError`` (not a silent drop, not a 2xx with truncation).
+    S1 (nexus-h29w1 critic): the previous slot tested ``QUOTAS.MAX_DOCUMENT_BYTES``
+    (16 384), a ChromaDB-Cloud free-tier quota that does NOT apply to the pgvector
+    write path (nexus-57dh4 — ``chroma_quotas.py`` is scoped to the retired Chroma
+    migration read-source only). That made the slot a permanent XFAIL and
+    reintroduced the exact cargo-cult constant 57dh4 was filed to remove.
 
-    NOTE: if the service currently does NOT enforce this boundary at the HTTP
-    layer (enforcement is at the Python QuotaValidator level only), this test
-    will FAIL, which is the correct outcome — it surfaces the missing server-side
-    guard as a test failure rather than a silent gap.
+    This replacement exercises a REAL pgvector server-side write-path transform:
+    Postgres ``text`` rejects raw NUL bytes, so ``PgVectorRepository.stripNul``
+    removes them before bind (``event=upsert_nul_sanitized``). The chunk's chash
+    (natural id) is computed client-side from the ORIGINAL text and is never
+    recomputed from the sanitized text, so we upsert under that id and read back
+    the NUL-stripped content. A definite outcome on the live backend — no Chroma
+    constant, no xfail.
     """
-    from nexus.db.chroma_quotas import QUOTAS
     from nexus.db.http_vector_client import (
-        VectorServiceError,
         get_http_vector_client,
         reset_http_vector_client_for_tests,
     )
@@ -483,31 +499,28 @@ def test_oversize_chunk_rejected_by_server(
     reset_http_vector_client_for_tests()
 
     client = get_http_vector_client()
-    coll = "knowledge__seam-gate-oversize__minilm-l6-v2-384__v1"
+    coll = "knowledge__seam-gate-nul__minilm-l6-v2-384__v1"
 
-    # Build a chunk that is exactly 1 byte over the limit
-    oversize_text = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
-    assert len(oversize_text.encode()) == QUOTAS.MAX_DOCUMENT_BYTES + 1
-    chunk_id = _chunk_id(oversize_text)
+    nul_text = "seam_gate_nul\x00\x00payload\x00tail"
+    clean_text = "seam_gate_nulpayloadtail"
+    assert "\x00" not in clean_text
+    # chash is derived from the original (NUL-bearing) text — server stores the
+    # sanitized text under this same id (the chash is not recomputed).
+    chunk_id = _chunk_id(nul_text)
 
-    try:
-        client.upsert_chunks(coll, [chunk_id], [oversize_text])
-        # If we reach here, the server accepted the oversize chunk.
-        # This is a finding: the server does not enforce MAX_DOCUMENT_BYTES.
-        # We mark this explicitly rather than silently passing.
-        pytest.xfail(
-            "Server accepted an oversize chunk (> MAX_DOCUMENT_BYTES). "
-            "This means enforcement is Python-only (QuotaValidator), not server-side. "
-            "Audit finding: server-side oversize guard is absent. "
-            "Track a follow-on bead to add server-side enforcement if desired."
-        )
-    except VectorServiceError as exc:
-        # Expected: server rejected the oversize chunk with a 4xx
-        # VectorServiceError.code carries the HTTP status when available.
-        if exc.code is not None:
-            assert 400 <= exc.code < 600, (
-                f"VectorServiceError.code={exc.code} is not a 4xx/5xx: {exc}"
-            )
-        # If code is None it was a transport error (connection refused etc.),
-        # which would indicate a different problem — the message string still
-        # surfaces the issue.
+    # Must NOT raise: a raw NUL would crash a naive text bind; the server's
+    # stripNul is what lets this round-trip succeed at all.
+    client.upsert_chunks(coll, [chunk_id], [nul_text])
+
+    found = client.existing_ids(coll, [chunk_id])
+    assert found == {chunk_id}, "NUL-bearing chunk was not stored under its chash"
+
+    entry = client.get_by_id(coll, chunk_id)
+    assert entry is not None, "get_by_id returned None for the NUL-sanitized chunk"
+    stored = entry.get("content", "")
+    assert "\x00" not in stored, (
+        f"server did not strip NUL bytes from stored chunk text: {stored!r}"
+    )
+    assert stored == clean_text, (
+        f"expected NUL-stripped text {clean_text!r}, got {stored!r}"
+    )

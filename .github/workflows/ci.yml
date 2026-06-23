@@ -503,9 +503,9 @@ jobs:
     #
     # This job boots the real service JAR (pre-built shaded jar) against a
     # throwaway pgvector/pgvector:pg17 Docker container and feeds >300-record,
-    # duplicate-chash, and oversized inputs through the REAL HttpVectorClient,
+    # duplicate-chash, and NUL-bearing inputs through the REAL HttpVectorClient,
     # asserting server-side enforcement: dedup collapse, ON CONFLICT idempotency,
-    # and oversize behaviour.  The new value is the Python-client -> real-server
+    # and NUL sanitization.  The new value is the Python-client -> real-server
     # WIRE CROSSING — this does NOT duplicate existing in-JVM Java coverage
     # (VectorHandlerEmbeddingModeTest, VectorIntegrationTest,
     # PgVectorRepositoryContractTest).
@@ -540,7 +540,13 @@ jobs:
           filters: |
             seam:
               - 'src/nexus/db/http_vector_client.py'
-              - 'service/src/main/java/dev/nexus/service/vectors/VectorHandler.java'
+              # C1 (nexus-h29w1 critic): VectorHandler lives in http/, not
+              # vectors/ — the old vectors/VectorHandler.java entry was a dead
+              # reference, so a diff to the real HTTP dispatch layer never fired
+              # the gate. AuthFilter does tenant extraction upstream of the
+              # write path, so it belongs in the seam too.
+              - 'service/src/main/java/dev/nexus/service/http/VectorHandler.java'
+              - 'service/src/main/java/dev/nexus/service/http/AuthFilter.java'
               - 'service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java'
               - 'tests/db/test_write_seam_gate_integration.py'
               - 'scripts/assert_write_seam_ran.py'
@@ -596,7 +602,7 @@ jobs:
         working-directory: service
         run: ./mvnw -q package -DskipTests
 
-      - name: Run write-seam gate (>300-record, dup-chash, ON CONFLICT, oversize)
+      - name: Run write-seam gate (>300-record, dup-chash, ON CONFLICT, NUL-sanitize)
         if: steps.changes.outputs.seam == 'true'
         env:
           # FAIL (not skip) on missing/stale JAR in CI — the conftest.py autouse
