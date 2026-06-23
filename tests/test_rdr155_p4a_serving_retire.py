@@ -191,3 +191,56 @@ class TestPhase4aSurvivalPins:
         assert offenders == [], (
             f"the superseded skp06 app-layer Chroma tenant guard surfaced in: {offenders}"
         )
+
+
+class TestRdr155P4bDeprecationWindowGate:
+    """nexus-5uvag — two-release deprecation-window release-N tripwire.
+
+    The single irreversible step of the migration arc is RDR-155 P4b, which
+    deletes the migration ETL AND the surviving Chroma read leg (and the
+    migration tool itself: beads nexus-19svb / nexus-g37fr / nexus-8zpmf).
+    The two-release deprecation window requires that release N — the first
+    migration-capable release that lets nexus-luxe6 lift — STILL ships those
+    modules, with P4b's deletion landing only in release N+1.
+
+    Today that ordering is held only by bead dependencies + human discipline.
+    The intended hard E2E gate (nexus-myk4e) is deferred until AFTER the
+    boundary lifts, so it cannot guard the very release it protects. This
+    class fills the gap with a mechanical, NOW-running assertion: a
+    mis-sequenced P4b that deletes (or breaks) the migration modules trips
+    this gate on the PR that would merge it into release N.
+
+    Stronger than the P4a presence pins above (which assert the file exists
+    and matches a source regex): these assert the modules actually IMPORT —
+    a file can exist but be half-deleted / broken. ``chroma_read`` imports
+    ``chromadb`` lazily (inside its functions), so importing the module is
+    lightweight and has no heavyweight client side effects.
+    """
+
+    def test_migration_package_importable(self) -> None:
+        import importlib
+
+        try:
+            importlib.import_module("nexus.migration")
+        except Exception as exc:  # pragma: no cover - failure path is the signal
+            raise AssertionError(
+                "nexus.migration must remain present AND importable through the "
+                "two-release deprecation window — its deletion is RDR-155 P4b and "
+                "must not land before release N+1 (nexus-5uvag / blocks nexus-h3ilf). "
+                f"Import failed: {exc!r}"
+            ) from exc
+
+    def test_chroma_read_leg_importable(self) -> None:
+        import importlib
+
+        try:
+            importlib.import_module("nexus.migration.chroma_read")
+        except Exception as exc:  # pragma: no cover - failure path is the signal
+            raise AssertionError(
+                "nexus.migration.chroma_read (the surviving Chroma read leg) must "
+                "remain present AND importable through the two-release deprecation "
+                "window. RDR-155 P4b deletes it (nexus-19svb / nexus-g37fr); that "
+                "deletion must land only in release N+1, never in the "
+                "migration-capable release N. Import failed: "
+                f"{exc!r}"
+            ) from exc
