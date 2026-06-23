@@ -149,6 +149,14 @@ See [docs/container-integration.md](https://github.com/Hellblazer/nexus/blob/mai
 service from a container, and [docs/migration-runbook.md](https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md) for the
 migration details.
 
+### Using the hosted managed service (no local stack)
+
+Prefer not to run the service stack yourself? Point `nx` at the hosted Conexus
+managed service with an operator-provisioned URL + token — no local service, no
+migration. See [docs/managed-onboarding.md](https://github.com/Hellblazer/nexus/blob/main/docs/managed-onboarding.md)
+for the greenfield journey (`nx config set service_url/service_token` → probe →
+first store/search).
+
 ## Update
 
 ```bash

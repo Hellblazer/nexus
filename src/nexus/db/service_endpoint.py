@@ -94,7 +94,9 @@ def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None]
     # https managed base_url would compare unequal to the http lease and rebind
     # every time, routing managed traffic to the wrong (local) service. Lease
     # recovery is for the lease-discovered path only.
-    if os.environ.get("NX_SERVICE_URL", "").strip():
+    from nexus.config import get_credential
+
+    if (get_credential("service_url") or "").strip():
         return None
     lease_url, lease_token = discover_lease()
     if lease_url is not None and lease_url.rstrip("/") != (current_base_url or "").rstrip("/"):
@@ -161,27 +163,33 @@ def resolve_service_endpoint() -> tuple[str, str]:
     here so a managed TLS endpoint survives end-to-end. Resolution order mirrors
     the T3 data path (:func:`nexus.db.http_vector_client._resolve_endpoint`):
 
-      1. ``NX_SERVICE_URL`` — the authoritative FULL endpoint, used VERBATIM
-         (scheme + host + port preserved). This is the ONLY scheme source:
-         ``https://api.conexus-nexus.com:443`` stays ``https``; flattening it to
-         ``http://…:443`` (the pre-RDR-166 bug, nexus-n3bwh) broke every managed
-         migration leg. The token half still falls back to lease/env independently.
+      1. ``service_url`` — the authoritative FULL endpoint, used VERBATIM
+         (scheme + host + port preserved). Resolved via
+         :func:`nexus.config.get_credential`, i.e. ``NX_SERVICE_URL`` env FIRST,
+         then the persisted ``config.yml`` credential a greenfield user set with
+         ``nx config set service_url`` (RDR-166 nexus-v3p0x). This is the ONLY
+         scheme source: ``https://api.conexus-nexus.com:443`` stays ``https``;
+         flattening it to ``http://…:443`` (the pre-RDR-166 bug, nexus-n3bwh)
+         broke every managed migration leg. The token half (``service_token``)
+         resolves the same way, then falls back to the lease independently.
       2. Otherwise ``http://{host}:{port}`` from :func:`resolve_service_config`
          (env halves → lease → fail loud) — the local-supervisor path, always
          ``http``.
     """
-    env_url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/") or None
-    if env_url is not None:
-        env_token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
-        token = env_token
+    from nexus.config import get_credential
+
+    url = (get_credential("service_url") or "").strip().rstrip("/") or None
+    if url is not None:
+        token = (get_credential("service_token") or "").strip() or None
         if token is None:
             _, token = discover_lease()
         if not token:
             raise RuntimeError(
-                "NX_SERVICE_URL is set but no NX_SERVICE_TOKEN is resolvable "
-                "(neither env nor supervisor lease): export NX_SERVICE_TOKEN "
-                "(the service's bearer token) and re-run."
+                "service_url is set but no service_token is resolvable (neither "
+                "NX_SERVICE_TOKEN env, config.yml, nor supervisor lease): set it "
+                "with `nx config set service_token <bearer>` (or export "
+                "NX_SERVICE_TOKEN) and re-run."
             )
-        return env_url, token
+        return url, token
     host, port, token = resolve_service_config()
     return f"http://{host}:{port}", token

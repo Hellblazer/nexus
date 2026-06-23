@@ -457,6 +457,12 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # explicitly via the ``voyage_key_present`` argument, never the ambient
     # cloud_mode fixture (the classifier is a pure deployment-mode function).
     "test_detection.py",
+    # RDR-166 nexus-hxry2 vector-ETL: voyage tokens are collection-NAME segments
+    # driving same-model passthrough vs cross-model routing (_is_same_model_
+    # passthrough / _migrate_one). The ETL never embeds — the server does — so
+    # these tests are deployment-mode-agnostic; they pin behavior via explicit
+    # target_name / collection names, never the ambient cloud_mode fixture.
+    "test_vector_etl.py",
     # RDR-159 P1d pre-gate + P1c quiesce: voyage tokens are collection-NAME /
     # wired-model-set fixtures driving the support gate and the count-mismatch
     # attribution message; mode is pinned explicitly via the injected

@@ -52,6 +52,27 @@ def test_config_set_writes(runner, fake_home, args, section, key, expected) -> N
     assert _read_config(fake_home)[section][key] == expected
 
 
+def test_config_set_service_url_and_token_persist(runner, fake_home, monkeypatch) -> None:
+    """RDR-166 nexus-v3p0x: the managed-onboarding ergonomics — `nx config set
+    service_url/service_token` persist to config.yml and resolve back (with no
+    env), so a greenfield managed user reaches a usable endpoint."""
+    for k in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    assert runner.invoke(
+        main, ["config", "set", "service_url=https://api.conexus-nexus.com"]
+    ).exit_code == 0
+    assert runner.invoke(
+        main, ["config", "set", "service_token", "tok-abc"]
+    ).exit_code == 0
+    cfg = _read_config(fake_home)["credentials"]
+    assert cfg["service_url"] == "https://api.conexus-nexus.com"
+    assert cfg["service_token"] == "tok-abc"
+    # get_credential resolves them from config.yml (no env).
+    from nexus.config import get_credential
+    assert get_credential("service_url") == "https://api.conexus-nexus.com"
+    assert get_credential("service_token") == "tok-abc"
+
+
 def test_config_set_creates_dir(runner, fake_home) -> None:
     assert not _config_path(fake_home).parent.exists()
     runner.invoke(main, ["config", "set", "voyage_api_key=vk-test"])

@@ -84,8 +84,14 @@ def _discover_lease() -> tuple[str | None, str | None]:
 def _resolve_endpoint() -> tuple[str, str]:
     """Return ``(base_url, token)`` per the resolution order above."""
     global _lease_cache
-    env_url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/") or None
-    env_token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+    # env FIRST, then the persisted config.yml credential (RDR-166 nexus-v3p0x:
+    # a greenfield managed user who ran `nx config set service_url/service_token`
+    # must reach a resolvable endpoint with no env exported). get_credential
+    # encodes env>config.yml precedence, so an exported env var still wins.
+    from nexus.config import get_credential
+
+    env_url = (get_credential("service_url") or "").strip().rstrip("/") or None
+    env_token = (get_credential("service_token") or "").strip() or None
     url, token = env_url, env_token
     if url is None or token is None:
         with _endpoint_lock:

@@ -15,6 +15,29 @@ from nexus.db.http_vector_client import (
 )
 
 
+class TestDataPathConfigYmlFallback:
+    """RDR-166 nexus-v3p0x — the T3 data path (_resolve_endpoint) must consume
+    config.yml service creds so greenfield store/search works after `nx config
+    set service_url/service_token` (no env, no lease)."""
+
+    def test_resolve_endpoint_reads_config_yml_when_env_absent(self, monkeypatch, tmp_path):
+        import nexus.db.http_vector_client as hvc
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        for k in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+            monkeypatch.delenv(k, raising=False)
+        hvc._invalidate_endpoint()  # clear any cached lease
+        from nexus.config import set_credential
+        set_credential("service_url", "https://api.conexus-nexus.com")
+        set_credential("service_token", "data-tok")
+        try:
+            assert hvc._resolve_endpoint() == (
+                "https://api.conexus-nexus.com", "data-tok",
+            )
+        finally:
+            hvc._invalidate_endpoint()
+
+
 # ── is_vector_service_mode ────────────────────────────────────────────────────
 
 class TestIsVectorServiceMode:

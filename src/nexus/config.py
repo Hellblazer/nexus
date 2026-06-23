@@ -325,6 +325,13 @@ CREDENTIALS: dict[str, str] = {
     "chroma_database":   "CHROMA_DATABASE",
     "voyage_api_key":    "VOYAGE_API_KEY",
     "migrated":          "NX_MIGRATED",
+    # RDR-166 managed onboarding (nexus-v3p0x): the operator-provisioned managed
+    # endpoint + bearer. `nx config set service_url/service_token` persists them
+    # to config.yml; the service resolvers consume them via get_credential, so
+    # the env var still wins and config.yml is the durable fallback — the single
+    # consume point the conexus issuance contract targets.
+    "service_url":       "NX_SERVICE_URL",
+    "service_token":     "NX_SERVICE_TOKEN",
 }
 
 

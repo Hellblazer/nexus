@@ -153,8 +153,38 @@ class TestSchemeAwareEndpoint:
         # NX_SERVICE_URL with no token (env or lease) → RuntimeError, not a
         # silent token-less request.
         monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com:443")
-        with pytest.raises(RuntimeError, match="no NX_SERVICE_TOKEN"):
+        with pytest.raises(RuntimeError, match="no service_token is resolvable"):
             resolve_service_endpoint()
+
+
+class TestConfigYmlFallback:
+    """RDR-166 nexus-v3p0x — greenfield managed onboarding ergonomics.
+
+    `nx config set service_url/service_token` persists to config.yml; the
+    resolver must CONSUME those (no env, no lease) so a greenfield managed user
+    who ran `nx config set` reaches a resolvable endpoint. Env still wins over
+    config.yml (get_credential precedence) — pinned below.
+    """
+
+    def test_config_yml_service_creds_resolve_when_env_absent(self):
+        from nexus.config import set_credential
+
+        # No env, no lease — only config.yml (written via the public surface).
+        set_credential("service_url", "https://api.conexus-nexus.com")
+        set_credential("service_token", "cfg-token")
+        assert resolve_service_endpoint() == (
+            "https://api.conexus-nexus.com",
+            "cfg-token",
+        )
+
+    def test_env_service_url_wins_over_config_yml(self, monkeypatch):
+        from nexus.config import set_credential
+
+        set_credential("service_url", "https://config.example:443")
+        set_credential("service_token", "cfg-token")
+        monkeypatch.setenv("NX_SERVICE_URL", "https://env.example:443")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
+        assert resolve_service_endpoint() == ("https://env.example:443", "env-token")
 
 
 class TestRecoverEndpointFromLease:
