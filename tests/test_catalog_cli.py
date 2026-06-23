@@ -1640,6 +1640,12 @@ class TestSeam3OwnersCarve:
     commands into ``commands.catalog``, dropping the ``register`` wiring, or
     binding ``_get_catalog`` at import time (which would break the
     ``patch("nexus.commands.catalog._get_catalog", …)`` test seam).
+
+    Note the two commands take different catalog-access paths: ``owners``
+    reads via ``_get_catalog()`` (defended by the patch seam below), while
+    ``dedupe-owners`` opens an admin catalog via ``make_catalog_admin()`` and
+    is NOT covered by that patch target — its behavioural coverage lives in
+    ``test_catalog_dedupe.py`` through ``NEXUS_CATALOG_PATH`` env plumbing.
     """
 
     def test_owner_commands_registered_on_group(self):
@@ -1663,6 +1669,8 @@ class TestSeam3OwnersCarve:
         """Patching commands.catalog._get_catalog is observed by the carved
         ``owners`` command — proves module-routed (not import-bound) access."""
         from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
 
         fake = MagicMock()
         fake.list_owners.return_value = [

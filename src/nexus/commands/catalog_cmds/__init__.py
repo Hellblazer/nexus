@@ -9,4 +9,10 @@ group, so command names and the ``nx catalog …`` invocation surface are
 unchanged. Submodules reference shared helpers (e.g. ``_get_catalog``) lazily
 through the ``nexus.commands.catalog`` module object so import stays acyclic
 and test monkeypatches on those helpers continue to take effect.
+
+Do NOT import the submodules from this ``__init__`` (keep it side-effect free):
+``commands.catalog`` is the single site that imports each family and calls its
+``register`` exactly once. Adding a convenience import here would risk a second
+``register`` call and silently double-attach commands (Click overwrites a
+duplicate ``add_command`` name without error).
 """
