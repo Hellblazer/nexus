@@ -79,7 +79,7 @@ def _lookup_existing_doc_id(
     if cat is None:
         return ""
     try:
-        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.tumbler)
 
         owner_name = corpus or "standalone-pdfs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
@@ -166,14 +166,14 @@ def _register_or_lookup_doc_id(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415
-        from nexus.catalog.catalog import make_relative  # noqa: PLC0415
-        from nexus.catalog.factory import (  # noqa: PLC0415
+        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.catalog)
+        from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
             make_catalog_writer,
         )
-        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-        from nexus.config import catalog_path  # noqa: PLC0415
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.tumbler)
+        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
@@ -287,7 +287,7 @@ def _make_local_embed_fn() -> tuple[EmbedFn, str]:
     re-index in local mode against unchanged content is a no-op
     instead of a silent re-embed.
     """
-    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415
+    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — circular-dep avoidance (nexus.db.local_ef)
 
     local_ef = LocalEmbeddingFunction()
     model_name = local_ef.model_name
@@ -595,7 +595,7 @@ def _index_document(
     # proof vacuous.
     local_target_model: str | None = None
     if embed_fn is None:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
 
         if is_vector_service_mode():
             # Service embeds server-side. embed_fn stays None here;
@@ -603,12 +603,12 @@ def _index_document(
             # No Voyage/Chroma creds required; no local ONNX constructed.
             pass
         else:
-            from nexus.config import is_local_mode  # noqa: PLC0415
+            from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
             if is_local_mode():
                 embed_fn, local_target_model = _make_local_embed_fn()
             elif not _has_credentials():
-                from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+                from nexus.errors import CredentialsMissingError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
 
                 missing = _missing_credentials()
                 raise CredentialsMissingError(
@@ -636,7 +636,7 @@ def _index_document(
         # rewritten to hyphens (``_`` is the conformant grammar's
         # segment separator); an explicit owner row is not required
         # for ad-hoc paths.
-        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
+        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
         owner_segment = corpus.replace("_", "-")
         collection_name = (
@@ -651,9 +651,9 @@ def _index_document(
     if t3 is not None:
         db = t3
     else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
         if is_vector_service_mode():
-            from nexus.mcp_infra import get_t3  # noqa: PLC0415
+            from nexus.mcp_infra import get_t3  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
             db = get_t3()
         else:
             db = make_t3()
@@ -695,7 +695,7 @@ def _index_document(
     if embed_fn is not None:
         embeddings, actual_model = embed_fn(documents, target_model)
     else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
         if is_vector_service_mode():
             # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
             # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
@@ -863,7 +863,7 @@ def _index_pdf_incremental(
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(batch_docs, target_model)
         else:
-            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
             if is_vector_service_mode():
                 # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
                 # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
@@ -1032,7 +1032,7 @@ def _pdf_chunks(
         from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         bib = bib_enrich(source_title)
 
-    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
@@ -1120,7 +1120,7 @@ def _markdown_chunks(
         or derive_title(md_path, body)
     )
 
-    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
@@ -1202,19 +1202,19 @@ def index_pdf(
     # a service-mode node with no Voyage/Chroma creds).
     local_target_model: str | None = None
     if embed_fn is None:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
 
         if is_vector_service_mode():
             # Service embeds server-side. embed_fn stays None; the upsert
             # site's stub branch handles it. No creds / no local ONNX.
             pass
         else:
-            from nexus.config import is_local_mode  # noqa: PLC0415
+            from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
             if is_local_mode():
                 embed_fn, local_target_model = _make_local_embed_fn()
             elif not _has_credentials():
-                from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+                from nexus.errors import CredentialsMissingError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
 
                 missing = _missing_credentials()
                 raise CredentialsMissingError(
@@ -1235,7 +1235,7 @@ def index_pdf(
     if collection_name is not None:
         col_name = collection_name
     else:
-        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
+        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
         owner_segment = corpus.replace("_", "-")
         col_name = (
             f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
@@ -1246,9 +1246,9 @@ def index_pdf(
     if t3 is not None:
         db = t3
     else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
         if is_vector_service_mode():
-            from nexus.mcp_infra import get_t3  # noqa: PLC0415
+            from nexus.mcp_infra import get_t3  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
             db = get_t3()
         else:
             db = make_t3()
@@ -1387,7 +1387,7 @@ def index_pdf(
         # content-sourcing contract.
         # nexus-tdgc: forward the catalog doc_id (lookup is post-register
         # so the entry exists by this point in the incremental path).
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
         _cat = make_catalog_reader()
         hooks.fire_document(
             str(pdf_path), col_name, "",
@@ -1410,7 +1410,7 @@ def index_pdf(
     if embed_fn is not None:
         embeddings, actual_model = embed_fn(documents, target_model)
     else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
         if is_vector_service_mode():
             # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
             # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
@@ -1654,7 +1654,7 @@ def index_markdown(
     if collection_name is not None:
         col_name = collection_name
     else:
-        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
+        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
         owner_segment = corpus.replace("_", "-")
         col_name = (
             f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"

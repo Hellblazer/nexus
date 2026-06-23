@@ -102,7 +102,7 @@ class _WriteOps:
         commit per N calls).
         """
         cat = self._cat
-        from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
+        from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.synthesizer)
 
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
@@ -272,7 +272,7 @@ class _WriteOps:
         catalog writers use.
         """
         cat = self._cat
-        from datetime import UTC, datetime  # noqa: PLC0415
+        from datetime import UTC, datetime  # noqa: PLC0415 — stdlib deferred to call site (datetime)
 
         ts = datetime.now(UTC).isoformat()
         event = _cat_mod._make_event(

@@ -54,7 +54,7 @@ def _purge_pipeline_db(name: str, counts: CascadeCounts) -> CascadeCounts:
         counts.pipeline_rows_deleted = PipelineDB(
             PIPELINE_DB_PATH
         ).delete_pipeline_data_for_collection(name)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort; failure logged via _log.warning and recorded in counts.failures, cascade continues
         _log.warning("purge_cascade_pipeline_failed", collection=name, error=str(exc))
         counts.failures.append(f"pipeline-state cleanup failed: {exc}")
     return counts
@@ -159,7 +159,7 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
                     )
             if cat.delete_collection_projection(name, reason="collection purge"):
                 counts.catalog_projection_deleted = 1
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort; failure logged via _log.warning and recorded in counts.failures, cascade continues
         _log.warning("purge_cascade_catalog_failed", collection=name, error=str(exc))
         counts.failures.append(f"catalog cascade failed: {exc}")
 

@@ -715,7 +715,7 @@ class CatalogStore:
         # segment, which is always correct when the name is well-formed.
         # Documents-table fallback for legacy 2-segment names is
         # operator-driven via ``nx catalog backfill-owner-id``.
-        from nexus.catalog.collections_owner_backfill import (  # noqa: PLC0415
+        from nexus.catalog.collections_owner_backfill import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.collections_owner_backfill)
             backfill_owner_id,
         )
         with self._conn:

@@ -380,7 +380,7 @@ class _DocumentOps:
         replaced was removed in Phase 5.
         """
         cat = self._cat
-        from nexus.repo_identity import _repo_identity  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
         _, repo_hash = _repo_identity(repo)
         owner = cat.owner_for_repo(repo_hash)

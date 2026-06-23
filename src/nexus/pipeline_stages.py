@@ -154,7 +154,7 @@ def _build_chunk_metadata(
     carries it at the document level. Parameter retained so existing call
     sites do not need to drop the kwarg simultaneously.
     """
-    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415  — circular-dep avoidance (nexus.metadata_schema)
 
     # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
     # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id.
@@ -194,7 +194,7 @@ def _embed_and_write_batch(
     if not chunks_to_embed:
         return 0, target_model
 
-    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
 
     chunk_texts = [c.text for c in chunks_to_embed]
     embeddings: list[list[float]] = []
@@ -687,7 +687,7 @@ def pipeline_index_pdf(
 
     # Resolve embed_fn from credentials when not provided (matches batch path).
     if embed_fn is None:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
         if is_vector_service_mode():
             # nexus-9n1u3 / RDR-152 Seam B: leave embed_fn=None — the service
             # embeds server-side at upload time. The embed stage writes a
@@ -991,7 +991,7 @@ def _prune_stale_chunks(
     registered the file, the chunk lookup keys on ``doc_id``. Empty or
     missing entries fall back to the legacy ``source_path`` lookup.
     """
-    from nexus.doc_indexer import _identity_where  # noqa: PLC0415
+    from nexus.doc_indexer import _identity_where  # noqa: PLC0415  — circular-dep avoidance (nexus.doc_indexer)
     stale_ids: list[str] = []
     offset = 0
     where_filter = _identity_where(pdf_path, corpus)

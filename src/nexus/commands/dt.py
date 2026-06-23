@@ -55,7 +55,7 @@ def _resolve_dt_collection(
     to conformant 4-segment names so the strict-naming guard at
     ``T3Database.get_or_create_collection`` accepts them.
     """
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — command-local import (effective_embedding_model_for_writes)
 
     if collection:
         return collection
@@ -105,7 +105,7 @@ def _index_record(
         # treat it as a no-op rather than a silent indexing run.
         return True
 
-    from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415
+    from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415 — command-local import (doc_indexer)
 
     file_path = Path(path)
     ext = file_path.suffix.lower()
@@ -139,10 +139,10 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
     aborting the whole batch. ``nx catalog update --source-uri`` can
     recover after the fact.
     """
-    from nexus.catalog import resolve_tumbler  # noqa: PLC0415
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415
-    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.catalog import resolve_tumbler  # noqa: PLC0415 — command-local import (catalog)
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — command-local import (catalog.factory)
+    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
 
     dt_uri = f"x-devonthink-item://{uuid}"
     cat_path = catalog_path()
@@ -210,10 +210,10 @@ def _link_semantic_record(uuid: str) -> bool:
     when at least one edge was created. Fail-soft: any error or unresolvable
     tumbler logs and returns ``False`` — linking never aborts the index batch.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-    from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415
-    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415
-    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
+    from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415 — command-local import (catalog.dt_link_generator)
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — command-local import (catalog.factory)
+    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
 
     dt_uri = f"x-devonthink-item://{uuid}"
     cat_path = catalog_path()
@@ -252,10 +252,10 @@ def _writeback_record(uuid: str) -> bool:
     keywords exist at ``nx dt index`` time. Stamping them is deferred to a
     follow-on re-stamp pass (tracked) rather than stamped empty.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
-    from nexus.config import catalog_path  # noqa: PLC0415
-    from nexus.dt_writeback import writeback_record  # noqa: PLC0415
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
+    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
+    from nexus.dt_writeback import writeback_record  # noqa: PLC0415 — command-local import (dt_writeback)
 
     dt_uri = f"x-devonthink-item://{uuid}"
     cat_path = catalog_path()
@@ -288,14 +288,14 @@ def _ingest_highlights_record(uuid: str) -> bool:
     row was written. Fail-soft: no tumbler / no highlights / any error -> log +
     ``False``; highlight ingest never aborts the index batch.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
-    from nexus.config import catalog_path  # noqa: PLC0415
-    from nexus.db.t2.document_highlights import (  # noqa: PLC0415
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
+    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
+    from nexus.db.t2.document_highlights import (  # noqa: PLC0415 — command-local import (db.t2.document_highlights)
         DocumentHighlights,
         HighlightRecord,
     )
-    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
 
     dt_uri = f"x-devonthink-item://{uuid}"
     cat_path = catalog_path()
@@ -317,10 +317,10 @@ def _ingest_highlights_record(uuid: str) -> bool:
         # has no highlights method, and not T2Database, which the storage
         # boundary lint reserves for the daemon). Low contention: one write
         # per indexed record, not a long-lived worker (RDR-128 hazard N/A).
-        from nexus.config import default_db_path  # noqa: PLC0415
+        from nexus.config import default_db_path  # noqa: PLC0415 — command-local import (config)
 
         store = DocumentHighlights(default_db_path())
-        from datetime import datetime, timezone  # noqa: PLC0415
+        from datetime import datetime, timezone  # noqa: PLC0415 — stdlib deferred to call site (datetime)
 
         return store.upsert(HighlightRecord(
             doc_id=str(entry.tumbler),
@@ -377,11 +377,11 @@ def _index_dt_content_record(
     ``file_path`` column resolvable; the DT identity (``source_uri``) is still
     the canonical reference.
     """
-    import json  # noqa: PLC0415
+    import json  # noqa: PLC0415 — stdlib deferred to call site (json)
 
-    from nexus.config import catalog_path  # noqa: PLC0415
-    from nexus.doc_indexer import index_markdown  # noqa: PLC0415
-    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
+    from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — command-local import (doc_indexer)
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
 
     if extraction_source not in _DT_EXTRACTION_SOURCES:
         raise ValueError(
@@ -661,7 +661,7 @@ def index_cmd(
     # byte-identical to today (Gap 0).
     dt_content_active = False
     if dt_content:
-        from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+        from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
 
         dt_content_active = _dt.available()
 
@@ -868,10 +868,10 @@ def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
         click.ClickException: when the tumbler doesn't resolve to any
             catalog entry (caller surfaces this as a non-zero exit).
     """
-    from nexus.catalog import resolve_tumbler  # noqa: PLC0415
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
-    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.catalog import resolve_tumbler  # noqa: PLC0415 — command-local import (catalog)
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
+    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
 
     path = catalog_path()
     if not Catalog.is_initialized(path):
@@ -944,8 +944,8 @@ def highlights_cmd(tumbler_or_uuid: str) -> None:
     ``document_highlights`` T2 table populated by ``nx dt index --highlights``.
     This is a pure T2 read — DEVONthink need not be running.
     """
-    from nexus.config import default_db_path  # noqa: PLC0415
-    from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415
+    from nexus.config import default_db_path  # noqa: PLC0415 — command-local import (config)
+    from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415 — command-local import (db.t2.document_highlights)
 
     store = DocumentHighlights(default_db_path())
     if _UUID_RE.match(tumbler_or_uuid):
@@ -1039,7 +1039,7 @@ def capture_cmd(
             "Provide exactly one capture source: a URL argument, --doi, or --file.",
         )
 
-    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
 
     if not _dt.available():
         # Gap-0 NON-OPTIONAL exception: capture cannot proceed without DT, so it
@@ -1057,7 +1057,7 @@ def capture_cmd(
         uuid = _dt.dt_capture_web_page(url, capture_type=capture_type)
         what = url
     elif doi:
-        import os as _os  # noqa: PLC0415
+        import os as _os  # noqa: PLC0415 — stdlib deferred to call site (os)
 
         email = contact_email or _os.environ.get("OPENALEX_MAILTO", "")
         if not email:

@@ -611,7 +611,7 @@ def _run_check_aspect_queue() -> None:
     error so a stuck worker is visible.
     """
     import sqlite3 as _sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance (nexus.commands._helpers)
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -808,7 +808,7 @@ def _run_check_post_store_hooks() -> None:
       * Smoke after upgrade: does the install factory still wire the
         expected default consumers?
     """
-    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415
+    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance (nexus.hook_registry)
 
     registry = HookRegistry()
     install_default_hooks(registry)
@@ -967,7 +967,7 @@ def _run_check_mineru() -> None:
     actionable error before they try to use the feature.
     """
     try:
-        from mineru.cli.common import do_parse  # noqa: PLC0415
+        from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
     except Exception as exc:  # noqa: BLE001 — boundary catch of optional MinerU import failure; surfaced via click.echo
         click.echo(_check("MinerU import", False, f"{type(exc).__name__}: {exc}"))
         click.echo(
@@ -989,13 +989,13 @@ def _run_check_mineru() -> None:
     # Optional: surface server-side state. The mineru-api server is opt-in;
     # not running is fine. Just report status.
     try:
-        from nexus.config import get_mineru_server_url  # noqa: PLC0415
+        from nexus.config import get_mineru_server_url  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
         url = get_mineru_server_url()
     except Exception:  # noqa: BLE001 — best-effort config read; falls back to None
         url = None
     if url:
         try:
-            import httpx  # noqa: PLC0415
+            import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
             with httpx.Client(timeout=2.0) as client:
                 r = client.get(f"{url}/health")
             if r.status_code == 200:
@@ -1745,7 +1745,7 @@ def _collect_quota_report() -> dict:
     # Phase 2: report what's actually embedding, not what the canonical
     # cloud schema would suggest.
     if is_local_mode():
-        from nexus.db.local_ef import (  # noqa: PLC0415
+        from nexus.db.local_ef import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.local_ef)
             LocalEmbeddingFunction,
             local_model_token,
         )
@@ -1796,7 +1796,7 @@ def _collect_quota_report() -> dict:
     retry = dict(get_retry_stats())
 
     # RDR-109 Phase 3: cross-encoder substrate availability + active backend.
-    from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415
+    from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
     cross_encoder_info = {
         "available": cross_encoder_available(),
         "backend": "voyage-rerank-2.5" if not is_local_mode() else "onnx-local",

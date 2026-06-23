@@ -192,7 +192,7 @@ def verify_service_version(
     else:
 
         def _get(url: str, timeout: float) -> Any:
-            import httpx  # noqa: PLC0415
+            import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
             return httpx.get(url, timeout=timeout)
 
@@ -250,7 +250,7 @@ def footprint_has_voyage_collections(report: "DetectionReport") -> bool:
     unrecognized model (the classifier already gives it the re-index diagnostic),
     not a voyage-capability problem, so it must not mis-fire this gate.
     """
-    from nexus.migration.detection import _VOYAGE_MODELS  # noqa: PLC0415
+    from nexus.migration.detection import _VOYAGE_MODELS  # noqa: PLC0415 — circular-dep avoidance (nexus.migration.detection)
 
     return any(
         c.has_data and c.model in _VOYAGE_MODELS for c in report.classifications
@@ -285,7 +285,7 @@ def verify_voyage_capability(
     else:
 
         def _get(url: str, timeout: float) -> Any:
-            import httpx  # noqa: PLC0415
+            import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
             return httpx.get(url, timeout=timeout)
 
@@ -302,7 +302,7 @@ def verify_voyage_capability(
         )
     try:
         body = resp.json()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — fallback path; safe default ({}) returned when response body is not JSON
         body = {}
     models = body.get("embedding_models") or []
     if any(isinstance(m, str) and m.startswith("voyage") for m in models):
@@ -409,7 +409,7 @@ class ProvisionResult:
 
 
 def _default_serve() -> Any:
-    from nexus.commands.init import provision_and_start_service  # noqa: PLC0415
+    from nexus.commands.init import provision_and_start_service  # noqa: PLC0415 — circular-dep avoidance (nexus.commands.init)
 
     return provision_and_start_service()
 
@@ -496,7 +496,7 @@ def _transport_error_types() -> tuple[type[BaseException], ...]:
     """
     types: list[type[BaseException]] = [OSError]
     try:
-        import httpx  # noqa: PLC0415
+        import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
         types.extend([httpx.ConnectError, httpx.TimeoutException])
     except Exception:  # noqa: BLE001 — httpx optional at probe-build time
@@ -531,7 +531,7 @@ def wait_for_service_health(
         # a real one), so the bounded-poll guarantee would not hold (code-review M1).
         raise ValueError(f"interval_s must be positive, got {interval_s}")
 
-    import time  # noqa: PLC0415
+    import time  # noqa: PLC0415 — stdlib deferred to call site (time)
 
     _sleep = sleep if sleep is not None else time.sleep
     _clock = clock if clock is not None else time.monotonic
@@ -540,7 +540,7 @@ def wait_for_service_health(
     else:
 
         def _get(url: str, timeout: float) -> Any:
-            import httpx  # noqa: PLC0415
+            import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
             return httpx.get(url, timeout=timeout)
 

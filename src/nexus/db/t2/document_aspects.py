@@ -427,7 +427,7 @@ class DocumentAspects:
         # supply one so post-drop reads can recover source_path via the
         # canonical URI shape.
         if not record.source_uri and record.collection and record.source_path:
-            from nexus.aspect_readers import uri_for  # noqa: PLC0415
+            from nexus.aspect_readers import uri_for  # noqa: PLC0415  — circular-dep avoidance (nexus.aspect_readers)
             derived_uri = uri_for(record.collection, record.source_path)
             if derived_uri:
                 record = replace(record, source_uri=derived_uri)
@@ -566,7 +566,7 @@ class DocumentAspects:
             )
             params: tuple = (collection, source_path)
         else:
-            from nexus.aspect_readers import uri_for  # noqa: PLC0415
+            from nexus.aspect_readers import uri_for  # noqa: PLC0415  — circular-dep avoidance (nexus.aspect_readers)
             uri = uri_for(collection, source_path)
             if not uri:
                 return None
@@ -673,7 +673,7 @@ class DocumentAspects:
             )
             params: tuple = (collection, source_path)
         else:
-            from nexus.aspect_readers import uri_for  # noqa: PLC0415
+            from nexus.aspect_readers import uri_for  # noqa: PLC0415  — circular-dep avoidance (nexus.aspect_readers)
             uri = uri_for(collection, source_path)
             if not uri:
                 return 0

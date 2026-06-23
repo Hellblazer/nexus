@@ -215,7 +215,7 @@ def _read_live_mineru_port() -> int | None:
     # reaching up into commands/. The CLI module re-exports under the
     # legacy private names.
     try:
-        from nexus._mineru_pid import (  # noqa: PLC0415
+        from nexus._mineru_pid import (  # noqa: PLC0415 — circular-dep avoidance (_mineru_pid)
             is_process_alive,
             read_pid_file,
         )

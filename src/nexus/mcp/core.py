@@ -2377,7 +2377,7 @@ def store_list(
         if not page:
             return f"No entries at offset {offset} (total {total})."
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
-        from datetime import datetime, timedelta  # noqa: PLC0415
+        from datetime import datetime, timedelta  # noqa: PLC0415 — stdlib deferred to call site (datetime)
         for e in page:
             doc_id = e.get("id", "")[:32]
             title = (e.get("title") or "")[:40]

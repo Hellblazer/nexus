@@ -97,5 +97,5 @@ def catalog_store_hook(
         if reader is not None:
             try:
                 reader._db.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally; close failure is non-critical and intentionally silent
                 pass

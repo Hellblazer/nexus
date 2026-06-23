@@ -290,7 +290,7 @@ class HttpCatalogClient:
         assigns the prefix; without repo_hash the server would allocate a fresh
         prefix per call and collide on the (name, owner_type) unique constraint.
         """
-        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
 
         derived_name, repo_hash, main_repo = _repo_identity_with_main(Path(repo))
         effective_name = name or derived_name

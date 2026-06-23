@@ -254,7 +254,7 @@ def expire_cmd() -> None:
         count = db.memory.expire()
         try:
             db.telemetry.expire_relevance_log(days=90)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — best-effort relevance_log purge; safe default (memory expiry already landed), facade logged the structured error
             # The relevance_log purge is best-effort; the facade
             # logged a structured ``relevance_log_error`` event for
             # this. Without the daemon-side facade we lose that

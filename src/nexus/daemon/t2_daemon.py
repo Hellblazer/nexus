@@ -1170,7 +1170,7 @@ class T2Daemon:
                     )
                 else:
                     self._lease_record = supervisor.record
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001  — best-effort self-heal; failure logged via _log.warning and degraded (never crash daemon)
                 # Self-heal is best-effort; never let it crash the daemon.
                 _log.warning("t2_daemon_discovery_reassert_failed", exc=str(exc))
 
@@ -1219,7 +1219,7 @@ class T2Daemon:
                         )
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001  — best-effort janitor; failure logged via _log.warning and degraded (never crash daemon)
                     # Best-effort janitor; never let it crash the daemon.
                     _log.warning(
                         "t2_daemon_aspect_reclaim_failed", exc=str(exc)
@@ -1330,7 +1330,7 @@ class T2Daemon:
             self._reclaim_task.cancel()
             try:
                 await self._reclaim_task
-            except BaseException:  # noqa: BLE001
+            except BaseException:  # noqa: BLE001  — fallback path; reclaim-task teardown swallows all, including cancellation, so stop() proceeds
                 pass
             self._reclaim_task = None
 
@@ -1394,7 +1394,7 @@ class T2Daemon:
                     "t2_daemon_t2db_close_timeout",
                     timeout_s=_DB_CLOSE_TIMEOUT,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001  — best-effort; close failure logged via _log.warning and degraded (handle nulled regardless)
                 _log.warning("t2_daemon_t2db_close_failed", error=str(exc))
             self._t2db = None
         # RDR-146 P1: close the hosted Catalog's SQLite handle. Catalog
@@ -1404,7 +1404,7 @@ class T2Daemon:
         if self._catalog is not None:
             try:
                 self._catalog._db.close()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001  — best-effort; catalog-close failure logged via _log.warning and degraded (handle nulled regardless)
                 _log.warning("t2_daemon_catalog_close_failed", error=str(exc))
             self._catalog = None
             self._catalog_write_lock = None
@@ -1527,7 +1527,7 @@ class T2Daemon:
                             "ok": True,
                             "result": result,
                         })
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001  — boundary catch; dispatched op raises undocumented types, failure logged via _log.warning and error returned to client
                         _log.warning(
                             "t2_daemon_dispatch_failed",
                             op=frame.get("op"),
@@ -1692,7 +1692,7 @@ class T2Daemon:
                 "ok": False,
                 "error": {"type": error_type, "message": message},
             })
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  — fallback path; sending an error frame is itself best-effort, silence acceptable as the peer is already in an error state
             pass
 
     # ── housekeeping ────────────────────────────────────────────────────
@@ -1999,7 +1999,7 @@ def _spin_heal_count_in_window(config_dir: Path, now: float) -> int:
                     stamps.append(ts)
         stamps.append(now)
         path.write_text("\n".join(f"{ts:.3f}" for ts in stamps) + "\n")
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  — fallback path; safe default returned (treat as first heal, self-heal allowed) on any IO error
         return 1
     return len(stamps)
 
@@ -2085,7 +2085,7 @@ def _t2_spin_capture_and_heal(
     timer.start()
     try:
         os.kill(pid, signal.SIGTERM)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  — fallback path; SIGTERM delivery failed, hard-exit fallback returned instead
         os._exit(_SPIN_EXIT_CODE)
 
 
@@ -2126,7 +2126,7 @@ def _run_main_spin_guarded(
                     asyncio.gather(*pending, return_exceptions=True)
                 )
             loop.run_until_complete(loop.shutdown_asyncgens())
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  — best-effort; loop-teardown cleanup silence acceptable as process is exiting anyway
             pass
         asyncio.set_event_loop(None)
         loop.close()

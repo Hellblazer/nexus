@@ -660,7 +660,7 @@ def _read_https_uri(
     # Step 2 — live fetch via httpx.
     own_client = False
     if http_client is None:
-        import httpx  # noqa: PLC0415
+        import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
 
         http_client = httpx.Client(timeout=30, follow_redirects=True)
         own_client = True
@@ -720,7 +720,7 @@ def _devonthink_resolver_default(uuid: str) -> tuple[str | None, str]:
     sentinel ``__NX_DT_MISSING__`` distinguishes "record not found" from
     a literal empty path.
     """
-    import subprocess  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415  — stdlib deferred to call site (subprocess)
     script = (
         'tell application id "DNtp"\n'
         f'  set theItem to get record with uuid "{uuid}"\n'
@@ -769,7 +769,7 @@ def _read_devonthink_uri(
     without launching osascript; production calls fall through to
     :func:`_devonthink_resolver_default`.
     """
-    import sys  # noqa: PLC0415
+    import sys  # noqa: PLC0415  — stdlib deferred to call site (sys)
 
     if dt_resolver is None:
         if sys.platform != "darwin":

@@ -695,7 +695,7 @@ def _read_owner_high_water(catalog_db_path: Path) -> dict[str, int]:
                    "if no documents were ever deleted from this catalog",
         )
         return {}
-    from nexus.catalog.tumbler import read_owners  # noqa: PLC0415
+    from nexus.catalog.tumbler import read_owners  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.tumbler)
 
     records = read_owners(jsonl_path)
     return {owner: rec.next_seq for owner, rec in records.items()}

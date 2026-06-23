@@ -339,7 +339,7 @@ class T3Database:
         # used (the eager top-level import was multi-second cold-start
         # cost on every CLI invocation through the indirect import chain).
         if voyage_api_key:
-            import voyageai  # noqa: PLC0415
+            import voyageai  # noqa: PLC0415 — optional/heavy dependency deferred (voyageai)
             self._voyage_client = voyageai.Client(
                 api_key=voyage_api_key,
                 timeout=read_timeout_seconds,
@@ -398,7 +398,7 @@ class T3Database:
     def _build_embedding_fn(self, collection_name: str):
         """Construct (uncached) the EF for *collection_name*. Bidirectional
         name-aware dispatch — see :meth:`_embedding_fn` docstring."""
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — command-local import (db.local_ef)
 
         parsed_token = embedding_model_for_collection_name(collection_name)
         is_local_token = parsed_token in LOCAL_EMBEDDING_MODELS
@@ -835,7 +835,7 @@ class T3Database:
         string is the legacy / no-catalog path; ``normalize`` Step 4c
         drops the field on the way to T3.
         """
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         # MCP-stored docs are single-chunk: chunk_text == content, so the
         # natural ID (chunk_text_hash[:32], per RDR-108 D1 / nexus-kmb6)
@@ -1179,7 +1179,7 @@ class T3Database:
 
         Returns the total number of deleted documents.
         """
-        from nexus.metadata_schema import is_expired  # noqa: PLC0415
+        from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         # ChromaDB only supports numeric $lt/$gt, so pre-filter by
         # ttl_days > 0 (eliminates permanent entries) then check
@@ -1803,7 +1803,7 @@ def apply_hnsw_ef(db: "T3Database") -> int:
     path — pgvector tunes HNSW server-side via ``SET LOCAL
     hnsw.iterative_scan``; RDR-155 P4a.2, nexus-1k8s1).
     """
-    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — circular-dep avoidance (db.http_vector_client)
 
     if is_service_backed(db):
         return 0

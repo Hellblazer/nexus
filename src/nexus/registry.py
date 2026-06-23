@@ -61,7 +61,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        import nexus.repo_identity as _ri  # noqa: PLC0415
+        import nexus.repo_identity as _ri  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
         return getattr(_ri, name)
     raise AttributeError(
         f"module 'nexus.registry' has no attribute {name!r}"

@@ -2008,10 +2008,10 @@ def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None
     # Attempt to drain in-flight rows before the drain precondition check.
     # Imports lazily to avoid a circular import at module load time.
     try:
-        import nexus.aspect_worker as _aw  # noqa: PLC0415
+        import nexus.aspect_worker as _aw  # noqa: PLC0415 — circular-dep avoidance (nexus.aspect_worker)
         memory_path = catalog_path.parent.parent / "memory.db"
         _aw.drain_worker(memory_path, timeout=30)
-    except Exception as _drain_err:  # noqa: BLE001
+    except Exception as _drain_err:  # noqa: BLE001 — best-effort pre-drain; failure logged via _log.warning and the drain precondition check proceeds
         _log.warning(
             "migrate_aspect_queue_drain_attempt_failed",
             error=str(_drain_err),

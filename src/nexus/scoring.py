@@ -404,7 +404,7 @@ def rerank_results(
     n = top_k or len(results)
     documents = [r.content for r in results]
 
-    from nexus.config import is_local_mode  # noqa: PLC0415
+    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
     if is_local_mode():
         return _rerank_local(results, query, documents, n)
@@ -465,7 +465,7 @@ def _rerank_local(
     download failures or missing optional deps fall back to the
     original order."""
     try:
-        from nexus.cross_encoder import get_local_cross_encoder  # noqa: PLC0415
+        from nexus.cross_encoder import get_local_cross_encoder  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
         scores = get_local_cross_encoder().score(query, documents)
     except Exception as exc:  # noqa: BLE001 — best-effort local rerank; model/dep failure logged, falls back to original order
         _log.warning(

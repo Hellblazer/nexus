@@ -455,7 +455,7 @@ class PlanLibrary:
         Returns True when the row was updated (1 row affected), False
         when the id does not exist. nexus-mrzp.
         """
-        from datetime import UTC, datetime  # noqa: PLC0415
+        from datetime import UTC, datetime  # noqa: PLC0415  — stdlib deferred to call site (datetime)
 
         now_iso = datetime.now(UTC).isoformat()
         reason_tag = (

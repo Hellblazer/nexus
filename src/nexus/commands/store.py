@@ -187,7 +187,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     shown_start = offset + 1
     shown_end = offset + len(entries)
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end} of {total})\n")
-    from datetime import datetime, timedelta  # noqa: PLC0415
+    from datetime import datetime, timedelta  # noqa: PLC0415  — stdlib deferred to call site (datetime)
     for e in entries:
         doc_id = e.get("id", "")[:32]
         title = (e.get("title") or "")[:40]

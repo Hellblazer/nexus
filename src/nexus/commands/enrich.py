@@ -1173,8 +1173,8 @@ def _run_extraction(
     # epsilon-allow claimed document_aspects.upsert was "not routable" —
     # true for the raw AspectRecord arg, but complete_aspect(asdict(...))
     # IS routable (added in nexus-zir76) and is the correct path.
-    import dataclasses as _dataclasses  # noqa: PLC0415
-    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415
+    import dataclasses as _dataclasses  # noqa: PLC0415 — stdlib deferred to call site (startup cost)
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.mcp_infra)
     with T2Database(db_path) as db:  # epsilon-allow: read-only handle; the aspect WRITE routes via t2_index_write -> complete_aspect (nexus-hb99x)
         for i, entry in enumerate(entries, 1):
             source_path = entry.file_path or entry.title
@@ -1237,7 +1237,7 @@ def _run_extraction(
                         _dataclasses.asdict(_rec)
                     )
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 — best-effort; failure logged via _log.warning and counted, batch continues
                 # nexus-24rf9: a single per-doc write failure (classically
                 # 'database is locked' under multi-writer WAL contention,
                 # even with RDR-129 B1's 30s busy_timeout) must NOT abort
@@ -1434,7 +1434,7 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
     filters to a single scheme (e.g., ``--scheme=chroma`` lists only
     chunk-reassembly-backed rows).
     """
-    from urllib.parse import urlparse  # noqa: PLC0415
+    from urllib.parse import urlparse  # noqa: PLC0415 — stdlib deferred to call site (startup cost)
 
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
@@ -1495,7 +1495,7 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
         )
         return
 
-    from urllib.parse import urlparse  # noqa: PLC0415
+    from urllib.parse import urlparse  # noqa: PLC0415 — stdlib deferred to call site (startup cost)
 
     scheme = (
         urlparse(record.source_uri).scheme

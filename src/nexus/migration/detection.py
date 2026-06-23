@@ -335,7 +335,7 @@ def voyage_key_available() -> bool:
     """
     if os.environ.get("NX_VOYAGE_API_KEY", "").strip():
         return True
-    from nexus.config import get_credential  # noqa: PLC0415
+    from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
     return bool(get_credential("voyage_api_key").strip())
 
@@ -352,8 +352,8 @@ def open_read_legs(
     (``FileNotFoundError`` / the cloud half-configured ``RuntimeError``) are
     swallowed; any other failure (a corrupt store) propagates loud.
     """
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
-    from nexus.migration.chroma_read import (  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+    from nexus.migration.chroma_read import (  # noqa: PLC0415 — circular-dep avoidance (nexus.migration.chroma_read)
         open_cloud_read_client,
         open_local_read_client,
     )

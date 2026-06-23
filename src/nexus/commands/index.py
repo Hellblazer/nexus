@@ -1066,7 +1066,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         if collection:
             col_name = collection
         else:
-            from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
+            from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.corpus)
             owner_segment = corpus.replace("_", "-")
             col_name = (
                 f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"

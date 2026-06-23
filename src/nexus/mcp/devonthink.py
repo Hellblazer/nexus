@@ -68,14 +68,14 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
     generates DT-derived ``relates`` edges (Layer B) and stamps the nexus
     identity back onto the DT record (Layer F). Returns a structured summary.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-    from nexus.catalog.factory import (  # noqa: PLC0415
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.catalog)
+    from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
         make_catalog_reader,
         make_catalog_writer,
     )
-    from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415
-    from nexus.config import catalog_path  # noqa: PLC0415
-    from nexus.dt_writeback import writeback_record  # noqa: PLC0415
+    from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.dt_link_generator)
+    from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+    from nexus.dt_writeback import writeback_record  # noqa: PLC0415 — circular-dep avoidance (nexus.dt_writeback)
 
     cp = catalog_path()
     if not Catalog.is_initialized(cp):
@@ -274,13 +274,13 @@ def build_server(*, available: bool) -> FastMCP:
 
 def main() -> None:
     """Run the DEVONthink agent-surface MCP server on stdio (RDR-139 Layer A')."""
-    import os  # noqa: PLC0415
+    import os  # noqa: PLC0415 — stdlib deferred to call site (startup cost)
 
-    import structlog  # noqa: PLC0415
+    import structlog  # noqa: PLC0415 — deferred to call site (startup cost)
 
-    from nexus.logging_setup import configure_logging  # noqa: PLC0415
-    from nexus.mcp._first_run import ensure_installed_and_running  # noqa: PLC0415
-    from nexus.mcp_client.devonthink import available  # noqa: PLC0415
+    from nexus.logging_setup import configure_logging  # noqa: PLC0415 — circular-dep avoidance (nexus.logging_setup)
+    from nexus.mcp._first_run import ensure_installed_and_running  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp._first_run)
+    from nexus.mcp_client.devonthink import available  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_client.devonthink)
 
     configure_logging("mcp")
     log = structlog.get_logger("nexus.mcp.devonthink")

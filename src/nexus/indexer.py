@@ -320,9 +320,9 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
     no-catalog ad-hoc workflow (tests, single-shot CLI runs on a fresh
     repo) continues to satisfy ``T3Database``'s strict-naming guard.
     """
-    from nexus.catalog import Catalog  # noqa: PLC0415
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
-    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.catalog import Catalog  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog)
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.factory)
+    from nexus.config import catalog_path  # noqa: PLC0415  — circular-dep avoidance (nexus.config)
 
     try:
         cat_path = catalog_path()
@@ -355,8 +355,8 @@ def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
     canonical model for ``content_type``; version is always v1 for
     ad-hoc fallbacks.
     """
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -391,7 +391,7 @@ def _legacy_collection_name(repo: "Path", content_type: str) -> str:
     in place to the conformant 4-segment shape on the first index after
     the catalog upgrade.
     """
-    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -431,8 +431,8 @@ def _migration_source_candidates(
     already crossed the Phase-5 strict-flip and accumulated synth-shape
     collections.
     """
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -498,17 +498,17 @@ def _migrate_legacy_collections(
     collection name. Sidesteps unknown legacy models like ``voyage-3``
     that pre-date :data:`CANONICAL_EMBEDDING_MODELS`.
     """
-    from typing import cast  # noqa: PLC0415
+    from typing import cast  # noqa: PLC0415  — stdlib deferred to call site (typing)
 
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.catalog)
     # nexus-8g79.10 (V5): import from peer module instead of reaching
     # up into commands/. The CLI wrapper in commands/collection.py
     # adds the ``t3_db=_t3()`` default; we pass ``t3_db`` explicitly.
-    from nexus.collection_rename import (  # noqa: PLC0415
+    from nexus.collection_rename import (  # noqa: PLC0415  — circular-dep avoidance (nexus.collection_rename)
         rename_collection_data_plane,
     )
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.repo_identity import _repo_identity  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     result: dict[str, str] = {}
 
@@ -599,7 +599,7 @@ def _migrate_legacy_collections(
             # this point onward any failure is non-fatal for the caller's
             # write path: ``conformant`` is the right name to use.
             try:
-                from nexus.corpus import (  # noqa: PLC0415
+                from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
                     is_conformant_collection_name,
                     parse_conformant_collection_name,
                 )
@@ -711,7 +711,7 @@ def _catalog_hook(
 
         # RDR-146 P1.2 strict split: reads via ``cat`` (read-only reader),
         # writes via ``writer`` (write-only daemon proxy).
-        from nexus.catalog.factory import (  # noqa: PLC0415
+        from nexus.catalog.factory import (  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
             make_catalog_writer,
         )
@@ -740,7 +740,7 @@ def _catalog_hook(
             # paths for every relative-path document under this owner
             # once the worktree was deleted. ``_repo_identity_with_main``
             # uses ``git rev-parse --git-common-dir`` to resolve.
-            from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
+            from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
             _name, _hash, main_repo = _repo_identity_with_main(repo)
             owner = writer.register_owner(
                 name=repo_name,
@@ -1192,12 +1192,12 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     code_collection = info.get("code_collection", info["collection"])
     docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
 
-    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415
+    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
     if _is_svc():
         # nexus-enehl: service mode — route frecency metadata updates through
         # the Java service's /v1/vectors/update-metadata endpoint.
         # No credential check needed: the service handles its own Chroma/Voyage.
-        from nexus.db.http_vector_client import get_http_vector_client as _get_svc  # noqa: PLC0415
+        from nexus.db.http_vector_client import get_http_vector_client as _get_svc  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
         db = _get_svc()
         _log.info(
             "frecency_service_mode",
@@ -1231,7 +1231,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     # nexus-ks40: frecency_only is a read-update flow; if the
     # collection has not yet been written, skip rather than mint an
     # empty zombie via get_or_create_collection.
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
 
     # nexus-7zcv (RDR-108 Phase 4 review D-H4): the legacy
     # ``where={"doc_id": <id>}`` lookup matches nothing for Phase-3
@@ -1897,7 +1897,7 @@ def _prune_misclassified(
     ~ceil(N / _CHROMA_PAGE_SIZE) queries per direction (~34 total for
     ART) — about a 300x reduction in roundtrips.
     """
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
     from tqdm import tqdm  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     # nexus-ks40: read-only sweeps must NOT speculatively create T3
@@ -2008,7 +2008,7 @@ def _prune_deleted_files(
     # T3 collection is a clean skip, not a speculative empty creation
     # (the latter is the leak that fed the doctor's "T3 collections
     # without projection rows" zombie list).
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
     for collection_name in (code_collection, docs_collection):
         referenced = catalog.chashes_for_collection(collection_name)
         try:
@@ -2125,7 +2125,7 @@ def _run_index(
     # non-conformant value through the path-derived conformant synth, which
     # builds ``code__<owner>__<model>__v1`` without needing a registered
     # owner (model segment self-adjusts to local/cloud mode).
-    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
     if not is_conformant_collection_name(code_collection):
         code_collection = _repo_collection_or_legacy(repo, "code")
     if not is_conformant_collection_name(docs_collection):
@@ -2330,7 +2330,7 @@ def _run_index(
             )
     else:
         _embed_fn_doc = None
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
         _service_mode = is_vector_service_mode()  # captured here; reused for T3 routing below
         if _service_mode:
             # RDR-152 Seam B (nexus-gmiaf.22): in service mode, embedding
@@ -2358,7 +2358,7 @@ def _run_index(
             voyage_key = get_credential("voyage_api_key")
             chroma_key = get_credential("chroma_api_key")
             check_credentials(voyage_key, chroma_key)
-            import voyageai  # noqa: PLC0415
+            import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
             code_model = index_model_for_collection(code_collection)
             docs_model = index_model_for_collection(docs_collection)
             voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
@@ -2369,7 +2369,7 @@ def _run_index(
     # use make_t3() to preserve the existing daemon-backed path.
     # Reuse _service_mode computed above to avoid a second module-import round-trip.
     if _service_mode:
-        from nexus.mcp_infra import get_t3 as _get_t3  # noqa: PLC0415
+        from nexus.mcp_infra import get_t3 as _get_t3  # noqa: PLC0415  — circular-dep avoidance (nexus.mcp_infra)
         db = _get_t3()
     else:
         db = make_t3()
@@ -2541,7 +2541,7 @@ def _run_index(
     # created (no files of that content_type). Caller-side
     # ``check_staleness(cache=…)`` falls through to the per-file path,
     # which itself short-circuits on a missing collection.
-    from nexus.indexer_utils import StalenessCache  # noqa: PLC0415
+    from nexus.indexer_utils import StalenessCache  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
     code_staleness = (
         build_staleness_cache(code_col) if code_col is not None
         else StalenessCache()

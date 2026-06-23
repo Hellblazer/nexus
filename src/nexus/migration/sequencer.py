@@ -103,7 +103,7 @@ def run_sequenced_migration(
     """
     targets = cross_model_targets or {}
     if remap_refs is None:
-        from nexus.collection_rename import remap_collection_references  # noqa: PLC0415
+        from nexus.collection_rename import remap_collection_references  # noqa: PLC0415  — circular-dep avoidance (nexus.collection_rename)
 
         remap_refs = remap_collection_references
     total = sum(1 for c in detection.classifications if c.has_data)

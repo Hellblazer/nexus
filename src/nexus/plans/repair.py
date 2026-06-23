@@ -58,7 +58,7 @@ def repair_scope_tags(conn: sqlite3.Connection) -> dict[str, Any]:
     if "scope_tags" not in _plan_columns(conn):
         return {"skipped": "scope_tags column missing"}
 
-    from nexus.plans.scope import (  # noqa: PLC0415
+    from nexus.plans.scope import (  # noqa: PLC0415 — circular-dep avoidance (nexus.plans.scope)
         _SCOPE_AGNOSTIC_SENTINELS,
         _infer_scope_tags,
         _normalize_scope_string,

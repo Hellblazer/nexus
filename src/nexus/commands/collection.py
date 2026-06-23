@@ -876,7 +876,7 @@ def _reembed_collection(
                 "VOYAGE_API_KEY not set; cannot re-embed without it. "
                 "(Dry-run only requires read access.)"
             )
-        import voyageai  # noqa: PLC0415
+        import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
 
         voyage_client = voyageai.Client(api_key=key)  # epsilon-allow: Phase-4 deletion target — collection re-embed CLI utility
 

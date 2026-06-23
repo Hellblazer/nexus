@@ -216,7 +216,7 @@ def _cold_start_is_current_and_wal(path: Path) -> bool:
 
         try:
             current_version = _pkg_version("conexus")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  — fallback path; safe default returned (False = treat as not-current) when package version is unresolvable
             return False
         if current_version == "0.0.0":
             return False
@@ -684,7 +684,7 @@ class T2Database:
         if self._catalog is not None:
             try:
                 self._catalog.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  — best-effort; catalog-close silence acceptable during teardown, handle nulled regardless
                 pass
             self._catalog = None
         # Reverse-construction order: document_highlights was built after

@@ -590,7 +590,7 @@ def catalog_auto_link(doc_id: str) -> int:
     finally:
         try:
             cat.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally; close failure must not mask the real result
             pass
     from nexus.catalog.auto_linker import auto_link, read_link_contexts  # noqa: PLC0415 — deferred to avoid circular import (catalog.auto_linker)
     contexts = read_link_contexts(link_entries)
@@ -986,7 +986,7 @@ def manifest_write_batch_hook(
         if _gclose is not None:
             try:
                 _gclose.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup; close failure is non-critical and intentionally silent
                 pass
     except Exception:  # noqa: BLE001 — no-catalog path best-effort; logged at debug, returns
         import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)

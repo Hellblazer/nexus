@@ -617,11 +617,11 @@ class HttpVectorClient:
         ``fail_on_oversized=True``; the server is responsible for rejecting
         oversized content on the HTTP path.
         """
-        from nexus.corpus import (  # noqa: PLC0415
+        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
             embedding_model_for_collection_name,
             index_model_for_collection,
         )
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         doc_id = content_hash[:32]
@@ -966,7 +966,7 @@ class HttpVectorClient:
 
     def count(self, collection: str) -> int:
         """Number of chunks in *collection* visible to this tenant."""
-        from urllib.parse import quote  # noqa: PLC0415
+        from urllib.parse import quote  # noqa: PLC0415 — stdlib deferred to call site (urllib.parse)
 
         result = _get(
             "/v1/vectors/count?collection=" + quote(collection),
@@ -1029,7 +1029,7 @@ class HttpVectorClient:
         """
         if not ids:
             return
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
         # Request-size chunk only (see docstring) — not a backend quota.
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         for start in range(0, len(ids), size):
@@ -1060,7 +1060,7 @@ class HttpVectorClient:
         creating a zombie collection (contrast with
         :meth:`get_or_create_collection`).
         """
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+        from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415 — optional dependency deferred (chromadb.errors)
         try:
             cols = self.list_collections()
             if not any(c.get("name") == name for c in cols):
@@ -1122,7 +1122,7 @@ class HttpVectorClient:
         returns no ids). Param name ``collection_name`` matches the oracle
         (nexus-7zuzz).
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
 
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         ids: list[str] = []
@@ -1175,7 +1175,7 @@ class HttpVectorClient:
         concurrent delete already removed some — in which case the prune-stale
         caller's ``deleted != len(ids)`` WARN correctly fires.
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
 
         ids = self.ids_for_source(collection_name, source_path)
         if not ids:

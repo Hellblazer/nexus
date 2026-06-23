@@ -63,8 +63,8 @@ def _repo_collections(repo_path: Path | None) -> set[str] | None:
     if repo_path is None:
         return None
     try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
-        from nexus.repos import read_dual  # noqa: PLC0415
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.factory)
+        from nexus.repos import read_dual  # noqa: PLC0415  — circular-dep avoidance (nexus.repos)
 
         cat = make_catalog_reader()
         reg_path = _ctx_nexus_config_dir() / "repos.json"

@@ -339,7 +339,7 @@ def _resolve_db_path(explicit: str | None) -> Path:
     env_path = os.environ.get("NX_DB_PATH", "")
     if env_path:
         return Path(env_path)
-    from nexus.config import default_db_path  # noqa: PLC0415
+    from nexus.config import default_db_path  # noqa: PLC0415 — command-local import (config)
 
     return default_db_path()
 
@@ -352,7 +352,7 @@ def _resolve_catalog_db_path(explicit: str | None) -> Path:
     env_path = os.environ.get("NX_CATALOG_DB_PATH", "")
     if env_path:
         return Path(env_path)
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — command-local import (config)
 
     return nexus_config_dir() / "catalog" / ".catalog.db"
 

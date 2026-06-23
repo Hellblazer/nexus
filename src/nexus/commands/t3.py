@@ -123,7 +123,7 @@ def _make_catalog():
 
     Patched in tests for isolation.
     """
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.factory)
 
     cat = make_catalog_reader()
     if cat is None:
@@ -138,7 +138,7 @@ def _make_t3_for_backfill():
 
     Patched in tests for isolation.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db)
     return make_t3()
 
 
@@ -185,7 +185,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
       nx t3 prune-stale -c rdr__nexus-571b8edd       # one collection
       nx t3 prune-stale --no-dry-run --confirm       # actually delete
     """
-    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db)
 
     will_delete = (not dry_run) and confirm
     if (not dry_run) and not confirm:
@@ -394,12 +394,12 @@ def gc_cmd(
       nx t3 gc -c rdr__nexus-571b8edd --no-dry-run --yes    # actually GC
       nx t3 gc -c code__nexus --orphan-window 7d --dry-run  # tighter window
     """
-    from nexus.catalog.event_log import EventLog  # noqa: PLC0415
-    from nexus.catalog.events import (  # noqa: PLC0415
+    from nexus.catalog.event_log import EventLog  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.event_log)
+    from nexus.catalog.events import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.events)
         ChunkOrphanedPayload,
         make_event,
     )
-    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db)
 
     window = _parse_orphan_window(orphan_window)
     cutoff = datetime.now(UTC) - window
@@ -618,7 +618,7 @@ def backfill_manifest_cmd(
       nx t3 backfill-manifest --no-dry-run -n 100               # first 100 docs
       nx t3 backfill-manifest --no-dry-run --resume             # continue after Ctrl-C
     """
-    from nexus.catalog.manifest_backfill import (  # noqa: PLC0415
+    from nexus.catalog.manifest_backfill import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.manifest_backfill)
         MissingChunkHashError,
         backfill_manifest_for_collection,
     )
@@ -854,7 +854,7 @@ def reidentify_cmd(
       nx t3 reidentify --all-collections --max-workers 8   # higher concurrency
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
-    from nexus.db.t3_reidentify import (  # noqa: PLC0415
+    from nexus.db.t3_reidentify import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t3_reidentify)
         MissingChunkHashError,
         reidentify_collection,
     )

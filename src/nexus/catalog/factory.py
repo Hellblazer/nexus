@@ -266,7 +266,7 @@ class CatalogWriter:
         if self._direct is not None:
             try:
                 self._direct._db.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 — fallback path; close-on-cleanup errors are non-critical, connection is being discarded
                 pass
             self._direct = None
 

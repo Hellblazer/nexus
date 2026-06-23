@@ -1207,7 +1207,7 @@ class Catalog:
         :func:`nexus.registry._repo_identity`; ``description`` defaults
         to ``"Git repository: {repo_name}"``.
         """
-        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
         # nexus-zr2ie (RDR-137 gate critique 2026-05-28): use the
         # 3-tuple variant so ``repo_root`` is the canonical main-repo
@@ -1292,7 +1292,7 @@ class Catalog:
                 (owner_str,),
             ).fetchone()
             if row is not None:
-                from nexus.catalog.tumbler import OwnerRecord, read_owners  # noqa: PLC0415
+                from nexus.catalog.tumbler import OwnerRecord, read_owners  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.tumbler)
 
                 # Read current JSONL state to recover next_seq.
                 if self._owners_path.exists():
@@ -1610,8 +1610,8 @@ class Catalog:
         canonical and the projector writes SQLite; in legacy mode SQLite
         is written directly and the event is shadow-emitted.
         """
-        from datetime import UTC, datetime  # noqa: PLC0415
-        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+        from datetime import UTC, datetime  # noqa: PLC0415  — stdlib deferred to call site (datetime)
+        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
 
         if not name:
             raise ValueError("register_collection: name must be non-empty")
@@ -1707,7 +1707,7 @@ class Catalog:
         forbid catalog writes outside the projector module. Cascade
         callers stay clean by routing through this verb.
         """
-        from nexus.catalog.events import CollectionDeletedPayload  # noqa: PLC0415
+        from nexus.catalog.events import CollectionDeletedPayload  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.events)
 
         dir_fd = self._acquire_lock()
         try:
@@ -2033,7 +2033,7 @@ class Catalog:
         ).fetchone()
         if row is None:
             return None
-        from nexus.catalog.tumbler import Tumbler as _T  # noqa: PLC0415
+        from nexus.catalog.tumbler import Tumbler as _T  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.tumbler)
         return self._docs.resolve(_T.parse(row[0]))
 
     def by_source_uri(self, uri: str) -> "CatalogEntry | None":

@@ -368,8 +368,8 @@ def backfill_collections_cmd(dry_run: bool) -> None:
       nx catalog backfill-collections --dry-run
       nx catalog backfill-collections
     """
-    from nexus.db import make_t3  # noqa: PLC0415
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
 
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -428,7 +428,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     # register_collection call — their owner_id remains empty and
     # the reader's owner_id JOIN excludes them from owner-scoped
     # lookups, which is the desired behaviour.
-    from nexus.corpus import (  # noqa: PLC0415
+    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
         is_conformant_collection_name,
         parse_conformant_collection_name,
     )
@@ -494,10 +494,10 @@ def backfill_owner_id_cmd(dry_run: bool, from_documents: bool) -> None:
       nx catalog backfill-owner-id --no-dry-run
       nx catalog backfill-owner-id --no-dry-run --no-from-documents
     """
-    from nexus.catalog.collections_owner_backfill import (  # noqa: PLC0415
+    from nexus.catalog.collections_owner_backfill import (  # noqa: PLC0415  — command-local import (nexus.catalog.collections_owner_backfill)
         backfill_owner_id,
     )
-    from nexus.catalog.factory import _is_catalog_service_mode  # noqa: PLC0415
+    from nexus.catalog.factory import _is_catalog_service_mode  # noqa: PLC0415  — command-local import (nexus.catalog.factory)
 
     if _is_catalog_service_mode():
         raise click.ClickException(
@@ -606,7 +606,7 @@ def migrate_fallback_cmd(
       nx catalog migrate-fallback knowledge__knowledge --dry-run
       nx catalog migrate-fallback docs__default --yes
     """
-    from nexus.corpus import (  # noqa: PLC0415
+    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
         is_conformant_collection_name, voyage_model_for_collection,
     )
 
@@ -642,7 +642,7 @@ def migrate_fallback_cmd(
         click.echo(f"{source}: 0 doc(s) to migrate.")
         return
 
-    from nexus.catalog.collection_name import owner_segment_for_tumbler  # noqa: PLC0415
+    from nexus.catalog.collection_name import owner_segment_for_tumbler  # noqa: PLC0415  — command-local import (nexus.catalog.collection_name)
 
     proposals: list[tuple[str, str]] = []
     for (tumbler,) in rows:
@@ -690,7 +690,7 @@ def migrate_fallback_cmd(
     for _, target in proposals:
         if target in targets_seen:
             continue
-        from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415
+        from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415  — command-local import (nexus.corpus)
         segments = parse_conformant_collection_name(target)
         writer.register_collection(
             target,
@@ -836,14 +836,14 @@ def rename_collection_cmd(
           knowledge__1-1__voyage-context-3__v1 --yes
       nx catalog rename-collection docs__nexus-571b8edd ... --dry-run
     """
-    from nexus.commands.collection import (  # noqa: PLC0415
+    from nexus.commands.collection import (  # noqa: PLC0415  — command-local import (nexus.commands.collection)
         rename_collection_data_plane,
     )
-    from nexus.corpus import (  # noqa: PLC0415
+    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
         is_conformant_collection_name,
         parse_conformant_collection_name,
     )
-    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -2801,7 +2801,7 @@ def link_density_cmd(
     The frontier count for one seed is the number of nodes reachable
     within ``--depth`` hops, excluding the seed itself.
     """
-    import statistics  # noqa: PLC0415
+    import statistics  # noqa: PLC0415  — stdlib deferred to call site (statistics)
 
     cat = _get_catalog()
     # By design the bead specifies physical_collection grouping; the
@@ -3289,7 +3289,7 @@ def consolidate_cmd(corpus: str, dry_run: bool) -> None:
         # RDR-103 Phase 5: mirror the conformant target shape that
         # ``merge_corpus`` will use when run for real so the dry-run
         # message reports the same name.
-        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
+        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — command-local import (nexus.corpus)
 
         owner_segment = corpus.replace("_", "-")
         target = (
@@ -3740,7 +3740,7 @@ def _resolve_via_devonthink(entry: object) -> Path | None:
     we can still recover from DT relocations using the meta we already
     record on entries that came in via DEVONthink.
     """
-    import sys  # noqa: PLC0415
+    import sys  # noqa: PLC0415  — stdlib deferred to call site (sys)
 
     if sys.platform != "darwin":
         return None
@@ -3751,7 +3751,7 @@ def _resolve_via_devonthink(entry: object) -> Path | None:
     uuid = dt_uri[len("x-devonthink-item://"):]
     if not uuid:
         return None
-    from nexus.aspect_readers import _devonthink_resolver_default  # noqa: PLC0415
+    from nexus.aspect_readers import _devonthink_resolver_default  # noqa: PLC0415  — command-local import (nexus.aspect_readers)
     path, _detail = _devonthink_resolver_default(uuid)
     if path is None:
         return None
@@ -4740,8 +4740,8 @@ def _run_collections_drift() -> dict:
     absent from T3 (post-rename state). Bypass-schema collections
     (``taxonomy__*``) are out of scope for this check.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
 
     cat = _get_catalog()
     try:
@@ -4875,9 +4875,9 @@ def _run_chunk_size_distribution() -> dict:
     carry centroid embeddings, not chunked text, so size stats
     aren't meaningful.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.chroma_quotas)
 
     try:
         t3 = make_t3()
@@ -4990,9 +4990,9 @@ def _run_chunk_text_dedup() -> dict:
     Returns
     ``{"pass": bool, "within": {coll: {...}}, "cross": [{...}]}``.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.chroma_quotas)
 
     try:
         t3 = make_t3()
@@ -5115,8 +5115,8 @@ def _run_t3_vs_catalog() -> dict:
     All read-only. PASS when all three lists are empty. Bypass-schema
     collections (``taxonomy__*``) are skipped from all three.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
 
     cat = _get_catalog()
     try:
@@ -5236,7 +5236,7 @@ def _expected_dim_for_model_token(token: str) -> int | None:
     Local-mode tokens encode the dim in the suffix
     (``minilm-l6-v2-384`` -> 384, ``bge-base-en-v15-768`` -> 768).
     Voyage tokens are hardcoded to 1024."""
-    from nexus.corpus import (  # noqa: PLC0415
+    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
         CANONICAL_EMBEDDING_MODELS,
         LOCAL_EMBEDDING_MODELS,
     )
@@ -5258,12 +5258,12 @@ def _run_name_vs_embed_dim() -> dict:
     names, samples one chunk per remaining collection, and compares
     actual embedding dim to the dim implied by the name's
     ``__<model>__`` segment. Read-only against T3."""
-    from nexus.corpus import (  # noqa: PLC0415
+    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
         is_conformant_collection_name,
         parse_conformant_collection_name,
     )
-    from nexus.db import make_t3  # noqa: PLC0415
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
 
     mismatches: list[dict] = []
     empty: list[str] = []
@@ -5794,7 +5794,7 @@ def _run_t3_doc_id_coverage(
     # are BERTopic centroids / embedding anchors, not document chunks).
     # The doc_id-coverage audit must skip them or it reports 100%
     # orphan ratio on every centroid set (false positive class).
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
 
     # Build expected (coll_id, chunk_id) → doc_id; track orphans.
     # RDR-102 D3: also track every coll_id that appears in events.jsonl
@@ -6600,7 +6600,7 @@ def _get_owner_for(collection: str) -> str:
     Raises ``click.ClickException`` if unknown so operators see the
     actionable error rather than a Python traceback.
     """
-    from nexus.catalog.orphan_backfill import (  # noqa: PLC0415
+    from nexus.catalog.orphan_backfill import (  # noqa: PLC0415  — command-local import (nexus.catalog.orphan_backfill)
         DEFAULT_COLLECTION_OWNER,
     )
     owner_prefix = DEFAULT_COLLECTION_OWNER.get(collection)
@@ -6637,9 +6637,9 @@ def dt_link_cmd(
     via osascript, and registers a Document per high-confidence match.
     Requires DEVONthink to be running (macOS only).
     """
-    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
-    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415  — command-local import (nexus.catalog.orphan_backfill)
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415  — command-local import (nexus.catalog.tumbler)
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
     if not owner:
         owner = _get_owner_for(collection)
@@ -6702,9 +6702,9 @@ def synthetic_cmd(
     is populated without claiming false provenance. For chunks lacking
     title metadata, falls back to per-chash singleton Documents.
     """
-    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
-    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415  — command-local import (nexus.catalog.orphan_backfill)
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415  — command-local import (nexus.catalog.tumbler)
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
     if not owner:
         owner = _get_owner_for(collection)
@@ -6755,9 +6755,9 @@ def dump_csv_cmd(
     fill in the right DT UUID where applicable, then feed back via
     ``apply-csv``.
     """
-    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415  — command-local import (nexus.catalog.orphan_backfill)
+    from nexus.config import nexus_config_dir  # noqa: PLC0415  — command-local import (nexus.config)
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
     out_path = (
         Path(out_dir) if out_dir
@@ -6801,9 +6801,9 @@ def apply_csv_cmd(
     (low_confidence.csv) per row; registers Documents with the verified
     UUIDs.
     """
-    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
-    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415  — command-local import (nexus.catalog.orphan_backfill)
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415  — command-local import (nexus.catalog.tumbler)
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
     if not owner:
         owner = _get_owner_for(collection)
@@ -6868,9 +6868,9 @@ def link_existing_cmd(
     Documents. With ``--also-synthetic``, unlinked chunks fall through
     to synthetic-mode registration.
     """
-    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
-    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415  — command-local import (nexus.catalog.orphan_backfill)
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415  — command-local import (nexus.catalog.tumbler)
+    from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
     cat = _get_catalog()
     t3 = make_t3()

@@ -114,14 +114,14 @@ def _default_reopen_leg(leg: str, local_path: str | Path | None) -> Any:
     The ETL opened + closed its own read client per leg; validation needs a
     FRESH read client (the detection clients were closed before the ETL ran).
     """
-    from nexus.migration.chroma_read import (  # noqa: PLC0415
+    from nexus.migration.chroma_read import (  # noqa: PLC0415  — command-local import (nexus.migration.chroma_read)
         open_cloud_read_client,
         open_local_read_client,
     )
 
     if leg == "cloud":
         return open_cloud_read_client()
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415  — command-local import (nexus.config)
 
     path = Path(local_path) if local_path else nexus_config_dir() / "chroma"
     return open_local_read_client(path)

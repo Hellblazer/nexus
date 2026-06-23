@@ -193,7 +193,7 @@ class Telemetry:
         call ``db.telemetry.record_tier_write(...)`` instead of reaching for a
         raw ``.conn`` (which a service-backed store does not have).
         """
-        from nexus.db.migrations import migrate_tier_writes  # noqa: PLC0415
+        from nexus.db.migrations import migrate_tier_writes  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
         with self._lock:
             migrate_tier_writes(self.conn)
             self.conn.execute(
@@ -220,7 +220,7 @@ class Telemetry:
         nexus-pyzk7: consumer redaction (trace=False) is applied by the caller
         before invoking this; the store just persists the given values.
         """
-        from nexus.db.migrations import migrate_nx_answer_runs  # noqa: PLC0415
+        from nexus.db.migrations import migrate_nx_answer_runs  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
         with self._lock:
             migrate_nx_answer_runs(self.conn)
             self.conn.execute(
@@ -255,7 +255,7 @@ class Telemetry:
         exists, then writes a single complete row (no per-caller column
         fallback ladder — the migration guarantees the columns).
         """
-        from nexus.db.migrations import (  # noqa: PLC0415
+        from nexus.db.migrations import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
             migrate_hook_failures,
             migrate_hook_failures_batch_columns,
             migrate_hook_failures_chain_column,

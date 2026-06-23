@@ -244,7 +244,7 @@ def _quiesce_daemon() -> None:
                 except (ProcessLookupError, PermissionError):
                     break  # gone
                 _time.sleep(0.1)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort daemon quiesce; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_daemon_quiesce_failed", error=str(exc))
 
 
@@ -267,7 +267,7 @@ def _cycle_daemon_to_current() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort daemon cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_daemon_cycle_failed", error=str(exc))
 
 
@@ -301,7 +301,7 @@ def _cycle_t3_daemon_to_current() -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort T3 daemon cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_t3_daemon_cycle_failed", error=str(exc))
 
 
@@ -354,7 +354,7 @@ def _cycle_storage_service_to_current(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort storage-service cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_storage_service_cycle_failed", error=str(exc))
 
 
@@ -628,7 +628,7 @@ def _refresh_all_git_hooks() -> None:
                     else "."
                 )
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort git-hook refresh; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_git_hook_refresh_failed", error=str(exc))
 
 

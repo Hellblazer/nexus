@@ -86,7 +86,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             _log.debug("skipped file with no chunks", path=str(file_path))
             return 0
 
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
         # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
         # file. Empty string when no catalog handle exists; ``normalize``
@@ -151,7 +151,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         _headings = _extract_headings(content)
         _heading_offsets = [h[0] for h in _headings]
 
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
         # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
         # file. Empty string when no catalog handle exists.
@@ -224,7 +224,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             embeddings = ctx.embed_fn(embed_texts)
             actual_model = ctx.embedding_model
         else:
-            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
 
             if is_vector_service_mode():
                 # RDR-152 Seam B stub (nexus-fsquc): the service embeds

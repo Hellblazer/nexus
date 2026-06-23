@@ -985,9 +985,9 @@ def _apply_salience_boost(
     Results without ``doc_id`` or whose document has no salient
     sentences fall through unchanged.
     """
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
-    from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415
-    from nexus.salience import token_overlap_boost  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+    from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415 — circular-dep avoidance (nexus.db.t2.document_aspects)
+    from nexus.salience import token_overlap_boost  # noqa: PLC0415 — circular-dep avoidance (nexus.salience)
 
     targeted = [
         r for r in results

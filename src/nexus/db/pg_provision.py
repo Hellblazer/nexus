@@ -833,7 +833,7 @@ def load_service_credentials_into_env(config_dir: Path | None = None) -> bool:
     the caller decide whether a missing token is fatal.
     """
     if config_dir is None:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415
+        from nexus.config import nexus_config_dir  # noqa: PLC0415  — circular-dep avoidance (nexus.config)
 
         config_dir = nexus_config_dir()
     creds_path = config_dir / CREDENTIALS_FILENAME
