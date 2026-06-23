@@ -28,18 +28,18 @@ jobs:
         python-version: ["3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: ${{ matrix.python-version }}
           # nexus-2ivn: see ci.yml. Bundled enable-cache caches metadata
           # only; the wheel cache lives at ${{ runner.temp }}/setup-uv-
-          # cache and needs an explicit actions/cache@v5 step.
+          # cache and needs an explicit actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5 step.
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
@@ -47,14 +47,14 @@ jobs:
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Cache ChromaDB ONNX model
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ~/.cache/chroma
           # nexus-8g79.33: same lockfile-bound key as ci.yml.
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
       - name: Cache HuggingFace models (docling, cross-encoder, MinerU)
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           # nexus-cxsbs: see ci.yml. Cache the whole HF hub dir so docling's
           # layout + TableFormer models persist across runs instead of being
@@ -95,18 +95,18 @@ jobs:
       contents: write   # required to create GitHub release
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.12"
           # nexus-2ivn: see ci.yml. Bundled enable-cache caches metadata
-          # only; explicit actions/cache@v5 step below targets the
+          # only; explicit actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5 step below targets the
           # wheel-cache directory setup-uv actually uses.
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
@@ -178,7 +178,7 @@ jobs:
           mkdir -p ../mcpb-dist && mv conexus.mcpb ../mcpb-dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
         # No api-token needed — uses OIDC trusted publisher
 
       - name: Create GitHub Release
