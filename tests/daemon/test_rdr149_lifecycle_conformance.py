@@ -960,3 +960,42 @@ class TestLiveT3SelfHeal:
             shutil.rmtree(cd, ignore_errors=True)
         # stop() relinquished the lease.
         assert not disc.exists()
+
+
+class TestDiscoverReapToctou:
+    """RDR-149 regression (nexus-2mpns): discover()'s reap of an expired lease
+    must not delete a concurrently-published higher-generation live record.
+
+    Conformance-suite home per the CLAUDE.md daemon mandate (lifecycle fixes
+    land in the primitive AND this suite). The race: discover() reads a stale
+    record (unlocked), judges it stale, then a successor publishes a fresh
+    higher-generation record under the election flock; the OLD blind-unlink
+    would delete the successor's live record by path.
+    """
+
+    def _registry(self, config_dir: Path, clock: _FakeClock) -> ServiceRegistry:
+        return ServiceRegistry(
+            dir=config_dir, tier="t2", clock=clock, ttl=3.0, heartbeat_interval=1.0
+        )
+
+    def test_reap_cannot_delete_concurrently_published_successor(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        reg = self._registry(config_dir, clock)
+        endpoint = {"host": "127.0.0.1", "port": 5000}
+        stale = reg.publish("scope", endpoint=endpoint, version="1", owner_token="A")
+        clock.advance(10.0)  # A is now stale (ttl=3.0)
+
+        # Successor B publishes a fresh, higher-generation record (the race winner).
+        fresh = reg.publish("scope", endpoint={"host": "127.0.0.1", "port": 6000},
+                            version="1", owner_token="B")
+        assert fresh.generation > stale.generation
+
+        # The reap, fired with the captured stale record, must re-read under the
+        # flock and leave the successor's live record intact.
+        reg._reap_if_still_stale(stale)
+
+        survived = reg.discover("scope")
+        assert survived is not None, "successor's higher-generation record was reaped"
+        assert survived.owner_token == "B"
+        assert survived.generation == fresh.generation
