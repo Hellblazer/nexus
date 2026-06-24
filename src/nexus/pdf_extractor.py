@@ -878,15 +878,30 @@ class PDFExtractor:
         # set, MinerU falls back to its default world-writable /tmp/mineru-
         # output instead of the per-user 0o700 directory.
         output_root = _mineru_output_root()
+        # RDR-148 Gap 4: this respawns the long-lived mineru-api server; like
+        # the `nx mineru start` path, route its output to a rotated child log
+        # so a crash-on-restart leaves evidence instead of dying silently
+        # into DEVNULL (nexus-ovbr7 silent-death class).
+        from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — branch-local; only on the restart path
+
+        # config_dir=None (global config dir): PDFExtractor is not
+        # config-dir-parameterized (__init__ takes no config_dir) and the
+        # mineru pid/env helpers all resolve the default dir, so None matches
+        # the rest of the subsystem (the daemon self._config_dir precedent
+        # does not apply here).
+        server_log = open_child_log_or_devnull("mineru_server")
         try:
             proc = _sp.Popen(
                 cmd, env=_server_env(output_root),
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                stdout=server_log, stderr=server_log,
                 start_new_session=True,
             )
         except (FileNotFoundError, PermissionError):
             _log.warning("mineru_restart_failed", reason="mineru-api not found")
             return False
+        finally:
+            if not isinstance(server_log, int):
+                server_log.close()
 
         # Poll health for up to 60s (models already cached in memory by OS)
         url = f"http://127.0.0.1:{port}/health"
@@ -967,6 +982,16 @@ class PDFExtractor:
             import os as _os  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
             import signal  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
+            # RDR-148 Gap 4 carve-out: unlike the two long-lived mineru-api
+            # server spawns (commands/mineru.py, _restart_mineru_server),
+            # this is a short-lived per-batch worker whose failure is
+            # returncode-detected by the caller (killpg + the returncode != 0
+            # -> RuntimeError below). DEVNULL is the deliberate, judged choice
+            # here; routing it to a child log would interleave per-batch
+            # worker output across concurrent extractions with no diagnostic
+            # gain. Full OOM/-9 exit-code classification is deferred to Gap 5
+            # (nexus-m26oq); when that lands it may revisit capturing stderr
+            # for OOM diagnostics — until then the carve-out stands.
             proc = subprocess.Popen(
                 [
                     sys.executable, "-c", _MINERU_WORKER_SCRIPT,
