@@ -1878,3 +1878,51 @@ class TestWhh61BackupsCarve:
             result = CliRunner().invoke(main, ["catalog", "undelete", "snap.jsonl"])
         assert result.exit_code != 0
         assert "daemon is live" in result.output
+
+
+class TestWhh61CollectionsCarve:
+    """Contract pins for the nexus-whh61.4 collections command carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+    """
+
+    COLLECTION_COMMANDS = [
+        "backfill-collections", "collection-name",
+        "rename-collection", "collection-gc",
+    ]
+
+    def test_collection_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.COLLECTION_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_collection_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.COLLECTION_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.collections"
+            ), f"{name} not in carved module"
+
+    def test_backfill_collections_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog + _get_catalog_writer
+        is observed by the carved backfill-collections command — proves
+        module-routed access. Empty T3 + empty catalog → nothing to backfill."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.distinct_doc_collections.return_value = []
+        cat.list_collections.return_value = []
+        t3 = MagicMock()
+        t3.list_collections.return_value = []
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()), \
+                patch("nexus.db.make_t3", return_value=t3):
+            result = CliRunner().invoke(main, ["catalog", "backfill-collections", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to backfill" in result.output
+        cat.distinct_doc_collections.assert_called()
