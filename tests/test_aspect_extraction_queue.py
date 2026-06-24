@@ -696,3 +696,47 @@ class TestMigration:
         migrate_aspect_extraction_queue_table(raw)
         migrate_aspect_extraction_queue_table(raw)  # no-op
         raw.close()
+
+
+# ── list_failed (nexus-2c51v: requeue-failed bulk recovery) ──────────────────
+
+
+class TestListFailed:
+    def _failed_store(self, tmp_path: Path):
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        # Two failed rows in coll-a, one in coll-b, one still pending.
+        for coll, sp, did in [
+            ("coll-a", "a1.pdf", "1.1"),
+            ("coll-a", "a2.pdf", ""),
+            ("coll-b", "b1.pdf", "2.2"),
+        ]:
+            store.enqueue(coll, sp, content_hash="h", content="c", doc_id=did)
+            store.mark_failed(coll, sp, "boom")
+        store.enqueue("coll-a", "pending.pdf")  # stays pending
+        return store
+
+    def test_list_failed_returns_only_failed_rows(self, tmp_path: Path) -> None:
+        store = self._failed_store(tmp_path)
+        rows = store.list_failed()
+        paths = sorted(r.source_path for r in rows)
+        assert paths == ["a1.pdf", "a2.pdf", "b1.pdf"]  # pending.pdf excluded
+
+    def test_list_failed_collection_scope(self, tmp_path: Path) -> None:
+        store = self._failed_store(tmp_path)
+        rows = store.list_failed(collection="coll-a")
+        assert sorted(r.source_path for r in rows) == ["a1.pdf", "a2.pdf"]
+        assert all(r.collection == "coll-a" for r in rows)
+
+    def test_list_failed_carries_doc_id_and_content(self, tmp_path: Path) -> None:
+        store = self._failed_store(tmp_path)
+        a1 = next(r for r in store.list_failed() if r.source_path == "a1.pdf")
+        assert a1.doc_id == "1.1"          # preserved for re-enqueue identity
+        assert a1.content_hash == "h"
+        assert a1.content == "c"
+
+    def test_list_failed_empty_when_none_failed(self, tmp_path: Path) -> None:
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        store.enqueue("coll", "only-pending.pdf")
+        assert store.list_failed() == []

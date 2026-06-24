@@ -609,6 +609,34 @@ class AspectExtractionQueue:
             for c, sp, ch, co, rc in rows
         ]
 
+    def list_failed(self, collection: str | None = None) -> list[QueueRow]:
+        """Return terminal-``failed`` rows, optionally scoped to one collection.
+
+        Drives ``nx aspects requeue-failed`` (nexus-2c51v): the operator
+        inspects/bulk-recovers rows that exhausted the retry ladder or hit a
+        non-retryable error. ``doc_id`` is selected so a re-enqueue preserves
+        the catalog identity. Ordered oldest-first for stable output.
+        """
+        sql = (
+            "SELECT collection, source_path, content_hash, content, retry_count, doc_id "
+            "FROM aspect_extraction_queue "
+            "WHERE status = 'failed'"
+        )
+        params: tuple = ()
+        if collection:
+            sql += " AND collection = ?"
+            params = (collection,)
+        sql += " ORDER BY enqueued_at ASC, source_path ASC"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [
+            QueueRow(
+                collection=c, source_path=sp, content_hash=ch,
+                content=co, retry_count=rc, doc_id=did or "",
+            )
+            for c, sp, ch, co, rc, did in rows
+        ]
+
     def rename_collection(self, *, old: str, new: str) -> int:
         """Re-point every row's denorm ``collection`` cache from ``old`` to ``new``.
 

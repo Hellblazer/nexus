@@ -911,6 +911,41 @@ class AspectRepositoryTest {
             .as("re-enqueued row must be immediately claimable").isPresent();
     }
 
+    @Test @Order(48)
+    void listFailed_returnsOnlyFailedRows_collectionScoped() {
+        // Isolated tenant so listFailed sees only this test's rows. doc_id omitted
+        // (NULL) to avoid the catalog_documents FK; doc_id round-trip is covered by
+        // the SQLite/HTTP list_failed tests and is structurally identical to the
+        // already-tested listPending map.
+        String tenant = "list-failed-tenant-" + System.nanoTime();
+        for (String[] cs : new String[][]{
+                {"lf-a", "a1.pdf"}, {"lf-a", "a2.pdf"}, {"lf-b", "b1.pdf"}}) {
+            var body = new java.util.LinkedHashMap<String, Object>();
+            body.put("collection", cs[0]);
+            body.put("source_path", cs[1]);
+            repo.enqueue(tenant, body);
+            repo.markFailed(tenant, cs[0], cs[1], "boom");
+        }
+        var pending = new java.util.LinkedHashMap<String, Object>();
+        pending.put("collection", "lf-a");
+        pending.put("source_path", "ok.pdf");
+        repo.enqueue(tenant, pending);   // stays pending
+
+        // All failed (pending excluded), FIFO by enqueued_at.
+        var all = repo.listFailed(tenant, null);
+        assertThat(all.stream().map(r -> r.get("source_path")).toList())
+            .as("listFailed returns only failed rows, FIFO")
+            .containsExactly("a1.pdf", "a2.pdf", "b1.pdf");
+
+        // Collection-scoped.
+        var scoped = repo.listFailed(tenant, "lf-a");
+        assertThat(scoped.stream().map(r -> r.get("source_path")).toList())
+            .as("listFailed honors the collection filter")
+            .containsExactly("a1.pdf", "a2.pdf");
+        assertThat(scoped).allSatisfy(r ->
+            assertThat(r.get("collection")).isEqualTo("lf-a"));
+    }
+
     /** Set next_retry_at on a specific row via a superuser connection (bypasses RLS). */
     private void setNextRetryAt(String tenant, String sourcePath, OffsetDateTime ts)
             throws SQLException {

@@ -518,3 +518,106 @@ def aspects_gc_pre_rdr096(apply: bool) -> None:
             )
     finally:
         conn.close()
+
+
+@aspects_group.command(name="requeue-failed")
+@click.option(
+    "--collection",
+    default=None,
+    help="Only re-enqueue failed rows in this collection (default: all).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Re-enqueue at most this many rows (oldest-enqueued first). Use to "
+    "pace recovery of a large backlog and avoid a thundering herd of workers "
+    "hammering a just-restored API quota.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Report the rows that would be re-enqueued without writing.",
+)
+def aspects_requeue_failed(
+    collection: str | None, limit: int | None, dry_run: bool,
+) -> None:
+    """Bulk re-enqueue terminal-``failed`` aspect-queue rows (nexus-2c51v).
+
+    A row reaches ``failed`` after exhausting the backoff-retry ladder
+    (RDR-163) or on a non-retryable error. Once the operator fixes the
+    root cause (restored API quota, repaired source identity), this verb
+    re-enqueues each failed row at its ``(collection, source_path)`` key,
+    resetting it to ``pending`` with ``retry_count=0`` (the exhaustion depth
+    shown in ``--dry-run`` is discarded) so the worker picks it up again.
+    The write is daemon-routed (nexus-zir76); reads use the active backend
+    (SQLite or the PG service).
+
+    \b
+    Rows are processed oldest-``enqueued_at``-first (enqueue order, NOT
+    most-recently-failed). ``--limit`` caps how many are re-enqueued.
+
+    \b
+    Examples:
+      nx aspects requeue-failed                       # all failed rows
+      nx aspects requeue-failed --collection knowledge__x
+      nx aspects requeue-failed --limit 100           # pace a large backlog
+      nx aspects requeue-failed --dry-run             # report only, no writes
+
+    \b
+    Operator note: single-operator recovery verb. It only touches ``failed``
+    rows (a terminal state no worker writes), so it is safe to re-run; but do
+    not run two instances concurrently — the read-snapshot / per-row-write
+    split has no cross-row transaction, so concurrent runs could redundantly
+    re-enqueue the same rows.
+
+    \b
+    Pairs with the RDR-163 ladder: the ladder reduces how often rows reach
+    terminal; this clears the ones that still do. Failed-backlog visibility
+    is ``nx doctor --check-aspect-queue``.
+    """
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if limit is not None and limit <= 0:
+        click.echo("--limit must be a positive integer.", err=True)
+        raise SystemExit(1)
+
+    mem_path = default_db_path()
+    if not mem_path.exists():
+        click.echo("aspect_extraction_queue: T2 database not found.")
+        return
+
+    # Read is concurrent-safe (no single-writer concern); the facade routes
+    # to the active backend (SQLite reader or the PG-service HTTP client).
+    with T2Database(mem_path) as db:  # epsilon-allow: read-only failed-row inspection for requeue-failed; routes to active backend, no WAL writer contention
+        failed = db.aspect_queue.list_failed(collection)
+
+    if limit is not None:
+        failed = failed[:limit]
+
+    scope = f" in {collection}" if collection else ""
+    if not failed:
+        click.echo(f"aspect_extraction_queue: no failed rows{scope}.")
+        return
+
+    if dry_run:
+        click.echo(f"Would re-enqueue {len(failed)} failed row(s){scope}:")
+        for row in failed:
+            click.echo(f"  {row.collection}  {row.source_path}  (retry_count={row.retry_count})")
+        click.echo("Re-run without --dry-run to re-enqueue.")
+        return
+
+    for row in failed:
+        # Daemon-routed write (nexus-zir76); INSERT OR REPLACE resets the row
+        # to pending / retry_count=0 / clears any stale next_retry_at backoff.
+        t2_index_write(
+            lambda db, _r=row: db.aspect_queue.enqueue(
+                _r.collection, _r.source_path,
+                content_hash=_r.content_hash, content=_r.content,
+                doc_id=_r.doc_id,
+            )
+        )
+    click.echo(f"Re-enqueued {len(failed)} failed row(s){scope} to pending.")

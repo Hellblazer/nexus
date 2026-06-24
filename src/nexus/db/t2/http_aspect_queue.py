@@ -251,6 +251,14 @@ class HttpAspectQueue(RawHandleGuardMixin):
         rows: list[dict] = self._get("/list_pending", params)
         return [_body_to_queue_row(r) for r in rows]
 
+    def list_failed(self, collection: str | None = None) -> list[QueueRow]:
+        """Return terminal-failed rows, optionally scoped to one collection."""
+        params: dict[str, Any] = {}
+        if collection:
+            params["collection"] = collection
+        rows: list[dict] = self._get("/list_failed", params)
+        return [_body_to_queue_row(r) for r in rows]
+
     def rename_collection(self, *, old: str, new: str) -> int:
         """Re-point every row's collection from *old* to *new*."""
         r = self._post("/rename_collection", {"old": old, "new": new})

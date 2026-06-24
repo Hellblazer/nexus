@@ -510,7 +510,12 @@ def test_dual_population_baseline_locked():
     # T2Database routes to the HTTP service (PG arbiter), NOT a raw SQLite
     # writer, so the single-writer concern this lint guards does not apply.
     # Both carry an ``# epsilon-allow:`` reason saying exactly that.
-    assert result.t2database_constructions == 33, (
+    #
+    # nexus-2c51v: 33 -> 34. The `nx aspects requeue-failed` read path opens a
+    # direct `T2Database(mem_path)` for a read-only failed-row inspection
+    # (mirrors `aspects gc`); reads are WAL-concurrent-safe so no single-writer
+    # concern. Carries an `# epsilon-allow:` reason.
+    assert result.t2database_constructions == 34, (
         f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
     )
 
