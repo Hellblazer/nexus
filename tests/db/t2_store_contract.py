@@ -123,7 +123,7 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
         'list_pending': ['limit'],
         'mark_done': ['collection', 'source_path', 'doc_id'],
         'mark_failed': ['collection', 'source_path', 'error'],
-        'mark_retry': ['collection', 'source_path'],
+        'mark_retry': ['collection', 'source_path', 'interval_seconds'],
         'pending_count': [],
         'reclaim_stale': ['timeout_seconds'],
         'rename_collection': ['old', 'new'],

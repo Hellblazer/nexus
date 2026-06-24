@@ -53,6 +53,7 @@ worker spawn).
 from __future__ import annotations
 
 import os
+import random
 import threading
 import time
 from pathlib import Path
@@ -70,6 +71,62 @@ from nexus.aspect_extractor import (
 from nexus.config import nexus_config_dir
 
 _log = structlog.get_logger(__name__)
+
+# ── Bounded backoff-retry ladder (RDR-163 P1, nexus-ztpt6) ──────────────────
+#
+# A transient failure re-queues the row with a backoff interval the WORKER
+# chooses; the service stamps the absolute next_retry_at = now()+interval
+# server-side. retry_count is monotonic and is the cap's source of truth, so
+# termination is guaranteed even under the ±1 race of concurrent reclaim.
+_RETRY_MAX_ATTEMPTS: int = 5          # terminal mark_failed once retry_count >= cap
+_RETRY_BASE_SECONDS: float = 30.0     # interval = base * 2**retry_count, jittered
+_RETRY_JITTER_FRACTION: float = 0.2   # ±20% — spreads re-claims when a wide outage clears
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True if *exc* is a transient failure class worth a backoff retry.
+
+    Reuses BOTH ``retry.py`` transient predicates: the ChromaDB class
+    (sqlite3 'database is locked', transport errors, HTTP 429/502/503/504) AND
+    the Voyage class (API overload/timeout). Everything else — ValueError, type
+    errors, malformed records, programming bugs — is non-retryable and
+    terminal-fails immediately (no wasted retries). A classifier dependency that
+    itself raises (e.g. the lazy ``voyageai`` import) must not break routing, so
+    each predicate is guarded and defaults to "not retryable".
+    """
+    from nexus.retry import (  # noqa: PLC0415 — deferred to avoid import cost at module load
+        _is_retryable_chroma_error,
+        _is_retryable_voyage_error,
+    )
+    for predicate in (_is_retryable_chroma_error, _is_retryable_voyage_error):
+        try:
+            if predicate(exc):
+                return True
+        except Exception as cls_exc:  # noqa: BLE001 — a classifier dependency must not break routing
+            # Observable signal: e.g. voyageai not installed makes the voyage
+            # predicate raise, which would silently route all API-overload
+            # failures to terminal. Log so an operator can see why.
+            _log.debug(
+                "aspect_worker_retry_classifier_unavailable",
+                predicate=getattr(predicate, "__name__", repr(predicate)),
+                error=str(cls_exc),
+            )
+            continue
+    return False
+
+
+def _backoff_interval_seconds(retry_count: int, *, rng=random.random) -> int:
+    """Worker-chosen backoff for the next retry, in integer seconds.
+
+    ``base * 2**retry_count`` with ±``_RETRY_JITTER_FRACTION`` jitter. The
+    service stamps the absolute ``next_retry_at = now()+interval``; only the
+    interval is chosen here. ``rng`` is injectable so the jitter is deterministic
+    under test without patching the global ``random`` module.
+    """
+    raw = _RETRY_BASE_SECONDS * (2 ** max(0, retry_count))
+    jitter = 1.0 + (rng() - 0.5) * 2.0 * _RETRY_JITTER_FRACTION
+    return max(0, int(raw * jitter))
+
 
 # ── Drain protocol exceptions ───────────────────────────────────────────────
 
@@ -446,6 +503,52 @@ class AspectExtractionWorker:
                 exc_info=True,
             )
 
+    def _mark_retry_or_fail_routed(self, row, exc: BaseException) -> None:
+        """Route a failed row to a backed-off retry, or terminal-fail it
+        (RDR-163 P1, nexus-ztpt6).
+
+        Decision:
+        * non-retryable exception (programming bug / malformed record) →
+          terminal ``mark_failed``;
+        * retry budget exhausted (``retry_count >= _RETRY_MAX_ATTEMPTS``) →
+          terminal ``mark_failed``;
+        * otherwise → ``mark_retry`` with a worker-chosen backoff interval; the
+          service stamps ``next_retry_at = now()+interval`` so the claim gate
+          holds the row back until the backoff elapses.
+
+        Routed through ``t2_index_write`` (nexus-zir76) so the worker never opens
+        ``memory.db`` directly. A routing failure is logged and falls to
+        ``reclaim_stale`` rather than killing the worker thread — the same
+        best-effort posture as ``_mark_failed_routed``.
+        """
+        retry_count = getattr(row, "retry_count", 0) or 0
+        if not _is_retryable(exc) or retry_count >= _RETRY_MAX_ATTEMPTS:
+            self._mark_failed_routed(row, str(exc))
+            return
+
+        interval = _backoff_interval_seconds(retry_count)
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+        try:
+            t2_index_write(
+                lambda db: db.aspect_queue.mark_retry(
+                    row.collection, row.source_path, interval_seconds=interval,
+                )
+            )
+            _log.info(
+                "aspect_worker_retry_scheduled",
+                collection=row.collection,
+                source_path=row.source_path,
+                retry_count=retry_count + 1,
+                interval_seconds=interval,
+            )
+        except Exception:  # noqa: BLE001 — retry persist best-effort; reclaim_stale backstops; logged
+            _log.warning(
+                "aspect_worker_mark_retry_persist_failed",
+                collection=row.collection,
+                source_path=row.source_path,
+                exc_info=True,
+            )
+
     def _process_row(self, row) -> None:
         """Run extraction on one queue row and dispatch on the result.
 
@@ -495,7 +598,7 @@ class AspectExtractionWorker:
                 source_path=row.source_path,
                 exc_info=True,
             )
-            self._mark_failed_routed(row, str(exc))
+            self._mark_retry_or_fail_routed(row, exc)
             return
 
         try:
@@ -542,7 +645,7 @@ class AspectExtractionWorker:
                 source_path=row.source_path,
                 exc_info=True,
             )
-            self._mark_failed_routed(row, str(exc))
+            self._mark_retry_or_fail_routed(row, exc)
 
 
 # ── Module-level singleton ──────────────────────────────────────────────────

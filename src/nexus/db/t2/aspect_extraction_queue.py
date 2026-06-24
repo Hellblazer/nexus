@@ -458,12 +458,20 @@ class AspectExtractionQueue:
                 )
                 self.conn.commit()
 
-    def mark_retry(self, collection: str, source_path: str) -> None:
+    def mark_retry(self, collection: str, source_path: str,
+                   interval_seconds: int = 0) -> None:
         """Reset the row to ``pending`` and increment ``retry_count``.
 
         Used by the worker when a single attempt failed transiently
         and the retry budget has not been exhausted. The next
         ``claim_next`` call will pick it up.
+
+        ``interval_seconds`` is accepted for signature parity with the
+        strategic PG/Java backend (RDR-163 P1, nexus-ztpt6) but IGNORED
+        here: this SQLite path has no ``next_retry_at`` column and is
+        retired (RDR-158) / deleted (RDR-152 P4.2). It will not gain the
+        backoff ladder — the parameter only keeps the store-contract
+        tripwire green until the class is removed.
         """
         with self.rename_lock:
             with self._lock:

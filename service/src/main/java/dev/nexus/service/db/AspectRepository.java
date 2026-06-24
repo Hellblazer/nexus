@@ -729,6 +729,12 @@ public final class AspectRepository {
                 .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,     EX_Q_ENQUEUED_AT)
                 .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
                 .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      (String) null)
+                // RDR-163 P1 (nexus-ztpt6): a re-enqueue is a fresh request — it
+                // resets retry_count to 0, so it must also clear any stale backoff
+                // (next_retry_at) left by a prior mark_retry. Otherwise the claim
+                // gate would silently hold the re-enqueued row until the old
+                // backoff elapses (up to base*2^(cap-1) seconds).
+                .set(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT,   (OffsetDateTime) null)
                 .execute();
             return null;
         });
@@ -754,7 +760,15 @@ public final class AspectRepository {
                     ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
                     ASPECT_EXTRACTION_QUEUE.DOC_ID)
                 .from(ASPECT_EXTRACTION_QUEUE)
-                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending"))
+                // RDR-163 P0 (nexus-795gv) backoff gate: a row backed off to a
+                // future next_retry_at must not be claimed early. NULL = ready now.
+                // now() is the server (DB) clock — correct for both the co-located
+                // local deployment and the cloud deployment where the worker host
+                // clock would skew against a client-stamped comparison.
+                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending")
+                    .and(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT.isNull()
+                        .or(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT.le(
+                            field("now()", OffsetDateTime.class)))))
                 .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc())
                 .limit(1)
                 .forUpdate().skipLocked()
@@ -846,15 +860,27 @@ public final class AspectRepository {
     }
 
     /**
-     * Reset a row to pending (transient retry).
+     * Reset a row to pending for a transient retry, backing it off for
+     * {@code intervalSeconds} (RDR-163 P1, nexus-ztpt6).
+     *
+     * <p>next_retry_at is stamped {@code now() + intervalSeconds} on the SERVER
+     * (DB) clock — the worker chooses the interval, the service stamps the
+     * absolute instant. This is the cloud clock-skew defense: the worker host is
+     * not the DB host, so a client-computed absolute timestamp would compare
+     * wrongly against the {@code now()}-based claim gate. {@code intervalSeconds
+     * = 0} means "ready immediately". retry_count is incremented (monotonic; the
+     * cap's source of truth); last_attempt_at is cleared.
      */
-    public void markRetry(String tenant, String collection, String sourcePath) {
+    public void markRetry(String tenant, String collection, String sourcePath, long intervalSeconds) {
         tenantScope.withTenant(tenant, ctx -> {
             ctx.update(ASPECT_EXTRACTION_QUEUE)
                .set(ASPECT_EXTRACTION_QUEUE.STATUS, "pending")
                .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
                    field("retry_count + 1", Integer.class))
                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
+               .set(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT,
+                   field("now() + make_interval(secs => ?)", OffsetDateTime.class,
+                         (double) intervalSeconds))
                .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection)
                    .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
                .execute();
