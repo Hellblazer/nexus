@@ -1983,3 +1983,44 @@ class TestWhh61MigrationCarve:
         assert result.exit_code == 0, result.output
         assert "docs__default: 1 doc(s) ->" in result.output
         cat.list_by_collection.assert_called_once_with("docs__default")
+
+
+class TestWhh61MaintenanceCarve:
+    """Contract pins for the nexus-whh61.4 maintenance (gc + chash-reconcile) carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+    """
+
+    MAINT_COMMANDS = ["gc", "chash-reconcile"]
+
+    def test_maintenance_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.MAINT_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_maintenance_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.MAINT_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.maintenance"
+            ), f"{name} not in carved module"
+
+    def test_gc_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved gc command — proves module-routed access. Empty catalog →
+        no orphans."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.all_documents.return_value = []
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(main, ["catalog", "gc"])
+        assert result.exit_code == 0, result.output
+        assert "No orphan entries found." in result.output
+        cat.all_documents.assert_called()
