@@ -26,7 +26,7 @@ from click.testing import CliRunner
 from nexus.catalog import events as ev
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.event_log import EventLog
-from nexus.commands.catalog import doctor_cmd
+from nexus.commands.catalog_cmds.doctor import doctor_cmd
 
 
 @pytest.fixture()

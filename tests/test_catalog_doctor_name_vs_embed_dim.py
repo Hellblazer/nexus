@@ -22,7 +22,7 @@ import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
 
-from nexus.commands.catalog import doctor_cmd
+from nexus.commands.catalog_cmds.doctor import doctor_cmd
 
 
 @pytest.fixture()

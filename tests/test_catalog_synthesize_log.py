@@ -175,7 +175,7 @@ class TestDryRun:
 
 class TestHappyPath:
     def test_synthesize_clears_fallback(self, fallback_catalog):
-        from nexus.commands.catalog import _check_bootstrap_status
+        from nexus.commands.catalog_cmds.doctor import _check_bootstrap_status
 
         assert _check_bootstrap_status()["fallback_active"] is True
 
@@ -197,7 +197,7 @@ class TestHappyPath:
         assert (snapshots[0] / "events.jsonl").exists()
 
     def test_synthesize_replay_equality_passes_after(self, fallback_catalog):
-        from nexus.commands.catalog import _run_replay_equality
+        from nexus.commands.catalog_cmds.doctor import _run_replay_equality
 
         runner = CliRunner()
         runner.invoke(main, ["catalog", "synthesize-log"])
@@ -280,7 +280,7 @@ class TestNoVerify:
             return {"pass": True}
 
         monkeypatch.setattr(
-            "nexus.commands.catalog._run_replay_equality", _spy
+            "nexus.commands.catalog_cmds.doctor._run_replay_equality", _spy
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -304,7 +304,7 @@ class TestAutoRestore:
             return {"pass": False, "reason": "synthetic test failure"}
 
         monkeypatch.setattr(
-            "nexus.commands.catalog._run_replay_equality", _failing_verify
+            "nexus.commands.catalog_cmds.doctor._run_replay_equality", _failing_verify
         )
 
         runner = CliRunner()

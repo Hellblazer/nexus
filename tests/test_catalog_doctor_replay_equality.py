@@ -23,7 +23,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
-from nexus.commands.catalog import doctor_cmd
+from nexus.commands.catalog_cmds.doctor import doctor_cmd
 
 
 def _appendl(path: Path, obj: dict) -> None:
