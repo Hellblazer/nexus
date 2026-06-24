@@ -353,8 +353,8 @@ class AspectExtractionWorker:
         try:
             from nexus.commands.enrich import _build_catalog_manifest_lookup  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
             manifest_lookup = _build_catalog_manifest_lookup()
-        except Exception:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
-            pass
+        except Exception as exc:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
+            _log.debug("aspect_worker_manifest_lookup_unavailable", error=str(exc))
 
         items: list[tuple[str, str, str, str]] = [
             (row.collection, row.source_path, row.content,
@@ -479,8 +479,8 @@ class AspectExtractionWorker:
             try:
                 from nexus.commands.enrich import _build_catalog_manifest_lookup  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
                 manifest_lookup = _build_catalog_manifest_lookup()
-            except Exception:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
-                pass
+            except Exception as exc:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
+                _log.debug("aspect_worker_manifest_lookup_unavailable", error=str(exc))
             record = _extract_aspects(
                 content=row.content,
                 source_path=row.source_path,

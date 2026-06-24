@@ -186,8 +186,8 @@ def _progress(msg: str) -> None:
     click.echo(msg)
     try:
         sys.stdout.buffer.flush()
-    except Exception:  # noqa: BLE001 - best-effort cleanup; non-fatal
-        pass
+    except Exception as exc:  # noqa: BLE001 - best-effort cleanup; non-fatal
+        _log.debug("taxonomy_stdout_flush_failed", error=str(exc))
 
 
 # ── Shared function (M5 — callable from CLI and index_repo_cmd) ──────────────
@@ -762,8 +762,8 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                 from pathlib import Path as _Path  # noqa: PLC0415 - branch-local; deferred to call time
                 from nexus.context import generate_context_l1  # noqa: PLC0415 - deferred to avoid circular import at module load
                 generate_context_l1(db.taxonomy, repo_path=_Path.cwd())
-            except Exception:  # noqa: BLE001 - non-fatal best-effort step
-                pass  # Non-fatal
+            except Exception as exc:  # noqa: BLE001 - non-fatal best-effort step
+                _log.debug("taxonomy_context_l1_generation_failed", error=str(exc))
 
     click.echo(f"\nTotal: {total_topics} topics, {total_labeled} labeled.")
 
@@ -1132,8 +1132,8 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
             parent_centroid_id = f"{collection_name}:{topic_id}"
             try:
                 centroid_coll.delete(ids=[parent_centroid_id])
-            except Exception:  # noqa: BLE001 - best-effort; non-fatal
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort; non-fatal
+                _log.debug("taxonomy_centroid_delete_failed", error=str(exc))
             c_ids = [f"{collection_name}:{cid}" for cid in child_ids]
             c_embs = [spec["centroid"] for spec in child_specs]
             c_metas = [
@@ -1166,8 +1166,8 @@ def _try_load_catalog() -> Any:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         return make_catalog_reader()
-    except Exception:  # noqa: BLE001 - best-effort lookup; degrades to None
-        pass
+    except Exception as exc:  # noqa: BLE001 - best-effort lookup; degrades to None
+        _log.debug("taxonomy_catalog_reader_unavailable", error=str(exc))
     return None
 
 
@@ -2110,8 +2110,8 @@ def _resolve_prefixes(cli_override: str) -> list[str]:
         cfg_prefixes = (cfg.get("taxonomy") or {}).get("collection_prefixes")
         if isinstance(cfg_prefixes, list) and cfg_prefixes:
             return [str(p).strip() for p in cfg_prefixes if str(p).strip()]
-    except Exception:  # noqa: BLE001 - best-effort prefix discovery; degrades to defaults
-        pass
+    except Exception as exc:  # noqa: BLE001 - best-effort prefix discovery; degrades to defaults
+        _log.debug("taxonomy_prefix_discovery_failed", error=str(exc))
     return list(_DEFAULT_PREFIXES)
 
 
@@ -2186,8 +2186,8 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
         if callable(close):
             try:
                 close()
-            except Exception:  # noqa: BLE001 - best-effort cleanup; non-fatal
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort cleanup; non-fatal
+                _log.debug("taxonomy_t3_close_failed", error=str(exc))
 
     # ── Render ──
     if fmt == "json":

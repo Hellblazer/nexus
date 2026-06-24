@@ -181,7 +181,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     # Get total count for page info
     try:
         total = db.collection_info(col_name)["count"]
-    except (KeyError, Exception):  # noqa: BLE001 — best-effort total count for display; '?' on any backend failure
+    except Exception:  # noqa: BLE001 — best-effort total count for display; '?' on any backend failure (incl. KeyError)
         total = "?"
 
     shown_start = offset + 1
@@ -217,7 +217,7 @@ def _list_documents(db: T3Database, col_name: str) -> None:
     """List unique documents (deduplicated by content_hash) in a collection."""
     try:
         total_chunks = db.collection_info(col_name)["count"]
-    except (KeyError, Exception):  # noqa: BLE001 — collection-open failure surfaced to user via click.echo, returns
+    except Exception:  # noqa: BLE001 — collection-open failure (incl. KeyError) surfaced to user via click.echo, returns
         click.echo(f"Collection not found: {col_name}")
         return
 
