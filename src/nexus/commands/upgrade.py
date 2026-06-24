@@ -732,7 +732,7 @@ def _emit_name_vs_embed_dim_advisory() -> None:
     if any collections are mislabeled. Silent on PASS, error-tolerant
     (T3 may be unavailable on a freshly-migrated install)."""
     try:
-        from nexus.commands.catalog import _run_name_vs_embed_dim  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.commands.catalog_cmds.doctor import _run_name_vs_embed_dim  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         report = _run_name_vs_embed_dim()
     except Exception:  # noqa: BLE001 — best-effort doctor advisory; silent return when T3 unavailable
         return

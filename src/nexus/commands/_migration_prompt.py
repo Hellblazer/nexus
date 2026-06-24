@@ -72,7 +72,7 @@ def maybe_emit_bootstrap_prompt() -> None:
     # Gate 4: actual catalog state. Do this last because it touches
     # the filesystem; the cheap gates run first.
     try:
-        from nexus.commands.catalog import _check_bootstrap_status  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.commands.catalog_cmds.doctor import _check_bootstrap_status  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         status = _check_bootstrap_status()
     except Exception:  # noqa: BLE001 — boundary catch of undocumented errors; degrades to safe fallback return
         return

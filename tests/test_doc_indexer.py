@@ -1988,7 +1988,7 @@ def test_preflight_registration_idempotent_on_staleness_skip(
 
     from click.testing import CliRunner
 
-    from nexus.commands.catalog import doctor_cmd
+    from nexus.commands.catalog_cmds.doctor import doctor_cmd
 
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
     sp = str(sample_md.resolve())

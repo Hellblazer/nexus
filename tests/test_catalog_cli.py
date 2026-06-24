@@ -2192,3 +2192,60 @@ class TestWhh61IntegrityCarve:
             result = CliRunner().invoke(main, ["catalog", "verify"])
         assert result.exit_code == 0, result.output
         cat.all_documents.assert_called()
+
+
+class TestWhh61DoctorCarve:
+    """Contract pins for the nexus-whh61.4 doctor carve (the final family).
+
+    Non-vacuous: fails on re-inline, dropped ``register``, the diagnostic
+    helpers not moving, or import-bound ``_get_catalog``.
+    """
+
+    DOCTOR_COMMANDS = ["doctor", "synthesize-log"]
+    SAMPLE_MOVED_HELPERS = [
+        "_run_replay_equality", "_snapshot_table", "_check_bootstrap_status",
+        "_run_name_vs_embed_dim", "_percentile", "_run_t3_doc_id_coverage",
+        "_run_collections_drift", "_run_chunk_size_distribution",
+        "_run_chunk_text_dedup", "_run_t3_vs_catalog",
+        "_print_replay_equality_text", "_expected_dim_for_model_token",
+        # threshold constants moved with the helpers:
+        "_MICRO_CHUNK_BYTES", "_VOYAGE_DIM", "_ORPHAN_RATIO_WARN_THRESHOLD",
+    ]
+
+    def test_prune_deprecated_keys_stayed_in_catalog(self):
+        """_PRUNE_DEPRECATED_KEYS is an indexer/normalisation constant, NOT a
+        diagnostic — it must stay in commands.catalog (indexer contract tests
+        import it from there), not get swept into the doctor module."""
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import doctor as doc_mod
+        assert hasattr(cat_mod, "_PRUNE_DEPRECATED_KEYS")
+        assert not hasattr(doc_mod, "_PRUNE_DEPRECATED_KEYS")
+
+    def test_doctor_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.DOCTOR_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_doctor_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.DOCTOR_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.doctor"
+            ), f"{name} not in carved module"
+
+    def test_diagnostic_helpers_relocated(self):
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import doctor as doc_mod
+        for h in self.SAMPLE_MOVED_HELPERS:
+            assert hasattr(doc_mod, h), f"{h} missing from doctor module"
+            assert not hasattr(cat_mod, h), f"{h} still in commands.catalog"
+
+    def test_doctor_requires_a_check_flag(self):
+        """Behavioural: no flag → UsageError (exit 2), proving the carved
+        command runs through its arg-validation path."""
+        from nexus.cli import main
+        result = CliRunner().invoke(main, ["catalog", "doctor"])
+        assert result.exit_code == 2
+        assert "Pass a check flag" in result.output

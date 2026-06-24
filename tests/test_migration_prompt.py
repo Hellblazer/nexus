@@ -33,7 +33,7 @@ def test_prompt_fires_once_when_fallback_active_and_tty(capsys):
     active. Expect a stderr WARNING with the migration verb name.
     """
     with patch(
-        "nexus.commands.catalog._check_bootstrap_status",
+        "nexus.commands.catalog_cmds.doctor._check_bootstrap_status",
         return_value={"fallback_active": True},
     ), patch("sys.stderr.isatty", return_value=True), \
        patch.dict("os.environ", {}, clear=False):
@@ -56,7 +56,7 @@ def test_prompt_fires_only_once_per_process(capsys):
     prompt.
     """
     with patch(
-        "nexus.commands.catalog._check_bootstrap_status",
+        "nexus.commands.catalog_cmds.doctor._check_bootstrap_status",
         return_value={"fallback_active": True},
     ), patch("sys.stderr.isatty", return_value=True):
         import os
@@ -72,7 +72,7 @@ def test_prompt_fires_only_once_per_process(capsys):
 def test_prompt_suppressed_when_not_tty(capsys):
     """Non-TTY context (CI / cron / MCP / pipe redirect): no prompt."""
     with patch(
-        "nexus.commands.catalog._check_bootstrap_status",
+        "nexus.commands.catalog_cmds.doctor._check_bootstrap_status",
         return_value={"fallback_active": True},
     ), patch("sys.stderr.isatty", return_value=False):
         import os
@@ -87,7 +87,7 @@ def test_prompt_suppressed_by_nexus_no_prompts_env(capsys, monkeypatch):
     """NEXUS_NO_PROMPTS=1 escape hatch: no prompt even in TTY context."""
     monkeypatch.setenv("NEXUS_NO_PROMPTS", "1")
     with patch(
-        "nexus.commands.catalog._check_bootstrap_status",
+        "nexus.commands.catalog_cmds.doctor._check_bootstrap_status",
         return_value={"fallback_active": True},
     ), patch("sys.stderr.isatty", return_value=True):
         _migration_prompt.maybe_emit_bootstrap_prompt()
@@ -103,7 +103,7 @@ def test_prompt_suppressed_by_truthy_no_prompts_values(
     """Several truthy spellings of NEXUS_NO_PROMPTS suppress."""
     monkeypatch.setenv("NEXUS_NO_PROMPTS", val)
     with patch(
-        "nexus.commands.catalog._check_bootstrap_status",
+        "nexus.commands.catalog_cmds.doctor._check_bootstrap_status",
         return_value={"fallback_active": True},
     ), patch("sys.stderr.isatty", return_value=True):
         _migration_prompt.maybe_emit_bootstrap_prompt()
@@ -115,7 +115,7 @@ def test_prompt_suppressed_by_truthy_no_prompts_values(
 def test_prompt_suppressed_when_fallback_not_active(capsys):
     """Catalog is fine — no fallback. No prompt."""
     with patch(
-        "nexus.commands.catalog._check_bootstrap_status",
+        "nexus.commands.catalog_cmds.doctor._check_bootstrap_status",
         return_value={"fallback_active": False},
     ), patch("sys.stderr.isatty", return_value=True):
         import os
@@ -133,7 +133,7 @@ def test_prompt_swallows_check_exceptions(capsys):
     structlog and surfaced in doctor's structured output regardless.
     """
     with patch(
-        "nexus.commands.catalog._check_bootstrap_status",
+        "nexus.commands.catalog_cmds.doctor._check_bootstrap_status",
         side_effect=RuntimeError("simulated check failure"),
     ), patch("sys.stderr.isatty", return_value=True):
         import os

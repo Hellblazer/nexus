@@ -456,7 +456,7 @@ class TestDoctorReplayEqualityEventLog:
         # links.jsonl), then projects through the doctor and asserts
         # the link IS present in the projected DB. Only the
         # events.jsonl path can produce that output.
-        from nexus.commands.catalog import _run_replay_equality
+        from nexus.commands.catalog_cmds.doctor import _run_replay_equality
 
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
         d = tmp_path / "test-catalog"
@@ -497,7 +497,7 @@ class TestDoctorReplayEqualityEventLog:
     def test_doctor_falls_back_to_synthesizer_when_no_events(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
-        from nexus.commands.catalog import _run_replay_equality
+        from nexus.commands.catalog_cmds.doctor import _run_replay_equality
 
         # PR ζ flipped NEXUS_EVENT_SOURCED default to ON; the doctor
         # synthesizer fallback is the legacy path, so pin explicitly.
