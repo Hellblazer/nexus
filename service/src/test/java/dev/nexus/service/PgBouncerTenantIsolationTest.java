@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.GenericContainer;
@@ -22,7 +23,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -75,6 +79,7 @@ class PgBouncerTenantIsolationTest {
     GenericContainer<?> pgbouncer;
     HikariDataSource ds;
     MemoryRepository repo;
+    AspectRepository queue;
 
     @BeforeAll
     @SuppressWarnings("resource")
@@ -146,6 +151,7 @@ class PgBouncerTenantIsolationTest {
         ds = new HikariDataSource(cfg);
 
         repo = new MemoryRepository(new TenantScope(ds));
+        queue = new AspectRepository(new TenantScope(ds));
     }
 
     @AfterAll
@@ -185,5 +191,91 @@ class PgBouncerTenantIsolationTest {
             .isEmpty();
         assertThat(repo.findByProject(TENANT_A, PROJECT))
             .as("tenant A sees its own row (positive control)").hasSize(1);
+    }
+
+    @Test
+    void aspectQueueBackoffLadderWorksThroughTransactionModePgBouncer() throws Exception {
+        // RDR-163 P-GATE (nexus-bsm0p): validate the next_retry_at backoff ladder
+        // through the production cloud topology — a real transaction-mode PgBouncer
+        // multiplexing every transaction onto a single server backend. Each repo
+        // call is one withTenant transaction (GUC set + query), so a reliance on
+        // session-scoped state would fail here. Unique tenants keep the test
+        // self-contained (RLS isolates; no truncation needed). doc_id omitted so no
+        // catalog_documents FK seeding is required.
+        String tenantA = "pgb-aspect-a-" + System.nanoTime();
+        String tenantB = "pgb-aspect-b-" + System.nanoTime();
+        String coll = "pgb-aspect-coll";
+
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection", coll);
+        body.put("source_path", "ladder.pdf");
+        queue.enqueue(tenantA, body);
+
+        // claim -> in_progress, single transaction through the pooler.
+        assertThat(queue.claimNext(tenantA))
+            .as("claimNext must succeed through txn-mode PgBouncer").isPresent();
+
+        // markRetry stamps next_retry_at = now()+interval SERVER-SIDE in one txn,
+        // no session-GUC reliance — the cloud clock-skew defense, txn-mode safe.
+        OffsetDateTime beforeRetry = OffsetDateTime.now(ZoneOffset.UTC);
+        queue.markRetry(tenantA, coll, "ladder.pdf", 3600);
+
+        // Prove markRetry actually worked through the pooler (not a silent no-op
+        // that would leave the row in_progress and make the later claimNext-empty
+        // assertion pass for the wrong reason): the row is pending again with
+        // retry_count incremented, and next_retry_at is server-stamped into the
+        // future (~now()+3600s on the DB clock).
+        var pending = queue.listPending(tenantA, 10);
+        assertThat(pending)
+            .as("markRetry must return the row to pending through the pooler").hasSize(1);
+        assertThat(((Number) pending.get(0).get("retry_count")).intValue())
+            .as("markRetry must increment retry_count").isEqualTo(1);
+        OffsetDateTime nra = readNextRetryAt(tenantA, "ladder.pdf");
+        assertThat(nra)
+            .as("markRetry must server-stamp next_retry_at into the future through the pooler")
+            .isNotNull();
+        assertThat(nra.toInstant())
+            .isAfter(beforeRetry.plusSeconds(3000).toInstant());
+
+        // The backoff gate composes with the per-tenant RLS predicate: the row is
+        // pending (proven above) but next_retry_at is in the future, so it is NOT
+        // re-claimable — unambiguously the backoff path, not an in_progress artifact.
+        assertThat(queue.claimNext(tenantA))
+            .as("a backed-off row must not be claimable through the pooler").isEmpty();
+
+        // isDrained counts non-failed rows: a backed-off pending row is NOT drained.
+        assertThat(queue.isDrained(tenantA))
+            .as("a backed-off pending row must report drained=false").isFalse();
+
+        // Cross-tenant isolation through the SHARED server backend. Positive
+        // control: tenant B has its OWN row and can claim it (so the queue is not
+        // simply empty for B); and the row B claims is B's, never tenant A's
+        // backed-off row — RLS + per-tenant scoping hold under txn-mode multiplexing.
+        var bodyB = new java.util.LinkedHashMap<String, Object>();
+        bodyB.put("collection", coll);
+        bodyB.put("source_path", "b-only.pdf");
+        queue.enqueue(tenantB, bodyB);
+        var claimedB = queue.claimNext(tenantB);
+        assertThat(claimedB)
+            .as("tenant B must claim its own row through the pooler (positive control)")
+            .isPresent();
+        assertThat(claimedB.get().get("source_path"))
+            .as("tenant B must see only its own row, never tenant A's")
+            .isEqualTo("b-only.pdf");
+    }
+
+    /** Read next_retry_at for a row via the superuser connection (bypasses RLS). */
+    private OffsetDateTime readNextRetryAt(String tenant, String sourcePath) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            try (var ps = su.prepareStatement(
+                    "SELECT next_retry_at FROM nexus.aspect_extraction_queue "
+                    + "WHERE tenant_id = ? AND source_path = ?")) {
+                ps.setString(1, tenant);
+                ps.setString(2, sourcePath);
+                ResultSet rs = ps.executeQuery();
+                assertThat(rs.next()).as("row must exist for readNextRetryAt").isTrue();
+                return rs.getObject("next_retry_at", OffsetDateTime.class);
+            }
+        }
     }
 }
