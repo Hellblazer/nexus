@@ -286,3 +286,38 @@ def test_probe_defaults_base_url_to_managed(monkeypatch):
 
     probe_managed_service(http_get=fake_get)
     assert seen["url"] == f"{DEFAULT_MANAGED_SERVICE_URL}/version"
+
+
+# ── fail-closed parser: drift guard + type-confusion ─────────────────────────
+
+
+def test_release_parser_matches_guided_upgrade_semver():
+    """The local _parse_release_version MUST stay behaviourally identical to
+    guided_upgrade._parse_semver (it is a deliberate local copy to avoid a
+    db->migration import). Mechanically enforce the "mirrors" claim so the two
+    security gates cannot silently diverge (nexus-x2g1z review)."""
+    from nexus.db.managed_endpoint import _parse_release_version
+    from nexus.migration.guided_upgrade import _parse_semver
+
+    fixtures = [
+        None, "", "   ", "0.1.8", "v0.1.8", "0.2.0", "0.1.5",
+        "0.1.9-SNAPSHOT", "0.1.8-dev", "0.1.8-rc1", "1.2.3.4", "x.y.z",
+        "unknown", "1.0-SNAPSHOT", "0.1", "v0.2.0", "-1.0.0",
+    ]
+    for raw in fixtures:
+        assert _parse_release_version(raw) == _parse_semver(raw), (
+            f"parser divergence on {raw!r}"
+        )
+
+
+@pytest.mark.parametrize("bad", [True, False, 1, 0, 1.5, [], {}, None])
+def test_probe_non_string_release_version_fails_closed(bad):
+    """A non-string release_version (malformed/JSON-confused service) must
+    fail closed — the isinstance(str) guard collapses it to "" -> refuse."""
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        body = _version_body()
+        body["release_version"] = bad
+        return _resp(200, body)
+
+    with pytest.raises(ManagedServiceIncompatible):
+        probe_managed_service(base_url="https://x", http_get=fake_get)
