@@ -733,3 +733,164 @@ class TestBatchPath:
             "/papers/p0.pdf", "/papers/p1.pdf", "/papers/p2.pdf",
             "/rdrs/r0.md", "/rdrs/r1.md",
         ])
+
+
+# ── Bounded backoff-retry ladder (RDR-163 P1, nexus-ztpt6) ──────────────────
+
+
+class TestRetryClassification:
+    """`_is_retryable` reuses BOTH retry.py transient predicates."""
+
+    def test_db_locked_is_retryable(self) -> None:
+        import sqlite3
+
+        from nexus.aspect_worker import _is_retryable
+        assert _is_retryable(sqlite3.OperationalError("database is locked"))
+
+    def test_transport_error_is_retryable(self) -> None:
+        import httpx
+
+        from nexus.aspect_worker import _is_retryable
+        assert _is_retryable(httpx.ConnectError("connection refused"))
+
+    def test_http_503_message_is_retryable(self) -> None:
+        from nexus.aspect_worker import _is_retryable
+        assert _is_retryable(Exception("upstream returned 503 service unavailable"))
+
+    def test_value_error_is_not_retryable(self) -> None:
+        from nexus.aspect_worker import _is_retryable
+        assert not _is_retryable(ValueError("malformed record"))
+
+    def test_type_error_is_not_retryable(self) -> None:
+        from nexus.aspect_worker import _is_retryable
+        assert not _is_retryable(TypeError("programming bug"))
+
+    def test_plain_exception_is_not_retryable(self) -> None:
+        from nexus.aspect_worker import _is_retryable
+        assert not _is_retryable(Exception("nothing transient here"))
+
+
+class TestBackoffInterval:
+    """`_backoff_interval_seconds` doubles per attempt with deterministic jitter."""
+
+    def test_no_jitter_doubles_per_attempt(self) -> None:
+        from nexus.aspect_worker import _RETRY_BASE_SECONDS, _backoff_interval_seconds
+
+        mid = lambda: 0.5  # jitter factor exactly 1.0  # noqa: E731
+        assert _backoff_interval_seconds(0, rng=mid) == int(_RETRY_BASE_SECONDS)
+        assert _backoff_interval_seconds(1, rng=mid) == int(_RETRY_BASE_SECONDS * 2)
+        assert _backoff_interval_seconds(3, rng=mid) == int(_RETRY_BASE_SECONDS * 8)
+
+    def test_jitter_bounds_are_plus_minus_fraction(self) -> None:
+        from nexus.aspect_worker import (
+            _RETRY_BASE_SECONDS,
+            _RETRY_JITTER_FRACTION,
+            _backoff_interval_seconds,
+        )
+
+        base = _RETRY_BASE_SECONDS * 4  # retry_count=2
+        lo = _backoff_interval_seconds(2, rng=lambda: 0.0)  # factor 1-frac
+        hi = _backoff_interval_seconds(2, rng=lambda: 1.0)  # factor 1+frac
+        assert lo == int(base * (1.0 - _RETRY_JITTER_FRACTION))
+        assert hi == int(base * (1.0 + _RETRY_JITTER_FRACTION))
+
+
+class _FakeQueue:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def mark_failed(self, collection, source_path, error) -> None:  # noqa: ANN001
+        self.calls.append(("failed", collection, source_path, error))
+
+    def mark_retry(self, collection, source_path, interval_seconds=0) -> None:  # noqa: ANN001
+        self.calls.append(("retry", collection, source_path, interval_seconds))
+
+
+class _FakeDb:
+    def __init__(self) -> None:
+        self.aspect_queue = _FakeQueue()
+
+
+class TestRetryLadderRouting:
+    """`_mark_retry_or_fail_routed` decision: retry vs terminal."""
+
+    def _worker_and_db(self, monkeypatch):  # noqa: ANN001
+        import nexus.mcp_infra as infra
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        fake_db = _FakeDb()
+        monkeypatch.setattr(infra, "t2_index_write", lambda fn: fn(fake_db))
+        return AspectExtractionWorker(poll_interval=10.0), fake_db
+
+    def _row(self, retry_count: int):
+        import types
+        return types.SimpleNamespace(
+            collection="knowledge__delos", source_path="/p.pdf", retry_count=retry_count,
+        )
+
+    def test_retryable_under_cap_marks_retry_with_backoff(self, monkeypatch) -> None:  # noqa: ANN001
+        import sqlite3
+        worker, db = self._worker_and_db(monkeypatch)
+        worker._mark_retry_or_fail_routed(self._row(0), sqlite3.OperationalError("database is locked"))
+        assert len(db.aspect_queue.calls) == 1
+        kind, _coll, _sp, interval = db.aspect_queue.calls[0]
+        assert kind == "retry"
+        assert interval > 0  # backed off (retry_count=0 -> base*1, jittered)
+
+    def test_non_retryable_marks_failed_immediately(self, monkeypatch) -> None:  # noqa: ANN001
+        worker, db = self._worker_and_db(monkeypatch)
+        worker._mark_retry_or_fail_routed(self._row(0), ValueError("malformed"))
+        assert len(db.aspect_queue.calls) == 1
+        assert db.aspect_queue.calls[0][0] == "failed"
+
+    def test_retryable_at_cap_marks_failed(self, monkeypatch) -> None:  # noqa: ANN001
+        import sqlite3
+        from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS
+        worker, db = self._worker_and_db(monkeypatch)
+        worker._mark_retry_or_fail_routed(
+            self._row(_RETRY_MAX_ATTEMPTS), sqlite3.OperationalError("database is locked"),
+        )
+        assert db.aspect_queue.calls[0][0] == "failed"
+
+
+class TestRetryLadderIntegration:
+    """End-to-end: a retryable failure cycles the ladder to terminal at the cap."""
+
+    def test_retryable_failure_climbs_to_terminal_at_cap(self, _isolate_t2: Path) -> None:
+        import sqlite3
+
+        from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS, AspectExtractionWorker
+
+        with T2Database(_isolate_t2) as db:
+            db.aspect_queue.enqueue("knowledge__delos", "/retry.pdf")
+
+        def fake_extract(content, source_path, collection, **_kw):  # noqa: ANN001, ANN202
+            raise sqlite3.OperationalError("database is locked")
+
+        # SQLite stub ignores the backoff interval (no next_retry_at column), so
+        # the row is immediately re-claimable and the worker burns the whole
+        # retry budget quickly before going terminal — proving the ladder ran
+        # (old behaviour was a single-shot terminal fail at retry_count==1).
+        with patch("nexus.aspect_worker._extract_aspects", fake_extract):
+            worker = AspectExtractionWorker(poll_interval=0.02)
+            worker.start()
+            try:
+                _wait_until(
+                    lambda: _row_status(_isolate_t2, "/retry.pdf") == "failed",
+                    timeout=10.0,
+                )
+            finally:
+                worker.stop(timeout=5.0)
+
+        with T2Database(_isolate_t2) as db:
+            row = db.aspect_queue.conn.execute(
+                "SELECT status, retry_count FROM aspect_extraction_queue WHERE source_path = ?",
+                ("/retry.pdf",),
+            ).fetchone()
+        assert row[0] == "failed"
+        # Exact boundary (single worker => deterministic): the row is retried at
+        # claim-time counts 0..cap-1 (cap mark_retry calls, each +1), then the
+        # claim-time count == cap trips terminal mark_failed (+1 more). Final
+        # retry_count is therefore cap+1 — proving the full ladder ran, not a
+        # single-shot fail (which would terminate at retry_count == 1).
+        assert row[1] == _RETRY_MAX_ATTEMPTS + 1

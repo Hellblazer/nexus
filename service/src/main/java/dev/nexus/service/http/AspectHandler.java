@@ -477,7 +477,13 @@ public final class AspectHandler implements HttpHandler {
     private void handleQueueMarkRetry(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
         Map<String, Object> body = readBody(ex);
-        repo.markRetry(tenant, (String) body.get("collection"), (String) body.get("source_path"));
+        // RDR-163 P1 (nexus-ztpt6): worker passes interval_seconds; the service
+        // stamps next_retry_at = now()+interval server-side. Default 0 (ready now)
+        // keeps any legacy caller behaving as the pre-backoff reset.
+        long intervalSeconds = body.containsKey("interval_seconds")
+            ? ((Number) body.get("interval_seconds")).longValue() : 0L;
+        repo.markRetry(tenant, (String) body.get("collection"), (String) body.get("source_path"),
+            intervalSeconds);
         HttpUtil.send(ex, 200, "{\"ok\":true}");
     }
 

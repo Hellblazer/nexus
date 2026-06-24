@@ -552,8 +552,8 @@ class AspectRepositoryTest {
 
         repo.markFailed(TENANT_A, "failretry-coll", "fr.pdf", "extractor crashed");
         // After failed, isDrained excludes failed — still counts as not-done
-        // Now retry: resets to pending
-        repo.markRetry(TENANT_A, "failretry-coll", "fr.pdf");
+        // Now retry with interval 0 (immediately ready): resets to pending
+        repo.markRetry(TENANT_A, "failretry-coll", "fr.pdf", 0L);
         int cnt = repo.pendingCount(TENANT_A);
         assertThat(cnt).isGreaterThanOrEqualTo(1);
     }
@@ -844,6 +844,67 @@ class AspectRepositoryTest {
             .isNull();
         assertThat(repo.claimNext(tenant))
             .as("a reclaimed NULL-next_retry_at row is immediately claimable").isPresent();
+    }
+
+    @Test @Order(46)
+    void markRetry_stampsNextRetryAtServerSide_andBacksOffClaim() throws Exception {
+        String tenant = "markretry-tenant-" + System.nanoTime();
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "mr-coll");
+        body.put("source_path", "mr.pdf");
+        repo.enqueue(tenant, body);
+        repo.claimNext(tenant);                       // -> in_progress
+
+        long interval = 600;                          // 10 minutes
+        OffsetDateTime before = OffsetDateTime.now(ZoneOffset.UTC);
+        repo.markRetry(tenant, "mr-coll", "mr.pdf", interval);
+        OffsetDateTime after = OffsetDateTime.now(ZoneOffset.UTC);
+
+        // next_retry_at is stamped now()+interval on the SERVER clock. In testcontainers
+        // the DB shares the host clock, so [before, after] bound the server now() tightly;
+        // a 30s pad absorbs any residual skew without making the assertion vacuous.
+        OffsetDateTime nra = readNextRetryAt(tenant, "mr.pdf");
+        assertThat(nra).as("markRetry must stamp next_retry_at").isNotNull();
+        assertThat(nra.toInstant())
+            .as("next_retry_at must be now()+interval, server-stamped")
+            .isBetween(before.plusSeconds(interval).minusSeconds(30).toInstant(),
+                       after.plusSeconds(interval).plusSeconds(30).toInstant());
+
+        // retry_count incremented to 1 (row is pending; listPending is ungated so it shows).
+        Map<String, Object> row = repo.listPending(tenant, 100).stream()
+            .filter(r -> "mr.pdf".equals(r.get("source_path")))
+            .findFirst().orElseThrow(() -> new AssertionError("retried row not in listPending"));
+        assertThat(((Number) row.get("retry_count")).intValue())
+            .as("markRetry must increment retry_count").isEqualTo(1);
+
+        // The backoff is live: the row is NOT claimable until next_retry_at elapses.
+        assertThat(repo.claimNext(tenant))
+            .as("a just-retried row backed off into the future must not be claimable")
+            .isEmpty();
+    }
+
+    @Test @Order(47)
+    void reEnqueue_clearsStaleBackoff_rowImmediatelyClaimable() throws Exception {
+        // RDR-163 P1 (nexus-ztpt6) H-1: a re-enqueue resets retry_count to 0, so
+        // it must also clear next_retry_at — otherwise a row backed off by a prior
+        // mark_retry stays silently held until the old backoff elapses.
+        String tenant = "reenqueue-backoff-tenant-" + System.nanoTime();
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "rb-coll");
+        body.put("source_path", "rb.pdf");
+        repo.enqueue(tenant, body);
+
+        // Back the row off far into the future (simulating a prior mark_retry).
+        setNextRetryAt(tenant, "rb.pdf", OffsetDateTime.now(ZoneOffset.UTC).plusHours(2));
+        assertThat(repo.claimNext(tenant))
+            .as("precondition: a backed-off row is not claimable").isEmpty();
+
+        // Re-enqueue at the same key: must clear the backoff and be claimable now.
+        repo.enqueue(tenant, body);
+        assertThat(readNextRetryAt(tenant, "rb.pdf"))
+            .as("re-enqueue must clear stale next_retry_at").isNull();
+        assertThat(repo.claimNext(tenant))
+            .as("re-enqueued row must be immediately claimable").isPresent();
     }
 
     /** Set next_retry_at on a specific row via a superuser connection (bypasses RLS). */

@@ -211,11 +211,18 @@ class HttpAspectQueue(RawHandleGuardMixin):
             "error": error[:2000],
         })
 
-    def mark_retry(self, collection: str, source_path: str) -> None:
-        """Reset the row to 'pending' and increment retry_count."""
+    def mark_retry(self, collection: str, source_path: str,
+                   interval_seconds: int = 0) -> None:
+        """Reset the row to 'pending', increment retry_count, and back it off.
+
+        ``interval_seconds`` is the worker-chosen backoff; the service stamps
+        ``next_retry_at = now() + interval_seconds`` server-side (RDR-163 P1,
+        nexus-ztpt6). Default 0 = ready immediately.
+        """
         self._post("/mark_retry", {
             "collection": collection,
             "source_path": source_path,
+            "interval_seconds": interval_seconds,
         })
 
     def reclaim_stale(self, timeout_seconds: int = 300) -> int:

@@ -435,6 +435,25 @@ class TestHttpAspectQueue:
         store = self._queue({"/v1/aspects/queue/mark_retry": {"ok": True}})
         store.mark_retry("c", "doc.pdf")
 
+    def test_mark_retry_posts_interval_seconds(self):
+        # RDR-163 P1 (nexus-ztpt6): the worker-chosen backoff must reach the
+        # service so it can stamp next_retry_at = now()+interval server-side.
+        captured = {}
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"ok": True})
+
+        store = HttpAspectQueue(base_url="http://test", _token="tok")
+        store._client = httpx.Client(
+            base_url="http://test", headers=store._headers,
+            transport=httpx.MockTransport(handle_request),
+        )
+        store.mark_retry("c", "doc.pdf", interval_seconds=120)
+        assert captured["body"]["interval_seconds"] == 120
+        assert captured["body"]["collection"] == "c"
+        assert captured["body"]["source_path"] == "doc.pdf"
+
     def test_reclaim_stale_returns_count(self):
         store = self._queue({"/v1/aspects/queue/reclaim_stale": {"reclaimed": 3}})
         assert store.reclaim_stale(300) == 3
