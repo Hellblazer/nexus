@@ -2039,6 +2039,8 @@ class TestWhh61RemediationCarve:
         "_build_basename_index", "_entry_needs_remediation",
         "_resolve_via_devonthink", "_resolve_candidate",
         "_rdr_prefix_of", "_build_rdr_prefix_index",
+        # module constants that anchor the helpers, moved with them:
+        "_REMEDIATE_DEFAULT_EXTENSIONS", "_RDR_PREFIX_RE",
     ]
 
     def test_remediation_commands_registered_on_group(self):

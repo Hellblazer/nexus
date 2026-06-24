@@ -2222,9 +2222,6 @@ def backfill_cmd(
         click.echo(f"  Hash:      {hash_updated} chunks updated")
 
 
-# ── nx catalog remediate-paths ──────────────────────────────────────────────
-
-
 # ── RDR-101 Phase 2: synthesize-log (in-place fallback recovery) ─────────
 
 
