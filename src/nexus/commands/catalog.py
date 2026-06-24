@@ -5347,9 +5347,6 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
         )
 
 
-# ── Backup-before-delete recovery surface (RDR-106 Option A) ─────────────
-
-
 @catalog.command("chash-reconcile")
 @click.option(
     "--apply",
