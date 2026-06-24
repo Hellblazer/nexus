@@ -1799,3 +1799,82 @@ class TestKgyozLinksCarve:
 
         catalog_group = main.commands["catalog"]
         assert catalog_group.commands["generate-links"] is links_mod.generate_links_cmd
+
+
+class TestWhh61BackupsCarve:
+    """Contract pins for the nexus-whh61.4 backups command carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+
+    Note the two access paths: ``list-backups`` / ``vacuum-backups`` read via
+    ``_get_catalog()`` (defended by the patch-seam pins below), while
+    ``undelete`` opens an admin catalog via ``make_catalog_admin()`` — pinned
+    here by its daemon-live guard; its full restore round-trip lives in
+    ``test_catalog_backup_and_safety.py`` via ``NEXUS_CATALOG_PATH`` plumbing.
+    """
+
+    BACKUP_COMMANDS = ["list-backups", "undelete", "vacuum-backups"]
+
+    def test_backup_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.BACKUP_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_backup_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.BACKUP_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.backups"
+            ), f"{name} not in carved module"
+
+    def test_list_backups_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved list-backups command — proves module-routed access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        fake = MagicMock()
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
+                patch("nexus.catalog.catalog_backup.list_backups", return_value=[]) as lb:
+            result = CliRunner().invoke(main, ["catalog", "list-backups"])
+        assert result.exit_code == 0, result.output
+        assert "No backups found." in result.output
+        lb.assert_called_once_with(fake)
+
+    def test_vacuum_backups_routes_get_catalog_through_module(self):
+        """Symmetric to list-backups: vacuum-backups also routes _get_catalog
+        through the module object (would fail if bound at import time)."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        fake = MagicMock()
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
+                patch(
+                    "nexus.catalog.catalog_backup.vacuum_old_backups",
+                    return_value=(0, 0),
+                ) as vac:
+            result = CliRunner().invoke(main, ["catalog", "vacuum-backups"])
+        assert result.exit_code == 0, result.output
+        vac.assert_called_once()
+        assert vac.call_args.args[0] is fake
+
+    def test_undelete_surfaces_daemon_live_guard(self):
+        """undelete uses the admin path (make_catalog_admin), not _get_catalog.
+        Pin the CLI-layer guard: a live daemon surfaces as a ClickException."""
+        from unittest.mock import patch
+
+        from nexus.catalog.factory import CatalogAdminDaemonLiveError
+        from nexus.cli import main
+
+        with patch(
+            "nexus.catalog.factory.make_catalog_admin",
+            side_effect=CatalogAdminDaemonLiveError("daemon is live"),
+        ):
+            result = CliRunner().invoke(main, ["catalog", "undelete", "snap.jsonl"])
+        assert result.exit_code != 0
+        assert "daemon is live" in result.output
