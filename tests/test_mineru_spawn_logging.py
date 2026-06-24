@@ -112,7 +112,7 @@ def test_worker_subprocess_keeps_devnull_carveout() -> None:
 
     src = Path(ext_mod.__file__).read_text()
     # The short-lived per-batch worker is a deliberate DEVNULL carve-out.
-    assert "RDR-148 Gap 4 carve-out" in src, (
+    assert "Gap 4 carve-out" in src, (
         "the per-batch worker DEVNULL choice must stay documented as a "
         "judged carve-out, not an oversight."
     )
