@@ -288,7 +288,6 @@ def rename_collection_cmd(
             f"Refusing to rename {old!r} on top of an existing collection."
         )
 
-    will_run = yes and not dry_run
     if dry_run:
         click.echo(f"would rename: {old} -> {new}")
         return

@@ -359,6 +359,14 @@ def setup_cmd(remote: str) -> None:
         click.echo("Setup complete.")
 
 
+# nexus-whh61.4 carve note: migrate-fallback is collection-adjacent (it
+# supersedes/registers collection projection rows) and is cross-referenced by
+# the collections family, but stays here for now. It calls the shared helpers
+# in the DIRECT form (``_get_catalog()`` below), not the module-routed
+# ``_cat_cmd._get_catalog()`` form the carved families use. If a future carve
+# moves it into catalog_cmds/, port it to the module-routed form or the
+# ``patch("nexus.commands.catalog._get_catalog")`` test seam will silently
+# stop intercepting it.
 @catalog.command("migrate-fallback")
 @click.argument("source")
 @click.option(
@@ -5149,9 +5157,6 @@ def chash_reconcile_cmd(apply: bool) -> None:
             )
     finally:
         idx.close()
-
-
-# ── nx catalog collection-gc (nexus-ks40) ────────────────────────────────
 
 
 # ── Catalog t3-doc-id-coverage support helpers ───────────────────────────
