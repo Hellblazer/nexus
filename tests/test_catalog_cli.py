@@ -1770,3 +1770,32 @@ class TestKgyozLinksCarve:
         assert result.exit_code == 0, result.output
         assert '"total": 7' in result.output
         fake.link_audit.assert_called_once()
+
+    def test_links_flat_query_runs_through_carved_body(self):
+        """End-to-end through the group for the most complex carved command:
+        the `links` flat-query + JSON render path runs intact (guards against
+        an intra-body line drop that the __module__ pin would miss)."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        edge = MagicMock()
+        edge.to_dict.return_value = {"from": "1.1.1", "to": "1.2.1", "link_type": "cites"}
+        fake = MagicMock()
+        fake.link_query.return_value = [edge]
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake):
+            result = CliRunner().invoke(
+                main, ["catalog", "links", "--created-by", "bib_enricher", "--json"],
+            )
+        assert result.exit_code == 0, result.output
+        assert '"link_type": "cites"' in result.output
+        fake.link_query.assert_called_once()
+
+    def test_link_generate_delegates_to_registered_generate_links(self):
+        """link-generate's ctx.invoke target IS the object registered as
+        generate-links — pins the delegation across the carve."""
+        from nexus.cli import main
+        from nexus.commands.catalog_cmds import links as links_mod
+
+        catalog_group = main.commands["catalog"]
+        assert catalog_group.commands["generate-links"] is links_mod.generate_links_cmd
