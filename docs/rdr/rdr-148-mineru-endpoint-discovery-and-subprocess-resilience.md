@@ -397,6 +397,16 @@ share one code region and one new catchable memory-error type (see item 5).
    classification (the SIGKILL-only mapping would have missed it). **Depends on
    item 4** (the shared error type + classification), so author 4 first within the
    arc — consistent with the bead graph (`yrlbd`/Gap 6 depends-on `m26oq`/Gap 5).
+   **Outcome (2026-06-24, bead `nexus-yrlbd`): SHIPPED.** Config knobs
+   `mineru_memory_ceiling_mb` (default 0 = disabled) and `mineru_page_timeout_s`
+   (default 180) added. RLIMIT_AS preexec is Linux-gated (`sys.platform`); when
+   applied, `_mineru_ceiling_applied` is set so item 4's classifier maps any
+   non-zero exit to `MineruMemoryError`. Per-page timeout = `mineru_page_timeout_s`
+   × pages-in-range (never tighter than the old flat 180s). The `batch//2` step is
+   implemented as a recursive bisection ladder (`_extract_range`): a failed range
+   halves toward 1-page rather than dropping straight to per-page, and only the
+   failed range is retried. The recursion subsumed and replaced the prior
+   `_run_page_or_degrade` per-page helper (single degrade site retained).
 
 ### Technical Design
 
