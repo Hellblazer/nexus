@@ -798,8 +798,12 @@ class AspectRepositoryTest {
         repo.enqueue(tenant, body);
 
         // Stamp a known PAST next_retry_at so the row is claimable, then claim it
-        // (-> in_progress). claimNext must not touch next_retry_at.
-        OffsetDateTime backoff = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
+        // (-> in_progress). claimNext must not touch next_retry_at. Truncate to
+        // microseconds: PG TIMESTAMPTZ has microsecond precision, so a nanosecond
+        // Java value would round on store and break the exact round-trip equality
+        // below (passes or fails depending on the random sub-microsecond digits).
+        OffsetDateTime backoff = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10)
+            .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         setNextRetryAt(tenant, "reclaim.pdf", backoff);
         assertThat(repo.claimNext(tenant))
             .as("setup: a past-next_retry_at row must claim into in_progress")
