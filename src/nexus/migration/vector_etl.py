@@ -337,6 +337,19 @@ def _migrate_one(
     # a server-side re-embed for that batch (correctness over cost — never store a
     # null vector).
     passthrough = _is_same_model_passthrough(name, target)
+    # nexus-bfdri: the model the collection name DECLARES (segment 3 of the
+    # conformant <ct>__<owner>__<embedding_model>__v<n> shape). Passthrough only
+    # copies a stored vector verbatim when each chunk's recorded provenance
+    # (metadata["embedding_model"], written by make_chunk_metadata at index time)
+    # MATCHES this declared model — the name segment alone is not proof the
+    # vectors came from the embedder the target is searched against.
+    declared_model = name.split("__")[2] if passthrough else None
+
+    def _provenance_ok(c: dict) -> bool:
+        # Verifiable AND matches the declared model. A missing/blank
+        # embedding_model is unverifiable -> fail closed (re-embed). nexus-bfdri.
+        return (c.get("metadata") or {}).get("embedding_model") == declared_model
+
     source_count = 0
     written = 0
     try:
@@ -349,20 +362,30 @@ def _migrate_one(
             # so re-runs stay idempotent on (tenant, target, chash).
             embeddings = None
             if passthrough:
-                if all(c.get("embedding") is not None for c in batch):
+                if all(
+                    c.get("embedding") is not None and _provenance_ok(c)
+                    for c in batch
+                ):
                     embeddings = [c["embedding"] for c in batch]
                 else:
-                    # Fallback: a batch with any missing source vector re-embeds
-                    # server-side (never store a null vector) — and that re-embed
-                    # bills. Logged so a mixed passthrough/re-embed run is auditable
-                    # (the dry-run cost caveat warns this is possible).
+                    # Fallback: a batch with any missing source vector OR any chunk
+                    # whose recorded provenance does not match the declared model
+                    # re-embeds server-side (never copy a null or mis-provenanced
+                    # vector) — and that re-embed bills. Logged so a mixed
+                    # passthrough/re-embed run is auditable (the dry-run cost caveat
+                    # warns this is possible).
                     missing = sum(1 for c in batch if c.get("embedding") is None)
+                    mis_provenance = sum(
+                        1 for c in batch
+                        if c.get("embedding") is not None and not _provenance_ok(c)
+                    )
                     _log.warning(
                         "vector_etl_passthrough_fallback_reembed",
                         collection=name,
                         target=target,
                         batch_size=len(batch),
                         missing_vectors=missing,
+                        provenance_mismatch=mis_provenance,
                     )
             vector_client.upsert_chunks(
                 target,

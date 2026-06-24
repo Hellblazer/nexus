@@ -222,22 +222,35 @@ class FailingUpsertClient(FakeVectorClient):
 # ── Source seeding ────────────────────────────────────────────────────────────
 
 
-def _seed_source(client, name: str, n: int, *, text_prefix: str = "chunk text") -> list[str]:
+def _seed_source(
+    client, name: str, n: int, *, text_prefix: str = "chunk text",
+    embedding_model: str | None = None,
+) -> list[str]:
     """Seed *n* chunks into a Chroma collection; returns the chash ids.
 
     Ids follow the chash convention (sha256(text)[:32]) so the migrated
     pgvector ``chash`` column round-trips the natural ID verbatim. Explicit
     tiny embeddings: the SOURCE vectors are never read by the ETL
     (decision (a)), so their dimension is deliberately nonsensical (2).
+
+    ``embedding_model`` (nexus-bfdri): when set, stamps each chunk's metadata
+    with the producing model id — the provenance the same-model passthrough
+    now verifies before trusting a stored vector for verbatim copy. Left
+    ``None`` for the cross-model / re-embed fixtures (whose vectors never cross
+    the ETL anyway) so their exact ``metadata`` assertions stay unchanged.
     """
     texts = [f"{text_prefix} {i:04d}" for i in range(n)]
     ids = [_chash(t) for t in texts]
     if n:
         col = client.get_or_create_collection(name)
+        meta = [{"position": i, "tag": "etl"} for i in range(n)]
+        if embedding_model is not None:
+            for m in meta:
+                m["embedding_model"] = embedding_model
         col.add(
             ids=ids,
             documents=texts,
-            metadatas=[{"position": i, "tag": "etl"} for i in range(n)],
+            metadatas=meta,
             embeddings=[[float(i), 1.0] for i in range(n)],
         )
     else:
@@ -335,7 +348,7 @@ class TestMigrateCollectionsUnit:
         from nexus.migration.vector_etl import _migrate_one
 
         name = _coll("ptbge", model=_MODEL_768)
-        ids = _seed_source(source_client, name, 3)
+        ids = _seed_source(source_client, name, 3, embedding_model=_MODEL_768)
         fake = FakeVectorClient()
 
         result = _migrate_one(
@@ -354,7 +367,7 @@ class TestMigrateCollectionsUnit:
         from nexus.migration.vector_etl import _migrate_one
 
         name = _coll("ptvoyage", model="voyage-context-3")
-        ids = _seed_source(source_client, name, 3)
+        ids = _seed_source(source_client, name, 3, embedding_model="voyage-context-3")
         fake = FakeVectorClient()
 
         result = _migrate_one(
@@ -389,6 +402,44 @@ class TestMigrateCollectionsUnit:
         assert result.status == "migrated"
         assert fake.upsert_calls[0][0] == target  # upserted into the TARGET
         assert all(emb is None for emb in fake.upsert_embeddings)  # re-embed, no copy
+
+    def test_mislabeled_provenance_does_not_passthrough(self, source_client) -> None:
+        """nexus-bfdri: a collection whose NAME says bge-768 but whose chunk
+        metadata records a DIFFERENT producing model is mislabeled — its stored
+        768-dim vectors are NOT from the embedder the target is searched with.
+        Passthrough must REFUSE to copy them verbatim and re-embed instead
+        (embeddings=None), even though the name+dimension checks both pass."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("mislabel", model=_MODEL_768)  # name declares bge-768
+        # ...but provenance says a different 768-dim embedder produced the vectors.
+        _seed_source(source_client, name, 3, embedding_model="other-768-embedder")
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+
+        assert result.status == "migrated"
+        # provenance mismatch → re-embed, never copy the contaminated vectors.
+        assert all(emb is None for emb in fake.upsert_embeddings)
+
+    def test_unverifiable_provenance_does_not_passthrough(self, source_client) -> None:
+        """nexus-bfdri: a chunk with NO embedding_model in metadata cannot prove
+        which embedder produced its stored vector — fail closed: re-embed rather
+        than trust a name segment (embeddings=None)."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("noprov", model=_MODEL_768)
+        _seed_source(source_client, name, 3)  # no embedding_model stamped
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+
+        assert result.status == "migrated"
+        assert all(emb is None for emb in fake.upsert_embeddings)
 
     def test_is_same_model_passthrough_helper(self) -> None:
         from nexus.migration.vector_etl import _is_same_model_passthrough
