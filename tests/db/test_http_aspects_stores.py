@@ -480,6 +480,34 @@ class TestHttpAspectQueue:
         assert len(result) == 1
         assert isinstance(result[0], QueueRow)
 
+    def test_list_failed_returns_rows_and_preserves_doc_id(self):
+        rows = [
+            {"collection": "c", "source_path": "f.pdf",
+             "content_hash": "h", "content": "x", "retry_count": 6, "doc_id": "1.2"}
+        ]
+        store = self._queue({"/v1/aspects/queue/list_failed": rows})
+        result = store.list_failed()
+        assert len(result) == 1
+        assert isinstance(result[0], QueueRow)
+        assert result[0].doc_id == "1.2"
+        assert result[0].retry_count == 6
+
+    def test_list_failed_forwards_collection_param(self):
+        # nexus-2c51v: --collection scope must reach the service as a query param.
+        captured = {}
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json=[])
+
+        store = HttpAspectQueue(base_url="http://test", _token="tok")
+        store._client = httpx.Client(
+            base_url="http://test", headers=store._headers,
+            transport=httpx.MockTransport(handle_request),
+        )
+        store.list_failed(collection="knowledge__x")
+        assert captured["params"].get("collection") == "knowledge__x"
+
     def test_list_pending_with_limit(self):
         rows = [
             {"collection": "c", "source_path": f"doc{i}.pdf",

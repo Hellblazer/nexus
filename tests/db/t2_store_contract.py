@@ -120,6 +120,7 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
         'claim_next': [],
         'enqueue': ['collection', 'source_path', 'content_hash', 'content', 'doc_id'],
         'is_drained': [],
+        'list_failed': ['collection'],
         'list_pending': ['limit'],
         'mark_done': ['collection', 'source_path', 'doc_id'],
         'mark_failed': ['collection', 'source_path', 'error'],

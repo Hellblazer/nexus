@@ -450,7 +450,9 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-
     # mode branches; both route to the HTTP service, not a raw SQLite writer).
-    assert result.t2database_constructions == 33, (
+    # nexus-2c51v: 33 -> 34 (`nx aspects requeue-failed` epsilon-allow'd
+    # read-only T2Database open, mirrors `aspects gc`).
+    assert result.t2database_constructions == 34, (
         f"t2database_constructions baseline changed: {result.t2database_constructions}"
     )
 

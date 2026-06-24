@@ -958,6 +958,47 @@ public final class AspectRepository {
     }
 
     /**
+     * List terminal-{@code failed} rows, optionally scoped to one collection
+     * (mirrors AspectExtractionQueue.list_failed). Drives the
+     * {@code nx aspects requeue-failed} bulk-recovery CLI (nexus-2c51v).
+     * doc_id is included so a re-enqueue preserves the catalog identity.
+     */
+    public List<Map<String, Object>> listFailed(String tenant, String collection) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = ASPECT_EXTRACTION_QUEUE.STATUS.eq("failed");
+            if (collection != null && !collection.isBlank()) {
+                cond = cond.and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection));
+            }
+            var rows = ctx.select(
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT,
+                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID)
+                .from(ASPECT_EXTRACTION_QUEUE)
+                .where(cond)
+                .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc())
+                .fetch();
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (var r : rows) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("collection",   r.get(ASPECT_EXTRACTION_QUEUE.COLLECTION));
+                m.put("source_path",  r.get(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH));
+                String ch = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
+                m.put("content_hash", ch == null ? "" : ch);
+                String co = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT);
+                m.put("content",      co == null ? "" : co);
+                m.put("retry_count",  r.get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT));
+                String di = r.get(ASPECT_EXTRACTION_QUEUE.DOC_ID);
+                m.put("doc_id",       di == null ? "" : di);
+                out.add(m);
+            }
+            return out;
+        });
+    }
+
+    /**
      * Rename collection in queue (mirrors AspectExtractionQueue.rename_collection).
      */
     public int renameQueueCollection(String tenant, String oldColl, String newColl) {

@@ -509,6 +509,31 @@ The promotion is logged to `aspect_promotion_log` (registry-managed) for audit. 
 
 ---
 
+## nx aspects
+
+Aspect-extraction queue management (the async queue feeding the aspect-extraction worker). The group also provides `drain` (drain before a PK migration), `gc`, and `gc-fixtures`.
+
+### nx aspects requeue-failed
+
+Bulk re-enqueue terminal-`failed` aspect-queue rows. A row reaches `failed` after exhausting the backoff-retry ladder (RDR-163) or on a non-retryable error. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb re-enqueues every failed row at its `(collection, source_path)` key — resetting it to `pending` with `retry_count=0` and clearing any stale backoff — so the worker picks it up again. The write is daemon-routed; the failed-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
+
+| Flag | Description |
+|------|-------------|
+| `--collection NAME` | Only re-enqueue failed rows in this collection. Default: all collections |
+| `--limit N` | Re-enqueue at most N rows (oldest-`enqueued_at` first). Paces recovery of a large backlog so a burst of newly-pending rows doesn't immediately re-hammer a just-restored API quota |
+| `--dry-run` | Report the rows that would be re-enqueued without writing anything |
+
+Rows are processed oldest-`enqueued_at`-first (enqueue order, not most-recently-failed); re-enqueue resets `retry_count` to 0. This is a single-operator recovery verb — safe to re-run (it only touches the terminal `failed` state), but do not run two instances concurrently.
+
+```bash
+nx aspects requeue-failed                        # re-enqueue all failed rows
+nx aspects requeue-failed --collection knowledge__x
+nx aspects requeue-failed --limit 100            # pace a large backlog
+nx aspects requeue-failed --dry-run              # report only, no writes
+```
+
+---
+
 ## nx catalog
 
 Document catalog — track indexed documents and the relationships between them.
