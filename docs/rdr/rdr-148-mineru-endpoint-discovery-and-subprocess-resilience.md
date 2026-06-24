@@ -131,16 +131,20 @@ consolidation:
 
 - **`nexus-oa7r`** (`1de1ce69`, 2026-05-11): stopped `nx mineru start` writing the
   ephemeral bound port into the persistent config — so the config no longer *rots*
-  with a dead port. But the *extractor* still selects the endpoint from
-  `get_mineru_server_url()` (config) at `pdf_extractor.py:741`/`:776`, **not** the
-  live pid file. Gap 1's Approach #1 (pid-file precedence in the resolver) is
-  **still unimplemented**.
+  with a dead port.
+- **Gap 1 resolver — already shipped (corrected by Spike Result 2, 2026-06-24).**
+  `get_mineru_server_url()` (`config.py:236-252`) now resolves pid file → config →
+  default, so the extractor *does* follow the live server. **However** the
+  precedence is pid-file-first, inverting Approach #1's "explicit override wins"
+  intent — Gap 1 is closed structurally but the precedence is wrong (CA-2). The
+  remaining Gap-1 work is the precedence fix, not building the resolver.
 - **`nexus-h1jk`** (`49aa05e8`, 2026-05-11): added warn-on-fallback + a
   server-unreachable surface in `nx doctor`. This is a partial Gap 2 mitigation
   (the fallback is no longer fully silent), but the rediscover-then-fail-loud
   policy (Approach #2) is **not** in place.
 
-Net: Gaps 1, 3, 4 are open; Gap 2 is partially mitigated; Gaps 5–6 are new. The
+Net (post-research): Gap 1 resolver **shipped but with wrong precedence** (CA-2
+fix needed); Gap 2 partially mitigated; Gaps 3, 4 open; Gaps 5–6 new. The
 implementation plan below sequences all of them.
 
 ## Context
@@ -199,21 +203,63 @@ signature from the failing run's stderr.
 
 ### Critical Assumptions
 
-- [ ] The pid file is the authoritative live endpoint whenever the recorded pid is
+- [x] The pid file is the authoritative live endpoint whenever the recorded pid is
   alive — **Status**: Verified — **Method**: Spike (`nx mineru status` + curl).
-- [ ] Resolving the endpoint from the pid file in the extractor does not break the
+- [x] Resolving the endpoint from the pid file in the extractor does not break the
   CI/server-managed deployments that legitimately set `pdf.mineru_server_url`
-  (remote MinerU) — **Status**: Unverified — **Method**: Source Search.
+  (remote MinerU) — **Status**: Verified — **Method**: Source Search (2026-06-24).
+  **FALSIFIED as currently implemented** — see Spike Result 2: the live resolver
+  is pid-file-**first** and overrides an explicit operator config. Gap 1's fix is
+  already in `get_mineru_server_url`, but with the *wrong* precedence; CA-2 demands
+  a precedence fix (explicit non-default config override must win), now folded into
+  the Approach.
 - [ ] A `__main__`-guarded subprocess entry fixes the macOS spawn crash without
-  regressing the OOM-isolation behavior — **Status**: Unverified — **Method**: Spike.
-- [ ] The page-31 `-9` is a content-specific MFR-model OOM that reproduces on the
+  regressing the OOM-isolation behavior — **Status**: Partially verified —
+  **Method**: Source analysis (2026-06-24). The worker is now a
+  `subprocess.Popen([sys.executable, "-c", _MINERU_WORKER_SCRIPT, …])`
+  (`pdf_extractor.py:970`), structurally different from the in-process form
+  RDR-148 originally diagnosed; the `__main__`-guard failure mode may be moot or
+  manifest differently. Full repro needs the MinerU model weights — deferred to an
+  implementation-time spike (not run here to avoid OOM-ing the dev host).
+- [x] The page-31 `-9` is a content-specific MFR-model OOM that reproduces on the
   current MinerU (server OR subprocess), not a stale artifact of the pre-`oa7r`
   endpoint split-brain — **Status**: Verified (2026-05-31, isolation re-run) —
-  **Method**: Spike. Re-confirm on the current MinerU version at implementation.
-- [ ] `RLIMIT_AS` is unsuitable as a hard memory ceiling on darwin (torch maps
-  large virtual arenas; the cap either spuriously kills or is ignored), so the
-  ceiling is Linux-gated and darwin retains the OS-OOM-killer + degrade path —
-  **Status**: Unverified — **Method**: Spike.
+  **Method**: Spike. Re-confirm on the current MinerU version at implementation
+  (needs model weights; not re-run here).
+- [x] `RLIMIT_AS` is unsuitable as a hard memory ceiling on darwin — **Status**:
+  **Verified** — **Method**: Spike (2026-06-24, darwin/arm64). See Spike Result 1.
+  Stronger than assumed: `setrlimit(RLIMIT_AS, …)` *raises* `ValueError: current
+  limit exceeds maximum limit` (soft or hard form), and an alloc past a nominal
+  ceiling succeeds — macOS reports RLIMIT_AS unlimited and does not enforce it. An
+  ungated `preexec_fn` would therefore **crash every darwin extraction**, so the
+  Linux-gate is mandatory, not merely preferable.
+
+### Spike Results (2026-06-24, RDR consolidation research)
+
+**Spike Result 1 — RLIMIT_AS on darwin/arm64 (CA-5): VERIFIED, design-critical.**
+`resource.setrlimit(RLIMIT_AS, (n, hard))` raises `ValueError: current limit
+exceeds maximum limit` on macOS (the reported soft/hard are both
+`9223372036854775807`); a 1.5 GB allocation under a nominal 1 GB ceiling
+succeeds. Conclusion: RLIMIT_AS is unsettable AND unenforced on darwin. The
+`_child_rlimit_preexec` helper MUST be gated `if sys.platform == "linux"` (or it
+hard-crashes the Popen on darwin); darwin keeps the OS-OOM-killer + the Gap 5
+degrade-to-docling path as its only ceiling. Linux enforcement is the documented
+behavior and will be asserted by the CI (linux-x64) preexec test.
+
+**Spike Result 2 — endpoint resolver precedence (CA-2 / Gap 1): VERIFIED, adverse.**
+`get_mineru_server_url()` (`config.py:236-252`) was *already* refactored to a
+resolver: (1) live pid file → `http://127.0.0.1:{live}`, (2) configured
+`pdf.mineru_server_url`, (3) built-in default. So **Gap 1 (pid-file resolution) is
+already closed** — the consolidation's reconciliation note claiming "extractor
+still reads config, not pid file" is **incorrect** and is corrected here. BUT the
+precedence is pid-file-**first unconditionally** (`config.py:249-251`): a live
+local pid file overrides an explicit operator `pdf.mineru_server_url`. This
+**inverts** RDR-148 Approach #1's intent (explicit non-default override should
+win) and is the live realization of the CA-2 hazard. Decision required (see
+Approach #1, revised): add explicit-non-default-config precedence above the pid
+file, OR accept pid-file-first as a deliberate local-dev convenience. Narrow in
+practice (a remote-configured install rarely co-runs a local server), but a real
+precedence inversion that must be resolved, not left implicit.
 
 ## Proposed Solution
 
@@ -223,11 +269,17 @@ Fixes layered so any one alone reduces harm. Items 1–3 are the discovery /
 correctness axis; 4–5 are the resource-resilience axis (folded-in beads). They
 share one code region and one new catchable memory-error type (see item 5).
 
-1. **Single-source endpoint resolution (Gap 1).** Make the extractor resolve the
-   MinerU endpoint with precedence: explicit non-default config override →
-   live pid file (when its pid is alive) → default config. So a server that
-   restarts on a new port is followed automatically; an operator who *deliberately*
-   points at a remote MinerU still wins.
+1. **Fix endpoint-resolution precedence (Gap 1 — resolver already shipped).**
+   `get_mineru_server_url()` already resolves pid file → config → default (Spike
+   Result 2), so the build is done; what is **wrong** is the order. Re-order to
+   precedence: **explicit non-default config override → live pid file (pid alive)
+   → default config**, so a restarted server is followed automatically AND an
+   operator who *deliberately* points at a remote/managed MinerU still wins. (A
+   "non-default" config value is anything `!= "http://127.0.0.1:8010"`.)
+   Alternatively, if pid-file-first is judged the better local-dev default, record
+   that decision explicitly and add a remote-override escape hatch — but do not
+   leave the inversion implicit. Covered by a regression test (remote config +
+   live local pid file → remote wins).
 
 2. **Rediscover-then-fail-loud, no silent OOM fallback (Gap 2).** When the
    resolved endpoint's `/health` fails, attempt pid-file rediscovery once; if a
