@@ -118,7 +118,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-093](rdr-093-groupby-aggregate-operators.md) | GroupBy and Aggregate Operators | Feature | Closed (implemented) | 2026-04-24 |
 | [RDR-094](rdr-094-mcp-owned-t1-chroma-lifecycle.md) | MCP-Owned T1 Chroma Lifecycle | Architecture | Closed | 2026-04-24 |
 | [RDR-095](rdr-095-post-store-hook-batch-contract.md) | Post-Store Hook Framework: Batch Contract | Architecture | Closed (implemented) | 2026-04-25 |
-| [RDR-096](rdr-096-uri-source-identity.md) | URI-Based Source Identity for Aspect Extraction | Architecture | Accepted | 2026-04-27 |
+| [RDR-096](rdr-096-uri-source-identity.md) | URI-Based Source Identity for Aspect Extraction | Architecture | Closed | 2026-04-27 |
 | [RDR-097](rdr-097-hybrid-retrieval-plan-template.md) | Hybrid Retrieval Plan Template — Fusing Catalog Traversal and Vector Search for Factual QA | Feature | Closed (implemented) | 2026-04-28 |
 | [RDR-098](rdr-098-abstract-question-plan-template.md) | Abstract-Question Plan Template — BERTopic Communities as Cheap Substitute for GraphRAG Community Reports | Feature | Closed (implemented) | 2026-04-29 |
 | [RDR-099](rdr-099-devonthink-integration.md) | DEVONthink Integration — First-Class CLI Verbs for Selection-Based Ingest and Reverse Lookup | Feature | Accepted | 2026-04-29 |
@@ -141,10 +141,10 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-120](rdr-120-storage-substrate-split.md) | Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers | Architecture | Accepted 2026-05-21 | 2026-05-19 |
 | [RDR-121](rdr-121-hook-enforced-tool-routing.md) | Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance | Architecture | Closed 2026-05-20 (shipped in 4.33.0) | 2026-05-19 |
 | [RDR-125](rdr-125-routing-hook-plugin-ownership.md) | Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules | Architecture | Closed 2026-05-21 (shipped in 4.33.1) | 2026-05-20 |
-| [RDR-126](rdr-126-claude-desktop-deployment-unified-chat-cowork.md) | Claude Desktop Deployment: Unified Chat and Cowork Surface | Architecture | Accepted | 2026-05-23 |
+| [RDR-126](rdr-126-claude-desktop-deployment-unified-chat-cowork.md) | Claude Desktop Deployment: Unified Chat and Cowork Surface | Architecture | Closed | 2026-05-23 |
 | [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md) | Substrate-Decoupled Surface Rendering | Architecture | Draft | 2026-05-24 |
 | [RDR-128](rdr-128-t2-single-writer-enforcement.md) | T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline | Architecture | Closed 2026-05-25 (implemented, shipped 5.1.0) | 2026-05-25 |
-| [RDR-129](rdr-129-t2-daemon-serving-path-cross-store-contention.md) | T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization | Architecture | Accepted | 2026-05-25 |
+| [RDR-129](rdr-129-t2-daemon-serving-path-cross-store-contention.md) | T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization | Architecture | Closed | 2026-05-25 |
 | [RDR-130](rdr-130-command-preambles-via-nx-cli.md) | Command Preambles via the nx CLI: Thin Commands, Tested Logic, No Inlined Bash | Architecture | Accepted 2026-05-26 | 2026-05-26 |
 | [RDR-131](rdr-131-t2-session-rollup-summaries.md) | T2 Session Rollup Summaries (MemTree-Lite): Recency-Windowed Memory Consolidation for Compact Context Injection | Architecture | Draft | 2026-05-27 |
 | [RDR-132](rdr-132-scope-routed-t1-t2-promotion.md) | Scope-Routed T1 to T2 Promotion: Entity / Session / Project Scopes for Targeted Memory Retrieval | Architecture | Draft | 2026-05-27 |
@@ -153,9 +153,9 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-135](rdr-135-windowed-aspect-extraction.md) | Windowed Aspect Extraction with Cross-Window Merge: Stop Whole-Paper Single-Shot Extraction from Degrading on Long Inputs | Architecture | Draft | 2026-05-27 |
 | [RDR-136](rdr-136-messagedisplay-projection-substrate.md) | Display Projection via the MessageDisplay Hook: One-Way Output Mirroring and Routing-Marker Hiding | Architecture | Draft | 2026-05-27 |
 | [RDR-137](rdr-137-eliminate-repos-json.md) | Eliminate repos.json: Catalog as the Canonical Repo→Collection Source of Truth | Architecture | Closed | 2026-05-28 |
-| [RDR-138](rdr-138-rename-cascade-aspect-worker-coordination.md) | Rename-Cascade / Aspect-Worker Coordination: Serialize T2 Collection Rename Against In-Flight Aspect Extraction | Architecture | Accepted | 2026-05-29 |
+| [RDR-138](rdr-138-rename-cascade-aspect-worker-coordination.md) | Rename-Cascade / Aspect-Worker Coordination: Serialize T2 Collection Rename Against In-Flight Aspect Extraction | Architecture | Closed | 2026-05-29 |
 | [RDR-139](rdr-139-devonthink-mcp-semantic-linking-sync.md) | DEVONthink MCP Integration: Semantic Linking, Bibliographic Enrichment, Content Extraction, Bidirectional Sync, and Capture | Architecture | Closed | 2026-05-30 |
-| [RDR-140](rdr-140-t2-daemon-supervisor-ownership-model.md) | T2 Daemon Supervisor & Ownership Model: Single-Flight Election to End the Spawn-Race / SQLite-Lock Thrash | Architecture | Accepted | 2026-05-31 |
+| [RDR-140](rdr-140-t2-daemon-supervisor-ownership-model.md) | T2 Daemon Supervisor & Ownership Model: Single-Flight Election to End the Spawn-Race / SQLite-Lock Thrash | Architecture | Closed | 2026-05-31 |
 | [RDR-141](rdr-141-t2-version-skew-double-writer.md) | T2 Version-Skew Double-Writer: Split t2_index_write Exception Arms + Self-Healing Daemon Re-Assert | Architecture | Closed | 2026-06-01 |
 | [RDR-142](rdr-142-migration-completeness-vs-version-row.md) | Migration Completeness vs the Version Row: apply_pending Advances `_nexus_version` While Deferred/Gated Steps Remain | Architecture | Accepted | 2026-06-01 |
 | [RDR-143](rdr-143-plugin-cli-version-lockstep.md) | Plugin↔CLI Version Lockstep: a SessionStart Version-Marker Hook That Keeps the nx CLI in Sync With the conexus Plugin | Architecture | Closed | 2026-06-01 |
@@ -174,14 +174,14 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-156](rdr-156-vector-store-capability-leverage.md) | Vector-Store Capability Leverage — Unify the Retrieval Substrate: Combined Queries, Schema-Enforced Integrity, and Specialized Functions over the RDR-155 pgvector Chunk Tables | Architecture | Accepted | 2026-06-10 |
 | [RDR-157](rdr-157-end-user-distribution-and-installation.md) | End-User Distribution and Installation: Native-Image Binaries, Embedded PG16+pgvector, Two-Distribution Model | Architecture | Closed | 2026-06-11 |
 | [RDR-158](rdr-158-retire-sqlite-t2-backend.md) | Retire the SQLite T2 Backend: Make the PG Service the Only T2 Path | Architecture | Accepted | 2026-06-12 |
-| [RDR-159](rdr-159-guided-upgrade-migration.md) | Guided Chroma-to-Service Upgrade Migration: One Survivable Command over the Proven ETL Primitives | Architecture | Accepted | 2026-06-13 |
+| [RDR-159](rdr-159-guided-upgrade-migration.md) | Guided Chroma-to-Service Upgrade Migration: One Survivable Command over the Proven ETL Primitives | Architecture | Closed | 2026-06-13 |
 | [RDR-160](rdr-160-bge-768-local-service-embedder.md) | bge-768 as the Local-Mode T3 Embedder in the Java Service: Replace MiniLM-384 ONNX, Parity-Gated Against fastembed | Architecture | Closed | 2026-06-15 |
-| [RDR-161](rdr-161-native-only-local-install.md) | Native-Only Local Install: Expunge the JAR Launch Path, Acquire the Signed Native Binary and PG Bundle | Architecture | Accepted | 2026-06-18 |
-| [RDR-162](rdr-162-truthful-post-rdr160-upgrade-path.md) | Truthful Post-RDR-160 Upgrade Path: Fix the Migration Model Classifier and Make the Legacy 384→768 Re-Index→Migrate Chain a Rehearsal-Proven Primitive | Architecture | Accepted | 2026-06-18 |
-| [RDR-163](rdr-163-aspect-queue-backoff-retry-ladder.md) | Aspect-Extraction Queue Bounded Backoff-Retry Ladder: Wire the Dormant mark_retry Primitive into a Transient-Failure-Surviving Drain | Architecture | Accepted | 2026-06-19 |
-| [RDR-164](rdr-164-collection-lifecycle-cascade-consolidation.md) | Collection- and Document-Lifecycle Cascade Consolidation: Replace SQLite-Era Client-Side Cross-Store Orchestration with Postgres-Native Atomic Cascades | Architecture | Accepted | 2026-06-21 |
-| [RDR-165](rdr-165-agent-lifecycle-and-operations.md) | Agent Lifecycle & Operations: Document the nexus Agent (engine-service + nx CLI) and the Full Install / Uninstall / Upgrade Story | Documentation | Draft | 2026-06-22 |
-| [RDR-166](rdr-166-managed-service-consumer-journeys.md) | Managed-Service Consumer Journeys: Greenfield Onboarding and Local→Managed Migration to conexus-nexus.com | Architecture | Draft | 2026-06-22 |
+| [RDR-161](rdr-161-native-only-local-install.md) | Native-Only Local Install: Expunge the JAR Launch Path, Acquire the Signed Native Binary and PG Bundle | Architecture | Closed | 2026-06-18 |
+| [RDR-162](rdr-162-truthful-post-rdr160-upgrade-path.md) | Truthful Post-RDR-160 Upgrade Path: Fix the Migration Model Classifier and Make the Legacy 384→768 Re-Index→Migrate Chain a Rehearsal-Proven Primitive | Architecture | Closed | 2026-06-18 |
+| [RDR-163](rdr-163-aspect-queue-backoff-retry-ladder.md) | Aspect-Extraction Queue Bounded Backoff-Retry Ladder: Wire the Dormant mark_retry Primitive into a Transient-Failure-Surviving Drain | Architecture | Closed | 2026-06-19 |
+| [RDR-164](rdr-164-collection-lifecycle-cascade-consolidation.md) | Collection- and Document-Lifecycle Cascade Consolidation: Replace SQLite-Era Client-Side Cross-Store Orchestration with Postgres-Native Atomic Cascades | Architecture | Closed | 2026-06-21 |
+| [RDR-165](rdr-165-agent-lifecycle-and-operations.md) | Agent Lifecycle & Operations: Document the nexus Agent (engine-service + nx CLI) and the Full Install / Uninstall / Upgrade Story | Documentation | Closed | 2026-06-22 |
+| [RDR-166](rdr-166-managed-service-consumer-journeys.md) | Managed-Service Consumer Journeys: Greenfield Onboarding and Local→Managed Migration to conexus-nexus.com | Architecture | Closed | 2026-06-22 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 

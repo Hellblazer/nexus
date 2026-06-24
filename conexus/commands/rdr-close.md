@@ -22,4 +22,4 @@ $ARGUMENTS
 - **Reverted / Abandoned**: offer post-mortem.
 - **Superseded**: prompt for superseding RDR ID, cross-link both files.
 - Post-mortem archive location: `{rdr_dir}/post-mortem/NNN-kebab-title.md`.
-- Update RDR file status field and register close in T2: use **memory_put** tool: project="{repo}_rdr", title="{id}" with updated status fields.
+- Flip the RDR file status + README index row with `nx rdr set-status {id} closed` (code-enforced — do NOT hand-edit frontmatter; this closes the RDR-165/166 ledger-drift class). Then register the close in T2: use **memory_put** tool: project="{repo}_rdr", title="{id}" with updated status fields.

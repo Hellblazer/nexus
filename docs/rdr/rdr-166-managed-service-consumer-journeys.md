@@ -2,11 +2,14 @@
 title: "Managed-Service Consumer Journeys: Greenfield Onboarding and Local→Managed Migration to conexus-nexus.com"
 id: RDR-166
 type: Architecture
-status: draft
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-22
+accepted_date: 2026-06-22
+status_history: draft -> accepted (2026-06-22, gate PASSED) -> closed (2026-06-24)
+closed_date: 2026-06-24
 related_issues: [nexus-w5v8j, nexus-vwvv5.12, nexus-gilf2, nexus-jioh1, nexus-luxe6]
 related: [RDR-001, RDR-152, RDR-155, RDR-157, RDR-159, RDR-162]
 ---

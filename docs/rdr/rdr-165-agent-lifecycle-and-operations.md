@@ -2,11 +2,14 @@
 title: "Agent Lifecycle & Operations: Document the nexus Agent (engine-service + nx CLI) and the Full Install / Uninstall / Upgrade Story"
 id: RDR-165
 type: Documentation
-status: draft
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-22
+accepted_date: 2026-06-22
+status_history: draft -> accepted (2026-06-22, gate PASSED) -> closed (2026-06-24)
+closed_date: 2026-06-24
 related_issues: [nexus-luxe6, nexus-y5avl]
 related: [RDR-002, RDR-144, RDR-149, RDR-152, RDR-155, RDR-157, RDR-159, RDR-161]
 ---

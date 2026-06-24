@@ -121,6 +121,67 @@ def test_closed_rdrs_have_post_mortems() -> None:
     )
 
 
+#: Status words recognised in the README index status cell (kept in sync with
+#: ``nexus.commands.rdr._KNOWN_STATUSES``).
+_README_STATUS_WORDS: frozenset[str] = frozenset({
+    "draft", "proposed", "accepted", "closed", "deferred", "superseded",
+    "scrapped", "abandoned", "revised", "locked", "final",
+})
+
+
+def _readme_status_cell(readme_text: str, filename: str) -> str | None:
+    """Return the lowercased status cell of the README index row for *filename*.
+
+    Matches the row by the RDR filename link and returns the first cell whose
+    content is a known status word (robust to the table's column ordering).
+    Returns None when no row references the file.
+    """
+    for line in readme_text.splitlines():
+        if f"]({filename})" not in line or "|" not in line:
+            continue
+        for cell in line.split("|"):
+            if cell.strip().lower() in _README_STATUS_WORDS:
+                return cell.strip().lower()
+    return None
+
+
+def test_readme_status_matches_frontmatter() -> None:
+    """README index-row status must agree with the RDR file's frontmatter.
+
+    This is the committed-file-only backstop for the accept/close *ledger-drift*
+    class (RDR-165 / RDR-166): the lifecycle skills advance status in T2 and the
+    RDR file via ``nx rdr set-status``; if a future edit flips one surface but
+    not the other, this catches it in CI. No T2 / bead snapshot needed — both
+    the README and the RDR markdown are committed, so the invariant is 100%
+    deterministic (unlike the T2-vs-file parity the post-mortem half cannot test).
+
+    Scope: parity is asserted only for RDRs that *have* a README index row.
+    README completeness (every RDR appears in the index) is a separate concern
+    and intentionally out of scope here.
+    """
+    readme_path = _RDR_DIR / "README.md"
+    assert readme_path.is_file(), f"missing RDR index: {readme_path}"
+    readme_text = readme_path.read_text(errors="replace")
+
+    offenders: list[str] = []
+    for f in sorted(_RDR_DIR.glob("rdr-*.md")):
+        text = f.read_text(errors="replace")
+        fm_status = _frontmatter_status(text)
+        if fm_status is None:
+            continue
+        cell = _readme_status_cell(readme_text, f.name)
+        if cell is None:
+            continue  # no index row → out of scope
+        if cell != fm_status:
+            offenders.append(f"{f.name}: file=`{fm_status}` README=`{cell}`")
+    assert not offenders, (
+        "These RDRs' README index-row status disagrees with their file "
+        "frontmatter status (ledger drift). Reconcile with "
+        "`nx rdr set-status <id> <status>` or fix the README cell:\n"
+        + "\n".join(offenders)
+    )
+
+
 def test_grandfather_list_does_not_mask_existing_post_mortems() -> None:
     """Keep the grandfather list honest: an id with a post-mortem already
     present must not also sit on the waiver (it would be dead weight and could
