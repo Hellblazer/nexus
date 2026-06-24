@@ -1409,6 +1409,24 @@ nx doctor --check-schema          # Validate T2 database schema and report pendi
 nx doctor --check-plan-library    # Report plan-library dimensional health (RDR-092 Phase 0c)
 ```
 
+```
+nx doctor --check-t3-legacy-metadata                        # Survey T3 for legacy doc_id/source_path chunk metadata
+nx doctor --check-t3-legacy-metadata --strict-legacy-metadata  # Exit non-zero if any collection still carries it
+```
+
+The `--check-t3-legacy-metadata` flag (nexus-1714) surveys local (Chroma)
+T3 collections and reports, per collection, whether any chunk still
+carries `doc_id` or `source_path` metadata — both retired by RDR-108
+Phase 3 in favour of the catalog `document_chunks` manifest. It gates
+removal of the legacy tolerance branches in `mcp/core.py`,
+`indexer_utils.py`, and `search_engine.py`: while any collection reports
+`LEGACY`, those branches must stay. Detection is a single cheap
+`get(where=…, limit=1)` presence probe per field per collection. Default
+behaviour is warn (exit 0); add `--strict-legacy-metadata` to exit
+non-zero when legacy metadata is found (for CI gating). The check is a
+local-Chroma concern and reports *not applicable* in service/cloud mode,
+where chunks use the RDR-155 pgvector schema.
+
 The `--check-plan-library` flag (introduced 4.9.13, nexus-4x9q) buckets
 every row in the `plans` table into **authored** (dimensions populated,
 not `backfill`-tagged), **backfilled** (dimensions populated, tagged
