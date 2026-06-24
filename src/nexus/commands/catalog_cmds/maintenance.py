@@ -13,6 +13,15 @@ attaches both to the shared ``catalog`` group so ``nx catalog gc`` /
 module's imports acyclic and preserving the
 ``patch("nexus.commands.catalog._get_catalog", …)`` test seam.
 ``chash-reconcile`` uses no shared helper (it opens the T2 db directly).
+
+Scope note: only the two STANDALONE hygiene verbs live here. The other two
+historically-"maintenance" verbs — ``prune-stale`` and ``remediate-paths`` —
+share six private path-remediation helpers (``_rdr_prefix_of``,
+``_build_rdr_prefix_index``, ``_build_basename_index``,
+``_entry_needs_remediation``, ``_resolve_candidate``,
+``_resolve_via_devonthink``) and are carved separately into
+``catalog_cmds/remediation.py`` (nexus-whh61.4), so this module stays
+helper-free.
 """
 from __future__ import annotations
 
