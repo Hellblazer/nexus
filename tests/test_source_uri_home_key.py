@@ -11,7 +11,7 @@ at most 4 logical roots.
 """
 from __future__ import annotations
 
-from nexus.commands.catalog import (
+from nexus.commands.catalog_cmds.integrity import (
     _DEVONTHINK_HOME_KEY,
     _EMPTY_HOME_KEY,
     _source_uri_home_key,

@@ -2146,6 +2146,8 @@ class TestWhh61IntegrityCarve:
     MOVED_HELPERS = [
         "_audit_membership_all", "_home_matches_root",
         "_source_uri_home_key", "_heal_ghosts",
+        # module constants that moved with _source_uri_home_key:
+        "_EMPTY_HOME_KEY", "_DEVONTHINK_HOME_KEY",
     ]
 
     def test_integrity_commands_registered_on_group(self):

@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import json
 import os
+from typing import TYPE_CHECKING
 
 import click
 
 from nexus.catalog.tumbler import Tumbler
+
+if TYPE_CHECKING:
+    from nexus.catalog.catalog import Catalog  # noqa: F401 — used in _heal_ghosts annotation (PEP 563 deferred)
 
 
 @click.command("audit-membership")
