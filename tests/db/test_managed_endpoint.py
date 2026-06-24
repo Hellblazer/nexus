@@ -48,14 +48,31 @@ def _resp(status_code: int, body: dict) -> httpx.Response:
     return resp
 
 
-def _version_body(app_version: str = "1.0-SNAPSHOT", mode: str = "voyage") -> dict:
-    return {
+def _version_body(
+    app_version: str = "1.0-SNAPSHOT",
+    mode: str = "voyage",
+    release_version: str | None = "0.1.8",
+) -> dict:
+    # nexus-x2g1z: the gate pins on release_version. app_version is the frozen
+    # 1.0-SNAPSHOT dev coordinate (informational only). The managed public
+    # /version was trimmed to {app_version, release_version} (relay [4566]); the
+    # embedding_mode / models / schema fields are kept here for the self-hosted
+    # path that still reports them (and to assert they stay optional).
+    body: dict = {
         "app_version": app_version,
         "embedding_mode": mode,
         "embedding_models": ["voyage-context-3", "voyage-code-3"],
         "schema_latest_id": "vectors-002",
         "schema_changeset_count": 64,
     }
+    if release_version is not None:
+        body["release_version"] = release_version
+    return body
+
+
+def _trimmed_version_body(release_version: str = "0.1.8") -> dict:
+    """The trimmed managed public /version payload (relay [4566])."""
+    return {"app_version": "1.0-SNAPSHOT", "release_version": release_version}
 
 
 # ── endpoint resolution ──────────────────────────────────────────────────────
@@ -137,30 +154,62 @@ def test_probe_non_200_is_incompatible():
     assert "503" in str(exc.value)
 
 
-def test_probe_missing_app_version_is_incompatible():
+def test_probe_missing_release_version_is_incompatible():
+    # No release_version at all -> fail-closed (a pre-field / dev engine).
     def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, {"embedding_mode": "voyage"})  # no app_version
-
-    with pytest.raises(ManagedServiceIncompatible):
-        probe_managed_service(base_url="https://x", http_get=fake_get)
-
-
-def test_probe_unknown_app_version_is_incompatible():
-    def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _version_body(app_version="unknown"))
-
-    with pytest.raises(ManagedServiceIncompatible):
-        probe_managed_service(base_url="https://x", http_get=fake_get)
-
-
-def test_probe_below_version_floor_is_incompatible():
-    def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _version_body(app_version="0.9.3"))
+        return _resp(200, _version_body(release_version=None))
 
     with pytest.raises(ManagedServiceIncompatible) as exc:
         probe_managed_service(base_url="https://x", http_get=fake_get)
-    # remedy points at upgrading the client/service, names the offending version
-    assert "0.9.3" in str(exc.value)
+    assert "release_version" in str(exc.value)
+
+
+def test_probe_null_release_version_is_incompatible():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        body = _version_body()
+        body["release_version"] = None
+        return _resp(200, body)
+
+    with pytest.raises(ManagedServiceIncompatible):
+        probe_managed_service(base_url="https://x", http_get=fake_get)
+
+
+def test_probe_snapshot_release_version_fails_closed():
+    # A SNAPSHOT/dev release identity is NOT a release — gate refuses.
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(release_version="0.1.9-SNAPSHOT"))
+
+    with pytest.raises(ManagedServiceIncompatible):
+        probe_managed_service(base_url="https://x", http_get=fake_get)
+
+
+def test_probe_unparseable_release_version_fails_closed():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(release_version="unknown"))
+
+    with pytest.raises(ManagedServiceIncompatible):
+        probe_managed_service(base_url="https://x", http_get=fake_get)
+
+
+def test_probe_below_release_floor_is_incompatible():
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(release_version="0.1.5"))
+
+    with pytest.raises(ManagedServiceIncompatible) as exc:
+        probe_managed_service(base_url="https://x", http_get=fake_get)
+    # remedy names the offending version and the floor
+    assert "0.1.5" in str(exc.value) and "0.1.8" in str(exc.value)
+
+
+def test_probe_snapshot_app_version_is_not_gated():
+    # app_version=1.0-SNAPSHOT is the frozen dev coordinate and must NOT fail
+    # the gate as long as release_version clears the floor (nexus-x2g1z).
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(app_version="1.0-SNAPSHOT", release_version="0.1.8"))
+
+    caps = probe_managed_service(base_url="https://x", http_get=fake_get)
+    assert caps.app_version == "1.0-SNAPSHOT"
+    assert caps.release_version == "0.1.8"
 
 
 # ── probe: compatible ────────────────────────────────────────────────────────
@@ -178,6 +227,7 @@ def test_probe_compatible_returns_capabilities():
     # probes the unauthenticated /version handshake
     assert seen["url"] == "https://api.conexus-nexus.com/version"
     assert caps.app_version == "1.0-SNAPSHOT"
+    assert caps.release_version == "0.1.8"
     assert caps.embedding_mode == "voyage"
     assert caps.embedding_models == ["voyage-context-3", "voyage-code-3"]
     assert caps.schema_latest_id == "vectors-002"
@@ -185,22 +235,45 @@ def test_probe_compatible_returns_capabilities():
     assert caps.base_url == "https://api.conexus-nexus.com"
 
 
-def test_probe_snapshot_version_meets_floor():
+def test_probe_at_release_floor_passes():
     def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _version_body(app_version="1.2.0-SNAPSHOT"))
+        return _resp(200, _version_body(release_version="0.1.8"))
 
     caps = probe_managed_service(base_url="https://x", http_get=fake_get)
-    assert caps.app_version == "1.2.0-SNAPSHOT"
+    assert caps.release_version == "0.1.8"
 
 
-def test_probe_v_prefixed_version_parses(monkeypatch):
-    # A self-hosted managed service tagging "v1.4.0" must not be misread as
-    # below-floor (lenient parse strips the leading v).
+def test_probe_above_release_floor_passes():
     def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _version_body(app_version="v1.4.0"))
+        return _resp(200, _version_body(release_version="0.2.0"))
 
     caps = probe_managed_service(base_url="https://x", http_get=fake_get)
-    assert caps.app_version == "v1.4.0"
+    assert caps.release_version == "0.2.0"
+
+
+def test_probe_v_prefixed_release_version_parses():
+    # A self-hosted service tagging "v0.2.0" must not be misread as below-floor.
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(release_version="v0.2.0"))
+
+    caps = probe_managed_service(base_url="https://x", http_get=fake_get)
+    assert caps.release_version == "v0.2.0"
+
+
+def test_probe_trimmed_payload_passes_and_defaults_optional_fields():
+    # The managed public /version (relay [4566]) returns only
+    # {app_version, release_version}; the optional embedding/schema fields are
+    # absent and must default gracefully — not fail the probe.
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _trimmed_version_body(release_version="0.1.8"))
+
+    caps = probe_managed_service(base_url="https://x", http_get=fake_get)
+    assert caps.release_version == "0.1.8"
+    assert caps.app_version == "1.0-SNAPSHOT"
+    assert caps.embedding_mode == "unknown"
+    assert caps.embedding_models == []
+    assert caps.schema_latest_id is None
+    assert caps.schema_changeset_count is None
 
 
 def test_probe_defaults_base_url_to_managed(monkeypatch):

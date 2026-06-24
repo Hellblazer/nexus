@@ -76,12 +76,12 @@ class TestGuidedUpgradeCmd:
         with patch(f"{_MOD}.detect_pending_migration",
                    return_value=_preflight(True, 3)), \
              patch(f"{_MOD}.establish_verified_service",
-                   return_value=_not_ready("service v0.1.3 < required v0.1.5")), \
+                   return_value=_not_ready("service v0.1.3 < required v0.1.8")), \
              patch("nexus.commands.migrate_cmd._run_migration") as mig:
             result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
         assert result.exit_code == 1
         assert "NOT migrating" in result.output
-        assert "v0.1.5" in result.output
+        assert "v0.1.8" in result.output
         mig.assert_not_called()  # never migrate a not-ready service
 
     def test_happy_path_provisions_migrates_and_advises(self) -> None:

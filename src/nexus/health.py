@@ -510,7 +510,7 @@ def _check_managed_service_probe() -> list[HealthResult]:
     return [HealthResult(
         label="Managed/remote service (version)",
         ok=True,
-        detail=f"{caps.base_url} — app_version {caps.app_version} (mode {caps.embedding_mode})",
+        detail=f"{caps.base_url} — release_version {caps.release_version} (app_version {caps.app_version})",
     )]
 
 

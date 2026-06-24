@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """ez5.4 — RDR-002 version-pin for ``nx guided-upgrade``.
 
-Asserts the engine-service is at or above the required release (>= v0.1.5) by
+Asserts the engine-service is at or above the required release (>= v0.1.8) by
 pinning on the dedicated ``release_version`` field (RDR-002 contract; conexus
 PR #78). FAIL-CLOSED on every uncertain outcome — transport error, non-200,
 absent/null/dev/SNAPSHOT release_version (an engine predating the field is
@@ -61,12 +61,13 @@ class TestParseSemver:
 
 
 class TestVerifyServiceVersion:
-    def test_required_floor_is_015(self) -> None:
-        assert REQUIRED_RELEASE_VERSION == (0, 1, 5)
+    def test_required_floor_is_018(self) -> None:
+        # Bumped (0,1,5)->(0,1,8) for nexus-x2g1z (engine-service-v0.1.8).
+        assert REQUIRED_RELEASE_VERSION == (0, 1, 8)
 
     def test_at_floor_passes(self) -> None:
         out = verify_service_version(
-            _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.5")))
+            _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.8")))
         )
         assert isinstance(out, VersionPinOutcome)
         assert out.ok is True
@@ -74,16 +75,16 @@ class TestVerifyServiceVersion:
 
     def test_above_floor_passes(self) -> None:
         out = verify_service_version(
-            _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.6")))
+            _URL, http_get=_get_returning(_Resp(200, _version_body("0.2.0")))
         )
         assert out.ok is True
 
     def test_below_floor_fails_closed(self) -> None:
         out = verify_service_version(
-            _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.3")))
+            _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.5")))
         )
         assert out.ok is False
-        assert "0.1.3" in out.reason and "0.1.5" in out.reason
+        assert "0.1.5" in out.reason and "0.1.8" in out.reason
 
     def test_null_release_version_fails_closed(self) -> None:
         # An engine predating the release_version field reports null → older

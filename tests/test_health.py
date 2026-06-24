@@ -368,6 +368,7 @@ class TestManagedServiceProbeCheck:
 
         caps = me.ManagedCapabilities(
             base_url="https://api.conexus-nexus.com", app_version="1.0",
+            release_version="0.1.8",
             embedding_mode="voyage", embedding_models=[],
             schema_latest_id=None, schema_changeset_count=None,
         )
@@ -392,6 +393,7 @@ class TestManagedServiceProbeCheck:
         seen = {}
         caps = me.ManagedCapabilities(
             base_url="https://staging.example.com", app_version="1.0",
+            release_version="0.1.8",
             embedding_mode="voyage", embedding_models=[],
             schema_latest_id=None, schema_changeset_count=None,
         )
@@ -410,6 +412,7 @@ class TestManagedServiceProbeCheck:
 
         caps = me.ManagedCapabilities(
             base_url="https://api.conexus-nexus.com", app_version="1.0-SNAPSHOT",
+            release_version="0.1.8",
             embedding_mode="voyage", embedding_models=[],
             schema_latest_id="vectors-002", schema_changeset_count=64,
         )
