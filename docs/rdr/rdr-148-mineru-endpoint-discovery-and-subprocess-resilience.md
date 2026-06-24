@@ -110,6 +110,26 @@ single-page subprocess raises it, optionally degrade THAT page to docling
 (`--on-formula-oom=docling|fail`, default `fail`) to preserve the
 no-silent-fallback-for-formulas guarantee by default.
 
+**Error-classification (gate-critical, corrected 2026-06-24).** A memory kill
+reaches the parent through *two different* returncodes depending on how it
+happened, and the mapping MUST cover both or Gap 6 silently bypasses this path
+(gate finding):
+- **OS OOM killer** (no ceiling, or a cgroup `memory.max`): the kernel sends
+  `SIGKILL` → `returncode == -9`.
+- **`RLIMIT_AS` breach** (Gap 6's Linux ceiling): `mmap`/`brk` return `ENOMEM`
+  *in-process* → Python raises `MemoryError` → the worker exits a normal nonzero
+  code, **not** `-9`.
+
+So the worker script catches `MemoryError` and exits an explicit sentinel
+(`_MINERU_OOM_EXIT = 42`), and `_mineru_run_subprocess` maps to
+`MineruMemoryError` when **`returncode == -signal.SIGKILL` OR `returncode ==
+_MINERU_OOM_EXIT` OR (`returncode != 0` AND a memory ceiling was applied)**. The
+parent already knows whether it set a ceiling (it installed the `preexec_fn`), so
+the third clause needs no env round-trip — it is the defensive catch-all for a
+C-level allocation failure under the ceiling that neither raises `MemoryError`
+nor trips SIGKILL. Everything else stays a generic `RuntimeError` (the existing
+1-page retry).
+
 #### Gap 6: No memory ceiling or per-page timeout before the subprocess spawn (was `nexus-yrlbd`)
 
 MinerU extraction relies entirely on the OS OOM killer: no `RLIMIT_AS`/cgroup
@@ -121,8 +141,12 @@ resolution. Proposal: an explicit, configurable memory ceiling before spawn
 torch's large virtual arenas on darwin, which keeps the OS-OOM-killer fallback),
 a per-page timeout within the batch loop, and an adaptive `batch//2` reduction
 before falling to 1-page. Exceeding the ceiling must surface as the *same
-catchable memory-error type* Gap 5 keys on — that shared type is the coordination
-seam between the two gaps.
+catchable memory-error type* Gap 5 keys on — but note (gate finding) an
+`RLIMIT_AS` breach exits via in-process `MemoryError` (sentinel exit), **not**
+`-9`; Gap 5's classification is the one corrected above to cover both the
+SIGKILL and the sentinel/ceiling-active cases. That corrected classification is
+the coordination seam — it is load-bearing for Gap 6 and MUST land in Gap 5
+(Step 4) before Gap 6's ceiling (Step 5) can rely on it.
 
 ### Reconciliation with already-shipped fixes (2026-06-24)
 
@@ -168,8 +192,11 @@ finding in T2 `nexus/mineru-formula-extraction-failure-root-cause-2026-06-03`.
   lifecycle/auto-start, NOT endpoint selection).
 - `src/nexus/_mineru_pid.py` — `read_pid_file()` (`:26`), `is_process_alive()`
   (`:37`), `_pid_file_path()` → `<config_dir>/mineru.pid` (`:20`).
-- `src/nexus/config.py` — `get_mineru_server_url()` returns the static
-  `pdf.mineru_server_url` config value.
+- `src/nexus/config.py` — `get_mineru_server_url()` **now resolves pid file →
+  config → default** (`config.py:236-252`); see Spike Result 2. (Originally
+  diagnosed as returning the static config value only — that was true at RDR
+  creation 2026-06-03; the resolver was added since, but pid-file-FIRST, which is
+  the CA-2 precedence issue.)
 - `src/nexus/commands/mineru.py` — `start` / `stop` / `status`; `status` reads
   the live pid file; `start` does not reconcile the config URL with the bound port.
 
@@ -187,7 +214,7 @@ signature from the failing run's stderr.
 | --- | --- | --- |
 | `nexus.pdf_extractor` | Yes | Endpoint chosen from `get_mineru_server_url()` (config) at `:740`/`:774`; `read_pid_file` imported at `:845` but not used to pick the endpoint; subprocess `do_parse` per page-range with 1-page OOM-retry. |
 | `nexus._mineru_pid` | Yes | `read_pid_file()` returns `{pid, port, started_at, output_root}`; `is_process_alive(pid)` available — sufficient to resolve and validate a live endpoint. |
-| `nexus.config.get_mineru_server_url` | Yes | Returns static config; no pid-file awareness. |
+| `nexus.config.get_mineru_server_url` | Yes (re-verified 2026-06-24) | **Now** resolves pid file → config → default (`config.py:236-252`); pid-file-FIRST (the CA-2 precedence issue). Originally returned static config only. |
 | MinerU `do_parse` (macOS spawn) | Docs/Spike | Multiprocessing workers require a `__main__` guard under spawn; absence → exit 1 + leaked-semaphore warning. |
 
 ### Key Discoveries
@@ -271,15 +298,25 @@ share one code region and one new catchable memory-error type (see item 5).
 
 1. **Fix endpoint-resolution precedence (Gap 1 — resolver already shipped).**
    `get_mineru_server_url()` already resolves pid file → config → default (Spike
-   Result 2), so the build is done; what is **wrong** is the order. Re-order to
-   precedence: **explicit non-default config override → live pid file (pid alive)
-   → default config**, so a restarted server is followed automatically AND an
-   operator who *deliberately* points at a remote/managed MinerU still wins. (A
-   "non-default" config value is anything `!= "http://127.0.0.1:8010"`.)
-   Alternatively, if pid-file-first is judged the better local-dev default, record
-   that decision explicitly and add a remote-override escape hatch — but do not
-   leave the inversion implicit. Covered by a regression test (remote config +
-   live local pid file → remote wins).
+   Result 2), so the build is done; what is **wrong** is the order. **DECISION
+   (committed at gate, 2026-06-24): explicit non-default config override → live
+   pid file (pid alive) → default config.** An operator who deliberately points at
+   a remote/managed MinerU is never hijacked by a stale local pid file, while a
+   restarted local server is still followed automatically. This was chosen over
+   "pid-file-first + escape hatch" because operator intent must not be silently
+   overridden, and it matches RDR-148's original design intent.
+
+   **Heuristic limitation (documented, not hidden).** "Non-default" is detected as
+   `config.pdf.mineru_server_url != "http://127.0.0.1:8010"` (the built-in
+   default). This cannot distinguish "default, never changed" from "operator
+   deliberately set the same value `:8010`": an operator who *intends* a fixed
+   local `:8010` server is still overridden by a live pid file. Mitigation: such
+   operators pick any other port, or (future) a `mineru_prefer_config` flag if a
+   concrete need arises. Acceptable because `:8010` is the default port a managed
+   deployment would *not* choose, and the pid-file value is also `127.0.0.1` so the
+   override is harmless when both point local. Covered by a regression test
+   (remote/non-default config + live local pid file → config wins; default config
+   + live pid file → pid file wins).
 
 2. **Rediscover-then-fail-loud, no silent OOM fallback (Gap 2).** When the
    resolved endpoint's `/health` fails, attempt pid-file rediscovery once; if a
@@ -287,30 +324,39 @@ share one code region and one new catchable memory-error type (see item 5).
    subprocess path — and that decision is logged at WARNING with the reason, not
    silent.
 
-3. **Fix the macOS subprocess multiprocessing guard (Gap 3).** Ensure the
-   per-page-range `do_parse` subprocess entry is invoked under a guarded
-   entrypoint (explicit `multiprocessing` start-method handling / `__main__`
-   guard / module-level worker function) so formula inference does not exit 1 on
-   darwin spawn. Preserve the existing OOM-isolation + 1-page retry.
+3. **Fix the macOS subprocess multiprocessing guard (Gap 3) — verify-first; may
+   be moot.** The worker is now a `subprocess.Popen([sys.executable, "-c",
+   _MINERU_WORKER_SCRIPT, …])` (`pdf_extractor.py:970`), which does **not** go
+   through Python's `multiprocessing` spawn path and does not need a `__main__`
+   guard — so the originally-diagnosed failure mode may already be closed by the
+   refactor since RDR creation. The impl-time spike (CA-3, needs model weights)
+   FIRST confirms whether Gap 3 still reproduces; if it does, guard the worker
+   entry (explicit start-method / module-level worker) while preserving
+   OOM-isolation + 1-page retry; if it does not, close Gap 3 as already-fixed.
 
-4. **Catchable OOM + optional per-page degrade-to-docling (Gap 5).** Convert a
-   `-9`/SIGKILL-class subprocess exit into a distinguishable `MineruMemoryError`
-   (subclass `RuntimeError`, so the existing `except RuntimeError` 1-page retry
-   still catches it). Thread an `on_formula_oom={"fail"|"docling"}` option through
-   `extract()` → `_extract_with_mineru`; when a *single-page* run raises
-   `MineruMemoryError` and the mode is `docling`, degrade THAT page to docling
-   (formula-stripped) and continue. Default `fail` re-raises the existing
-   formula-aware error (no silent fallback). CLI flag `--on-formula-oom`.
+4. **Catchable OOM + optional per-page degrade-to-docling (Gap 5).** Introduce
+   `MineruMemoryError(RuntimeError)` (subclass so the existing `except RuntimeError`
+   1-page retry still catches it). The worker script catches `MemoryError` →
+   `os._exit(_MINERU_OOM_EXIT)`; `_mineru_run_subprocess` raises `MineruMemoryError`
+   when `returncode == -signal.SIGKILL` OR `returncode == _MINERU_OOM_EXIT` OR
+   (`returncode != 0` AND a memory ceiling was applied) — covering both the OS
+   SIGKILL and the `RLIMIT_AS` in-process-`MemoryError` paths (gate finding).
+   Thread an `on_formula_oom={"fail"|"docling"}` option through `extract()` →
+   `_extract_with_mineru`; when a *single-page* run raises `MineruMemoryError` and
+   the mode is `docling`, degrade THAT page to docling (formula-stripped) and
+   continue. Default `fail` re-raises the existing formula-aware error (no silent
+   fallback). CLI flag `--on-formula-oom`.
 
 5. **Memory ceiling + per-page timeout + adaptive batch reduction (Gap 6).** Set a
    configurable `RLIMIT_AS` ceiling via `Popen(preexec_fn=...)`, **Linux-gated**
-   (darwin keeps the OS-OOM-killer; see Critical Assumption). New config knob
-   `mineru_memory_ceiling_mb` (mirrors `get_mineru_page_batch`). Replace the bare
-   batch-level `timeout=180` with a per-page budget. Insert a `batch//2` step
-   between batch-failed and the 1-page drop. A ceiling breach surfaces as the same
-   `MineruMemoryError` item 4 keys on. **Depends on item 4** (the shared error
-   type), so author 4 first within the arc even though the bead graph records
-   `yrlbd` (Gap 6) depending on `m26oq` (Gap 5).
+   (darwin keeps the OS-OOM-killer; see Critical Assumption — an ungated preexec
+   *crashes* darwin). New config knob `mineru_memory_ceiling_mb` (mirrors
+   `get_mineru_page_batch`). Replace the bare batch-level `timeout=180` with a
+   per-page budget. Insert a `batch//2` step between batch-failed and the 1-page
+   drop. A ceiling breach surfaces as `MineruMemoryError` via item 4's *corrected*
+   classification (the SIGKILL-only mapping would have missed it). **Depends on
+   item 4** (the shared error type + classification), so author 4 first within the
+   arc — consistent with the bead graph (`yrlbd`/Gap 6 depends-on `m26oq`/Gap 5).
 
 ### Technical Design
 
@@ -346,7 +392,7 @@ explicitly. Keep one subprocess per page-range and the 1-page OOM-retry.
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| `resolve_mineru_endpoint()` | `config.get_mineru_server_url` + `_mineru_pid.read_pid_file` | Add: a thin resolver composing both; callers switch to it. |
+| endpoint precedence | `config.get_mineru_server_url` (already composes pid file + config since RDR creation) | Modify: re-order to explicit-override → pid file → default. No new wrapper; callers already use it. |
 | Rediscover-then-fail-loud | `pdf_extractor.py:740-778` health/parse path | Extend: one rediscovery pass + explicit fallback logging. |
 | Subprocess guard | `pdf_extractor.py:597-657` do_parse subprocess | Fix: guard the worker entry; keep OOM-isolation. |
 | `nx mineru start` writes live port to config | `commands/mineru.py` | Alternative/complement: optionally reconcile config on start (decide vs resolver). |
@@ -422,8 +468,12 @@ a silent exit-1.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: `resolve_mineru_endpoint()` + caller switch
-Add the resolver; replace `get_mineru_server_url()` reads at the health/parse sites.
+#### Step 1: Re-order `get_mineru_server_url()` precedence
+The resolver already exists (Spike Result 2) — this is a *modification*, not a new
+wrapper: re-order to explicit-non-default-config → pid file → default, add the
+`!= "http://127.0.0.1:8010"` override check, and a regression test (remote config
++ live pid file → config wins). No caller switch needed (callers already use
+`get_mineru_server_url()`).
 
 #### Step 2: Rediscover-then-fail-loud
 One pid re-read on health failure; explicit WARNING-logged fallback decision.
@@ -432,10 +482,17 @@ One pid re-read on health failure; explicit WARNING-logged fallback decision.
 Guard the `do_parse` worker entry for macOS spawn; preserve OOM isolation + retry.
 
 #### Step 4: Catchable OOM + per-page degrade-to-docling (Gap 5, `nexus-m26oq`)
-Introduce `MineruMemoryError(RuntimeError)`; map the `-9`/SIGKILL-class exit in
-`_mineru_run_subprocess` onto it. Thread `on_formula_oom` through `extract()` →
-`_extract_with_mineru`; single-page `MineruMemoryError` + `docling` mode degrades
-that page (default `fail` re-raises). Add `--on-formula-oom` CLI flag.
+Introduce `MineruMemoryError(RuntimeError)` and `_MINERU_OOM_EXIT = 42`. Worker
+script catches `MemoryError` → `os._exit(_MINERU_OOM_EXIT)`.
+`_mineru_run_subprocess` raises `MineruMemoryError` when `returncode ==
+-signal.SIGKILL` OR `returncode == _MINERU_OOM_EXIT` OR (`returncode != 0` AND a
+ceiling was applied) — the corrected classification that covers both SIGKILL and
+`RLIMIT_AS`-`MemoryError` (gate finding; the `-9`-only mapping was the blocking
+defect). Thread `on_formula_oom` through `extract()` → `_extract_with_mineru`;
+single-page `MineruMemoryError` + `docling` mode degrades that page (default
+`fail` re-raises). Add `--on-formula-oom` CLI flag. Test: a fake proc returning
+`_MINERU_OOM_EXIT` with ceiling-active, and `-9`, both map to `MineruMemoryError`;
+a plain exit-1 with no ceiling stays `RuntimeError`.
 
 #### Step 5: Memory ceiling + per-page timeout + batch//2 (Gap 6, `nexus-yrlbd`)
 `preexec_fn` `RLIMIT_AS` ceiling (Linux-gated; `_child_rlimit_preexec(ceiling)`
