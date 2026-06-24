@@ -2249,3 +2249,52 @@ class TestWhh61DoctorCarve:
         result = CliRunner().invoke(main, ["catalog", "doctor"])
         assert result.exit_code == 2
         assert "Pass a check flag" in result.output
+
+
+class TestWhh61OrphanBackfillCarve:
+    """Contract pins for the nexus-whh61.4 orphan-backfill subgroup carve.
+
+    Non-vacuous: fails on re-inline, dropped ``register``, ``_get_owner_for``
+    not moving, or import-bound ``_get_catalog``.
+    """
+
+    SUBCOMMANDS = ["dt-link", "synthetic", "dump-csv", "apply-csv", "link-existing"]
+
+    def test_orphan_backfill_group_registered(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        assert "orphan-backfill" in catalog_group.commands
+        ob = catalog_group.commands["orphan-backfill"]
+        for sub in self.SUBCOMMANDS:
+            assert sub in ob.commands, f"{sub} missing from orphan-backfill group"
+
+    def test_orphan_backfill_defined_in_carved_module(self):
+        from nexus.cli import main
+        ob = main.commands["catalog"].commands["orphan-backfill"]
+        assert ob.callback.__module__ == "nexus.commands.catalog_cmds.orphan_backfill"
+        for sub in self.SUBCOMMANDS:
+            assert ob.commands[sub].callback.__module__ == (
+                "nexus.commands.catalog_cmds.orphan_backfill"
+            ), f"{sub} not in carved module"
+
+    def test_get_owner_for_relocated(self):
+        """_get_owner_for is orphan-backfill-exclusive and moved; the SHARED
+        _make_t3 / _make_registry / _backfill_repos stayed (used by setup)."""
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import orphan_backfill as ob_mod
+        assert hasattr(ob_mod, "_get_owner_for")
+        assert not hasattr(cat_mod, "_get_owner_for")
+        for shared in ("_make_t3", "_make_registry", "_backfill_repos"):
+            assert hasattr(cat_mod, shared), f"{shared} must stay in catalog (shared w/ setup)"
+
+    def test_orphan_backfill_subgroup_resolves_through_main_group(self):
+        """The carved subgroup is reachable as ``nx catalog orphan-backfill``
+        and its help lists every subcommand — proves the add_command wiring.
+        (Module-routed _get_catalog access is exercised end-to-end by
+        test_orphan_backfill.py.)"""
+        from nexus.cli import main
+
+        result = CliRunner().invoke(main, ["catalog", "orphan-backfill", "--help"])
+        assert result.exit_code == 0
+        for sub in self.SUBCOMMANDS:
+            assert sub in result.output, f"{sub} not listed in group help"
