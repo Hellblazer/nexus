@@ -21,7 +21,7 @@ from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
-from nexus.commands.catalog import (
+from nexus.commands.catalog_cmds.remediation import (
     _build_basename_index,
     _entry_needs_remediation,
     _resolve_candidate,

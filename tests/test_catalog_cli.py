@@ -2024,3 +2024,59 @@ class TestWhh61MaintenanceCarve:
         assert result.exit_code == 0, result.output
         assert "No orphan entries found." in result.output
         cat.all_documents.assert_called()
+
+
+class TestWhh61RemediationCarve:
+    """Contract pins for the nexus-whh61.4 remediation carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, the six shared helpers not moving, or import-bound
+    (non-module-routed) ``_get_catalog``.
+    """
+
+    REMEDIATION_COMMANDS = ["remediate-paths", "prune-stale"]
+    MOVED_HELPERS = [
+        "_build_basename_index", "_entry_needs_remediation",
+        "_resolve_via_devonthink", "_resolve_candidate",
+        "_rdr_prefix_of", "_build_rdr_prefix_index",
+    ]
+
+    def test_remediation_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.REMEDIATION_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_remediation_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.REMEDIATION_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.remediation"
+            ), f"{name} not in carved module"
+
+    def test_shared_helpers_relocated_to_remediation_module(self):
+        """The six private helpers moved out of commands.catalog into the
+        carved module (and the test files that import them were repointed)."""
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import remediation as rem_mod
+        for h in self.MOVED_HELPERS:
+            assert hasattr(rem_mod, h), f"{h} missing from remediation module"
+            assert not hasattr(cat_mod, h), f"{h} still in commands.catalog"
+
+    def test_prune_stale_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved prune-stale command — proves module-routed access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.all_documents.return_value = []
+        cat.owners_with_roots.return_value = {}
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(main, ["catalog", "prune-stale"])
+        assert result.exit_code == 0, result.output
+        assert "0 stale" in result.output
+        cat.all_documents.assert_called()
