@@ -1926,3 +1926,38 @@ class TestWhh61CollectionsCarve:
         assert result.exit_code == 0, result.output
         assert "Nothing to backfill" in result.output
         cat.distinct_doc_collections.assert_called()
+
+
+class TestWhh61MigrationCarve:
+    """Contract pins for the nexus-whh61.4 migration command carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+    The original used the DIRECT ``_get_catalog()`` form; the carve converts
+    it to the module-routed form — pin 3 proves the patch seam still fires.
+    """
+
+    def test_migrate_fallback_registered_on_group(self):
+        from nexus.cli import main
+        assert "migrate-fallback" in main.commands["catalog"].commands
+
+    def test_migrate_fallback_defined_in_carved_module(self):
+        from nexus.cli import main
+        cmd = main.commands["catalog"].commands["migrate-fallback"]
+        assert cmd.callback.__module__ == "nexus.commands.catalog_cmds.migration"
+
+    def test_migrate_fallback_routes_get_catalog_through_module(self):
+        """Patching commands.catalog._get_catalog is observed by the carved
+        migrate-fallback — proves the direct->module-routed conversion."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.get_collection.return_value = None  # -> ClickException before any write
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(main, ["catalog", "migrate-fallback", "docs__default"])
+        assert result.exit_code != 0
+        assert "not registered in the collections" in result.output
+        cat.get_collection.assert_called_once_with("docs__default")
