@@ -51,8 +51,9 @@ def probe(url: str | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(f"✓ managed nexus service reachable: {caps.base_url}")
-    click.echo(f"  app_version:    {caps.app_version}")
-    click.echo(f"  embedding_mode: {caps.embedding_mode}")
+    click.echo(f"  release_version: {caps.release_version}")
+    click.echo(f"  app_version:     {caps.app_version}")
+    click.echo(f"  embedding_mode:  {caps.embedding_mode}")
     if caps.embedding_models:
         click.echo(f"  models:         {', '.join(caps.embedding_models)}")
     if caps.schema_latest_id:

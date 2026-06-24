@@ -189,7 +189,7 @@ nx guided-upgrade             # detect -> provision+verify the service -> migrat
 `nx guided-upgrade` detects your existing ChromaDB footprint, provisions and
 starts the service, version-pins it (its `/version` must report a
 `release_version` — present from engine-service v0.1.6+; the code floor is
-v0.1.5 but earlier binaries omit the field and fail closed),
+v0.1.8 but earlier binaries are below it / omit the field and fail closed),
 health-gates it, then migrates your collections into pgvector with validation
 and **copy-not-move** rollback safety — your ChromaDB store is left intact as
 the source. Voyage-capability and version pre-flights fail loud *before* any

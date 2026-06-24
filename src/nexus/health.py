@@ -463,7 +463,7 @@ def _check_managed_service_probe() -> list[HealthResult]:
 
     Complements :func:`_check_vector_service` (which probes
     ``/v1/vectors/collections`` for reachability + auth): this adds the
-    unauthenticated ``/version`` handshake → app_version COMPATIBILITY, which
+    unauthenticated ``/version`` handshake → release_version COMPATIBILITY, which
     reachability alone misses (a reachable-but-incompatible managed service). SOFT
     warn only — reachability fatals are ``_check_vector_service``'s domain, so this
     surfaces the version/remedy signal without a duplicate fatal on a down service.
@@ -510,7 +510,7 @@ def _check_managed_service_probe() -> list[HealthResult]:
     return [HealthResult(
         label="Managed/remote service (version)",
         ok=True,
-        detail=f"{caps.base_url} — app_version {caps.app_version} (mode {caps.embedding_mode})",
+        detail=f"{caps.base_url} — release_version {caps.release_version} (app_version {caps.app_version})",
     )]
 
 

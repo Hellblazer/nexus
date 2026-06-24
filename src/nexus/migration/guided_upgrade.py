@@ -136,7 +136,13 @@ class VersionPinOutcome:
 
 
 #: Minimum engine-service release the guided upgrade will hand off to (RDR-002).
-REQUIRED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 5)
+#: Bumped (0,1,5)->(0,1,8) for nexus-x2g1z (2026-06-24): engine-service-v0.1.8
+#: is the current managed/native release; conexus relay [4566] confirmed the
+#: managed service reports release_version on /version. The managed cloud gate
+#: keeps its own floor (``managed_endpoint.MIN_MANAGED_RELEASE_VERSION``); this
+#: constant is the native-binary floor enforced by ``verify_service_version``
+#: and the 3rq00 parity test.
+REQUIRED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 8)
 
 
 def _parse_semver(raw: str | None) -> tuple[int, int, int] | None:

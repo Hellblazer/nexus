@@ -38,36 +38,28 @@ _log = structlog.get_logger(__name__)
 #: every client at a staging or self-hosted managed deployment.
 DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
 
-#: Minimum managed-service ``app_version`` this client speaks. The ``/version``
-#: handshake is the cross-repo contract surface (conexus RDR-001); bump this floor
-#: when the client starts to depend on a newer managed-service capability. Parsed
-#: leniently (a leading ``v`` and Maven ``-SNAPSHOT`` / qualifier suffixes are
-#: stripped).
+#: Minimum managed-service RELEASE this client speaks (nexus-x2g1z, 2026-06-24).
 #:
-#: NOTE (reviewed 2026-06-15): ``(1, 0, 0)`` is the intent floor, not a known-bad
-#: boundary — the local service reports ``1.0-SNAPSHOT`` which already clears it,
-#: so the check is presently a no-op against a current build. Bump it the moment
-#: the client starts to require a managed-service capability introduced after a
-#: specific release, and name that capability here when you do.
+#: The gate pins on the dedicated ``release_version`` field of the ``/version``
+#: handshake, NOT ``app_version``. ``app_version`` is the JAR's frozen Maven
+#: coordinate ``1.0-SNAPSHOT`` (parses to ``(1,0,0)``) — pinning on it was a
+#: structural NO-OP (any build cleared it). ``release_version`` is the real
+#: release identity: stamped from the ``engine-service-vX.Y.Z`` git tag at
+#: build time and ``null``/dev/SNAPSHOT on unstamped builds, so it FAILS CLOSED
+#: by construction (mirrors ``guided_upgrade.verify_service_version`` /
+#: RDR-002 for the native binary).
+#:
+#: This is the MANAGED cloud floor, deliberately SEPARATE from the native floor
+#: ``guided_upgrade.REQUIRED_RELEASE_VERSION`` (different topology / deploy
+#: cadence) — both currently ``(0,1,8)`` but free to move independently.
 #:
 #: CROSS-REPO CONTRACT (conexus RDR-001): the managed multitenant service MUST
-#: expose ``GET /version`` UNAUTHENTICATED with at least an ``app_version`` field.
-#: The local single-tenant Java ``VersionHandler`` is unauthenticated only because
-#: it is loopback-only; the managed service serves ``/version`` over the public
-#: internet, so this must be an explicit term of its API contract, not inherited.
-#:
-#: RDR-002 ASYMMETRY (deliberate, two gates for two topologies): THIS gate pins on
-#: ``app_version`` for the MANAGED cloud service; the local ``nx guided-upgrade``
-#: version-pin (``nexus.migration.guided_upgrade.verify_service_version``) pins on
-#: the dedicated ``release_version`` field of the NATIVE binary. They are distinct
-#: by design — the managed service has its own deployment versioning, the native
-#: binary's release identity lives in ``release_version`` (``app_version`` there is
-#: the frozen dev coordinate ``1.0-SNAPSHOT``). NOTE: because the local service
-#: also reports ``app_version=1.0-SNAPSHOT`` (parses to ``(1,0,0)``), this floor is
-#: presently a NO-OP — bump it (and name the required managed-service capability)
-#: the moment the client depends on one. Relayed to conexus RDR-001 (the managed
-#: service owner) that the managed floor provides no version assurance until bumped.
-MIN_MANAGED_APP_VERSION: tuple[int, int, int] = (1, 0, 0)
+#: expose ``GET /version`` UNAUTHENTICATED with ``release_version`` (and
+#: ``app_version``). conexus relay [4566] (2026-06-23) confirmed the managed
+#: ``/version`` now returns ``release_version`` and was trimmed to
+#: ``{app_version, release_version}`` (the embedding-mode / model / schema
+#: disclosure was dropped from the public endpoint).
+MIN_MANAGED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 8)
 
 #: Probe timeout — short, so an unreachable managed service fails fast and loud
 #: rather than hanging a CLI command.
@@ -94,6 +86,15 @@ class ManagedCapabilities:
 
     base_url: str
     app_version: str
+    #: The release identity the version gate pins on (nexus-x2g1z). ``""`` only
+    #: for a self-hosted service that predates the field — the probe refuses
+    #: before constructing caps in that case, so a returned caps always carries
+    #: a real release.
+    release_version: str
+    #: embedding_mode / models / schema_* are informational and OPTIONAL: the
+    #: managed public ``/version`` was trimmed to ``{app_version,
+    #: release_version}`` (conexus relay [4566]); a self-hosted/local service
+    #: may still report them. Absent -> ``"unknown"`` / ``[]`` / ``None``.
     embedding_mode: str
     embedding_models: list[str]
     schema_latest_id: str | None
@@ -131,30 +132,36 @@ def resolve_managed_endpoint(*, require_token: bool = True) -> tuple[str, str | 
     return base, token
 
 
-def _parse_version(raw: str) -> tuple[int, int, int] | None:
-    """Lenient ``major.minor.patch`` parse; ``-SNAPSHOT``/qualifiers stripped.
+def _parse_release_version(raw: str | None) -> tuple[int, int, int] | None:
+    """FAIL-CLOSED ``X.Y.Z`` parse for the managed ``release_version`` gate.
 
-    Returns ``None`` when no leading numeric version is present (e.g. ``"unknown"``).
+    Returns ``None`` (caller refuses) for a blank, ``snapshot``/``dev``-qualified,
+    or otherwise non-clean-release value — a dev/unstamped engine is by
+    definition older than any required release. Trailing qualifiers
+    (``-rc1``, ``+meta``, a 4th segment) are rejected, not silently accepted.
+    Mirrors ``guided_upgrade._parse_semver`` (RDR-002); kept local to avoid a
+    ``db`` -> ``migration`` import.
     """
-    digits: list[str] = []
-    for ch in raw.strip().lstrip("vV"):
-        if ch.isdigit() or ch == ".":
-            digits.append(ch)
-        else:
-            break
-    core = "".join(digits).strip(".")
-    if not core:
+    if not raw:
         return None
-    parts = core.split(".")[:3]
+    s = raw.strip()
+    if not s:
+        return None
+    if s[:1] in ("v", "V"):
+        s = s[1:]
+    lower = s.lower()
+    if "snapshot" in lower or "dev" in lower:
+        return None
+    parts = s.split(".")
+    if len(parts) != 3:
+        return None
     try:
-        nums = [int(p) for p in parts if p != ""]
+        major, minor, patch = (int(p) for p in parts)
     except ValueError:
         return None
-    if not nums:
+    if major < 0 or minor < 0 or patch < 0:
         return None
-    while len(nums) < 3:
-        nums.append(0)
-    return nums[0], nums[1], nums[2]
+    return (major, minor, patch)
 
 
 def probe_managed_service(
@@ -167,8 +174,10 @@ def probe_managed_service(
     """Probe ``GET {base}/version`` for reachability + compatibility (fail loud).
 
     * Unreachable (connect / TLS / DNS / timeout) → :class:`ManagedServiceUnreachable`.
-    * Non-200, missing/``unknown`` ``app_version``, or an ``app_version`` below
-      :data:`MIN_MANAGED_APP_VERSION` → :class:`ManagedServiceIncompatible`.
+    * Non-200, a missing / null / dev / SNAPSHOT / unparseable ``release_version``,
+      or a ``release_version`` below :data:`MIN_MANAGED_RELEASE_VERSION` →
+      :class:`ManagedServiceIncompatible` (the gate FAILS CLOSED). ``app_version``
+      is informational only and is not gated (nexus-x2g1z).
     * Otherwise returns the parsed :class:`ManagedCapabilities`.
 
     ``base_url`` defaults to :func:`resolve_managed_endpoint` (probe-only, so no
@@ -213,21 +222,32 @@ def probe_managed_service(
             f"body — not a nexus managed service? ({exc})"
         ) from exc
 
+    # app_version is informational only (the JAR's frozen 1.0-SNAPSHOT
+    # coordinate); the gate pins on release_version below. nexus-x2g1z.
     app_version = str(body.get("app_version") or "").strip()
-    if not app_version or app_version == "unknown":
-        raise ManagedServiceIncompatible(
-            f"managed nexus service at {base_url} reported no app_version on "
-            "/version — cannot verify compatibility. Confirm NX_SERVICE_URL "
-            "points at a nexus managed service."
-        )
 
-    parsed = _parse_version(app_version)
-    if parsed is None or parsed < MIN_MANAGED_APP_VERSION:
-        floor = ".".join(str(p) for p in MIN_MANAGED_APP_VERSION)
+    # Version gate: pin on the dedicated release_version field, FAIL-CLOSED.
+    # A missing / null / blank / dev / SNAPSHOT / unparseable release_version
+    # means a dev/unstamped engine, which is by definition below the floor.
+    release_raw = body.get("release_version")
+    release_version = str(release_raw).strip() if isinstance(release_raw, str) else ""
+    parsed = _parse_release_version(release_version)
+    if parsed is None:
+        floor = ".".join(str(p) for p in MIN_MANAGED_RELEASE_VERSION)
         raise ManagedServiceIncompatible(
-            f"managed nexus service at {base_url} is app_version {app_version!r}, "
-            f"below the minimum this client supports ({floor}). Upgrade the "
-            "managed service, or upgrade/downgrade the nx client to match."
+            f"managed nexus service at {base_url} reported no usable "
+            f"release_version on /version (got {release_raw!r}) — a "
+            f"dev/unstamped or pre-release engine is older than the minimum "
+            f"this client supports (v{floor}). Confirm NX_SERVICE_URL points "
+            "at a current nexus managed service."
+        )
+    if parsed < MIN_MANAGED_RELEASE_VERSION:
+        floor = ".".join(str(p) for p in MIN_MANAGED_RELEASE_VERSION)
+        raise ManagedServiceIncompatible(
+            f"managed nexus service at {base_url} is release_version "
+            f"{release_version!r}, below the minimum this client supports "
+            f"(v{floor}). Upgrade the managed service, or upgrade/downgrade "
+            "the nx client to match."
         )
 
     models_raw = body.get("embedding_models") or []
@@ -238,6 +258,7 @@ def probe_managed_service(
     caps = ManagedCapabilities(
         base_url=base_url,
         app_version=app_version,
+        release_version=release_version,
         embedding_mode=str(body.get("embedding_mode") or "unknown"),
         embedding_models=models,
         schema_latest_id=(str(body["schema_latest_id"]) if body.get("schema_latest_id") else None),
@@ -247,6 +268,7 @@ def probe_managed_service(
         "managed_service_probe_ok",
         base_url=base_url,
         app_version=app_version,
+        release_version=release_version,
         embedding_mode=caps.embedding_mode,
     )
     return caps
