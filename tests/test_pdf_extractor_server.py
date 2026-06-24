@@ -351,16 +351,15 @@ class TestAdaptivePageRanges:
         assert mock_iso.call_count == expected_calls
         assert [c.args[1:] for c in mock_iso.call_args_list] == expected_ranges
 
-    def test_oom_retry_splits_to_single_pages(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
-        ok_return = ("text", [], [])
-        call_count = 0
-
+    def test_oom_retry_bisects_to_single_pages(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
+        # RDR-148 Gap 6 batch//2 ladder: any multi-page range OOMs; only single
+        # pages succeed, so the ladder bisects all the way to 1-page
+        # granularity and every page is ultimately extracted.
         def mock_isolated(path, start, end):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
+            rng_end = end if end is not None else 5
+            if rng_end - start > 1:
                 raise RuntimeError("MinerU subprocess exited with code -9")
-            return ok_return
+            return ("text", [], [])
 
         with (
             _mock_pymupdf(5), _mock_do_parse(),
@@ -368,8 +367,29 @@ class TestAdaptivePageRanges:
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated) as mock_iso,
         ):
             result = extractor._extract_with_mineru(dummy_pdf)
-        assert mock_iso.call_count == 6  # 1 failed batch + 5 per-page retries
+        single_calls = [
+            c for c in mock_iso.call_args_list
+            if ((c.args[2] if c.args[2] is not None else 5) - c.args[1]) == 1
+        ]
+        assert len(single_calls) == 5  # all 5 pages reached at 1-page granularity
         assert result.metadata["extraction_method"] == "mineru"
+
+    def test_oom_retry_bisects_not_straight_to_single(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
+        # When the halves succeed, the ladder STOPS at batch//2 — it does not
+        # drop straight to single pages (that was the pre-Gap-6 behavior).
+        def mock_isolated(path, start, end):
+            if start == 0 and end is None:  # the full 5-page batch
+                raise RuntimeError("MinerU subprocess exited with code -9")
+            return ("text", [], [])
+
+        with (
+            _mock_pymupdf(5), _mock_do_parse(),
+            patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated) as mock_iso,
+        ):
+            extractor._extract_with_mineru(dummy_pdf)
+        ranges = [c.args[1:] for c in mock_iso.call_args_list]
+        assert ranges == [(0, None), (0, 2), (2, 5)]  # bisected once, halves OK
 
     def test_oom_retry_single_page_propagates(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
         with (
@@ -405,15 +425,12 @@ class TestAdaptivePageRanges:
         assert len(warning_calls) == 1
 
     def test_oom_multi_batch_only_retries_failed_range(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
-        ok_return = ("text", [], [])
-        call_count = 0
-
+        # Only the first 5-page batch OOMs; it bisects into (0,2)+(2,5). The
+        # healthy (5,10) batch runs exactly once and is never retried.
         def mock_isolated(path, start, end):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1 and start == 0 and end == 5:
+            if start == 0 and end == 5:
                 raise RuntimeError("OOM")
-            return ok_return
+            return ("text", [], [])
 
         with (
             _mock_pymupdf(10), _mock_do_parse(),
@@ -421,5 +438,7 @@ class TestAdaptivePageRanges:
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated) as mock_iso,
         ):
             result = extractor._extract_with_mineru(dummy_pdf)
-        assert mock_iso.call_count == 7  # 1 failed (0,5) + 5 retries + 1 success (5,10)
+        ranges = [c.args[1:] for c in mock_iso.call_args_list]
+        assert ranges == [(0, 5), (0, 2), (2, 5), (5, 10)]  # failed range bisected only
+        assert ranges.count((5, 10)) == 1  # healthy batch never retried
         assert result.metadata["extraction_method"] == "mineru"

@@ -112,6 +112,19 @@ class PDFConfig:
     mineru_server_url: str = "http://127.0.0.1:8010"
     mineru_table_enable: bool = False
     mineru_page_batch: int = 1
+    # RDR-148 Gap 6: hard RLIMIT_AS address-space ceiling (MB) applied to the
+    # MinerU worker. 0 = disabled (rely on the OS OOM-killer / jetsam). Opt-in
+    # because too low a value turns healthy pages into spurious OOMs. Enforced
+    # only on Linux — macOS does not honour RLIMIT_AS (see get_mineru helpers).
+    # NB: RLIMIT_AS caps VIRTUAL address space, not physical RSS; PyTorch/MinerU
+    # mmap model weights aggressively, so the address-space footprint can be 3-5x
+    # the resident size — set this generously (e.g. several GB) to avoid spurious
+    # OOMs on healthy pages.
+    mineru_memory_ceiling_mb: int = 0
+    # RDR-148 Gap 6: per-page wall-clock budget (seconds) for the worker,
+    # replacing the old fixed batch-level 180s. The effective subprocess timeout
+    # is this value times the number of pages in the range.
+    mineru_page_timeout_s: int = 180
 
 
 def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
@@ -126,6 +139,8 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
         mineru_server_url=pdf.get("mineru_server_url", "http://127.0.0.1:8010"),
         mineru_table_enable=bool(pdf.get("mineru_table_enable", False)),
         mineru_page_batch=max(1, int(pdf.get("mineru_page_batch", 1))),
+        mineru_memory_ceiling_mb=max(0, int(pdf.get("mineru_memory_ceiling_mb", 0))),
+        mineru_page_timeout_s=max(1, int(pdf.get("mineru_page_timeout_s", 180))),
     )
 
 
@@ -233,29 +248,51 @@ def _read_live_mineru_port() -> int | None:
     return port
 
 
-def get_mineru_server_url(repo_root: Path | None = None) -> str:
-    """Return the URL of the live MinerU server, falling back to the
-    configured default when no live server is found.
+_MINERU_DEFAULT_URL = "http://127.0.0.1:8010"
 
-    Resolution order:
-    1. Live PID file (``~/.config/nexus/mineru.pid``) — the canonical
-       source of truth when a server is running. Validated via
-       ``_is_process_alive``.
-    2. Configured ``pdf.mineru_server_url`` — the static fallback for
-       installs where the operator manages the server out-of-band
-       (e.g. a launchctl service on a fixed port).
+
+def get_mineru_server_url(repo_root: Path | None = None) -> str:
+    """Return the URL of the MinerU server to talk to.
+
+    Resolution order (RDR-148 Gap 1 — explicit operator intent wins):
+    1. An explicit, non-default ``pdf.mineru_server_url`` — when the
+       operator has set the config to anything other than the built-in
+       default ``http://127.0.0.1:8010``, that intent wins outright.
+       This covers out-of-band server management (e.g. a launchctl
+       service or a remote host on a fixed URL); a live local pid file
+       must not silently hijack it.
+    2. Live PID file (``~/.config/nexus/mineru.pid``) — the canonical
+       source of truth when ``nx mineru start`` brought a server up on
+       an ephemeral port and the config was left at the default.
+       Validated via ``_is_process_alive``.
     3. Built-in default ``http://127.0.0.1:8010``.
+
+    Documented heuristic limitation: the ``!=`` default check cannot
+    distinguish "operator deliberately fixed local :8010" from "config
+    never changed", so an operator who pins :8010 is still overridden by
+    a live pid file. Both target 127.0.0.1, so this is harmless; a
+    ``mineru_prefer_config`` flag can be added later if a concrete need
+    arises.
     """
+    configured = get_pdf_config(repo_root).mineru_server_url
+    if configured != _MINERU_DEFAULT_URL:
+        return configured
     live = _read_live_mineru_port()
     if live is not None:
         return f"http://127.0.0.1:{live}"
-    return get_pdf_config(repo_root).mineru_server_url
+    return configured
 
 def get_mineru_table_enable(repo_root: Path | None = None) -> bool:
     return get_pdf_config(repo_root).mineru_table_enable
 
 def get_mineru_page_batch(repo_root: Path | None = None) -> int:
     return get_pdf_config(repo_root).mineru_page_batch
+
+def get_mineru_memory_ceiling_mb(repo_root: Path | None = None) -> int:
+    return get_pdf_config(repo_root).mineru_memory_ceiling_mb
+
+def get_mineru_page_timeout_s(repo_root: Path | None = None) -> int:
+    return get_pdf_config(repo_root).mineru_page_timeout_s
 
 
 def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:

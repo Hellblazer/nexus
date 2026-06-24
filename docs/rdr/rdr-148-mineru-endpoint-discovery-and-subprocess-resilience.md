@@ -2,12 +2,12 @@
 title: "MinerU endpoint discovery + subprocess-fallback resilience: stop formula-PDF extraction from silently degrading onto a broken in-process path"
 id: RDR-148
 type: Bug Fix
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-03
-accepted_date:
+accepted_date: 2026-06-24
 related_issues: [nexus-m26oq, nexus-yrlbd]
 related: [RDR-044, RDR-046, RDR-147]
 ---
@@ -79,6 +79,13 @@ multiprocessing guard, exiting code 1 on the formula pages. **Verified
 `resource_tracker: There appear to be 1 leaked semaphore objects to clean up at
 shutdown` — a multiprocessing-without-guard signature. So even when the fallback
 is correctly chosen, it cannot extract formula PDFs on darwin/arm64.
+
+> **Resolution (2026-06-24, bead `nexus-vehin.3`): CLOSED-AS-MOOT.** This diagnosis
+> predates the `subprocess.Popen([sys.executable, "-c", _MINERU_WORKER_SCRIPT, …])`
+> worker. That worker is a fresh interpreter, not a multiprocessing-spawn child, so
+> the `__main__`-guard hazard is categorically inapplicable at the nexus→worker
+> boundary. No guard was needed. Residual MinerU-internal multiprocessing mode is
+> CA-3/CA-4 deferred (needs model weights). See **Spike Result 3**.
 
 #### Gap 4: mineru-api server is spawned with stdout/stderr → DEVNULL
 
@@ -251,14 +258,15 @@ signature from the failing run's stderr.
   already in `get_mineru_server_url`, but with the *wrong* precedence; CA-2 demands
   a precedence fix (explicit non-default config override must win), now folded into
   the Approach.
-- [ ] A `__main__`-guarded subprocess entry fixes the macOS spawn crash without
-  regressing the OOM-isolation behavior — **Status**: Partially verified —
-  **Method**: Source analysis (2026-06-24). The worker is now a
-  `subprocess.Popen([sys.executable, "-c", _MINERU_WORKER_SCRIPT, …])`
-  (`pdf_extractor.py:970`), structurally different from the in-process form
-  RDR-148 originally diagnosed; the `__main__`-guard failure mode may be moot or
-  manifest differently. Full repro needs the MinerU model weights — deferred to an
-  implementation-time spike (not run here to avoid OOM-ing the dev host).
+- [x] A `__main__`-guarded subprocess entry fixes the macOS spawn crash without
+  regressing the OOM-isolation behavior — **Status**: Resolved CLOSED-AS-MOOT
+  (impl-time, 2026-06-24, bead `nexus-vehin.3`) — **Method**: Source analysis. The
+  worker is a `subprocess.Popen([sys.executable, "-c", _MINERU_WORKER_SCRIPT, …])`
+  (`pdf_extractor.py:970`) — a fresh interpreter, not a multiprocessing-spawn
+  child — so the originally-diagnosed `__main__`-guard failure mode is categorically
+  inapplicable at the nexus→worker boundary. No guard was needed or added. The
+  residual MinerU-internal multiprocessing mode remains CA-3/CA-4 deferred (needs
+  model weights). See **Spike Result 3**.
 - [x] The page-31 `-9` is a content-specific MFR-model OOM that reproduces on the
   current MinerU (server OR subprocess), not a stale artifact of the pre-`oa7r`
   endpoint split-brain — **Status**: Verified (2026-05-31, isolation re-run) —
@@ -298,6 +306,24 @@ Approach #1)**: re-order to explicit-non-default-config → pid file → default
 explicit operator override wins. Narrow in practice (a remote-configured install
 rarely co-runs a local server), but a real precedence inversion now resolved
 rather than left implicit.
+
+**Spike Result 3 — macOS multiprocessing spawn-guard (Gap 3 / CA-3): CLOSED-AS-MOOT, source-verified (2026-06-24, impl-time, bead `nexus-vehin.3`).**
+The originally-diagnosed hazard (in-process MinerU worker failing on macOS under
+multiprocessing's `spawn` start method without an `if __name__ == "__main__"`
+guard — exit 1 + "leaked semaphore") is **moot for the boundary it described**.
+The worker is now `subprocess.Popen([sys.executable, "-c", _MINERU_WORKER_SCRIPT,
+...])` (`pdf_extractor.py:970`) — a **fresh interpreter, not a
+multiprocessing-spawn child** — so the parent-`__main__` re-import recursion the
+guard protects against is categorically inapplicable at the nexus→worker
+boundary. `os._exit(0)` further skips the pool teardown that leaked the
+semaphore. **Residual, distinct, unverified**: if MinerU's `do_parse` itself
+spawns multiprocessing children, the unguarded `-c` `__main__` could re-trigger an
+analogous issue; reproducing that needs model weights and is **CA-3/CA-4 deferred**
+(not run casually on a dev host). Per the no-preventive-scope-beyond-evidence
+discipline, **no speculative multiprocessing guard was added**. Delivered: a source
+comment documenting the finding and a structural regression guard
+(`test_worker_uses_fresh_interpreter_subprocess_form`) pinning the
+fresh-interpreter `-c` form so a revert to a multiprocessing worker fails loudly.
 
 ## Proposed Solution
 
@@ -344,6 +370,9 @@ share one code region and one new catchable memory-error type (see item 5).
    FIRST confirms whether Gap 3 still reproduces; if it does, guard the worker
    entry (explicit start-method / module-level worker) while preserving
    OOM-isolation + 1-page retry; if it does not, close Gap 3 as already-fixed.
+   **Outcome (2026-06-24, bead `nexus-vehin.3`): closed-as-moot by source analysis**
+   — fresh-interpreter `-c` worker, no multiprocessing-spawn boundary, no guard
+   added; residual MinerU-internal mode CA-3/CA-4 deferred. See **Spike Result 3**.
 
 4. **Catchable OOM + optional per-page degrade-to-docling (Gap 5).** Introduce
    `MineruMemoryError(RuntimeError)` (subclass so the existing `except RuntimeError`
@@ -368,6 +397,16 @@ share one code region and one new catchable memory-error type (see item 5).
    classification (the SIGKILL-only mapping would have missed it). **Depends on
    item 4** (the shared error type + classification), so author 4 first within the
    arc — consistent with the bead graph (`yrlbd`/Gap 6 depends-on `m26oq`/Gap 5).
+   **Outcome (2026-06-24, bead `nexus-yrlbd`): SHIPPED.** Config knobs
+   `mineru_memory_ceiling_mb` (default 0 = disabled) and `mineru_page_timeout_s`
+   (default 180) added. RLIMIT_AS preexec is Linux-gated (`sys.platform`); when
+   applied, `_mineru_ceiling_applied` is set so item 4's classifier maps any
+   non-zero exit to `MineruMemoryError`. Per-page timeout = `mineru_page_timeout_s`
+   × pages-in-range (never tighter than the old flat 180s). The `batch//2` step is
+   implemented as a recursive bisection ladder (`_extract_range`): a failed range
+   halves toward 1-page rather than dropping straight to per-page, and only the
+   failed range is retried. The recursion subsumed and replaced the prior
+   `_run_page_or_degrade` per-page helper (single degrade site retained).
 
 ### Technical Design
 

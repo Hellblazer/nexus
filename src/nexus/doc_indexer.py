@@ -968,6 +968,7 @@ def _pdf_chunks(
     chunk_chars: int | None = None,
     bib_enrich_enabled: bool = False,
     extractor: str = "auto",
+    on_formula_oom: str = "fail",
     git_meta: dict | None = None,
     doc_id: str = "",
 ) -> list[tuple[str, str, dict]]:
@@ -994,7 +995,9 @@ def _pdf_chunks(
     if git_meta is None:
         from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         git_meta = detect_git_metadata(pdf_path)
-    result = PDFExtractor().extract(pdf_path, extractor=extractor)
+    result = PDFExtractor().extract(
+        pdf_path, extractor=extractor, on_formula_oom=on_formula_oom,
+    )
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
     chunks = chunker.chunk(result.text, result.metadata)
     if not chunks:
@@ -1164,6 +1167,7 @@ def index_pdf(
     on_progress: Callable[[int, int], None] | None = None,
     enrich: bool = False,
     extractor: str = "auto",
+    on_formula_oom: str = "fail",
     streaming: str = "auto",
     hooks: "HookRegistry | None" = None,
 ) -> int | dict:
@@ -1314,7 +1318,7 @@ def index_pdf(
             # a 0 here means a concurrent pipeline is active on this content_hash.
             count = pipeline_index_pdf(
                 pdf_path, content_hash, col_name, db,
-                embed_fn=embed_fn, extractor=extractor,
+                embed_fn=embed_fn, extractor=extractor, on_formula_oom=on_formula_oom,
                 corpus=corpus, target_model=target_model,
                 force=force,
                 doc_id=doc_id,
@@ -1364,7 +1368,7 @@ def index_pdf(
 
     # Extract and chunk the entire document
     now_iso = datetime.now(UTC).isoformat()
-    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, doc_id=doc_id)
+    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, on_formula_oom=on_formula_oom, doc_id=doc_id)
     prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
     if not prepared:
         return _empty_meta if return_metadata else 0
@@ -1709,6 +1713,7 @@ def batch_index_pdfs(
     force: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
     extractor: str = "auto",
+    on_formula_oom: str = "fail",
     hooks: "HookRegistry | None" = None,
 ) -> dict[str, str]:
     """Index multiple PDFs sequentially, returning per-file status.
@@ -1727,7 +1732,7 @@ def batch_index_pdfs(
         count: int = 0
         t0 = time.monotonic()
         try:
-            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, hooks=hooks)
+            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, on_formula_oom=on_formula_oom, hooks=hooks)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller

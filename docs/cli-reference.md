@@ -106,6 +106,7 @@ nx index repo ./my-project
 | `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich bib <collection>` for bulk backfill |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
+| `--on-formula-oom [fail\|docling]` | What to do when a single page reproducibly OOM-kills MinerU's formula model (default: `fail`). `fail` aborts the document (preserves the no-silent-fallback-for-formulas guarantee). `docling` degrades only that page to docling (formula-stripped) and continues |
 | `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs (crash-resilient); `never` forces the legacy batch+checkpoint path |
 
@@ -144,9 +145,23 @@ Or add to `.nexus.yml` (per-repo) or `~/.config/nexus/config.yml` (global) direc
 ```yaml
 pdf:
   extractor: mineru   # auto | docling | mineru
+  mineru_page_batch: 1          # pages per MinerU subprocess (memory isolation)
+  mineru_page_timeout_s: 180    # per-page wall-clock budget (× pages-in-range)
+  mineru_memory_ceiling_mb: 0   # 0 = disabled; Linux-only RLIMIT_AS cap (see below)
 ```
 
 The `--extractor` flag overrides the config when passed explicitly.
+
+**MinerU OOM resilience (RDR-148).** Formula-dense pages can OOM-kill MinerU's
+formula model. The recovery ladder: a failed multi-page batch bisects toward
+single pages; a single page that still OOMs either aborts the document
+(`--on-formula-oom fail`, the default) or degrades only that page to docling
+(`--on-formula-oom docling`). On **Linux** you can additionally set
+`mineru_memory_ceiling_mb` to cap the worker's address space (RLIMIT_AS) so a
+runaway page fails fast and catchably instead of thrashing; macOS does not honour
+RLIMIT_AS (the knob logs a warning and is ignored there). Note RLIMIT_AS caps
+**virtual** address space, not physical RAM; PyTorch/MinerU mmap weights
+aggressively, so set it generously (several GB).
 
 **Forcing a specific backend (one-off):**
 
