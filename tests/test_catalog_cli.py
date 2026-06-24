@@ -808,7 +808,7 @@ class TestStatsCommand:
                 similarity=0.8, source_collection="docs__src",
             )
 
-        import nexus.commands.catalog as catalog_mod
+        import nexus.commands.catalog_cmds.report as catalog_mod
 
         monkeypatch.setattr(
             catalog_mod, "_taxonomy_stats",
@@ -836,7 +836,7 @@ class TestStatsCommand:
     ):
         """--json output carries the taxonomy block under a top-level
         ``taxonomy`` key so machine readers can consume it."""
-        import nexus.commands.catalog as catalog_mod
+        import nexus.commands.catalog_cmds.report as catalog_mod
 
         monkeypatch.setattr(
             catalog_mod, "_taxonomy_stats",
@@ -861,7 +861,7 @@ class TestStatsCommand:
         text output must not include a Topics line and --json must not
         include a taxonomy key. Regression guard against accidental
         inclusion of a misleading empty block."""
-        import nexus.commands.catalog as catalog_mod
+        import nexus.commands.catalog_cmds.report as catalog_mod
 
         monkeypatch.setattr(catalog_mod, "_taxonomy_stats", lambda: None)
 
@@ -2082,3 +2082,53 @@ class TestWhh61RemediationCarve:
         assert result.exit_code == 0, result.output
         assert "0 stale" in result.output
         cat.all_documents.assert_called()
+
+
+class TestWhh61ReportCarve:
+    """Contract pins for the nexus-whh61.4 report carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, ``_taxonomy_stats`` not moving, or import-bound
+    (non-module-routed) ``_get_catalog``.
+    """
+
+    REPORT_COMMANDS = ["stats", "orphans", "session-summary", "coverage"]
+
+    def test_report_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.REPORT_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_report_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.REPORT_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.report"
+            ), f"{name} not in carved module"
+
+    def test_taxonomy_stats_relocated(self):
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import report as rep_mod
+        assert hasattr(rep_mod, "_taxonomy_stats")
+        assert not hasattr(cat_mod, "_taxonomy_stats")
+
+    def test_stats_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved stats command — proves module-routed access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.stats.return_value = {
+            "owner_count": 3, "doc_count": 9, "link_count": 4, "chunk_count": 0,
+            "by_content_type": {}, "links_by_type": {},
+        }
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog_cmds.report._taxonomy_stats", return_value=None):
+            result = CliRunner().invoke(main, ["catalog", "stats"])
+        assert result.exit_code == 0, result.output
+        assert "Documents: 9" in result.output
+        cat.stats.assert_called()
