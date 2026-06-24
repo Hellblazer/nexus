@@ -1799,3 +1799,42 @@ class TestKgyozLinksCarve:
 
         catalog_group = main.commands["catalog"]
         assert catalog_group.commands["generate-links"] is links_mod.generate_links_cmd
+
+
+class TestWhh61BackupsCarve:
+    """Contract pins for the nexus-whh61.4 backups command carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+    """
+
+    BACKUP_COMMANDS = ["list-backups", "undelete", "vacuum-backups"]
+
+    def test_backup_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.BACKUP_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_backup_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.BACKUP_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.backups"
+            ), f"{name} not in carved module"
+
+    def test_list_backups_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved list-backups command — proves module-routed access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        fake = MagicMock()
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
+                patch("nexus.catalog.catalog_backup.list_backups", return_value=[]) as lb:
+            result = CliRunner().invoke(main, ["catalog", "list-backups"])
+        assert result.exit_code == 0, result.output
+        assert "No backups found." in result.output
+        lb.assert_called_once_with(fake)
