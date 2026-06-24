@@ -38,9 +38,12 @@ class TestSig7BackfillCollectionsPassesOwnerIdForConformantNames:
         # Source-level invariant: the bare cat.register_collection(name)
         # call must be replaced with one that forwards content_type +
         # owner_id when parse_conformant_collection_name succeeds.
+        # nexus-whh61.4 carved the catalog-cli families out of the
+        # commands/catalog.py monolith; backfill_collections (and the
+        # parse helper) now live in commands/catalog_cmds/collections.py.
         src = (
             Path(__file__).resolve().parent.parent
-            / "src" / "nexus" / "commands" / "catalog.py"
+            / "src" / "nexus" / "commands" / "catalog_cmds" / "collections.py"
         )
         text = src.read_text()
         # The bare call without keyword args was the SIG-7 bug.
@@ -49,7 +52,7 @@ class TestSig7BackfillCollectionsPassesOwnerIdForConformantNames:
         assert "parse_conformant_collection_name" in text, (
             "SIG-7: backfill_collections must parse conformant names "
             "and forward owner_id; the parse helper must appear in "
-            "commands/catalog.py."
+            "commands/catalog_cmds/collections.py."
         )
 
 
