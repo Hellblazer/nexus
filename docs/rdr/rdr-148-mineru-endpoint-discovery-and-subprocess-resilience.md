@@ -130,6 +130,17 @@ C-level allocation failure under the ceiling that neither raises `MemoryError`
 nor trips SIGKILL. Everything else stays a generic `RuntimeError` (the existing
 1-page retry).
 
+**Known limitation of the catch-all (documented, not hidden).** The third clause
+`(returncode != 0 AND ceiling-active)` *over-captures*: a non-memory worker
+failure (corrupt PDF, missing model file) under an active Linux ceiling is
+classified `MineruMemoryError`. Under default `--on-formula-oom=fail` this is
+invisible (it re-raises either way). Under opt-in `--on-formula-oom=docling` such
+a page would be degraded to formula-stripped docling rather than hard-failing —
+an acceptable trade (the clause must stay broad to catch C-level alloc failures),
+but the operator opted into degrade, so a degraded non-OOM page is within the
+contract. Step 4's tests pin both the over-capture (exit-1 WITH ceiling → memory
+error) and the no-ceiling case (exit-1 WITHOUT ceiling → `RuntimeError`).
+
 #### Gap 6: No memory ceiling or per-page timeout before the subprocess spawn (was `nexus-yrlbd`)
 
 MinerU extraction relies entirely on the OS OOM killer: no `RLIMIT_AS`/cgroup
@@ -282,11 +293,11 @@ still reads config, not pid file" is **incorrect** and is corrected here. BUT th
 precedence is pid-file-**first unconditionally** (`config.py:249-251`): a live
 local pid file overrides an explicit operator `pdf.mineru_server_url`. This
 **inverts** RDR-148 Approach #1's intent (explicit non-default override should
-win) and is the live realization of the CA-2 hazard. Decision required (see
-Approach #1, revised): add explicit-non-default-config precedence above the pid
-file, OR accept pid-file-first as a deliberate local-dev convenience. Narrow in
-practice (a remote-configured install rarely co-runs a local server), but a real
-precedence inversion that must be resolved, not left implicit.
+win) and is the live realization of the CA-2 hazard. **Decision committed at gate (see
+Approach #1)**: re-order to explicit-non-default-config → pid file → default, so an
+explicit operator override wins. Narrow in practice (a remote-configured install
+rarely co-runs a local server), but a real precedence inversion now resolved
+rather than left implicit.
 
 ## Proposed Solution
 
@@ -360,19 +371,22 @@ share one code region and one new catchable memory-error type (see item 5).
 
 ### Technical Design
 
-**Endpoint resolver** (illustrative — verify signatures):
+**Endpoint resolver** — re-order the EXISTING `get_mineru_server_url()`
+(`config.py:236-252`), which already composes pid file + config; this is a
+precedence modification, NOT a new function (see Step 1 / Existing Infrastructure
+Audit):
 
 ```text
-// resolve_mineru_endpoint() -> str | None
+// get_mineru_server_url() -> str   (revised precedence)
 //   1. if config pdf.mineru_server_url is set AND != built-in default -> return it
-//      (operator intent: remote/managed MinerU)
+//      (operator intent: remote/managed MinerU wins — CA-2 fix)
 //   2. info = _mineru_pid.read_pid_file(); if info and is_process_alive(info.pid):
 //        return f"http://127.0.0.1:{info['port']}"
 //   3. return config default (may be stale) — caller health-checks before use
 ```
 
-Replace the direct `get_mineru_server_url()` reads at `pdf_extractor.py:740`/`:774`
-with `resolve_mineru_endpoint()`. The `/health` probe stays; on failure, one
+No caller switch — the health/parse sites at `pdf_extractor.py:741`/`:776`
+already call `get_mineru_server_url()`. The `/health` probe stays; on failure, one
 rediscovery pass (re-read the pid file in case the server restarted mid-run)
 before any fallback. Endpoint strings continue to flow through
 `_redact_url_credentials()` (existing) for log safety.
@@ -490,9 +504,10 @@ ceiling was applied) — the corrected classification that covers both SIGKILL a
 `RLIMIT_AS`-`MemoryError` (gate finding; the `-9`-only mapping was the blocking
 defect). Thread `on_formula_oom` through `extract()` → `_extract_with_mineru`;
 single-page `MineruMemoryError` + `docling` mode degrades that page (default
-`fail` re-raises). Add `--on-formula-oom` CLI flag. Test: a fake proc returning
-`_MINERU_OOM_EXIT` with ceiling-active, and `-9`, both map to `MineruMemoryError`;
-a plain exit-1 with no ceiling stays `RuntimeError`.
+`fail` re-raises). Add `--on-formula-oom` CLI flag. Tests: a fake proc returning
+`_MINERU_OOM_EXIT` (any ceiling state) and `-9` both map to `MineruMemoryError`;
+exit-1 WITH ceiling-active maps to `MineruMemoryError` (documented over-capture);
+exit-1 WITHOUT a ceiling stays `RuntimeError`.
 
 #### Step 5: Memory ceiling + per-page timeout + batch//2 (Gap 6, `nexus-yrlbd`)
 `preexec_fn` `RLIMIT_AS` ceiling (Linux-gated; `_child_rlimit_preexec(ceiling)`
