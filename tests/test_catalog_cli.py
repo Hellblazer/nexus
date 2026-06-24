@@ -2132,3 +2132,63 @@ class TestWhh61ReportCarve:
         assert result.exit_code == 0, result.output
         assert "Documents: 9" in result.output
         cat.stats.assert_called()
+
+
+class TestWhh61IntegrityCarve:
+    """Contract pins for the nexus-whh61.4 integrity carve.
+
+    Non-vacuous: fails on re-inline, dropped ``register``, the four private
+    helpers not moving, ``_make_t3`` wrongly moving (it is SHARED and must
+    stay in commands.catalog), or import-bound ``_get_catalog``.
+    """
+
+    INTEGRITY_COMMANDS = ["audit-membership", "verify"]
+    MOVED_HELPERS = [
+        "_audit_membership_all", "_home_matches_root",
+        "_source_uri_home_key", "_heal_ghosts",
+        # module constants that moved with _source_uri_home_key:
+        "_EMPTY_HOME_KEY", "_DEVONTHINK_HOME_KEY",
+    ]
+
+    def test_integrity_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.INTEGRITY_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_integrity_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.INTEGRITY_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.integrity"
+            ), f"{name} not in carved module"
+
+    def test_private_helpers_relocated_but_make_t3_stays(self):
+        """The four exclusive helpers move; the SHARED _make_t3 stays in
+        commands.catalog (verify routes to it via the module object)."""
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import integrity as integ_mod
+        for h in self.MOVED_HELPERS:
+            assert hasattr(integ_mod, h), f"{h} missing from integrity module"
+            assert not hasattr(cat_mod, h), f"{h} still in commands.catalog"
+        # _make_t3 is shared (setup/consolidate/backfill) — must NOT move.
+        assert hasattr(cat_mod, "_make_t3")
+        assert not hasattr(integ_mod, "_make_t3")
+
+    def test_verify_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved verify command — proves module-routed access. (The shared
+        _make_t3 routing is pinned structurally above and exercised by the
+        real verify suite, which reaches the t3 path with non-empty docs.)"""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.all_documents.return_value = []  # empty → clean early return
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(main, ["catalog", "verify"])
+        assert result.exit_code == 0, result.output
+        cat.all_documents.assert_called()
