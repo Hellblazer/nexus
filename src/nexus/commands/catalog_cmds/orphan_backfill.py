@@ -21,8 +21,6 @@ from pathlib import Path
 
 import click
 
-from nexus.catalog.tumbler import Tumbler
-
 
 @click.group("orphan-backfill")
 def orphan_backfill_group() -> None:
