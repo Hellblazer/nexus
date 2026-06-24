@@ -39,6 +39,24 @@ except ImportError:
 # Inline script executed in a child Python process for memory isolation.
 # Uses os._exit to force-terminate without waiting for daemon threads / worker
 # pools that MinerU's pipeline may leave running.
+#
+# RDR-148 Gap 3 (macOS spawn-guard) — VERIFY-FIRST spike outcome, source-
+# verified 2026-06-24: the original diagnosis (in-process MinerU worker failing
+# on macOS under multiprocessing's `spawn` start method without an
+# `if __name__ == "__main__"` guard — exit 1 + "leaked semaphore") is MOOT for
+# the boundary it described. The worker is now a plain
+# ``subprocess.Popen([sys.executable, "-c", _MINERU_WORKER_SCRIPT, ...])`` — a
+# fresh interpreter, NOT a multiprocessing-spawn child, so the parent-__main__
+# re-import recursion that the guard protects against is categorically
+# inapplicable at the nexus->worker boundary. ``os._exit(0)`` further skips the
+# pool teardown that leaked the semaphore. Residual, distinct, and UNVERIFIED:
+# if MinerU's ``do_parse`` itself spawns multiprocessing children, the un-
+# guarded ``-c`` __main__ could re-trigger an analogous issue; reproducing that
+# needs model weights (CA-3/CA-4 deferred — do not run casually on a dev host).
+# Do NOT add a speculative multiprocessing guard here without that repro: it is
+# untested surface (feedback_no_preventive_scope_beyond_evidence). The
+# fresh-interpreter `-c` form is a load-bearing invariant — see the structural
+# guard in tests/test_mineru_spawn_logging.py.
 _MINERU_WORKER_SCRIPT = '''
 import json, sys, os
 from pathlib import Path

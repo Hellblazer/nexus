@@ -117,3 +117,26 @@ def test_worker_subprocess_keeps_devnull_carveout() -> None:
         "judged carve-out, not an oversight."
     )
     assert "_MINERU_WORKER_SCRIPT" in src
+
+
+# ── RDR-148 Gap 3: fresh-interpreter worker (macOS spawn-guard moot) ──
+
+
+def test_worker_uses_fresh_interpreter_subprocess_form() -> None:
+    """RDR-148 Gap 3 (spike: closed-as-moot). The worker must stay a
+    fresh-interpreter ``subprocess.Popen([sys.executable, "-c", ...])``,
+    NOT a multiprocessing-spawn child. That structural property is what
+    makes the originally-diagnosed macOS spawn-guard hazard categorically
+    inapplicable at the nexus->worker boundary; a regression to a
+    multiprocessing worker would re-open it. This guard pins the form so
+    such a revert fails loudly here rather than silently on macOS."""
+    import nexus.pdf_extractor as ext_mod
+
+    src = Path(ext_mod.__file__).read_text()
+    # The worker is spawned as a fresh interpreter running the inline script.
+    assert "sys.executable, \"-c\", _MINERU_WORKER_SCRIPT" in src, (
+        "the MinerU worker must remain a fresh-interpreter `-c` subprocess "
+        "(RDR-148 Gap 3 moot-by-refactor invariant)."
+    )
+    # And the spike outcome stays documented next to it.
+    assert "RDR-148 Gap 3" in src and "VERIFY-FIRST spike outcome" in src
