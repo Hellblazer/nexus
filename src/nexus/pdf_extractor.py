@@ -720,51 +720,98 @@ class PDFExtractor:
             formula_count_floor=formula_count,
         )
 
+    def _probe_mineru_health(self, base_url: str) -> tuple[bool, str]:
+        """Probe ``{base_url}/health`` once. Return ``(ok, reason)``.
+
+        ``reason`` is empty on success, else a short diagnostic
+        (``http_503`` / ``ConnectError: ...``) for the caller to surface
+        on the loud fallback decision. Per-probe failures are logged at
+        DEBUG — the single WARNING belongs to the final fallback in
+        :meth:`_mineru_server_available`, not to each probe.
+        """
+        url = f"{base_url}/health"
+        try:
+            resp = httpx.get(url, timeout=2)
+            if resp.status_code == 200:
+                return True, ""
+            _log.debug("mineru_health_probe_non_200", url=url,
+                       http_status=resp.status_code)
+            return False, f"http_{resp.status_code}"
+        except (httpx.ConnectError, httpx.TimeoutException,
+                httpx.RemoteProtocolError) as exc:
+            # RemoteProtocolError: a server dying mid-startup can accept the
+            # TCP connection but return a truncated/malformed response. The
+            # parse path (_mineru_run_isolated) already treats it as a
+            # crash-and-fall-back; the health probe must too, not crash.
+            _log.debug("mineru_health_probe_unreachable", url=url,
+                       error=f"{type(exc).__name__}: {exc}")
+            return False, f"{type(exc).__name__}: {exc}"
+
     def _mineru_server_available(self) -> bool:
         """Check if the MinerU API server is reachable.
 
         Result cached for the lifetime of this PDFExtractor instance —
         a False result is never retried. Create a new instance to re-check.
 
-        nexus-h1jk: when the configured URL is unreachable, emit a
-        structured warning + ``_progress`` line so the operator knows
-        the run is silently degrading to the in-process subprocess
-        path (where math-heavy / large PDFs OOM-kill the worker).
-        The auto-restart machinery writes the live port back to
-        ``~/.config/nexus/config.yml``, so a stale URL persists across
-        sessions when the server is later killed.
+        RDR-148 Gap 2 (rediscover-then-fail-loud): on a /health failure
+        the run must not silently degrade to the in-process subprocess
+        path (where math-heavy / large PDFs OOM-kill the worker). Before
+        degrading, perform exactly ONE rediscovery pass — re-resolve the
+        endpoint, which re-reads the live PID file when config is at the
+        default, so a server that restarted mid-run on a new port is
+        picked up. Only when rediscovery still finds no live server is the
+        subprocess path selected, and that decision is logged LOUD (a
+        single WARNING + ``_progress`` line naming the reason), never
+        silently (nexus-h1jk warn-on-fallback, made non-silent here).
+
+        Known limitation (by Gap 1 design, for vehin.5): "rediscover" means
+        re-resolve via ``get_mineru_server_url()``, whose pid-file read is
+        gated by the Gap 1 precedence — an EXPLICIT non-default operator URL
+        wins and the pid file is intentionally NOT consulted. So rediscovery
+        re-reads the pid file only on the default-config path; with an
+        explicit URL it is a transient-recovery re-probe of the same
+        endpoint. This is deliberate: honoring "operator intent wins" (Gap 1)
+        precludes a pid file silently redirecting an explicitly-pinned URL.
         """
         if self._mineru_server_checked:
             return self._mineru_server_up
 
         from nexus.config import get_mineru_server_url  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-        url = f"{get_mineru_server_url()}/health"
-        try:
-            resp = httpx.get(url, timeout=2)
-            self._mineru_server_up = resp.status_code == 200
-            if not self._mineru_server_up:
-                _log.warning(
-                    "mineru_server_unhealthy",
-                    url=url, http_status=resp.status_code,
-                )
-                _progress(
-                    f"  warn: MinerU server at {url} returned HTTP "
-                    f"{resp.status_code}; falling back to in-process subprocess. "
-                    f"Run `nx mineru start` to enable server mode."
-                )
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            self._mineru_server_up = False
-            _log.warning(
-                "mineru_server_unreachable",
-                url=url, error=f"{type(exc).__name__}: {exc}",
-            )
-            _progress(
-                f"  warn: MinerU server at {url} unreachable; falling back "
-                f"to in-process subprocess (slower, OOM-risk on large math PDFs). "
-                f"Run `nx mineru start` to enable server mode."
-            )
 
+        first_url = get_mineru_server_url()
+        ok, first_reason = self._probe_mineru_health(first_url)
+        if ok:
+            self._mineru_server_up = True
+            self._mineru_server_checked = True
+            return True
+
+        # Gap 2: exactly one rediscovery pass before degrading. Re-resolving
+        # re-reads the PID file (default-config path), so a mid-run restart
+        # to a new port is picked up; with an explicit operator URL this is
+        # a single transient-recovery re-probe of the same endpoint.
+        second_url = get_mineru_server_url()
+        ok, reason = self._probe_mineru_health(second_url)
+        if ok:
+            _log.info("mineru_server_rediscovered",
+                      url=second_url, prior_url=first_url)
+            self._mineru_server_up = True
+            self._mineru_server_checked = True
+            return True
+
+        # No live server after rediscovery — loud, reasoned fallback.
+        self._mineru_server_up = False
         self._mineru_server_checked = True
+        _log.warning(
+            "mineru_fallback_to_subprocess",
+            first_url=first_url, rediscovered_url=second_url,
+            reason=reason, first_reason=first_reason,
+        )
+        _progress(
+            f"  warn: MinerU server unreachable after rediscovery "
+            f"({reason}); falling back to in-process subprocess (slower, "
+            f"OOM-risk on large math PDFs). Run `nx mineru start` to enable "
+            f"server mode, or pass --extractor docling."
+        )
         return self._mineru_server_up
 
     def _mineru_run_via_server(

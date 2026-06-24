@@ -117,3 +117,74 @@ def test_mineru_server_available_caches_success() -> None:
         assert ex._mineru_server_available() is True
         assert ex._mineru_server_available() is True  # cache hit
         mock_get.assert_called_once()
+
+
+# ── RDR-148 Gap 2: rediscover-then-fail-loud ─────────────────────────
+
+
+def test_health_fail_triggers_single_rediscovery_then_loud_fallback() -> None:
+    """On /health failure, exactly one rediscovery pass runs (2 probes
+    total); when it also fails, the fallback is logged LOUD (WARNING),
+    not silently."""
+    from structlog.testing import capture_logs
+
+    from nexus.pdf_extractor import PDFExtractor
+
+    ex = PDFExtractor()
+    with patch(
+        "nexus.config.get_mineru_server_url",
+        return_value="http://127.0.0.1:49353",
+    ), patch(
+        "httpx.get", side_effect=httpx.ConnectError("refused"),
+    ) as mock_get, capture_logs() as logs:
+        assert ex._mineru_server_available() is False
+        # First probe + exactly one rediscovery probe = 2 calls.
+        assert mock_get.call_count == 2
+    # The fallback decision is loud and reasoned, not silent.
+    fallback = [e for e in logs if e["event"] == "mineru_fallback_to_subprocess"]
+    assert len(fallback) == 1, f"expected one loud fallback warning; got {logs!r}"
+    assert fallback[0]["log_level"] == "warning"
+    assert fallback[0]["reason"]  # a non-empty diagnostic reason is surfaced
+    # This is the same-endpoint transient-recovery path (URL unchanged);
+    # the new-port pid rediscovery path is covered by the next test.
+    assert fallback[0]["first_url"] == fallback[0]["rediscovered_url"]
+
+
+def test_health_probe_remote_protocol_error_degrades_gracefully() -> None:
+    """A server dying mid-startup can return a malformed HTTP response
+    (httpx.RemoteProtocolError). The probe must treat it as unreachable
+    and fall back, not crash the extraction."""
+    from nexus.pdf_extractor import PDFExtractor
+
+    ex = PDFExtractor()
+    with patch(
+        "nexus.config.get_mineru_server_url",
+        return_value="http://127.0.0.1:8010",
+    ), patch(
+        "httpx.get", side_effect=httpx.RemoteProtocolError("malformed"),
+    ):
+        # Must not raise — degrades to False.
+        assert ex._mineru_server_available() is False
+
+
+def test_health_fail_then_rediscovery_finds_restarted_server(monkeypatch) -> None:
+    """The server died on the first port but restarted on a new one; the
+    rediscovery pass re-resolves (re-reads the pid file) and uses it —
+    no degrade to subprocess."""
+    from nexus.pdf_extractor import PDFExtractor
+
+    # First resolve -> dead port; rediscovery resolve -> live port.
+    urls = iter(["http://127.0.0.1:49353", "http://127.0.0.1:8010"])
+    monkeypatch.setattr(
+        "nexus.config.get_mineru_server_url", lambda *a, **k: next(urls),
+    )
+
+    def fake_get(url, *a, **k):
+        if "8010" in url:
+            return MagicMock(status_code=200)
+        raise httpx.ConnectError("refused")
+
+    ex = PDFExtractor()
+    with patch("httpx.get", side_effect=fake_get) as mock_get:
+        assert ex._mineru_server_available() is True
+        assert mock_get.call_count == 2  # one dead probe + one live probe
