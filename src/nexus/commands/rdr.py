@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -439,7 +440,6 @@ def set_status(
         sys.exit(1)
 
     if date is None:
-        from datetime import datetime, timezone
         date = datetime.now(timezone.utc).date().isoformat()
 
     text = rdr_file.read_text(encoding="utf-8")
