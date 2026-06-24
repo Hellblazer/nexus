@@ -2,8 +2,9 @@
 title: "Aspect-Extraction Queue Bounded Backoff-Retry Ladder: Wire the Dormant mark_retry Primitive into a Transient-Failure-Surviving Drain"
 id: RDR-163
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-06-19
+closed_date: 2026-06-24
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
