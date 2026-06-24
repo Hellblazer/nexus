@@ -1110,10 +1110,7 @@ def check_version_compatibility() -> None:
         stored_ver: str | None = None
         if db_path.exists():
             try:
-                from nexus.daemon.t2_client import (  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
-                    T2DaemonNotReachableError,
-                    make_t2_client,
-                )
+                from nexus.daemon.t2_client import make_t2_client  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
 
                 client = make_t2_client()
                 try:
@@ -1122,7 +1119,7 @@ def check_version_compatibility() -> None:
                     stored_ver = raw if raw and raw != "0.0.0" else None
                 finally:
                     client.close()
-            except (T2DaemonNotReachableError, Exception):  # noqa: BLE001 — drift check best-effort; daemon-unreachable/RPC-fail degrades stored_ver to None
+            except Exception:  # noqa: BLE001 — drift check best-effort; daemon-unreachable (incl. T2DaemonNotReachableError) / RPC-fail degrades stored_ver to None
                 # Daemon unreachable or RPC failed — drift check is
                 # best-effort. Operator can run `nx doctor` for the
                 # full diagnostic.
