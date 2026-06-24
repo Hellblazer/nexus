@@ -2,12 +2,12 @@
 title: "MinerU endpoint discovery + subprocess-fallback resilience: stop formula-PDF extraction from silently degrading onto a broken in-process path"
 id: RDR-148
 type: Bug Fix
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-03
-accepted_date:
+accepted_date: 2026-06-24
 related_issues: [nexus-m26oq, nexus-yrlbd]
 related: [RDR-044, RDR-046, RDR-147]
 ---
