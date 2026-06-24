@@ -408,7 +408,10 @@ class TestMigrateCollectionsUnit:
         metadata records a DIFFERENT producing model is mislabeled — its stored
         768-dim vectors are NOT from the embedder the target is searched with.
         Passthrough must REFUSE to copy them verbatim and re-embed instead
-        (embeddings=None), even though the name+dimension checks both pass."""
+        (embeddings=None), even though the name+dimension checks both pass. The
+        warn log surfaces the provenance_mismatch count for audit."""
+        from structlog.testing import capture_logs
+
         from nexus.migration.vector_etl import _migrate_one
 
         name = _coll("mislabel", model=_MODEL_768)  # name declares bge-768
@@ -416,22 +419,36 @@ class TestMigrateCollectionsUnit:
         _seed_source(source_client, name, 3, embedding_model="other-768-embedder")
         fake = FakeVectorClient()
 
-        result = _migrate_one(
-            source_client, fake, name, dry_run=False, page=100, target_name=name
-        )
+        with capture_logs() as logs:
+            result = _migrate_one(
+                source_client, fake, name, dry_run=False, page=100, target_name=name
+            )
 
         assert result.status == "migrated"
         # provenance mismatch → re-embed, never copy the contaminated vectors.
         assert all(emb is None for emb in fake.upsert_embeddings)
+        # audit signal: the warn fires with exact counts — all 3 mis-provenanced,
+        # none merely missing.
+        rec = next(
+            e for e in logs
+            if e.get("event") == "vector_etl_passthrough_fallback_reembed"
+        )
+        assert rec["provenance_mismatch"] == 3
+        assert rec["missing_vectors"] == 0
 
-    def test_unverifiable_provenance_does_not_passthrough(self, source_client) -> None:
-        """nexus-bfdri: a chunk with NO embedding_model in metadata cannot prove
-        which embedder produced its stored vector — fail closed: re-embed rather
-        than trust a name segment (embeddings=None)."""
+    def test_absent_provenance_passes_through_pre_factory(self, source_client) -> None:
+        """nexus-bfdri (MISMATCH-ONLY): a chunk with NO embedding_model in
+        metadata is a PRE-FACTORY collection (code_indexer didn't stamp it until
+        2026-04-26, but conformant code__*__voyage-code-3__v1 names existed from
+        2026-02-22) — its vectors DID come from the named embedder, just
+        unstamped. Absent provenance is TRUSTED (passed through verbatim), NOT
+        re-embedded: forcing a re-embed would silently revert the nexus-hxry2
+        optimization (billed Voyage / wasted ONNX) with no correctness gain.
+        Absent != mislabel; only present-and-wrong is evidence of contamination."""
         from nexus.migration.vector_etl import _migrate_one
 
-        name = _coll("noprov", model=_MODEL_768)
-        _seed_source(source_client, name, 3)  # no embedding_model stamped
+        name = _coll("noprov", model="voyage-context-3")
+        ids = _seed_source(source_client, name, 3)  # no embedding_model stamped
         fake = FakeVectorClient()
 
         result = _migrate_one(
@@ -439,7 +456,10 @@ class TestMigrateCollectionsUnit:
         )
 
         assert result.status == "migrated"
-        assert all(emb is None for emb in fake.upsert_embeddings)
+        # trusted -> vectors forwarded verbatim (passthrough), NOT re-embedded.
+        assert len(fake.upsert_embeddings) == 1
+        assert fake.upsert_embeddings[0] is not None
+        assert len(fake.upsert_embeddings[0]) == len(ids) == 3
 
     def test_is_same_model_passthrough_helper(self) -> None:
         from nexus.migration.vector_etl import _is_same_model_passthrough

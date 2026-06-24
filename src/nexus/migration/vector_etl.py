@@ -343,12 +343,34 @@ def _migrate_one(
     # (metadata["embedding_model"], written by make_chunk_metadata at index time)
     # MATCHES this declared model — the name segment alone is not proof the
     # vectors came from the embedder the target is searched against.
+    # nexus-bfdri: the model the conformant name DECLARES (segment 3 of
+    # <ct>__<owner>__<embedding_model>__v<n>; passthrough already asserts 4
+    # segments). ``None`` only on the non-passthrough path (helper unused there).
     declared_model = name.split("__")[2] if passthrough else None
 
     def _provenance_ok(c: dict) -> bool:
-        # Verifiable AND matches the declared model. A missing/blank
-        # embedding_model is unverifiable -> fail closed (re-embed). nexus-bfdri.
-        return (c.get("metadata") or {}).get("embedding_model") == declared_model
+        """MISMATCH-ONLY provenance check (nexus-bfdri).
+
+        Re-embed ONLY when a chunk's recorded ``embedding_model`` is PRESENT and
+        DISAGREES with the declared model — that is the detectable mislabel the
+        bead targets (vectors from a different embedder than the name claims).
+
+        ABSENT/blank provenance is TRUSTED (passed through), NOT re-embedded:
+        ``code_indexer`` did not stamp ``embedding_model`` until the
+        ``make_chunk_metadata`` factory landed (2026-04-26), but conformant
+        ``code__*__voyage-code-3__v1`` names existed from 2026-02-22 — so
+        pre-factory chunks have a conformant name and no provenance, yet their
+        vectors DID come from the named embedder (just unstamped). Forcing those
+        to re-embed would silently revert the nexus-hxry2 passthrough
+        optimization (a billed Voyage re-embed / wasted local ONNX) with no
+        correctness gain. Absent ≠ mislabel; only present-and-wrong is evidence.
+        """
+        if declared_model is None:
+            return False  # defensive: meaningless without a declared target
+        prov = (c.get("metadata") or {}).get("embedding_model")
+        if not prov:  # absent/blank -> unverifiable but benign -> trust
+            return True
+        return prov == declared_model
 
     source_count = 0
     written = 0
