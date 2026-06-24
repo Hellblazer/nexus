@@ -176,8 +176,12 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 1. Update T2 record: mcp__plugin_conexus_nexus__memory_put(content="... (same fields, status: Implemented, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
    If T3 archive fails, set `archived: false` — retryable by re-running `/conexus:rdr-close`
 
-2. Update status in RDR markdown metadata
-3. Regenerate `docs/rdr/README.md` index
+2. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):**
+   ```bash
+   nx rdr set-status NNN closed
+   ```
+   Code-enforced flip: rewrites the RDR file `status -> closed`, adds `closed_date`, and updates the README index-row status cell in one tested action. Hand-editing frontmatter is the source of the RDR-165/166 ledger drift (T2 advanced, file left stale) — always use the command. (`--date YYYY-MM-DD` overrides the default of today.)
+3. (The README index row is updated by the command in step 2 — no separate regen step.)
 4. **Scoped conditional reindex** — if the RDR body changed during close (e.g. divergence notes added, post-mortem link inserted, or any text outside the frontmatter block modified), run `nx index rdr` **scoped to the single RDR file**, NOT the whole corpus:
 
    ```bash
@@ -265,15 +269,15 @@ Renamed documents do not automatically gain `category="rdr_postmortem"` on their
 1. Prompt for reason (free text)
 2. Offer post-mortem (useful for capturing what was learned, even from abandoned work)
 3. Update T2 record with close reason
-4. Update markdown metadata
+4. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):** run `nx rdr set-status NNN reverted` (or `abandoned`). Code-enforced — same ledger-drift fix as the Implemented flow.
 5. **Scoped conditional reindex** — if the RDR body changed, run `nx index rdr docs/rdr/rdr-NNN-<slug>.md` (single-file form). A frontmatter-only `status: reverted` flip does not warrant a reindex. Apply the same diff check from Step 4 of the Implemented flow.
 6. Archive post-mortem (if created) to the conformant knowledge collection via Step 6 of the Implemented flow: same `nx catalog collection-name --content-type knowledge` lookup, same `category="rdr_postmortem"` stamp.
-7. Regenerate README index
+7. (README index row is updated by `set-status` in step 4 — no separate regen.)
 
 ## Flow: Superseded
 
 1. Prompt for superseding RDR ID
-2. Cross-link both RDRs (bidirectional):
+2. **Flip the old RDR's file status + README via the CLI:** run `nx rdr set-status MMM superseded` (code-enforced; do NOT hand-edit the status). Then cross-link both RDRs (bidirectional):
    - **Old RDR**: In T2, set `superseded_by: "NNN"`. In markdown, add "Superseded by RDR-NNN" note
    - **New RDR**: In T2, set `supersedes: "MMM"`. In markdown, add "Supersedes RDR-MMM" note
 3. **Scoped reindex** — this flow typically DOES warrant a reindex because the markdown notes added in step 2 live in the RDR body. Run the single-file form: `nx index rdr docs/rdr/rdr-NNN-<slug>.md` on the OLD RDR, and separately on the NEW RDR. Two files → two single-file invocations. Do NOT run the whole-corpus form.
