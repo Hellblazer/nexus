@@ -754,7 +754,15 @@ public final class AspectRepository {
                     ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
                     ASPECT_EXTRACTION_QUEUE.DOC_ID)
                 .from(ASPECT_EXTRACTION_QUEUE)
-                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending"))
+                // RDR-163 P0 (nexus-795gv) backoff gate: a row backed off to a
+                // future next_retry_at must not be claimed early. NULL = ready now.
+                // now() is the server (DB) clock — correct for both the co-located
+                // local deployment and the cloud deployment where the worker host
+                // clock would skew against a client-stamped comparison.
+                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending")
+                    .and(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT.isNull()
+                        .or(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT.le(
+                            field("now()", OffsetDateTime.class)))))
                 .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc())
                 .limit(1)
                 .forUpdate().skipLocked()
