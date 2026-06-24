@@ -233,23 +233,39 @@ def _read_live_mineru_port() -> int | None:
     return port
 
 
-def get_mineru_server_url(repo_root: Path | None = None) -> str:
-    """Return the URL of the live MinerU server, falling back to the
-    configured default when no live server is found.
+_MINERU_DEFAULT_URL = "http://127.0.0.1:8010"
 
-    Resolution order:
-    1. Live PID file (``~/.config/nexus/mineru.pid``) — the canonical
-       source of truth when a server is running. Validated via
-       ``_is_process_alive``.
-    2. Configured ``pdf.mineru_server_url`` — the static fallback for
-       installs where the operator manages the server out-of-band
-       (e.g. a launchctl service on a fixed port).
+
+def get_mineru_server_url(repo_root: Path | None = None) -> str:
+    """Return the URL of the MinerU server to talk to.
+
+    Resolution order (RDR-148 Gap 1 — explicit operator intent wins):
+    1. An explicit, non-default ``pdf.mineru_server_url`` — when the
+       operator has set the config to anything other than the built-in
+       default ``http://127.0.0.1:8010``, that intent wins outright.
+       This covers out-of-band server management (e.g. a launchctl
+       service or a remote host on a fixed URL); a live local pid file
+       must not silently hijack it.
+    2. Live PID file (``~/.config/nexus/mineru.pid``) — the canonical
+       source of truth when ``nx mineru start`` brought a server up on
+       an ephemeral port and the config was left at the default.
+       Validated via ``_is_process_alive``.
     3. Built-in default ``http://127.0.0.1:8010``.
+
+    Documented heuristic limitation: the ``!=`` default check cannot
+    distinguish "operator deliberately fixed local :8010" from "config
+    never changed", so an operator who pins :8010 is still overridden by
+    a live pid file. Both target 127.0.0.1, so this is harmless; a
+    ``mineru_prefer_config`` flag can be added later if a concrete need
+    arises.
     """
+    configured = get_pdf_config(repo_root).mineru_server_url
+    if configured != _MINERU_DEFAULT_URL:
+        return configured
     live = _read_live_mineru_port()
     if live is not None:
         return f"http://127.0.0.1:{live}"
-    return get_pdf_config(repo_root).mineru_server_url
+    return configured
 
 def get_mineru_table_enable(repo_root: Path | None = None) -> bool:
     return get_pdf_config(repo_root).mineru_table_enable
