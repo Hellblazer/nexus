@@ -879,12 +879,23 @@ def run_collection_postprocessing(
     ),
 )
 @click.option(
+    "--on-formula-oom",
+    type=click.Choice(["fail", "docling"]),
+    default="fail",
+    help=(
+        "What to do when a single page reproducibly OOM-kills MinerU's formula "
+        "model (RDR-148 Gap 5). 'fail' (default) aborts the document, preserving "
+        "the no-silent-fallback-for-formulas guarantee. 'docling' degrades only "
+        "THAT page to docling (formula-stripped) and continues."
+    ),
+)
+@click.option(
     "--streaming",
     type=click.Choice(["auto", "always", "never"]),
     default="auto",
     help="Streaming pipeline mode: auto (default, all PDFs), always, never.",
 )
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, streaming: str) -> None:
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
@@ -998,7 +1009,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 n = index_pdf(
                     pdf, corpus=corpus, collection_name=collection,
                     force=force, enrich=enrich, extractor=extractor,
-                    streaming=streaming,
+                    on_formula_oom=on_formula_oom, streaming=streaming,
                 )
                 elapsed = _time.monotonic() - t0
                 total_chunks += n
@@ -1045,7 +1056,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed, enrich=enrich, extractor=extractor, streaming=streaming)
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming)
         except (ImportError, RuntimeError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -1110,7 +1121,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         try:
             meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
-                             return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, streaming=streaming)
+                             return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming)
         except (ImportError, RuntimeError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -1131,7 +1142,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(f"\n  {'  '.join(parts)}")
     else:
         try:
-            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, streaming=streaming)
+            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming)
         except (ImportError, RuntimeError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational

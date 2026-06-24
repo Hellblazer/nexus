@@ -62,7 +62,7 @@ def _er(page_count: int = 3) -> ExtractionResult:
 
 def _fx(n: int = 3, result: ExtractionResult | None = None, text_fn=None):
     r = result or _er(n)
-    def extract(pdf_path, *, extractor="auto", on_page=None):
+    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
         for i in range(n):
             txt = text_fn(i) if text_fn else f"Page {i} content."
             if on_page:
@@ -176,7 +176,7 @@ class TestExtractorLoop:
         result = _er(3)
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:
-            def f(pdf_path, *, extractor="auto", on_page=None):
+            def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
                 for i in range(3):
                     if on_page:
                         on_page(i, f"Page {i} text content.",
@@ -191,7 +191,7 @@ class TestExtractorLoop:
     def test_cancel_raises_pipeline_cancelled(self, db: PipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         cancel = threading.Event()
-        def f(pdf_path, *, extractor="auto", on_page=None):
+        def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
             for i in range(10):
                 if on_page:
                     on_page(i, f"Page {i}", {"page_number": i + 1, "text_length": 6})

@@ -61,6 +61,7 @@ def extractor_loop(
     db: PipelineDB,
     cancel: threading.Event,
     extractor: str = "auto",
+    on_formula_oom: str = "fail",
     extraction_done: threading.Event | None = None,
 ) -> ExtractionResult:
     """Extract pages to PipelineDB buffer via the on_page streaming callback.
@@ -91,7 +92,7 @@ def extractor_loop(
     ext = PDFExtractor()
     try:
         try:
-            result = ext.extract(pdf_path, extractor=extractor, on_page=on_page)
+            result = ext.extract(pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page)
         except PipelineCancelled:
             return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
 
@@ -607,6 +608,7 @@ def pipeline_index_pdf(
     db: PipelineDB | None = None,
     embed_fn: EmbedFn | None = None,
     extractor: str = "auto",
+    on_formula_oom: str = "fail",
     corpus: str = "",
     target_model: str = "voyage-context-3",
     git_meta: dict | None = None,
@@ -717,8 +719,9 @@ def pipeline_index_pdf(
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         extract_future = pool.submit(
-            extractor_loop, pdf_path, content_hash, db, cancel, extractor,
-            extraction_done,
+            extractor_loop, pdf_path, content_hash, db, cancel,
+            extractor=extractor, on_formula_oom=on_formula_oom,
+            extraction_done=extraction_done,
         )
         chunk_future = pool.submit(
             chunker_loop, content_hash, db, cancel, embed_fn,
