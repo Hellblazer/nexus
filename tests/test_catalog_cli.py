@@ -395,7 +395,7 @@ class TestLinksFilterCommand:
         then bare tumbler. Covers the register-via-API path where
         documents can carry a file_path with empty title."""
         from nexus.catalog.tumbler import Tumbler
-        from nexus.commands.catalog import _endpoint_label
+        from nexus.commands.catalog_cmds.links import _endpoint_label
 
         cat = initialized_catalog
         # Register programmatically to bypass the CLI --title requirement.
@@ -1713,3 +1713,89 @@ class TestKgyozBackfillCarve:
             result = CliRunner().invoke(main, ["catalog", "backfill-owner-id"])
         assert result.exit_code != 0
         assert "not supported in service mode" in result.output
+
+
+class TestKgyozLinksCarve:
+    """Contract pins for the nexus-kgyoz links-family command carve.
+
+    Non-vacuous: fails if any link command is re-inlined into
+    ``commands.catalog``, if the ``register`` wiring is dropped, if the
+    moved link-only helpers regress, or if module-routed ``_get_catalog``
+    access is bound at import time.
+    """
+
+    LINK_COMMANDS = [
+        "link", "unlink", "links", "link-bulk-delete", "link-audit",
+        "links-for-file", "link-density", "suggest-links",
+        "generate-links", "link-generate",
+    ]
+
+    def test_all_link_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.LINK_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_link_commands_defined_in_carved_module(self):
+        """Every link command's callback lives in catalog_cmds.links."""
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.LINK_COMMANDS:
+            cmd = catalog_group.commands[name]
+            assert cmd.callback.__module__ == "nexus.commands.catalog_cmds.links", (
+                f"{name} callback not in carved module: {cmd.callback.__module__}"
+            )
+
+    def test_link_only_helpers_live_in_carved_module(self):
+        """The two link-render helpers moved with the commands."""
+        from nexus.commands.catalog_cmds import links as links_mod
+        assert hasattr(links_mod, "_endpoint_label")
+        assert hasattr(links_mod, "_unique_edges_by_target")
+
+    def test_link_audit_routes_get_catalog_through_module(self):
+        """End-to-end through the group: patching
+        commands.catalog._get_catalog is observed by the carved link-audit
+        command — proves module-routed (not import-bound) access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        fake = MagicMock()
+        fake.link_audit.return_value = {
+            "total": 7, "orphaned_count": 0, "duplicate_count": 0,
+            "by_type": {}, "by_creator": {}, "orphaned": [],
+        }
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake):
+            result = CliRunner().invoke(main, ["catalog", "link-audit", "--json"])
+        assert result.exit_code == 0, result.output
+        assert '"total": 7' in result.output
+        fake.link_audit.assert_called_once()
+
+    def test_links_flat_query_runs_through_carved_body(self):
+        """End-to-end through the group for the most complex carved command:
+        the `links` flat-query + JSON render path runs intact (guards against
+        an intra-body line drop that the __module__ pin would miss)."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        edge = MagicMock()
+        edge.to_dict.return_value = {"from": "1.1.1", "to": "1.2.1", "link_type": "cites"}
+        fake = MagicMock()
+        fake.link_query.return_value = [edge]
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake):
+            result = CliRunner().invoke(
+                main, ["catalog", "links", "--created-by", "bib_enricher", "--json"],
+            )
+        assert result.exit_code == 0, result.output
+        assert '"link_type": "cites"' in result.output
+        fake.link_query.assert_called_once()
+
+    def test_link_generate_delegates_to_registered_generate_links(self):
+        """link-generate's ctx.invoke target IS the object registered as
+        generate-links — pins the delegation across the carve."""
+        from nexus.cli import main
+        from nexus.commands.catalog_cmds import links as links_mod
+
+        catalog_group = main.commands["catalog"]
+        assert catalog_group.commands["generate-links"] is links_mod.generate_links_cmd
