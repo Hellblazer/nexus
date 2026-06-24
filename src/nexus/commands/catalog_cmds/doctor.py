@@ -1501,20 +1501,6 @@ def _print_replay_equality_text(report: dict) -> None:
         click.echo("FAIL — projector replay diverges from live SQLite. See diffs above.")
 
 
-_PRUNE_DEPRECATED_KEYS: frozenset[str] = frozenset({
-    # RDR-101 Phase 4 (.10.2 audit, Category B).
-    "source_path",
-    "git_branch",
-    "git_commit_hash",
-    "git_project_name",
-    "git_remote_url",
-    # RDR-101 Phase 5c (nexus-o6aa.13).
-    "corpus",
-    "store_type",
-    "git_meta",
-})
-
-
 def _run_t3_doc_id_coverage(
     *, strict_not_in_t3: bool = False, progress: bool = False,
 ) -> dict:

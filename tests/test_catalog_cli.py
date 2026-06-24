@@ -2205,7 +2205,21 @@ class TestWhh61DoctorCarve:
     SAMPLE_MOVED_HELPERS = [
         "_run_replay_equality", "_snapshot_table", "_check_bootstrap_status",
         "_run_name_vs_embed_dim", "_percentile", "_run_t3_doc_id_coverage",
+        "_run_collections_drift", "_run_chunk_size_distribution",
+        "_run_chunk_text_dedup", "_run_t3_vs_catalog",
+        "_print_replay_equality_text", "_expected_dim_for_model_token",
+        # threshold constants moved with the helpers:
+        "_MICRO_CHUNK_BYTES", "_VOYAGE_DIM", "_ORPHAN_RATIO_WARN_THRESHOLD",
     ]
+
+    def test_prune_deprecated_keys_stayed_in_catalog(self):
+        """_PRUNE_DEPRECATED_KEYS is an indexer/normalisation constant, NOT a
+        diagnostic — it must stay in commands.catalog (indexer contract tests
+        import it from there), not get swept into the doctor module."""
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import doctor as doc_mod
+        assert hasattr(cat_mod, "_PRUNE_DEPRECATED_KEYS")
+        assert not hasattr(doc_mod, "_PRUNE_DEPRECATED_KEYS")
 
     def test_doctor_commands_registered_on_group(self):
         from nexus.cli import main

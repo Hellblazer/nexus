@@ -195,6 +195,24 @@ def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
     return t
 
 
+# Metadata keys the indexing/normalisation layer prunes from chunk metadata.
+# Not a diagnostics concern — kept here (not in catalog_cmds/doctor) so the
+# indexer-side contract tests that assert it stays disjoint from
+# ALLOWED_TOP_LEVEL keep importing it from nexus.commands.catalog (nexus-whh61.4).
+_PRUNE_DEPRECATED_KEYS: frozenset[str] = frozenset({
+    # RDR-101 Phase 4 (.10.2 audit, Category B).
+    "source_path",
+    "git_branch",
+    "git_commit_hash",
+    "git_project_name",
+    "git_remote_url",
+    # RDR-101 Phase 5c (nexus-o6aa.13).
+    "corpus",
+    "store_type",
+    "git_meta",
+})
+
+
 @click.group()
 def catalog() -> None:
     """Document catalog — tracks every indexed document and the links between them.
