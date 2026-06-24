@@ -195,7 +195,6 @@ def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
     return t
 
 
-
 @click.group()
 def catalog() -> None:
     """Document catalog — tracks every indexed document and the links between them.
@@ -487,7 +486,6 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
                         click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
 
 
-
 @catalog.command("search")
 @click.argument("query")
 @click.option("--limit", "-n", default=20)
@@ -719,8 +717,6 @@ def pull_cmd() -> None:
     finally:
         cat.close()
     click.echo("Catalog pulled and rebuilt.")
-
-
 
 
 @catalog.command("compact", hidden=True)
@@ -1162,8 +1158,6 @@ def _source_uri_home_key(uri: str) -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
-
-
 @catalog.command("verify")
 @click.option(
     "--heal",
@@ -1342,8 +1336,6 @@ def _heal_ghosts(
                 )
             # anything else = skip
     click.echo(f"\nHealed: {dropped} tumbler(s) dropped.")
-
-
 
 
 # ── Backfill helpers ──────────────────────────────────────────────────────────
@@ -3902,7 +3894,6 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
 
 
 # ── Catalog t3-doc-id-coverage support helpers ───────────────────────────
-
 
 
 # ── nx catalog orphan-backfill (nexus-h2pm / nexus-4fw8 / nexus-oa9k) ──────
