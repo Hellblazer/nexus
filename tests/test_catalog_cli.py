@@ -1961,3 +1961,25 @@ class TestWhh61MigrationCarve:
         assert result.exit_code != 0
         assert "not registered in the collections" in result.output
         cat.get_collection.assert_called_once_with("docs__default")
+
+    def test_migrate_fallback_dry_run_emits_proposal_through_carved_body(self):
+        """Deeper pin: the dry-run proposal path runs intact through the
+        carved body (guards an intra-body line drop the early-exit pin and
+        __module__ pin would miss)."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        entry = MagicMock()
+        entry.tumbler = "1.1.1"
+        cat = MagicMock()
+        cat.get_collection.return_value = {"name": "docs__default"}  # non-None
+        cat.list_by_collection.return_value = [entry]
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(
+                main, ["catalog", "migrate-fallback", "docs__default", "--dry-run"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "docs__default: 1 doc(s) ->" in result.output
+        cat.list_by_collection.assert_called_once_with("docs__default")
