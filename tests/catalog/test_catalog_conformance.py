@@ -72,31 +72,8 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 # RDR-168 Phase 3 reconciliation removes each name here as the client method is brought
 # to the canonical signature. The empty set is the GREEN end state.
 EXPECTED_NONCONFORMING: frozenset[str] = frozenset(
-    {
-        # group 3A — collection / owner (indexing-path criticals, CA-4 core)
-        "collection_for",
-        "collection_for_repo",
-        "ensure_owner_for_repo",
-        "lookup_doc_id_by_collection_and_path",
-        "list_by_collection",
-        # group 3B — mutation / lifecycle
-        "update_document_collection",
-        "update_documents_collection_batch",
-        "supersede_collection",
-        # group 3C — links (incl. the SILENT case)
-        "link",
-        "link_if_absent",  # SILENT: **kwargs swallow — the load-bearing case
-        "links_from",
-        "links_to",
-        "bulk_unlink",
-        # group 3D — graph / resolve / reads
-        "all_documents",
-        "graph",
-        "graph_many",
-        "resolve_chash",
-        "resolve_span",
-        "is_initialized",
-    }
+    # RDR-168 Phase 3 complete: all 19 audited divergences reconciled.
+    # The empty set is the GREEN end state — the permanent guard is now fully live.
 )
 
 
@@ -239,35 +216,33 @@ def test_nonconforming_set_matches_locked_baseline() -> None:
 
 
 def test_nonconforming_count_is_locked() -> None:
-    """The audited divergence count is exactly 19 (18 breaking + 1 silent)."""
-    assert len(_compute_nonconforming()) == 19
+    """RDR-168 Phase 3 complete: the reconciled divergence count is 0."""
+    assert len(_compute_nonconforming()) == 0
 
 
 # ── the load-bearing predicate, proven directly ──────────────────────────────────
 
 
 def test_predicate_rejects_kwargs_swallow_for_link_if_absent() -> None:
-    """`link_if_absent` is non-conforming BECAUSE the client `**kwargs` is excluded.
+    """`link_if_absent` is now CONFORMING after RDR-168 Phase 3 reconciliation.
 
-    This is the silent-data-loss case the RDR-168 gate flagged: a naive
-    call-compatibility check would PASS here (the client's `**kwargs` absorbs any keyword
-    argument), hiding the divergence. The predicate must instead report the local named
-    params the client does not expose explicitly.
+    Phase 3 replaced the silent `**kwargs` with explicit named parameters that are
+    serialized onto the wire. This test confirms the reconciliation is complete:
+    - `link_if_absent` is in the caller-facing surface
+    - `_missing_client_params` returns [] (no missing params)
+    - The client no longer has a bare `VAR_KEYWORD` that swallows named params silently
     """
     assert "link_if_absent" in _CALLER_FACING
     missing = _missing_client_params("link_if_absent")
-    assert missing, (
-        "predicate failed to surface the link_if_absent silent **kwargs swallow — a "
-        "VAR_KEYWORD on the client must NOT satisfy a caller's named parameter"
+    assert not missing, (
+        f"link_if_absent still has missing params after Phase 3 reconciliation: {missing}"
     )
-    # The client genuinely has a **kwargs (that is what makes it silent, not breaking)…
-    client_kinds = {
-        p.kind
-        for p in inspect.signature(_CLIENT_METHODS["link_if_absent"]).parameters.values()
-    }
-    assert inspect.Parameter.VAR_KEYWORD in client_kinds
-    # …yet the named caller params (e.g. created_by) are still reported as unserved.
-    assert "created_by" in missing
+    # The explicit params now present on the client
+    client_params = set(_explicit_named_params(_CLIENT_METHODS["link_if_absent"]))
+    assert "created_by" in client_params
+    assert "from_span" in client_params
+    assert "to_span" in client_params
+    assert "allow_dangling" in client_params
 
 
 def test_kwargs_does_not_satisfy_a_named_param_unit() -> None:

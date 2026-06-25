@@ -57,6 +57,24 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     #: propagation can be asserted.
     rename_conflicts: bool = False
 
+    #: RDR-168 P3 wire-semantics regression coverage.
+    get_ops: list[str] = []          # ops seen by do_GET, in order
+    post_ops: list[str] = []         # ops seen by do_POST, in order
+    last_link_body: dict[str, Any] = {}
+    #: from_tumbler value for which /link_query reports NO existing link (absent path).
+    link_absent_from: str = "9.9.9"
+    #: when set, /list returns this many docs for a content_type-filtered request
+    #: (CatalogHandler returns ALL matching rows ignoring limit/offset — used to prove
+    #: the client issues a single request and does not loop).
+    list_content_type_count: int = 0
+
+    @classmethod
+    def reset_log(cls) -> None:
+        cls.get_ops = []
+        cls.post_ops = []
+        cls.last_link_body = {}
+        cls.list_content_type_count = 0
+
     def log_message(self, *args: Any) -> None:
         pass  # suppress test noise
 
@@ -81,13 +99,21 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         op = path.removeprefix("/v1/catalog")
+        FakeCatalogHandler.get_ops.append(op)
 
         if op == "/stats":
             self._send_json({"doc_count": 7, "link_count": 3, "owner_count": 2})
         elif op == "/show":
             self._send_json(_entry_dict())
         elif op == "/list":
-            self._send_json({"documents": [_entry_dict(), _entry_dict(title="Second")], "count": 2})
+            params = self._query_params()
+            if params.get("content_type") and FakeCatalogHandler.list_content_type_count:
+                # Mirror CatalogHandler: the content_type branch ignores limit/offset and
+                # returns ALL matching rows in one response.
+                n = FakeCatalogHandler.list_content_type_count
+                self._send_json({"documents": [_entry_dict() for _ in range(n)], "count": n})
+            else:
+                self._send_json({"documents": [_entry_dict(), _entry_dict(title="Second")], "count": 2})
         elif op == "/search":
             self._send_json({"documents": [_entry_dict()], "count": 1})
         elif op == "/resolve":
@@ -102,7 +128,11 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"links_from": [], "links_to": []})
         elif op == "/link_query":
-            self._send_json({"links": [{"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}], "count": 1})
+            params = self._query_params()
+            if params.get("from_tumbler") == FakeCatalogHandler.link_absent_from:
+                self._send_json({"links": [], "count": 0})
+            else:
+                self._send_json({"links": [{"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}], "count": 1})
         elif op == "/manifest/get":
             self._send_json({"rows": [{"position": 0, "chash": "abc123"}], "count": 1})
         elif op == "/manifest/chashes":
@@ -139,6 +169,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         op = path.removeprefix("/v1/catalog")
         body = self._read_body()
+        FakeCatalogHandler.post_ops.append(op)
 
         if op == "/doc/register":
             self._send_json({"tumbler": _fake_tumbler()})
@@ -149,6 +180,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/delete":
             self._send_json({"deleted": 1})
         elif op == "/link":
+            FakeCatalogHandler.last_link_body = body
             self._send_json({"ok": True})
         elif op == "/unlink":
             self._send_json({"deleted": 1})
@@ -317,9 +349,72 @@ class TestHttpCatalogClientRoundTrip:
         assert len(docs) == 2
         assert docs[1].title == "Second"
 
-    def test_link_returns_dict(self, client: HttpCatalogClient) -> None:
-        result = client.link("1.1.1", "1.1.2", "cites")
-        assert isinstance(result, dict)
+    def test_link_returns_bool(self, client: HttpCatalogClient) -> None:
+        # Canonical Catalog.link() takes positional created_by and returns bool.
+        # Migrated from old client-specific sig (created_by was kw-only with default).
+        result = client.link("1.1.1", "1.1.2", "cites", "test-suite")
+        assert isinstance(result, bool)
+
+    # ── RDR-168 P3 wire-semantics regressions (substantive-critic Criticals) ──────
+
+    def test_all_documents_content_type_does_not_loop(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """all_documents(content_type=X, limit=0) issues ONE /list, never loops.
+
+        The service's content_type branch ignores limit/offset and returns every row.
+        A pagination loop would re-fetch the full (>=page) set forever. Regression guard
+        for the infinite-loop Critical: assert a single /list request and all rows back.
+        """
+        FakeCatalogHandler.reset_log()
+        FakeCatalogHandler.list_content_type_count = 1500  # >= the 1000 page size
+        docs = client.all_documents(content_type="code")  # limit defaults to 0 (unbounded)
+        assert len(docs) == 1500
+        assert FakeCatalogHandler.get_ops.count("/list") == 1
+
+    def test_link_if_absent_skips_when_link_present(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """Existing link → skip (return False), NO /link write (no overwrite).
+
+        Canonical link_if_absent is INSERT-OR-SKIP; the service POST /link is an UPSERT
+        that would overwrite created_by/spans/meta. The pre-flight must short-circuit.
+        """
+        FakeCatalogHandler.reset_log()
+        result = client.link_if_absent("1.1.1", "1.1.2", "cites", "indexer")
+        assert result is False
+        assert "/link" not in FakeCatalogHandler.post_ops
+
+    def test_link_if_absent_writes_when_absent_and_serializes_params(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """Absent link → write, with every caller param serialized onto the payload."""
+        FakeCatalogHandler.reset_log()
+        result = client.link_if_absent(
+            FakeCatalogHandler.link_absent_from, "1.1.2", "cites", "indexer",
+            from_span="chash:aa", to_span="chash:bb", allow_dangling=True,
+        )
+        assert result is True
+        assert "/link" in FakeCatalogHandler.post_ops
+        body = FakeCatalogHandler.last_link_body
+        assert body["created_by"] == "indexer"
+        assert body["from_span"] == "chash:aa"
+        assert body["to_span"] == "chash:bb"
+        assert body["allow_dangling"] is True
+
+    def test_bulk_unlink_dry_run_returns_real_count_without_deleting(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """dry_run=True returns the would-delete count via link_query, no /unlink POST."""
+        FakeCatalogHandler.reset_log()
+        n = client.bulk_unlink(link_type="cites", dry_run=True)
+        assert n == 1  # the fake /link_query reports one matching link
+        assert "/unlink" not in FakeCatalogHandler.post_ops
+
+    def test_bulk_unlink_requires_a_filter(self, client: HttpCatalogClient) -> None:
+        """Canonical parity: no filter and not dry_run → ValueError (guard against mass delete)."""
+        with pytest.raises(ValueError, match="at least one filter"):
+            client.bulk_unlink()
 
     def test_links_from_uses_direction_out(self, client: HttpCatalogClient) -> None:
         # GET /links?tumbler=X&direction=out
@@ -427,8 +522,11 @@ class TestHttpCatalogClientRoundTrip:
         assert len(colls) == 1
 
     def test_supersede_collection(self, client: HttpCatalogClient) -> None:
-        n = client.supersede_collection("old__coll", superseded_by="new__coll")
-        assert n == 5
+        # Canonical Catalog.supersede_collection() takes positional old_name, new_name.
+        # Migrated from old client-specific sig (new_name was keyword-only superseded_by).
+        # Returns None (canonical), not int.
+        result = client.supersede_collection("old__coll", "new__coll")
+        assert result is None
 
     def test_rename_collection(self, client: HttpCatalogClient) -> None:
         # Sends {old_name, new_name} (canonical form)
@@ -478,8 +576,11 @@ class TestHttpCatalogClientRoundTrip:
         assert n == 1  # fake server returns {"deleted": 1}
 
     def test_update_documents_collection_batch(self, client: HttpCatalogClient) -> None:
-        # No batch endpoint: iterates update per tumbler
-        n = client.update_documents_collection_batch(["1.1.1", "1.1.2"], "new__coll")
+        # Canonical Catalog.update_documents_collection_batch() takes pairs: list[tuple[str,str]].
+        # Migrated from old client-specific sig (tumblers list + collection string).
+        n = client.update_documents_collection_batch(
+            [("1.1.1", "new__coll"), ("1.1.2", "new__coll")]
+        )
         assert n == 2
 
     def test_register_owner(self, client: HttpCatalogClient) -> None:
