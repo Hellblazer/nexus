@@ -103,6 +103,19 @@ deployment, the copy-not-move T2/T3 ETL, and the RDR lifecycle. nexus's read on 
 
 ## Research Findings
 
+### Key Discoveries
+
+- **The FTS path already tolerates NULL content** — `chunk_tsv` is a nullable generated
+  column; a reference-only row (NULL `chunk_text`) yields a NULL tsvector that the `@@`
+  match and the GIN index both skip. The schema slice is therefore just `retention` +
+  `chunk_text DROP NOT NULL`; the generated `chunk_tsv` expression is untouched.
+- **embed-without-store is already half-built** — `PgVectorRepository.upsertChunksWithVectors`
+  (RDR-166 same-model passthrough) stores caller-supplied vectors verbatim with a fail-loud
+  dim check. Reference-only ingest reuses this; the only addition is a nullable-content upsert
+  branch under `retention='reference-only'`.
+- Both schema-track Critical Assumptions clear at the source/schema level; the remaining
+  verification (CA-1 reconcile) is the cross-repo co-design step with conexus, not engine work.
+
 ### Critical Assumptions
 
 - [ ] **The retention slice is purely additive and reconcile-safe** — `ADD COLUMN retention
@@ -111,13 +124,18 @@ deployment, the copy-not-move T2/T3 ETL, and the RDR lifecycle. nexus's read on 
   chash, not on content, so an additive defaulted column does not false-positive reconcile —
   **Status**: Confirmed by conexus (relay A2); re-verify against the ETL `_TABLE_SPECS` at
   co-design — **Method**: cross-repo co-design + reconcile dry-run.
-- [ ] **`chunk_tsv` (FTS) degrades gracefully when `chunk_text` is NULL** — the generated
-  tsvector column must tolerate NULL content (reference-only chunks are vector-only / not
-  FTS-searchable) without breaking the prose-lane FTS path — **Status**: Unverified —
-  **Method**: schema spike against the generated-column definition.
-- [ ] **A reference-only chunk is still embeddable** — embed-without-store requires a vector
-  even when content is absent (the consumer supplies it, or nexus embeds a supplied span at
-  register time then discards content) — **Status**: Unverified — **Method**: design spike.
+- [x] **`chunk_tsv` (FTS) degrades gracefully when `chunk_text` is NULL** — **Status**:
+  Verified — **Method**: schema spike (research-1). `chunk_tsv` carries no `NOT NULL`, so
+  `to_tsvector('english', NULL)` → NULL tsvector → excluded from FTS (`@@` on NULL is false)
+  and skipped by the GIN index. The generated-column expression needs **no** change; only
+  `chunk_text DROP NOT NULL`. The earlier `COALESCE(chunk_text,'')` idea is unnecessary
+  (empty vs NULL tsvector both exclude the row); keep the expression unchanged.
+- [x] **A reference-only chunk is still embeddable** — **Status**: Verified-feasible —
+  **Method**: source spike (research-1). The precomputed-vector primitive already exists:
+  `PgVectorRepository.upsertChunksWithVectors` (RDR-166 passthrough — stores caller-supplied
+  embeddings verbatim, dim-validated, no embedder). The embed path is text→vector, decoupled
+  from storage. Remaining work is only a nullable-content upsert branch under
+  `retention='reference-only'` + the schema slice — not a blocker.
 - [ ] **RLS is unconditional** — `tenant_id` stays `NOT NULL` on reference-only rows; content
   nullability is orthogonal to tenancy — **Status**: Confirmed mutual (relay) — **Method**:
   schema invariant + RLS behavioral test.
