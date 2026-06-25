@@ -24,8 +24,21 @@ DO_BUILD=1
 GUIDED=0
 COLD=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
-# its /version reports >= v0.1.5 and the guided-upgrade version-pin PASSES.
-GUIDED_STAMP_VERSION="0.1.6"
+# its /version reports >= the guided-upgrade version-pin floor and PASSES.
+# Derived from the product constant (REQUIRED_RELEASE_VERSION) so this stamp can
+# never go stale: a hardcoded "0.1.6" silently fell below the bumped v0.1.8 floor
+# and the MVV fail-closed at the version gate without ever exercising the
+# migration (nexus-... 6.0.0 validation). Falls back to a literal floor if the
+# constant can't be parsed.
+GUIDED_STAMP_VERSION="$(
+  python3 - <<'PY' 2>/dev/null || true
+import re, pathlib
+src = pathlib.Path("src/nexus/migration/guided_upgrade.py").read_text()
+m = re.search(r"REQUIRED_RELEASE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src)
+print(".".join(m.groups()) if m else "")
+PY
+)"
+[ -n "$GUIDED_STAMP_VERSION" ] || GUIDED_STAMP_VERSION="0.1.8"
 RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # nexus-4mm24: the published engine-service tag the COLD box auto-acquires from.
 COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.6}"
