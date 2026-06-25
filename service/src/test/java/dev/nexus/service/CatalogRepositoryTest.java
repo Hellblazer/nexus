@@ -298,6 +298,13 @@ class CatalogRepositoryTest {
         var doc = repo.getDocument(TENANT_A, "2.1");
         assertThat(doc.get("title")).isEqualTo("New Title");
         assertThat(doc.get("year")).isEqualTo(2025);
+
+        // RDR-168 nexus-njrcn.7: a "meta" object field must be JSON-encoded into the
+        // jsonb metadata column, not bound as a raw Map (which threw
+        // "LinkedHashMap is not supported in dialect POSTGRES" → 500).
+        int metaUpdated = repo.updateDocument(
+            TENANT_A, "2.1", Map.of("meta", Map.of("content_hash", "abc123")));
+        assertThat(metaUpdated).isEqualTo(1);
     }
 
     @Test @Order(14)

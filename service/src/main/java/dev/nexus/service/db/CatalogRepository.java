@@ -536,6 +536,16 @@ public final class CatalogRepository {
                 if (e.getValue() == null) continue;
                 // Strip deleted_at — must not be settable via updateDocument
                 if ("deleted_at".equals(e.getKey())) continue;
+                // metadata is a jsonb column: callers pass it as an object (or JSON
+                // string) under "meta"/"metadata". A bare set() of a Map fails with
+                // "LinkedHashMap is not supported in dialect POSTGRES"; JSON-encode and
+                // bind as jsonb, mirroring upsertDocument (RDR-168 nexus-njrcn.7).
+                if ("meta".equals(e.getKey()) || "metadata".equals(e.getKey())) {
+                    more = (more == null)
+                        ? step.set(F_DOC_META, jsonbVal(jsonOrNull(e.getValue())))
+                        : more.set(F_DOC_META, jsonbVal(jsonOrNull(e.getValue())));
+                    continue;
+                }
                 @SuppressWarnings("unchecked")
                 Field<Object> f = (Field<Object>) DSL.field(DSL.name("catalog_documents", e.getKey()));
                 more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
