@@ -91,46 +91,78 @@ Filed as `nexus-7y0ab` (P1).
 
 ### Investigation
 
-To be completed during `/conexus:rdr-research`. The load-bearing task is the
-**full signature audit**: enumerate every public method on `Catalog` (the caller-facing
-interface) and compare against `HttpCatalogClient`, classifying each as
-{match, name-divergence, missing-param, missing-method, extra-method}. Also trace the
-service-mode registration + manifest-write path end-to-end to confirm whether Gap 2 is
-fully explained by Gap 1 divergences or has additional causes (e.g. the manifest hook
-not firing with a populated `catalog_doc_id`).
+**Full signature audit (completed 2026-06-25, introspection spike).** Compared
+`inspect.signature` of every public method of `Catalog` (the caller-facing facade)
+against `HttpCatalogClient`. Result: `Catalog` exposes **87** public methods,
+`HttpCatalogClient` **93**; **0** are missing on the client; **62 match**; **25
+diverge**. Classifying the 25 by caller impact (does a caller written against the local
+signature break?):
+
+- **18 BREAKING** — the client is missing, or has renamed, a parameter the caller
+  passes, with no `**kwargs` to absorb it → `TypeError`: `all_documents`,
+  `bulk_unlink`, `collection_for`, `collection_for_repo`, `ensure_owner_for_repo`,
+  `graph`, `graph_many`, `is_initialized`, `link`, `links_from`, `links_to`,
+  `list_by_collection`, `lookup_doc_id_by_collection_and_path`, `resolve_chash`,
+  `resolve_span`, `supersede_collection`, `update_document_collection`,
+  `update_documents_collection_batch`.
+- **1 SILENT** — `link_if_absent` has a `**kwargs` that *swallows*
+  `created_by`/`from_span`/`to_span`/`allow_dangling`/`meta` with no error. Arguably
+  worse than a `TypeError`: it loses link provenance/metadata silently.
+- **6 BENIGN** — the client only adds extra optional params (`atomic_manifest_replace`,
+  `link_query`, `register`, `register_collection`, `register_owner`,
+  `rename_collection`); callers using the local signature are unaffected.
+
+Several BREAKING methods sit directly in the indexing/registration path
+(`collection_for`, `collection_for_repo`, `update_document_collection`,
+`supersede_collection`), strongly supporting the hypothesis that the empty-catalog
+symptom (Gap 2) is primarily caused by these signature divergences. Confirming there is
+no *second* cause (manifest hook / `catalog_doc_id` threading) is the remaining
+implementation-phase spike (CA-4).
+
+Reproduction: `/tmp/catalog_conformance_spike.py` (full audit), `/tmp/catalog_breaking.py`
+(breaking classification). Recorded in T2: `nexus_rdr/168-research-1`.
 
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| `Catalog` / `_DocumentOps` (local) | Partial | `collection_for(content_type, owner, embedding_model)`, `all_documents(content_type=...)` confirmed |
-| `HttpCatalogClient` | Partial | `collection_for(*, content_type, owner_id, embedding_model)`, `all_documents()` (no content_type) confirmed |
-| `CatalogHandler.java` | Partial | `/collections/for_tuple`, `/collections/rename`, manifest endpoints exist; map each to the client method |
+| `Catalog` / `_DocumentOps` (local) | Yes | 87 public methods; canonical caller-facing signatures |
+| `HttpCatalogClient` | Yes | 93 public methods; 0 missing vs local; 62 match, 18 breaking, 1 silent, 6 benign |
+| `CatalogHandler.java` | Partial | endpoints exist for all client methods; the gap is the Python client signature, not a missing endpoint |
 
 ### Key Discoveries
 
-- **Verified** — two signature divergences reproduce live (`collection_for`,
-  `all_documents`) and break the indexer + CLI in service mode.
+- **Verified** — the divergence is **18 breaking methods (+1 silent)**, not 2. Patching
+  only the two known (`collection_for`, `all_documents`) would have left 16 breaking +
+  1 silent unaddressed — a 9× under-estimate. The audit-first approach is vindicated.
+- **Verified** — the introspection conformance test (~40 lines, pure `inspect`) catches
+  every divergence including the two known. It needs no hand-maintained list; it is the
+  recurrence guard (CA-2).
+- **Verified** — `Catalog` has 87 public methods and `HttpCatalogClient` is missing
+  none of them, so a `Protocol` over the caller-facing surface is feasible (CA-1).
 - **Verified** — service-mode `nx index repo` leaves the catalog empty
-  (`Documents:0`/`manifest_empty`).
-- **Assumed** — the empty-catalog symptom is fully explained by signature divergences
-  in the registration path; needs end-to-end tracing to confirm there is not a second
-  cause (manifest hook / `catalog_doc_id` threading).
+  (`Documents:0`/`manifest_empty`); multiple breaking methods are in that path.
+- **Assumed** — signature reconciliation alone fully restores catalog population (no
+  second cause). Needs the implementation spike (CA-4).
 
 ### Critical Assumptions
 
-- [ ] **The caller-facing catalog interface can be expressed as a single Protocol/ABC**
+- [x] **The caller-facing catalog interface can be expressed as a single Protocol/ABC**
   that both `Catalog` and `HttpCatalogClient` are intended to satisfy — **Status**:
-  Unverified — **Method**: Source Search (enumerate the actual caller surface, not all 94 methods)
-- [ ] **A signature-conformance test would have caught both confirmed divergences** and
-  is cheap to maintain (introspection-based, not a hand-list) — **Status**: Unverified
-  — **Method**: Spike (write the test against current code, confirm it fails on the 2 known gaps)
+  Verified — **Method**: Source Search (87 local methods, 0 missing on the client; the
+  surface is bounded and enumerable)
+- [x] **A signature-conformance test would have caught both confirmed divergences** and
+  is cheap to maintain (introspection-based, not a hand-list) — **Status**: Verified
+  — **Method**: Spike (`/tmp/catalog_conformance_spike.py` flags all 25 divergences incl.
+  the 2 known; ~40 lines)
 - [ ] **Reconciling the signatures (renaming params / adding params on the client) does
   not break the 173 existing HTTP integration tests** — **Status**: Unverified —
-  **Method**: Source Search + run the suite
+  **Method**: Source Search + run the suite (deferred to implementation; scope now known:
+  18 breaking methods, most fixes additive — accept the local param name, derive the
+  client param; the `link_if_absent` `**kwargs` swallow needs explicit handling)
 - [ ] **Once signatures match, service-mode `nx index repo` populates the catalog**
   (Documents/Chunks > 0 + manifest) with no second root cause — **Status**: Unverified
-  — **Method**: Spike (the MVV)
+  — **Method**: Spike (the MVV; deferred to implementation)
 
 ## Proposed Solution
 
@@ -317,3 +349,8 @@ The auto-generation alternative is explicitly deferred.
 ## Revision History
 
 - 2026-06-25: Initial draft (from the 6.0.0 validation + stacked-review discovery).
+- 2026-06-25 (research round 1): Full signature audit completed. 87 local methods, 18
+  BREAKING + 1 SILENT + 6 BENIGN divergences (not 2). CA-1 (interface enumerable) and
+  CA-2 (introspection conformance test catches all divergences) Verified by spike.
+  CA-3 (no regression) and CA-4 (catalog populates after fix) remain for the
+  implementation phase. T2: `nexus_rdr/168-research-1`.
