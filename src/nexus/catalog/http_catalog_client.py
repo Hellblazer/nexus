@@ -62,7 +62,7 @@ import httpx
 import structlog
 
 from nexus.catalog.catalog import CatalogEntry, Tumbler
-from nexus.catalog.collection_name import CollectionName
+from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 
 _log = structlog.get_logger(__name__)
 
@@ -1186,22 +1186,45 @@ class HttpCatalogClient:
         *,
         bump: bool = False,
     ) -> CollectionName:
-        # bump: no direct equivalent on the service; the service allocates the next
-        # collection when the tuple is not found. Accepted for signature conformance.
+        # Mirror canonical _DocumentOps.collection_for: the catalog RENDERS the name; a
+        # NEW tuple lands at v1 (never a 404/None), an existing tuple returns vN, and
+        # bump returns vN+1. The service /collections/for_tuple is lookup-only (404 on a
+        # new tuple), so we use it purely as the version oracle and render the name with
+        # the SAME canonical helpers (owner_segment_for_tumbler + CollectionName) — no
+        # client-side reimplementation, so local and service modes cannot diverge on the
+        # physical name. (nexus-njrcn.2; the prior lookup-only behaviour 404'd the very
+        # first index of a repo — the CA-4 empty-catalog cause.)
+        owner_id = owner_segment_for_tumbler(owner)
+        if not owner_id:
+            raise ValueError(
+                f"collection_for: cannot derive owner_id segment from owner {owner!r}"
+            )
+        existing_version = 0
         try:
             result = self._get(
                 "/collections/for_tuple",
                 content_type=content_type,
-                owner_id=str(owner),  # wire key is owner_id; canonical param is owner
+                owner_id=owner_id,  # canonical owner SEGMENT, not the raw tumbler
                 embedding_model=embedding_model,
             )
+            if result and result.get("name"):
+                existing_version = CollectionName.parse(result["name"]).model_version
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                raise KeyError(
-                    f"No collection for ({content_type!r}, {owner!r}, {embedding_model!r})"
-                ) from exc
-            raise
-        return CollectionName.parse(result["name"])
+            if exc.response.status_code != 404:
+                raise
+            # 404 == tuple not yet registered == new tuple → v1 (canonical semantics).
+        if existing_version == 0:
+            new_version = 1
+        elif bump:
+            new_version = existing_version + 1
+        else:
+            new_version = existing_version
+        return CollectionName(
+            content_type=content_type,
+            owner_id=owner_id,
+            embedding_model=embedding_model,
+            model_version=new_version,
+        )
 
     def collection_for_repo(
         self,
