@@ -2,12 +2,12 @@
 title: "Docuverse Storage: Reference-Only Chunks — Retention Enum, Nullable Content, Reference-Only Search DTO, and the URI-Resolver / Embed-Without-Store Surface"
 id: RDR-169
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-25
-accepted_date:
+accepted_date: 2026-06-25
 related_issues: [nexus-ssm3p, nexus-3kybd, nexus-mt9p8]
 related: [RDR-053, RDR-096, RDR-108, RDR-103, RDR-152, RDR-155]
 ---
