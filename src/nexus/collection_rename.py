@@ -275,8 +275,14 @@ def remap_collection_references(
         else:
             counts["catalog_docs"] = catalog.rename_collection(source, target)
     except Exception as exc:  # noqa: BLE001 — catalog cascade is best-effort after T2 remap; surfaced via on_warn
+        # The catalog is a derived view (see docstring): a cascade miss here —
+        # e.g. a 404 when the legacy source was never registered as a catalog
+        # collection — is non-fatal and repairable. State the remedy so this
+        # does not read as a data-loss failure (nexus-i6p73).
         on_warn(
-            f"warn: T2 reference remap succeeded but catalog cascade failed: {exc}"
+            f"warn: T2 reference remap succeeded but catalog cascade failed: {exc}\n"
+            f"       (non-fatal: the catalog is a derived view; run "
+            f"`nx catalog rebuild` to reconcile.)"
         )
 
     return counts
