@@ -18,6 +18,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 /**
  * RDR-155 Phase 2 - vector operations repository backed by pgvector
@@ -104,6 +106,14 @@ public final class PgVectorRepository {
             "voyage-3",            1024,
             "bge-base-en-v15-768",  768,
             "minilm-l6-v2-384",     384);
+
+    /**
+     * Test-visibility hook (S1, RDR-169 G5): counts invocations of {@link #sourceUrisByChash}.
+     * Public so cross-package integration tests (e.g. {@code dev.nexus.service.BridgeAddressFieldsTest})
+     * can assert that the default path (includeSourceUri=false) runs ZERO catalog JOINs and the
+     * opt-in path runs ≥1. Production code never reads this field.
+     */
+    public final AtomicInteger sourceUriJoinCalls = new AtomicInteger();
 
     /**
      * Pairs a value with the embedding token count consumed to produce it (bead nexus-ehc4q).
@@ -413,22 +423,36 @@ public final class PgVectorRepository {
      *         chunk's metadata keys flattened in (same shape as the Chroma path's
      *         flattened rows so handlers port unchanged)
      */
-    /** Delegates to {@link #searchWithTokens}; discards the token count. */
+    /** Delegates to {@link #searchWithTokens}; discards the token count. source_uri not included. */
     public List<Map<String, Object>> search(String tenant, String queryText,
                                             List<String> collectionNames,
                                             int nResults,
                                             Map<String, Object> where) {
-        return searchWithTokens(tenant, queryText, collectionNames, nResults, where).value();
+        return searchWithTokens(tenant, queryText, collectionNames, nResults, where, false).value();
     }
 
     /**
-     * Token-aware sibling of {@link #search} (bead nexus-ehc4q).
-     * Returns search results alongside the embedding token count.
+     * Backward-compat 5-arg overload of {@link #searchWithTokens} (source_uri not included).
+     * Existing callers (contract tests, graph-hop, metadata-scoped) use this form.
      */
     public Tokened<List<Map<String, Object>>> searchWithTokens(String tenant, String queryText,
                                                                List<String> collectionNames,
                                                                int nResults,
                                                                Map<String, Object> where) {
+        return searchWithTokens(tenant, queryText, collectionNames, nResults, where, false);
+    }
+
+    /**
+     * Token-aware sibling of {@link #search} (bead nexus-ehc4q).
+     * Returns search results alongside the embedding token count.
+     *
+     * @param includeSourceUri when true, resolves source_uri via catalog JOIN (opt-in, RDR-169 G5)
+     */
+    public Tokened<List<Map<String, Object>>> searchWithTokens(String tenant, String queryText,
+                                                               List<String> collectionNames,
+                                                               int nResults,
+                                                               Map<String, Object> where,
+                                                               boolean includeSourceUri) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -483,6 +507,8 @@ public final class PgVectorRepository {
             row.putAll(fromJson(rec.get("metadata_json", String.class)));
             rows.add(row);
         }
+        // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
+        enrichSearchRows(tenant, rows, includeSourceUri);
         return new Tokened<>(rows, embedResult.tokens());
     }
 
@@ -575,27 +601,45 @@ public final class PgVectorRepository {
      * @throws IllegalArgumentException if {@code nResults < 1} (a non-positive LIMIT would
      *                                  silently unbound the query: LIMIT -1 means no limit)
      */
-    /** Delegates to the 6-arg overload with {@link #SELECTIVE_GATE_MAX}; discards token count. */
+    /**
+     * Delegates to the enriched path (includeSourceUri=false) so callers get chash+span,
+     * symmetric with {@link #search(String, String, List, int, Map)} (fix #M3-cr).
+     */
     public List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                                   List<String> collectionNames,
                                                   int nResults,
                                                   Map<String, Object> where) {
-        return hybridSearch(tenant, queryText, collectionNames, nResults, where, SELECTIVE_GATE_MAX);
+        return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, false).value();
     }
 
     /**
      * Token-aware sibling of {@link #hybridSearch} (bead nexus-ehc4q).
      * Returns hybrid search results alongside the embedding token count.
+     *
+     * @param includeSourceUri when true, resolves source_uri via catalog JOIN (opt-in, RDR-169 G5)
+     */
+    public Tokened<List<Map<String, Object>>> hybridSearchWithTokens(String tenant, String queryText,
+                                                                      List<String> collectionNames,
+                                                                      int nResults,
+                                                                      Map<String, Object> where,
+                                                                      boolean includeSourceUri) {
+        long[] tokensOut = {0L};
+        List<Map<String, Object>> rows =
+            hybridSearch(tenant, queryText, collectionNames, nResults, where, SELECTIVE_GATE_MAX,
+                         tokensOut);
+        // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
+        enrichSearchRows(tenant, rows, includeSourceUri);
+        return new Tokened<>(rows, tokensOut[0]);
+    }
+
+    /**
+     * Backward-compat 5-arg overload of {@link #hybridSearchWithTokens} (source_uri not included).
      */
     public Tokened<List<Map<String, Object>>> hybridSearchWithTokens(String tenant, String queryText,
                                                                       List<String> collectionNames,
                                                                       int nResults,
                                                                       Map<String, Object> where) {
-        long[] tokensOut = {0L};
-        List<Map<String, Object>> rows =
-            hybridSearch(tenant, queryText, collectionNames, nResults, where, SELECTIVE_GATE_MAX,
-                         tokensOut);
-        return new Tokened<>(rows, tokensOut[0]);
+        return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, false);
     }
 
     /**
@@ -788,13 +832,16 @@ public final class PgVectorRepository {
     /**
      * Fetch specific chunk IDs from a collection.
      *
+     * @param includeSourceUri when true, resolves source_uris via catalog JOIN (opt-in, RDR-169 G5)
      * @return Chroma-style envelope {@code {ids: List<String>, documents: List<String>,
-     *         metadatas: List<Map>}} aligned by index; IDs not present (or not visible
+     *         metadatas: List<Map>}} plus {@code chashes}/{@code spans} always and
+     *         {@code source_uris} when requested; IDs not present (or not visible
      *         under RLS) are omitted; {@code limit}/{@code offset} paginate in chash
      *         order (same ordering as {@link #list})
      */
     public Map<String, Object> get(String tenant, String collection,
-                                   List<String> ids, int limit, int offset) {
+                                   List<String> ids, int limit, int offset,
+                                   boolean includeSourceUri) {
         int dim = dimForCollection(collection);
         if (ids == null || ids.isEmpty()) {
             return Map.of("ids", List.of(), "documents", List.of(), "metadatas", List.of());
@@ -820,7 +867,16 @@ public final class PgVectorRepository {
             outDocs.add(rec.get("chunk_text", String.class));
             outMetas.add(fromJson(rec.get("metadata_json", String.class)));
         }
-        return Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas);
+        // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
+        return enrichGetEnvelope(tenant,
+            new LinkedHashMap<>(Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas)),
+            includeSourceUri);
+    }
+
+    /** Backward-compat 5-arg overload of {@link #get} (source_uri not included). */
+    public Map<String, Object> get(String tenant, String collection,
+                                   List<String> ids, int limit, int offset) {
+        return get(tenant, collection, ids, limit, offset, false);
     }
 
     /**
@@ -943,7 +999,8 @@ public final class PgVectorRepository {
      */
     public Map<String, Object> getWhere(String tenant, String collection,
                                         Map<String, Object> where,
-                                        int limit, int offset) {
+                                        int limit, int offset,
+                                        boolean includeSourceUri) {
         int dim = dimForCollection(collection);
         StringBuilder sql = new StringBuilder()
             .append("SELECT chash, chunk_text, metadata::text AS metadata_json FROM ")
@@ -971,7 +1028,17 @@ public final class PgVectorRepository {
             outDocs.add(rec.get("chunk_text", String.class));
             outMetas.add(fromJson(rec.get("metadata_json", String.class)));
         }
-        return Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas);
+        // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
+        return enrichGetEnvelope(tenant,
+            new LinkedHashMap<>(Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas)),
+            includeSourceUri);
+    }
+
+    /** Backward-compat 5-arg overload of {@link #getWhere} (source_uri not included). */
+    public Map<String, Object> getWhere(String tenant, String collection,
+                                        Map<String, Object> where,
+                                        int limit, int offset) {
+        return getWhere(tenant, collection, where, limit, offset, false);
     }
 
     /**
@@ -1716,6 +1783,220 @@ public final class PgVectorRepository {
             throw new IllegalArgumentException("metadata is not JSON-serializable: " + m, e);
         }
     }
+
+    // ── RDR-169 G5: address-triple enrichment (chash / source_uri / span) ────────
+
+    /**
+     * Fetch {@code source_uri} per chash in one round-trip (RDR-169 G5, bead nexus-jkv85).
+     *
+     * <p>Joins {@code catalog_document_chunks} to {@code catalog_documents} to resolve
+     * the document's {@code source_uri} from each chunk's {@code chash}. Runs under the
+     * tenant's RLS so cross-tenant leaks are impossible. Returns a map from chash to
+     * source_uri (null entry when the chash has no catalog document row).
+     *
+     * <p>Runs as a SINGLE IN-clause query — not N+1. Chunks with no catalog entry
+     * map to null; the caller emits null in the response (graceful, never 500).
+     *
+     * @param tenant  the tenant whose catalog rows to query (RLS-scoped)
+     * @param chashes the set of chunk chashes to resolve
+     * @return map from chash → source_uri (null value when not in catalog)
+     */
+    private Map<String, String> sourceUrisByChash(String tenant, Set<String> chashes) {
+        sourceUriJoinCalls.incrementAndGet();
+        if (chashes.isEmpty()) return Map.of();
+
+        // Batch into ≤300 chashes per IN-clause (ChromaQuotaValidator.MAX_RECORDS_PER_WRITE)
+        // so large get-envelope id lists never overflow the bind-param budget.
+        List<String> chashList = new ArrayList<>(chashes);
+        Map<String, String> out = new HashMap<>(chashList.size() * 2);
+        int batchSize = ChromaQuotaValidator.MAX_RECORDS_PER_WRITE;
+
+        for (int start = 0; start < chashList.size(); start += batchSize) {
+            List<String> batch = chashList.subList(start, Math.min(start + batchSize, chashList.size()));
+
+            // d.tenant_id = ? guards against cross-tenant source_uri leak when two tenants
+            // share a tumbler string. FORCE RLS scopes the chunks table; the explicit bind
+            // adds defense-in-depth on the catalog_documents side (fix #H2).
+            // Note: last-writer-wins when a chash appears in multiple catalog_document_chunks
+            // rows (shared chunk text across documents) — non-determinism accepted for now.
+            String sql = "SELECT cdc.chash, d.source_uri"
+                       + " FROM nexus.catalog_document_chunks cdc"
+                       + " JOIN nexus.catalog_documents d"
+                       + "   ON d.tumbler = cdc.doc_id AND d.tenant_id = ?"
+                       + " WHERE cdc.tenant_id = ?"
+                       + " AND cdc.chash IN (" + placeholders(batch.size()) + ")";
+            List<Object> binds = new ArrayList<>();
+            binds.add(tenant);   // d.tenant_id
+            binds.add(tenant);   // cdc.tenant_id
+            binds.addAll(batch);
+
+            Result<Record> result = tenantScope.withTenant(tenant, ctx ->
+                ctx.fetch(sql, binds.toArray()));
+
+            for (Record rec : result) {
+                String chash     = rec.get("chash",      String.class);
+                String sourceUri = rec.get("source_uri", String.class);
+                if (chash != null) out.put(chash, sourceUri);
+            }
+        }
+        return out;
+    }
+
+    /** Precompiled hex pattern for chunk_text_hash validation (fix #M1-cr: length+charset). */
+    private static final Pattern HEX64 = Pattern.compile("[0-9a-f]{64}");
+
+    /**
+     * Compute a span string from chunk metadata (RDR-169 G5, bead nexus-jkv85).
+     *
+     * <p>Span priority (highest-fidelity first):
+     * <ol>
+     *   <li>{@code chash:<chunk_text_hash>} — full 64-char lowercase-hex sha256 from stored
+     *       metadata (matches the {@code _SPAN_PATTERN} {@code chash:} form used by catalog
+     *       links). A non-hex 64-char value falls through to the next priority rather than
+     *       emitting a malformed span.
+     *   <li>{@code line_start-line_end} — line range when both fields are present and
+     *       {@code line_end > 0}.
+     *   <li>{@code ""} — whole-document span when no positional data is available.
+     * </ol>
+     *
+     * @param meta the chunk's metadata map (already deserialized from JSONB)
+     * @return span string matching the Python {@code _SPAN_PATTERN}; never null
+     */
+    static String spanFromMeta(Map<String, Object> meta) {
+        // Priority 1: chash:<full_sha256> from chunk_text_hash metadata field.
+        // Length AND hex-charset check: a 64-char non-hex value must not emit a malformed span.
+        Object cth = meta.get("chunk_text_hash");
+        if (cth instanceof String s && HEX64.matcher(s).matches()) {
+            return "chash:" + s;
+        }
+        // Priority 2: line_start-line_end (both must be present; line_end > 0 = positioned)
+        Object ls = meta.get("line_start");
+        Object le = meta.get("line_end");
+        if (ls instanceof Number lsn && le instanceof Number len) {
+            int lineEnd = len.intValue();
+            if (lineEnd > 0) {
+                return lsn.intValue() + "-" + lineEnd;
+            }
+        }
+        // Fallback: whole-document (empty span)
+        return "";
+    }
+
+    /**
+     * Enrich CHUNK-LEVEL search result rows with the address triple (RDR-169 G5, bead nexus-jkv85).
+     *
+     * <p><strong>Chunk-level callers only.</strong> {@code row.get("id")} IS the chash — this
+     * is the invariant for {@link #searchWithTokens} and {@link #hybridSearchWithTokens} rows.
+     * Document-level paths ({@code searchMetadataScoped}, {@code searchGraphHop}) return tumblers
+     * as id and MUST NOT call this method.
+     *
+     * <p>Always adds {@code chash} and {@code span} to each row in-place (free — no I/O).
+     * Adds {@code source_uri} only when {@code includeSourceUri} is {@code true} (opt-in,
+     * default false — gates the catalog JOIN so the default path pays zero extra I/O).
+     *
+     * <p>Field-presence contract:
+     * <ul>
+     *   <li>{@code includeSourceUri=false}: {@code source_uri} is ABSENT from each row
+     *       (byte-identical wire shape to callers that never set the flag).
+     *   <li>{@code includeSourceUri=true}: {@code source_uri} present; value is the URI
+     *       string when a catalog row exists, {@code null} when not.
+     * </ul>
+     *
+     * @param tenant           the tenant for the catalog JOIN (RLS-scoped)
+     * @param rows             the chunk-level search result rows to enrich (mutated in-place)
+     * @param includeSourceUri when true, resolves source_uri via a catalog JOIN
+     */
+    private void enrichSearchRows(String tenant, List<Map<String, Object>> rows,
+                                  boolean includeSourceUri) {
+        if (rows.isEmpty()) return;
+        Map<String, String> uriMap = Map.of();
+        if (includeSourceUri) {
+            Set<String> chashes = new LinkedHashSet<>(rows.size() * 2);
+            for (Map<String, Object> row : rows) {
+                Object id = row.get("id");
+                if (id instanceof String s) chashes.add(s);
+            }
+            uriMap = sourceUrisByChash(tenant, chashes);
+        }
+        for (Map<String, Object> row : rows) {
+            Object idVal = row.get("id");
+            // Fail loud if id is not a 32-hex chash — document-level callers must not reach here.
+            if (!(idVal instanceof String chashStr) || chashStr.length() != 32) {
+                throw new IllegalStateException(
+                    "enrichSearchRows: id '" + idVal + "' is not a 32-char chash — "
+                    + "only chunk-level search rows may be enriched");
+            }
+            row.put("chash", chashStr);
+            if (includeSourceUri) {
+                row.put("source_uri", uriMap.get(chashStr));
+            }
+            // spanFromMeta reads chunk_text_hash / line_start / line_end from the FLATTENED row:
+            // search rows include metadata keys at the top level (via row.putAll(fromJson(...))).
+            row.put("span", spanFromMeta(row));
+        }
+    }
+
+    /**
+     * Enrich a {@code {ids, documents, metadatas}} get-envelope with address triple parallel
+     * lists (RDR-169 G5, bead nexus-jkv85).
+     *
+     * <p>Always adds {@code chashes} and {@code spans} as parallel lists aligned with
+     * {@code ids}. The existing three keys are UNTOUCHED. Adds {@code source_uris} only when
+     * {@code includeSourceUri} is {@code true} (gates the catalog JOIN).
+     *
+     * <p>Field-presence contract:
+     * <ul>
+     *   <li>{@code includeSourceUri=false}: {@code source_uris} is ABSENT from the envelope.
+     *   <li>{@code includeSourceUri=true}: {@code source_uris} present and parallel with ids;
+     *       null entries where no catalog row exists.
+     * </ul>
+     *
+     * @param tenant           the tenant for the catalog JOIN (RLS-scoped)
+     * @param envelope         the raw get envelope (must contain {@code ids} and {@code metadatas})
+     * @param includeSourceUri when true, resolves source_uris via a catalog JOIN
+     * @return a new map containing all existing keys plus the new parallel lists
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> enrichGetEnvelope(String tenant, Map<String, Object> envelope,
+                                                   boolean includeSourceUri) {
+        Object idsRaw = envelope.get("ids");
+        if (!(idsRaw instanceof List<?>)) return envelope;
+        List<String> ids = (List<String>) idsRaw;
+        if (ids.isEmpty()) return envelope;
+
+        // Defensive cast: bail gracefully if metadatas is not the expected shape
+        Object metasRaw = envelope.get("metadatas");
+        List<Map<String, Object>> metas = (metasRaw instanceof List<?>) ? (List<Map<String, Object>>) metasRaw : null;
+
+        Map<String, String> uriMap = Map.of();
+        if (includeSourceUri) {
+            uriMap = sourceUrisByChash(tenant, new LinkedHashSet<>(ids));
+        }
+
+        List<String> chashes   = new ArrayList<>(ids.size());
+        List<String> sourceUris = includeSourceUri ? new ArrayList<>(ids.size()) : null;
+        List<String> spans     = new ArrayList<>(ids.size());
+
+        for (int i = 0; i < ids.size(); i++) {
+            String chash = ids.get(i);
+            chashes.add(chash);
+            if (includeSourceUri) {
+                sourceUris.add(chash != null ? uriMap.get(chash) : null);
+            }
+            Map<String, Object> meta = (metas != null && i < metas.size()) ? metas.get(i) : Map.of();
+            spans.add(spanFromMeta(meta != null ? meta : Map.of()));
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>(envelope);
+        out.put("chashes", chashes);
+        if (includeSourceUri) {
+            out.put("source_uris", sourceUris);
+        }
+        out.put("spans", spans);
+        return out;
+    }
+
+    // ── JSON / SQL helpers ────────────────────────────────────────────────────
 
     private static Map<String, Object> fromJson(String json) {
         if (json == null || json.isBlank()) return Map.of();

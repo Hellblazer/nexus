@@ -360,6 +360,8 @@ class _ServiceCollectionStub:
         include: list[str] | None = None,
         limit: int = 10,
         offset: int = 0,
+        *,
+        include_source_uri: bool = False,
     ) -> dict:
         """Query chunks from the service. Returns Chroma-style result dict.
 
@@ -378,6 +380,8 @@ class _ServiceCollectionStub:
                     "limit": limit,
                     "offset": offset,
                 }
+                if include_source_uri:
+                    body["include_source_uri"] = True
                 result = _post("/v1/vectors/store-get", body, tenant=self._tenant)
             else:
                 # Where-filter lookup (incremental-sync staleness check)
@@ -390,13 +394,21 @@ class _ServiceCollectionStub:
                     body["where"] = where
                 if include:
                     body["include"] = include
+                if include_source_uri:
+                    body["include_source_uri"] = True
                 result = _post("/v1/vectors/get", body, tenant=self._tenant)
-            # Normalise to Chroma shape: {ids, documents, metadatas}
-            return {
+            # Normalise to Chroma shape: {ids, documents, metadatas}.
+            # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
+            # source_uris present only when include_source_uri=True was forwarded.
+            out: dict[str, Any] = {
                 "ids":       result.get("ids", []),
                 "documents": result.get("documents", []),
                 "metadatas": result.get("metadatas", []),
             }
+            for key in ("chashes", "source_uris", "spans"):
+                if key in result:
+                    out[key] = result[key]
+            return out
         except VectorServiceError as exc:
             _log.warning(
                 "service_collection_get_failed",
@@ -686,6 +698,7 @@ class HttpVectorClient:
         cluster_by: str = "",
         threshold: float | None = None,
         structured: bool = False,
+        include_source_uri: bool = False,
     ) -> list[dict] | dict:
         """Semantic search via the Java service.
 
@@ -697,6 +710,10 @@ class HttpVectorClient:
         Returns the same list-of-dicts shape as ``T3Database.search()``
         when ``structured=False``, or a ``{ids, tumblers, distances, collections}``
         dict when ``structured=True``.
+
+        When ``include_source_uri=True``, gates a catalog JOIN server-side to
+        populate ``source_uri`` on each row (RDR-169 G5, bead nexus-jkv85).
+        Default False — omits the field so default callers pay zero JOIN cost.
         """
         body: dict[str, Any] = {
             "query": query,
@@ -705,6 +722,8 @@ class HttpVectorClient:
         }
         if where:
             body["where"] = where
+        if include_source_uri:
+            body["include_source_uri"] = True
 
         results = _post("/v1/vectors/search", body, tenant=self._tenant)
         # results is a list of {id, content, distance, collection, ...}
