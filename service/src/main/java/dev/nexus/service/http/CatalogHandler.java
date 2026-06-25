@@ -389,6 +389,17 @@ public final class CatalogHandler implements HttpHandler {
         String tumbler   = queryParam(exchange, "tumbler");
         String direction = queryParam(exchange, "direction");
         String linkType  = queryParam(exchange, "link_type");
+        // RDR-168 njrcn.5: optional comma-separated link_types for a server-side IN filter
+        // (multi-type callers no longer fetch every edge and filter client-side). link_types
+        // takes precedence; falls back to the single link_type; null = no type filter.
+        String linkTypesRaw = queryParam(exchange, "link_types");
+        List<String> linkTypes = null;
+        if (linkTypesRaw != null && !linkTypesRaw.isBlank()) {
+            linkTypes = java.util.Arrays.stream(linkTypesRaw.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).toList();
+        } else if (linkType != null && !linkType.isBlank()) {
+            linkTypes = List.of(linkType);
+        }
         if (tumbler == null || tumbler.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"tumbler query param required\"}"); return;
         }
@@ -397,10 +408,10 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> linksFrom = List.of();
         List<Map<String, Object>> linksTo   = List.of();
         if ("out".equals(direction) || "both".equals(direction)) {
-            linksFrom = repo.linksFrom(tenant, tumbler, linkType);
+            linksFrom = repo.linksFrom(tenant, tumbler, linkTypes);
         }
         if ("in".equals(direction) || "both".equals(direction)) {
-            linksTo = repo.linksTo(tenant, tumbler, linkType);
+            linksTo = repo.linksTo(tenant, tumbler, linkTypes);
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("links_from", linksFrom, "links_to", linksTo)));

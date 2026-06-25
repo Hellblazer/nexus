@@ -1005,15 +1005,14 @@ class HttpCatalogClient:
         link_types: list[str] | None = None,
     ) -> list[CatalogLink]:
         params: dict = {"tumbler": str(tumbler), "direction": "out"}
-        if link_type:
-            params["link_type"] = link_type
-        # link_types multi-value forwarding: service /links accepts a single link_type;
-        # when link_types is provided and link_type is empty, filter client-side.
-        result = self._get("/links", **params)
-        links = [_link_from_dict(r) for r in (result.get("links_from", []) if result else [])]
+        # njrcn.5: forward link_types to the server-side IN filter (no client-side
+        # over-fetch). link_types takes precedence; else the single link_type.
         if link_types:
-            links = [lnk for lnk in links if lnk.link_type in link_types]
-        return links
+            params["link_types"] = ",".join(link_types)
+        elif link_type:
+            params["link_type"] = link_type
+        result = self._get("/links", **params)
+        return [_link_from_dict(r) for r in (result.get("links_from", []) if result else [])]
 
     def links_to(
         self,
@@ -1022,13 +1021,12 @@ class HttpCatalogClient:
         link_types: list[str] | None = None,
     ) -> list[CatalogLink]:
         params: dict = {"tumbler": str(tumbler), "direction": "in"}
-        if link_type:
+        if link_types:
+            params["link_types"] = ",".join(link_types)
+        elif link_type:
             params["link_type"] = link_type
         result = self._get("/links", **params)
-        links = [_link_from_dict(r) for r in (result.get("links_to", []) if result else [])]
-        if link_types:
-            links = [lnk for lnk in links if lnk.link_type in link_types]
-        return links
+        return [_link_from_dict(r) for r in (result.get("links_to", []) if result else [])]
 
     def link_query(
         self,

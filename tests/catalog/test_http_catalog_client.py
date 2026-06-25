@@ -121,8 +121,16 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/links":
             params = self._query_params()
             direction = params.get("direction", "both")
+            # njrcn.5: mirror the server-side type filter (single link_type or link_types IN).
+            requested = None
+            if params.get("link_types"):
+                requested = {t for t in params["link_types"].split(",") if t}
+            elif params.get("link_type"):
+                requested = {params["link_type"]}
+            row = {"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}
+            match = requested is None or "cites" in requested
             if direction == "out":
-                self._send_json({"links_from": [{"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}], "links_to": []})
+                self._send_json({"links_from": [row] if match else [], "links_to": []})
             elif direction == "in":
                 self._send_json({"links_from": [], "links_to": []})
             else:
@@ -427,6 +435,13 @@ class TestHttpCatalogClientRoundTrip:
         # Return-type parity: typed CatalogLink (attribute access), like local Catalog.
         assert links[0].link_type == "cites"
         assert str(links[0].to_tumbler) == "1.1.2"
+
+    def test_links_from_forwards_link_types_server_side(self, client: HttpCatalogClient) -> None:
+        # njrcn.5: link_types is forwarded to the server-side IN filter (the fake mirrors
+        # it), so a matching set returns the link and a non-matching set returns nothing —
+        # no client-side over-fetch-then-filter.
+        assert len(client.links_from("1.1.1", link_types=["cites", "relates"])) == 1
+        assert client.links_from("1.1.1", link_types=["implements"]) == []
 
     def test_links_to_uses_direction_in(self, client: HttpCatalogClient) -> None:
         # GET /links?tumbler=X&direction=in

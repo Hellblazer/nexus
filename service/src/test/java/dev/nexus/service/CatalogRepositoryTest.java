@@ -469,7 +469,7 @@ class CatalogRepositoryTest {
             "created_at", "2026-06-02T00:00:00Z"
         ));
         assertThat(merged).as("second upsert conflicts → merged").isFalse();
-        var links = repo.linksFrom(TENANT_A, "lnk.1", null);
+        var links = repo.linksFrom(TENANT_A, "lnk.1", (java.util.List<String>) null);
         assertThat(links).hasSize(1);
         assertThat(links.get(0).get("to_tumbler")).isEqualTo("lnk.2");
         assertThat(links.get(0).get("link_type")).isEqualTo("cites");
@@ -477,7 +477,7 @@ class CatalogRepositoryTest {
 
     @Test @Order(31)
     void link_linksTo() {
-        var links = repo.linksTo(TENANT_A, "lnk.2", null);
+        var links = repo.linksTo(TENANT_A, "lnk.2", (java.util.List<String>) null);
         assertThat(links).hasSize(1);
         assertThat(links.get(0).get("from_tumbler")).isEqualTo("lnk.1");
     }
@@ -492,13 +492,20 @@ class CatalogRepositoryTest {
             "created_by", "user",
             "created_at", "2026-06-01T00:00:00Z"
         ));
-        var citesLinks = repo.linksFrom(TENANT_A, "lnk.1", "cites");
+        var citesLinks = repo.linksFrom(TENANT_A, "lnk.1", java.util.List.of("cites"));
         assertThat(citesLinks).hasSize(1);
         assertThat(citesLinks.get(0).get("link_type")).isEqualTo("cites");
 
-        var implLinks = repo.linksFrom(TENANT_A, "lnk.1", "implements");
+        var implLinks = repo.linksFrom(TENANT_A, "lnk.1", java.util.List.of("implements"));
         assertThat(implLinks).hasSize(1);
         assertThat(implLinks.get(0).get("link_type")).isEqualTo("implements");
+
+        // RDR-168 njrcn.5: server-side IN filter over a SET of link types.
+        var bothTypes = repo.linksFrom(TENANT_A, "lnk.1", java.util.List.of("cites", "implements"));
+        assertThat(bothTypes).hasSize(2);
+        var onlyCites = repo.linksFrom(TENANT_A, "lnk.1", java.util.List.of("cites", "relates"));
+        assertThat(onlyCites).hasSize(1);
+        assertThat(onlyCites.get(0).get("link_type")).isEqualTo("cites");
     }
 
     @Test @Order(33)
@@ -511,10 +518,10 @@ class CatalogRepositoryTest {
             "from_tumbler", "del.1", "to_tumbler", "del.2",
             "link_type", "cites", "created_by", "user", "created_at", "2026-06-01T00:00:00Z"
         ));
-        assertThat(repo.linksFrom(TENANT_A, "del.1", null)).hasSize(1);
+        assertThat(repo.linksFrom(TENANT_A, "del.1", (java.util.List<String>) null)).hasSize(1);
         int deleted = repo.deleteLink(TENANT_A, "del.1", "del.2", "cites");
         assertThat(deleted).isEqualTo(1);
-        assertThat(repo.linksFrom(TENANT_A, "del.1", null)).isEmpty();
+        assertThat(repo.linksFrom(TENANT_A, "del.1", (java.util.List<String>) null)).isEmpty();
     }
 
     @Test @Order(34)
@@ -976,7 +983,7 @@ class CatalogRepositoryTest {
         );
         repo.importLink(etlTenant, lnk);
         repo.importLink(etlTenant, lnk); // second import: no error, no duplicate
-        var links = repo.linksFrom(etlTenant, "elA", null);
+        var links = repo.linksFrom(etlTenant, "elA", (java.util.List<String>) null);
         assertThat(links).hasSize(1); // exactly one, not two
     }
 

@@ -882,10 +882,16 @@ public final class CatalogRepository {
     }
 
     /** Links from a tumbler, optionally filtered by link_type. */
-    public List<Map<String, Object>> linksFrom(String tenant, String fromTumbler, String linkType) {
+    /**
+     * Links from a tumbler, optionally filtered by a SET of link types (server-side IN).
+     * RDR-168 nexus-njrcn.5: lets multi-type callers filter in SQL instead of fetching
+     * every edge and filtering client-side (the high-fan-out over-fetch). Pass {@code null}
+     * (or empty) for no type filter, a singleton list for one type.
+     */
+    public List<Map<String, Object>> linksFrom(String tenant, String fromTumbler, List<String> linkTypes) {
         return tenantScope.withTenant(tenant, ctx -> {
             Condition where = F_LNK_FROM.eq(fromTumbler);
-            if (linkType != null && !linkType.isBlank()) where = where.and(F_LNK_TYPE.eq(linkType));
+            if (linkTypes != null && !linkTypes.isEmpty()) where = where.and(F_LNK_TYPE.in(linkTypes));
             return ctx.select(F_LNK_ID, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
                                F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
                       .from(T_LINKS).where(where).fetch()
@@ -894,11 +900,11 @@ public final class CatalogRepository {
         });
     }
 
-    /** Links to a tumbler, optionally filtered by link_type. */
-    public List<Map<String, Object>> linksTo(String tenant, String toTumbler, String linkType) {
+    /** Links to a tumbler, optionally filtered by a SET of link types (RDR-168 njrcn.5). */
+    public List<Map<String, Object>> linksTo(String tenant, String toTumbler, List<String> linkTypes) {
         return tenantScope.withTenant(tenant, ctx -> {
             Condition where = F_LNK_TO.eq(toTumbler);
-            if (linkType != null && !linkType.isBlank()) where = where.and(F_LNK_TYPE.eq(linkType));
+            if (linkTypes != null && !linkTypes.isEmpty()) where = where.and(F_LNK_TYPE.in(linkTypes));
             return ctx.select(F_LNK_ID, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
                                F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
                       .from(T_LINKS).where(where).fetch()
