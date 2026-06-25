@@ -980,18 +980,27 @@ def manifest_write_batch_hook(
     # read locks and contribute to the very write starvation this RDR closes.
     try:
         _gate = get_catalog()
-        if _gate is None:
-            return
-        _gclose = getattr(_gate, "_db", None)
-        if _gclose is not None:
-            try:
-                _gclose.close()
-            except Exception:  # noqa: BLE001 — best-effort handle cleanup; close failure is non-critical and intentionally silent
-                pass
     except Exception:  # noqa: BLE001 — no-catalog path best-effort; logged at debug, returns
         import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
         structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
         return
+    if _gate is None:
+        return
+    # Close the read-only SQLite handle (local mode opens a WAL read lock per call).
+    # HttpCatalogClient (service mode) has NO such handle: its ``_db`` property RAISES
+    # RuntimeError, and ``getattr(_gate, "_db", None)`` does NOT swallow that (the
+    # default only applies to AttributeError) — the raise would abort the whole hook
+    # before the manifest write, leaving service-mode catalogs with an empty manifest
+    # (RDR-168 nexus-njrcn.6). Guard the access so the local-only cleanup is skipped.
+    try:
+        _read_handle = _gate._db
+    except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
+        _read_handle = None
+    if _read_handle is not None:
+        try:
+            _read_handle.close()
+        except Exception:  # noqa: BLE001 — best-effort handle cleanup; close failure is non-critical and intentionally silent
+            pass
     # RDR-146 P1.2: this hook fires per T3 batch in the long-lived MCP
     # server — close the writer in finally so socket / SQLite handles do
     # not accumulate across a session.

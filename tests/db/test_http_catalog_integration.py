@@ -1562,11 +1562,13 @@ class TestServiceModeIndexMVV:
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "RDR-168 P4 falsified CA-4: signature reconciliation + the indexer "
-            "service-mode init-gate fixes get DOCUMENTS registering, but the manifest "
-            "(catalog_document_chunks) is still empty — the manifest post-store hook / "
-            "catalog_doc_id threading is a distinct second cause (nexus-njrcn.6). Remove "
-            "this xfail when the manifest populates in service mode."
+            "RDR-168 nexus-njrcn.6 LAYER 2 (service-side): layer 1 is FIXED — the manifest "
+            "post-store hook no longer silently aborts in service mode (it used to: "
+            "getattr(reader, '_db', None) does NOT swallow the RuntimeError HttpCatalogClient._db "
+            "raises, so the read-handle cleanup killed the hook before the write). The hook "
+            "now FIRES atomic_manifest_replace → POST /manifest/write, but the service returns "
+            "500 (repo.writeManifest insert fails — a distinct service-side cause; the JAR "
+            "handler swallows the stack). Remove this xfail when /manifest/write succeeds."
         ),
     )
     def test_service_mode_index_populates_manifest(
@@ -1579,5 +1581,5 @@ class TestServiceModeIndexMVV:
         manifest = cat.get_manifest(code_doc.tumbler)
         assert manifest, (
             f"manifest empty for {code_doc.tumbler} — catalog_document_chunks not "
-            "populated (Chunks == 0): the manifest hook did not reach the service catalog."
+            "populated (Chunks == 0): /manifest/write returned 500 (service-side layer 2)."
         )
