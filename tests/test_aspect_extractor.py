@@ -454,6 +454,78 @@ class TestContentSourcing:
         assert "FileNotFoundError" in result.detail
 
 
+class TestReadIndexedText:
+    """nexus-vwns1: read_indexed_text returns the SAME reassembled T3
+    chunk text the extractor consumes, so --validate-sample verifies
+    against the extracted prose rather than raw (PDF-binary) file bytes."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_get_t3(self, monkeypatch):
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.get_t3", lambda: MagicMock(),
+        )
+
+    def test_returns_reassembled_chunk_text_on_read_ok(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import read_indexed_text
+        from nexus.aspect_readers import ReadOk
+
+        captured: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            captured.append(uri)
+            return ReadOk(text="OCR PROSE\x00 from chunks", metadata={})
+
+        monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
+        text = read_indexed_text(
+            collection="knowledge__delos",
+            source_path="/scanned/paper.pdf",
+        )
+        # Null bytes stripped; same identity-URI shape the extractor builds.
+        assert text == "OCR PROSE from chunks"
+        assert captured == ["chroma://knowledge__delos//scanned/paper.pdf"]
+
+    def test_lookup_path_overrides_source_path_in_uri(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import read_indexed_text
+        from nexus.aspect_readers import ReadOk
+
+        captured: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            captured.append(uri)
+            return ReadOk(text="x", metadata={})
+
+        monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
+        read_indexed_text(
+            collection="knowledge__delos",
+            source_path="relative/p.pdf",
+            lookup_path="/abs/p.pdf",
+        )
+        assert captured == ["chroma://knowledge__delos//abs/p.pdf"]
+
+    def test_returns_none_on_read_fail(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import read_indexed_text
+        from nexus.aspect_readers import ReadFail
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.read_source",
+            lambda uri, t3=None, **_kw: ReadFail(reason="empty", detail="no chunks"),
+        )
+        assert read_indexed_text(
+            collection="knowledge__delos", source_path="ghost",
+        ) is None
+
+    def test_returns_none_when_t3_unavailable(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import read_indexed_text
+
+        def _boom():
+            raise RuntimeError("no daemon")
+
+        monkeypatch.setattr("nexus.aspect_extractor.get_t3", _boom)
+        assert read_indexed_text(
+            collection="knowledge__delos", source_path="x",
+        ) is None
+
+
 # ── URI dispatch + chroma integration (RDR-096 P1.2) ────────────────────────
 
 

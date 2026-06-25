@@ -909,7 +909,9 @@ def enrich_aspects(
         return
 
     if validate_sample > 0:
-        _run_validation_sample(extracted, sample_pct=validate_sample)
+        _run_validation_sample(
+            extracted, collection=collection, sample_pct=validate_sample,
+        )
 
 
 def _select_entries(
@@ -1146,7 +1148,9 @@ def _run_extraction(
 
     extractor_name = config.extractor_name
 
-    extracted: list[tuple[str, object]] = []
+    # (source_path, AspectRecord, lookup_path). lookup_path is the T3
+    # identity used for the read (nexus-vwns1: re-fetched for validation).
+    extracted: list[tuple[str, object, str]] = []
     success = 0
     null_fields = 0
     skipped = 0
@@ -1190,11 +1194,15 @@ def _run_extraction(
             # path as ``lookup_path`` so the chroma reader's identity
             # match succeeds. ``source_path`` is preserved as the
             # storage key for AspectRecord.
+            # nexus-vwns1: capture the lookup identity used for the T3
+            # read so --validate-sample can re-fetch the EXACT indexed
+            # chunk text the extractor saw (not the raw source bytes).
+            lookup_path = _chroma_source_id_for_entry(entry)
             record = extract_aspects(
                 content="",
                 source_path=source_path,
                 collection=collection,
-                lookup_path=_chroma_source_id_for_entry(entry),
+                lookup_path=lookup_path,
                 doc_id_lookup=doc_id_lookup,
                 manifest_lookup=manifest_lookup,
             )
@@ -1271,7 +1279,7 @@ def _run_extraction(
                 )
             else:
                 success += 1
-                extracted.append((source_path, record))
+                extracted.append((source_path, record, lookup_path))
                 click.echo(
                     f"  [{i}/{len(entries)}] {Path(source_path).name}: extracted"
                 )
@@ -1290,18 +1298,43 @@ def _run_extraction(
 
 
 def _run_validation_sample(
-    extracted: list[tuple[str, object]],
+    extracted: list[tuple[str, object, str]],
     *,
+    collection: str,
     sample_pct: int,
 ) -> None:
     """Sample N% of extracted records, run operator_verify against the
-    raw document text, and write disagreements to
-    ``./validation_failures.jsonl``.
+    INDEXED T3 chunk text (the same evidence the extractor consumed), and
+    write disagreements to ``./validation_failures.jsonl``.
+
+    nexus-vwns1: this previously read the raw source file off disk and
+    handed those bytes to the verifier. For PDFs that yields the
+    compressed content-stream / image-object binary, not the extracted
+    prose, so the validator verified the claim against different evidence
+    than the extractor saw — reliable false negatives on scanned/OCR'd
+    docs. We now re-fetch the reassembled chunk text via
+    :func:`read_indexed_text`. A sample whose indexed text cannot be
+    re-fetched is counted as ``errored`` and skipped (never read raw bytes
+    as a silent fallback); an all-errored run is surfaced loudly (below).
+
+    This applies to ALL collection types, not just PDFs: the indexed chunk
+    text is the correct evidence the extractor saw for born-digital prose
+    too. For a plain-text source that happens to be unindexed in T3 this is
+    a behavior change (previously validated against file bytes); such a
+    sample is now skipped-and-counted rather than validated against a
+    different source than the extractor used.
     """
     import asyncio  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
     import json  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
     import random  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
     from datetime import UTC, datetime  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
+
+    from nexus.aspect_extractor import read_indexed_text  # noqa: PLC0415 — command-local import; deferred to validation path
+
+    # Process-cached catalog projections (same builders the extractor used);
+    # cheap to rebuild here so validation is self-contained.
+    doc_id_lookup = _build_catalog_doc_id_lookup()
+    manifest_lookup = _build_catalog_manifest_lookup()
 
     sample_count = max(1, len(extracted) * sample_pct // 100)
     sample_count = min(sample_count, len(extracted))
@@ -1321,18 +1354,19 @@ def _run_validation_sample(
     verified = 0
     errored = 0
 
-    for source_path, record in sample:
-        try:
-            content = (
-                Path(source_path)
-                .read_text(encoding="utf-8", errors="replace")
-                .replace("\x00", "")
-            )
-        except OSError as exc:
+    for source_path, record, lookup_path in sample:
+        content = read_indexed_text(
+            collection=collection,
+            source_path=source_path,
+            lookup_path=lookup_path,
+            doc_id_lookup=doc_id_lookup,
+            manifest_lookup=manifest_lookup,
+        )
+        if not content:
             errored += 1
             _log.warning(
-                "validate_sample_read_failed",
-                source_path=source_path, error=str(exc),
+                "validate_sample_indexed_text_unavailable",
+                source_path=source_path, collection=collection,
             )
             continue
 
@@ -1369,7 +1403,19 @@ def _run_validation_sample(
                 "timestamp": datetime.now(UTC).isoformat(),
             }) + "\n")
 
-    if failures:
+    # nexus-vwns1: an all-errored run (no sample's indexed text could be
+    # re-fetched — T3 down, collection not indexed) must NOT read as a quiet
+    # pass. Surface it loudly so a broad read_indexed_text regression can't
+    # make --validate-sample silently verify nothing.
+    if sample_count and errored == sample_count:
+        click.echo(
+            f"WARNING: validation verified 0 samples — indexed text was "
+            f"unavailable for ALL {sample_count} sampled document(s). "
+            f"Is the collection indexed and T3 reachable? "
+            f"(no verification signal this run)",
+            err=True,
+        )
+    elif failures:
         click.echo(
             f"Validation: {verified} verified, {failures} disagreement(s) "
             f"written to {failures_path}, {errored} errored."

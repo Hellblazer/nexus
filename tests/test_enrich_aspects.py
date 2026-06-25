@@ -835,7 +835,6 @@ class TestValidateSample:
         writes one ``validation_failures.jsonl`` row per disagreement."""
         _, _, cat = env
 
-        # Create real source files so the validate-sample read works.
         src1 = tmp_path / "p1.txt"
         src1.write_text("paper content 1")
         src2 = tmp_path / "p2.txt"
@@ -850,7 +849,17 @@ class TestValidateSample:
             ),
         )
 
+        # nexus-vwns1: validation now verifies against the INDEXED chunk
+        # text, not the raw file bytes. Capture the evidence passed to the
+        # verifier to assert that.
+        seen_evidence: list[str] = []
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.read_indexed_text",
+            lambda **_kw: "reassembled OCR prose from T3 chunks",
+        )
+
         async def disagree(claim, evidence, timeout=60.0):
+            seen_evidence.append(evidence)
             return {
                 "verified": False,
                 "reason": "claim cites datasets not in evidence",
@@ -880,6 +889,56 @@ class TestValidateSample:
             assert row["citations"] == ["page 3"]
             assert "extracted_aspects" in row
             assert "timestamp" in row
+        # The verifier saw the indexed chunk text, never the raw file bytes.
+        assert seen_evidence
+        assert all(e == "reassembled OCR prose from T3 chunks" for e in seen_evidence)
+        assert all("paper content" not in e for e in seen_evidence)
+
+    def test_validate_sample_skips_when_indexed_text_unavailable(
+        self,
+        env,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-vwns1: when the indexed text can't be re-fetched, the
+        sample is counted as errored and NO raw-file fallback runs — the
+        verifier is never invoked against file bytes."""
+        _, _, cat = env
+
+        src1 = tmp_path / "p1.txt"
+        src1.write_text("raw file bytes that must never reach the verifier")
+        _register_entries(cat, [str(src1)])
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _make_record(
+                source_path=source_path,
+            ),
+        )
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.read_indexed_text",
+            lambda **_kw: None,
+        )
+
+        verify_calls: list[str] = []
+
+        async def never_verify(claim, evidence, timeout=60.0):
+            verify_calls.append(evidence)
+            return {"verified": True, "reason": "", "citations": []}
+
+        monkeypatch.setattr("nexus.mcp.core.operator_verify", never_verify)
+
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(enrich, [
+                "aspects", "knowledge__delos", "--validate-sample", "100",
+            ])
+            assert result.exit_code == 0, result.output
+            assert not Path("validation_failures.jsonl").exists()
+            # All-errored must be surfaced loudly, not read as a quiet pass.
+            assert "WARNING" in result.output
+            assert "0 samples" in result.output
+        assert verify_calls == []
 
     def test_validate_sample_default_is_5_percent(self, env) -> None:
         """The CLI default --validate-sample is 5% per the RDR's

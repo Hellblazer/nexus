@@ -703,6 +703,54 @@ _SCHOLARLY_SECTIONS = frozenset({
 # ── Extraction core ──────────────────────────────────────────────────────────
 
 
+def read_indexed_text(
+    *,
+    collection: str,
+    source_path: str,
+    lookup_path: str = "",
+    doc_id_lookup: Callable[[str, str], str] | None = None,
+    manifest_lookup: Callable[[str], list[Any]] | None = None,
+) -> str | None:
+    """Return the reassembled T3 chunk text for a document, or ``None``.
+
+    This is the SAME evidence :func:`extract_aspects` consumes: the
+    document reassembled from its indexed T3 chunks via
+    :func:`nexus.aspect_readers.read_source` over the ``chroma://`` URI and
+    the catalog ``document_chunks`` manifest. Use it to verify an extracted
+    claim against what the extractor actually saw — NOT the raw source file.
+
+    nexus-vwns1: ``Path(source_path).read_text()`` on a PDF yields its
+    FlateDecode-compressed content streams / CCITTFax image objects (for a
+    scanned, OCR'd doc), not the extracted prose. A validator fed those raw
+    bytes disagrees with a correct extraction (false negative). The extractor
+    never sees the file bytes; it sees this reassembled chunk text, so the
+    validator must too.
+
+    Returns ``None`` (never raises, never falls back to file bytes) when T3
+    is unavailable or the source is unreadable; the caller treats that as an
+    indeterminate sample to skip, not a verification failure.
+    """
+    uri_identity = lookup_path or source_path
+    uri = f"chroma://{collection}/{quote(uri_identity, safe='/')}"
+    try:
+        t3 = get_t3()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
+        _log.warning("read_indexed_text_t3_unavailable", uri=uri, error=str(exc))
+        return None
+    result = read_source(
+        uri, t3=t3,
+        doc_id_lookup=doc_id_lookup,
+        manifest_lookup=manifest_lookup,
+    )
+    if isinstance(result, ReadOk):
+        return result.text.replace("\x00", "")
+    _log.warning(
+        "read_indexed_text_unreadable",
+        uri=uri, reason=result.reason, detail=result.detail,
+    )
+    return None
+
+
 def extract_aspects(
     content: str,
     source_path: str,
