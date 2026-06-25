@@ -470,6 +470,12 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # cloud_mode fixture.
     "test_pregate.py",
     "test_quiesce.py",
+    # RDR-169 G5 bridge address-field tests: voyage tokens appear only as
+    # collection-NAME fixtures (knowledge__test__voyage-context-3__v1) in fully
+    # mocked HttpVectorClient / _ServiceCollectionStub unit tests. The server
+    # embeds, not these tests — they assert additive /v1 response shape and the
+    # include_source_uri opt-in, never cloud-mode embedding behavior.
+    "test_bridge_address_fields.py",
     # nexus-8o9pm voyage-capability gate: voyage tokens are collection-NAME
     # fixtures (footprint detection) and embedding_models inside a FAKE /version
     # response body; the gate is a pure data/HTTP predicate that never embeds, so
