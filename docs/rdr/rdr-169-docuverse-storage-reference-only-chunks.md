@@ -1,0 +1,181 @@
+---
+title: "Docuverse Storage: Reference-Only Chunks — Retention Enum, Nullable Content, Reference-Only Search DTO, and the URI-Resolver / Embed-Without-Store Surface"
+id: RDR-169
+type: Architecture
+status: draft
+priority: medium
+author: Hal Hildebrand
+reviewed-by: self
+created: 2026-06-25
+accepted_date:
+related_issues: [nexus-ssm3p, nexus-3kybd, nexus-mt9p8]
+related: [RDR-053, RDR-096, RDR-108, RDR-103, RDR-152, RDR-155]
+---
+
+# RDR-169: Docuverse Storage — Reference-Only Chunks
+
+> Revise during planning; lock at implementation.
+> If wrong, abandon code and iterate RDR.
+
+## Problem Statement
+
+A second class of bridge consumer — Conductus (the Obsidian plugin, peer to conexus over
+the RDR-152 bridge) and any future reference-heavy client — wants nexus to be the **index
+and graph** over content it does **not** own: the bytes live in the user's vault (or any
+addressable source), and nexus should store the chunk's *identity* (address + span + chash
++ metadata + embedding) without duplicating its *content*. Today every nexus chunk requires
+its text (`chunks_<dim>.chunk_text NOT NULL`), there is no retention model, the search
+return assumes content is present, and there is no on-demand content resolver. This RDR
+designs the engine-side "docuverse storage" model — **reference-only chunks** — and the
+bridge surface that makes them usable, co-designed with conexus on the one shared-schema
+slice.
+
+This is the nexus-engine response to **item 5** of the conexus↔nexus Conductus relay
+(2026-06-25; T2 `nexus/nexus-to-conexus-conductus-relay-2026-06-25` r1/r3). The schema slice
+lands in the multitenant Postgres conexus operates and migrates, so it is gated by conexus's
+RLS / ETL / freeze constraints (recorded below).
+
+### Enumerated gaps to close
+
+#### Gap 1: No retention model — chunk content cannot be absent
+
+`chunks_<dim>.chunk_text` is `NOT NULL`, and nothing distinguishes a fully-stored chunk from
+one whose content lives elsewhere. A reference-only consumer cannot register a chunk's
+address + embedding + metadata without also handing nexus the bytes. Deliver a `retention`
+classifier `{reference-only | snapshot | full}` plus nullable `chunk_text`, so a chunk row
+can carry identity without content.
+
+#### Gap 2: The search-return DTO assumes content is present
+
+Search/serving returns `chunk_text` inline. A reference-only hit has no stored text — the
+DTO must return the *address* (collection + chash + source_uri + span) and metadata, with a
+nullable content field, so existing consumers are unaffected (additive) and reference-aware
+consumers can resolve on demand. Must stay RDR-152-bridge-compatible.
+
+#### Gap 3: No URI-scheme resolver registry for on-demand content
+
+Resolving a reference-only chunk's bytes requires a pluggable, read-time resolver keyed on
+the `source_uri` scheme (`file://`, `chroma://`, `nx-scratch://` exist; `obsidian://` and
+others are needed). There is no registry to register/dispatch these.
+
+#### Gap 4: No embed-without-store / upsert-precomputed-vector path
+
+A consumer that has already embedded a chunk (its own model, or to avoid shipping content)
+wants to register the vector + identity directly. Today the only ingest path re-embeds and
+stores content. Deliver an additive bridge route to upsert a precomputed vector for a
+reference-only chunk.
+
+#### Gap 5: span / source_uri / chash are not first-class on the bridge
+
+The engine already has chash-addressed spans (RDR-053), `source_uri` identity (RDR-096), and
+the catalog/T3 manifest split (RDR-108), but these are not surfaced as first-class fields on
+the bridge for editor/plugin clients (e.g. mapping a vault `[[wikilink]]`/heading-ref to a
+catalog span). Surface them additively.
+
+#### Gap 6: No staleness / dangling lifecycle for externally-held content
+
+A reference-only chunk's bytes can change or disappear outside nexus. There is no
+freshness/dangling check tying the reference to its source (`source_mtime` is tracked;
+`allow_dangling` exists for links). Define a read-time/maintenance staleness signal.
+
+## Context
+
+### Background
+
+Discovered via the Conductus handoff relayed through conexus (2026-06-25). Conductus is a
+SECOND consumer of the RDR-152 bridge; its "ask-your-vault" / docuverse use case needs the
+index without the content. nexus owns the engine design; conexus owns the multitenant
+deployment, the copy-not-move T2/T3 ETL, and the RDR lifecycle. nexus's read on the relay
+(supportive, architecturally aligned) and conexus's binding constraints are recorded in
+`nexus/nexus-to-conexus-conductus-relay-2026-06-25` (r1/r3) and
+`conexus/conexus-to-nexus-conductus-relay-2026-06-25-r2`.
+
+### Technical Environment
+
+- T3 chunks live in `nexus.chunks_{384,768,1024}` (PK `(tenant_id, collection, chash)`,
+  `chunk_text NOT NULL`, `metadata JSONB`, `chunk_tsv` generated from `chunk_text`,
+  `embedding vector(dim) NOT NULL`) under FORCE ROW LEVEL SECURITY (RDR-155).
+- The catalog/T3 split (RDR-108): documents addressed by tumbler; chunks content-addressed
+  by `chash[:32]`; the `document_chunks` manifest joins them.
+- `source_uri` identity (RDR-096) and chash spans (RDR-053) already model "where content
+  lives" and "which span of it."
+- The bridge is the RDR-152 thin HTTP `/v1` contract behind conexus's edge proxy.
+
+## Research Findings
+
+### Critical Assumptions
+
+- [ ] **The retention slice is purely additive and reconcile-safe** — `ADD COLUMN retention
+  NOT NULL DEFAULT 'full'` + `ALTER chunk_text DROP NOT NULL` needs no backfill (existing
+  rows default `full`), and the conexus copy-not-move ETL reconcile keys on natural-key /
+  chash, not on content, so an additive defaulted column does not false-positive reconcile —
+  **Status**: Confirmed by conexus (relay A2); re-verify against the ETL `_TABLE_SPECS` at
+  co-design — **Method**: cross-repo co-design + reconcile dry-run.
+- [ ] **`chunk_tsv` (FTS) degrades gracefully when `chunk_text` is NULL** — the generated
+  tsvector column must tolerate NULL content (reference-only chunks are vector-only / not
+  FTS-searchable) without breaking the prose-lane FTS path — **Status**: Unverified —
+  **Method**: schema spike against the generated-column definition.
+- [ ] **A reference-only chunk is still embeddable** — embed-without-store requires a vector
+  even when content is absent (the consumer supplies it, or nexus embeds a supplied span at
+  register time then discards content) — **Status**: Unverified — **Method**: design spike.
+- [ ] **RLS is unconditional** — `tenant_id` stays `NOT NULL` on reference-only rows; content
+  nullability is orthogonal to tenancy — **Status**: Confirmed mutual (relay) — **Method**:
+  schema invariant + RLS behavioral test.
+
+## Proposed Solution
+
+### Approach
+
+Two tracks, separated by schema impact (per conexus's gating):
+
+1. **Schema-touching (co-designed with conexus, build gated on the freeze):** the retention
+   enum + nullable `chunk_text` (Gaps 1, partial 6) and the reference-only search-return DTO
+   (Gap 2). Additive, nullable, RDR-152-compatible.
+2. **Non-schema (proceeds independently):** the URI-scheme resolver registry (Gap 3),
+   embed-without-store / upsert-precomputed-vector bridge route (Gap 4), span/source_uri/chash
+   first-class surfacing (Gap 5), and the read-time staleness signal (Gap 6) keyed on the
+   already-tracked `source_mtime` + dangling handling.
+
+### Technical Design
+
+- **Retention column (per chunks_<dim> table):** `retention TEXT NOT NULL DEFAULT 'full'
+  CHECK (retention IN ('reference-only','snapshot','full'))`; `ALTER chunk_text DROP NOT
+  NULL`. `chunk_tsv` definition adjusted to `to_tsvector('english', COALESCE(chunk_text,''))`
+  so NULL content yields an empty tsvector (vector-only chunk; not FTS-matchable, by design).
+  `embedding` stays `NOT NULL` (a reference-only chunk is still a vector). `tenant_id NOT
+  NULL` unchanged.
+- **Reference-only search DTO:** the `/v1` search/serving return gains a nullable
+  `chunk_text` and a `retention` field plus the always-present address (`collection`,
+  `chash`, `source_uri`, span). Existing consumers ignore the new nullable fields
+  (RDR-152-additive).
+- **URI-scheme resolver registry:** an engine-side registry mapping a `source_uri` scheme to
+  a read-time resolver; `obsidian://` (vault-relative) joins `file://` / `chroma://` /
+  `nx-scratch://`. Resolution is read-time and has no shared-schema impact.
+- **embed-without-store:** an additive bridge route to upsert `(collection, chash,
+  source_uri, span, embedding, metadata, retention='reference-only')` with `chunk_text=NULL`.
+- **Staleness:** a read-time signal comparing the reference's recorded `source_mtime` to the
+  resolver's current view; dangling references handled analogously to `allow_dangling` links.
+
+### Binding constraints (conexus, relay r2 — non-negotiable)
+
+1. **Cross-repo lockstep:** the `retention` column on the per-tenant chunk table requires the
+   conexus T3 ETL `_TABLE_SPECS` column-list edit **in the same coordinated change** — the
+   nexus changeset and the paired conexus ETL edit are reviewed together; neither ships half.
+2. **Build waits for `aqb-done`:** the schema-touching slice is *designed* now but its
+   build/landing holds until conexus signals the xr7.8 cutover/freeze close (`aqb-done`); no
+   freeze-end date exists yet. The non-schema track proceeds independently.
+3. **RLS unconditional + RDR-152-additive DTO** (above).
+
+## Alternatives Considered
+
+### Alternative 1: Always store content (status quo)
+
+Keep `chunk_text NOT NULL`; reference consumers ship their bytes. **Rejected**: defeats the
+docuverse use case (duplicates vault content into the multitenant store, with privacy +
+size cost) and cannot represent "indexed but not stored."
+
+### Alternative 2: Sentinel empty content (`chunk_text=''`) instead of NULL + retention
+
+Store `''` for reference-only. **Rejected**: loses the explicit retention distinction,
+pollutes FTS with empty docs, and gives no honest signal that content lives elsewhere — a
+silent-degradation trap.
