@@ -148,7 +148,17 @@ public final class PlanHandler implements HttpHandler {
             long id = parseLong(params.get("id"), "id");
             row = repo.getById(tenant, id);
         } else {
-            String project    = requireParam(params, "project");
+            // An EMPTY project is the valid global-scope sentinel (mirrors the
+            // Python _default_project_for_scope("global") -> "" convention and the
+            // nexus.plans.project NOT NULL DEFAULT '' column). Require the key to
+            // be PRESENT but allow a blank value; only an absent key is a 400.
+            // Rejecting blank here (via requireParam) broke `nx catalog setup`
+            // plan seeding in service mode entirely — every global builtin
+            // template queries by-dimensions with project="". (nexus-82ihm)
+            if (!params.containsKey("project")) {
+                throw new IllegalArgumentException("missing required query param: project");
+            }
+            String project    = params.get("project");
             String dimensions = requireParam(params, "dimensions");
             row = repo.getByDimensions(tenant, project, dimensions);
         }
