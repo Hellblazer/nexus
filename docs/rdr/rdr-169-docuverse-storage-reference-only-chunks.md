@@ -42,8 +42,9 @@ RLS / ETL / freeze constraints (recorded below).
 `chunks_<dim>.chunk_text` is `NOT NULL`, and nothing distinguishes a fully-stored chunk from
 one whose content lives elsewhere. A reference-only consumer cannot register a chunk's
 address + embedding + metadata without also handing nexus the bytes. Deliver a `retention`
-classifier `{reference-only | snapshot | full}` plus nullable `chunk_text`, so a chunk row
-can carry identity without content.
+classifier `{reference-only | full}` plus nullable `chunk_text`, so a chunk row can carry
+identity without content. (A third `snapshot` value is deferred — no named consumer yet;
+added via a one-line `CHECK` change when an offline-snapshot use case is specified.)
 
 #### Gap 2: The search-return DTO assumes content is present
 
@@ -55,7 +56,8 @@ consumers can resolve on demand. Must stay RDR-152-bridge-compatible.
 #### Gap 3: No URI-scheme resolver registry for on-demand content
 
 Resolving a reference-only chunk's bytes requires a pluggable, read-time resolver keyed on
-the `source_uri` scheme (`file://`, `chroma://`, `nx-scratch://` exist; `obsidian://` and
+the `source_uri` scheme (`file://`, `chroma://`, `x-devonthink-item://` exist in the aspect
+resolvers today; `obsidian://` and
 others are needed). There is no registry to register/dispatch these.
 
 #### Gap 4: No embed-without-store / upsert-precomputed-vector path
@@ -159,20 +161,41 @@ Two tracks, separated by schema impact (per conexus's gating):
 ### Technical Design
 
 - **Retention column (per chunks_<dim> table):** `retention TEXT NOT NULL DEFAULT 'full'
-  CHECK (retention IN ('reference-only','snapshot','full'))`; `ALTER chunk_text DROP NOT
-  NULL`. `chunk_tsv` definition adjusted to `to_tsvector('english', COALESCE(chunk_text,''))`
-  so NULL content yields an empty tsvector (vector-only chunk; not FTS-matchable, by design).
-  `embedding` stays `NOT NULL` (a reference-only chunk is still a vector). `tenant_id NOT
-  NULL` unchanged.
+  CHECK (retention IN ('reference-only','full'))`; `ALTER chunk_text DROP NOT NULL`. The
+  `chunk_tsv` generated expression is **unchanged** — `to_tsvector('english', chunk_text)`
+  evaluates to NULL when `chunk_text` is NULL, which excludes the row from FTS and the GIN
+  index by construction (verified CA-2; no generated-column rewrite). `embedding` stays
+  `NOT NULL` (a reference-only chunk is still a vector); `tenant_id NOT NULL` unchanged.
+  (`'snapshot'` was dropped as speculative — no named consumer; a future value is a
+  one-line `DROP/ADD CONSTRAINT` when an offline-snapshot use case is actually specified.
+  Tracked as a follow-on if/when named.)
+- **Re-index / retention-transition semantics:** a `full → reference-only` transition is
+  **prohibited** via the engine ingest path — the existing `ON CONFLICT (tenant_id,
+  collection, chash) DO UPDATE SET chunk_text = EXCLUDED.chunk_text` would silently NULL
+  stored content if a previously-full chunk were re-submitted reference-only. The client
+  must explicitly delete + re-insert to change retention; the reference-only ingest branch
+  (below) rejects a write whose `chash` already holds full content (fail-loud, not silent
+  overwrite). `reference-only → reference-only` re-writes (metadata/embedding refresh) are
+  fine.
 - **Reference-only search DTO:** the `/v1` search/serving return gains a nullable
   `chunk_text` and a `retention` field plus the always-present address (`collection`,
   `chash`, `source_uri`, span). Existing consumers ignore the new nullable fields
   (RDR-152-additive).
 - **URI-scheme resolver registry:** an engine-side registry mapping a `source_uri` scheme to
   a read-time resolver; `obsidian://` (vault-relative) joins `file://` / `chroma://` /
-  `nx-scratch://`. Resolution is read-time and has no shared-schema impact.
+  `x-devonthink-item://`. Resolution is read-time and has no shared-schema impact.
+  **Multi-tenant scope:** the registry is a **global `scheme → handler`** map; the handler
+  receives tenant context and dispatches per-tenant (e.g. `obsidian://` resolves against the
+  requesting tenant's vault). This avoids per-tenant registration storage (which would be a
+  schema touch); cross-tenant resolution is impossible because the handler only ever sees the
+  request's tenant.
 - **embed-without-store:** an additive bridge route to upsert `(collection, chash,
   source_uri, span, embedding, metadata, retention='reference-only')` with `chunk_text=NULL`.
+  Note: the existing `PgVectorRepository.upsertChunksWithVectors` passthrough takes a
+  non-null `List<String> documents` and `stripNul`s each element (NPE on null), so this is
+  **not** a drop-in — implement a dedicated `upsertReferenceOnlyChunk(...)` (or a null-content
+  guard before the dedup loop) that binds `chunk_text=NULL` + `retention='reference-only'`
+  and rejects overwriting an existing full-content chash (see re-index semantics above).
 - **Staleness:** a read-time signal comparing the reference's recorded `source_mtime` to the
   resolver's current view; dangling references handled analogously to `allow_dangling` links.
 
