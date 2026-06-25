@@ -42,6 +42,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * if present); only an ABSENT project key is a 400.
  *
  * <p>Hermetic: embedded Postgres (Testcontainers pgvector), port 0, requires Docker.
+ *
+ * <p>Isolation invariant (PER_CLASS shares one DB, no per-test cleanup): each
+ * test keys on a DISTINCT {@code dimensions} value (the unique index is on
+ * {@code (tenant_id, project, dimensions)}), so test order is irrelevant and no
+ * test poisons another. A new test MUST pick its own dimensions marker; do NOT
+ * add a DELETE/reset step without revisiting this invariant.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PlanHandlerTest {

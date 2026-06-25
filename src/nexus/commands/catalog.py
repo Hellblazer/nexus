@@ -1123,9 +1123,14 @@ def _backfill_all_chunk_text_hashes(t3) -> int:
     ``AttributeError`` and degraded ``nx catalog setup`` to "Hash backfill
     partial", leaving the manifest empty. Skip cleanly instead.
     """
-    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
 
-    if is_vector_service_mode():
+    # Instance-based guard (NOT env-based is_vector_service_mode): a service-
+    # backed handle is an HttpVectorClient with no chroma ._client. Keying on the
+    # handle keeps injected chroma-backed T3Database test fixtures on the legacy
+    # branch regardless of NX_STORAGE_BACKEND_VECTORS (the documented preference
+    # in http_vector_client.is_service_backed).
+    if is_service_backed(t3):
         click.echo(
             "  (service mode: chunk_text_hash is owned by the service; "
             "skipping local backfill)"

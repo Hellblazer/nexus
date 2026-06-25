@@ -41,7 +41,11 @@ PY
 [ -n "$GUIDED_STAMP_VERSION" ] || GUIDED_STAMP_VERSION="0.1.8"
 RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # nexus-4mm24: the published engine-service tag the COLD box auto-acquires from.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.6}"
+# Must be >= the guided-upgrade version-pin floor (REQUIRED_RELEASE_VERSION); a
+# stale default fail-closes the --cold MVV at the version gate. Kept literal (it
+# names a PUBLISHED release tag, which need not equal the floor) but bumped to
+# track it; override via NEXUS_SERVICE_TAG. (nexus-v0zmv)
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.8}"
 for a in "$@"; do
   case "$a" in
     --with-cloud) WITH_CLOUD=1 ;;
