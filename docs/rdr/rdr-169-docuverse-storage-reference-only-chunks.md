@@ -118,12 +118,14 @@ deployment, the copy-not-move T2/T3 ETL, and the RDR lifecycle. nexus's read on 
 
 ### Critical Assumptions
 
-- [ ] **The retention slice is purely additive and reconcile-safe** — `ADD COLUMN retention
-  NOT NULL DEFAULT 'full'` + `ALTER chunk_text DROP NOT NULL` needs no backfill (existing
-  rows default `full`), and the conexus copy-not-move ETL reconcile keys on natural-key /
-  chash, not on content, so an additive defaulted column does not false-positive reconcile —
-  **Status**: Confirmed by conexus (relay A2); re-verify against the ETL `_TABLE_SPECS` at
-  co-design — **Method**: cross-repo co-design + reconcile dry-run.
+- [x] **The retention slice is purely additive and reconcile-safe** — **Status**: Verified
+  (co-design relay 2026-06-25, `conexus/conexus-to-nexus-rdr169-docuverse-codesign-2026-06-25`
+  A2). The conexus copy-not-move T3 reconcile (`etl_t3.py:489+`) selects ONLY
+  `(collection, chash)` and checksums ONLY `chash` (`sha256(sorted(chashes))`) — it never
+  reads `chunk_text` or `retention`, so the additive column + nullable content are invisible
+  to reconcile by construction (additive-column class, not the conexus-lzm FK/dedup class).
+  conexus will run a seeded-sample dry-run during the paired-PR review; the SELECT makes the
+  outcome deterministic regardless.
 - [x] **`chunk_tsv` (FTS) degrades gracefully when `chunk_text` is NULL** — **Status**:
   Verified — **Method**: schema spike (research-1). `chunk_tsv` carries no `NOT NULL`, so
   `to_tsvector('english', NULL)` → NULL tsvector → excluded from FTS (`@@` on NULL is false)
@@ -174,15 +176,28 @@ Two tracks, separated by schema impact (per conexus's gating):
 - **Staleness:** a read-time signal comparing the reference's recorded `source_mtime` to the
   resolver's current view; dangling references handled analogously to `allow_dangling` links.
 
-### Binding constraints (conexus, relay r2 — non-negotiable)
+### Binding constraints (conexus — verified at co-design 2026-06-25, relay r2 + codesign A1–A4)
 
-1. **Cross-repo lockstep:** the `retention` column on the per-tenant chunk table requires the
-   conexus T3 ETL `_TABLE_SPECS` column-list edit **in the same coordinated change** — the
-   nexus changeset and the paired conexus ETL edit are reviewed together; neither ships half.
-2. **Build waits for `aqb-done`:** the schema-touching slice is *designed* now but its
-   build/landing holds until conexus signals the xr7.8 cutover/freeze close (`aqb-done`); no
-   freeze-end date exists yet. The non-schema track proceeds independently.
-3. **RLS unconditional + RDR-152-additive DTO** (above).
+1. **Cross-repo lockstep — the load-bearing paired edit is NOT the column line.** The cutover
+   copy needs no ETL edit (the column is omitted from `etl_t3.py:_insert_batch`'s explicit
+   INSERT list, so `NOT NULL DEFAULT 'full'` fills it — correct for all full-content cutover
+   rows). The real paired edit, shipped with the nexus changeset, is: **(a)** add `retention`
+   to the `_insert_batch` column list + row tuple, and **(b)** relax the
+   `etl_t3.py:226-227` null/empty-doc **skip** to a reference-only passthrough (emit
+   `chash` + `chunk_text=None` + `retention='reference-only'`) — otherwise reference-only
+   chunks silently never copy. (b) is the non-obvious load-bearing change.
+2. **Sequencing — STANDALONE POST-CUTOVER, gated on `aqb-done`** (conexus A3 preference). The
+   slice is independent (zero backfill, default-covered, reconcile-invisible) and adds nothing
+   by folding into the highest-risk cutover. Order: cutover copies the pre-retention schema →
+   conexus signals `aqb-done` (local-data-frozen + cutover verified; tracked conexus-od6a,
+   blocked on conexus-xr7.8) → nexus lands the additive `ALTER` on the live cloud (instant)
+   **paired** with the conexus `_insert_batch` edit. Post-cutover the paired edit serves future
+   reference-only writes + rollback-rerun, not the cutover copy.
+3. **RLS unconditional** (`tenant_id NOT NULL` on reference-only rows).
+4. **DTO strictly additive + nullable, no framing change** (conexus A4). The edge proxy
+   streams the response body verbatim (never parses JSON), so additive nullable fields pass
+   through untouched — but the DTO addition MUST NOT change `Content-Type` or response framing;
+   add `chunk_text` (nullable) + `retention` to the existing response shape only.
 
 ## Alternatives Considered
 
