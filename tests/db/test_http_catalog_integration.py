@@ -1549,37 +1549,29 @@ class TestServiceModeIndexMVV:
         )
         return code_docs[0]
 
-    def test_service_mode_index_registers_documents(
+    def test_service_mode_index_populates_catalog_and_manifest(
         self, fixture_repo: Path, cat, service, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """DOCUMENTS register through the real wire — the part P3 + the init-gate fix
-        restored (collection_for renders v1; the catalog hook fires in service mode)."""
+        """End-to-end: service-mode `nx index repo` populates DOCUMENTS and the MANIFEST.
+
+        Indexes ONCE against the live stack and asserts both, so this is the single
+        load-bearing proof that the full catalog-write path works through the real wire:
+        - Documents register (collection_for renders v1; the catalog hook fires in
+          service mode — the P3 signatures + init-gate fixes).
+        - The manifest (catalog_document_chunks) is non-empty (Chunks > 0) — the manifest
+          post-store hook reaches the service (the njrcn.6 _db-abort + chash-length +
+          ManifestRow return-type fixes).
+        """
         code_doc = self._run_service_mode_index_and_find_code_doc(
             fixture_repo, cat, service, monkeypatch
         )
         assert str(code_doc.tumbler)  # registered with a real tumbler
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "RDR-168 nexus-njrcn.6 LAYER 2 (service-side): layer 1 is FIXED — the manifest "
-            "post-store hook no longer silently aborts in service mode (it used to: "
-            "getattr(reader, '_db', None) does NOT swallow the RuntimeError HttpCatalogClient._db "
-            "raises, so the read-handle cleanup killed the hook before the write). The hook "
-            "now FIRES atomic_manifest_replace → POST /manifest/write, but the service returns "
-            "500 (repo.writeManifest insert fails — a distinct service-side cause; the JAR "
-            "handler swallows the stack). Remove this xfail when /manifest/write succeeds."
-        ),
-    )
-    def test_service_mode_index_populates_manifest(
-        self, fixture_repo: Path, cat, service, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Self-contained: runs its own attributed index, then asserts the manifest.
-        code_doc = self._run_service_mode_index_and_find_code_doc(
-            fixture_repo, cat, service, monkeypatch
-        )
         manifest = cat.get_manifest(code_doc.tumbler)
         assert manifest, (
             f"manifest empty for {code_doc.tumbler} — catalog_document_chunks not "
-            "populated (Chunks == 0): /manifest/write returned 500 (service-side layer 2)."
+            "populated (Chunks == 0): the manifest hook did not reach the service catalog."
+        )
+        assert all(len(row.chash) == 32 for row in manifest), (
+            "manifest chash must be the 32-char natural ID (catalog_document_chunks_chash_len_check)"
         )

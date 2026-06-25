@@ -62,11 +62,29 @@ import httpx
 import structlog
 
 from nexus.catalog.catalog import CatalogEntry, Tumbler
+from nexus.catalog.catalog_writes import ManifestRow
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 
 _log = structlog.get_logger(__name__)
 
 DEFAULT_TENANT: str = "default"
+
+
+def _manifest_row_from_dict(d: dict) -> ManifestRow:
+    """Build a typed ``ManifestRow`` from a wire dict (return-type parity, RDR-168).
+
+    The Java ``/manifest/get`` rows carry an extra ``doc_id`` key the dataclass does not
+    model; only the seven schema fields are mapped.
+    """
+    return ManifestRow(
+        position=int(d.get("position", 0)),
+        chash=d.get("chash", "") or "",
+        chunk_index=d.get("chunk_index"),
+        line_start=d.get("line_start"),
+        line_end=d.get("line_end"),
+        char_start=d.get("char_start"),
+        char_end=d.get("char_end"),
+    )
 
 
 # RDR-152 nexus-fjwxh: delegate to the centralized resolver (was an inline
@@ -1319,16 +1337,42 @@ class HttpCatalogClient:
     # MANIFEST / CHUNKS
     # ══════════════════════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _manifest_rows(chunks: list[dict]) -> list[dict]:
+        """Normalize manifest rows for the wire: chash to the 32-char natural ID.
+
+        The catalog chash is ``chunk_text_hash[:32]`` (RDR-108 D1 — the Chroma natural
+        ID). The local Catalog truncates at the write layer (catalog_writes.py); callers
+        pass the full 64-char ``chunk_text_hash`` (e.g. the manifest post-store hook), so
+        the service client MUST truncate too or the Postgres
+        ``catalog_document_chunks_chash_len_check`` (length == 32) rejects the insert
+        (RDR-168 nexus-njrcn.6 layer 2).
+        """
+        out: list[dict] = []
+        for c in chunks:
+            row = dict(c)
+            row["chash"] = (row.get("chash") or "")[:32]
+            out.append(row)
+        return out
+
     def write_manifest(self, doc_id: str, chunks: list[dict]) -> None:
         """Replace manifest for doc_id (atomic delete + insert)."""
-        self._post("/manifest/write", {"doc_id": doc_id, "rows": chunks})
+        self._post("/manifest/write", {"doc_id": doc_id, "rows": self._manifest_rows(chunks)})
 
     def append_manifest_chunks(self, doc_id: str, chunks: list[dict]) -> None:
-        self._post("/manifest/append", {"doc_id": doc_id, "rows": chunks})
+        self._post("/manifest/append", {"doc_id": doc_id, "rows": self._manifest_rows(chunks)})
 
-    def get_manifest(self, doc_id: str) -> list[Any]:
+    def get_manifest(self, doc_id: str) -> list[ManifestRow]:
+        """Return ordered manifest rows — typed like local Catalog.get_manifest.
+
+        Return-type parity (RDR-168): local returns list[ManifestRow] and consumers do
+        attribute access (``row.chash``); the wire returns dicts, so reconstruct the
+        dataclass here or service-mode housekeeping (e.g. _prune_misclassified) breaks
+        with ``'dict' object has no attribute 'chash'``.
+        """
         result = self._get("/manifest/get", doc_id=doc_id)
-        return result.get("rows", []) if result else []
+        rows = result.get("rows", []) if result else []
+        return [_manifest_row_from_dict(r) for r in rows]
 
     def get_manifests(self, doc_ids: list[str]) -> dict[str, list[Any]]:
         """Batch-fetch manifests for multiple doc_ids in one round-trip.
@@ -1347,7 +1391,11 @@ class HttpCatalogClient:
         if not doc_ids:
             return {}
         result = self._post("/manifest/get_many", {"doc_ids": doc_ids})
-        return result.get("manifests", {}) if result else {}
+        manifests = result.get("manifests", {}) if result else {}
+        return {
+            did: [_manifest_row_from_dict(r) for r in rows]
+            for did, rows in manifests.items()
+        }
 
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
         """Return chashes for all chunks of doc_id.
@@ -1358,7 +1406,7 @@ class HttpCatalogClient:
         use get_manifest() + extract chash from each row.
         """
         rows = self.get_manifest(doc_id)
-        return [row["chash"] for row in rows if row.get("chash")]
+        return [row.chash for row in rows if row.chash]
 
     def docs_for_chashes(self, chashes: list[str]) -> list[str]:
         """Return the list of document tumblers that contain any of the given chashes.
@@ -1387,7 +1435,7 @@ class HttpCatalogClient:
         new_chunk_count: int | None = None,
     ) -> None:
         # /manifest/write performs the atomic delete+insert already
-        self._post("/manifest/write", {"doc_id": doc_id, "rows": chunks})
+        self._post("/manifest/write", {"doc_id": doc_id, "rows": self._manifest_rows(chunks)})
         if new_collection or new_chunk_count is not None:
             updates: dict = {}
             if new_collection:              updates["physical_collection"] = new_collection

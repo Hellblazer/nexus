@@ -456,7 +456,9 @@ class TestHttpCatalogClientRoundTrip:
         # GET /manifest/get?doc_id=X → response key 'rows'
         rows = client.get_manifest("1.1.1")
         assert len(rows) == 1
-        assert rows[0]["chash"] == "abc123"
+        # Return-type parity: typed ManifestRow (attribute access), like local Catalog.
+        assert rows[0].chash == "abc123"
+        assert rows[0].position == 0
 
     def test_get_chunk_chashes_from_manifest(self, client: HttpCatalogClient) -> None:
         # Pulls chashes from manifest rows (not a separate endpoint)
