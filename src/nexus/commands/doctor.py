@@ -46,6 +46,18 @@ def _run_check_schema() -> None:
 
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.db.migrations import MIGRATIONS, _parse_version  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    # nexus-p0clh: in service mode the T2 schema lives in Postgres and is
+    # Liquibase-managed by the nexus-service (applied at startup), not the local
+    # SQLite migrations checked below. Report N/A honestly instead of the
+    # misleading "T2 database not found" (which reads as an error).
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        click.echo(
+            "T2 schema is service-backed (Postgres, Liquibase-managed) — "
+            "local SQLite schema check N/A in service mode."
+        )
+        return
 
     db_path = default_db_path()
     if not db_path.exists():
