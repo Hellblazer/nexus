@@ -29,10 +29,11 @@ verified empirically in research-4, id 1011).
 """
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import structlog
 
@@ -47,7 +48,13 @@ __all__ = [
     "ReadFailReason",
     "ReadOk",
     "ReadResult",
+    "StalenessSignal",
+    "StatFail",
+    "StatOk",
+    "StatResult",
     "read_source",
+    "staleness_signal",
+    "stat_source",
     "uri_for",
 ]
 
@@ -822,6 +829,25 @@ def _read_devonthink_uri(
 
 # ── obsidian:// reader (RDR-169 G3) ──────────────────────────────────────────
 
+# Vault roots that are filesystem roots or known system directories. A real
+# Obsidian vault is never at "/" or any system prefix; these values indicate
+# misconfiguration or injection. The per-path traversal guard is defense-in-depth,
+# not the primary check — a "/" vault_root makes every path relative_to("/"),
+# neutralising it. Shared by the reader (_read_obsidian_uri) and the stat path
+# (_stat_obsidian_uri) so the security blocklist cannot drift between them.
+# vault_path is resolved (symlinks followed) before the check, so on macOS
+# "/etc" → "/private/etc"; both the symlinked short name and canonical path are listed.
+_OBSIDIAN_BLOCKED_ROOTS = frozenset({
+    "/",
+    "/etc", "/private/etc",
+    "/usr", "/private/usr",
+    "/var", "/private/var",
+    "/bin", "/sbin",
+    "/private",
+    "/System",
+})
+
+
 
 def _read_obsidian_uri(
     uri: str,
@@ -870,7 +896,6 @@ def _read_obsidian_uri(
     ``ReadFail(reason='unauthorized')``.
     """
     from pathlib import Path  # noqa: PLC0415 — stdlib deferred to call site
-    from urllib.parse import parse_qs  # noqa: PLC0415
 
     if vault_root is None:
         return ReadFail(
@@ -880,25 +905,8 @@ def _read_obsidian_uri(
 
     vault_path = Path(vault_root).resolve()
 
-    # Reject vault roots that are filesystem roots or known system directories.
-    # A real Obsidian vault is never at "/" or any system prefix; these values
-    # indicate misconfiguration or injection.  The traversal guard below is
-    # defense-in-depth, not the primary check — a "/" vault_root makes every
-    # path relative_to("/"), neutralising it.
-    #
-    # ``vault_path`` has already been resolved (symlinks followed), so on macOS
-    # ``/etc`` becomes ``/private/etc`` — we check the resolved form to handle
-    # both the symlinked short name and the canonical path.
-    _BLOCKED_ROOTS = frozenset({
-        "/",
-        "/etc", "/private/etc",
-        "/usr", "/private/usr",
-        "/var", "/private/var",
-        "/bin", "/sbin",
-        "/private",
-        "/System",
-    })
-    if not vault_path.is_absolute() or str(vault_path) in _BLOCKED_ROOTS:
+    # ``vault_path`` is already resolved; see _OBSIDIAN_BLOCKED_ROOTS for rationale.
+    if not vault_path.is_absolute() or str(vault_path) in _OBSIDIAN_BLOCKED_ROOTS:
         return ReadFail(
             reason="unauthorized",
             detail=(
@@ -1042,3 +1050,437 @@ def read_source(
         manifest_lookup=manifest_lookup,
         vault_root=vault_root,
     )
+
+
+# ── RDR-169 G6: Staleness / dangling signal ───────────────────────────────────
+#
+# A reference-only chunk's bytes can change or disappear outside nexus.
+# G6 defines a READ-TIME signal: compare the reference's RECORDED source_mtime
+# (catalog_documents.source_mtime, a POSIX float; callers coerce NULL → 0.0)
+# against the resolver's CURRENT view of the source.  Four outcomes:
+#
+#   fresh    — recorded mtime >= current source mtime (no change since indexing),
+#              OR scheme has no meaningful mtime (chroma, nx-scratch, https Phase A)
+#   stale    — recorded mtime < current source mtime  (source newer than record)
+#   dangling — source is CONFIRMED absent (FileNotFoundError on a known path)
+#   unknown  — check was indeterminate (transient error, deferred scheme, etc.)
+#
+# The ``dangling`` outcome (CONFIRMED-ABSENT only) mirrors the ``allow_dangling``
+# convention in catalog_links.py:  with ``allow_dangling=False`` a confirmed-absent
+# reference raises ``ValueError``; with ``allow_dangling=True`` it is surfaced as a
+# signal but does not raise.  ``unknown`` (indeterminate) NEVER raises regardless
+# of ``allow_dangling`` — absence was not confirmed, so the strict raise would be
+# a false alarm.
+#
+# SPLIT (inherits RDR-169 G3 reachability split):
+#   Python-side (this file): ALL schemes currently in _READERS.
+#     file://             — os.stat().st_mtime
+#     obsidian://         — os.stat() on the resolved vault path
+#     x-devonthink-item:// — os.stat() on the dt_resolver path (macOS only)
+#     nx-scratch://       — scratch.get() existence check (no mtime on scratch)
+#     chroma://           — content-addressed; chash IS identity → staleness N/A
+#                          (always returns StatOk(current_mtime=None))
+#     https://            — HEAD + Last-Modified; DEFERRED to Phase B (nexus-dtnpu)
+#                          (returns StatFail so staleness_signal returns 'dangling'
+#                          and callers know to defer the check)
+#   Java-side: deferred to Phase B (nexus-dtnpu).  The UriSchemeHandler interface
+#     has a comment-only seam; no stat/head capability is implemented yet.
+
+
+@dataclass(frozen=True)
+class StatOk:
+    """Source is reachable.  ``current_mtime`` is the POSIX float mtime of the
+    source at the time of the stat, or ``None`` for schemes where a meaningful
+    mtime is unavailable (e.g. ``chroma://`` is content-addressed, ``nx-scratch``
+    lacks per-entry mtime).  When ``None``, ``staleness_signal`` returns
+    ``'fresh'`` — absence of a mtime signal is treated as non-stale.
+    """
+    current_mtime: float | None
+
+
+@dataclass(frozen=True)
+class StatFail:
+    """Source is unreachable or the scheme has no stat capability.
+    ``reason`` mirrors ``ReadFailReason``; ``detail`` is a human-readable message.
+    """
+    reason: str
+    detail: str
+
+
+StatResult = StatOk | StatFail
+
+StalenessSignal = Literal["fresh", "stale", "dangling", "unknown"]
+
+# StatFail.reason taxonomy for G6:
+#   "absent"       — confirmed gone: FileNotFoundError on a local path we could stat.
+#                    staleness_signal raises ValueError (allow_dangling=False) or
+#                    returns "dangling" (allow_dangling=True).
+#   "error"        — indeterminate: PermissionError, transient OSError, resolver
+#                    failure, missing context, etc.  staleness_signal returns
+#                    "unknown" and NEVER raises — absence was not confirmed.
+#   "deferred"     — scheme has no stat capability in Phase A (https://).
+#                    staleness_signal returns "unknown".
+#   "scheme_unknown" — no handler registered.  staleness_signal returns "unknown".
+#   "unreachable"  — legacy / generic failure; treated as "error" (indeterminate).
+#
+# source_mtime coercion note: catalog_documents.source_mtime is a FLOAT NOT NULL
+# DEFAULT 0.0 (or equivalent at the Python layer).  Callers of staleness_signal
+# must coerce NULL → 0.0 before calling; this function receives 0.0 as the
+# "never stamped" sentinel and handles it correctly (0.0 < any real mtime → stale).
+
+
+# ── Per-scheme stat handlers ──────────────────────────────────────────────────
+
+
+def _stat_file_uri(uri: str, **_kw: Any) -> StatResult:
+    """Stat a ``file://`` URI — return current mtime without reading bytes."""
+    parsed = urlparse(uri)
+    path = unquote(parsed.path)
+    if not path:
+        return StatFail(reason="error", detail=f"empty path in {uri!r}")
+    try:
+        st = os.stat(path)
+    except FileNotFoundError as e:
+        # Confirmed absent — staleness_signal will treat as "dangling".
+        return StatFail(reason="absent", detail=f"FileNotFoundError: {e}")
+    except PermissionError as e:
+        # Indeterminate — can't confirm absence.
+        return StatFail(reason="error", detail=f"PermissionError: {e}")
+    except OSError as e:
+        return StatFail(reason="error", detail=f"{type(e).__name__}: {e}")
+    return StatOk(current_mtime=st.st_mtime)
+
+
+def _stat_obsidian_uri(
+    uri: str,
+    *,
+    vault_root: Any = None,
+    **_kw: Any,
+) -> StatResult:
+    """Stat an ``obsidian://`` URI — resolve vault path, stat without reading.
+
+    Uses the same ``vault_root`` convention as ``_read_obsidian_uri``
+    (server-provisioned per-tenant config, never from URI params).
+
+    Applies the same ``_BLOCKED_ROOTS`` + ``is_absolute()`` guard as
+    ``_read_obsidian_uri`` to prevent "/" vault_root from making the
+    traversal check vacuous.
+    """
+    if vault_root is None:
+        return StatFail(
+            reason="error",
+            detail="obsidian:// stat requires vault_root (tenant context not provided)",
+        )
+    from pathlib import Path  # noqa: PLC0415 — deferred, matches _read_obsidian_uri
+
+    # Identical guard to _read_obsidian_uri via the shared _OBSIDIAN_BLOCKED_ROOTS.
+    # vault_root is resolved before the check so macOS symlinks (/etc → /private/etc)
+    # are caught in their canonical form.
+    vault_path = Path(vault_root).resolve()
+    if not vault_path.is_absolute() or str(vault_path) in _OBSIDIAN_BLOCKED_ROOTS:
+        return StatFail(
+            reason="error",
+            detail=(
+                f"vault_root {str(vault_path)!r} is not permitted — must be an "
+                f"absolute path to a user vault directory, never a system root. "
+                f"vault_root MUST be server-provisioned config, not client-supplied."
+            ),
+        )
+
+    parsed = urlparse(uri)
+    params = parse_qs(parsed.query)
+    file_parts = params.get("file")
+    if not file_parts or not file_parts[0]:
+        return StatFail(
+            reason="error",
+            detail=f"obsidian:// URI missing 'file' query param: {uri!r}",
+        )
+    raw_file = file_parts[0]  # parse_qs already unquotes
+    try:
+        candidate = (vault_path / raw_file).resolve()
+        candidate.relative_to(vault_path)  # traversal guard
+    except ValueError:
+        return StatFail(
+            reason="error",
+            detail=f"path traversal rejected for {uri!r}",
+        )
+    try:
+        st = os.stat(candidate)
+    except FileNotFoundError as e:
+        # Confirmed absent — staleness_signal will treat as "dangling".
+        return StatFail(reason="absent", detail=f"FileNotFoundError: {e}")
+    except PermissionError as e:
+        return StatFail(reason="error", detail=f"PermissionError: {e}")
+    except OSError as e:
+        return StatFail(reason="error", detail=f"{type(e).__name__}: {e}")
+    return StatOk(current_mtime=st.st_mtime)
+
+
+def _stat_devonthink_uri(
+    uri: str,
+    *,
+    dt_resolver: Callable[[str], tuple[str | None, str]] | None = None,
+    **_kw: Any,
+) -> StatResult:
+    """Stat an ``x-devonthink-item://`` URI — resolve path via dt, stat without reading.
+
+    macOS-only; returns ``StatFail`` on other platforms (same as the full reader).
+    """
+    import sys  # noqa: PLC0415 — deferred, matches _read_devonthink_uri
+    if dt_resolver is None:
+        if sys.platform != "darwin":
+            return StatFail(
+                reason="unreachable",
+                detail="DEVONthink stat is macOS-only",
+            )
+        dt_resolver = _devonthink_resolver_default
+    parsed = urlparse(uri)
+    uuid = parsed.netloc or parsed.path.lstrip("/")
+    if not uuid:
+        return StatFail(
+            reason="unreachable",
+            detail=f"empty UUID in DEVONthink URI {uri!r}",
+        )
+    path, error_detail = dt_resolver(uuid)
+    if path is None:
+        return StatFail(
+            reason="error",
+            detail=error_detail or "DEVONthink resolver returned no path",
+        )
+    try:
+        st = os.stat(path)
+    except FileNotFoundError as e:
+        # Confirmed absent — staleness_signal will treat as "dangling".
+        return StatFail(reason="absent", detail=f"FileNotFoundError: {e}")
+    except PermissionError as e:
+        return StatFail(reason="error", detail=f"PermissionError: {e}")
+    except OSError as e:
+        return StatFail(reason="error", detail=f"{type(e).__name__}: {e}")
+    return StatOk(current_mtime=st.st_mtime)
+
+
+def _stat_scratch_uri(uri: str, *, scratch: Any = None, **_kw: Any) -> StatResult:
+    """Stat an ``nx-scratch://session/<session-id>/<entry-id>`` URI.
+
+    Parses the canonical shape (same as ``_read_scratch_uri``) so that
+    ``nx-scratch://session/sess123/entry-abc`` correctly extracts
+    ``entry_id = "entry-abc"`` rather than ``"sess123/entry-abc"``.
+
+    Scratch entries have no per-entry mtime, so ``StatOk.current_mtime`` is
+    ``None`` on success.  The caller then receives ``'fresh'`` from
+    ``staleness_signal`` — a live scratch entry is never considered stale.
+    """
+    if scratch is None:
+        return StatFail(reason="error", detail="no scratch client provided")
+    parsed = urlparse(uri)
+    if parsed.netloc != "session":
+        return StatFail(
+            reason="error",
+            detail=(
+                f"unexpected netloc {parsed.netloc!r} in nx-scratch URI; "
+                f"expected 'session' (shape: nx-scratch://session/<session-id>/<entry-id>)"
+            ),
+        )
+    path = parsed.path.removeprefix("/")
+    parts = path.split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return StatFail(
+            reason="error",
+            detail=(
+                f"malformed nx-scratch uri {uri!r}; expected "
+                f"nx-scratch://session/<session-id>/<entry-id>"
+            ),
+        )
+    _session_id, entry_id = parts
+    entry = scratch.get(entry_id)
+    if entry is None:
+        # Confirmed absent — entry expired or deleted.
+        return StatFail(
+            reason="absent",
+            detail=f"scratch entry {entry_id!r} not found (expired or deleted)",
+        )
+    return StatOk(current_mtime=None)  # no mtime on scratch → treated as fresh
+
+
+def _stat_chroma_uri(uri: str, **_kw: Any) -> StatResult:
+    """Stat a ``chroma://`` URI.
+
+    ``chroma://`` is content-addressed: the chash IS the identity, so the
+    content cannot change out from under the reference — a chunk either
+    exists with the recorded chash or it does not.  Staleness in the
+    mtime sense does not apply; this handler always returns
+    ``StatOk(current_mtime=None)`` so ``staleness_signal`` returns
+    ``'fresh'``.
+
+    Dangling detection (chunk deleted from T3) is handled by the resolve
+    path at serving time, not here.  Phase B may add a lightweight
+    ``chroma://`` existence check if the serving layer needs it.
+    """
+    # Content-addressed: mtime is N/A.  Return StatOk with None so
+    # staleness_signal returns 'fresh' and the caller knows to defer to
+    # the serve-path existence check.
+    return StatOk(current_mtime=None)
+
+
+def _stat_https_uri(uri: str, **_kw: Any) -> StatResult:
+    """Stat an ``https://`` URI.
+
+    A full implementation would issue a HEAD request and parse the
+    ``Last-Modified`` header.  This is DEFERRED to Phase B (nexus-dtnpu):
+    HEAD + Last-Modified adds a network round-trip to the serving hot-path
+    and requires timeout / retry plumbing that belongs in the Phase B
+    reference-only serving milestone, not Phase A.
+
+    In Phase A this returns ``StatOk(current_mtime=None)`` — same semantics
+    as ``chroma://`` and ``nx-scratch://``: "can't check yet → treat as fresh."
+    Phase B replaces this body with a live HEAD call that either returns a
+    real mtime (enabling stale detection) or a confirmed-absent signal.
+    """
+    # Phase A: can't check → fresh (not "dangling" — absence not confirmed).
+    return StatOk(current_mtime=None)
+
+
+# ── Stat registry ─────────────────────────────────────────────────────────────
+
+
+_STAT_HANDLERS: dict[str, Callable[..., StatResult]] = {
+    "file":               _stat_file_uri,
+    "obsidian":           _stat_obsidian_uri,
+    "x-devonthink-item":  _stat_devonthink_uri,
+    "nx-scratch":         _stat_scratch_uri,
+    "chroma":             _stat_chroma_uri,
+    "https":              _stat_https_uri,
+}
+
+
+def stat_source(
+    uri: str,
+    *,
+    scratch: Any = None,
+    tenant: dict[str, Any] | None = None,
+    dt_resolver: Callable[[str], tuple[str | None, str]] | None = None,
+) -> StatResult:
+    """Dispatch ``uri`` to its registered stat handler by scheme.
+
+    Returns a ``StatOk`` (source reachable, ``current_mtime`` is the POSIX
+    float mtime or ``None`` for schemes without a meaningful mtime) or
+    ``StatFail`` (source unreachable or scheme has no stat capability).
+
+    Unknown schemes return ``StatFail(reason='scheme_unknown')``.
+
+    ``tenant`` carries per-request context for local-scheme handlers
+    (same contract as ``read_source``): ``tenant["vault_root"]`` is used by
+    the ``obsidian://`` handler.
+
+    ``dt_resolver`` is a test-injection hook for the ``x-devonthink-item://``
+    handler; production callers leave it ``None``.
+
+    RDR-169 G6 split (inherits G3):
+    - Python-side handlers: ``file``, ``obsidian``, ``x-devonthink-item``,
+      ``nx-scratch``, ``chroma`` (content-addressed → always fresh),
+      ``https`` (deferred Phase A → StatOk(None) → fresh; Phase B adds HEAD).
+    - Java-side stat: deferred to Phase B (nexus-dtnpu).
+    """
+    if not uri:
+        return StatFail(reason="error", detail="empty uri")
+    parsed = urlparse(uri)
+    scheme = parsed.scheme
+    if not scheme:
+        return StatFail(reason="scheme_unknown", detail=f"no scheme in {uri!r}")
+    handler = _STAT_HANDLERS.get(scheme)
+    if handler is None:
+        return StatFail(
+            reason="scheme_unknown",
+            detail=f"no stat handler for scheme {scheme!r}",
+        )
+    vault_root = tenant.get("vault_root") if tenant else None
+    return handler(
+        uri,
+        scratch=scratch,
+        vault_root=vault_root,
+        dt_resolver=dt_resolver,
+    )
+
+
+def staleness_signal(
+    recorded_mtime: float,
+    stat_result: StatResult,
+    *,
+    allow_dangling: bool = False,
+) -> StalenessSignal:
+    """Decide the staleness state of a reference-only chunk.
+
+    Compares the reference's RECORDED ``source_mtime`` (from
+    ``catalog_documents.source_mtime``, a POSIX float seconds epoch; callers
+    must coerce SQL NULL → 0.0 before calling) against the resolver's CURRENT
+    view of the source (from ``stat_source()``).
+
+    Four outcomes (``StalenessSignal = Literal['fresh', 'stale', 'dangling', 'unknown']``):
+
+    * ``'fresh'``    — ``StatOk`` and ``current_mtime is None`` (scheme has no
+                        meaningful mtime, e.g. ``chroma://``, ``nx-scratch://``,
+                        or ``https://`` in Phase A)
+                        OR ``StatOk`` and ``recorded_mtime >= current_mtime``
+                        (source has not changed since the reference was recorded).
+    * ``'stale'``    — ``StatOk`` and ``recorded_mtime < current_mtime``
+                        (source has changed since the reference was recorded).
+    * ``'dangling'`` — ``StatFail(reason='absent')`` only: source is confirmed
+                        gone (``FileNotFoundError`` on a path we know existed).
+                        With ``allow_dangling=False`` (default) this raises
+                        ``ValueError``; with ``allow_dangling=True`` it returns
+                        ``'dangling'`` without raising.
+    * ``'unknown'``  — ``StatFail`` with any reason OTHER than ``'absent'``
+                        (``'error'``, ``'deferred'``, ``'scheme_unknown'``,
+                        ``'unreachable'``, etc.): the check was indeterminate.
+                        NEVER raises; callers can retry or treat as non-fatal.
+
+    The ``allow_dangling`` parameter mirrors the convention in
+    ``catalog_links.py``:
+
+    * ``allow_dangling=False`` (default) — confirmed-absent raises ``ValueError``
+      matching the catalog-links error shape
+      ``ValueError("dangling reference: <detail>")``.
+    * ``allow_dangling=True`` — confirmed-absent is returned as ``'dangling'``
+      without raising; the caller decides how to handle missing sources.
+
+    ``recorded_mtime=0.0`` is treated as "no recorded mtime" (the catalog
+    default sentinel; callers coerce NULL → 0.0 at the SQL/ORM boundary).
+    When the scheme provides a real mtime, ``0.0 < current_mtime`` always,
+    so a never-stamped reference is classified as ``'stale'``, which is the
+    correct conservative default.
+
+    Args:
+        recorded_mtime: POSIX float from ``catalog_documents.source_mtime``
+                        (callers coerce NULL → 0.0).
+        stat_result:    result of ``stat_source(source_uri)``.
+        allow_dangling: when ``False`` (default), confirmed-absent raises
+                        ``ValueError``; when ``True``, returns ``'dangling'``.
+
+    Returns:
+        ``'fresh'``, ``'stale'``, ``'dangling'``, or ``'unknown'``.
+
+    Raises:
+        ValueError: when ``allow_dangling=False`` and ``stat_result`` is
+                    ``StatFail(reason='absent')``.  Message begins
+                    ``"dangling reference: "`` followed by ``StatFail.detail``.
+    """
+    if isinstance(stat_result, StatFail):
+        if stat_result.reason == "absent":
+            # Confirmed gone — matches catalog-links allow_dangling semantics.
+            if allow_dangling:
+                return "dangling"
+            raise ValueError(f"dangling reference: {stat_result.detail}")
+        # Indeterminate (transient error, deferred scheme, missing context, etc.)
+        # — NEVER raise; cannot confirm absence.
+        return "unknown"
+
+    # StatOk
+    current_mtime = stat_result.current_mtime
+    if current_mtime is None:
+        # Scheme has no meaningful mtime (chroma://, nx-scratch://).
+        # Treat as fresh — absence of mtime signal is not evidence of staleness.
+        return "fresh"
+
+    if recorded_mtime >= current_mtime:
+        return "fresh"
+    return "stale"
