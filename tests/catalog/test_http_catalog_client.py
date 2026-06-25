@@ -192,6 +192,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "count": len(body.get("rows", []))})
         elif op == "/manifest/purge":
             self._send_json({"deleted": 1})
+        elif op == "/manifest/get_many":
+            self._send_json({"manifests": {
+                "1.1.1": [{"position": 0, "chash": "abc123", "line_start": 1, "line_end": 9}],
+            }})
         elif op == "/manifest/docs_for_chashes":
             # Real server: {"tumblers": [tumbler_string, ...]} (flat list, SELECT DISTINCT)
             self._send_json({"tumblers": ["1.1.1"]})
@@ -420,7 +424,9 @@ class TestHttpCatalogClientRoundTrip:
         # GET /links?tumbler=X&direction=out
         links = client.links_from("1.1.1")
         assert len(links) == 1
-        assert links[0]["link_type"] == "cites"
+        # Return-type parity: typed CatalogLink (attribute access), like local Catalog.
+        assert links[0].link_type == "cites"
+        assert str(links[0].to_tumbler) == "1.1.2"
 
     def test_links_to_uses_direction_in(self, client: HttpCatalogClient) -> None:
         # GET /links?tumbler=X&direction=in
@@ -430,6 +436,15 @@ class TestHttpCatalogClientRoundTrip:
     def test_link_query(self, client: HttpCatalogClient) -> None:
         links = client.link_query(link_type="cites")
         assert len(links) == 1
+        assert links[0].link_type == "cites"  # typed CatalogLink, not dict
+
+    def test_get_manifests_returns_typed_rows(self, client: HttpCatalogClient) -> None:
+        # Return-type parity: batch get_manifests yields list[ManifestRow] per doc_id
+        # (search_engine.py prefers this over the per-doc loop in service mode).
+        by_doc = client.get_manifests(["1.1.1"])
+        assert "1.1.1" in by_doc
+        assert by_doc["1.1.1"][0].chash == "abc123"
+        assert by_doc["1.1.1"][0].position == 0
 
     def test_graph_post_traverse(self, client: HttpCatalogClient) -> None:
         # graph() must POST /traverse (not GET)

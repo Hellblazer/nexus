@@ -86,7 +86,54 @@ _LOCAL = {
 }
 
 
+# Catalog return types that carry typed objects consumers do ATTRIBUTE access on. A
+# client method returning a raw dict/Any where local returns one of these is the
+# return-type parity bug class (RDR-168): the signature-only conformance test cannot see
+# it, and it crashes service-mode consumers with `'dict' object has no attribute ...`
+# (e.g. get_manifest→ManifestRow, links_from→CatalogLink). Guarded below.
+_TYPED_RETURNS = ("CatalogEntry", "CatalogLink", "ManifestRow", "CollectionName", "Tumbler")
+
+
 # ── fidelity ─────────────────────────────────────────────────────────────────────
+
+
+def _return_annotation(method) -> str:  # noqa: ANN001
+    try:
+        return str(inspect.signature(method).return_annotation)
+    except (ValueError, TypeError):
+        return ""
+
+
+def test_client_return_types_match_local_typed_returns() -> None:
+    """Client methods must NOT return raw dict/Any where local returns a typed object.
+
+    The conformance test (test_catalog_conformance.py) checks PARAMETER signatures only;
+    return-type divergence is a distinct bug class it cannot catch. This pins it: for
+    every caller-facing method whose local return is a typed catalog object, the client's
+    return annotation must not collapse to dict/Any.
+    """
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415
+
+    client = {
+        n: m for n, m in inspect.getmembers(HttpCatalogClient, inspect.isfunction)
+        if not n.startswith("_")
+    }
+    offenders: dict[str, dict[str, str]] = {}
+    for name in _UNION:
+        if name not in _LOCAL or name not in client:
+            continue
+        local_ret = _return_annotation(_LOCAL[name])
+        client_ret = _return_annotation(client[name])
+        local_typed = any(t in local_ret for t in _TYPED_RETURNS)
+        client_collapsed = ("dict" in client_ret or "Any" in client_ret) and not any(
+            t in client_ret for t in _TYPED_RETURNS
+        )
+        if local_typed and client_collapsed and local_ret != client_ret:
+            offenders[name] = {"local": local_ret, "client": client_ret}
+    assert offenders == {}, (
+        "HttpCatalogClient methods collapse a typed local return to dict/Any "
+        f"(return-type parity bug class): {offenders}"
+    )
 
 
 def test_every_protocol_method_exists_on_local_catalog() -> None:

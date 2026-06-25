@@ -642,21 +642,21 @@ class TestLinkAndTraversal:
         a, b, c = linked_docs
         lf = cat.links_from(a)
         assert len(lf) >= 1
-        to_tumblers = [lk["to_tumbler"] for lk in lf]
+        to_tumblers = [str(lk.to_tumbler) for lk in lf]
         assert str(b) in to_tumblers
 
     def test_links_to(self, cat, linked_docs) -> None:
         a, b, c = linked_docs
         lt = cat.links_to(b)
         assert len(lt) >= 1
-        from_tumblers = [lk["from_tumbler"] for lk in lt]
+        from_tumblers = [str(lk.from_tumbler) for lk in lt]
         assert str(a) in from_tumblers
 
     def test_link_query_filter_by_type(self, cat, linked_docs) -> None:
         a, b, c = linked_docs
         links = cat.link_query(link_type="cites", from_t=str(a))
         assert len(links) >= 1
-        assert all(lk["link_type"] == "cites" for lk in links)
+        assert all(lk.link_type == "cites" for lk in links)
 
     def test_graph_depth_1(self, cat, linked_docs) -> None:
         """graph() POST /traverse with depth=1 returns direct neighbors."""
@@ -684,7 +684,7 @@ class TestLinkAndTraversal:
     def test_link_if_absent_idempotent(self, cat, linked_docs) -> None:
         """link_if_absent on an existing edge must not raise."""
         a, b, c = linked_docs
-        cat.link_if_absent(a, b, "cites")
+        cat.link_if_absent(a, b, "cites", created_by="inttest")
 
     def test_unlink(self, cat) -> None:
         """Create, verify, then remove a link."""
@@ -692,12 +692,12 @@ class TestLinkAndTraversal:
                          source_uri="file:///unlink/x.md")
         y = cat.register("1.1", "UnlinkDoc-Y", content_type="paper",
                          source_uri="file:///unlink/y.md")
-        cat.link(x, y, "relates")
+        cat.link(x, y, "relates", created_by="inttest")
         before = cat.links_from(x)
-        assert any(lk["to_tumbler"] == str(y) for lk in before)
+        assert any(str(lk.to_tumbler) == str(y) for lk in before)
         cat.unlink(x, y, "relates")
         after = cat.links_from(x)
-        assert not any(lk["to_tumbler"] == str(y) for lk in after)
+        assert not any(str(lk.to_tumbler) == str(y) for lk in after)
 
 
 class TestManifest:
@@ -725,7 +725,7 @@ class TestManifest:
         t, expected = doc_with_manifest
         rows = cat.get_manifest(str(t))
         assert len(rows) == 3
-        chashes = [r["chash"] for r in rows]
+        chashes = [r.chash for r in rows]
         assert "chunk_hash_000000000000000000000" in chashes
         assert "chunk_hash_010000000000000000000" in chashes
         assert "chunk_hash_020000000000000000000" in chashes
@@ -742,7 +742,7 @@ class TestManifest:
             {"position": 3, "chash": "chunk_hash_030000000000000000000"},
         ])
         rows = cat.get_manifest(str(t))
-        chashes = [r["chash"] for r in rows]
+        chashes = [r.chash for r in rows]
         assert "chunk_hash_030000000000000000000" in chashes
 
     def test_docs_for_chashes_reverse_lookup(self, cat, doc_with_manifest) -> None:
@@ -784,7 +784,7 @@ class TestManifest:
             {"position": 1, "chash": "new_hash_01000000000000000000000"},
         ])
         rows = cat.get_manifest(str(t))
-        chashes = [r["chash"] for r in rows]
+        chashes = [r.chash for r in rows]
         assert "new_hash_00000000000000000000000" in chashes
         assert "new_hash_01000000000000000000000" in chashes
         assert "old_hash000000000000000000000000" not in chashes
@@ -991,7 +991,7 @@ class TestETLFidelity:
         })
         assert r is not None
         links = cat.links_from(a, link_type="etl-test")
-        assert any(lk["to_tumbler"] == str(b) for lk in links)
+        assert any(str(lk.to_tumbler) == str(b) for lk in links)
 
     def test_collections_round_trip(self, cat) -> None:
         """register_collection + list_collections + get_collection."""
@@ -1198,12 +1198,12 @@ class TestLinkQueryDirectionTumbler:
         a, b = link_query_docs
         links = cat.link_query(direction="out", tumbler=str(a))
         assert isinstance(links, list), f"Expected list, got {type(links)}"
-        from_tumblers = [lk["from_tumbler"] for lk in links]
+        from_tumblers = [str(lk.from_tumbler) for lk in links]
         assert str(a) in from_tumblers, (
             f"direction=out tumbler={a}: expected {a} in from_tumblers, got {from_tumblers}"
         )
         # Must not contain links where A is the to_tumbler
-        to_tumblers = [lk["to_tumbler"] for lk in links]
+        to_tumblers = [str(lk.to_tumbler) for lk in links]
         assert str(a) not in to_tumblers, (
             f"direction=out: A appeared as to_tumbler, expected only from_tumbler"
         )
@@ -1213,30 +1213,34 @@ class TestLinkQueryDirectionTumbler:
         a, b = link_query_docs
         links = cat.link_query(direction="in", tumbler=str(b))
         assert isinstance(links, list)
-        to_tumblers = [lk["to_tumbler"] for lk in links]
+        to_tumblers = [str(lk.to_tumbler) for lk in links]
         assert str(b) in to_tumblers, (
             f"direction=in tumbler={b}: expected {b} in to_tumblers, got {to_tumblers}"
         )
         # Must not contain links where B is the from_tumbler
-        from_tumblers = [lk["from_tumbler"] for lk in links]
+        from_tumblers = [str(lk.from_tumbler) for lk in links]
         assert str(b) not in from_tumblers, (
             f"direction=in: B appeared as from_tumbler"
         )
 
-    def test_link_query_results_are_dicts(self, cat, link_query_docs) -> None:
-        """Results from link_query must be plain dicts (service mode — no .to_dict() needed).
+    def test_link_query_results_are_typed_links(self, cat, link_query_docs) -> None:
+        """Results from link_query are typed CatalogLink, like local Catalog (RDR-168).
 
-        mcp/catalog.py line ~495 previously called l.to_dict() which fails when
-        HttpCatalogClient returns list[dict]. Now uses 'l if isinstance(l, dict) else l.to_dict()'.
+        Return-type parity: the client previously returned list[dict], which crashed
+        consumers doing attribute access (indexer rename-detection: lnk.to_tumbler). The
+        mcp/catalog.py dual-handle sites (`l if isinstance(l, dict) else l.to_dict()`)
+        keep working because CatalogLink.to_dict() exists.
         """
+        from nexus.catalog.catalog import CatalogLink  # noqa: PLC0415
+
         a, b = link_query_docs
         links = cat.link_query(direction="out", tumbler=str(a))
         for lk in links:
-            assert isinstance(lk, dict), f"Expected dict, got {type(lk)}: {lk}"
-            # These are the fields the mcp/catalog.py link_query result uses
-            assert "from_tumbler" in lk
-            assert "to_tumbler" in lk
-            assert "link_type" in lk
+            assert isinstance(lk, CatalogLink), f"Expected CatalogLink, got {type(lk)}: {lk}"
+            assert str(lk.from_tumbler)
+            assert str(lk.to_tumbler)
+            assert lk.link_type
+            assert isinstance(lk.to_dict(), dict)  # dual-handle (mcp/catalog.py) path stays valid
 
     def test_link_query_tumbler_both_direction(self, cat, link_query_docs) -> None:
         """link_query(direction='both', tumbler=A) returns all links touching A."""
@@ -1245,7 +1249,7 @@ class TestLinkQueryDirectionTumbler:
         assert len(links) >= 1
         touching_a = [
             lk for lk in links
-            if lk["from_tumbler"] == str(a) or lk["to_tumbler"] == str(a)
+            if str(lk.from_tumbler) == str(a) or str(lk.to_tumbler) == str(a)
         ]
         assert len(touching_a) >= 1
 

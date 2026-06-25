@@ -61,7 +61,7 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.catalog.catalog import CatalogEntry, Tumbler
+from nexus.catalog.catalog import CatalogEntry, CatalogLink, Tumbler
 from nexus.catalog.catalog_writes import ManifestRow
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 
@@ -78,12 +78,37 @@ def _manifest_row_from_dict(d: dict) -> ManifestRow:
     """
     return ManifestRow(
         position=int(d.get("position", 0)),
-        chash=d.get("chash", "") or "",
+        # Defensive [:32]: the catalog chash is the 32-char natural ID; keep the read
+        # path consistent with the write path and every other chash site.
+        chash=(d.get("chash") or "")[:32],
         chunk_index=d.get("chunk_index"),
         line_start=d.get("line_start"),
         line_end=d.get("line_end"),
         char_start=d.get("char_start"),
         char_end=d.get("char_end"),
+    )
+
+
+def _link_from_dict(d: dict) -> CatalogLink:
+    """Build a typed ``CatalogLink`` from a wire dict (return-type parity, RDR-168).
+
+    Local ``Catalog.links_from`` / ``links_to`` / ``link_query`` return
+    ``list[CatalogLink]`` and consumers do attribute access (``lnk.to_tumbler`` —
+    e.g. the indexer rename-detection housekeeping); the wire returns dicts, so a raw
+    list[dict] crashes them in service mode (nexus-njrcn.3 follow-up / critic finding).
+    """
+    def _tum(v: object) -> Tumbler:
+        return Tumbler.parse(v) if isinstance(v, str) else v  # type: ignore[return-value]
+
+    return CatalogLink(
+        from_tumbler=_tum(d.get("from_tumbler", "")),
+        to_tumbler=_tum(d.get("to_tumbler", "")),
+        link_type=d.get("link_type", "") or "",
+        from_span=d.get("from_span", "") or "",
+        to_span=d.get("to_span", "") or "",
+        created_by=d.get("created_by", "") or "",
+        created_at=d.get("created_at", "") or "",
+        meta=d.get("metadata") or d.get("meta") or {},
     )
 
 
@@ -978,32 +1003,32 @@ class HttpCatalogClient:
         tumbler: Tumbler | str,
         link_type: str = "",
         link_types: list[str] | None = None,
-    ) -> list[dict]:
+    ) -> list[CatalogLink]:
         params: dict = {"tumbler": str(tumbler), "direction": "out"}
         if link_type:
             params["link_type"] = link_type
         # link_types multi-value forwarding: service /links accepts a single link_type;
-        # when link_types is provided and link_type is empty, use first or filter client-side
+        # when link_types is provided and link_type is empty, filter client-side.
         result = self._get("/links", **params)
-        rows = result.get("links_from", []) if result else []
+        links = [_link_from_dict(r) for r in (result.get("links_from", []) if result else [])]
         if link_types:
-            rows = [r for r in rows if r.get("link_type") in link_types]
-        return rows
+            links = [lnk for lnk in links if lnk.link_type in link_types]
+        return links
 
     def links_to(
         self,
         tumbler: Tumbler | str,
         link_type: str = "",
         link_types: list[str] | None = None,
-    ) -> list[dict]:
+    ) -> list[CatalogLink]:
         params: dict = {"tumbler": str(tumbler), "direction": "in"}
         if link_type:
             params["link_type"] = link_type
         result = self._get("/links", **params)
-        rows = result.get("links_to", []) if result else []
+        links = [_link_from_dict(r) for r in (result.get("links_to", []) if result else [])]
         if link_types:
-            rows = [r for r in rows if r.get("link_type") in link_types]
-        return rows
+            links = [lnk for lnk in links if lnk.link_type in link_types]
+        return links
 
     def link_query(
         self,
@@ -1017,7 +1042,7 @@ class HttpCatalogClient:
         tumbler: str | None = None,
         limit: int = 200,
         offset: int = 0,
-    ) -> list[dict]:
+    ) -> list[CatalogLink]:
         params: dict = {"limit": limit, "offset": offset}
         if from_t:            params["from_tumbler"] = from_t
         if to_t:              params["to_tumbler"] = to_t
@@ -1027,7 +1052,7 @@ class HttpCatalogClient:
         if direction:         params["direction"] = direction
         if tumbler:           params["tumbler"] = tumbler
         result = self._get("/link_query", **params)
-        return result.get("links", []) if result else []
+        return [_link_from_dict(r) for r in (result.get("links", []) if result else [])]
 
     def bulk_unlink(
         self,
@@ -1374,7 +1399,7 @@ class HttpCatalogClient:
         rows = result.get("rows", []) if result else []
         return [_manifest_row_from_dict(r) for r in rows]
 
-    def get_manifests(self, doc_ids: list[str]) -> dict[str, list[Any]]:
+    def get_manifests(self, doc_ids: list[str]) -> dict[str, list[ManifestRow]]:
         """Batch-fetch manifests for multiple doc_ids in one round-trip.
 
         nexus-7lm3q: replaces the N per-doc ``get_manifest()`` loop in
