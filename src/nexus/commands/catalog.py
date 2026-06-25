@@ -354,13 +354,9 @@ def setup_cmd(remote: str) -> None:
         click.echo(f"  Backfill incomplete ({type(exc).__name__}: {exc})")
 
     click.echo("Backfilling chunk_text_hash...")
-    from nexus.commands.collection import _backfill_chunk_text_hash  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     hash_updated = 0
     try:
-        for col_info in t3.list_collections():
-            col = t3._client.get_collection(col_info["name"])
-            updated, _, _ = _backfill_chunk_text_hash(col)
-            hash_updated += updated
+        hash_updated = _backfill_all_chunk_text_hashes(t3)
     except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         click.echo(f"  Hash backfill partial ({type(exc).__name__}: {exc})")
     click.echo(f"  {hash_updated} chunks updated")
@@ -1116,6 +1112,36 @@ def _make_t3():
     return make_t3()
 
 
+def _backfill_all_chunk_text_hashes(t3) -> int:
+    """Backfill ``chunk_text_hash`` across every T3 collection; return chunks updated.
+
+    No-op in vector-service mode (nexus-84gbt): the Java service owns chunk
+    identity (chash) via its manifest + post-store path, and the local,
+    Chroma-specific paginate-and-upsert backfill reaches into ``t3._client``
+    (a ``chromadb`` client attribute). In service mode ``t3`` is an
+    ``HttpVectorClient`` with no ``_client`` — calling it there raised
+    ``AttributeError`` and degraded ``nx catalog setup`` to "Hash backfill
+    partial", leaving the manifest empty. Skip cleanly instead.
+    """
+    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+
+    if is_vector_service_mode():
+        click.echo(
+            "  (service mode: chunk_text_hash is owned by the service; "
+            "skipping local backfill)"
+        )
+        return 0
+
+    from nexus.commands.collection import _backfill_chunk_text_hash  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+    hash_updated = 0
+    for col_info in t3.list_collections():
+        col = t3._client.get_collection(col_info["name"])
+        updated, _, _ = _backfill_chunk_text_hash(col)
+        hash_updated += updated
+    return hash_updated
+
+
 def _make_registry():
     """RDR-137 Phase 5.3 (nexus-tts0d.20): tiny adapter exposing the
     two methods ``_backfill_repos`` consumes (``all_info``). Reads
@@ -1389,11 +1415,7 @@ def backfill_cmd(
     hash_updated = 0
     if not dry_run:
         click.echo("Pass 4: chunk_text_hash backfill...")
-        from nexus.commands.collection import _backfill_chunk_text_hash  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-        for col_info in t3.list_collections():
-            col = t3._client.get_collection(col_info["name"])
-            updated, _, _ = _backfill_chunk_text_hash(col)
-            hash_updated += updated
+        hash_updated = _backfill_all_chunk_text_hashes(t3)
 
     mode = "dry-run" if dry_run else "registered"
     click.echo(f"\nBackfill complete ({mode}):")
