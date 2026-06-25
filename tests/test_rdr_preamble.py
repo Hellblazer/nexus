@@ -915,6 +915,112 @@ class TestPhaseReviewGate:
         assert "Item2" in result.output
         assert "Byte-equality CI guard" in result.output
 
+    def test_implementation_plan_heading_pass1_enumerates(self, rdr_env):
+        """RDRs that structure phased work under '## Implementation Plan'
+        (e.g. conexus RDR-001) must be recognised, not error out (nexus-2pw1x)."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "## Implementation Plan\n\n"
+            "1. **Schema slice**: Add the retention column.\n"
+            "2. **ETL passthrough**: Relax the null-doc skip.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-multitenant-cloud.md",
+            {"title": "Multitenant Cloud", "status": "accepted",
+             "type": "architecture", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "1", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ERROR" not in result.output
+        assert "§Approach Cross-Walk" in result.output
+        assert "Item1" in result.output
+        assert "Schema slice" in result.output
+        assert "Item2" in result.output
+        assert "ETL passthrough" in result.output
+
+    def test_implementation_plan_heading_pass2_validates_evidence(self, rdr_env):
+        """Pass 2 cross-walk works for '## Implementation Plan' RDRs (nexus-2pw1x)."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "## Implementation Plan\n\n"
+            "1. **Schema slice**: Add the retention column.\n"
+            "2. **ETL passthrough**: Relax the null-doc skip.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-multitenant-cloud.md",
+            {"title": "Multitenant Cloud", "status": "accepted",
+             "type": "architecture", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr,
+            [
+                "preamble", "phase-review-gate", "--", "1", "--phase", "1",
+                "--evidence", "Item1=nexus-abc1,Item2=nexus-xyz2",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "APPROACH CROSS-WALK PASSED" in result.output
+        assert "nexus-abc1" in result.output
+        assert "nexus-xyz2" in result.output
+
+
+class TestApproachSectionExtractor:
+    """Unit tests for _prg_extract_approach_section synonym recognition (nexus-2pw1x)."""
+
+    def test_extracts_implementation_plan_heading(self):
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = "## Intro\n\nx.\n\n## Implementation Plan\n\nbody line.\n\n## Next\n\ny."
+        assert _prg_extract_approach_section(text).strip() == "body line."
+
+    def test_extracts_phases_heading(self):
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = "## Intro\n\nx.\n\n### Phases\n\nbody line.\n\n### Next\n\ny."
+        assert _prg_extract_approach_section(text).strip() == "body line."
+
+    def test_extracts_plain_plan_heading_case_insensitive(self):
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = "## Intro\n\nx.\n\n## plan\n\nbody line.\n\n## Next\n\ny."
+        assert _prg_extract_approach_section(text).strip() == "body line."
+
+    def test_approach_still_extracted(self):
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = "## Intro\n\nx.\n\n### Approach\n\nbody line.\n\n## Next\n\ny."
+        assert _prg_extract_approach_section(text).strip() == "body line."
+
+    def test_no_recognised_heading_returns_empty(self):
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = "## Intro\n\nx.\n\n## Tradeoffs\n\ny."
+        assert _prg_extract_approach_section(text) == ""
+
+    def test_plan_prefix_words_do_not_match(self):
+        """Bare 'Plan' must not match 'Planned'/'Planning'/'Planner' (prefix)."""
+        from nexus.commands.rdr import _prg_extract_approach_section
+        for heading in ("## Planned Work", "## Planning Notes", "### Planner Design"):
+            text = f"## Intro\n\nx.\n\n{heading}\n\nbody.\n\n## Next\n\ny."
+            assert _prg_extract_approach_section(text) == "", heading
+
+    def test_plan_with_extra_words_does_not_match(self):
+        """'## Plan Optimization' is a differently-scoped section, not the
+        phase plan — bare 'Plan' matches only as the whole heading name."""
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = "## Intro\n\nx.\n\n## Plan Optimization\n\nbody.\n\n## Next\n\ny."
+        assert _prg_extract_approach_section(text) == ""
+
+    def test_approach_with_trailing_text_still_matches(self):
+        """Suffix tolerance preserved for Approach/Implementation Plan/Phases."""
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = "## Intro\n\nx.\n\n### Approach (two tracks)\n\nbody line.\n\n## Next\n\ny."
+        assert _prg_extract_approach_section(text).strip() == "body line."
+
 
 class TestPhaseBlockParser:
     """Unit tests for _prg_parse_phase_block_items (nexus-4u6mt)."""

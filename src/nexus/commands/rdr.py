@@ -328,9 +328,12 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
     Operates on the raw frontmatter block (only the first two ``---`` fences)
     so existing key order and formatting are preserved and a ``---`` horizontal
     rule inside the body is never mistaken for the fence. When *new_status* maps
-    to a date key (accepted/closed) that is not already present, the key is
-    inserted immediately after the ``status:`` line; an existing date key is
-    left untouched (never overwritten).
+    to a date key (accepted/closed): if the key is absent it is inserted
+    immediately after the ``status:`` line; if the key is present but blank
+    (``accepted_date:`` with no value, as the RDR template ships it) it is
+    filled with *date*; an existing key that already carries a value is left
+    untouched (never overwritten). (nexus-re3nm: the present-but-blank case
+    previously left the date empty, forcing a hand-edit.)
     """
     if not text.startswith("---"):
         raise ValueError("RDR file has no YAML frontmatter fence")
@@ -354,14 +357,26 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
     )
 
     date_key = _STATUS_DATE_KEY.get(new_status)
-    if date_key and not re.search(rf"^{date_key}:", fm, re.MULTILINE):
-        fm = re.sub(
-            r"^(status:.*?)(\r?)$",
-            lambda m: f"{m.group(1)}{m.group(2)}\n{date_key}: {date}{m.group(2)}",
-            fm,
-            count=1,
-            flags=re.MULTILINE,
-        )
+    if date_key:
+        # Present-but-blank (``accepted_date:`` with no value) -> fill it.
+        blank_pat = rf"^{date_key}:[ \t]*(\r?)$"
+        if re.search(blank_pat, fm, re.MULTILINE):
+            fm = re.sub(
+                blank_pat,
+                lambda m: f"{date_key}: {date}{m.group(1)}",
+                fm,
+                count=1,
+                flags=re.MULTILINE,
+            )
+        elif not re.search(rf"^{date_key}:", fm, re.MULTILINE):
+            # Absent -> insert immediately after the ``status:`` line.
+            fm = re.sub(
+                r"^(status:.*?)(\r?)$",
+                lambda m: f"{m.group(1)}{m.group(2)}\n{date_key}: {date}{m.group(2)}",
+                fm,
+                count=1,
+                flags=re.MULTILINE,
+            )
 
     return "---" + fm + "---" + parts[2]
 
@@ -1546,21 +1561,33 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 
 def _prg_extract_approach_section(text: str) -> str:
-    """Extract content under §Approach (handles ### and ## variants)."""
-    for pat in [
-        r"\n### Approach[^\n]*\n",
-        r"\n## Approach[^\n]*\n",
-        r"\n#### Approach[^\n]*\n",
-    ]:
-        m = re.search(pat, text)
-        if m:
-            start = m.end()
-            heading_depth = len(
-                re.match(r"(#+)", m.group(0).strip()).group(1)
-            )
-            end_pat = r"\n#{1," + str(heading_depth) + r"} "
-            nxt = re.search(end_pat, text[start:])
-            return text[start: start + nxt.start()] if nxt else text[start:]
+    """Extract the phase-structure section to cross-walk.
+
+    Recognises §Approach plus the common synonym headings RDRs use to
+    structure phased work — ``Implementation Plan`` (e.g. conexus RDR-001),
+    ``Phases``, and plain ``Plan`` — at ``##``/``###``/``####`` level,
+    case-insensitively. Returns the earliest such section in the document
+    (nexus-2pw1x).
+
+    ``Approach`` / ``Implementation Plan`` / ``Phases`` tolerate trailing
+    heading text (``### Approach (two tracks)``) but are word-anchored so
+    they do not match longer words. Bare ``Plan`` is matched ONLY as the
+    whole heading name (optionally trailing whitespace) so it does NOT
+    false-positive on ``## Planned Work`` / ``## Planning`` (prefix) or
+    ``## Plan Optimization`` (a differently-scoped section) — review
+    findings on the first cut of this fix.
+    """
+    heading = re.search(
+        r"\n(#{2,4})[ \t]+(?:(?:Approach|Implementation Plan|Phases)\b[^\n]*|Plan[ \t]*)\r?\n",
+        text,
+        re.IGNORECASE,
+    )
+    if heading:
+        start = heading.end()
+        heading_depth = len(heading.group(1))
+        end_pat = r"\n#{1," + str(heading_depth) + r"} "
+        nxt = re.search(end_pat, text[start:])
+        return text[start: start + nxt.start()] if nxt else text[start:]
     return ""
 
 
@@ -1769,8 +1796,11 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
     # Extract §Approach items
     approach_text = _prg_extract_approach_section(text)
     if not approach_text.strip():
-        print("> **ERROR**: No `### Approach` section found in this RDR.")
-        print("> Phase-review gate requires §Approach to cross-walk against closing beads.")
+        print(
+            "> **ERROR**: No `### Approach` (or `## Implementation Plan` / "
+            "`## Phases` / `## Plan`) section found in this RDR."
+        )
+        print("> Phase-review gate requires a phase-structure section to cross-walk against closing beads.")
         return
 
     items = _prg_parse_approach_items(approach_text)

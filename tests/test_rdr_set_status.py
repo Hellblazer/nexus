@@ -111,6 +111,42 @@ def test_accepted_to_closed_flips_file_and_adds_closed_date(tmp_path):
     assert "accepted_date: 2026-06-22" in text
 
 
+def test_present_but_blank_accepted_date_is_filled(tmp_path):
+    """nexus-re3nm: the RDR template ships ``accepted_date:`` blank. A flip to
+    accepted must FILL it, not skip because the key is present."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 210, "draft", extra_fm="accepted_date:\n")
+    _write_readme(rdr_dir, 210, "Draft")
+
+    res = _invoke(rdr_dir, "210", "accepted", "--date", "2026-06-25")
+    assert res.exit_code == 0, res.output
+
+    text = f.read_text()
+    assert "accepted_date: 2026-06-25" in text
+    # not duplicated, no leftover blank key
+    assert text.count("accepted_date:") == 1
+    assert "accepted_date:\n" not in text
+
+
+def test_present_but_blank_closed_date_is_filled(tmp_path):
+    """nexus-re3nm: same for a blank ``closed_date:`` on a close flip."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(
+        rdr_dir, 211, "accepted",
+        extra_fm="accepted_date: 2026-06-22\nclosed_date:\n",
+    )
+    _write_readme(rdr_dir, 211, "Accepted")
+
+    res = _invoke(rdr_dir, "211", "closed", "--date", "2026-06-25")
+    assert res.exit_code == 0, res.output
+
+    text = f.read_text()
+    assert "closed_date: 2026-06-25" in text
+    assert text.count("closed_date:") == 1
+    # accepted_date untouched
+    assert "accepted_date: 2026-06-22" in text
+
+
 def test_readme_status_cell_updated(tmp_path):
     rdr_dir = _rdr_dir(tmp_path)
     _write_rdr(rdr_dir, 202, "draft")
