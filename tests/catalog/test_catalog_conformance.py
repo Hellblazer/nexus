@@ -33,9 +33,11 @@ turns the resulting XPASS into a failure, forcing removal of the method from
 `EXPECTED_NONCONFORMING` (the single source of truth) in lockstep. When the set is
 empty the suite is fully GREEN with the permanent guard live.
 
-Phase 2 (bead nexus-ja47l) refactors the enumerated surface from "all public `Catalog`
-methods" to the explicit `CatalogReader` / `CatalogWriter` Protocol subset; the
-predicate itself does not change.
+The enumerated surface is the explicit `CatalogReader` / `CatalogWriter` Protocol pair
+(`nexus.catalog.catalog_protocol`, RDR-168 Phase 2 bead nexus-ja47l) — the single source
+of truth for the caller-facing subset, NOT all 87 public `Catalog` methods. The predicate
+is unchanged from Phase 1; `test_catalog_protocol_fidelity.py` guards that the Protocol
+honestly mirrors the canonical `Catalog` signatures and hides no divergence.
 
 SCOPE BOUNDARY (necessary, not sufficient)
 ------------------------------------------
@@ -56,6 +58,7 @@ from collections.abc import Callable
 import pytest
 
 from nexus.catalog.catalog import Catalog
+from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 
 # ── the gate-locked RED baseline ────────────────────────────────────────────────
@@ -159,12 +162,29 @@ def _missing_client_params(method_name: str) -> list[str]:
 _LOCAL_METHODS = _public_methods(Catalog)
 _CLIENT_METHODS = _public_methods(HttpCatalogClient)
 
-# Caller-facing surface for Phase 1: every public `Catalog` method also present on the
-# client. (The audit found 0 methods missing on the client.) Phase 2 (nexus-ja47l)
-# narrows this to the explicit Protocol subset.
-_CALLER_FACING: list[str] = sorted(
-    name for name in _LOCAL_METHODS if name in _CLIENT_METHODS
-)
+
+def _protocol_method_names(*protocols: type) -> set[str]:
+    """Public method names declared directly on the given `Protocol` classes.
+
+    The `callable` filter matches `test_catalog_protocol_fidelity._protocol_methods`
+    exactly, so a non-method class attribute (e.g. a `ClassVar`) added to a Protocol
+    cannot make the two test files enumerate different surfaces (which would otherwise
+    surface as a `KeyError` here rather than a clean assertion).
+    """
+    names: set[str] = set()
+    for proto in protocols:
+        names |= {
+            n for n, m in vars(proto).items() if not n.startswith("_") and callable(m)
+        }
+    return names
+
+
+# Caller-facing surface (RDR-168 Phase 2, bead nexus-ja47l): the explicit
+# CatalogReader / CatalogWriter Protocol pair is the single source of truth — the
+# non-substrate consumer surface plus the 19 audited divergences, NOT all 87 public
+# Catalog methods. `test_catalog_protocol_fidelity.py` guards that this subset honestly
+# contains every divergence (none hidden) and excludes only internal helpers.
+_CALLER_FACING: list[str] = sorted(_protocol_method_names(CatalogReader, CatalogWriter))
 
 
 def _compute_nonconforming() -> set[str]:
