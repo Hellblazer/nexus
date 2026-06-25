@@ -451,7 +451,9 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "lnk.2", "title", "Link Target",
             "content_type", "paper", "corpus", "knowledge"));
 
-        repo.upsertLink(TENANT_A, Map.of(
+        // RDR-168 nexus-njrcn.3: upsertLink returns true=created on first insert,
+        // false=merged on the ON CONFLICT path (the created-vs-merged signal).
+        boolean created = repo.upsertLink(TENANT_A, Map.of(
             "from_tumbler", "lnk.1",
             "to_tumbler", "lnk.2",
             "link_type", "cites",
@@ -460,6 +462,13 @@ class CatalogRepositoryTest {
             "created_by", "user",
             "created_at", "2026-06-01T00:00:00Z"
         ));
+        assertThat(created).as("first upsert inserts → created").isTrue();
+        boolean merged = repo.upsertLink(TENANT_A, Map.of(
+            "from_tumbler", "lnk.1", "to_tumbler", "lnk.2", "link_type", "cites",
+            "from_span", "", "to_span", "", "created_by", "user2",
+            "created_at", "2026-06-02T00:00:00Z"
+        ));
+        assertThat(merged).as("second upsert conflicts → merged").isFalse();
         var links = repo.linksFrom(TENANT_A, "lnk.1", null);
         assertThat(links).hasSize(1);
         assertThat(links.get(0).get("to_tumbler")).isEqualTo("lnk.2");

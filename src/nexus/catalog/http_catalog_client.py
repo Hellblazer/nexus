@@ -940,7 +940,7 @@ class HttpCatalogClient:
         if meta:
             payload["metadata"] = dict(meta)
         result = self._post("/link", payload)
-        return bool(result.get("ok") if result else False)
+        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
 
     def link_if_absent(
         self,
@@ -983,7 +983,7 @@ class HttpCatalogClient:
         if meta:
             payload["metadata"] = dict(meta)
         result = self._post("/link", payload)
-        return bool(result.get("ok") if result else False)
+        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
 
     def unlink(
         self,

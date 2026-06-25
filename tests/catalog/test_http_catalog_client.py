@@ -181,7 +181,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"deleted": 1})
         elif op == "/link":
             FakeCatalogHandler.last_link_body = body
-            self._send_json({"ok": True})
+            self._send_json({"ok": True, "created": True})
         elif op == "/unlink":
             self._send_json({"deleted": 1})
         elif op == "/traverse":

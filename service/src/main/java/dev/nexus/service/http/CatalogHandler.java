@@ -355,8 +355,8 @@ public final class CatalogHandler implements HttpHandler {
     private void handleLink(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        repo.upsertLink(tenant, body);
-        HttpUtil.send(exchange, 200, "{\"ok\":true}");
+        boolean created = repo.upsertLink(tenant, body);
+        HttpUtil.send(exchange, 200, "{\"ok\":true,\"created\":" + created + "}");
     }
 
     /** POST /v1/catalog/unlink — delete link(s). */

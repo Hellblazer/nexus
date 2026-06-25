@@ -842,10 +842,17 @@ public final class CatalogRepository {
     // ══════════════════════════════════════════════════════════════════════════
 
     /** Insert a link. ON CONFLICT (tenant_id, from, to, type) update spans/created_by/metadata. */
-    public void upsertLink(String tenant, Map<String, Object> lnk) {
+    /**
+     * Upsert a link. Returns {@code true} when the row was newly INSERTed (created),
+     * {@code false} when the ON CONFLICT path merged into an existing link — the
+     * created-vs-merged signal the local {@code Catalog.link} returns (RDR-168
+     * nexus-njrcn.3). The {@code (xmax = 0)} RETURNING predicate is the standard Postgres
+     * idiom: a freshly inserted row has {@code xmax = 0}; a row reached via DO UPDATE does not.
+     */
+    public boolean upsertLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
-        tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(T_LINKS,
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rec = ctx.insertInto(T_LINKS,
                     F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
                     F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
                .values(DSL.val(tenant),
@@ -859,8 +866,9 @@ public final class CatalogRepository {
                .set(F_LNK_TSPAN, EX_LNK_TSPAN)
                .set(F_LNK_CRTBY, EX_LNK_CRTBY)
                .set(F_LNK_META,  EX_LNK_META)
-               .execute();
-            return null;
+               .returning(DSL.field("(xmax = 0)", Boolean.class))
+               .fetchOne();
+            return rec != null && Boolean.TRUE.equals(rec.get(0, Boolean.class));
         });
     }
 
