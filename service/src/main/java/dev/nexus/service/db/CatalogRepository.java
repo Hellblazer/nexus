@@ -841,7 +841,6 @@ public final class CatalogRepository {
     // LINKS
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** Insert a link. ON CONFLICT (tenant_id, from, to, type) update spans/created_by/metadata. */
     /**
      * Upsert a link. Returns {@code true} when the row was newly INSERTed (created),
      * {@code false} when the ON CONFLICT path merged into an existing link — the

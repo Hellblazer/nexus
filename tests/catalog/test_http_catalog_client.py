@@ -67,6 +67,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     #: (CatalogHandler returns ALL matching rows ignoring limit/offset — used to prove
     #: the client issues a single request and does not loop).
     list_content_type_count: int = 0
+    #: /link response shape: None omits the key (old-JAR skew), bool sets created (njrcn.3).
+    link_created: "bool | None" = True
 
     @classmethod
     def reset_log(cls) -> None:
@@ -223,7 +225,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"deleted": 1})
         elif op == "/link":
             FakeCatalogHandler.last_link_body = body
-            self._send_json({"ok": True, "created": True})
+            resp: dict = {"ok": True}
+            if FakeCatalogHandler.link_created is not None:
+                resp["created"] = FakeCatalogHandler.link_created
+            self._send_json(resp)
         elif op == "/unlink":
             self._send_json({"deleted": 1})
         elif op == "/traverse":
@@ -400,6 +405,33 @@ class TestHttpCatalogClientRoundTrip:
         # Migrated from old client-specific sig (created_by was kw-only with default).
         result = client.link("1.1.1", "1.1.2", "cites", "test-suite")
         assert isinstance(result, bool)
+
+    def test_link_returns_true_when_created(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.link_created = True
+        try:
+            assert client.link("1.1.1", "1.1.2", "cites", "test-suite") is True
+        finally:
+            FakeCatalogHandler.link_created = True
+
+    def test_link_returns_false_when_merged(self, client: HttpCatalogClient) -> None:
+        # njrcn.3: created=False (ON CONFLICT merged an existing link) → link() returns
+        # False, mirroring canonical (True=new, False=merged). This is the branch that
+        # changed meaning (was result['ok'], now result['created']).
+        FakeCatalogHandler.link_created = False
+        try:
+            assert client.link("1.1.1", "1.1.2", "cites", "test-suite") is False
+        finally:
+            FakeCatalogHandler.link_created = True
+
+    def test_link_returns_false_on_response_without_created(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # Version-skew lock: a service that omits 'created' (old JAR) → bool(None) → False.
+        FakeCatalogHandler.link_created = None  # omit the key
+        try:
+            assert client.link("1.1.1", "1.1.2", "cites", "test-suite") is False
+        finally:
+            FakeCatalogHandler.link_created = True
 
     # ── RDR-168 P3 wire-semantics regressions (substantive-critic Criticals) ──────
 
