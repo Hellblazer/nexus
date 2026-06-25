@@ -636,6 +636,19 @@ public final class MemoryHandler implements HttpHandler {
         return java.net.URLDecoder.decode(s, StandardCharsets.UTF_8);
     }
 
+    /**
+     * Returns the non-blank value for {@code key}, rejecting absent OR blank.
+     *
+     * <p>Audit note (nexus-c9k22 / sibling of D1 nexus-82ihm): blank-rejection
+     * is correct for every {@code requireParam("project")} site here
+     * (get/resolve/all/delete/flag_stale). Unlike {@link PlanHandler}, T2
+     * memory has <em>no</em> empty-project-as-global-scope sentinel — a memory
+     * entry's project is always a real namespace. So do NOT relax this to a
+     * presence-only check the way PlanHandler had to (its blank project is the
+     * valid global-scope sentinel). If a blank-valid query param is ever added
+     * to this handler, introduce a separate presence-only
+     * {@code requireParamKey} variant rather than loosening {@code requireParam}.
+     */
     private static String requireParam(Map<String, String> params, String key) {
         String v = params.get(key);
         if (v == null || v.isBlank()) {
