@@ -405,6 +405,163 @@ public final class PgVectorRepository {
                 collection, table, dedupIds.size());
     }
 
+    // -------------------------------------------------------------------------
+    // RDR-169 G4: embed-without-store / reference-only upsert
+    // -------------------------------------------------------------------------
+
+    /**
+     * Phase-A write gate (RDR-169 G4, nexus-xvb6b): set to {@code false} until Phase B
+     * (nexus-dtnpu) adds the {@code retention} column + nullable {@code chunk_text} to every
+     * {@code chunks_<dim>} table.  Flipping this to {@code true} without the schema migration
+     * will cause every {@link #upsertReferenceOnlyChunk} call to fail at the DB layer.
+     *
+     * <p>When {@code false}, {@link #upsertReferenceOnlyChunk} runs all pre-SQL validation
+     * (null/dim check, full→reference-only guard SELECT) but short-circuits before the
+     * retention-binding INSERT, throwing {@link IllegalStateException}.  No Phase-A code
+     * path reaches the INSERT.
+     */
+    static final boolean REFERENCE_ONLY_WRITES_ENABLED = false;
+
+    /**
+     * Returns the INSERT SQL used by {@link #upsertReferenceOnlyChunk} for the given
+     * {@code chunks_<dim>} table name.
+     *
+     * <p>Package-private (accessed from {@code dev.nexus.service.vectors} test sources):
+     * tests assert the SQL fragment is correctly formed (NULL chunk_text, retention column
+     * present) without executing it against the live schema (the {@code retention} column
+     * does not exist until Phase B / nexus-dtnpu).
+     */
+    static String referenceOnlyInsertSql(String table) {
+        return "INSERT INTO " + table
+             + " (tenant_id, collection, chash, chunk_text, embedding, metadata, retention)"
+             + " VALUES (?, ?, ?, NULL, ?::vector, ?::jsonb, 'reference-only')"
+             + " ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET"
+             + "   embedding  = EXCLUDED.embedding,"
+             + "   metadata   = EXCLUDED.metadata,"
+             + "   retention  = EXCLUDED.retention";
+        // NOTE: chunk_text is intentionally EXCLUDED from the DO UPDATE clause —
+        // reference-only→reference-only rewrites refresh embedding+metadata but must
+        // never overwrite a non-NULL chunk_text (the guard below catches the full→ref
+        // transition before SQL runs; this omission is defense-in-depth).
+    }
+
+    /**
+     * Upserts a reference-only chunk: stores a pre-computed embedding + metadata with
+     * {@code chunk_text=NULL} and {@code retention='reference-only'} (RDR-169 G4,
+     * embed-without-store).
+     *
+     * <h3>Phase-A status (non-executing)</h3>
+     * No {@code /v1} HTTP route is registered in Phase A — option (b) gate: the route
+     * registration line lands in Phase B (nexus-dtnpu) alongside the retention schema slice.
+     * Additionally, {@link #REFERENCE_ONLY_WRITES_ENABLED} is {@code false} in Phase A:
+     * the method runs all pre-SQL validation (null/dim check, full→reference-only guard
+     * SELECT) but short-circuits with {@link IllegalStateException} before the
+     * retention-binding INSERT.  No Phase-A code path reaches the INSERT.
+     *
+     * <h3>Null and dim validation (pre-SQL)</h3>
+     * {@code embedding} must be non-null, non-empty, and its length must equal the dimension
+     * implied by {@code collection}.  Mismatch fails loud — no silent truncation.
+     *
+     * <h3>full → reference-only transition guard (pre-INSERT SELECT)</h3>
+     * If a chunk with the same {@code (tenant, collection, chash)} already exists and has a
+     * non-NULL {@code chunk_text}, this method throws {@link IllegalStateException}.  The
+     * caller must explicitly delete + re-insert to change retention (RDR-169 §Re-index).
+     * {@code reference-only → reference-only} rewrites (embedding/metadata refresh) are
+     * permitted; the INSERT's DO UPDATE clause omits {@code chunk_text} as defense-in-depth.
+     *
+     * <h3>Phase-B deferred (nexus-dtnpu) — open seams</h3>
+     * <ul>
+     *   <li>TOCTOU between guard SELECT and INSERT: needs a DB-level CHECK or trigger (M1).</li>
+     *   <li>reference-only→reference-only rewrite path: SQL correct, untestable until schema.</li>
+     *   <li>FTS-NULL-exclusion end-to-end: seed reference-only row, hybrid search, assert absent.</li>
+     *   <li>Retention migration: CHECK constraint, DEFAULT 'full' backfill, idempotency.</li>
+     *   <li>Guard reads only {@code chunk_text} (not {@code retention}); correctness relies on
+     *       the schema invariant {@code chunk_text NOT NULL ⇒ retention='full'}.</li>
+     * </ul>
+     *
+     * @param tenant     tenant principal for RLS scoping
+     * @param collection four-segment conformant collection name
+     * @param chash      32-char content-addressed chunk ID (sha256(text)[:32])
+     * @param embedding  precomputed vector (non-null, non-empty) — dim must match collection
+     * @param metadata   chunk metadata (may be empty, not null)
+     * @throws IllegalArgumentException if {@code embedding} is null/empty or dim mismatches
+     * @throws IllegalStateException    if a full-content chunk already occupies this chash,
+     *                                  or if Phase-A write gate is closed
+     */
+    public void upsertReferenceOnlyChunk(String tenant, String collection,
+                                         String chash,
+                                         float[] embedding,
+                                         Map<String, Object> metadata) {
+        // (1) Null / empty guard — pre-SQL, mirrors upsertChunksWithVectors null check.
+        if (embedding == null || embedding.length == 0) {
+            throw new IllegalArgumentException(
+                "upsertReferenceOnlyChunk: embedding must be non-null and non-empty for chash '"
+                + chash + "' in collection '" + collection + "'");
+        }
+
+        // (2) Dim validation — pre-SQL, fail loud, no silent truncation.
+        int dim = dimForCollection(collection);
+        if (embedding.length != dim) {
+            throw new IllegalArgumentException(
+                "upsertReferenceOnlyChunk: " + embedding.length + "-dim vector for collection '"
+                + collection + "' which dispatches to chunks_" + dim
+                + " (dim mismatch — no silent truncation)");
+        }
+
+        String table = chunksTable(dim);
+        String[] collSegs  = collection.split("__");
+        boolean conformant = collSegs.length == 4;
+
+        tenantScope.withTenant(tenant, ctx -> {
+            // (3) full → reference-only guard: SELECT before INSERT.
+            // Reads only chunk_text — safe against Phase-A schema (no retention column needed).
+            // A previously-full chunk must never be silently NULLed (RDR-169 §Re-index PROHIBITS).
+            var existing = ctx.fetchOne(
+                "SELECT chunk_text FROM " + table
+                + " WHERE tenant_id = ? AND collection = ? AND chash = ?",
+                tenant, collection, chash);
+            if (existing != null && existing.get("chunk_text", String.class) != null) {
+                throw new IllegalStateException(
+                    "upsertReferenceOnlyChunk: chash '" + chash + "' in collection '"
+                    + collection + "' already has full content (chunk_text IS NOT NULL). "
+                    + "A full→reference-only transition is prohibited by RDR-169 §Re-index. "
+                    + "Delete + re-insert to change retention.");
+            }
+
+            // (4) Phase-A write gate — short-circuits BEFORE the retention-binding INSERT.
+            // REFERENCE_ONLY_WRITES_ENABLED is false until Phase B (nexus-dtnpu) adds the
+            // retention column.  The ensure-registered and chunk INSERT below are correct
+            // code that will execute once the gate is flipped; they do not run in Phase A.
+            if (!REFERENCE_ONLY_WRITES_ENABLED) {
+                throw new IllegalStateException(
+                    "upsertReferenceOnlyChunk: reference-only writes are disabled until "
+                    + "RDR-169 Phase B (retention column absent) — nexus-dtnpu flips "
+                    + "REFERENCE_ONLY_WRITES_ENABLED");
+            }
+
+            // (5) Ensure-registered: INSERT stub collection row before any chunk write.
+            // Standing rule (RDR-156 P0.2, bead nexus-70r3c.2) — mirrors upsertChunksInternal.
+            // ON CONFLICT DO NOTHING: preserves fully-populated rows from the catalog ETL.
+            ctx.execute(
+                "INSERT INTO nexus.catalog_collections"
+                + " (tenant_id, name, content_type, owner_id, embedding_model, model_version)"
+                + " VALUES (?, ?, ?, ?, ?, ?)"
+                + " ON CONFLICT (tenant_id, name) DO NOTHING",
+                tenant, collection,
+                conformant ? collSegs[0] : "",
+                conformant ? collSegs[1] : "",
+                conformant ? collSegs[2] : "",
+                conformant ? collSegs[3] : "");
+
+            // (6) Reference-only chunk INSERT (Phase B — requires retention column).
+            ctx.execute(referenceOnlyInsertSql(table),
+                tenant, collection, chash,
+                vectorLiteral(embedding), toJson(sanitizeNulDeep(metadata)));
+            return null;
+        });
+        log.debug("event=upsert_reference_only_done collection={} chash={}", collection, chash);
+    }
+
     /**
      * Semantic search: embed the query server-side, then
      * {@code ORDER BY embedding <=> $q} with the tenant RLS scope, an optional metadata
