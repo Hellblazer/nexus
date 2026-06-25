@@ -269,6 +269,31 @@ class TestPlansMVV:
         assert row["tags"]      == "research,rdr"
         assert row["verb"]      == "research"
 
+    def test_a2_get_by_dimensions_empty_project_global_scope(self, plan_store):
+        """a2) get_plan_by_dimensions with an EMPTY project (global-scope sentinel).
+
+        Regression for nexus-82ihm: the Java service rejected a blank ``project``
+        as HTTP 400 'missing required query param', which broke global builtin
+        plan seeding in service mode entirely (every global template queries
+        by-dimensions with project=''). An empty project is the valid
+        global-scope value — absent row must be None (404), present row 200.
+        """
+        dims = '{"scope":"global","verb":"research","name":"integ-empty-proj-marker"}'
+        # Absent row over the HTTP path must be a clean None (404 -> None), NOT a 400.
+        assert plan_store.get_plan_by_dimensions(project="", dimensions=dims) is None
+
+        plan_store.save_plan(
+            query="global plan via empty project",
+            plan_json='{"steps":[]}',
+            project="",
+            verb="research",
+            scope="global",
+            dimensions=dims,
+        )
+        row = plan_store.get_plan_by_dimensions(project="", dimensions=dims)
+        assert row is not None, "empty-project (global) get_by_dimensions must find the row"
+        assert row["query"] == "global plan via empty project"
+
     def test_b_tags_empty_string_default(self, plan_store):
         """b) untagged plan has tags='' (not null/missing)."""
         pid = plan_store.save_plan(
