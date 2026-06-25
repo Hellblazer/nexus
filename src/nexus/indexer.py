@@ -326,8 +326,11 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
     from nexus.config import catalog_path  # noqa: PLC0415  — circular-dep avoidance (nexus.config)
 
     try:
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+
+        catalog_service_mode = storage_backend_for("catalog") == StorageBackend.SERVICE
         cat_path = catalog_path()
-        if Catalog.is_initialized(cat_path):
+        if catalog_service_mode or Catalog.is_initialized(cat_path):
             cat = make_catalog_reader()
             try:
                 return cat.collection_for_repo(repo, content_type).render()
@@ -705,8 +708,17 @@ def _catalog_hook(
         from nexus.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
+        # The init-gate is a LOCAL-mode filesystem check (does the on-disk catalog
+        # exist). In SERVICE mode there is no local catalog — the catalog is the remote
+        # Postgres service — so this gate must NOT apply, or the hook silently skips all
+        # catalog registration and service-mode `nx index repo` leaves the catalog empty
+        # (RDR-168 P4 / CA-4 second cause: nexus-pwclh). In service mode we proceed; the
+        # service-backed writer below fails loud if the service is unreachable.
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+
+        catalog_service_mode = storage_backend_for("catalog") == StorageBackend.SERVICE
         cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
+        if not catalog_service_mode and not Catalog.is_initialized(cat_path):
             _log.debug("catalog_hook_skipped", reason="catalog not initialized")
             return file_to_doc_id
 
@@ -1138,8 +1150,15 @@ def _build_frecency_doc_id_map(
         from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
+        # Same service-mode caveat as _catalog_hook: the local is_initialized gate must
+        # NOT short-circuit in service mode, or this doc_id resolver returns empty and
+        # the manifest post-store hook has no catalog doc_ids to key chunks on → empty
+        # manifest (RDR-168 P4 / nexus-njrcn.6).
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+
+        catalog_service_mode = storage_backend_for("catalog") == StorageBackend.SERVICE
         cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
+        if not catalog_service_mode and not Catalog.is_initialized(cat_path):
             return file_to_doc_id
         cat = make_catalog_reader()
         _, repo_hash = _repo_identity(repo)

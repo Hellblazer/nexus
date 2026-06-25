@@ -61,11 +61,56 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.catalog.catalog import CatalogEntry, Tumbler
+from nexus.catalog.catalog import CatalogEntry, CatalogLink, Tumbler
+from nexus.catalog.catalog_spans import parse_chash_span
+from nexus.catalog.catalog_writes import ManifestRow
+from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 
 _log = structlog.get_logger(__name__)
 
 DEFAULT_TENANT: str = "default"
+
+
+def _manifest_row_from_dict(d: dict) -> ManifestRow:
+    """Build a typed ``ManifestRow`` from a wire dict (return-type parity, RDR-168).
+
+    The Java ``/manifest/get`` rows carry an extra ``doc_id`` key the dataclass does not
+    model; only the seven schema fields are mapped.
+    """
+    return ManifestRow(
+        position=int(d.get("position", 0)),
+        # Defensive [:32]: the catalog chash is the 32-char natural ID; keep the read
+        # path consistent with the write path and every other chash site.
+        chash=(d.get("chash") or "")[:32],
+        chunk_index=d.get("chunk_index"),
+        line_start=d.get("line_start"),
+        line_end=d.get("line_end"),
+        char_start=d.get("char_start"),
+        char_end=d.get("char_end"),
+    )
+
+
+def _link_from_dict(d: dict) -> CatalogLink:
+    """Build a typed ``CatalogLink`` from a wire dict (return-type parity, RDR-168).
+
+    Local ``Catalog.links_from`` / ``links_to`` / ``link_query`` return
+    ``list[CatalogLink]`` and consumers do attribute access (``lnk.to_tumbler`` —
+    e.g. the indexer rename-detection housekeeping); the wire returns dicts, so a raw
+    list[dict] crashes them in service mode (nexus-njrcn.3 follow-up / critic finding).
+    """
+    def _tum(v: object) -> Tumbler:
+        return Tumbler.parse(v) if isinstance(v, str) else v  # type: ignore[return-value]
+
+    return CatalogLink(
+        from_tumbler=_tum(d.get("from_tumbler", "")),
+        to_tumbler=_tum(d.get("to_tumbler", "")),
+        link_type=d.get("link_type", "") or "",
+        from_span=d.get("from_span", "") or "",
+        to_span=d.get("to_span", "") or "",
+        created_by=d.get("created_by", "") or "",
+        created_at=d.get("created_at", "") or "",
+        meta=d.get("metadata") or d.get("meta") or {},
+    )
 
 
 # RDR-152 nexus-fjwxh: delegate to the centralized resolver (was an inline
@@ -274,6 +319,8 @@ class HttpCatalogClient:
         self,
         repo: Path | str,
         *,
+        repo_name: str = "",
+        description: str = "",
         name: str | None = None,
         owner_type: str = "repo",
         head_hash: str | None = None,
@@ -293,7 +340,8 @@ class HttpCatalogClient:
         from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
 
         derived_name, repo_hash, main_repo = _repo_identity_with_main(Path(repo))
-        effective_name = name or derived_name
+        # repo_name (canonical param) takes precedence, then name (benign extra), then derived
+        effective_name = repo_name or name or derived_name
         # Idempotent fast path: an owner already exists for this repo
         # (owner_for_repo returns None on 404).
         if owner_type == "repo" and repo_hash:
@@ -306,6 +354,7 @@ class HttpCatalogClient:
             "repo_root": str(main_repo),
             "repo_hash": repo_hash,
         }
+        if description:    payload["description"] = description
         if tumbler_prefix: payload["tumbler_prefix"] = tumbler_prefix
         if head_hash:      payload["head_hash"] = head_hash
         result = self._post("/owners/upsert", payload)
@@ -732,16 +781,42 @@ class HttpCatalogClient:
         return self._docs_from(self._get("/list", corpus=corpus))
 
     def all_documents(
-        self, *, limit: int = 200, offset: int = 0
+        self, limit: int = 0, *, content_type: str = "", offset: int = 0,
     ) -> list[CatalogEntry]:
-        return self._docs_from(
-            self._get("/list", limit=limit, offset=offset)
-        )
+        if limit > 0:
+            params: dict = {"limit": limit, "offset": offset}
+            if content_type:
+                params["content_type"] = content_type
+            return self._docs_from(self._get("/list", **params))
+        # limit == 0 means UNBOUNDED (canonical semantics).
+        if content_type:
+            # The service's content_type branch (CatalogHandler.handleList ->
+            # documentsByContentType) ignores limit/offset and returns ALL matching rows
+            # in one shot. A pagination loop would re-fetch the same full set every page
+            # and never terminate, so issue a single unbounded request. (Service-side
+            # content_type+limit interaction is a CA-4 / P4 item: nexus-pwclh.)
+            return self._docs_from(self._get("/list", content_type=content_type))
+        # Unfiltered: the service respects limit/offset (listDocuments), so paginate
+        # exhaustively rather than silently capping — a hardcoded cap would truncate
+        # large catalogs with no error.
+        page = 1000
+        out: list[CatalogEntry] = []
+        cur = offset
+        while True:
+            batch = self._docs_from(self._get("/list", limit=page, offset=cur))
+            out.extend(batch)
+            if len(batch) < page:
+                break
+            cur += page
+        return out
 
-    def list_by_collection(self, physical_collection: str) -> list[CatalogEntry]:
-        return self._docs_from(
-            self._get("/list", collection=physical_collection)
-        )
+    def list_by_collection(
+        self, physical_collection: str, *, limit: int | None = None,
+    ) -> list[CatalogEntry]:
+        params: dict = {"collection": physical_collection}
+        if limit is not None:
+            params["limit"] = limit
+        return self._docs_from(self._get("/list", **params))
 
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         return self.resolve(doc_id)
@@ -771,12 +846,12 @@ class HttpCatalogClient:
         return entries
 
     def lookup_doc_id_by_collection_and_path(
-        self, collection: str, file_path: str
+        self, collection: str, source_path: str
     ) -> str | None:
         try:
             result = self._get(
                 "/resolve",
-                file_path=file_path,
+                file_path=source_path,  # wire key is file_path; canonical param is source_path
                 collection=collection,
             )
         except httpx.HTTPStatusError as exc:
@@ -808,11 +883,93 @@ class HttpCatalogClient:
         entry = self.resolve(tumbler)
         return Path(entry.file_path) if entry and entry.file_path else None
 
-    def resolve_span(self, tumbler: Tumbler | str, span: str) -> dict | None:
-        return None  # not supported in initial service-mode implementation
+    def resolve_span(
+        self,
+        span: str,
+        physical_collection: str,
+        t3: "Any" = None,
+    ) -> dict | None:
+        """Resolve a ``chash:`` span to chunk text + metadata (nexus-njrcn.4).
 
-    def resolve_chash(self, chash: str, *, collection: str | None = None) -> dict | None:
-        return None  # not supported in initial service-mode implementation
+        Non-``chash:`` spans (line-range, chunk:char) are out of scope for
+        service mode — return ``None`` so callers fall back gracefully.
+        ``t3`` is a local-mode artefact; accepted for conformance, ignored.
+        """
+        if not span.startswith("chash:"):
+            return None
+        try:
+            hex_chash, char_range = parse_chash_span(span)
+        except ValueError:
+            return None
+        try:
+            result = self._get(
+                "/resolve_span",
+                span_chash=hex_chash[:32],
+                collection=physical_collection,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if not result:
+            return None
+        text: str = result.get("chunk_text", "")
+        if char_range:
+            text = text[char_range[0]:char_range[1]]
+        out: dict = {
+            "chunk_text": text,
+            "metadata":   result.get("metadata", {}),
+            "chunk_hash": hex_chash,
+        }
+        if char_range:
+            out["char_range"] = char_range
+        return out
+
+    def resolve_chash(
+        self,
+        chash: str,
+        t3: "Any" = None,
+        chash_index: "Any" = None,
+        *,
+        prefer_collection: str | None = None,
+    ) -> dict | None:
+        """Globally resolve a chash to chunk text + collection + doc_id (nexus-njrcn.4).
+
+        ``t3`` and ``chash_index`` are local-mode artefacts; accepted for
+        conformance, ignored. The service resolves via its own internal index.
+        """
+        try:
+            hex_chash, char_range = parse_chash_span(chash)
+        except ValueError:
+            return None
+        params: dict[str, Any] = {"chash": hex_chash[:32]}
+        if prefer_collection:
+            params["prefer_collection"] = prefer_collection
+        try:
+            result = self._get("/resolve_chash", **params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if not result:
+            return None
+        chunk_text: str = result.get("chunk_text", "")
+        if char_range:
+            chunk_text = chunk_text[char_range[0]:char_range[1]]
+        out: dict = {
+            # Canonical contract (catalog_spans._build_ref): chash/chunk_hash are the
+            # FULL parsed hex, NOT the 32-char wire key the service stores/echoes — a
+            # downstream consumer comparing against a 64-char citation hex must match.
+            "chash":               hex_chash,
+            "chunk_hash":          hex_chash,
+            "physical_collection": result.get("physical_collection", ""),
+            "doc_id":              result.get("doc_id", ""),
+            "chunk_text":          chunk_text,
+            "metadata":            result.get("metadata", {}),
+        }
+        if char_range:
+            out["char_range"] = char_range
+        return out
 
     def resolve_chunk(self, tumbler: Tumbler | str) -> dict | None:
         result = self.resolve(tumbler)
@@ -830,32 +987,69 @@ class HttpCatalogClient:
         from_t: Tumbler | str,
         to_t: Tumbler | str,
         link_type: str,
+        created_by: str,
         *,
         from_span: str = "",
         to_span: str = "",
-        created_by: str = "user",
-        metadata: dict | None = None,
-    ) -> dict:
+        allow_dangling: bool = False,
+        **meta: object,
+    ) -> bool:
         payload: dict = {
             "from_tumbler": str(from_t),
             "to_tumbler": str(to_t),
             "link_type": link_type,
+            "created_by": created_by,
             "from_span": from_span,
             "to_span": to_span,
-            "created_by": created_by,
+            "allow_dangling": allow_dangling,
         }
-        if metadata:
-            payload["metadata"] = metadata
-        return self._post("/link", payload) or {}
+        if meta:
+            payload["metadata"] = dict(meta)
+        result = self._post("/link", payload)
+        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
 
     def link_if_absent(
         self,
         from_t: Tumbler | str,
         to_t: Tumbler | str,
         link_type: str,
-        **kwargs: Any,
-    ) -> dict:
-        return self.link(from_t, to_t, link_type, **kwargs)
+        created_by: str,
+        *,
+        from_span: str = "",
+        to_span: str = "",
+        allow_dangling: bool = False,
+        **meta: object,
+    ) -> bool:
+        # THE LOAD-BEARING CASE (RDR-168 Phase 3): all params explicitly wired to the
+        # service. Previously **kwargs swallowed them silently (data loss). Each param
+        # now serializes onto the wire payload; no accept-and-drop.
+        #
+        # Idempotency parity with canonical _LinkOps.link_if_absent (INSERT-OR-SKIP):
+        # the service's POST /link is an UPSERT (ON CONFLICT DO UPDATE), which would
+        # overwrite created_by / from_span / to_span / meta on an existing link — silent
+        # mutation on every re-index. Canonical instead SKIPS when the row exists and
+        # never touches its fields. Pre-flight the existence check and skip the write so
+        # the "if absent" contract holds. (TOCTOU is acceptable: the canonical
+        # cross-process path is not atomic either, and the common case is a re-index
+        # where the row already exists and we correctly no-op.)
+        existing = self.link_query(
+            from_t=str(from_t), to_t=str(to_t), link_type=link_type, limit=1
+        )
+        if existing:
+            return False  # row present — no overwrite, matching canonical skip
+        payload: dict = {
+            "from_tumbler": str(from_t),
+            "to_tumbler": str(to_t),
+            "link_type": link_type,
+            "created_by": created_by,
+            "from_span": from_span,
+            "to_span": to_span,
+            "allow_dangling": allow_dangling,
+        }
+        if meta:
+            payload["metadata"] = dict(meta)
+        result = self._post("/link", payload)
+        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
 
     def unlink(
         self,
@@ -873,26 +1067,32 @@ class HttpCatalogClient:
     def links_from(
         self,
         tumbler: Tumbler | str,
-        *,
-        link_type: str | None = None,
-    ) -> list[dict]:
+        link_type: str = "",
+        link_types: list[str] | None = None,
+    ) -> list[CatalogLink]:
         params: dict = {"tumbler": str(tumbler), "direction": "out"}
-        if link_type:
+        # njrcn.5: forward link_types to the server-side IN filter (no client-side
+        # over-fetch). link_types takes precedence; else the single link_type.
+        if link_types:
+            params["link_types"] = ",".join(link_types)
+        elif link_type:
             params["link_type"] = link_type
         result = self._get("/links", **params)
-        return result.get("links_from", []) if result else []
+        return [_link_from_dict(r) for r in (result.get("links_from", []) if result else [])]
 
     def links_to(
         self,
         tumbler: Tumbler | str,
-        *,
-        link_type: str | None = None,
-    ) -> list[dict]:
+        link_type: str = "",
+        link_types: list[str] | None = None,
+    ) -> list[CatalogLink]:
         params: dict = {"tumbler": str(tumbler), "direction": "in"}
-        if link_type:
+        if link_types:
+            params["link_types"] = ",".join(link_types)
+        elif link_type:
             params["link_type"] = link_type
         result = self._get("/links", **params)
-        return result.get("links_to", []) if result else []
+        return [_link_from_dict(r) for r in (result.get("links_to", []) if result else [])]
 
     def link_query(
         self,
@@ -906,7 +1106,7 @@ class HttpCatalogClient:
         tumbler: str | None = None,
         limit: int = 200,
         offset: int = 0,
-    ) -> list[dict]:
+    ) -> list[CatalogLink]:
         params: dict = {"limit": limit, "offset": offset}
         if from_t:            params["from_tumbler"] = from_t
         if to_t:              params["to_tumbler"] = to_t
@@ -916,18 +1116,49 @@ class HttpCatalogClient:
         if direction:         params["direction"] = direction
         if tumbler:           params["tumbler"] = tumbler
         result = self._get("/link_query", **params)
-        return result.get("links", []) if result else []
+        return [_link_from_dict(r) for r in (result.get("links", []) if result else [])]
 
     def bulk_unlink(
         self,
-        *,
         from_t: str = "",
         to_t: str = "",
         link_type: str = "",
         created_by: str = "",
         created_at_before: str = "",
+        dry_run: bool = False,
     ) -> int:
-        """Bulk delete links — all fields are optional filters."""
+        """Bulk delete links — all fields are optional filters.
+
+        Canonical parity: requires at least one filter (unless ``dry_run``), and
+        ``dry_run=True`` returns the count that *would* be deleted (no deletion).
+        """
+        has_filter = any((from_t, to_t, link_type, created_by, created_at_before))
+        if not has_filter and not dry_run:
+            raise ValueError(
+                "bulk_unlink requires at least one filter (or dry_run=True)"
+            )
+        if dry_run:
+            # The service has no server-side dry_run yet (Phase 4 follow-up nexus-pwclh).
+            # Compute the real would-delete count via link_query — matching canonical
+            # semantics — rather than silently returning 0 (a misleading preview).
+            page = 1000
+            cur = 0
+            total = 0
+            while True:
+                batch = self.link_query(
+                    from_t=from_t or None,
+                    to_t=to_t or None,
+                    link_type=link_type or None,
+                    created_by=created_by or None,
+                    created_at_before=created_at_before or None,
+                    limit=page,
+                    offset=cur,
+                )
+                total += len(batch)
+                if len(batch) < page:
+                    break
+                cur += page
+            return total
         payload: dict = {}
         if from_t:            payload["from_tumbler"] = from_t
         if to_t:              payload["to_tumbler"] = to_t
@@ -951,10 +1182,11 @@ class HttpCatalogClient:
     def graph(
         self,
         tumbler: Tumbler | str,
-        *,
-        link_types: list[str] | None = None,
-        direction: str = "both",
         depth: int = 1,
+        direction: str = "both",
+        link_type: str = "",
+        link_types: list[str] | None = None,
+        include_heuristic: bool = False,
     ) -> dict:
         """BFS traversal from a single seed — POST /v1/catalog/traverse."""
         payload: dict = {
@@ -962,26 +1194,41 @@ class HttpCatalogClient:
             "direction": direction,
             "depth": depth,
         }
-        if link_types:
-            payload["link_types"] = link_types
+        # Merge link_type (scalar) into link_types list for the wire
+        effective_link_types = list(link_types) if link_types else []
+        if link_type and link_type not in effective_link_types:
+            effective_link_types.insert(0, link_type)
+        if effective_link_types:
+            payload["link_types"] = effective_link_types
+        # include_heuristic: forwarded to service for future support; currently informational
+        if include_heuristic:
+            payload["include_heuristic"] = True
         return self._post("/traverse", payload) or {"nodes": [], "edges": []}
 
     def graph_many(
         self,
-        tumblers: list[Tumbler | str],
-        *,
-        link_types: list[str] | None = None,
-        direction: str = "both",
+        seeds: list[Tumbler | str],
         depth: int = 1,
+        direction: str = "both",
+        link_type: str = "",
+        link_types: list[str] | None = None,
+        include_heuristic: bool = False,
     ) -> dict:
         """BFS traversal from multiple seeds — POST /v1/catalog/traverse."""
         payload: dict = {
-            "seeds": [str(t) for t in tumblers],
+            "seeds": [str(t) for t in seeds],
             "direction": direction,
             "depth": depth,
         }
-        if link_types:
-            payload["link_types"] = link_types
+        # Merge link_type (scalar) into link_types list for the wire
+        effective_link_types = list(link_types) if link_types else []
+        if link_type and link_type not in effective_link_types:
+            effective_link_types.insert(0, link_type)
+        if effective_link_types:
+            payload["link_types"] = effective_link_types
+        # include_heuristic: forwarded to service for future support; currently informational
+        if include_heuristic:
+            payload["include_heuristic"] = True
         return self._post("/traverse", payload) or {"nodes": [], "edges": []}
 
     def link_audit(self, *, t3: Any = None) -> dict:
@@ -1040,49 +1287,89 @@ class HttpCatalogClient:
 
     def collection_for(
         self,
-        *,
         content_type: str,
-        owner_id: str,
+        owner: Tumbler | str,
         embedding_model: str,
-    ) -> dict | None:
+        *,
+        bump: bool = False,
+    ) -> CollectionName:
+        # Mirror canonical _DocumentOps.collection_for: the catalog RENDERS the name; a
+        # NEW tuple lands at v1 (never a 404/None), an existing tuple returns vN, and
+        # bump returns vN+1. The service /collections/for_tuple is lookup-only (404 on a
+        # new tuple), so we use it purely as the version oracle and render the name with
+        # the SAME canonical helpers (owner_segment_for_tumbler + CollectionName) — no
+        # client-side reimplementation, so local and service modes cannot diverge on the
+        # physical name. (nexus-njrcn.2; the prior lookup-only behaviour 404'd the very
+        # first index of a repo — the CA-4 empty-catalog cause.)
+        owner_id = owner_segment_for_tumbler(owner)
+        if not owner_id:
+            raise ValueError(
+                f"collection_for: cannot derive owner_id segment from owner {owner!r}"
+            )
+        existing_version = 0
         try:
             result = self._get(
                 "/collections/for_tuple",
                 content_type=content_type,
-                owner_id=owner_id,
+                owner_id=owner_id,  # canonical owner SEGMENT, not the raw tumbler
                 embedding_model=embedding_model,
             )
+            if result and result.get("name"):
+                existing_version = CollectionName.parse(result["name"]).model_version
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return None
-            raise
-        return result if result and result.get("name") else None
+            if exc.response.status_code != 404:
+                raise
+            # 404 == tuple not yet registered == new tuple → v1 (canonical semantics).
+        if existing_version == 0:
+            new_version = 1
+        elif bump:
+            new_version = existing_version + 1
+        else:
+            new_version = existing_version
+        return CollectionName(
+            content_type=content_type,
+            owner_id=owner_id,
+            embedding_model=embedding_model,
+            model_version=new_version,
+        )
 
     def collection_for_repo(
         self,
-        *,
-        owner: Tumbler | str,
+        repo: Path,
         content_type: str,
-        embedding_model: str,
-    ) -> dict | None:
-        return self.collection_for(
-            content_type=content_type,
-            owner_id=str(owner),
-            embedding_model=embedding_model,
-        )
+        *,
+        bump: bool = False,
+    ) -> CollectionName:
+        # Mirrors canonical _DocumentOps.collection_for_repo:
+        # look up the owner by repo_hash, then resolve the embedding model.
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance
+
+        _, repo_hash = _repo_identity(repo)
+        owner = self.owner_for_repo(repo_hash)
+        if owner is None:
+            raise LookupError(
+                f"collection_for_repo: no owner registered for repo_hash {repo_hash!r} "
+                f"(repo {repo!s}). Call ensure_owner_for_repo() first."
+            )
+        embedding_model = effective_embedding_model_for_writes(content_type)
+        return self.collection_for(content_type, owner, embedding_model, bump=bump)
 
     def supersede_collection(
         self,
-        name: str,
+        old_name: str,
+        new_name: str,
         *,
-        superseded_by: str,
+        reason: str = "",
         superseded_at: str | None = None,
-    ) -> int:
-        payload: dict = {"name": name, "superseded_by": superseded_by}
+    ) -> None:
+        # Wire keys: name (old_name), superseded_by (new_name); reason is informational.
+        payload: dict = {"name": old_name, "superseded_by": new_name}
+        if reason:
+            payload["reason"] = reason
         if superseded_at:
             payload["superseded_at"] = superseded_at
-        result = self._post("/collections/supersede", payload)
-        return int(result.get("updated", 0) if result else 0)
+        self._post("/collections/supersede", payload)
 
     def rename_collection(self, old: str, new: str, *, cross_model: bool = False) -> int:
         # RDR-164 P3: the consolidated endpoint returns {"renamed": {per-table counts}}.
@@ -1118,39 +1405,65 @@ class HttpCatalogClient:
         return {k: int(v) for k, v in renamed.items()}
 
     def update_document_collection(
-        self, tumbler: Tumbler | str, collection: str
-    ) -> None:
-        self._post("/update", {
-            "tumbler": str(tumbler), "physical_collection": collection
+        self, tumbler: str, new_collection: str,
+    ) -> bool:
+        result = self._post("/update", {
+            "tumbler": str(tumbler), "physical_collection": new_collection,
         })
+        return bool(result.get("updated", 0) > 0 if result else False)
 
     def update_documents_collection_batch(
         self,
-        tumblers: list[Tumbler | str],
-        collection: str,
+        pairs: list[tuple[str, str]],
     ) -> int:
         # No server-side batch endpoint yet (guard+track bead nexus-gmiaf.24);
-        # iterate single updates.
-        for t in tumblers:
-            self.update_document_collection(t, collection)
-        return len(tumblers)
+        # iterate single updates. Each pair is (tumbler, new_collection).
+        for tumbler, new_collection in pairs:
+            self.update_document_collection(tumbler, new_collection)
+        return len(pairs)
 
     # ══════════════════════════════════════════════════════════════════════════
     # MANIFEST / CHUNKS
     # ══════════════════════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _manifest_rows(chunks: list[dict]) -> list[dict]:
+        """Normalize manifest rows for the wire: chash to the 32-char natural ID.
+
+        The catalog chash is ``chunk_text_hash[:32]`` (RDR-108 D1 — the Chroma natural
+        ID). The local Catalog truncates at the write layer (catalog_writes.py); callers
+        pass the full 64-char ``chunk_text_hash`` (e.g. the manifest post-store hook), so
+        the service client MUST truncate too or the Postgres
+        ``catalog_document_chunks_chash_len_check`` (length == 32) rejects the insert
+        (RDR-168 nexus-njrcn.6 layer 2).
+        """
+        out: list[dict] = []
+        for c in chunks:
+            row = dict(c)
+            row["chash"] = (row.get("chash") or "")[:32]
+            out.append(row)
+        return out
+
     def write_manifest(self, doc_id: str, chunks: list[dict]) -> None:
         """Replace manifest for doc_id (atomic delete + insert)."""
-        self._post("/manifest/write", {"doc_id": doc_id, "rows": chunks})
+        self._post("/manifest/write", {"doc_id": doc_id, "rows": self._manifest_rows(chunks)})
 
     def append_manifest_chunks(self, doc_id: str, chunks: list[dict]) -> None:
-        self._post("/manifest/append", {"doc_id": doc_id, "rows": chunks})
+        self._post("/manifest/append", {"doc_id": doc_id, "rows": self._manifest_rows(chunks)})
 
-    def get_manifest(self, doc_id: str) -> list[Any]:
+    def get_manifest(self, doc_id: str) -> list[ManifestRow]:
+        """Return ordered manifest rows — typed like local Catalog.get_manifest.
+
+        Return-type parity (RDR-168): local returns list[ManifestRow] and consumers do
+        attribute access (``row.chash``); the wire returns dicts, so reconstruct the
+        dataclass here or service-mode housekeeping (e.g. _prune_misclassified) breaks
+        with ``'dict' object has no attribute 'chash'``.
+        """
         result = self._get("/manifest/get", doc_id=doc_id)
-        return result.get("rows", []) if result else []
+        rows = result.get("rows", []) if result else []
+        return [_manifest_row_from_dict(r) for r in rows]
 
-    def get_manifests(self, doc_ids: list[str]) -> dict[str, list[Any]]:
+    def get_manifests(self, doc_ids: list[str]) -> dict[str, list[ManifestRow]]:
         """Batch-fetch manifests for multiple doc_ids in one round-trip.
 
         nexus-7lm3q: replaces the N per-doc ``get_manifest()`` loop in
@@ -1167,7 +1480,11 @@ class HttpCatalogClient:
         if not doc_ids:
             return {}
         result = self._post("/manifest/get_many", {"doc_ids": doc_ids})
-        return result.get("manifests", {}) if result else {}
+        manifests = result.get("manifests", {}) if result else {}
+        return {
+            did: [_manifest_row_from_dict(r) for r in rows]
+            for did, rows in manifests.items()
+        }
 
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
         """Return chashes for all chunks of doc_id.
@@ -1178,7 +1495,7 @@ class HttpCatalogClient:
         use get_manifest() + extract chash from each row.
         """
         rows = self.get_manifest(doc_id)
-        return [row["chash"] for row in rows if row.get("chash")]
+        return [row.chash for row in rows if row.chash]
 
     def docs_for_chashes(self, chashes: list[str]) -> list[str]:
         """Return the list of document tumblers that contain any of the given chashes.
@@ -1207,7 +1524,7 @@ class HttpCatalogClient:
         new_chunk_count: int | None = None,
     ) -> None:
         # /manifest/write performs the atomic delete+insert already
-        self._post("/manifest/write", {"doc_id": doc_id, "rows": chunks})
+        self._post("/manifest/write", {"doc_id": doc_id, "rows": self._manifest_rows(chunks)})
         if new_collection or new_chunk_count is not None:
             updates: dict = {}
             if new_collection:              updates["physical_collection"] = new_collection
@@ -1261,8 +1578,12 @@ class HttpCatalogClient:
     def stats(self) -> dict:
         return self._get("/stats") or {}
 
-    def is_initialized(self) -> bool:
-        """True when the service responds to /stats."""
+    def is_initialized(self, catalog_path: Path | None = None) -> bool:
+        """True when the service responds to /stats.
+
+        catalog_path is a local-mode filesystem path with no service-mode meaning;
+        accepted for signature conformance, ignored here. Service reachability == initialized.
+        """
         try:
             self._get("/stats")
             return True

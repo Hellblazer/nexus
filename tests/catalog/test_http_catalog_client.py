@@ -57,6 +57,26 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     #: propagation can be asserted.
     rename_conflicts: bool = False
 
+    #: RDR-168 P3 wire-semantics regression coverage.
+    get_ops: list[str] = []          # ops seen by do_GET, in order
+    post_ops: list[str] = []         # ops seen by do_POST, in order
+    last_link_body: dict[str, Any] = {}
+    #: from_tumbler value for which /link_query reports NO existing link (absent path).
+    link_absent_from: str = "9.9.9"
+    #: when set, /list returns this many docs for a content_type-filtered request
+    #: (CatalogHandler returns ALL matching rows ignoring limit/offset — used to prove
+    #: the client issues a single request and does not loop).
+    list_content_type_count: int = 0
+    #: /link response shape: None omits the key (old-JAR skew), bool sets created (njrcn.3).
+    link_created: "bool | None" = True
+
+    @classmethod
+    def reset_log(cls) -> None:
+        cls.get_ops = []
+        cls.post_ops = []
+        cls.last_link_body = {}
+        cls.list_content_type_count = 0
+
     def log_message(self, *args: Any) -> None:
         pass  # suppress test noise
 
@@ -81,13 +101,21 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         op = path.removeprefix("/v1/catalog")
+        FakeCatalogHandler.get_ops.append(op)
 
         if op == "/stats":
             self._send_json({"doc_count": 7, "link_count": 3, "owner_count": 2})
         elif op == "/show":
             self._send_json(_entry_dict())
         elif op == "/list":
-            self._send_json({"documents": [_entry_dict(), _entry_dict(title="Second")], "count": 2})
+            params = self._query_params()
+            if params.get("content_type") and FakeCatalogHandler.list_content_type_count:
+                # Mirror CatalogHandler: the content_type branch ignores limit/offset and
+                # returns ALL matching rows in one response.
+                n = FakeCatalogHandler.list_content_type_count
+                self._send_json({"documents": [_entry_dict() for _ in range(n)], "count": n})
+            else:
+                self._send_json({"documents": [_entry_dict(), _entry_dict(title="Second")], "count": 2})
         elif op == "/search":
             self._send_json({"documents": [_entry_dict()], "count": 1})
         elif op == "/resolve":
@@ -95,14 +123,26 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/links":
             params = self._query_params()
             direction = params.get("direction", "both")
+            # njrcn.5: mirror the server-side type filter (single link_type or link_types IN).
+            requested = None
+            if params.get("link_types"):
+                requested = {t for t in params["link_types"].split(",") if t}
+            elif params.get("link_type"):
+                requested = {params["link_type"]}
+            row = {"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}
+            match = requested is None or "cites" in requested
             if direction == "out":
-                self._send_json({"links_from": [{"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}], "links_to": []})
+                self._send_json({"links_from": [row] if match else [], "links_to": []})
             elif direction == "in":
                 self._send_json({"links_from": [], "links_to": []})
             else:
                 self._send_json({"links_from": [], "links_to": []})
         elif op == "/link_query":
-            self._send_json({"links": [{"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}], "count": 1})
+            params = self._query_params()
+            if params.get("from_tumbler") == FakeCatalogHandler.link_absent_from:
+                self._send_json({"links": [], "count": 0})
+            else:
+                self._send_json({"links": [{"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}], "count": 1})
         elif op == "/manifest/get":
             self._send_json({"rows": [{"position": 0, "chash": "abc123"}], "count": 1})
         elif op == "/manifest/chashes":
@@ -132,6 +172,40 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"tumbler_prefix": "1.1", "name": "myrepo"})
         elif op == "/owners/by_name":
             self._send_json({"owners": [{"tumbler_prefix": "1.1", "name": "myrepo"}]})
+        elif op == "/resolve_span":
+            params = self._query_params()
+            chash = params.get("span_chash", "")
+            coll  = params.get("collection", "")
+            if chash == "deadbeef" * 4 and coll == "knowledge__o__bge-768__v1":
+                self._send_json({
+                    "chunk_text": "hello span world",
+                    "metadata":   {"lang": "en"},
+                    "chunk_hash": chash,
+                })
+            elif chash == "feeded00" * 4:  # _MISSING_32
+                self.send_response(404)
+                self.end_headers()
+            else:
+                self._send_json({
+                    "chunk_text": "generic chunk text",
+                    "metadata":   {},
+                    "chunk_hash": chash,
+                })
+        elif op == "/resolve_chash":
+            params = self._query_params()
+            chash = params.get("chash", "")
+            if chash == "00000000" * 4:
+                self.send_response(404)
+                self.end_headers()
+            else:
+                self._send_json({
+                    "chash":               chash,
+                    "chunk_hash":          chash,
+                    "physical_collection": "knowledge__o__bge-768__v1",
+                    "doc_id":              "1.2.3",
+                    "chunk_text":          "resolved chunk body",
+                    "metadata":            {"source": "test"},
+                })
         else:
             self._send_json({"error": f"unknown GET op: {op}"}, 404)
 
@@ -139,6 +213,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         op = path.removeprefix("/v1/catalog")
         body = self._read_body()
+        FakeCatalogHandler.post_ops.append(op)
 
         if op == "/doc/register":
             self._send_json({"tumbler": _fake_tumbler()})
@@ -149,7 +224,11 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/delete":
             self._send_json({"deleted": 1})
         elif op == "/link":
-            self._send_json({"ok": True})
+            FakeCatalogHandler.last_link_body = body
+            resp: dict = {"ok": True}
+            if FakeCatalogHandler.link_created is not None:
+                resp["created"] = FakeCatalogHandler.link_created
+            self._send_json(resp)
         elif op == "/unlink":
             self._send_json({"deleted": 1})
         elif op == "/traverse":
@@ -160,6 +239,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "count": len(body.get("rows", []))})
         elif op == "/manifest/purge":
             self._send_json({"deleted": 1})
+        elif op == "/manifest/get_many":
+            self._send_json({"manifests": {
+                "1.1.1": [{"position": 0, "chash": "abc123", "line_start": 1, "line_end": 9}],
+            }})
         elif op == "/manifest/docs_for_chashes":
             # Real server: {"tumblers": [tumbler_string, ...]} (flat list, SELECT DISTINCT)
             self._send_json({"tumblers": ["1.1.1"]})
@@ -317,15 +400,114 @@ class TestHttpCatalogClientRoundTrip:
         assert len(docs) == 2
         assert docs[1].title == "Second"
 
-    def test_link_returns_dict(self, client: HttpCatalogClient) -> None:
-        result = client.link("1.1.1", "1.1.2", "cites")
-        assert isinstance(result, dict)
+    def test_link_returns_bool(self, client: HttpCatalogClient) -> None:
+        # Canonical Catalog.link() takes positional created_by and returns bool.
+        # Migrated from old client-specific sig (created_by was kw-only with default).
+        result = client.link("1.1.1", "1.1.2", "cites", "test-suite")
+        assert isinstance(result, bool)
+
+    def test_link_returns_true_when_created(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.link_created = True
+        try:
+            assert client.link("1.1.1", "1.1.2", "cites", "test-suite") is True
+        finally:
+            FakeCatalogHandler.link_created = True
+
+    def test_link_returns_false_when_merged(self, client: HttpCatalogClient) -> None:
+        # njrcn.3: created=False (ON CONFLICT merged an existing link) → link() returns
+        # False, mirroring canonical (True=new, False=merged). This is the branch that
+        # changed meaning (was result['ok'], now result['created']).
+        FakeCatalogHandler.link_created = False
+        try:
+            assert client.link("1.1.1", "1.1.2", "cites", "test-suite") is False
+        finally:
+            FakeCatalogHandler.link_created = True
+
+    def test_link_returns_false_on_response_without_created(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # Version-skew lock: a service that omits 'created' (old JAR) → bool(None) → False.
+        FakeCatalogHandler.link_created = None  # omit the key
+        try:
+            assert client.link("1.1.1", "1.1.2", "cites", "test-suite") is False
+        finally:
+            FakeCatalogHandler.link_created = True
+
+    # ── RDR-168 P3 wire-semantics regressions (substantive-critic Criticals) ──────
+
+    def test_all_documents_content_type_does_not_loop(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """all_documents(content_type=X, limit=0) issues ONE /list, never loops.
+
+        The service's content_type branch ignores limit/offset and returns every row.
+        A pagination loop would re-fetch the full (>=page) set forever. Regression guard
+        for the infinite-loop Critical: assert a single /list request and all rows back.
+        """
+        FakeCatalogHandler.reset_log()
+        FakeCatalogHandler.list_content_type_count = 1500  # >= the 1000 page size
+        docs = client.all_documents(content_type="code")  # limit defaults to 0 (unbounded)
+        assert len(docs) == 1500
+        assert FakeCatalogHandler.get_ops.count("/list") == 1
+
+    def test_link_if_absent_skips_when_link_present(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """Existing link → skip (return False), NO /link write (no overwrite).
+
+        Canonical link_if_absent is INSERT-OR-SKIP; the service POST /link is an UPSERT
+        that would overwrite created_by/spans/meta. The pre-flight must short-circuit.
+        """
+        FakeCatalogHandler.reset_log()
+        result = client.link_if_absent("1.1.1", "1.1.2", "cites", "indexer")
+        assert result is False
+        assert "/link" not in FakeCatalogHandler.post_ops
+
+    def test_link_if_absent_writes_when_absent_and_serializes_params(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """Absent link → write, with every caller param serialized onto the payload."""
+        FakeCatalogHandler.reset_log()
+        result = client.link_if_absent(
+            FakeCatalogHandler.link_absent_from, "1.1.2", "cites", "indexer",
+            from_span="chash:aa", to_span="chash:bb", allow_dangling=True,
+        )
+        assert result is True
+        assert "/link" in FakeCatalogHandler.post_ops
+        body = FakeCatalogHandler.last_link_body
+        assert body["created_by"] == "indexer"
+        assert body["from_span"] == "chash:aa"
+        assert body["to_span"] == "chash:bb"
+        assert body["allow_dangling"] is True
+
+    def test_bulk_unlink_dry_run_returns_real_count_without_deleting(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """dry_run=True returns the would-delete count via link_query, no /unlink POST."""
+        FakeCatalogHandler.reset_log()
+        n = client.bulk_unlink(link_type="cites", dry_run=True)
+        assert n == 1  # the fake /link_query reports one matching link
+        assert "/unlink" not in FakeCatalogHandler.post_ops
+
+    def test_bulk_unlink_requires_a_filter(self, client: HttpCatalogClient) -> None:
+        """Canonical parity: no filter and not dry_run → ValueError (guard against mass delete)."""
+        with pytest.raises(ValueError, match="at least one filter"):
+            client.bulk_unlink()
 
     def test_links_from_uses_direction_out(self, client: HttpCatalogClient) -> None:
         # GET /links?tumbler=X&direction=out
         links = client.links_from("1.1.1")
         assert len(links) == 1
-        assert links[0]["link_type"] == "cites"
+        # Return-type parity: typed CatalogLink (attribute access), like local Catalog.
+        assert links[0].link_type == "cites"
+        assert str(links[0].to_tumbler) == "1.1.2"
+
+    def test_links_from_forwards_link_types_server_side(self, client: HttpCatalogClient) -> None:
+        # njrcn.5: link_types is forwarded to the server-side IN filter (the fake mirrors
+        # it), so a matching set returns the link and a non-matching set returns nothing —
+        # no client-side over-fetch-then-filter.
+        assert len(client.links_from("1.1.1", link_types=["cites", "relates"])) == 1
+        assert client.links_from("1.1.1", link_types=["implements"]) == []
 
     def test_links_to_uses_direction_in(self, client: HttpCatalogClient) -> None:
         # GET /links?tumbler=X&direction=in
@@ -335,6 +517,15 @@ class TestHttpCatalogClientRoundTrip:
     def test_link_query(self, client: HttpCatalogClient) -> None:
         links = client.link_query(link_type="cites")
         assert len(links) == 1
+        assert links[0].link_type == "cites"  # typed CatalogLink, not dict
+
+    def test_get_manifests_returns_typed_rows(self, client: HttpCatalogClient) -> None:
+        # Return-type parity: batch get_manifests yields list[ManifestRow] per doc_id
+        # (search_engine.py prefers this over the per-doc loop in service mode).
+        by_doc = client.get_manifests(["1.1.1"])
+        assert "1.1.1" in by_doc
+        assert by_doc["1.1.1"][0].chash == "abc123"
+        assert by_doc["1.1.1"][0].position == 0
 
     def test_graph_post_traverse(self, client: HttpCatalogClient) -> None:
         # graph() must POST /traverse (not GET)
@@ -361,7 +552,9 @@ class TestHttpCatalogClientRoundTrip:
         # GET /manifest/get?doc_id=X → response key 'rows'
         rows = client.get_manifest("1.1.1")
         assert len(rows) == 1
-        assert rows[0]["chash"] == "abc123"
+        # Return-type parity: typed ManifestRow (attribute access), like local Catalog.
+        assert rows[0].chash == "abc123"
+        assert rows[0].position == 0
 
     def test_get_chunk_chashes_from_manifest(self, client: HttpCatalogClient) -> None:
         # Pulls chashes from manifest rows (not a separate endpoint)
@@ -427,8 +620,11 @@ class TestHttpCatalogClientRoundTrip:
         assert len(colls) == 1
 
     def test_supersede_collection(self, client: HttpCatalogClient) -> None:
-        n = client.supersede_collection("old__coll", superseded_by="new__coll")
-        assert n == 5
+        # Canonical Catalog.supersede_collection() takes positional old_name, new_name.
+        # Migrated from old client-specific sig (new_name was keyword-only superseded_by).
+        # Returns None (canonical), not int.
+        result = client.supersede_collection("old__coll", "new__coll")
+        assert result is None
 
     def test_rename_collection(self, client: HttpCatalogClient) -> None:
         # Sends {old_name, new_name} (canonical form)
@@ -478,8 +674,11 @@ class TestHttpCatalogClientRoundTrip:
         assert n == 1  # fake server returns {"deleted": 1}
 
     def test_update_documents_collection_batch(self, client: HttpCatalogClient) -> None:
-        # No batch endpoint: iterates update per tumbler
-        n = client.update_documents_collection_batch(["1.1.1", "1.1.2"], "new__coll")
+        # Canonical Catalog.update_documents_collection_batch() takes pairs: list[tuple[str,str]].
+        # Migrated from old client-specific sig (tumblers list + collection string).
+        n = client.update_documents_collection_batch(
+            [("1.1.1", "new__coll"), ("1.1.2", "new__coll")]
+        )
         assert n == 2
 
     def test_register_owner(self, client: HttpCatalogClient) -> None:
@@ -660,3 +859,196 @@ class TestFactorySeam:
             "Production code constructs HttpCatalogClient directly, bypassing factory:\n"
             + "\n".join(hits)
         )
+
+
+# ── resolve_span / resolve_chash unit tests (nexus-njrcn.4) ─────────────────
+
+# 64-char hex chash for test fixtures (all must be valid [0-9a-f]{64})
+_FULL_CHASH = "deadbeef" * 8               # 64 hex chars
+_CHASH_32   = "deadbeef" * 4               # first 32 chars (server key)
+_MISSING_CHASH = "feeded00" * 8            # 64-char hex for 404 path
+_MISSING_32 = "feeded00" * 4              # first 32 chars
+_GLOBAL_CHASH_FULL = "aabbccdd" * 8        # 64-char hex for global lookup
+_GLOBAL_CHASH_32   = "aabbccdd" * 4        # first 32 chars
+_MISS_GLOBAL_FULL  = "00000000" * 8        # 64-char hex — missing in server
+_MISS_GLOBAL_32    = "00000000" * 4        # first 32 chars
+
+
+class TestResolveSpan:
+    """Unit tests for HttpCatalogClient.resolve_span (nexus-njrcn.4)."""
+
+    def test_resolve_span_returns_chunk_text(self) -> None:
+        """Happy path: correct dict shape with chunk_text and metadata."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span(
+                f"chash:{_FULL_CHASH}",
+                "knowledge__o__bge-768__v1",
+            )
+            assert result is not None
+            assert result["chunk_text"] == "hello span world"
+            assert result["metadata"] == {"lang": "en"}
+            # chunk_hash carries the full 64-char hex (from parse_chash_span), not the 32-char server key
+            assert result["chunk_hash"] == _FULL_CHASH
+            assert "char_range" not in result
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_applies_char_range(self) -> None:
+        """char_range slices chunk_text and is included in the output dict."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            # generic chash (not deadbeef) to hit the "generic chunk text" branch
+            generic_chash = "cafebabe" * 8
+            result = client.resolve_span(
+                f"chash:{generic_chash}:8-13",
+                "knowledge__o__bge-768__v1",
+            )
+            assert result is not None
+            # "generic chunk text"[8:13] == "chunk"
+            assert result["chunk_text"] == "chunk"
+            assert result["char_range"] == (8, 13)
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_non_chash_returns_none(self) -> None:
+        """Non-chash span (e.g. line-range) returns None without HTTP call."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span("42-57", "knowledge__o__bge-768__v1")
+            assert result is None
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_404_returns_none(self) -> None:
+        """A 404 from the server maps to None (chunk not found)."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span(
+                f"chash:{_MISSING_CHASH}",
+                "knowledge__o__bge-768__v1",
+            )
+            assert result is None
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_malformed_chash_returns_none(self) -> None:
+        """Malformed chash span returns None (ValueError caught gracefully)."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span("chash:not-a-hex", "knowledge__o__bge-768__v1")
+            assert result is None
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_t3_ignored(self) -> None:
+        """t3 kwarg is accepted (conformance) and silently ignored."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span(
+                f"chash:{_FULL_CHASH}",
+                "knowledge__o__bge-768__v1",
+                t3=object(),  # arbitrary non-None value
+            )
+            assert result is not None
+            assert result["chunk_text"] == "hello span world"
+        finally:
+            server.shutdown()
+
+
+class TestResolveChash:
+    """Unit tests for HttpCatalogClient.resolve_chash (nexus-njrcn.4)."""
+
+    def test_resolve_chash_returns_full_dict(self) -> None:
+        """Happy path: correct dict shape with all expected keys."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(f"chash:{_GLOBAL_CHASH_FULL}")
+            assert result is not None
+            # Canonical contract: chash/chunk_hash are the FULL 64-char parsed hex,
+            # not the 32-char wire key the service stores (njrcn.4 review High).
+            assert result["chash"] == _GLOBAL_CHASH_FULL
+            assert result["chunk_hash"] == _GLOBAL_CHASH_FULL
+            assert result["physical_collection"] == "knowledge__o__bge-768__v1"
+            assert result["doc_id"] == "1.2.3"
+            assert result["chunk_text"] == "resolved chunk body"
+            assert result["metadata"] == {"source": "test"}
+            assert "char_range" not in result
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_applies_char_range(self) -> None:
+        """char_range slices chunk_text and is included in output.
+
+        The span form ``chash:<hex>:<start>-<end>`` passes start/end to the
+        client which parses them via parse_chash_span; the client then sends
+        only chash[:32] to the server and slices the returned text locally.
+        Server returns "resolved chunk body"; slice [9:14] == "chunk".
+        """
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(f"chash:{_GLOBAL_CHASH_FULL}:9-14")
+            assert result is not None
+            assert result["chunk_text"] == "chunk"
+            assert result["char_range"] == (9, 14)
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_404_returns_none(self) -> None:
+        """A 404 from the server maps to None."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(f"chash:{_MISS_GLOBAL_FULL}")
+            assert result is None
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_prefer_collection_forwarded(self) -> None:
+        """prefer_collection kwarg is forwarded as a query param."""
+        server, base_url = start_fake_server()
+        try:
+            FakeCatalogHandler.reset_log()
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(
+                f"chash:{_GLOBAL_CHASH_FULL}",
+                prefer_collection="knowledge__o__bge-768__v1",
+            )
+            assert result is not None
+            # The server saw the resolve_chash GET
+            assert "/resolve_chash" in FakeCatalogHandler.get_ops
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_t3_and_chash_index_ignored(self) -> None:
+        """t3 and chash_index positional args are accepted and silently ignored."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(
+                f"chash:{_GLOBAL_CHASH_FULL}",
+                object(),   # t3 — positional, must be accepted
+                object(),   # chash_index — positional, must be accepted
+            )
+            assert result is not None
+            assert result["chunk_text"] == "resolved chunk body"
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_malformed_returns_none(self) -> None:
+        """Malformed chash returns None (ValueError caught gracefully)."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash("chash:not-a-valid-hex")
+            assert result is None
+        finally:
+            server.shutdown()
