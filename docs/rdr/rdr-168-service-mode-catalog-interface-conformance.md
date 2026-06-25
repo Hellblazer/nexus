@@ -2,12 +2,13 @@
 title: "Service-Mode Catalog Interface Conformance: Make HttpCatalogClient a Faithful Drop-In for the Local Catalog, Enforced by a Signature-Conformance Test"
 id: RDR-168
 type: Bug Fix
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-25
 accepted_date: 2026-06-25
+closed_date: 2026-06-25
 related_issues: [nexus-7y0ab]
 related: [RDR-152, RDR-155, RDR-164, RDR-108, RDR-103]
 ---
