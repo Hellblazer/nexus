@@ -62,6 +62,7 @@ import httpx
 import structlog
 
 from nexus.catalog.catalog import CatalogEntry, CatalogLink, Tumbler
+from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.catalog_writes import ManifestRow
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 
@@ -888,9 +889,41 @@ class HttpCatalogClient:
         physical_collection: str,
         t3: "Any" = None,
     ) -> dict | None:
-        # t3 is a local-mode ClientAPI object with no service-mode meaning;
-        # accepted for signature conformance, ignored here.
-        return None  # not yet implemented in service mode (Phase 4 follow-up nexus-pwclh)
+        """Resolve a ``chash:`` span to chunk text + metadata (nexus-njrcn.4).
+
+        Non-``chash:`` spans (line-range, chunk:char) are out of scope for
+        service mode — return ``None`` so callers fall back gracefully.
+        ``t3`` is a local-mode artefact; accepted for conformance, ignored.
+        """
+        if not span.startswith("chash:"):
+            return None
+        try:
+            hex_chash, char_range = parse_chash_span(span)
+        except ValueError:
+            return None
+        try:
+            result = self._get(
+                "/resolve_span",
+                span_chash=hex_chash[:32],
+                collection=physical_collection,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if not result:
+            return None
+        text: str = result.get("chunk_text", "")
+        if char_range:
+            text = text[char_range[0]:char_range[1]]
+        out: dict = {
+            "chunk_text": text,
+            "metadata":   result.get("metadata", {}),
+            "chunk_hash": hex_chash,
+        }
+        if char_range:
+            out["char_range"] = char_range
+        return out
 
     def resolve_chash(
         self,
@@ -900,10 +933,43 @@ class HttpCatalogClient:
         *,
         prefer_collection: str | None = None,
     ) -> dict | None:
-        # t3 and chash_index are local-mode execution-context objects with no
-        # service-mode meaning; accepted for signature conformance, ignored here.
-        # The service resolves chashes via its own internal index.
-        return None  # not yet implemented in service mode (Phase 4 follow-up nexus-pwclh)
+        """Globally resolve a chash to chunk text + collection + doc_id (nexus-njrcn.4).
+
+        ``t3`` and ``chash_index`` are local-mode artefacts; accepted for
+        conformance, ignored. The service resolves via its own internal index.
+        """
+        try:
+            hex_chash, char_range = parse_chash_span(chash)
+        except ValueError:
+            return None
+        params: dict[str, Any] = {"chash": hex_chash[:32]}
+        if prefer_collection:
+            params["prefer_collection"] = prefer_collection
+        try:
+            result = self._get("/resolve_chash", **params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if not result:
+            return None
+        chunk_text: str = result.get("chunk_text", "")
+        if char_range:
+            chunk_text = chunk_text[char_range[0]:char_range[1]]
+        out: dict = {
+            # Canonical contract (catalog_spans._build_ref): chash/chunk_hash are the
+            # FULL parsed hex, NOT the 32-char wire key the service stores/echoes — a
+            # downstream consumer comparing against a 64-char citation hex must match.
+            "chash":               hex_chash,
+            "chunk_hash":          hex_chash,
+            "physical_collection": result.get("physical_collection", ""),
+            "doc_id":              result.get("doc_id", ""),
+            "chunk_text":          chunk_text,
+            "metadata":            result.get("metadata", {}),
+        }
+        if char_range:
+            out["char_range"] = char_range
+        return out
 
     def resolve_chunk(self, tumbler: Tumbler | str) -> dict | None:
         result = self.resolve(tumbler)

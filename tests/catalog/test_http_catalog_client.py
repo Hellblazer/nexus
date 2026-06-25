@@ -170,6 +170,40 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"tumbler_prefix": "1.1", "name": "myrepo"})
         elif op == "/owners/by_name":
             self._send_json({"owners": [{"tumbler_prefix": "1.1", "name": "myrepo"}]})
+        elif op == "/resolve_span":
+            params = self._query_params()
+            chash = params.get("span_chash", "")
+            coll  = params.get("collection", "")
+            if chash == "deadbeef" * 4 and coll == "knowledge__o__bge-768__v1":
+                self._send_json({
+                    "chunk_text": "hello span world",
+                    "metadata":   {"lang": "en"},
+                    "chunk_hash": chash,
+                })
+            elif chash == "feeded00" * 4:  # _MISSING_32
+                self.send_response(404)
+                self.end_headers()
+            else:
+                self._send_json({
+                    "chunk_text": "generic chunk text",
+                    "metadata":   {},
+                    "chunk_hash": chash,
+                })
+        elif op == "/resolve_chash":
+            params = self._query_params()
+            chash = params.get("chash", "")
+            if chash == "00000000" * 4:
+                self.send_response(404)
+                self.end_headers()
+            else:
+                self._send_json({
+                    "chash":               chash,
+                    "chunk_hash":          chash,
+                    "physical_collection": "knowledge__o__bge-768__v1",
+                    "doc_id":              "1.2.3",
+                    "chunk_text":          "resolved chunk body",
+                    "metadata":            {"source": "test"},
+                })
         else:
             self._send_json({"error": f"unknown GET op: {op}"}, 404)
 
@@ -793,3 +827,196 @@ class TestFactorySeam:
             "Production code constructs HttpCatalogClient directly, bypassing factory:\n"
             + "\n".join(hits)
         )
+
+
+# ── resolve_span / resolve_chash unit tests (nexus-njrcn.4) ─────────────────
+
+# 64-char hex chash for test fixtures (all must be valid [0-9a-f]{64})
+_FULL_CHASH = "deadbeef" * 8               # 64 hex chars
+_CHASH_32   = "deadbeef" * 4               # first 32 chars (server key)
+_MISSING_CHASH = "feeded00" * 8            # 64-char hex for 404 path
+_MISSING_32 = "feeded00" * 4              # first 32 chars
+_GLOBAL_CHASH_FULL = "aabbccdd" * 8        # 64-char hex for global lookup
+_GLOBAL_CHASH_32   = "aabbccdd" * 4        # first 32 chars
+_MISS_GLOBAL_FULL  = "00000000" * 8        # 64-char hex — missing in server
+_MISS_GLOBAL_32    = "00000000" * 4        # first 32 chars
+
+
+class TestResolveSpan:
+    """Unit tests for HttpCatalogClient.resolve_span (nexus-njrcn.4)."""
+
+    def test_resolve_span_returns_chunk_text(self) -> None:
+        """Happy path: correct dict shape with chunk_text and metadata."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span(
+                f"chash:{_FULL_CHASH}",
+                "knowledge__o__bge-768__v1",
+            )
+            assert result is not None
+            assert result["chunk_text"] == "hello span world"
+            assert result["metadata"] == {"lang": "en"}
+            # chunk_hash carries the full 64-char hex (from parse_chash_span), not the 32-char server key
+            assert result["chunk_hash"] == _FULL_CHASH
+            assert "char_range" not in result
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_applies_char_range(self) -> None:
+        """char_range slices chunk_text and is included in the output dict."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            # generic chash (not deadbeef) to hit the "generic chunk text" branch
+            generic_chash = "cafebabe" * 8
+            result = client.resolve_span(
+                f"chash:{generic_chash}:8-13",
+                "knowledge__o__bge-768__v1",
+            )
+            assert result is not None
+            # "generic chunk text"[8:13] == "chunk"
+            assert result["chunk_text"] == "chunk"
+            assert result["char_range"] == (8, 13)
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_non_chash_returns_none(self) -> None:
+        """Non-chash span (e.g. line-range) returns None without HTTP call."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span("42-57", "knowledge__o__bge-768__v1")
+            assert result is None
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_404_returns_none(self) -> None:
+        """A 404 from the server maps to None (chunk not found)."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span(
+                f"chash:{_MISSING_CHASH}",
+                "knowledge__o__bge-768__v1",
+            )
+            assert result is None
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_malformed_chash_returns_none(self) -> None:
+        """Malformed chash span returns None (ValueError caught gracefully)."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span("chash:not-a-hex", "knowledge__o__bge-768__v1")
+            assert result is None
+        finally:
+            server.shutdown()
+
+    def test_resolve_span_t3_ignored(self) -> None:
+        """t3 kwarg is accepted (conformance) and silently ignored."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_span(
+                f"chash:{_FULL_CHASH}",
+                "knowledge__o__bge-768__v1",
+                t3=object(),  # arbitrary non-None value
+            )
+            assert result is not None
+            assert result["chunk_text"] == "hello span world"
+        finally:
+            server.shutdown()
+
+
+class TestResolveChash:
+    """Unit tests for HttpCatalogClient.resolve_chash (nexus-njrcn.4)."""
+
+    def test_resolve_chash_returns_full_dict(self) -> None:
+        """Happy path: correct dict shape with all expected keys."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(f"chash:{_GLOBAL_CHASH_FULL}")
+            assert result is not None
+            # Canonical contract: chash/chunk_hash are the FULL 64-char parsed hex,
+            # not the 32-char wire key the service stores (njrcn.4 review High).
+            assert result["chash"] == _GLOBAL_CHASH_FULL
+            assert result["chunk_hash"] == _GLOBAL_CHASH_FULL
+            assert result["physical_collection"] == "knowledge__o__bge-768__v1"
+            assert result["doc_id"] == "1.2.3"
+            assert result["chunk_text"] == "resolved chunk body"
+            assert result["metadata"] == {"source": "test"}
+            assert "char_range" not in result
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_applies_char_range(self) -> None:
+        """char_range slices chunk_text and is included in output.
+
+        The span form ``chash:<hex>:<start>-<end>`` passes start/end to the
+        client which parses them via parse_chash_span; the client then sends
+        only chash[:32] to the server and slices the returned text locally.
+        Server returns "resolved chunk body"; slice [9:14] == "chunk".
+        """
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(f"chash:{_GLOBAL_CHASH_FULL}:9-14")
+            assert result is not None
+            assert result["chunk_text"] == "chunk"
+            assert result["char_range"] == (9, 14)
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_404_returns_none(self) -> None:
+        """A 404 from the server maps to None."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(f"chash:{_MISS_GLOBAL_FULL}")
+            assert result is None
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_prefer_collection_forwarded(self) -> None:
+        """prefer_collection kwarg is forwarded as a query param."""
+        server, base_url = start_fake_server()
+        try:
+            FakeCatalogHandler.reset_log()
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(
+                f"chash:{_GLOBAL_CHASH_FULL}",
+                prefer_collection="knowledge__o__bge-768__v1",
+            )
+            assert result is not None
+            # The server saw the resolve_chash GET
+            assert "/resolve_chash" in FakeCatalogHandler.get_ops
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_t3_and_chash_index_ignored(self) -> None:
+        """t3 and chash_index positional args are accepted and silently ignored."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash(
+                f"chash:{_GLOBAL_CHASH_FULL}",
+                object(),   # t3 — positional, must be accepted
+                object(),   # chash_index — positional, must be accepted
+            )
+            assert result is not None
+            assert result["chunk_text"] == "resolved chunk body"
+        finally:
+            server.shutdown()
+
+    def test_resolve_chash_malformed_returns_none(self) -> None:
+        """Malformed chash returns None (ValueError caught gracefully)."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chash("chash:not-a-valid-hex")
+            assert result is None
+        finally:
+            server.shutdown()

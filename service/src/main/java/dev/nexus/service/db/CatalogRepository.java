@@ -1188,6 +1188,137 @@ public final class CatalogRepository {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // SPAN / CHASH RESOLUTION  (nexus-njrcn.4)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Resolve a chash within a specific collection to chunk_text + metadata.
+     *
+     * <p>Queries {@code nexus.chunks_768}, {@code nexus.chunks_384}, and
+     * {@code nexus.chunks_1024} in sequence (first match wins). The chash
+     * must be the 32-char natural ID (chunk_text_hash[:32]) — the same
+     * convention used by the catalog_document_chunks manifest (RDR-108 D1).
+     *
+     * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
+     *
+     * @param tenant     tenant identifier
+     * @param collection physical collection name (e.g. {@code knowledge__o__bge-768__v1})
+     * @param chash      32-char hex chash (chunk_text_hash[:32])
+     * @return {@code {chunk_text, metadata, chunk_hash}} or {@code null} on miss
+     */
+    public Map<String, Object> resolveSpan(String tenant, String collection, String chash) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Query the three dim tables in order; stop at first hit.
+            // Raw SQL UNION ALL would need casting across schemas; sequential jOOQ
+            // selects with early-return is cleaner and avoids cross-table JOIN complexity.
+            var r768 = ctx.select(CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA)
+                          .from(CHUNKS_768)
+                          .where(CHUNKS_768.COLLECTION.eq(collection).and(CHUNKS_768.CHASH.eq(chash)))
+                          .limit(1).fetchOne();
+            if (r768 != null) return chunkRow(chash, r768.value1(), r768.value2());
+
+            var r384 = ctx.select(CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA)
+                          .from(CHUNKS_384)
+                          .where(CHUNKS_384.COLLECTION.eq(collection).and(CHUNKS_384.CHASH.eq(chash)))
+                          .limit(1).fetchOne();
+            if (r384 != null) return chunkRow(chash, r384.value1(), r384.value2());
+
+            var r1024 = ctx.select(CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA)
+                           .from(CHUNKS_1024)
+                           .where(CHUNKS_1024.COLLECTION.eq(collection).and(CHUNKS_1024.CHASH.eq(chash)))
+                           .limit(1).fetchOne();
+            if (r1024 != null) return chunkRow(chash, r1024.value1(), r1024.value2());
+            return null;
+        });
+    }
+
+    /**
+     * Resolve a chash globally (across all collections), with optional tie-break.
+     *
+     * <p>Executes a {@code UNION ALL} across the three dim tables filtering on
+     * {@code chash = ?}, ordered so {@code prefer_collection} sorts first, then
+     * newest {@code created_at}. Takes the winning row, then looks up
+     * {@code doc_id} from {@code catalog_document_chunks}.
+     *
+     * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
+     *
+     * @param tenant            tenant identifier
+     * @param chash             32-char hex chash
+     * @param preferCollection  preferred collection name (may be null)
+     * @return {@code {chash, chunk_hash, physical_collection, doc_id, chunk_text,
+     *         metadata}} or {@code null} on miss
+     */
+    public Map<String, Object> resolveChash(String tenant, String chash, String preferCollection) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Raw SQL: UNION ALL wrapped in a subquery so the outer ORDER BY can
+            // use expressions (PostgreSQL rejects expressions in UNION ORDER BY;
+            // wrapping in FROM avoids that restriction).
+            // prefer_collection is a bind parameter — never inlined into SQL.
+            String pref = preferCollection != null ? preferCollection : "";
+            String sql =
+                "SELECT collection, chunk_text, metadata, created_at FROM ("
+                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_768"
+                + "  WHERE chash = ?"
+                + " UNION ALL"
+                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_384"
+                + "  WHERE chash = ?"
+                + " UNION ALL"
+                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_1024"
+                + "  WHERE chash = ?"
+                + ") sub"
+                // Third key `collection ASC` matches the canonical _sort_key
+                // (preferred, newest created_at, deterministic name) so a chash in two
+                // collections with equal created_at resolves stably (njrcn.4 review).
+                + " ORDER BY (collection = ?) DESC, created_at DESC, collection ASC LIMIT 1";
+
+            var result = ctx.fetch(sql, chash, chash, chash, pref);
+            if (result.isEmpty()) return null;
+
+            var row     = result.get(0);
+            String col  = row.get("collection", String.class);
+            String text = row.get("chunk_text",  String.class);
+            String metaJson = row.get("metadata", String.class);
+
+            // Lookup doc_id from catalog_document_chunks. ORDER BY doc_id for a
+            // deterministic winner when a chash is referenced by multiple docs (dedup).
+            String docId = "";
+            var docRow = ctx.select(F_CHK_DOC).from(T_CHUNKS)
+                            .where(F_CHK_CHASH.eq(chash))
+                            .orderBy(F_CHK_DOC.asc()).limit(1).fetchOne();
+            if (docRow != null) docId = docRow.value1();
+
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("chash",               chash);
+            m.put("chunk_hash",          chash);
+            m.put("physical_collection", col);
+            m.put("doc_id",              docId);
+            m.put("chunk_text",          text);
+            m.put("metadata",            metaJson != null ? parseMetaJson(metaJson) : Map.of());
+            return m;
+        });
+    }
+
+    /** Build a span-resolution result map from chunk row values. */
+    private static Map<String, Object> chunkRow(String chash, String chunkText,
+                                                  org.jooq.JSONB metadata) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("chunk_text",  chunkText);
+        m.put("metadata",    metadata != null ? parseMetaJson(metadata.data()) : Map.of());
+        m.put("chunk_hash",  chash);
+        return m;
+    }
+
+    /** Parse a JSON metadata string into a Map. Returns empty map on null/error. */
+    private static Map<String, Object> parseMetaJson(String json) {
+        if (json == null || json.isBlank()) return Map.of();
+        try {
+            return MAPPER.readValue(json, MAP_TYPE);
+        } catch (Exception e) {
+            return Map.of();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // COLLECTIONS
     // ══════════════════════════════════════════════════════════════════════════
 

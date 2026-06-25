@@ -184,6 +184,10 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Batch resolve endpoints (nexus-7lm3q) ────────────────────
                 case "/resolve_many"          -> handleResolveMany(exchange, tenant, method);
 
+                // ── Span / chash resolution (nexus-njrcn.4) ──────────────────
+                case "/resolve_span"          -> handleResolveSpan(exchange, tenant, method);
+                case "/resolve_chash"         -> handleResolveChash(exchange, tenant, method);
+
                 // ── Server-side tumbler assignment ────────────────────────────
                 case "/doc/register"          -> handleDocRegister(exchange, tenant, method);
 
@@ -574,6 +578,54 @@ public final class CatalogHandler implements HttpHandler {
         }
         var manifests = repo.getManifestMany(tenant, docIds);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("manifests", manifests)));
+    }
+
+    /**
+     * GET /v1/catalog/resolve_span?span_chash=<hex32>&collection=<name>  (nexus-njrcn.4)
+     *
+     * <p>Resolves a 32-char chunk chash within a specific collection to its text and
+     * metadata. The client parses the full span string client-side and sends only the
+     * truncated chash + collection so the server does a simple keyed lookup.
+     *
+     * <p>Response: {@code {"chunk_text": "...", "metadata": {...}, "chunk_hash": "..."}}
+     * or 404 on miss.
+     */
+    private void handleResolveSpan(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String spanChash = queryParam(exchange, "span_chash");
+        String collection = queryParam(exchange, "collection");
+        if (spanChash == null || spanChash.isBlank() || collection == null || collection.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"span_chash and collection query params required\"}"); return;
+        }
+        var result = repo.resolveSpan(tenant, collection, spanChash);
+        if (result == null) {
+            HttpUtil.send(exchange, 404, "{\"error\":\"chunk not found\"}"); return;
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
+    }
+
+    /**
+     * GET /v1/catalog/resolve_chash?chash=<hex32>[&prefer_collection=<name>]  (nexus-njrcn.4)
+     *
+     * <p>Globally resolves a 32-char chunk chash (across all dim tables) to its text,
+     * metadata, owning collection, and doc_id. Tie-breaks by prefer_collection (if
+     * provided) then newest created_at.
+     *
+     * <p>Response: {@code {"chash": "...", "chunk_hash": "...", "physical_collection": "...",
+     * "doc_id": "...", "chunk_text": "...", "metadata": {...}}} or 404 on miss.
+     */
+    private void handleResolveChash(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String chash = queryParam(exchange, "chash");
+        if (chash == null || chash.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"chash query param required\"}"); return;
+        }
+        String preferCollection = queryParam(exchange, "prefer_collection"); // may be null
+        var result = repo.resolveChash(tenant, chash, preferCollection);
+        if (result == null) {
+            HttpUtil.send(exchange, 404, "{\"error\":\"chunk not found\"}"); return;
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
     /**
