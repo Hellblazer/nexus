@@ -820,6 +820,142 @@ def _read_devonthink_uri(
     )
 
 
+# ── obsidian:// reader (RDR-169 G3) ──────────────────────────────────────────
+
+
+def _read_obsidian_uri(
+    uri: str,
+    *,
+    vault_root: Any = None,
+    **_kw: Any,
+) -> ReadResult:
+    """Read an ``obsidian://open?vault=<v>&file=<rel>`` URI.
+
+    LOCAL scheme (RDR-169 G3 split): the file lives in the requesting
+    tenant's Obsidian vault.  ``vault_root`` MUST be supplied as an
+    absolute ``pathlib.Path`` (or path-coercible value) identifying the
+    tenant's vault directory.  Without it the handler cannot resolve the
+    path and returns ``ReadFail(reason='unreachable')`` — cross-tenant
+    resolution is structurally impossible because the handler only ever
+    sees the ``vault_root`` supplied for the current request's tenant.
+
+    URI shape: ``obsidian://open?vault=<vault-name>&file=<url-encoded-path>``
+    (the ``vault`` query param is informational; resolution uses ``vault_root``
+    passed in by the caller, not the vault name in the URI, to ensure the
+    correct tenant vault root is always used).
+
+    **Security contract (IMPORTANT):**
+
+    ``vault_root`` MUST be server-provisioned per-tenant configuration —
+    it must come from a trusted registry/config store, NEVER from client-
+    supplied request data such as HTTP query params, request headers, or
+    the ``vault`` param of the ``obsidian://`` URI itself.  This invariant
+    is enforced at the call boundary (``read_source`` extracts
+    ``tenant["vault_root"]`` from a caller-supplied mapping; the caller is
+    responsible for populating that mapping from a trusted source only).
+
+    The path-traversal guard below (``relative_to`` after ``.resolve()``)
+    is DEFENSE-IN-DEPTH against a malicious ``file=`` query param — it is
+    NOT the primary isolation mechanism.  The primary isolation is: the
+    handler only ever sees the vault_root that was server-provisioned for
+    the current request's tenant; a different tenant's vault_root never
+    appears here.
+
+    As an additional defense this handler REJECTS ``vault_root`` values
+    that are system roots (``/``, ``/etc``, ``/usr``, ``/private``,
+    ``/var``, ``/bin``, ``/sbin``, ``/System``) — a vault legitimately
+    never lives at a filesystem root, and accepting them would make the
+    traversal guard vacuous.  Such values indicate misconfiguration or an
+    attempted injection and are returned as
+    ``ReadFail(reason='unauthorized')``.
+    """
+    from pathlib import Path  # noqa: PLC0415 — stdlib deferred to call site
+    from urllib.parse import parse_qs  # noqa: PLC0415
+
+    if vault_root is None:
+        return ReadFail(
+            reason="unreachable",
+            detail="obsidian:// reader requires vault_root (tenant context not provided)",
+        )
+
+    vault_path = Path(vault_root).resolve()
+
+    # Reject vault roots that are filesystem roots or known system directories.
+    # A real Obsidian vault is never at "/" or any system prefix; these values
+    # indicate misconfiguration or injection.  The traversal guard below is
+    # defense-in-depth, not the primary check — a "/" vault_root makes every
+    # path relative_to("/"), neutralising it.
+    #
+    # ``vault_path`` has already been resolved (symlinks followed), so on macOS
+    # ``/etc`` becomes ``/private/etc`` — we check the resolved form to handle
+    # both the symlinked short name and the canonical path.
+    _BLOCKED_ROOTS = frozenset({
+        "/",
+        "/etc", "/private/etc",
+        "/usr", "/private/usr",
+        "/var", "/private/var",
+        "/bin", "/sbin",
+        "/private",
+        "/System",
+    })
+    if not vault_path.is_absolute() or str(vault_path) in _BLOCKED_ROOTS:
+        return ReadFail(
+            reason="unauthorized",
+            detail=(
+                f"vault_root {str(vault_path)!r} is not permitted — must be an "
+                f"absolute path to a user vault directory, never a system root. "
+                f"vault_root MUST be server-provisioned config, not client-supplied."
+            ),
+        )
+
+    parsed = urlparse(uri)
+    params = parse_qs(parsed.query)
+    file_parts = params.get("file")
+    if not file_parts or not file_parts[0]:
+        return ReadFail(
+            reason="unreachable",
+            detail=f"obsidian URI missing 'file' query param: {uri!r}",
+        )
+    rel_file = unquote(file_parts[0])
+
+    # Resolve the full path and confirm it stays inside the vault.
+    candidate = (vault_path / rel_file).resolve()
+    try:
+        candidate.relative_to(vault_path)
+    except ValueError:
+        return ReadFail(
+            reason="unauthorized",
+            detail=(
+                f"resolved path {str(candidate)!r} escapes vault root "
+                f"{str(vault_path)!r} (path traversal blocked)"
+            ),
+        )
+
+    try:
+        data = candidate.read_bytes()
+    except FileNotFoundError as e:
+        return ReadFail(reason="unreachable", detail=f"FileNotFoundError: {e}")
+    except PermissionError as e:
+        return ReadFail(reason="unauthorized", detail=f"PermissionError: {e}")
+    except OSError as e:
+        return ReadFail(reason="unreachable", detail=f"{type(e).__name__}: {e}")
+
+    if not data:
+        return ReadFail(reason="empty", detail=f"empty file at {str(candidate)!r}")
+
+    text = data.decode("utf-8", errors="replace")
+    return ReadOk(
+        text=text,
+        metadata={
+            "scheme": "obsidian",
+            "vault_root": str(vault_path),
+            "relative_path": rel_file,
+            "resolved_path": str(candidate),
+            "bytes": len(data),
+        },
+    )
+
+
 # ── Reader registry + dispatch helper ────────────────────────────────────────
 
 
@@ -829,6 +965,7 @@ _READERS: dict[str, Callable[..., ReadResult]] = {
     "nx-scratch": _read_scratch_uri,
     "https": _read_https_uri,
     "x-devonthink-item": _read_devonthink_uri,
+    "obsidian": _read_obsidian_uri,
 }
 
 
@@ -839,6 +976,7 @@ def read_source(
     scratch: Any = None,
     doc_id_lookup: Callable[[str, str], str] | None = None,
     manifest_lookup: Callable[[str], list[Any]] | None = None,
+    tenant: dict[str, Any] | None = None,
 ) -> ReadResult:
     """Dispatch ``uri`` to its registered reader by scheme.
 
@@ -854,6 +992,32 @@ def read_source(
     order multi-chunk docs by the catalog manifest's canonical
     position rather than the dropped ``chunk_index`` metadata field.
     Other readers ignore both.
+
+    ``tenant`` carries per-request context for LOCAL-scheme handlers
+    (RDR-169 G3 split).  Currently ``obsidian://`` uses
+    ``tenant["vault_root"]`` to resolve vault-relative paths.
+
+    **Registered Python-side schemes** (all schemes currently in ``_READERS``):
+    ``file``, ``chroma``, ``nx-scratch``, ``https``, ``x-devonthink-item``,
+    ``obsidian``.
+
+    **RDR-169 G3 reachability split:** the Java service also has handlers for
+    ``chroma://`` and ``https://`` in its ``UriSchemeResolverRegistry``
+    (``dev.nexus.service.resolver``).  The SPLIT means: at /v1 serving time a
+    server-reachable scheme (``chroma``, ``https``) MAY be resolved inline by
+    the Java handler; a local scheme (``file``, ``obsidian``,
+    ``x-devonthink-item``, ``nx-scratch``) is resolved client-side by calling
+    this function.  The Python-side ``chroma`` and ``https`` readers exist for
+    the Python bridge's own aspect-enrichment path (``commands/enrich.py``),
+    which runs in the MCP process on the tenant's local machine where both local
+    and network sources are reachable.
+
+    **Security contract for ``obsidian://`` (and any future local-scheme that
+    uses ``tenant``):** ``tenant["vault_root"]`` MUST be server-provisioned
+    per-tenant config, NEVER sourced from client-supplied request data.  The
+    traversal guard in ``_read_obsidian_uri`` is defense-in-depth.
+    Cross-tenant isolation is structural: the handler only ever sees the
+    context supplied for the current request's tenant.
     """
     if not uri:
         return ReadFail(reason="unreachable", detail="empty uri")
@@ -867,8 +1031,14 @@ def read_source(
             reason="scheme_unknown",
             detail=f"no reader for scheme {scheme!r}",
         )
+    # ``tenant`` carries per-request context for local-scheme handlers (e.g.
+    # obsidian:// needs ``tenant["vault_root"]``).  Handlers that don't need it
+    # accept ``**_kw`` and ignore it; the kwarg is always forwarded so new
+    # handlers can adopt it without a signature change at the call site.
+    vault_root = tenant.get("vault_root") if tenant else None
     return reader(
         uri, t3=t3, scratch=scratch,
         doc_id_lookup=doc_id_lookup,
         manifest_lookup=manifest_lookup,
+        vault_root=vault_root,
     )

@@ -1522,6 +1522,37 @@ public final class PgVectorRepository {
         });
     }
 
+    /**
+     * Fetch the {@code chunk_text} for a single {@code (tenant, collection, chash)}
+     * triple — targeted single-row lookup for the RDR-169 G3 URI-resolver path.
+     *
+     * <p>Returns {@code null} when:
+     * <ul>
+     *   <li>the row does not exist (missing chunk), or</li>
+     *   <li>{@code chunk_text} is {@code NULL} (reference-only retention, RDR-169 G1).</li>
+     * </ul>
+     *
+     * <p>Callers must distinguish "missing row" from "reference-only" at the
+     * resolver level if needed; this method treats both as "no stored text."
+     * RLS is enforced via {@link dev.nexus.service.db.TenantScope#withTenant} —
+     * cross-tenant rows are invisible.
+     *
+     * @param tenant     the requesting tenant principal
+     * @param collection four-segment conformant collection name (drives dim dispatch)
+     * @param chash      the chunk's natural ID ({@code sha256(text)[:32]})
+     * @return the stored {@code chunk_text}, or {@code null} if none
+     */
+    public String fetchChunkText(String tenant, String collection, String chash) {
+        int dim = dimForCollection(collection);
+        return tenantScope.withTenant(tenant, ctx -> {
+            Record row = ctx.fetchOne(
+                "SELECT chunk_text FROM " + chunksTable(dim)
+                + " WHERE collection = ? AND chash = ?",
+                collection, chash);
+            return row != null ? row.get("chunk_text", String.class) : null;
+        });
+    }
+
     // -- Internal helpers -------------------------------------------------------
 
     private static String chunksTable(int dim) {
