@@ -20,7 +20,7 @@ related: [RDR-152, RDR-155, RDR-164, RDR-108, RDR-103]
 ## Problem Statement
 
 In service mode (the 6.0.0 default), the catalog is served by `HttpCatalogClient`
-(94 public methods, talking to the Java `CatalogHandler` over HTTP). It is supposed
+(93 public methods, talking to the Java `CatalogHandler` over HTTP). It is supposed
 to be a drop-in substitute for the local `Catalog` so that callers — the indexer, the
 `nx catalog` CLI, post-store hooks — work unchanged regardless of backend. It is not:
 several method **signatures diverge** from the local interface. Callers written
@@ -44,8 +44,9 @@ Confirmed during the 6.0.0 validation pass:
 - `all_documents`: local accepts `content_type=`; `HttpCatalogClient.all_documents()`
   rejects it → `TypeError` in `nx catalog list` (`catalog.py:437`).
 
-These are two confirmed instances of an unknown-sized class (94 methods). Some methods
-match (`owner_for_repo`, `register`); the full divergent set is unenumerated.
+These were the first two found; the full audit (Research Findings) since enumerated the
+class: of 87 caller-facing methods, **18 break**, 1 silently absorbs, 6 are benign, and
+62 match.
 
 #### Gap 2: Service-mode `nx index repo` silently does not populate the catalog
 
@@ -105,9 +106,15 @@ signature break?):
   `list_by_collection`, `lookup_doc_id_by_collection_and_path`, `resolve_chash`,
   `resolve_span`, `supersede_collection`, `update_document_collection`,
   `update_documents_collection_batch`.
-- **1 SILENT** — `link_if_absent` has a `**kwargs` that *swallows*
-  `created_by`/`from_span`/`to_span`/`allow_dangling`/`meta` with no error. Arguably
-  worse than a `TypeError`: it loses link provenance/metadata silently.
+- **1 SILENT** — `link_if_absent` has a `**kwargs`. Gate-round runtime tracing refined
+  this: `link_if_absent(**kwargs)` forwards to `self.link(...)`, and the client's `link`
+  *does* accept `from_span`/`to_span`/`created_by`, so those forward correctly. The true
+  residual gap is `allow_dangling` (and `meta`), which the client's `link` lacks — but
+  no current caller passes `allow_dangling` (indexer call sites pass only `created_by`),
+  so the practical damage today is zero. The lasting hazard is structural: the `**kwargs`
+  makes the signature *look* compatible, so a naive conformance predicate would not catch
+  a future explicit-param divergence here — which is why the predicate is specified to
+  require explicit named params (see Technical Design).
 - **6 BENIGN** — the client only adds extra optional params (`atomic_manifest_replace`,
   `link_query`, `register`, `register_collection`, `register_owner`,
   `rename_collection`); callers using the local signature are unaffected.
@@ -160,9 +167,15 @@ Reproduction: `/tmp/catalog_conformance_spike.py` (full audit), `/tmp/catalog_br
   **Method**: Source Search + run the suite (deferred to implementation; scope now known:
   18 breaking methods, most fixes additive — accept the local param name, derive the
   client param; the `link_if_absent` `**kwargs` swallow needs explicit handling)
+- [ ] **After signature reconciliation, the client correctly SERIALIZES every accepted
+  param into the HTTP payload the Java `CatalogHandler` expects** (signature parity ≠
+  wire correctness: accepting `owner` and then sending it as the wrong key, or dropping
+  it, is a distinct failure the Python-only conformance test cannot see) — **Status**:
+  Unverified — **Method**: covered by the integration-level MVV, which exercises the
+  real wire path end-to-end (deferred to implementation)
 - [ ] **Once signatures match, service-mode `nx index repo` populates the catalog**
   (Documents/Chunks > 0 + manifest) with no second root cause — **Status**: Unverified
-  — **Method**: Spike (the MVV; deferred to implementation)
+  — **Method**: Spike (the integration-level MVV; deferred to implementation)
 
 ## Proposed Solution
 
@@ -171,8 +184,9 @@ Reproduction: `/tmp/catalog_conformance_spike.py` (full audit), `/tmp/catalog_br
 1. **Audit** (research): enumerate the caller-facing catalog surface and produce the
    complete divergence table (the unknown size becomes known).
 2. **Pin the contract**: define the catalog interface as a `typing.Protocol` (the
-   caller-facing subset, not all 94 methods) that both backends satisfy. Prefer the
-   **local** signatures as canonical (callers are written against them).
+   caller-facing subset, not all 87 methods) that both backends satisfy. Prefer the
+   **local** signatures as canonical (callers are written against them); the contract is
+   a *minimum* — the client may carry extra service-only params (see Technical Design).
 3. **Conformance test**: an introspection-based test that, for every method on the
    Protocol, asserts `HttpCatalogClient` has a matching name + compatible signature.
    This is the artifact that makes the whole class detectable and keeps it from
@@ -188,16 +202,33 @@ says fix the class with a conformance test, not the two symptoms in hand.
 
 ### Technical Design
 
-To be expanded in research after the audit. Interface intent: a `CatalogReader` /
-`CatalogWriter` Protocol pair capturing the caller-facing methods; the conformance
-test parametrized over the Protocol's methods using `inspect.signature`.
+The audit is complete (see Research Findings). Interface intent: a `CatalogReader` /
+`CatalogWriter` Protocol pair capturing the **caller-facing subset** of `Catalog`
+(derived empirically from the indexer / CLI / post-store-hook call sites and the 18
+breaking methods, not all 87 — freezing internal helpers into the contract is
+undesirable). The conformance test is parametrized over the Protocol's methods using
+`inspect.signature`.
+
+**The compatibility predicate is the load-bearing detail** (gate finding): it must NOT
+be "the client is call-compatible with the local arguments," because a `**kwargs` on
+the client satisfies that for *any* keyword argument — which is exactly how the
+`link_if_absent`-class divergence stays invisible. The predicate must instead require,
+for every **explicit named** parameter on the local Protocol method, a matching
+**explicit named** parameter on the client (a `VAR_KEYWORD` does NOT satisfy it):
 
 ```text
-// Illustrative — verify during implementation
-// for name in protocol_methods(CatalogReader):
-//     assert compatible(signature(getattr(HttpCatalogClient, name)),
-//                        signature(getattr(Catalog, name)))
+// Required predicate (verify during implementation)
+// local_named  = explicit positional/keyword params of Catalog.<m> (excl. **kwargs)
+// client_named = explicit positional/keyword params of HttpCatalogClient.<m> (excl. **kwargs)
+// for p in local_named: assert p in client_named   // by NAME; **kwargs does not count
+// // one-directional: client MAY have extra params (service-only); do NOT flag those
 ```
+
+The contract is a **minimum**, one-directional: the client must satisfy every local
+param by explicit name, but may extend the signature with service-only params (the 6
+BENIGN methods — e.g. `cross_model`, `legacy_grandfathered`, `new_collection` — are
+deliberate service capabilities, NOT to be removed). The test flags missing/renamed
+local params; it does not flag extra client params.
 
 ### Existing Infrastructure Audit
 
@@ -222,8 +253,8 @@ methods is explicitly rejected (Alternative 1) as patch-thrash.
 
 **Pros**: Smallest diff; unblocks service-mode indexing fastest.
 
-**Cons**: Leaves the unenumerated rest of the 94-method surface unverified; no guard
-against recurrence; the next divergence ships silently.
+**Cons**: Leaves the other 16 breaking (+1 silent) divergences the audit found
+unaddressed; no guard against recurrence; the next divergence ships silently.
 
 **Reason for rejection**: Exactly the patch-thrash pattern the project's discipline
 forbids; the test-gap (Gap 3) is the actual root cause and goes unaddressed.
@@ -264,6 +295,12 @@ forbids; the test-gap (Gap 3) is the actual root cause and goes unaddressed.
 Service-mode `nx index repo` of a fixture repo yields `catalog stats` Documents > 0 and
 a non-empty manifest, asserted by an automated test; AND a conformance test fails on
 the two currently-known divergences before the fix and passes after. In scope.
+
+**The index MVV MUST be an integration test against the live service stack** (real
+`CatalogHandler.java` + Postgres), NOT a mocked HTTP client (gate finding). CA-4's
+safety net — "fails loud, points at a second cause" — only holds when the test
+exercises the real wire path; a mocked client cannot detect a second cause (manifest
+hook / `catalog_doc_id` threading / wire serialization).
 
 ### Phase 1: Code Implementation
 
@@ -307,7 +344,13 @@ N/A (correctness fix). No estimates.
 
 ### Contradiction Check
 
-To be completed at gate.
+No contradictions between research findings, design, and proposed solution. The gate's
+substantive-critic raised no contradiction; its three Significant findings (conformance
+predicate must require explicit named params; MVV must be integration-level; the
+contract is a one-directional minimum) were folded into the Technical Design, MVV, and
+Critical Assumptions rather than left as conflicts. Directional alignment with RDR-152/164
+(server-side catalog authority) confirmed complementary — this RDR pins the *consumer*
+contract, those pin the *persistence* authority.
 
 ### Assumption Verification
 
@@ -354,3 +397,12 @@ The auto-generation alternative is explicitly deferred.
   CA-2 (introspection conformance test catches all divergences) Verified by spike.
   CA-3 (no regression) and CA-4 (catalog populates after fix) remain for the
   implementation phase. T2: `nexus_rdr/168-research-1`.
+- 2026-06-25 (gate round): substantive-critic — 0 Critical, 3 Significant, 3
+  Observations → PASSED. Folded in: (1) the conformance predicate must require EXPLICIT
+  named params (a `**kwargs` must not satisfy it) or the SILENT class escapes the guard;
+  (2) the index MVV must be an integration test against the live service stack;
+  (3) the Protocol is a one-directional MINIMUM contract — the client may carry
+  service-only params (the 6 BENIGN), which must NOT be removed. Added CA (wire
+  serialization ≠ signature parity). Corrected the SILENT classification (`link_if_absent`
+  forwards most params via `link()`; residual is `allow_dangling`, unused by callers
+  today). Stale "94 / unenumerated" references reconciled to the audited figures.
