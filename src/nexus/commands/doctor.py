@@ -45,7 +45,7 @@ def _run_check_schema() -> None:
     import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.migrations import MIGRATIONS, _parse_version  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.migrations import MIGRATIONS, _parse_version, expected_t2_schema_version  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     # nexus-p0clh: in service mode the T2 schema lives in Postgres and is
@@ -135,19 +135,17 @@ def _run_check_schema() -> None:
         ).fetchone()
         if row:
             stored = row[0]
-            try:
-                from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-                cli_ver = _pkg_version("conexus")
-            except Exception:  # noqa: BLE001 — best-effort version read; falls back to 0.0.0
-                cli_ver = "0.0.0"
+            # RDR-170: report the canonical schema version (registry-aware),
+            # the same value apply_pending targets/stamps, and gate pending on
+            # the lower bound ONLY. The old upper bound (`<= cli_t`) made
+            # --check-schema report "Schema version: OK" while apply_pending was
+            # actively applying an ahead-of-release step on a frozen branch.
+            cli_ver = expected_t2_schema_version()
             stored_t = _parse_version(stored)
-            cli_t = _parse_version(cli_ver)
             pending = [
                 m
                 for m in MIGRATIONS
                 if _parse_version(m.introduced) > stored_t
-                and _parse_version(m.introduced) <= cli_t
             ]
             if pending:
                 all_ok = False

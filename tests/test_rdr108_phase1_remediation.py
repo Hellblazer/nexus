@@ -536,10 +536,20 @@ class TestOBS1MigrationTelemetry:
     """OBS-1: apply_pending must emit structured log events with duration_ms
     at migration start and completion."""
 
-    def test_migration_log_events_emitted(self, tmp_path):
+    def test_migration_log_events_emitted(self, tmp_path, monkeypatch):
         """apply_pending calls _log.info with migration_start and migration_done events."""
         from nexus.db import migrations as _migrations
-        from nexus.db.migrations import _upgrade_done, apply_pending
+        from nexus.db.migrations import _parse_version, _upgrade_done, apply_pending
+
+        # RDR-170: apply_pending is lower-bound-only, so a "4.29.1" target no
+        # longer caps the run — it would attempt the catalog-absent je0b defer
+        # steps (4.30.0), set any_skipped, and return BEFORE migration_done.
+        # Slice the registry to introduced <= 4.29.1 (the old upper-bound scope).
+        monkeypatch.setattr(
+            _migrations,
+            "MIGRATIONS",
+            [m for m in _migrations.MIGRATIONS if _parse_version(m.introduced) <= _parse_version("4.29.1")],
+        )
 
         path = tmp_path / "t2_obs1.db"
         path_key = str(path.resolve())
@@ -569,10 +579,18 @@ class TestOBS1MigrationTelemetry:
             f"Expected 'migration_done' log call, got: {events}"
         )
 
-    def test_migration_done_has_duration_ms(self, tmp_path):
+    def test_migration_done_has_duration_ms(self, tmp_path, monkeypatch):
         """migration_done log call includes duration_ms field."""
         from nexus.db import migrations as _migrations
-        from nexus.db.migrations import _upgrade_done, apply_pending
+        from nexus.db.migrations import _parse_version, _upgrade_done, apply_pending
+
+        # RDR-170: slice to introduced <= 4.29.1 so the catalog-absent je0b
+        # defer steps (4.30.0) don't set any_skipped and suppress migration_done.
+        monkeypatch.setattr(
+            _migrations,
+            "MIGRATIONS",
+            [m for m in _migrations.MIGRATIONS if _parse_version(m.introduced) <= _parse_version("4.29.1")],
+        )
 
         path = tmp_path / "t2_obs1_dur.db"
         path_key = str(path.resolve())
