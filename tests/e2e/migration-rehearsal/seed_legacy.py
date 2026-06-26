@@ -36,7 +36,13 @@ from pathlib import Path
 import chromadb
 
 _MINILM = "knowledge__rehearsal__minilm-l6-v2-384__v1"
-_VOYAGE = "knowledge__rehearsal__voyage-context-3__v1"
+# nexus-pi3s3: the voyage source is a SAME-MODEL passthrough (copied byte-for-byte
+# into a voyage-mode service). Its name MUST NOT collide with the minilm→voyage
+# cross-model remap target: in voyage mode (--with-cloud, voyage_key_present) the
+# migrate re-embeds _MINILM (knowledge/voyage) into knowledge__rehearsal__voyage-
+# context-3__v1 (detection.cross_model_target_model). A distinct version segment
+# (__v2) keeps a single conformant owner ("rehearsal") while avoiding that clash.
+_VOYAGE = "knowledge__rehearsal__voyage-context-3__v2"
 # RDR-162 P2: a SOURCELESS store_put-style note — a minilm-384 collection with
 # NO backing source file (only a topic_assignment references it). embed_migrate
 # (re-reads source files) cannot upgrade it; the cross-model migrate re-embeds
@@ -44,18 +50,39 @@ _VOYAGE = "knowledge__rehearsal__voyage-context-3__v1"
 # case that motivated RDR-162.
 _NOTE = "knowledge__rehearsal-note__minilm-l6-v2-384__v1"
 
-# The bge-768 targets the cross-model migrate re-embeds the minilm sources into
-# (mirrors vector_etl.cross_model_target_name: only the model segment swaps).
-_MINILM_TARGET = "knowledge__rehearsal__bge-base-en-v15-768__v1"
-_NOTE_TARGET = "knowledge__rehearsal-note__bge-base-en-v15-768__v1"
+# The model the cross-model migrate re-embeds the minilm sources into. This is
+# MODE-AWARE (nexus-pi3s3, mirrors detection.cross_model_target_model): a voyage-
+# mode service (--with-cloud, voyage_key_present) re-embeds knowledge collections
+# into voyage-context-3; a local bge-768 service re-embeds into bge-base-en-v15-768.
+# A stale unconditional bge-768 here made the voyage-mode parity assert the wrong
+# target collection (service=0 [MISMATCH] false negative).
+_BGE_MODEL = "bge-base-en-v15-768"
+_VOYAGE_CTX_MODEL = "voyage-context-3"  # knowledge content-type → voyage-context-3
+
+
+def _remap_model(source: str, model: str) -> str:
+    """Swap the model segment of a conformant 4-segment collection name."""
+    seg = source.split("__")
+    seg[2] = model
+    return "__".join(seg)
 
 
 def _chash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:32]
 
 
-def _seed(client, name: str, n: int, *, prefix: str) -> list[str]:
-    """Seed a legacy Chroma collection; return the chunk chashes (ids)."""
+def _seed(client, name: str, n: int, *, prefix: str, dim: int = 2) -> list[str]:
+    """Seed a legacy Chroma collection; return the chunk chashes (ids).
+
+    ``dim`` (nexus-pi3s3): the CROSS-MODEL re-embed legs (minilm→bge/voyage) never
+    read the source vector — the ETL re-embeds the documents server-side — so a
+    nonsensical 2-dim stub suffices (matches the repo's ETL fixtures). The
+    SAME-MODEL voyage passthrough is different: it COPIES the stored vector
+    byte-for-byte into chunks_1024, so its source vectors must be the real
+    dimension (1024) or the service's RDR-156 schema guard rejects the upsert
+    ("embedder produced a 2-dim vector ... dispatches to chunks_1024"). Values are
+    irrelevant (parity asserts COUNT, not similarity) — only the dim matters.
+    """
     texts = [f"{prefix} {i:04d}" for i in range(n)]
     ids = [_chash(t) for t in texts]
     col = client.get_or_create_collection(name)
@@ -63,10 +90,7 @@ def _seed(client, name: str, n: int, *, prefix: str) -> list[str]:
         ids=ids,
         documents=texts,
         metadatas=[{"position": i, "tag": "rehearsal"} for i in range(n)],
-        # Source vectors are never read by the ETL (it re-embeds the documents
-        # server-side); dim is deliberately nonsensical, matching the repo's
-        # ETL fixtures.
-        embeddings=[[float(i), 1.0] for i in range(n)],
+        embeddings=[[float(i)] + [1.0] * (dim - 1) for i in range(n)],
     )
     return ids
 
@@ -166,13 +190,22 @@ def main() -> int:
     chashes[_MINILM] = _seed(client, _MINILM, n, prefix="onnx chunk")
     chashes[_NOTE] = _seed(client, _NOTE, n, prefix="note chunk")
     if with_cloud:
-        chashes[_VOYAGE] = _seed(client, _VOYAGE, n, prefix="voyage chunk")
+        # 1024-dim source vectors: the voyage same-model passthrough COPIES them
+        # (no re-embed) into chunks_1024 (nexus-pi3s3).
+        chashes[_VOYAGE] = _seed(client, _VOYAGE, n, prefix="voyage chunk", dim=1024)
     t2 = _seed_t2_and_catalog(chashes)
     seeded = {name: len(ids) for name, ids in chashes.items()}
-    # cross_model: source -> bge-768 target the migrate re-embeds into. The
-    # voyage leg (when present) migrates byte-for-byte (servable with a key), so
-    # it is NOT remapped and is absent from this map.
-    cross_model = {_MINILM: _MINILM_TARGET, _NOTE: _NOTE_TARGET}
+    # cross_model: source -> the target the migrate re-embeds into, MODE-AWARE
+    # (nexus-pi3s3). voyage_key_present (== with_cloud here) decides the target
+    # model exactly as detection.cross_model_target_model does: voyage-context-3
+    # in voyage mode, bge-768 in local mode. The voyage source itself is a
+    # SAME-MODEL passthrough (NOT remapped) so it is absent from this map; the
+    # parity check then verifies it under its own name (cross.get(name, name)).
+    _tgt_model = _VOYAGE_CTX_MODEL if with_cloud else _BGE_MODEL
+    cross_model = {
+        _MINILM: _remap_model(_MINILM, _tgt_model),
+        _NOTE: _remap_model(_NOTE, _tgt_model),
+    }
     print(json.dumps({"collections": seeded, "cross_model": cross_model, **t2}))
     return 0
 

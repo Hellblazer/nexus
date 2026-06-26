@@ -146,7 +146,11 @@ nx migrate-to-service --dry-run --local-path "$CHROMA_LOCAL" 2>&1 | sed 's/^/   
   && ok "dry-run classified the footprint" || bad "dry-run failed"
 
 note "nx migrate-to-service (detect → ETL → validate → unlock)…"
-if nx migrate-to-service --local-path "$CHROMA_LOCAL" 2>&1 | sed 's/^/       /'; then
+# --yes: skip the Voyage re-embed cost confirmation (nexus-cewad). Harmless on the
+# ONNX leg (nothing billed → no prompt); REQUIRED on --with-cloud where the
+# cross-model→voyage re-embed is billed and click.confirm aborts on the rehearsal's
+# non-interactive stream (else: empty pgvector target → parity MISMATCH).
+if nx migrate-to-service --local-path "$CHROMA_LOCAL" --yes 2>&1 | sed 's/^/       /'; then
   ok "migrate-to-service completed"
 else
   bad "migrate-to-service failed"
