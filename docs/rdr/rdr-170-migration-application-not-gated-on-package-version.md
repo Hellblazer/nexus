@@ -2,17 +2,20 @@
 title: "T2 Migration Application Must Not Gate on Package Version: Drop the apply_pending Upper Bound"
 id: RDR-170
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-25
 accepted_date: 2026-06-25
+closed_date: 2026-06-25
+close_reason: implemented
 related_issues: [nexus-j25po]
 related_rdrs: [RDR-076, RDR-120, RDR-142]
 supersedes: []
-related_tests: [tests/test_migrations.py]
-implementation_notes: ""
+related_tests: [tests/test_migrations.py, tests/test_upgrade_e2e.py, tests/db/test_migration_fast_path.py]
+post_mortem: docs/rdr/post-mortem/170-migration-application-not-gated-on-package-version.md
+implementation_notes: "Shipped to develop (merge 7c737fee, fix 38883b63). Drop apply_pending upper bound across 3 filter sites; expected_t2_schema_version registry-aware; slcn7 un-dormants (validated on live-db copy). Gate caught a handshake Critical (round 1 BLOCKED); stacked review 0 Critical; full suite 11374 passed."
 ---
 
 # RDR-170: T2 Migration Application Must Not Gate on Package Version: Drop the apply_pending Upper Bound
