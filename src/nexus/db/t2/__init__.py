@@ -212,12 +212,14 @@ def _cold_start_is_current_and_wal(path: Path) -> bool:
     if not path.exists():
         return False
     try:
-        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        # RDR-170: compare against the canonical (registry-aware) schema version
+        # — the value apply_pending stamps — NOT the raw package version. On a
+        # frozen/ahead branch the daemon stamps the registry max (e.g. 5.10.7)
+        # while the package is 5.10.6; reading _pkg_version here would make the
+        # row compare unequal and break the fast path on every cold start.
+        from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
-        try:
-            current_version = _pkg_version("conexus")
-        except Exception:  # noqa: BLE001  — fallback path; safe default returned (False = treat as not-current) when package version is unresolvable
-            return False
+        current_version = expected_t2_schema_version()
         if current_version == "0.0.0":
             return False
 
@@ -631,12 +633,13 @@ class T2Database:
                 # while we blocked on the flock.
                 if path_key in _upgrade_done:
                     return
-                try:
-                    from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+                # RDR-170: stamp the canonical (registry-aware) schema version
+                # — max(package, registry_max) — so a frozen/ahead branch records
+                # the highest migration that actually ran (5.10.7), not the frozen
+                # package version (5.10.6) which would leave it reported pending.
+                from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
-                    current_version = _pkg_version("conexus")
-                except Exception:  # noqa: BLE001 — best-effort current-version read; falls back to 0.0.0
-                    current_version = "0.0.0"
+                current_version = expected_t2_schema_version()
 
                 import sys as _sys  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
                 if hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty():

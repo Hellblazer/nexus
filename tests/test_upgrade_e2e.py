@@ -56,17 +56,23 @@ def _no_real_daemon_nudge():
 
 class TestSC1VersionTable:
     def test_fresh_install_creates_version_table(self, tmp_path: Path) -> None:
+        from nexus.catalog.catalog import Catalog
+        from nexus.commands.upgrade import _current_version
         from nexus.db.migrations import apply_pending
 
+        # RDR-170: the lower-bound-only runner attempts every registered
+        # migration, including the je0b PK steps that require a catalog. Init one
+        # so the run completes and stamps the canonical version cleanly.
+        Catalog.init(tmp_path / "catalog")
         db_path = tmp_path / "memory.db"
         conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, "4.1.2")
+        apply_pending(conn, _current_version())
 
         row = conn.execute(
             "SELECT value FROM _nexus_version WHERE key='cli_version'"
         ).fetchone()
         assert row is not None
-        assert row[0] == "4.1.2"
+        assert row[0] == _current_version()
         conn.close()
 
     def test_t2database_populates_version(self, tmp_path: Path) -> None:
@@ -94,22 +100,41 @@ class TestSC2VersionGating:
             ver = _parse_version(m.introduced)
             assert ver > (0, 0, 0), f"Migration {m.name!r} has invalid version"
 
-    def test_only_newer_migrations_run(self) -> None:
-        from nexus.db.migrations import apply_pending
-
-        conn = sqlite3.connect(":memory:")
-        apply_pending(conn, "2.0.0")  # Only 1.10.0 migration should run
-
+    def test_only_newer_migrations_run(self, monkeypatch) -> None:
+        """RDR-170: gating is by the LOWER bound only — a migration runs iff
+        ``introduced > last_seen``. ``current_version`` no longer caps the upper
+        end (that upper bound was the nexus-j25po dormancy bug). A second pass at
+        the same version runs nothing new. Uses a clean monkeypatched registry
+        for determinism (no catalog-absent defer noise)."""
         from nexus.db import migrations
+        from nexus.db.migrations import Migration, apply_pending
 
+        ran: list[str] = []
+        monkeypatch.setattr(
+            migrations,
+            "MIGRATIONS",
+            [
+                Migration("1.10.0", "a", lambda c: ran.append("a")),
+                Migration("2.8.0", "b", lambda c: ran.append("b")),
+                Migration("3.7.0", "c", lambda c: ran.append("c")),
+            ],
+        )
         migrations._upgrade_done.clear()
 
-        # Upgrade to 3.7.0 — should run 2.8.0 and 3.7.0 migrations
-        apply_pending(conn, "3.7.0")
+        conn = sqlite3.connect(":memory:")
+        apply_pending(conn, "3.7.0")  # current >= all introduced
+        assert ran == ["a", "b", "c"]
+
         row = conn.execute(
             "SELECT value FROM _nexus_version WHERE key='cli_version'"
         ).fetchone()
         assert row[0] == "3.7.0"
+
+        # Second pass at the same version: nothing new (all <= last_seen).
+        migrations._upgrade_done.clear()
+        ran.clear()
+        apply_pending(conn, "3.7.0")
+        assert ran == []
 
 
 # ── SC-3: nx upgrade command flags ──────────────────────────────────────────
@@ -173,6 +198,70 @@ class TestSC4DoctorSchema:
             result = runner.invoke(main, ["doctor", "--check-schema"])
         assert result.exit_code == 0
         assert "passed" in result.output.lower()
+
+
+class TestRDR170FrozenBranchReporting:
+    """RDR-170 Approach step 3: ``nx doctor --check-schema`` and ``nx upgrade
+    --dry-run`` must REPORT a registered step whose ``introduced`` exceeds the
+    package version as pending (the dormancy-inverse of nexus-j25po). These
+    guard the RDR-142 reporting-lie class in both CLI surfaces against
+    re-introduction of a package-version upper bound."""
+
+    @staticmethod
+    def _sentinel_registry() -> list:
+        from nexus.db.migrations import Migration
+
+        # introduced (99.0.0) far above the package version → a frozen-branch
+        # "ahead of release" step. A package-version upper bound would exclude it.
+        return [Migration("99.0.0", "rdr170 frozen-branch sentinel", lambda c: None)]
+
+    def _healthy_db(self, tmp_path: Path) -> "Path":
+        from nexus.catalog.catalog import Catalog
+        from nexus.commands.upgrade import _current_version
+        from nexus.db.migrations import apply_pending
+
+        Catalog.init(tmp_path / "catalog")  # je0b PK migrations need a catalog
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, _current_version())  # stored = real registry max
+        conn.close()
+        return db_path
+
+    def test_doctor_check_schema_reports_ahead_of_version_step(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ) -> None:
+        import nexus.db.migrations as _m
+
+        db_path = self._healthy_db(tmp_path)
+        monkeypatch.setattr(_m, "MIGRATIONS", self._sentinel_registry())
+
+        with patch("nexus.config.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-schema"])
+        out = result.output.lower()
+        assert "pending migrations" in out, out
+        assert "all checks passed" not in out
+
+    def test_upgrade_dry_run_reports_ahead_of_version_step(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ) -> None:
+        import nexus.db.migrations as _m
+
+        db_path = self._healthy_db(tmp_path)
+        sentinel = self._sentinel_registry()
+        # Patch BOTH refs: the source (expected_t2_schema_version computes
+        # registry_max from it) and the upgrade module-level import (pending_t2).
+        monkeypatch.setattr(_m, "MIGRATIONS", sentinel)
+        monkeypatch.setattr("nexus.commands.upgrade.MIGRATIONS", sentinel)
+
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        ):
+            result = runner.invoke(main, ["upgrade", "--dry-run"])
+        out = result.output.lower()
+        assert "up to date" not in out, out
+        assert "pending migrations" in out
+        assert "frozen-branch sentinel" in out
 
 
 # ── SC-5: MCP version divergence warning ────────────────────────────────────

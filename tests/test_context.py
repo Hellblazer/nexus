@@ -109,19 +109,29 @@ class TestGenerateContextL1:
 
         doc_count is now trigger-maintained (the topic_assignments statement-level
         trigger is the sole writer), so ``generate_context_l1`` no longer masks
-        identical root-topic rows. Identical rows pass through verbatim (subject
+        same-label root-topic rows. Same-label rows pass through verbatim (subject
         only to the ``_TOPICS_PER_PREFIX`` cap). Any residual duplicate-topic-row
         state is a separate clustering concern (nexus-9iw41), now surfaced rather
         than papered over at read time.
+
+        RDR-170: the inserted rows use DISTINCT collections (same ``docs__``
+        prefix, same label) rather than five byte-identical rows. The slcn7
+        migration (``introduced=5.10.7``) now enforces a partial unique index on
+        ``topics(collection, label) WHERE parent_id IS NULL`` — un-dormanted by
+        RDR-170 — so byte-identical root rows can no longer exist. Distinct
+        collections keep all five rows valid, in the one ``docs`` prefix bucket,
+        and with the same label so the read path is still exercised for non-
+        collapse (the original five-identical-rows shape only ever materialised
+        because slcn7 was dormant; that was the bug RDR-170 fixed).
         """
         from nexus.context import _TOPICS_PER_PREFIX
         from nexus.context import generate_context_l1
 
-        for _ in range(5):
+        for i in range(5):
             db.taxonomy.conn.execute(
                 "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
                 "VALUES (?, ?, ?, ?, ?)",
-                ("Phantom Duplicate", "docs__phantom", 144,
+                ("Phantom Duplicate", f"docs__phantom{i}", 144,
                  "2026-05-28T00:00:00Z", "accepted"),
             )
         db.taxonomy.conn.commit()

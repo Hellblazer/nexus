@@ -154,12 +154,15 @@ def _check_deferred_migrations(conn: sqlite3.Connection) -> list[dict]:
 
 
 def _current_version() -> str:
-    try:
-        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — stdlib import kept branch-local
+    # RDR-170: the upgrade target is the canonical (registry-aware) schema
+    # version — max(package, registry_max) — NOT the raw package version. If
+    # this returned the frozen package version (5.10.6) while the registry
+    # carries an ahead-of-release step (5.10.7), apply_pending would RUN that
+    # step but stamp 5.10.6, leaving it perpetually "pending" to doctor and the
+    # next upgrade. expected_t2_schema_version() keeps the stamp == what ran.
+    from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — branch-local; avoids import cost on cold CLI start
 
-        return _pkg_version("conexus")
-    except Exception:  # noqa: BLE001 — best-effort version read; '0.0.0' fallback
-        return "0.0.0"
+    return expected_t2_schema_version()
 
 
 @click.command("upgrade")
@@ -430,12 +433,14 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
             last_seen = "0.0.0"
             last_seen_t = (0, 0, 0)
 
-        # Compute pending T2 migrations
+        # Compute pending T2 migrations. RDR-170: lower bound only, mirroring
+        # apply_pending — the upper bound (`<= current_t`) would make --dry-run
+        # report "no pending" while apply_pending runs an ahead-of-release step
+        # on a frozen branch (the RDR-142 reporting-lie class, in a new surface).
         pending_t2 = [
             m
             for m in MIGRATIONS
             if _parse_version(m.introduced) > last_seen_t
-            and _parse_version(m.introduced) <= current_t
         ]
 
         # Compute pending T3 steps (skip in auto mode or when --skip-t3)
@@ -445,7 +450,6 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                 s
                 for s in T3_UPGRADES
                 if _parse_version(s.introduced) > last_seen_t
-                and _parse_version(s.introduced) <= current_t
             ]
 
         if dry_run:

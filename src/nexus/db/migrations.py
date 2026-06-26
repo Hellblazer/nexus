@@ -4,10 +4,12 @@
 
 Extracts all existing ``ALTER TABLE`` / FTS-rebuild migrations from domain
 stores into module-level functions, each accepting ``sqlite3.Connection``.
-A version-gated runner (``apply_pending``) executes only the migrations
-introduced between the last-seen CLI version and the current version.
+A registry-gated runner (``apply_pending``) executes every migration
+introduced AFTER the last-seen CLI version (lower bound only; RDR-170). The
+``current_version`` argument is used for the post-run version stamp and the
+downgrade guard, NOT as an upper bound on which migrations run.
 
-RDR-076 (nexus-6cn).
+RDR-076 (nexus-6cn). RDR-170 (nexus-j25po).
 """
 from __future__ import annotations
 
@@ -2343,22 +2345,40 @@ T3_UPGRADES: list[T3UpgradeStep] = [
 # ── Constants ───────────────────────────────────────────────────────────────
 
 def expected_t2_schema_version() -> str:
-    """Return the T2 schema version this client was built against.
+    """Return the highest T2 schema version this client's code can produce.
 
     RDR-120 P3b (nexus-e9x4l): T2Client surfaces this to the daemon
     during the connection handshake; the daemon compares against the
     schema version recorded in its own ``_nexus_version`` row and
-    fails loud on mismatch. Derived from the installed ``conexus``
-    package version (the same source ``apply_pending`` uses to gate
-    pending migrations) so client + daemon agree by construction
-    when running the same wheel.
+    fails loud on mismatch.
+
+    RDR-170: this is ``max(package_version, max(MIGRATIONS introduced))`` —
+    the **registry**, not the package string, is the authority on the schema
+    this code can produce. On a frozen / ahead-of-release branch (e.g. develop
+    pinned at ``5.10.6`` while the registry already carries an ``introduced=
+    5.10.7`` step) the package version understates the schema ``apply_pending``
+    actually applies and stamps. Reporting the registry max keeps the daemon
+    stamp, the client↔daemon handshake (``t2_client._do_handshake``), and the
+    cold-start fast path (``_cold_start_is_current_and_wal``) in agreement.
+
+    Same-wheel client and daemon read the identical ``MIGRATIONS`` list and so
+    compute the identical value — the RDR-120 P3b "agree when running the same
+    wheel" invariant is preserved, just sourced from the registry. A genuinely
+    older wheel computes a lower registry max and still mismatches a newer
+    daemon, so cross-wheel skew detection is intact. On a released build, where
+    ``package_version >= registry_max``, this is a no-op.
     """
     try:
         from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
-        return _pkg_version("conexus")
+        pkg = _pkg_version("conexus")
     except Exception:  # noqa: BLE001 — best-effort version read; falls back to 0.0.0
-        return "0.0.0"
+        pkg = "0.0.0"
+    # Version-aware max — NOT string max ("5.5.0" > "5.10.7" lexically).
+    registry_max = max(
+        (m.introduced for m in MIGRATIONS), key=_parse_version, default="0.0.0"
+    )
+    return registry_max if _parse_version(registry_max) > _parse_version(pkg) else pkg
 
 
 PRE_REGISTRY_VERSION = "4.1.2"
@@ -2485,7 +2505,15 @@ def bootstrap_version(conn: sqlite3.Connection) -> str:
 
 
 def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
-    """Run all migrations introduced between last-seen and *current_version*.
+    """Run every migration introduced AFTER last-seen (lower bound only).
+
+    RDR-170: ``current_version`` is NOT an upper bound on which migrations
+    execute — it is used only for the post-run ``_nexus_version`` stamp and the
+    downgrade guard. The ``MIGRATIONS`` registry ships in the same wheel as this
+    runner (a client can never hold a registered migration newer than its own
+    code), so an upper bound only ever fired on a frozen / ahead-of-release
+    branch, where it WRONGLY suppressed a migration whose implementation is
+    present (nexus-j25po).
 
     Idempotent — every migration function has column/table-existence guards.
 
@@ -2526,7 +2554,15 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
         any_skipped = False
         for m in MIGRATIONS:
             m_ver = _parse_version(m.introduced)
-            if m_ver > last_seen_t and m_ver <= current_t:
+            # RDR-170: gate on the lower bound ONLY. The MIGRATIONS registry
+            # ships in the same wheel as this runner, so a client can never hold
+            # a registered migration newer than its own code; the old upper
+            # bound (``m_ver <= current_t``) therefore only ever fired on a
+            # frozen / ahead-of-release branch (e.g. develop pinned below the
+            # next release), where it WRONGLY suppressed a migration whose
+            # implementation is present and intended to run. ``current_version``
+            # is retained only for the post-run version stamp + guards below.
+            if m_ver > last_seen_t:
                 _t_step = _time.monotonic()
                 _log.info(
                     "migration_step_start",

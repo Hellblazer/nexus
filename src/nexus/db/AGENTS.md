@@ -37,6 +37,8 @@ Migrations are **version-gated** and live in `migrations.py` as a registry. Each
 
 `apply_pending(conn)` reads `schema_version` from the meta table and runs every newer migration in order. New migrations land as **additional** rows; **never edit a migration that has shipped** — write a follow-up.
 
+**RDR-170 — migration application is gated by the registry, NOT the package version.** `apply_pending` runs every registered migration with `introduced > last_seen`; there is no upper bound on `introduced` vs the package version. The registry ships in the same wheel as the runner, so a client can never hold a migration newer than its own code — an upper bound could only ever mis-fire on a frozen / ahead-of-release branch (e.g. `develop` pinned below the next release), silently dropping a migration whose code is present. `introduced` orders steps and stamps the version row; it does **not** authorize them. The canonical schema version (`expected_t2_schema_version()`, used by the daemon stamp, the client↔daemon handshake, and the cold-start fast path) is `max(package_version, max(MIGRATIONS introduced))` for the same reason. The three pending-migration filters (`apply_pending`, `nx upgrade --dry-run`, `nx doctor --check-schema`) must stay in lock-step on the lower-bound-only rule — diverging reintroduces the RDR-142 reporting-lie class in whichever surface kept the upper bound.
+
 `T3UpgradeStep` is the parallel mechanism for T3-side upgrades that aren't SQL — collection re-creates, embedder swaps, etc. Same registry pattern, separate version counter.
 
 `nx doctor --check-schema` validates that the on-disk schema matches the version the registry claims. `nx upgrade --dry-run` shows what `apply_pending` would do.
