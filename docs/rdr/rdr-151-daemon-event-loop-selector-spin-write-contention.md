@@ -2,16 +2,18 @@
 title: "Daemon Event-Loop Selector Busy-Loop and Write-Lock Contention: Root-Cause Fix for the Recurring T2 Daemon 100% CPU Peg and Multi-Daemon database-is-locked Cascade"
 id: RDR-151
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-05
 accepted_date: 2026-06-05
+closed_date: 2026-06-26
+close_reason: partial
 related_issues: [nexus-xmohw, nexus-x47yx, nexus-00en9, nexus-hcw0g, nexus-whl8n]
-related_rdrs: [RDR-128, RDR-129, RDR-140, RDR-141, RDR-146, RDR-149]
+related_rdrs: [RDR-128, RDR-129, RDR-140, RDR-141, RDR-146, RDR-149, RDR-152]
 related_tests: []
-implementation_notes: ""
+implementation_notes: "Phase 1 (the 100% CPU peg + write-contention root cause: Gaps 1-4 + the peg) IMPLEMENTED and accepted (epic nexus-5kcsq, 11/16 beads). Phase 2 remainder DROPPED 2026-06-26 (keep/drop call): Gap 6 sentinel-count guard-accuracy refinement + review/test/gate wrappers (nexus-1wpa4/seuwj/336ig/n9vxu/eceik) close won't-do — the T2 daemon is superseded by RDR-152 P4.1 deletion (nexus-gmiaf.24) and RDR-158 P3 (nexus-7bomn); the Gaps-3/4 contention Gap 6 guards against was already fixed in Phase 1. Reversible if the daemon-deletion timeline slips and a guard-accuracy incident occurs."
 ---
 
 # RDR-151: Daemon Event-Loop Selector Busy-Loop and Write-Lock Contention
