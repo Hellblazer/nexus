@@ -911,6 +911,51 @@ def _allocate_free_port() -> int:
     return port
 
 
+def _open_t2db_or_loud_gate_crash(db_path: "Path") -> "Any":
+    """Open ``T2Database`` running startup migrations; on a GATE, crash LOUDLY.
+
+    RDR-142 adjacent (nexus-3lbhb). ``apply_pending`` raises ``MigrationError``
+    when a migration is *gated* — high-volume unmapped orphans, an undrained
+    aspect queue, or a NULL ``source_uri`` — conditions that need operator
+    curation before the step can complete safely. Today that exception reaches
+    daemon bootstrap as a bare uncaught traceback.
+
+    We deliberately stay **fail-closed**: log a structured ``error`` carrying the
+    gate's own remediation plus a pointer to ``nx upgrade --dry-run`` (which
+    reports the same gate, RDR-142 P2.1), then **re-raise** so the daemon crashes
+    and the supervisor restarts it. A "daemon not running" state is recoverable
+    and forces the operator to act; serving a *degraded* daemon on the pre-gate
+    schema would be strictly worse — its stored schema version never advanced
+    past the gate, so the RDR-120 P3b client↔daemon version handshake would raise
+    ``T2SchemaVersionMismatchError`` on every RPC while the health ping still
+    reported the daemon alive (an inescapable bad state). So we do NOT degrade-
+    and-serve; we make the crash loud and point at the read-only resolver surface.
+
+    A non-gate ``MigrationRetry`` (catalog absent) is non-fatal and handled inside
+    ``apply_pending`` (deferred, retried) — it never reaches here. A genuine
+    SQLite error (corruption, lock exhaustion) is not a ``MigrationError`` and is
+    not intercepted, so real failures are unaffected.
+    """
+    from nexus.db.migrations import MigrationError  # noqa: PLC0415 — deferred to avoid circular import at module load
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    try:
+        return T2Database(db_path, run_migrations=True)
+    except MigrationError as exc:
+        _log.error(
+            "t2_daemon_bootstrap_migration_gated",
+            error=str(exc),
+            remediation=(
+                "a migration is GATED and needs operator curation before the T2 "
+                "daemon can start. Run `nx upgrade --dry-run` to see the gate + "
+                "remediation (e.g. `nx catalog rename-collection`, `nx aspects "
+                "drain`, or `nx aspects backfill-source-uri`); once resolved, the "
+                "daemon starts cleanly on the next launch."
+            ),
+        )
+        raise
+
+
 # ---------------------------------------------------------------------------
 # T2 Daemon
 # ---------------------------------------------------------------------------
@@ -1036,8 +1081,10 @@ class T2Daemon:
         # caller. T2Database.__init__ no longer auto-runs migrations; the
         # daemon passes ``run_migrations=True`` so its construction
         # bootstraps the schema before any client connects.
-        from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
-        self._t2db = T2Database(self._db_path, run_migrations=True)
+        #
+        # RDR-142 adjacent (nexus-3lbhb): on a GATED migration, turn the bare
+        # uncaught traceback into a LOUD, actionable error — but stay fail-closed.
+        self._t2db = _open_t2db_or_loud_gate_crash(self._db_path)
         self._dispatch_table = _build_dispatch_table(self._t2db)
 
         # RDR-146 P1 (nexus-5p2ci.20): host the rich Catalog and merge its
