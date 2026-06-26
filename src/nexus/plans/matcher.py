@@ -33,7 +33,7 @@ import structlog
 
 from nexus.db.t2.plan_library import PlanLibrary
 from nexus.plans.match import Match
-from nexus.plans.scope import _normalize_scope_string
+from nexus.plans.scope import _SCOPE_AGNOSTIC_SENTINELS, _normalize_scope_string
 
 __all__ = ["PlanCache", "plan_match"]
 
@@ -80,6 +80,31 @@ def _is_grown_plan_tags(tags: str | None) -> bool:
     if not tags:
         return False
     return "grown" in [t.strip() for t in tags.split(",")]
+
+
+def _is_unanchored_grown(row: dict) -> bool:
+    """Return True for a grown plan with NO scope anchor.
+
+    nexus-mz5tv: a grown plan inherits its origin question's match-text,
+    so it is NOT genuinely scope-agnostic — but ``_scope_fit`` treats an
+    empty ``scope_tags`` as agnostic (neutral, always kept). When such a
+    plan ALSO has a blank ``project`` column (the #1069/#1099 project
+    fallback then has nothing to scope on), it has zero provenance and
+    becomes a cross-project attractor: it competes globally at the grown
+    floor against scoped questions in unrelated projects.
+
+    "Unanchored" = grown tag AND empty ``scope_tags`` AND blank
+    ``project``. The caller drops such a plan when an explicit
+    ``scope_preference`` is supplied (a scoped caller should not match a
+    plan with no scope provenance). A grown plan carrying either anchor
+    is unaffected, and with no caller scope nothing is dropped (the
+    legitimate corpus:all → corpus:all case).
+    """
+    if not _is_grown_plan_tags(row.get("tags")):
+        return False
+    if (row.get("scope_tags") or "").strip():
+        return False
+    return not (row.get("project") or "").strip()
 
 
 def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None:
@@ -275,6 +300,11 @@ def plan_match(
     """
     filter_dims = dimensions or {}
     scope_pref = _normalize_scope_string(scope_preference) if scope_preference else ""
+    # nexus-mz5tv: a "real" scope preference excludes the corpus:all
+    # sentinel ("all"). A corpus:all caller has NO project preference, so it
+    # must NOT trigger the unanchored-grown drop below — that would lose the
+    # legitimate corpus:all -> corpus:all match the drop is designed to keep.
+    scope_pref_is_real = bool(scope_pref) and scope_pref.lower() not in _SCOPE_AGNOSTIC_SENTINELS
 
     # T1 cosine path when cache available + has hits.
     # Over-fetch covers (a) dimension post-filter attrition, (b) min_confidence
@@ -322,6 +352,13 @@ def plan_match(
             m = Match.from_plan_row(row, confidence=confidence)
             if filter_dims and not _superset(m.dimensions, filter_dims):
                 continue
+            # nexus-mz5tv: a scoped caller must not match an unanchored
+            # grown plan (no scope_tags AND no project) — it has no
+            # provenance and would otherwise compete globally at the
+            # grown floor inside the unrelated-same-domain band.
+            if scope_pref_is_real and _is_unanchored_grown(row):
+                scope_conflict_drops += 1
+                continue
             fit = _scope_fit(m.scope_tags, scope_pref)
             if fit is None:
                 scope_conflict_drops += 1
@@ -358,6 +395,11 @@ def plan_match(
     for row in rows:
         m = Match.from_plan_row(row, confidence=None)
         if filter_dims and not _superset(m.dimensions, filter_dims):
+            continue
+        # nexus-mz5tv: same unanchored-grown drop on the FTS5 path — an
+        # empty-project grown plan otherwise passes search_plans' project
+        # filter and _scope_fit's agnostic-neutral keep.
+        if scope_pref_is_real and _is_unanchored_grown(row):
             continue
         if _scope_fit(m.scope_tags, scope_pref) is None:
             continue  # scope conflict on the fallback path too

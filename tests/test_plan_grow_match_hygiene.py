@@ -203,3 +203,148 @@ def test_grown_floor_does_not_break_fts5_fallback(library) -> None:
     # numeric comparison and confidence=None should not be excluded by it.
     assert result, "FTS5 fallback for grown plans must still admit"
     assert result[0].confidence is None
+
+
+# ── nexus-mz5tv: unanchored grown plan must not be a cross-project attractor ──
+
+
+def _seed_unanchored(library, *, query: str, tags: str, project: str = "") -> int:
+    """Seed a plan with an explicit (possibly empty) project and NO
+    scope_tags — the unanchored shape the mz5tv residual is about."""
+    from nexus.plans.matcher import _is_unanchored_grown  # noqa: F401 — import-time guard that symbol exists
+    return library.save_plan(
+        query=query,
+        plan_json=json.dumps({"steps": []}),
+        # scope_tags forced "" below (explicit kwarg) — bypasses the #1069
+        # project-inference path so this seeds the unanchored shape directly.
+        tags=tags,
+        project=project,
+        dimensions=None,
+        verb="research",
+        scope="",
+        name="default",
+        scope_tags="",
+    )
+
+
+def test_unanchored_grown_dropped_under_scope_pref(library) -> None:
+    """A grown plan with empty scope_tags AND empty project must NOT match
+    a scoped caller — it has no provenance and would otherwise compete
+    globally at the grown floor (the mz5tv residual)."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed_unanchored(
+        library, query="how does the projector replay events",
+        tags="ad-hoc,grown", project="",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.15)])  # confidence 0.85, above grown floor
+    result = plan_match(
+        intent="how does the projector replay events",
+        library=library, cache=cache,
+        min_confidence=0.40, n=5,
+        scope_preference="knowledge__nexus",
+    )
+    assert result == [], (
+        f"unanchored grown plan must drop under a scope_preference; "
+        f"got {[(m.plan_id, m.confidence) for m in result]}"
+    )
+
+
+def test_unanchored_grown_kept_without_scope_pref(library) -> None:
+    """With NO caller scope, the unanchored grown plan still competes (the
+    legitimate corpus:all -> corpus:all case) — the drop is scoped to an
+    explicit scope_preference."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed_unanchored(
+        library, query="how does the projector replay events",
+        tags="ad-hoc,grown", project="",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.15)])
+    result = plan_match(
+        intent="how does the projector replay events",
+        library=library, cache=cache,
+        min_confidence=0.40, n=5,
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_grown_with_project_anchor_kept_under_scope_pref(library) -> None:
+    """A non-empty ``project`` column is the escape hatch from the
+    unanchored-grown drop: mz5tv targets EMPTY project only, so a grown
+    plan with project set (scope_tags forced empty here) is NOT dropped.
+    Production plans that take the #1069 path instead carry a non-empty
+    scope_tags, which is the other escape hatch."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed_unanchored(
+        library, query="how does the projector replay events",
+        tags="ad-hoc,grown", project="nexus",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.15)])
+    result = plan_match(
+        intent="how does the projector replay events",
+        library=library, cache=cache,
+        min_confidence=0.40, n=5,
+        scope_preference="knowledge__nexus",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_non_grown_unanchored_kept_under_scope_pref(library) -> None:
+    """The drop is grown-specific: a non-grown agnostic plan (empty
+    scope_tags + empty project) stays neutral under a scope_preference."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed_unanchored(
+        library, query="how does the projector replay events",
+        tags="ad-hoc", project="",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.15)])
+    result = plan_match(
+        intent="how does the projector replay events",
+        library=library, cache=cache,
+        min_confidence=0.40, n=5,
+        scope_preference="knowledge__nexus",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_unanchored_grown_dropped_on_fts5_path(library) -> None:
+    """The same drop applies on the FTS5 fallback path (no cache)."""
+    from nexus.plans.matcher import plan_match
+
+    _seed_unanchored(
+        library, query="projector replay events catalog",
+        tags="ad-hoc,grown", project="",
+    )
+    result = plan_match(
+        intent="projector replay events", library=library, cache=None,
+        min_confidence=0.40, n=5,
+        scope_preference="knowledge__nexus",
+    )
+    assert result == [], (
+        "unanchored grown plan must drop on the FTS5 path under a scope_pref"
+    )
+
+
+def test_unanchored_grown_kept_for_corpus_all_sentinel(library) -> None:
+    """nexus-mz5tv review: ``scope_preference="all"`` is the corpus:all
+    sentinel — NO real scope preference — so the unanchored-grown drop must
+    NOT fire (it would lose the legitimate corpus:all -> corpus:all match)."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed_unanchored(
+        library, query="how does the projector replay events",
+        tags="ad-hoc,grown", project="",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.15)])
+    result = plan_match(
+        intent="how does the projector replay events",
+        library=library, cache=cache,
+        min_confidence=0.40, n=5,
+        scope_preference="all",
+    )
+    assert [m.plan_id for m in result] == [plan_id], (
+        "corpus:all sentinel must not trigger the unanchored-grown drop"
+    )
