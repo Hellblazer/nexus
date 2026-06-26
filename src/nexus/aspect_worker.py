@@ -386,11 +386,13 @@ class AspectExtractionWorker:
         from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
         from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
 
-        # extract_aspects_batch requires every input to share a single
-        # ExtractorConfig. claim_batch grabs FIFO across collections, so
-        # a knowledge__ row enqueued before an rdr__ row lands in the
-        # same claim and crosses the homogeneity boundary. Fall back to
-        # per-row processing instead of marking the whole batch failed.
+        # extract_aspects_batch now supports mixed configs internally
+        # (nexus-kmbys: it partitions by per-document resolved config and
+        # runs deterministic parser_fn configs inline). This pre-filter is
+        # retained as a conservative simplification: a claim mixing prefix
+        # configs (knowledge__ + rdr__) falls back to per-row processing
+        # rather than relying on the batch partition path for cross-prefix
+        # mixes. Same-prefix claims (the common case) go through the batch.
         configs = {select_config(row.collection) for row in rows}
         if len(configs - {None}) > 1:
             _log.info(

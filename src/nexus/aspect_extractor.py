@@ -167,6 +167,9 @@ class ExtractorConfig:
     prompt_template: str
     required_fields: tuple[str, ...]
     parser_fn: object = None  # Optional[Callable[[str, str, str], dict]]
+    #: Batch-mode prompt header (multi-doc one-call extraction). Empty for
+    #: deterministic (parser_fn) configs that never run the batch LLM path.
+    batch_prompt_header: str = ""
 
 
 _SCHOLARLY_PAPER_PROMPT = """\
@@ -250,6 +253,99 @@ _SCHOLARLY_PAPER_CONFIG = ExtractorConfig(
         "experimental_baselines",
         "experimental_results",
     ),
+    batch_prompt_header=_SCHOLARLY_BATCH_PROMPT_HEADER,
+)
+
+
+# ── General-prose extractor (nexus-kmbys) ────────────────────────────────────
+#
+# scholarly-paper-v1 HALLUCINATES paper structure (title/abstract/datasets/
+# baselines/venue) when forced onto non-paper prose — design notes, essays,
+# documentation. For knowledge__ collections that mix papers with general
+# prose, ``_classify_document_shape`` routes each document to the extractor
+# whose schema actually fits, per-document. general-prose-v1 maps prose
+# HONESTLY into the same five columns: it never fabricates datasets/baselines
+# (always empty) and treats the paper-only fields as topic/argument/takeaways.
+
+_GENERAL_PROSE_PROMPT = """\
+You are extracting structured aspects from a general prose document — a
+design note, essay, blog post, or piece of documentation. It is NOT a
+scholarly paper: do NOT invent an abstract, datasets, baselines, or a
+publication venue. Return a JSON object with EXACTLY the following fields:
+
+  problem_formulation:    string — one or two sentences naming the topic
+                          or question the document addresses.
+  proposed_method:        string — one to three sentences summarizing the
+                          document's main argument, approach, or content.
+  experimental_datasets:  array — ALWAYS an empty array [] for prose.
+  experimental_baselines: array — ALWAYS an empty array [] for prose.
+  experimental_results:   string — one or two sentences naming the
+                          document's key conclusions or takeaways (empty
+                          string if it draws none).
+  extras:                 JSON object — any other useful structured fields
+                          (e.g. doc_kind, audience). May be empty.
+  confidence:             number in [0, 1] — your confidence that the
+                          extraction is faithful to the document.
+
+Do NOT fabricate fields that the document does not support. If the document
+names no datasets or baselines (the usual case for prose), return empty
+arrays — do not guess. Respond with ONLY the JSON object (no Markdown, no
+commentary).
+
+Document text follows:
+
+---
+
+{content}
+"""
+
+
+_GENERAL_PROSE_BATCH_PROMPT_HEADER = """\
+You are extracting structured aspects from N general prose documents (design
+notes, essays, documentation — NOT scholarly papers) in one pass. Each
+document carries a ``source_path`` identifier; echo it back in each output
+entry so the caller can match extractions to inputs.
+
+Return a JSON object with this exact shape:
+
+  {{
+    "documents": [
+      {{
+        "source_path": "<verbatim from input>",
+        "problem_formulation": string — topic/question, one or two sentences,
+        "proposed_method": string — main argument/approach, one to three sentences,
+        "experimental_datasets": [] — ALWAYS empty for prose,
+        "experimental_baselines": [] — ALWAYS empty for prose,
+        "experimental_results": string — key takeaways (empty string if none),
+        "extras": JSON object (may be empty),
+        "confidence": number in [0, 1]
+      }},
+      ...
+    ]
+  }}
+
+Do NOT fabricate datasets, baselines, or a venue. The ``documents`` array must
+have EXACTLY one entry per input document, in the same order. Echo each
+``source_path`` verbatim. Respond with ONLY the JSON object (no Markdown, no
+commentary).
+
+The documents follow, separated by ``=====``. Each is preceded by its
+``source_path`` line.
+"""
+
+
+_GENERAL_PROSE_CONFIG = ExtractorConfig(
+    extractor_name="general-prose-v1",
+    model_version="claude-haiku-4-5-20251001",
+    prompt_template=_GENERAL_PROSE_PROMPT,
+    # Only the two prose-applicable fields are required; datasets/baselines
+    # are always [] and ``experimental_results`` is optional (a reference
+    # doc may draw no conclusions) so prose never spuriously null-fields.
+    required_fields=(
+        "problem_formulation",
+        "proposed_method",
+    ),
+    batch_prompt_header=_GENERAL_PROSE_BATCH_PROMPT_HEADER,
 )
 
 
@@ -641,6 +737,86 @@ def select_config(collection: str) -> ExtractorConfig | None:
     return None
 
 
+# ── Per-document shape routing (nexus-kmbys) ─────────────────────────────────
+
+#: Paper-structure signals. A document scoring >= _PAPER_SHAPE_THRESHOLD
+#: distinct signals is treated as a scholarly paper; otherwise as general
+#: prose. Each entry is a compiled, case-insensitive pattern matched against
+#: the document text. Kept deterministic (no LLM) so routing is cheap,
+#: reproducible, and unit-testable with exact assertions.
+#
+# Signals are deliberately PAPER-SPECIFIC and low-noise. Patterns that fire
+# on ordinary technical prose — bare ``[1]`` list markers, parenthetical
+# years ``(2024)``, generic first-person like "our approach" — are excluded:
+# promoting a design note to the paper extractor re-introduces the exact
+# hallucination this fix removes, and the default-to-prose bias only protects
+# the false-NEGATIVE direction (review finding, nexus-kmbys).
+_PAPER_SHAPE_SIGNALS: tuple[re.Pattern[str], ...] = (
+    # An "Abstract" heading (markdown ## or a bare line).
+    re.compile(r"^\s{0,3}#{0,4}\s*abstract\s*$", re.IGNORECASE | re.MULTILINE),
+    # A references / bibliography section.
+    re.compile(
+        r"^\s{0,3}#{0,4}\s*(references|bibliography|works cited)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    # Academic citation apparatus: "et al." (strongly paper-specific).
+    re.compile(r"\bet al\.", re.IGNORECASE),
+    # Explicit paper self-reference (NOT generic "our approach", which is
+    # ubiquitous in design notes).
+    re.compile(r"\bin this paper\b|\bwe propose\b|\bwe present\b", re.IGNORECASE),
+    # arXiv / DOI identifiers.
+    re.compile(r"\barxiv:\s*\d|doi:\s*10\.\d{4}", re.IGNORECASE),
+)
+
+#: Minimum distinct paper signals for a document to route to the scholarly
+#: extractor. Two independent signals guard against an incidental single
+#: match (e.g. a design note that happens to cite "[1]") mis-routing prose
+#: to the hallucinating paper extractor.
+_PAPER_SHAPE_THRESHOLD = 2
+
+
+def _classify_document_shape(content: str) -> str:
+    """Classify a document as ``"paper"`` or ``"prose"`` (nexus-kmbys).
+
+    Deterministic, LLM-free heuristic: counts distinct paper-structure
+    signals (abstract/references headings, citation markers, first-person
+    paper framing, arXiv/DOI). A document with >= ``_PAPER_SHAPE_THRESHOLD``
+    signals is a ``"paper"``; everything else is ``"prose"``.
+
+    Defaults to ``"prose"`` on ambiguity by design: the prose extractor never
+    fabricates datasets/baselines/venue, so a mis-classified paper loses some
+    structured extraction but a mis-classified prose doc is NOT hallucinated.
+    Real paper corpora (clear Abstract + References) clear the threshold and
+    are unaffected.
+    """
+    score = sum(1 for pat in _PAPER_SHAPE_SIGNALS if pat.search(content))
+    return "paper" if score >= _PAPER_SHAPE_THRESHOLD else "prose"
+
+
+def _resolve_config_for_document(
+    collection: str, content: str, base_config: ExtractorConfig,
+) -> ExtractorConfig:
+    """Refine a prefix-selected config by per-document shape (nexus-kmbys).
+
+    Only the scholarly-paper config is auto-routing-eligible: a knowledge__
+    document classified as prose is routed to ``general-prose-v1`` instead of
+    having paper structure hallucinated onto it. Every other base config
+    (rdr-frontmatter, future recipes) is returned unchanged.
+    """
+    if base_config is not _SCHOLARLY_PAPER_CONFIG:
+        return base_config
+    shape = _classify_document_shape(content)
+    chosen = base_config if shape == "paper" else _GENERAL_PROSE_CONFIG
+    if chosen is not base_config:
+        _log.info(
+            "aspect_extractor_document_routed",
+            collection=collection,
+            shape=shape,
+            extractor=chosen.extractor_name,
+        )
+    return chosen
+
+
 # ── Retry helpers ────────────────────────────────────────────────────────────
 
 
@@ -751,6 +927,37 @@ def read_indexed_text(
     return None
 
 
+def _extract_via_parser_fn(
+    config: ExtractorConfig, content: str, source_path: str, collection: str,
+) -> AspectRecord:
+    """Run a deterministic ``parser_fn`` config and build its record.
+
+    Shared by the single-doc and batch paths (nexus-kmbys): a config with
+    ``parser_fn`` set must NEVER reach the LLM subprocess. Errors degrade to
+    a null-fields record, never raise.
+    """
+    try:
+        parsed = config.parser_fn(content, source_path, collection)  # type: ignore[misc]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
+        _log.warning(
+            "aspect_extractor_parser_fn_raised",
+            extractor=config.extractor_name,
+            source_path=source_path,
+            error=str(exc),
+            exc_info=True,
+        )
+        return _empty_record(source_path, collection, config)
+    if not isinstance(parsed, dict):
+        _log.warning(
+            "aspect_extractor_parser_fn_wrong_shape",
+            extractor=config.extractor_name,
+            source_path=source_path,
+            got=type(parsed).__name__,
+        )
+        return _empty_record(source_path, collection, config)
+    return _build_record(parsed, source_path, collection, config)
+
+
 def extract_aspects(
     content: str,
     source_path: str,
@@ -849,30 +1056,15 @@ def extract_aspects(
     # subprocess hand-off (POSIX argv rejects them outright).
     content = content.replace("\x00", "")
 
+    # nexus-kmbys: per-document shape routing. A knowledge__ document that
+    # is general prose (not a paper) is routed to general-prose-v1 so paper
+    # structure is not hallucinated onto it. No-op for non-scholarly configs.
+    config = _resolve_config_for_document(collection, content, config)
+
     if config.parser_fn is not None:
         # Pure-Python parser path (RDR-089 Phase F: rdr-frontmatter-v1).
-        # No subprocess, no retry budget, no Claude API cost. Errors
-        # surface as null-fields records.
-        try:
-            parsed = config.parser_fn(content, source_path, collection)
-        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
-            _log.warning(
-                "aspect_extractor_parser_fn_raised",
-                extractor=config.extractor_name,
-                source_path=source_path,
-                error=str(exc),
-                exc_info=True,
-            )
-            return _empty_record(source_path, collection, config)
-        if not isinstance(parsed, dict):
-            _log.warning(
-                "aspect_extractor_parser_fn_wrong_shape",
-                extractor=config.extractor_name,
-                source_path=source_path,
-                got=type(parsed).__name__,
-            )
-            return _empty_record(source_path, collection, config)
-        return _build_record(parsed, source_path, collection, config)
+        # No subprocess, no retry budget, no Claude API cost.
+        return _extract_via_parser_fn(config, content, source_path, collection)
 
     prompt = config.prompt_template.format(content=content)
     parsed = _retry_subprocess(prompt, config)
@@ -929,11 +1121,13 @@ def extract_aspects_batch(
     extractor must be conservative; use batch when corpus drain time
     dominates.
 
-    Single-config batches: every input must map to the same
-    ``ExtractorConfig`` (same prompt template + schema). The batch
-    function rejects mixed configs and returns ``None`` for any
-    paper whose collection has no config (the caller should not
-    have included such papers).
+    Mixed-config batches (nexus-kmbys): configs are resolved per document
+    after content is sourced, then the batch is partitioned by resolved
+    config — one subprocess call per group (a knowledge__ batch containing
+    both papers and prose runs the scholarly extractor on the papers and
+    general-prose-v1 on the prose). A homogeneous batch still runs exactly
+    one call. Items whose collection has no registered config keep their
+    ``None`` slot (the caller should not have included such items).
 
     Empty-content sourcing (RDR-096 P5.1, nexus-8g79.34): rows with
     ``content=""`` route through
@@ -966,26 +1160,12 @@ def extract_aspects_batch(
         else:
             normalised.append(item)  # type: ignore[arg-type]
 
-    # Group by ExtractorConfig (allows future multi-config batches; for
-    # Phase D ships single-config support — multi-config raises).
-    config = None
+    # nexus-kmbys: configs are resolved PER DOCUMENT after content is
+    # sourced (a knowledge__ batch may contain both papers and prose), then
+    # the batch is partitioned by resolved config — one subprocess call per
+    # config group. Items in unsupported collections (no prefix config) keep
+    # their pre-set None slot.
     out: list[AspectRecord | ExtractFail | None] = [None] * len(normalised)
-    for idx, (collection, _source_path, _content, _doc_id) in enumerate(normalised):
-        item_config = select_config(collection)
-        if item_config is None:
-            out[idx] = None
-            continue
-        if config is None:
-            config = item_config
-        elif config is not item_config:
-            raise ValueError(
-                f"extract_aspects_batch requires all items to share "
-                f"a single ExtractorConfig; got {config.extractor_name} "
-                f"and {item_config.extractor_name} in one batch"
-            )
-    if config is None:
-        # Every item was unsupported.
-        return out
 
     indexed_inputs: list[tuple[int, str, str, str, str]] = [
         (i, normalised[i][0], normalised[i][1], normalised[i][2], normalised[i][3])
@@ -996,7 +1176,7 @@ def extract_aspects_batch(
     # nexus-8g79.34: per-row URI-based content sourcing for empty-
     # content rows. Mirrors the single-doc path's pattern at
     # extract_aspects:882-920.
-    callable_inputs: list[tuple[int, str, str, str]] = []
+    callable_inputs: list[tuple[int, str, str, str, ExtractorConfig]] = []
     t3_handle: Any = None  # lazy: only construct when we actually need to read
     for idx, collection, source_path, content, queue_doc_id in indexed_inputs:
         if not content:
@@ -1046,41 +1226,69 @@ def extract_aspects_batch(
             content = result.text
         # Defensive null-byte strip (matches single-paper path).
         content = content.replace("\x00", "")
-        callable_inputs.append((idx, collection, source_path, content))
+        # nexus-kmbys: resolve per-document config (paper vs prose) now that
+        # content is in hand. select_config gives the prefix base; the
+        # resolver substitutes general-prose-v1 for prose knowledge__ docs.
+        base_config = select_config(collection)
+        if base_config is None:
+            continue  # defensive: indexed_inputs already filtered these out
+        item_config = _resolve_config_for_document(collection, content, base_config)
+        if item_config.parser_fn is not None:
+            # Deterministic config (e.g. rdr-frontmatter-v1) must NOT reach
+            # the LLM batch path — it has no batch_prompt_header and would
+            # otherwise fall back to the scholarly prompt and hallucinate.
+            # Run the parser inline, mirroring the single-doc path.
+            out[idx] = _extract_via_parser_fn(
+                item_config, content, source_path, collection,
+            )
+            continue
+        callable_inputs.append((idx, collection, source_path, content, item_config))
 
     if not callable_inputs:
         return out
 
-    prompt = _build_batch_prompt(callable_inputs, config)
-    timeout = 180 + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(callable_inputs) - 1)
-    parsed = _retry_subprocess_batch(prompt, config, timeout=timeout)
+    # nexus-kmbys: partition by resolved config and run one sub-batch per
+    # group (a mixed paper/prose knowledge__ batch yields two calls; a
+    # homogeneous batch still yields exactly one). Output slots stay keyed
+    # by the original input index, so order is preserved across partitions.
+    by_config: dict[str, tuple[ExtractorConfig, list[tuple[int, str, str, str]]]] = {}
+    for idx, collection, source_path, content, cfg in callable_inputs:
+        bucket = by_config.setdefault(cfg.extractor_name, (cfg, []))
+        bucket[1].append((idx, collection, source_path, content))
 
-    if parsed is None:
-        # Whole batch failed: every paper gets a null-fields record.
-        for idx, collection, source_path, _content in callable_inputs:
-            out[idx] = _empty_record(source_path, collection, config)
-        return out
+    for cfg, group in by_config.values():
+        prompt = _build_batch_prompt(group, cfg)
+        timeout = 180 + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(group) - 1)
+        parsed = _retry_subprocess_batch(prompt, cfg, timeout=timeout)
 
-    # Demux parsed['papers'] back into per-input slots by source_path.
-    by_source = {}
-    for entry in parsed.get("papers", []):
-        if not isinstance(entry, dict):
+        if parsed is None:
+            # Whole sub-batch failed: every doc in it gets a null-fields record.
+            for idx, collection, source_path, _content in group:
+                out[idx] = _empty_record(source_path, collection, cfg)
             continue
-        sp = entry.get("source_path")
-        if isinstance(sp, str):
-            by_source[sp] = entry
 
-    for idx, collection, source_path, _content in callable_inputs:
-        entry = by_source.get(source_path)
-        if entry is None:
-            _log.warning(
-                "aspect_extractor_batch_missing_entry",
-                source_path=source_path,
-                detail="batch response did not include this source_path",
-            )
-            out[idx] = _empty_record(source_path, collection, config)
-            continue
-        out[idx] = _build_record_from_entry(entry, source_path, collection, config)
+        # Demux the response array back into per-input slots by source_path.
+        # Scholarly header emits ``papers``; the general-prose header emits
+        # ``documents`` (nexus-kmbys) — accept either.
+        by_source = {}
+        for entry in (parsed.get("papers") or parsed.get("documents") or []):
+            if not isinstance(entry, dict):
+                continue
+            sp = entry.get("source_path")
+            if isinstance(sp, str):
+                by_source[sp] = entry
+
+        for idx, collection, source_path, _content in group:
+            entry = by_source.get(source_path)
+            if entry is None:
+                _log.warning(
+                    "aspect_extractor_batch_missing_entry",
+                    source_path=source_path,
+                    detail="batch response did not include this source_path",
+                )
+                out[idx] = _empty_record(source_path, collection, cfg)
+                continue
+            out[idx] = _build_record_from_entry(entry, source_path, collection, cfg)
 
     return out
 
@@ -1091,11 +1299,13 @@ def _build_batch_prompt(
 ) -> str:
     """Build the multi-paper prompt for a batch call.
 
-    Header is the shared instruction; each paper is presented with a
-    ``source_path`` line followed by its content, separated from
-    other papers by a ``=====`` divider.
+    Header is the config's batch instruction (scholarly vs general-prose,
+    nexus-kmbys); each document is presented with a ``source_path`` line
+    followed by its content, separated from others by a ``=====`` divider.
+    Falls back to the scholarly header for any config that predates the
+    ``batch_prompt_header`` field.
     """
-    parts = [_SCHOLARLY_BATCH_PROMPT_HEADER]
+    parts = [config.batch_prompt_header or _SCHOLARLY_BATCH_PROMPT_HEADER]
     for _idx, _collection, source_path, content in callable_inputs:
         parts.append("\n=====\n")
         parts.append(f"source_path: {source_path}\n\n")
@@ -1203,10 +1413,14 @@ def _invoke_once_batch(prompt: str, *, timeout: int) -> dict:
         raise _HardFailure(
             f"inner json top-level not a dict (got {type(parsed).__name__})"
         )
-    papers = parsed.get("papers")
-    if not isinstance(papers, list):
+    # Scholarly header emits ``papers``; the general-prose header emits
+    # ``documents`` (nexus-kmbys). Accept either as the entries array.
+    entries = parsed.get("papers")
+    if entries is None:
+        entries = parsed.get("documents")
+    if not isinstance(entries, list):
         raise _HardFailure(
-            "batch response missing 'papers' array"
+            "batch response missing 'papers'/'documents' array"
         )
 
     return parsed
