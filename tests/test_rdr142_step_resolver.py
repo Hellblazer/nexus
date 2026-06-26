@@ -277,6 +277,27 @@ class TestAspectQueuePkPrecondition:
         assert v.outcome == StepOutcome.WOULD_SUCCEED, v
         conn.close()
 
+    def test_already_migrated_would_succeed(self, tmp_path: Path) -> None:
+        """Symmetry with the document_aspects already-migrated path."""
+        from nexus.db.migrations import StepOutcome, _precondition_aspect_queue_pk
+
+        mem, cat = _layout(tmp_path)
+        cat.parent.mkdir(parents=True)
+        _make_catalog_db(cat)  # catalog present (checked before already-migrated)
+        conn = _make_memory_db(mem)
+        conn.executescript("""
+            DROP TABLE aspect_extraction_queue;
+            CREATE TABLE aspect_extraction_queue (
+                doc_id TEXT NOT NULL, collection TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'failed', enqueued_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (doc_id)
+            );
+        """)
+        conn.commit()
+        v = _precondition_aspect_queue_pk(conn)
+        assert v.outcome == StepOutcome.WOULD_SUCCEED
+        conn.close()
+
 
 # ── drop_source_path precondition ─────────────────────────────────────────────
 
