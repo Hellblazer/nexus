@@ -235,6 +235,56 @@ class TestForceDryRun:
         assert "pending migrations" in out
 
 
+class TestOrphanFallbackAndDedup:
+    def test_orphan_predict_fallback_on_malformed_catalog(self, tmp_path, monkeypatch) -> None:
+        """P2.4 gap: a catalog missing documents/collections tables makes the
+        accurate JOIN raise OperationalError; the predictor falls back to the
+        simple unmapped-row count instead of crashing (still WOULD_GATE)."""
+        from nexus.db.migrations import StepOutcome, _precondition_document_aspects_pk
+
+        monkeypatch.setenv("NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD", "1")
+        mem = tmp_path / "memory.db"
+        cat = tmp_path / "catalog" / ".catalog.db"
+        cat.parent.mkdir(parents=True)
+        sqlite3.connect(str(cat)).close()  # empty catalog — no documents/collections
+        conn = sqlite3.connect(str(mem))
+        conn.executescript("""
+            CREATE TABLE document_aspects (collection TEXT NOT NULL, source_path TEXT NOT NULL,
+                doc_id TEXT NOT NULL DEFAULT '', source_uri TEXT,
+                PRIMARY KEY (collection, source_path));
+            INSERT INTO document_aspects (collection, source_path) VALUES ('k__o', '/a'), ('k__o', '/b');
+        """)
+        conn.commit()
+        with patch("nexus.db.migrations._catalog_db_path_from_conn", return_value=cat):
+            v = _precondition_document_aspects_pk(conn)
+        conn.close()
+        assert v.outcome == StepOutcome.WOULD_GATE  # fallback count > threshold
+
+    def test_resolve_blocking_steps_no_double_report(self, tmp_path, monkeypatch) -> None:
+        """P2.4 gap: a precondition-bearing step in the eligible set must NOT also
+        appear in the supplementary section (the `seen` dedup guard)."""
+        from nexus.db import migrations
+        from nexus.db.migrations import Migration, resolve_blocking_steps
+
+        def _gate(c):
+            from nexus.db.migrations import PreconditionVerdict, StepOutcome
+            return PreconditionVerdict(StepOutcome.WOULD_GATE, detail="d", remediation="r")
+
+        sentinel = Migration("9.9.9", "dedup-sentinel", lambda c: None, precondition=_gate)
+        orig = migrations.MIGRATIONS
+        conn = sqlite3.connect(":memory:")
+        try:
+            migrations.MIGRATIONS = [sentinel]
+            # last_seen 0.0.0 -> sentinel is eligible (9.9.9 > 0.0.0).
+            steps = resolve_blocking_steps(conn, "9.9.9", last_seen="0.0.0")
+        finally:
+            migrations.MIGRATIONS = orig
+        conn.close()
+        names = [s.name for s in steps]
+        assert names.count("dedup-sentinel") == 1, names
+        assert steps[0].eligible is True
+
+
 class TestStopgapGone:
     def test_no_check_deferred_migrations_residue(self) -> None:
         import nexus.commands.upgrade as up
