@@ -101,10 +101,18 @@ def _catalog_db_for(tmp_path: Path) -> Path:
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir(parents=True, exist_ok=True)
     cat_db = cat_dir / ".catalog.db"
-    # Minimal schema — just needs to exist; _check_deferred_migrations only checks
-    # catalog_db_path.exists(), not the schema contents.
+    # RDR-142 P2.1: realistic catalog schema (documents + collections) so the
+    # resolver's accurate orphan-prediction JOIN runs — not just the
+    # OperationalError fallback. Empty tables => every aspect row is an orphan.
     conn = _sqlite3.connect(str(cat_db))
-    conn.execute("CREATE TABLE IF NOT EXISTS documents (tumbler TEXT PRIMARY KEY)")
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS documents (
+            tumbler TEXT PRIMARY KEY, title TEXT DEFAULT 'd',
+            file_path TEXT, physical_collection TEXT);
+        CREATE TABLE IF NOT EXISTS collections (
+            name TEXT PRIMARY KEY, superseded_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '');
+    """)
     conn.commit()
     conn.close()
     return cat_db
