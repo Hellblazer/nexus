@@ -2,17 +2,20 @@
 title: "Migration Completeness vs the Version Row: apply_pending Advances `_nexus_version` While Deferred/Gated Steps Remain"
 id: RDR-142
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-01
 accepted_date: 2026-06-01
+closed_date: 2026-06-26
+close_reason: implemented
 related_issues: [nexus-qd1yp, nexus-3lbhb]
-related_rdrs: [RDR-108, RDR-076, RDR-096]
+related_rdrs: [RDR-108, RDR-076, RDR-096, RDR-170]
 supersedes: []
-related_tests: []
-implementation_notes: ""
+related_tests: [tests/test_rdr142_step_resolver.py, tests/test_rdr142_dry_run_resolver.py, tests/test_gh1061_e2_upgrade_dryrun_deferred.py]
+post_mortem: docs/rdr/post-mortem/142-migration-completeness-vs-version-row.md
+implementation_notes: "Direction A shipped. P1 (merge 88bfebc6): read-only step-resolver — resolve_pending_steps + StepOutcome/PreconditionVerdict/StepResolution + Migration.precondition + classifiers for all 7 defer/gate sites, shared anti-drift helpers, agreement tests. P2 (merges 9307565a + c1e78109): nx upgrade --dry-run reports from resolve_blocking_steps; _check_deferred_migrations stopgap deleted; output frames eligible (will-run) vs supplementary (table-state, version-gate-passed) + informational undrained gate. Gate PASSED (P3.1). Stacked review 0 Critical across all phases; full suite 11408 passed. Scope = nx upgrade --dry-run only (not doctor --check-schema). Adjacent daemon-bootstrap gate-crash hardening deferred to nexus-3lbhb (explicitly out of core scope)."
 ---
 
 # RDR-142: Migration Completeness vs the Version Row: apply_pending Advances `_nexus_version` While Deferred/Gated Steps Remain
