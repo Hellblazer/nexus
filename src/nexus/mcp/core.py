@@ -4282,11 +4282,89 @@ def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
         )
 
 
+#: Max historical plans injected as few-shot examples into the inline
+#: planner on a miss (nexus-mhyf3 / CacheRAG R1). Three balances prompt
+#: cost against the demonstrated lift.
+_PLANNER_FEW_SHOT_MAX = 3
+#: Per-example plan-JSON character cap so a pathological stored plan can't
+#: blow the planner prompt budget.
+_PLANNER_FEW_SHOT_PLAN_CHARS = 1200
+#: Soft similarity floor for using a near-miss as an exemplar. Set BELOW the
+#: 0.40 hit gate (every match reaching the miss path is below the caller's
+#: effective threshold) but high enough to exclude near-random plans: a
+#: dissimilar exemplar teaches the planner the wrong structure and is worse
+#: than zero-shot (review finding). FTS5 fallback matches (confidence=None)
+#: are keyword hits, not semantic similarity, and are excluded outright.
+_PLANNER_FEW_SHOT_MIN_CONFIDENCE = 0.25
+#: Cap on the rendered example question (the stored plan ``description`` /
+#: ``query`` column). Collapsed to a single line + truncated so an
+#: agent-authored description cannot inject prompt instructions or crowd the
+#: budget (review finding).
+_PLANNER_FEW_SHOT_DESC_CHARS = 200
+
+
+def _format_plan_few_shot(matches: "list | None") -> str:
+    """Render the top similar historical plans as few-shot examples.
+
+    nexus-mhyf3 (CacheRAG R1): on a plan MISS the near-miss ``matches``
+    are still the nearest stored plans by similarity. Feeding the
+    sufficiently-similar ones to the inline planner as
+    ``Question -> {"steps": [...]}`` examples is the single highest-leverage
+    cache mechanism in CacheRAG's ablation.
+
+    Only matches with a cosine confidence >= ``_PLANNER_FEW_SHOT_MIN_CONFIDENCE``
+    are used; FTS5-fallback matches (``confidence is None``) are excluded
+    (keyword overlap is not structural similarity). Returns ``""`` when no
+    usable example exists so the planner falls back to the prior zero-shot
+    prompt unchanged. Only the ``steps`` of each example are shown — the
+    exact shape the planner must emit. The example question is collapsed to
+    one line and truncated to neutralise prompt-injection via a stored
+    description.
+    """
+    import json as _json  # noqa: PLC0415 — branch-local stdlib import; deferred to miss path
+
+    if not matches:
+        return ""
+    examples: list[str] = []
+    for m in matches:
+        if len(examples) >= _PLANNER_FEW_SHOT_MAX:
+            break
+        conf = getattr(m, "confidence", None)
+        if conf is None or conf < _PLANNER_FEW_SHOT_MIN_CONFIDENCE:
+            continue
+        description = (getattr(m, "description", "") or "").strip()
+        # Collapse ALL whitespace (incl. newlines) to single spaces, then
+        # truncate — neutralises injection + bounds the prompt cost.
+        description = " ".join(description.split())[:_PLANNER_FEW_SHOT_DESC_CHARS]
+        raw = getattr(m, "plan_json", "") or ""
+        try:
+            plan = _json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        steps = plan.get("steps") if isinstance(plan, dict) else None
+        if not description or not isinstance(steps, list) or not steps:
+            continue
+        rendered = _json.dumps({"steps": steps})
+        if len(rendered) > _PLANNER_FEW_SHOT_PLAN_CHARS:
+            continue
+        examples.append(f"Question: {description}\nPlan: {rendered}")
+    if not examples:
+        return ""
+    body = "\n\n".join(examples)
+    return (
+        "Here are similar questions that were previously answered with these "
+        "plans. Use them as a guide for tool choice and step structure; adapt "
+        "to THIS question rather than copying verbatim:\n\n"
+        f"{body}\n\n"
+    )
+
+
 async def _nx_answer_plan_miss(
     question: str,
     *,
     scope: str = "",
     max_steps: int = 6,
+    few_shot_matches: "list | None" = None,
 ) -> Any:
     """Decompose *question* into a plan via claude_dispatch, execute it,
     and return a synthetic Match for plan_run.
@@ -4315,9 +4393,26 @@ async def _nx_answer_plan_miss(
             "collection actually starts with that prefix."
         )
 
+    # nexus-mhyf3 (CacheRAG R1): inject the nearest stored plans as few-shot
+    # examples. On a miss these near-miss matches are still the most similar
+    # historical plans; demonstrating their structure measurably lifts plan
+    # quality over the prior zero-shot prompt.
+    few_shot_block = _format_plan_few_shot(few_shot_matches)
+    if few_shot_block:
+        import structlog as _slog2  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+        # One "\nPlan: " per example: each example is rendered as
+        # "Question: <one-line desc>\nPlan: <json>" and the description is
+        # whitespace-collapsed (no embedded "\nPlan: "), so this counts
+        # examples exactly.
+        _slog2.get_logger().info(
+            "nx_answer_planner_few_shot",
+            examples=few_shot_block.count("\nPlan: "),
+        )
+
     prompt = (
         f"Decompose this question into a retrieval-and-analysis plan "
         f"with at most {max_steps} steps:{corpus_hint}\n\n"
+        f"{few_shot_block}"
         f"Question: {question}\n"
         f"{corpus_names_hint}\n\n"
         f"{_PLANNER_TOOL_REFERENCE}\n"
@@ -4629,7 +4724,10 @@ async def nx_answer(
             question=question[:100] if trace else "[redacted]",
         )
         try:
-            best = await _nx_answer_plan_miss(question, scope=scope, max_steps=max_steps)
+            best = await _nx_answer_plan_miss(
+                question, scope=scope, max_steps=max_steps,
+                few_shot_matches=matches,
+            )
         except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
             _log.warning("nx_answer_planner_failed", error=str(exc))
