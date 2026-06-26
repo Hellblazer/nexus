@@ -182,6 +182,11 @@ class PreconditionVerdict:
     outcome: StepOutcome
     detail: str = ""        # human reason (for defer/gate)
     remediation: str = ""   # operator next-step (for gate)
+    #: A WOULD_GATE that ``apply_pending`` may clear automatically (e.g. the
+    #: aspect_extraction_queue undrained gate — the real wrapper attempts
+    #: ``drain_worker`` first). Consumers should present these as informational
+    #: ("run nx aspects drain"), NOT as a hard blocking failure.
+    informational: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +198,14 @@ class StepResolution:
     outcome: StepOutcome
     detail: str = ""
     remediation: str = ""
+    informational: bool = False
+    #: True when the step is in ``apply_pending``'s eligible set (``introduced >
+    #: last_seen``) — i.e. it WILL run on the next upgrade / daemon start. False
+    #: for supplementary :func:`resolve_blocking_steps` entries whose version gate
+    #: has already passed: ``apply_pending`` will NOT re-run them; a non-succeed
+    #: verdict there signals an incomplete table state with RUNTIME impact, not a
+    #: next-start crash.
+    eligible: bool = True
 
 
 # ── Module-level migration functions ────────────────────────────────────────
@@ -2103,27 +2116,50 @@ def _predict_orphan_collections_readonly(
     unmapped_clause = "t.doc_id = ''" if "doc_id" in cols else "1=1"
     _attach_catalog(conn, catalog_db_path)
     try:
-        rows = conn.execute(f"""
-            SELECT t.collection, COUNT(*) AS n
-            FROM {table} t
-            WHERE {unmapped_clause}
-              AND NOT EXISTS (
-                  SELECT 1 FROM cat_db.documents d
-                  WHERE t.collection = d.physical_collection
-                    AND t.source_path = d.file_path
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM cat_db.documents d
-                  JOIN cat_db.collections c
-                    ON d.physical_collection = c.superseded_by
-                  WHERE c.superseded_by != ''
-                    AND c.name = t.collection
-                    AND d.file_path = t.source_path
-              )
-            GROUP BY t.collection
-            HAVING n > {threshold}
-            ORDER BY n DESC
-        """).fetchall()
+        try:
+            rows = conn.execute(f"""
+                SELECT t.collection, COUNT(*) AS n
+                FROM {table} t
+                WHERE {unmapped_clause}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM cat_db.documents d
+                      WHERE t.collection = d.physical_collection
+                        AND t.source_path = d.file_path
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM cat_db.documents d
+                      JOIN cat_db.collections c
+                        ON d.physical_collection = c.superseded_by
+                      WHERE c.superseded_by != ''
+                        AND c.name = t.collection
+                        AND d.file_path = t.source_path
+                  )
+                GROUP BY t.collection
+                HAVING n > {threshold}
+                ORDER BY n DESC
+            """).fetchall()
+        except sqlite3.OperationalError as exc:
+            _log.warning(
+                "orphan_predict_catalog_join_fallback",
+                table=table,
+                error=str(exc),
+                note="catalog schema unusable for the accurate JOIN; using conservative unmapped-row count (may over-count mappable rows)",
+            )
+            # Catalog missing the expected documents/collections schema (corrupt
+            # / partially-initialised). Rather than crash the READ-ONLY resolver —
+            # which would make ``nx upgrade --dry-run`` / ``--check-schema`` fail
+            # where they should report — fall back to the legacy simple
+            # unmapped-row count (the pre-resolver ``_check_deferred_migrations``
+            # probe). Over-counts mappable rows but never crashes; a well-formed
+            # catalog takes the accurate JOIN above.
+            rows = conn.execute(f"""
+                SELECT t.collection, COUNT(*) AS n
+                FROM {table} t
+                WHERE {unmapped_clause}
+                GROUP BY t.collection
+                HAVING n > {threshold}
+                ORDER BY n DESC
+            """).fetchall()
     finally:
         _detach_catalog(conn)
     return rows
@@ -2132,21 +2168,24 @@ def _predict_orphan_collections_readonly(
 def _precondition_document_aspects_pk(conn: sqlite3.Connection) -> "PreconditionVerdict":
     """Read-only verdict for ``_migrate_document_aspects_pk_via_apply_pending``.
 
-    Check order mirrors the REAL path exactly: the wrapper checks the catalog
-    first (raising MigrationRetry before delegating), then the inner fn checks
-    already-migrated, then table-presence, then the orphan gate.
+    Order: already-migrated / table-absent → would-succeed FIRST (a completed or
+    nonexistent table is done regardless of catalog presence — checking catalog
+    first would falsely report a migrated-but-catalog-absent table as deferred,
+    and such a table is never in apply_pending's eligible set anyway). Then
+    catalog-absent → defer, then the orphan gate — mirroring the real wrapper for
+    every UNMIGRATED-table state (where catalog-absent does defer).
     """
+    if _is_already_migrated(conn, table="document_aspects"):
+        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
+    if not cols:
+        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)  # table absent → no-op
     catalog_path = _catalog_db_path_from_conn(conn)
     if not catalog_path.exists():
         return PreconditionVerdict(
             StepOutcome.WOULD_DEFER,
             detail=f"catalog absent — retry deferred until catalog exists: {catalog_path}",
         )
-    if _is_already_migrated(conn, table="document_aspects"):
-        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
-    if not cols:
-        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)  # table absent → no-op
     orphans = _predict_orphan_collections_readonly(
         conn, table="document_aspects", catalog_db_path=catalog_path
     )
@@ -2162,23 +2201,24 @@ def _precondition_document_aspects_pk(conn: sqlite3.Connection) -> "Precondition
 def _precondition_aspect_queue_pk(conn: sqlite3.Connection) -> "PreconditionVerdict":
     """Read-only verdict for ``_migrate_aspect_queue_pk_via_apply_pending``.
 
-    Ordering mirrors the real path exactly: the wrapper checks the catalog
-    first, then the inner fn checks already-migrated, table, the undrained gate
-    (read-only COUNT, no drain), then the orphan gate.
+    Order: already-migrated / table-absent → would-succeed first (see the
+    document_aspects classifier), then catalog-absent → defer, then the undrained
+    gate (read-only COUNT, no drain), then the orphan gate.
     """
+    if _is_already_migrated(conn, table="aspect_extraction_queue"):
+        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(aspect_extraction_queue)").fetchall()}
+    if not cols:
+        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
     catalog_path = _catalog_db_path_from_conn(conn)
     if not catalog_path.exists():
         return PreconditionVerdict(
             StepOutcome.WOULD_DEFER,
             detail=f"catalog absent — retry deferred until catalog exists: {catalog_path}",
         )
-    if _is_already_migrated(conn, table="aspect_extraction_queue"):
-        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(aspect_extraction_queue)").fetchall()}
-    if not cols:
-        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
-    # Undrained gate FIRST (the real wrapper attempts a drain, but the read-only
-    # classifier never drains; it reports the current undrained state honestly).
+    # Undrained gate: the real wrapper attempts a drain FIRST, so this is a SOFT
+    # gate — apply_pending may clear it automatically. Marked informational so the
+    # dry-run presents "run nx aspects drain", not a hard BLOCKED failure.
     actionable = conn.execute(
         "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
     ).fetchone()
@@ -2186,7 +2226,8 @@ def _precondition_aspect_queue_pk(conn: sqlite3.Connection) -> "PreconditionVerd
         return PreconditionVerdict(
             StepOutcome.WOULD_GATE,
             detail=f"{actionable[0]} pending/in_progress queue row(s) — not drained",
-            remediation="run 'nx aspects drain' or call drain_worker(timeout=30), then re-run nx upgrade",
+            remediation="apply_pending attempts drain_worker(timeout=30) first; run 'nx aspects drain' if it persists",
+            informational=True,
         )
     orphans = _predict_orphan_collections_readonly(
         conn, table="aspect_extraction_queue", catalog_db_path=catalog_path
@@ -2248,7 +2289,7 @@ def _read_only_stored_version(conn: sqlite3.Connection) -> str:
 
 
 def resolve_pending_steps(
-    conn: sqlite3.Connection, current_version: str
+    conn: sqlite3.Connection, current_version: str, *, last_seen: str | None = None
 ) -> "list[StepResolution]":
     """READ-ONLY report of which pending migration steps would succeed/defer/gate.
 
@@ -2268,12 +2309,15 @@ def resolve_pending_steps(
 
     ``current_version`` does NOT cap the eligible set (RDR-170 made the upper
     bound vacuous); it is accepted for signature stability with ``apply_pending``
-    and possible future use. On an uninitialised DB (no ``_nexus_version``),
-    ``last_seen`` reads ``0.0.0`` so every registered step reports as pending —
-    the same set ``apply_pending`` would attempt.
+    and possible future use. ``last_seen`` overrides the stored version when the
+    caller already knows it (e.g. ``nx upgrade --force`` resets it to ``0.0.0``
+    to preview a full re-migration); when ``None`` it is read READ-ONLY from
+    ``_nexus_version`` (defaulting to ``0.0.0`` on an uninitialised DB, so every
+    registered step reports as pending — the set ``apply_pending`` would attempt).
     """
     _ = current_version  # intentionally not used for gating (see docstring)
-    last_seen_t = _parse_version(_read_only_stored_version(conn))
+    effective = last_seen if last_seen is not None else _read_only_stored_version(conn)
+    last_seen_t = _parse_version(effective)
     out: list[StepResolution] = []
     for m in MIGRATIONS:
         if _parse_version(m.introduced) > last_seen_t:
@@ -2289,6 +2333,54 @@ def resolve_pending_steps(
                     outcome=verdict.outcome,
                     detail=verdict.detail,
                     remediation=verdict.remediation,
+                    informational=verdict.informational,
+                    eligible=True,
+                )
+            )
+    return out
+
+
+def resolve_blocking_steps(
+    conn: sqlite3.Connection, current_version: str, *, last_seen: str | None = None
+) -> "list[StepResolution]":
+    """READ-ONLY report for ``nx upgrade --dry-run`` (RDR-142 P2.1): the
+    version-eligible steps (:func:`resolve_pending_steps`) PLUS any
+    precondition-bearing step that is NOT version-eligible but whose read-only
+    precondition still reports would-defer / would-gate.
+
+    The second set is the table-state safety the pre-resolver
+    ``_check_deferred_migrations`` stopgap provided: a defer/gate step whose
+    table is in an incomplete state (legacy PK, high-volume orphans, undrained
+    queue, ``source_path`` still present) even though the version row has
+    advanced past it. Such a step is not re-run by ``apply_pending``'s
+    version-gated loop, but it signals genuine incomplete migration work the
+    operator must see — so dry-run coverage never regresses below the stopgap.
+
+    Best-effort on the supplementary probe: a precondition that cannot evaluate
+    against an unusual / partial schema is skipped rather than crashing the
+    read-only dry-run.
+    """
+    eligible = resolve_pending_steps(conn, current_version, last_seen=last_seen)
+    seen = {s.name for s in eligible}
+    out = list(eligible)
+    for m in MIGRATIONS:
+        if m.precondition is None or m.name in seen:
+            continue
+        try:
+            verdict = m.precondition(conn)
+        except Exception as exc:  # noqa: BLE001 — supplementary state probe is best-effort; a precondition that cannot evaluate on a partial schema is skipped, not fatal to the read-only dry-run
+            _log.debug("resolve_blocking_state_probe_skipped", name=m.name, error=str(exc))
+            continue
+        if verdict.outcome != StepOutcome.WOULD_SUCCEED:
+            out.append(
+                StepResolution(
+                    name=m.name,
+                    introduced=m.introduced,
+                    outcome=verdict.outcome,
+                    detail=verdict.detail,
+                    remediation=verdict.remediation,
+                    informational=verdict.informational,
+                    eligible=False,  # version gate passed → runtime impact, not a next-start crash
                 )
             )
     return out
