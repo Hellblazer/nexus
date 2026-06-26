@@ -147,6 +147,17 @@ def _make_supervisor(
 class TestStorageServiceSupervisorUnit:
     """Unit tests for the supervisor, mocking out real pg/jar spawning."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_service_token_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nexus-zr9rv: these tests assert the supervisor resolves
+        ``NX_SERVICE_TOKEN`` from the ``creds`` dict, but
+        ``_resolve_service_token`` takes the ENV var over creds. Several
+        ``tests/db/`` tests set ``os.environ["NX_SERVICE_TOKEN"]`` directly;
+        when one runs earlier in the same process the leaked env value wins
+        over the test's creds and the assertion fails. Clear the env so the
+        creds path is exercised deterministically regardless of ordering."""
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+
     def test_publish_only_after_ready(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
