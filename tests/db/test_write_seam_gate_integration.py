@@ -291,8 +291,8 @@ def local_service(pg_instance: dict):
 # ── Integration tests ─────────────────────────────────────────────────────────
 
 
-# Collection uses minilm-l6-v2-384 (the ONNX local embedder) — same as seam_b.
-_COLLECTION = "knowledge__seam-gate-dedup__minilm-l6-v2-384__v1"
+# Collection uses bge-base-en-v15-768 (the ONNX local embedder) — same as seam_b.
+_COLLECTION = "knowledge__seam-gate-dedup__bge-base-en-v15-768__v1"
 
 
 def _make_chunks(n: int, prefix: str = "chunk") -> tuple[list[str], list[str]]:
@@ -384,7 +384,7 @@ def test_duplicate_chash_dedup_collapse(
     assert len(dup_ids) == 50
     assert len(set(dup_ids)) == 10
 
-    coll = "knowledge__seam-gate-dedup2__minilm-l6-v2-384__v1"
+    coll = "knowledge__seam-gate-dedup2__bge-base-en-v15-768__v1"
 
     # Server must not error on duplicate chash ids in one batch
     client.upsert_chunks(coll, dup_ids, dup_docs)
@@ -422,7 +422,7 @@ def test_on_conflict_idempotency(
     reset_http_vector_client_for_tests()
 
     client = get_http_vector_client()
-    coll = "knowledge__seam-gate-conflict__minilm-l6-v2-384__v1"
+    coll = "knowledge__seam-gate-conflict__bge-base-en-v15-768__v1"
 
     # First upsert
     ids, docs = _make_chunks(5, prefix="conflict_gate")
@@ -499,7 +499,7 @@ def test_nul_bytes_sanitized_server_side(
     reset_http_vector_client_for_tests()
 
     client = get_http_vector_client()
-    coll = "knowledge__seam-gate-nul__minilm-l6-v2-384__v1"
+    coll = "knowledge__seam-gate-nul__bge-base-en-v15-768__v1"
 
     nul_text = "seam_gate_nul\x00\x00payload\x00tail"
     clean_text = "seam_gate_nulpayloadtail"

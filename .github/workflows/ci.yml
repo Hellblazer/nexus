@@ -627,6 +627,35 @@ jobs:
         working-directory: service
         run: ./mvnw -q package -DskipTests
 
+      - name: Cache bge-768 ONNX model
+        # nexus-h29w1: the JAR boots its local ONNX embedder at startup
+        # (RDR-160 = bge-768). Without the model the service never finishes
+        # booting and never binds its port → the gate timed out ("port not
+        # reachable after 90s"). service-ci.yml + engine-release.yml provision
+        # this same model; the write-seam gate must too. STABLE key (immutable
+        # upstream export) — one cold download, restored thereafter.
+        if: steps.changes.outputs.seam == 'true'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: ~/.cache/nexus/onnx_models/bge-base-en-v1.5
+          key: bge-onnx-standard-${{ runner.os }}-v1
+
+      - name: Prime bge-768 ONNX on cache miss
+        if: steps.changes.outputs.seam == 'true'
+        run: |
+          MODEL_DIR="$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx"
+          if [ ! -f "$MODEL_DIR/model.onnx" ]; then
+            echo "bge ONNX not in cache; downloading the standard fp32 export (~416MB)."
+            mkdir -p "$MODEL_DIR"
+            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx \
+              -o "$MODEL_DIR/model.onnx"
+            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json \
+              -o "$MODEL_DIR/tokenizer.json"
+            test -f "$MODEL_DIR/model.onnx" || { echo "bge model.onnx missing after download"; exit 1; }
+          else
+            echo "bge ONNX restored from cache."
+          fi
+
       - name: Run write-seam gate (>300-record, dup-chash, ON CONFLICT, NUL-sanitize)
         if: steps.changes.outputs.seam == 'true'
         env:
