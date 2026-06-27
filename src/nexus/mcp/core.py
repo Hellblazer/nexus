@@ -2060,12 +2060,25 @@ def store_put(
         # store_put is `def`, not `async def`, so no await/to_thread).
         # content is the full document text already in scope; pass it
         # through literally per the P0.1 content-sourcing contract.
-        # source_path is doc_id here — there is no on-disk file at the
-        # MCP boundary, so the doc_id serves as the stable identifier
-        # the hook uses for failure attribution.
-        # nexus-tdgc: forward doc_id explicitly so the aspect-queue
-        # hook can store it on the queue row alongside source_path.
-        _hooks.fire_document(doc_id, col_name, content, doc_id=doc_id)
+        # source_path (1st positional) is the chunk natural-id here — there
+        # is no on-disk file at the MCP boundary, so it serves as the stable
+        # per-doc queue key + the identifier the hook uses for failure
+        # attribution. It is NOT foreign-keyed (RDR-156 fk-001: aspect_
+        # extraction_queue.source_path is a storage path, not a tumbler).
+        # nexus-tdgc: forward an explicit doc_id so the aspect-queue hook can
+        # stamp it on the queue row.
+        # RDR-172 / nexus-pyn35 (closes nexus-ov0sw): the queue row's doc_id
+        # carries a composite FK -> catalog_documents(tumbler) (RDR-156
+        # fk-001), so it MUST be the catalog tumbler (catalog_doc_id), NOT
+        # the t3.put chunk natural-id (sha256(content)[:32]) — a chunk hash
+        # is never a tumbler and 500s the service enqueue, which the best-
+        # effort hook then swallows (silent, total loss of RDR-089 aspects in
+        # service mode). When no tumbler was minted, catalog_doc_id is '' —
+        # the blank sentinel the service NULL-coerces (nullIfBlank), which
+        # satisfies the FK and still extracts from the queued content. This
+        # matches every other fire_document caller (doc_indexer, pipeline_
+        # stages, code_indexer, prose_indexer), which all pass catalog_doc_id.
+        _hooks.fire_document(doc_id, col_name, content, doc_id=catalog_doc_id)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.
