@@ -107,6 +107,84 @@ instead of producing a soft orphan.
   through the MCP. It currently carries a documented gap note for `document_aspects = 0`;
   this RDR converts that into an assertion.
 
+## Research Findings
+
+All findings below are **Verified** against the codebase at develop tip (2026-06-27) unless
+marked Assumed. Recorded in T2 `nexus_rdr/172-research-*`.
+
+### RF-1 (Verified): `store_put` is the *only* `fire_document` caller passing the T3 chunk id
+
+Every other caller already passes the catalog tumbler (`catalog_doc_id`):
+`src/nexus/doc_indexer.py:746` (`doc_id=_catalog_doc_id_for_batch`),
+`src/nexus/pipeline_stages.py:858` (`doc_id=_lookup_existing_doc_id(...)`),
+`src/nexus/code_indexer.py:509` (`doc_id=catalog_doc_id`),
+`src/nexus/prose_indexer.py:266` (`doc_id=catalog_doc_id`). Only
+`src/nexus/mcp/core.py:2068` passes `doc_id=doc_id`, where `doc_id = t3.put(...)` returns
+the chunk natural-id (`chunk_chroma_id = sha256(content)[:32]`, core.py ~1995), **not** the
+tumbler. **Impact:** the client fix (Approach 3) is a one-line consistency repair to a
+convention already proven at four call sites — the lowest-risk, primary fix.
+
+### RF-2 (Verified): the FK is composite `(tenant_id, doc_id) → catalog_documents(tenant_id, tumbler)`, and NULL satisfies it
+
+`fk-001-catalog-cross-store.xml` (RDR-156, nexus-b7v6i): `aspect_extraction_queue
+(tenant_id, doc_id) → catalog_documents(tenant_id, tumbler)` ON DELETE CASCADE. The column
+was converted from `DEFAULT ''` to nullable; "NULL doc_id satisfies the FK; only non-NULL
+values are checked." A non-NULL, non-tumbler value (the chunk hash) raises SQLSTATE 23503.
+**Impact:** confirms both the failure mechanism and that NULL-coercion is a valid escape.
+
+### RF-3 (Verified): the server *already* NULL-coerces blank `doc_id` — that is why the CLI path works
+
+`AspectRepository.enqueue` writes `nullIfBlank((String) body.get("doc_id"))`
+(`service/.../AspectRepository.java:230`; same at lines 500/715/1070 for the other insert
+paths; `nullIfBlank` defined at :1522). The CLI ingest path passes `doc_id=''` → coerced to
+NULL → FK satisfied. `store_put` passes a non-blank chunk hash → not coerced, non-NULL,
+non-tumbler → FK violation. **Impact:** Approach 2 is a narrow extension of existing
+behavior — "NULL if blank **or not a registered tumbler**" — the runtime mirror of the
+migration's one-time orphan-nullify pre-flight (fk-001 Step 2).
+
+### RF-4 (Verified): the worker tolerates NULL/empty `doc_id` — NULL-coercion is extraction-safe
+
+`src/nexus/aspect_worker.py:574`: `queued_doc_id = getattr(row, "doc_id", "") or ""`; an
+empty `doc_id` passes through and the `doc_id_lookup` falls back to the document text carried
+on the queue row (RDR-089 P0.1 content-sourcing contract). **Impact:** Approach 2 causes no
+extraction regression; a NULL-`doc_id` row still extracts from row content.
+
+### RF-5 (Verified): `AspectHandler` bare-500s any non-`IllegalArgumentException`
+
+`service/.../AspectHandler.java`: only `IllegalArgumentException → 400`; every other
+`Exception → 500` with `e.getMessage()`. A constraint violation is therefore an unhandled
+500. **Impact:** Approach 1 (map SQLSTATE class 23 → 4xx) is correct server hygiene; it ships
+only in a fresh `engine-service` cut (two-lifecycle release rule).
+
+### RF-6 (Verified): telemetry infra exists for the tripwire; `--fullstack` already has psql
+
+Telemetry stores exist (`src/nexus/db/t2/telemetry.py`, `http_telemetry_store.py`,
+`telemetry_etl.py`), so a counter-based CI tripwire on `aspect_extraction_enqueue_failed`
+(Approach 4) needs no new infra. `--fullstack` (`rehearse_fullstack.sh`) already runs psql
+against the service, so the `document_aspects > 0` assertion (Approach 5) is a one-line add.
+
+### RF-7 (Assumed → risk): without the loudness arm, the class silently recurs
+
+The failure is observable today only as a `log.warning("aspect_extraction_enqueue_failed")`
+inside the best-effort `try/except` (`aspect_worker.py` hook). No counter, no test gate.
+**Risk:** a client-only fix leaves the next field-level constraint change free to recur the
+same silent-total failure. **Assessment:** the loudness arm (Approach 4/5) is the recurrence
+guard, not optional polish — this is the explicit lesson of the RDR-142/3lbhb fail-closed
+class. Classified Assumed because "a future constraint change will reintroduce silence" is a
+forward-looking risk, not a present-state fact; the mitigation cost is low (one counter, two
+assertions) and the downside of omission is another invisible total outage.
+
+### Net effect on the Approach
+
+The findings **strengthen and re-rank** the three surfaces rather than change them:
+- **Approach 3 (client) is the primary, lowest-risk fix** — make `store_put` match the
+  convention already used everywhere else (RF-1).
+- **Approach 2 (server NULL-coercion) is a narrow extension of `nullIfBlank`** and is
+  worker-safe (RF-3, RF-4) — defense-in-depth for any future mis-identifying caller.
+- **Approach 1 (SQLSTATE → 4xx)** is server hygiene gated on an engine cut (RF-5).
+- **Approach 4/5 (loudness)** are feasible with existing infra and are the recurrence guard
+  (RF-6, RF-7).
+
 ## Decision
 
 Fix the failure on all three surfaces it touches, because each alone is insufficient: a
