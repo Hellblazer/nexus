@@ -150,6 +150,29 @@ def _seed_t2_and_catalog(collections: dict[str, list[str]]) -> dict[str, int]:
     owner = cat.register_owner(
         "rehearsal", "project", repo_hash="rehearsal01", repo_root=repo_root,
     )
+
+    # nexus-qeoxf: register EVERY seeded collection in catalog_collections
+    # (RDR-103, the collection-name authority), mirroring a real pre-cutover
+    # install. The cross-model migrate's reference cascade renames the collection
+    # via POST /v1/catalog/collections/rename, which the service 404s when the
+    # source is absent from catalog_collections (handleCollectionRename ->
+    # repo.collectionExists == false). A real RDR-103 user HAS these rows (the
+    # catalog ETL migrates the `collections` table), so the rehearsal must seed
+    # them too — else it injects a spurious non-fatal cascade 404 that does not
+    # occur in production. Includes _NOTE: sourceless as a DOCUMENT, but still a
+    # registered COLLECTION. Names are conformant 4-segment
+    # (<content_type>__<owner>__<model>__v<n>); supply the segments so they
+    # round-trip exactly.
+    for coll in collections:
+        seg = coll.split("__")
+        cat.register_collection(
+            coll,
+            content_type=seg[0],
+            owner_id=seg[1],
+            embedding_model=seg[2],
+            model_version=seg[3],
+        )
+
     docs = 0
     for coll, chashes in collections.items():
         # _NOTE is the SOURCELESS case: no catalog file document, only the
