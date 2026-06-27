@@ -60,8 +60,12 @@ MCPJSON
 #    nx_answer) so the post-store hook enqueues aspects and several tools fire.
 MARK="fsmark$$"
 prompt="You have the nexus MCP server; use ONLY its tools (names start mcp__nexus__). Do ALL of:
-1. store_put four knowledge notes (collection 'knowledge'), ONE call each, unique titles:
-   a) 'Widgets are small mechanical parts. $MARK widget assembly note.'
+1. store_put four knowledge notes (collection 'knowledge'), ONE call each, unique titles.
+   Doc (a) MUST be a PAPER-SHAPED research fragment (RDR-172 P2.2 / RDR-145 Gap-3:
+   knowledge__ stays in-surface via shape-aware routing; a paper shape routes to
+   scholarly-paper-v1 and yields a populated document_aspects row — the non-vacuous
+   positive signal). Keep them verbatim:
+   a) 'We propose a widget-assembly index. In this paper we present a method for mechanical-part retrieval, evaluated against the prior approach of Gear et al. (2021). $MARK widget paper fragment.'
    b) 'Sprockets mesh with chains to transfer torque. $MARK sprocket note.'
    c) 'Gadgets combine widgets and sprockets into devices. $MARK gadget note.'
    d) 'Retrieval ranks documents by semantic similarity. $MARK retrieval note.'
@@ -77,55 +81,73 @@ printf '%s' "$wlout" | grep -q "WORKLOADDONE" && ok "MCP workload completed (cla
 # 3b. Did store_put REALLY execute? (disambiguates 'claude didn't call the tool /
 #     MCP didn't connect' from 'tool ran but hook didn't enqueue'.)
 sleep 3
-if nx collection list 2>/dev/null | grep -qi "knowledge"; then ok "store_put materialized a knowledge collection (MCP tools really executed)"
-else bad "no knowledge collection — claude did NOT actually call store_put (MCP connect / allowedTools issue)"; note "$(nx collection list 2>&1 | head -3 | tr '\n' ' ')"; fi
+if nx collection list 2>/dev/null | grep -qi "knowledge"; then ok "store_put materialized a knowledge collection (MCP tools really executed)"; STORED_OK=1
+else bad "no knowledge collection — claude did NOT actually call store_put (MCP connect / allowedTools issue)"; note "$(nx collection list 2>&1 | head -3 | tr '\n' ' ')"; STORED_OK=0; fi
 
 # 3c. nx_answer produced a grounded composed answer (from the workload).
 printf '%s' "$wlout" | grep -qiE "widget|sprocket|gadget" && ok "nx_answer (MCP) returned a grounded composed answer" || note "nx_answer answer not evident in workload output"
 
-# 4-6. ASPECT PIPELINE IN SERVICE MODE — FINDING (documented, not faked green).
-# store_put of plain knowledge notes does NOT enqueue aspects: by design there is
-# no extractor for ad-hoc knowledge notes (aspect extraction targets prose /
-# scholarly / RDR document SHAPES via _classify_document_shape), and the worker
-# lazy-spawns on a HOOK enqueue. So the natural enqueue→worker-drain→extraction
-# path is not exercised by an MCP knowledge store, and forcing it via a psql seed
-# would test uncertain worker-lazy-spawn / service-queue-routing mechanics. Whether
-# service-mode aspect extraction is fully wired end-to-end is a SEPARATE focused-
-# investigation gap — recorded in T2 nexus/6.0.0-plugin-surface-coverage-gap, NOT
-# asserted/faked here.
-# store_put fires the post-document hook (core.py:830) and knowledge__* IS
-# extractor-eligible (select_config → scholarly-paper-v1), so store_put SHOULD
-# enqueue + the lazy-spawned worker drains it IN the MCP process during the
-# session. Assert the END STATE (document_aspects), not the transient queue.
-sleep 12
+# 4-6. ASPECT PIPELINE IN SERVICE MODE — POSITIVE END-TO-END ASSERTION.
+# RF-9 (RDR-172) corrects the prior stale comment here: store_put of a knowledge__
+# note DOES enqueue aspects. store_put fires the post-document hook (mcp/core.py)
+# and knowledge__* IS extractor-eligible — select_config → scholarly-paper-v1, then
+# per-document shape routing (RDR-145 Gap-3 / nexus-kmbys): a PAPER-shaped doc (the
+# workload's doc (a)) extracts via scholarly-paper-v1, prose via general-prose-v1.
+# So store_put enqueues and the lazy-spawned worker drains it IN the MCP process
+# during the session. Assert the END STATE (document_aspects > 0) as a HARD failure,
+# not a soft note — guarded by the non-vacuity check that store_put actually landed
+# the document (the knowledge-collection assertion above).
+#
+# LIFECYCLE CAVEAT (P2.1 review): the worker is a daemon thread inside nx-mcp; when
+# claude -p exits it tears down nx-mcp and the worker dies WITHOUT a join. So the
+# extraction must complete BEFORE claude -p returns — this post-process poll only
+# absorbs PG read-visibility lag, it canNOT extend the drain window. A hard FAIL
+# here therefore means the in-session drain did not complete (the worker-lifecycle
+# question the prior soft-note dodged) — that is exactly the silent-loss class this
+# RDR makes loud, so it SHOULD fail rather than be excused. P2.5 (nexus-8zog5)
+# characterises whether the in-session drain is reliable on the real container; if
+# it is not, that is a NEW bug to file, not a reason to soften this gate.
+for _ in $(seq 1 12); do
+  asp="$(q "select count(*) from nexus.document_aspects")"
+  [ "${asp:-0}" -gt 0 ] 2>/dev/null && break
+  sleep 3
+done
 enq="$(q "select count(*) from nexus.aspect_extraction_queue")"
 pend="$(q "select count(*) from nexus.aspect_extraction_queue where status in ('pending','in_progress')")"
-asp="$(q "select count(*) from nexus.document_aspects")"
 note "post-workload: aspect_queue total=${enq:-?} pending=${pend:-?}; document_aspects=${asp:-?}"
 # RDR-172 P2.1 (nexus-hlkvj): enqueue-failure tripwire — the ingest E2E must
 # complete with ZERO swallowed aspect-enqueue failures. The hook persists a
 # hook_failures row on its best-effort swallow (the nexus-ov0sw silent-total-
 # failure class); a non-zero count here means an enqueue silently failed.
 # NOTE: this gate is only NON-VACUOUS if the workload above actually drives
-# store_put through aspect_extraction_enqueue_hook in service mode. That the
-# path is exercised is verified by P2.5 (nexus-8zog5, post-fix --fullstack
-# real-validation run); P2.2 (nexus-jr84c) reconciles the stale comment at the
-# top of this block. Until P2.5 confirms, treat a green assert-zero as
-# necessary-but-not-sufficient.
+# store_put through aspect_extraction_enqueue_hook in service mode. The workload
+# now stores a paper-shaped knowledge doc (P2.2) so the path IS exercised; final
+# liveness is confirmed by P2.5 (nexus-8zog5, post-fix --fullstack real run).
+# Until P2.5 confirms, treat a green assert-zero as necessary-but-not-sufficient.
 enqfail="$(q "select count(*) from nexus.hook_failures where hook_name='aspect_extraction_enqueue_hook'")"
 if [ "${enqfail:-0}" -eq 0 ] 2>/dev/null; then ok "enqueue-failure tripwire: 0 swallowed aspect-enqueue failures"
 else bad "enqueue-failure tripwire FIRED: ${enqfail} swallowed aspect_extraction_enqueue_hook failure(s) — silent-loss class recurred (RF-7)"; fi
+# RDR-172 P2.2 (nexus-jr84c): HARD positive assertion. document_aspects MUST be
+# populated when store_put landed a (paper-shaped) knowledge doc — the END-TO-END
+# proof that store_put → enqueue → worker → document_aspects actually completes in
+# service mode (closes Gap 2, half). Non-vacuity guard: only a hard FAIL when
+# store_put demonstrably landed (STORED_OK); if it never landed, that miss is
+# already a `bad` above and this would be vacuous.
 if [ "${asp:-0}" -gt 0 ] 2>/dev/null; then
   ok "SERVICE-MODE aspect pipeline works END-TO-END: store_put → enqueue → worker → document_aspects (${asp} rows, real extraction)"
-elif [ "${enq:-0}" -gt 0 ] 2>/dev/null; then
-  note "FINDING: aspects ENQUEUED (${enq}) but document_aspects=0 — worker did not drain in-session (worker-lifecycle gap → investigate/file)"
+elif [ "${STORED_OK:-0}" -eq 1 ] 2>/dev/null; then
+  if [ "${enq:-0}" -gt 0 ] 2>/dev/null; then
+    bad "SERVICE-MODE aspect pipeline BROKEN: enqueued=${enq} (pending=${pend:-?}) but document_aspects=0 — worker did not drain in-session before nx-mcp teardown (worker-lifecycle; Approach 5 / P2.2)"
+  else
+    bad "SERVICE-MODE aspect pipeline BROKEN: store_put landed but enqueued=0 AND document_aspects=0 — hook did not enqueue (the silent-loss class; Approach 5 / P2.2)"
+  fi
 else
-  note "FINDING: store_put enqueued 0 — store_put may not fire the document hook in service mode (→ investigate/file)"
+  note "document_aspects=0 but store_put did not land (already failed above) — positive assertion vacuous this run"
 fi
 
 # 8. Service healthy after the full-stack run.
 nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|running" && ok "service healthy after full-stack run" || bad "service unhealthy"
 
 say "RESULT"
-if [ "$FAILS" -eq 0 ]; then printf '\033[32mFULL-STACK SHAKEOUT PASSED\033[0m — full topology: service + claude auth + MCP tools (store_put/search/nx_answer) end-to-end vs the 6.0.0 service (aspect-pipeline drain = documented gap)\n'; exit 0
+if [ "$FAILS" -eq 0 ]; then printf '\033[32mFULL-STACK SHAKEOUT PASSED\033[0m — full topology: service + claude auth + MCP tools (store_put/search/nx_answer) end-to-end vs the 6.0.0 service (aspect-pipeline drain ASSERTED: document_aspects>0 + zero enqueue-failure tripwire; real-container liveness confirmed by P2.5 nexus-8zog5)\n'; exit 0
 else printf '\033[31mFULL-STACK SHAKEOUT FAILED — %d check(s)\033[0m\n' "$FAILS"; exit 1; fi
