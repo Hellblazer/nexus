@@ -1442,3 +1442,100 @@ class TestDocumentShapeClassifier:
         assert rec.extractor_name == "general-prose-v1"
         assert rec.experimental_datasets == []
         assert rec.experimental_baselines == []
+
+
+class TestGap3KnowledgeNoteRouting:
+    """RDR-145 Phase 1 (P1.1, nexus-3g0l4): regression test pinning the
+    shipped nexus-kmbys shape-aware routing for the ``knowledge__knowledge``
+    collection — the exact locus of the aspect-orphan bug (nexus-pfzgb).
+
+    MCP-stored notes (``store_put`` with no explicit collection) land in
+    ``knowledge__knowledge``. Before nexus-kmbys these prose notes routed to
+    ``scholarly-paper-v1``, whose prompt invites the model to invent
+    datasets/baselines/venue — the fabrication this fix removed. These tests
+    are the machine-checkable form of "non-fabricated": a representative note
+    must route to ``general-prose-v1`` (NOT ``scholarly-paper-v1``) and the
+    resulting aspect must carry empty experimental fields.
+
+    Note: ``general-prose-v1`` enforces non-fabrication via *routing* (its
+    prose prompt declares datasets/baselines ALWAYS ``[]``), not by stripping
+    values in ``_build_record`` — so the discriminating, non-vacuous assertion
+    is the routing decision plus the prose prompt being the one invoked.
+    """
+
+    #: A representative MCP-stored knowledge note: prose, no paper structure.
+    _NOTE = (
+        "# Session note: plan-match thresholds\n\n"
+        "We settled on a 0.40 confidence floor for the plan-match gate. "
+        "This is a working note captured during a session, not a published "
+        "result. It records a decision, nothing more.\n"
+    )
+
+    def test_knowledge_note_routes_to_general_prose(self):
+        """``knowledge__knowledge`` prose note resolves to general-prose-v1,
+        never scholarly-paper-v1 (the fabricating extractor)."""
+        from nexus.aspect_extractor import (
+            _GENERAL_PROSE_CONFIG,
+            _SCHOLARLY_PAPER_CONFIG,
+            _resolve_config_for_document,
+            select_config,
+        )
+
+        base = select_config("knowledge__knowledge")
+        assert base is _SCHOLARLY_PAPER_CONFIG  # prefix selection unchanged
+        chosen = _resolve_config_for_document(
+            "knowledge__knowledge", self._NOTE, base,
+        )
+        assert chosen is _GENERAL_PROSE_CONFIG
+        assert chosen is not _SCHOLARLY_PAPER_CONFIG
+
+    def test_general_prose_config_does_not_require_experimental_fields(self):
+        """Schema contract: general-prose-v1 requires ONLY the two prose
+        fields, so a prose note never spuriously null-fields for missing
+        datasets/baselines/results."""
+        from nexus.aspect_extractor import _GENERAL_PROSE_CONFIG
+
+        assert _GENERAL_PROSE_CONFIG.required_fields == (
+            "problem_formulation",
+            "proposed_method",
+        )
+        assert "experimental_datasets" not in _GENERAL_PROSE_CONFIG.required_fields
+        assert "experimental_baselines" not in _GENERAL_PROSE_CONFIG.required_fields
+        assert "experimental_results" not in _GENERAL_PROSE_CONFIG.required_fields
+
+    def test_knowledge_note_aspect_has_empty_experimental_fields(self, monkeypatch):
+        """End-to-end: a ``knowledge__knowledge`` note runs through the
+        general-prose prompt and the row carries empty experimental fields.
+
+        Non-vacuity: the fixture ASSERTS the prose prompt was invoked (the
+        prompt that instructs datasets/baselines ``[]``) before returning the
+        prose-contract payload — so the empty fields are tied to the routing
+        under test, not merely echoed."""
+        import subprocess as _sp
+        from nexus.aspect_extractor import extract_aspects
+
+        def fake_run(args, **kwargs):
+            prompt = kwargs.get("input", "")
+            assert "NOT a" in prompt and "scholarly paper" in prompt, (
+                "knowledge__knowledge prose note must use the general-prose prompt"
+            )
+            return _make_completed(_wrap_inner(json.dumps({
+                "problem_formulation": "What confidence floor for plan-match",
+                "proposed_method": "Use a 0.40 floor",
+                "experimental_datasets": [],
+                "experimental_baselines": [],
+                "experimental_results": "",
+                "extras": {},
+                "confidence": 0.6,
+            })))
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        rec = extract_aspects(
+            content=self._NOTE, source_path="my-note",
+            collection="knowledge__knowledge",
+        )
+        assert rec is not None
+        assert rec.extractor_name == "general-prose-v1"
+        assert rec.experimental_datasets == []
+        assert rec.experimental_baselines == []
+        assert rec.experimental_results in ("", None)
