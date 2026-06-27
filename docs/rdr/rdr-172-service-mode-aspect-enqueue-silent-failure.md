@@ -174,16 +174,52 @@ class. Classified Assumed because "a future constraint change will reintroduce s
 forward-looking risk, not a present-state fact; the mitigation cost is low (one counter, two
 assertions) and the downside of omission is another invisible total outage.
 
+### RF-8 (Verified): the catalog write is committed before the enqueue runs — no visibility race behind the identity bug
+
+A natural second failure mode (raised at gate Layer 3): `store_put` issues `catalog_store_hook`
+and the enqueue as **separate HTTP round-trips**; even a correct `catalog_doc_id` would 500
+if the catalog row were not yet visible to the enqueue's PG session. This is **ruled out**
+under the supported topology: `service/.../db/TenantScope.java` runs every unit of work with
+`autoCommit=false` inside a transaction and **eager-commits before returning the connection
+to the pool** (`:25-31`, `:76`); Postgres default `synchronous_commit=on` makes that commit
+durable before the HTTP 200 returns; both stores use connections to the **same PG server**
+(`:105`), and the enqueue runs in a later READ COMMITTED txn that sees the committed parent
+row. The design mandates a transaction-mode pooler (`:35-38`); a session-mode pooler or
+`synchronous_commit=off` would reopen the window, which is out of scope here. **Impact:** the
+identity mismatch (RF-1) is the *sole* cause; the fix does not need a distributed transaction
+or retry for correctness. It also means a non-blank-unregistered `doc_id` at runtime can only
+come from a **client bug**, not a race — see the revised Decision §1.
+
+### RF-9 (Verified): `store_put` of a `knowledge__` note *does* reach the enqueue; the `--fullstack` harness comment is stale
+
+The enqueue hook's only gate is `select_config(collection) is None`
+(`aspect_worker.py`); `select_config("knowledge__…")` returns `_SCHOLARLY_PAPER_CONFIG`
+(non-None — `aspect_extractor.py:353` registers the `knowledge__` prefix). There is **no**
+`_classify_document_shape` gate in the hook — shape routing happens worker-side, *after*
+claim, when choosing the per-document extractor. So `store_put` of a `knowledge__` note
+reaches the enqueue and 500s; the empty queue is the swallowed failure, not a by-design skip.
+The current `rehearse_fullstack.sh` comment ("store_put of plain knowledge notes does NOT
+enqueue aspects: by design") is a **stale pre-root-cause misexplanation** and must be
+corrected. **Impact on Approach 5:** `document_aspects > 0` is only a non-vacuous assertion
+if the workload produces *extractable* aspects — note-shaped content can route to a
+low/empty extraction worker-side. Approach 5 must therefore drive a **paper-shaped** document
+(not a one-line note) and the assertion is validated post-fix by an actual `--fullstack` run,
+not asserted in advance.
+
 ### Net effect on the Approach
 
-The findings **strengthen and re-rank** the three surfaces rather than change them:
+The findings **re-rank and tighten** the surfaces:
 - **Approach 3 (client) is the primary, lowest-risk fix** — make `store_put` match the
-  convention already used everywhere else (RF-1).
-- **Approach 2 (server NULL-coercion) is a narrow extension of `nullIfBlank`** and is
-  worker-safe (RF-3, RF-4) — defense-in-depth for any future mis-identifying caller.
-- **Approach 1 (SQLSTATE → 4xx)** is server hygiene gated on an engine cut (RF-5).
-- **Approach 4/5 (loudness)** are feasible with existing infra and are the recurrence guard
-  (RF-6, RF-7).
+  convention already used at four call sites (RF-1); RF-8 confirms this fully closes the FK
+  failure (no residual race).
+- **Server NULL-coercion is scoped to BLANK only (the existing `nullIfBlank`, no change).**
+  A non-blank-unregistered `doc_id` is a client bug (RF-8), so the server must surface it
+  **loudly** as the typed 4xx (Approach 1) — *not* silently NULL it. Silent coercion of a
+  non-blank id would mask exactly the loud-fail class this RDR exists to fix (RDR-142).
+  (This revises the original Approach 2; see Decision.)
+- **Approach 1 (SQLSTATE → 4xx)** is the server's loud surface, gated on an engine cut (RF-5).
+- **Approach 4/5 (loudness)** are feasible with existing infra (RF-6) and are the recurrence
+  guard (RF-7); Approach 5's workload must be paper-shaped and post-fix-validated (RF-9).
 
 ## Decision
 
@@ -192,26 +228,28 @@ graceful server still drops aspects if the client sends a bad id; a correct clie
 leaves the server fragile to the next constraint; and both fixed silently is how the class
 recurs. Specifically:
 
-1. **Server — never bare-500 a constraint violation.** `AspectHandler` (and the shared
-   handler error path) maps Postgres integrity errors (SQLSTATE class 23) to a typed 4xx
-   with a structured body, distinct from genuine 5xx. Independently, `AspectRepository.enqueue`
-   **NULL-coerces an unregistered `doc_id`** (mirroring the existing `'' → NULL` pre-flight
-   contract) so a not-yet-registered document degrades to a queue row with `doc_id = NULL`
-   rather than hard-failing — the worker already tolerates NULL/empty `doc_id` (CLI path
-   passes `''`).
+1. **Server — never bare-500 a constraint violation; keep failures LOUD.** `AspectHandler`
+   (and the shared handler error path) maps Postgres integrity errors (SQLSTATE class 23) to
+   a typed 4xx with a structured body, distinct from genuine 5xx. The existing blank→NULL
+   coercion (`nullIfBlank`, for the legitimate "no catalog id" sentinel) stays. The server
+   does **not** silently NULL-coerce a *non-blank* unregistered `doc_id` — RF-8 shows such a
+   value can only be a client bug (there is no visibility race), so masking it would
+   reintroduce the silent-failure class this RDR exists to kill (RDR-142). It surfaces as the
+   typed 4xx, which the client's loudness counter (3) then catches.
 2. **Client — enqueue with the registered catalog identity.** `store_put` passes
    `catalog_doc_id` (the tumbler) to `fire_document`, not the `t3.put` chunk id; when no
-   catalog id was minted, it passes `doc_id=''` (the documented NULL-coercion sentinel)
-   rather than a chunk id that can never satisfy the FK.
+   catalog id was minted, it passes `doc_id=''` (the existing blank→NULL sentinel) rather than
+   a chunk id that can never satisfy the FK. RF-8 confirms this alone fully closes the FK
+   failure — no residual ordering/visibility race.
 3. **Loudness — make the swallow observable and tripwired.** Keep the enqueue best-effort
    (never block ingest), but (a) emit a counter/structured signal on
    `aspect_extraction_enqueue_failed` that CI asserts is zero across the ingest E2E, and
-   (b) have `--fullstack` assert `document_aspects > 0` after the MCP workload.
+   (b) have `--fullstack` assert `document_aspects > 0` after a **paper-shaped** MCP workload
+   (RF-9), as a hard `bad`/fail, not a soft note.
 
-The combination of server-side NULL-coercion (1) and the client identity fix (2) is
-belt-and-suspenders on purpose: either alone stops the 500, but Gap 3 means we want the
-*correct* identity on the row when one exists, and Gap 1 means we want the server robust to
-the next caller that gets identity wrong.
+The client identity fix (2) is the correctness fix; the server typed-4xx (1) and the loudness
+arm (3) are the recurrence guards — every arm keeps failures **loud**, none silently masks a
+mis-identified id.
 
 ## Approach
 
@@ -221,29 +259,45 @@ the next caller that gets identity wrong.
    `{"error": ..., "sqlstate": ...}`, ahead of the generic `Exception → 500`. Test:
    `AspectRepositoryTest`/handler test asserting a violating enqueue yields the typed 4xx,
    not 500. (Closes Gap 1, server half.)
-2. **Server: NULL-coerce unregistered `doc_id` in the enqueue insert.** In
-   `AspectRepository.enqueue`, before the INSERT, resolve `doc_id` against `catalog_documents`
-   (same tenant); if absent, write `NULL`. Mirror the `aspects-001`/`fk-001` `'' → NULL`
-   pre-flight contract. Test: enqueue with an unregistered `doc_id` lands a `pending` row with
-   `doc_id IS NULL` and returns 200. (Closes Gap 1, durable half.)
+2. **Server: keep blank→NULL; do not silently coerce a non-blank id.** Leave the existing
+   `nullIfBlank` (blank `doc_id` → NULL, the legitimate sentinel) unchanged. A *non-blank*
+   `doc_id` that fails the FK is a client bug (RF-8: no race) and must surface as the typed
+   4xx from step 1, not a silent NULL. Test: enqueue with `doc_id=''` lands a `pending` row
+   with `doc_id IS NULL` and 200 (unchanged); enqueue with a non-blank unregistered `doc_id`
+   returns the typed 4xx, never 500 and never a silent 200. (Reinforces Gap 1 + the loudness
+   thesis; replaces the original silent-NULL-coerce plan per gate Layer 3.)
 3. **Client: pass the catalog identity.** In `src/nexus/mcp/core.py` `store_put`, change the
-   `fire_document` call to forward `catalog_doc_id` when non-empty, else `''`. Audit the
-   non-MCP ingest callers of `fire_document` (`doc_indexer`, pipeline_stages) for the same
-   identity expectation. Test: a service-mode `store_put` enqueues a row whose `doc_id`
-   equals the registered tumbler. (Closes Gap 3.)
+   `fire_document` call to forward `catalog_doc_id` when non-empty, else `''`. No change to
+   the other `fire_document` callers — RF-1 verified all four already pass `catalog_doc_id`.
+   Test: a service-mode `store_put` enqueues a row whose `doc_id` equals the registered
+   tumbler (exact `==`, not just non-null). (Closes Gap 3; this is the correctness fix.)
 4. **Loudness: enqueue-failure tripwire.** Add a structured signal (telemetry counter or a
    well-known log event the E2E greps) on `aspect_extraction_enqueue_failed`. Wire a CI
-   assertion that the ingest E2E completes with zero such events. (Closes Gap 2, half.)
-5. **Loudness: `--fullstack` positive assertion.** In `rehearse_fullstack.sh`, after the MCP
-   workload, assert `SELECT count(*) FROM nexus.document_aspects WHERE tenant_id='default' > 0`
-   (with a non-vacuity guard that store_put actually ran). Replace the current documented-gap
-   note. (Closes Gap 2, half.)
-6. **Regression seam: end-to-end aspect round-trip test.** A service-mode test
-   (`store_put → enqueue → worker drain → document_aspects row`) using the stub extractor, so
-   the full chain is covered by a fast suite, not only the heavy `--fullstack` container.
+   assertion that the ingest E2E completes with zero such events. Verify the counter actually
+   increments on a forced failure (so the gate is non-vacuous). (Closes Gap 2, half.)
+5. **Loudness: `--fullstack` positive assertion + correct the stale comment.** Fix the stale
+   `rehearse_fullstack.sh` comment (RF-9: `knowledge__` *does* enqueue). Drive a **paper-shaped**
+   document through the MCP workload (a short research-paper fragment, not a one-line note),
+   then assert `SELECT count(*) FROM nexus.document_aspects WHERE tenant_id='default' > 0` as a
+   hard `bad`/`FAILS++` (not a soft `note`), guarded by a non-vacuity check that the store_put
+   actually landed the document. This assertion is **validated by a real post-fix `--fullstack`
+   run** before the RDR closes, not asserted in advance. (Closes Gap 2, half.)
+6. **Regression seam: service-mode round-trip test — vehicle specified.** Two layers, because
+   "fast" and "real service" trade off: (a) a fast in-process test that asserts `store_put`
+   forwards `catalog_doc_id` (not the chunk id) to the enqueue hook (mock/capture the hook
+   args — proves Gap 3 without a container); (b) the full `store_put → enqueue → worker drain →
+   document_aspects` chain lives in the `--fullstack` harness (same vehicle as step 5, with the
+   stub extractor on PATH). No new mock service is introduced.
 7. **Docs.** Update `src/nexus/mcp/AGENTS.md` / `docs/architecture.md` post-store hook
-   contract to state the enqueue identity is the catalog id and that unregistered ids
-   NULL-coerce; note the tripwire.
+   contract to state the enqueue identity is the catalog id (blank → NULL for the no-catalog
+   case; non-blank unregistered → typed 4xx, never silent); note the tripwire.
+
+**RDR-145 dependency.** RDR-145 Gap 3 (whether `knowledge__` collections belong on the aspect
+surface at all) is unresolved. If it resolves to "exclude `knowledge__`", Approach 5's
+paper-shaped workload must move to an explicitly extractor-eligible collection, and the
+exclusion must be reconciled with RF-9. This RDR fixes the *transport* failure (the 500 +
+swallow); RDR-145 owns the *policy* of which shapes get aspects. They do not overlap, but
+Approach 5's workload choice must track the RDR-145 Gap 3 decision.
 
 ## Consequences
 
@@ -253,8 +307,9 @@ the next caller that gets identity wrong.
   note-backed-identity work and any worker logic keyed on `doc_id`.
 - **Negative / cost.** Touches both the Java service and the Python client (coordinated
   change across the HTTP boundary — requires a fresh `engine-service` cut if the server arm
-  ships, per the two-lifecycle release rules). The NULL-coercion adds a per-enqueue
-  catalog lookup (one indexed point query; negligible, and only on the ingest path).
+  ships, per the two-lifecycle release rules). The client fix (step 3) alone is correctness-
+  complete (RF-8) and ships in a normal PyPI release; the server typed-4xx (step 1) is a
+  separate engine cut and can land independently.
 - **Neutral.** The best-effort contract is preserved — ingest still never blocks on enqueue;
   the only behavioral change is that failures are now loud and rare instead of silent and
   total.
@@ -267,6 +322,13 @@ the next caller that gets identity wrong.
 - **Server-only fix (NULL-coerce, leave client passing the chunk id).** Rejected: the queue
   row then always has `doc_id = NULL` even when a real catalog id exists, discarding the
   identity the worker and downstream FKs want (Gap 3 unaddressed).
+- **Server silently NULL-coerces *non-blank* unregistered ids (original Approach 2).**
+  Rejected at gate Layer 3: RF-8 shows a non-blank-unregistered id can only be a client bug
+  (no visibility race), so silently NULLing it would mask exactly the silent-failure class
+  this RDR exists to kill (RDR-142). The server surfaces it loudly as a typed 4xx instead.
+- **Distributed transaction / retry-on-FK between catalog write and enqueue.** Rejected as
+  unnecessary: RF-8 rules out the visibility race (eager-commit before HTTP return,
+  `synchronous_commit=on`, same PG server), so the correct id always satisfies the FK.
 - **Drop the `doc_id → catalog_documents` FK.** Rejected: the FK is deliberate RDR-156
   schema-enforced integrity; removing it trades a loud, fixable failure for silent orphans
   (the pre-RDR-156 state RDR-145 was filed against).
