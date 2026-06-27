@@ -9,6 +9,21 @@ Follow every step in order. Do not skip or reorder. Authority: CLAUDE.md § Rele
 
 ## Steps
 
+### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
+
+The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release PINS one engine tag — `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, Step 3) plus the `REQUIRED_RELEASE_VERSION` floor (`src/nexus/migration/guided_upgrade.py`). Before cutting the PyPI release, verify the pinned engine is cloud-current — do NOT ship on a stale, un-cloud-validated engine:
+
+```bash
+git tag -l "engine-service-v*" | sort -V | tail -1          # last engine tag
+git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant drift?
+```
+
+1. Confirm the pinned engine tag is (a) cloud-DEPLOYED and (b) cloud-GATED (recall + hybrid parity, xr7.8.9-style) — read the authoritative bead + conexus bus, **not memory** (cross-repo gate state goes stale fast: 2026-06-26 a `luxe6` condition had been cleared a week earlier than memory implied).
+2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — have conexus deploy + re-gate it (passive bus: surface an explicit "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Hal), THEN bump `PINNED_SERVICE_TAG` here. The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary.
+3. The engine cut itself: full `service/` suite green on the tagged commit (confirm the `service/` tree equals a green-`service-ci` commit — the Java CI is advisory and does not block auto-merge, so verify), then the **human** pushes `engine-service-vX.Y.Z`.
+
+This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.
+
 ### 1. Run unit + integration suite
 
 ```bash
