@@ -2,12 +2,12 @@
 title: "Note-Backed Document Identity in the Aspect Pipeline: Stop Unmappable Aspect Orphans from MCP-Stored Knowledge Notes"
 id: RDR-145
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-02
-accepted_date:
+accepted_date: 2026-06-27
 related_issues: [nexus-pfzgb]
 related_rdrs: [RDR-089, RDR-096, RDR-101, RDR-108, RDR-142]
 supersedes: []
@@ -83,7 +83,7 @@ Read-only queries against the live prod T2 (`~/.config/nexus/memory.db`) and cat
 
 Post-research, two of the three gaps are **already closed by landed work**, so the remaining scope is a one-time cleanup plus a forward defense. The Gap-3 surface decision was locked to **"hybrid: shape-aware extraction"** (Hal, 2026-06-27) — which `nexus-kmbys` already implements (CA-6).
 
-0. **HARD PREREQUISITE — RDR-172 merged to `develop` (CA-5).** No Gap-1 work here, but the cleanup (item 4) and the "now-correct write path" assumption are **gated on RDR-172 (PR #1337) merging to develop**. Verify `mcp/core.py` forwards `doc_id=catalog_doc_id` on develop HEAD before item 4 runs. Until then, new `store_put` calls keep producing orphans and any cleanup re-blocks.
+0. **HARD PREREQUISITE — RDR-172 merged to `develop` (CA-5): ✅ SATISFIED 2026-06-27.** RDR-172 PR #1337 merged to `develop`; `mcp/core.py:2081` now forwards `doc_id=catalog_doc_id` (verified on develop HEAD). The write-path is correct, so the cleanup (item 4) and the "now-correct write path" assumption hold. (Kept as item 0 for the record: re-verify on the develop tip in force at implementation time.)
 1. **Gap 1 — note identity at write time: closed by RDR-172 ON MERGE (no work here).** `store_put` forwards the catalog tumbler as the aspect `doc_id` (CA-5), so new note aspects are mappable + FK-satisfied. RDR-145 inherits this; it does not re-implement it. (Inherited, not landed-on-develop yet — see item 0.)
 2. **Gap 3 — surface eligibility: DECIDED "shape-aware routing", already shipped by `nexus-kmbys` (CA-6).** Note-shaped `knowledge__` docs route to `general-prose-v1`, paper-shaped to `scholarly-paper-v1`. RDR-145's only Gap-3 work is a **regression test** that a representative `knowledge__knowledge` note routes to `general-prose-v1` (not the paper extractor) AND that the resulting aspect has `experimental_datasets == []`, `experimental_baselines == []`, and `experimental_results` empty/None (the `general-prose-v1` schema contract, `aspect_extractor.py:337` — the machine-checkable form of "non-fabricated") — locking the decision against regression. (Cost lever "skip note extraction entirely" is explicitly deferred — not adopted; the shipped haiku light extractor is the chosen behavior, and every note `store_put` pays one async haiku extraction. Acknowledged, accepted.)
 3. **Gap 2 — absolute-path `source_path` contamination: BUILD (mechanism locked).** In `aspect_extraction_enqueue_hook` (`src/nexus/aspect_worker.py`), before writing the queue row, resolve `source_path` against the catalog: `lookup_doc_id_by_collection_and_path(collection, source_path)` / the catalog's canonical `file_path` for that physical collection; if found and the stored form is relative, replace `source_path` with the catalog's canonical relative form; if not found, leave as-is and `log.warning("aspect_source_path_uncanonical", ...)` (never silently rewrite to a guessed path — that would re-introduce the `nexus-3e4s` class). Forward-only defense; does not touch existing rows.
