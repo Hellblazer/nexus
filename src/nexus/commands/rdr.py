@@ -1031,6 +1031,12 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         ))
         if step_count == 0:
             step_count = len(re.findall(r"^### \d", plan_section, re.MULTILINE))
+        if step_count == 0:
+            # nexus RDR convention: numbered implementation steps live as a
+            # top-level numbered list directly under ## Approach (no ###
+            # subheadings). Count only top-level items (no leading indent) so
+            # nested/prose-numbered sub-lists are not double-counted.
+            step_count = len(re.findall(r"^\d+\.\s", plan_section, re.MULTILINE))
 
     print("### Planning Handoff")
     print(f"**Step count detected:** {step_count}")

@@ -371,6 +371,30 @@ class TestRdrAccept:
         assert "Planning Handoff" in result.output
         assert "Step count detected:" in result.output
 
+    def test_rdr_accept_counts_numbered_approach_items(self, rdr_env):
+        """nexus convention: numbered list under ## Approach (no ###
+        subheadings) -> step_count == number of top-level items."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "## Approach\n\n"
+            "1. **First step.** Do thing one.\n"
+            "2. **Second step.** Do thing two.\n"
+            "3. **Third step.** Do thing three.\n"
+            "   1. A nested sub-item that must NOT be counted.\n"
+            "4. **Fourth step.** Do thing four.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-numbered-approach.md",
+            {"title": "Numbered", "status": "draft", "type": "decision", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "Step count detected:** 4" in result.output
+        assert "Has plan section:** yes" in result.output
+
     def test_rdr_accept_blocked_non_draft_status(self, rdr_env):
         """Non-draft/accepted status: prints BLOCKED message."""
         _write_rdr(
