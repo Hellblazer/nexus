@@ -723,6 +723,104 @@ class TestGap2SourcePathNormalization:
         )
 
 
+class TestEnqueueFailureTripwire:
+    """RDR-172 P2.1 (nexus-hlkvj): loudness tripwire on enqueue failure.
+
+    ``aspect_extraction_enqueue_hook`` keeps the enqueue best-effort (never
+    block ingest, RDR-089 P0.1), but that internal swallow also hides the
+    failure from ``hook_registry``'s ``hook_failures`` recorder — the silent-
+    total-failure class (RF-7, the nexus-ov0sw bug). The hook therefore
+    persists its OWN ``hook_failures`` row inside the except block so CI /
+    --fullstack can assert zero enqueue failures across an ingest E2E. The
+    persist is itself best-effort: a telemetry-write failure never blocks
+    ingest.
+    """
+
+    def test_enqueue_failure_records_hook_failures_row(
+        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """NON-VACUITY (RF-7): a forced enqueue failure WRITES a structured
+        hook_failures row keyed ``hook_name='aspect_extraction_enqueue_hook'``
+        — the tripwire is proven to increment, not just assert-zero on green."""
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
+
+        def _boom(self, *a, **k):
+            raise RuntimeError("enqueue boom")
+
+        monkeypatch.setattr(AspectExtractionQueue, "enqueue", _boom)
+
+        aspect_extraction_enqueue_hook(
+            source_path="/p1.pdf", collection="knowledge__delos", content="x",
+        )
+        with T2Database(_isolate_t2) as db:
+            rows = db.telemetry.conn.execute(
+                "SELECT doc_id, collection, hook_name, error, chain "
+                "FROM hook_failures"
+            ).fetchall()
+        assert len(rows) == 1
+        doc_id, coll, hook_name, error, chain = rows[0]
+        assert doc_id == "/p1.pdf"
+        assert coll == "knowledge__delos"
+        assert hook_name == "aspect_extraction_enqueue_hook"
+        assert "enqueue boom" in error
+        assert chain == "document"
+
+    def test_successful_enqueue_writes_no_hook_failures(
+        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ASSERT-ZERO baseline (the CI invariant): a normal enqueue writes a
+        queue row and ZERO hook_failures rows."""
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
+
+        aspect_extraction_enqueue_hook(
+            source_path="/p1.pdf", collection="knowledge__delos", content="x",
+        )
+        with T2Database(_isolate_t2) as db:
+            pending = db.aspect_queue.list_pending()
+            failures = db.telemetry.conn.execute(
+                "SELECT count(*) FROM hook_failures "
+                "WHERE hook_name = 'aspect_extraction_enqueue_hook'"
+            ).fetchone()[0]
+        assert len(pending) == 1
+        assert failures == 0
+
+    def test_tripwire_persist_failure_never_blocks_ingest(
+        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Best-effort: if BOTH the enqueue AND the tripwire persist raise, the
+        hook still returns without propagating (ingest is never blocked)."""
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+        from nexus.db.t2.telemetry import Telemetry
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
+
+        def _boom(self, *a, **k):
+            raise RuntimeError("enqueue boom")
+
+        def _boom_telemetry(self, *a, **k):
+            raise RuntimeError("telemetry down")
+
+        monkeypatch.setattr(AspectExtractionQueue, "enqueue", _boom)
+        monkeypatch.setattr(Telemetry, "record_hook_failure", _boom_telemetry)
+
+        # Must not raise.
+        aspect_extraction_enqueue_hook(
+            source_path="/p1.pdf", collection="knowledge__delos", content="x",
+        )
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 

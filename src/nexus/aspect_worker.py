@@ -1164,13 +1164,39 @@ def aspect_extraction_enqueue_hook(
                 doc_id=doc_id,
             )
         )
-    except Exception:  # noqa: BLE001 — enqueue is best-effort; failure logged via log.warning
+    except Exception as exc:  # noqa: BLE001 — enqueue is best-effort; failure logged via log.warning
         _log.warning(
             "aspect_extraction_enqueue_failed",
             source_path=source_path,
             collection=collection,
             exc_info=True,
         )
+        # RDR-172 P2.1 (nexus-hlkvj): loudness tripwire. Keeping the enqueue
+        # best-effort (never block ingest, RDR-089 P0.1) also hides this
+        # failure from hook_registry's hook_failures recorder — the hook
+        # swallows it here, so fire_document sees success. Persist a structured
+        # hook_failures row directly so CI / --fullstack can assert ZERO
+        # enqueue failures across an ingest E2E (the fail-closed recurrence
+        # guard, RF-7 — the nexus-ov0sw silent-total-failure class). The
+        # persist is itself best-effort: a telemetry-write failure (T2 down,
+        # service 5xx) must never block ingest either.
+        try:
+            t2_index_write(
+                lambda t2: t2.telemetry.record_hook_failure(
+                    doc_id=source_path,
+                    collection=collection,
+                    hook_name="aspect_extraction_enqueue_hook",
+                    error=str(exc)[:2000],  # match hook_registry's truncation
+                    chain="document",
+                )
+            )
+        except Exception:  # noqa: BLE001 — tripwire persist is best-effort; never block ingest
+            _log.warning(
+                "aspect_enqueue_tripwire_persist_failed",
+                source_path=source_path,
+                collection=collection,
+                exc_info=True,
+            )
         # Enqueue failure is non-fatal — ingest is never blocked.
         # The document_aspects row will simply not be populated until
         # a manual re-enqueue triggers extraction.

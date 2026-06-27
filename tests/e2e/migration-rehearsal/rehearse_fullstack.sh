@@ -102,6 +102,19 @@ enq="$(q "select count(*) from nexus.aspect_extraction_queue")"
 pend="$(q "select count(*) from nexus.aspect_extraction_queue where status in ('pending','in_progress')")"
 asp="$(q "select count(*) from nexus.document_aspects")"
 note "post-workload: aspect_queue total=${enq:-?} pending=${pend:-?}; document_aspects=${asp:-?}"
+# RDR-172 P2.1 (nexus-hlkvj): enqueue-failure tripwire — the ingest E2E must
+# complete with ZERO swallowed aspect-enqueue failures. The hook persists a
+# hook_failures row on its best-effort swallow (the nexus-ov0sw silent-total-
+# failure class); a non-zero count here means an enqueue silently failed.
+# NOTE: this gate is only NON-VACUOUS if the workload above actually drives
+# store_put through aspect_extraction_enqueue_hook in service mode. That the
+# path is exercised is verified by P2.5 (nexus-8zog5, post-fix --fullstack
+# real-validation run); P2.2 (nexus-jr84c) reconciles the stale comment at the
+# top of this block. Until P2.5 confirms, treat a green assert-zero as
+# necessary-but-not-sufficient.
+enqfail="$(q "select count(*) from nexus.hook_failures where hook_name='aspect_extraction_enqueue_hook'")"
+if [ "${enqfail:-0}" -eq 0 ] 2>/dev/null; then ok "enqueue-failure tripwire: 0 swallowed aspect-enqueue failures"
+else bad "enqueue-failure tripwire FIRED: ${enqfail} swallowed aspect_extraction_enqueue_hook failure(s) — silent-loss class recurred (RF-7)"; fi
 if [ "${asp:-0}" -gt 0 ] 2>/dev/null; then
   ok "SERVICE-MODE aspect pipeline works END-TO-END: store_put → enqueue → worker → document_aspects (${asp} rows, real extraction)"
 elif [ "${enq:-0}" -gt 0 ] 2>/dev/null; then
