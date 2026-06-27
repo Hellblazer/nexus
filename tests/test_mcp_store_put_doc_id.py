@@ -126,6 +126,123 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
     assert expected_doc_id, "expected catalog tumbler for the mcp-stored doc"
 
 
+def test_mcp_store_put_forwards_catalog_tumbler_as_fire_document_doc_id(
+    inject_local_t3: T3Database,
+    catalog_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-172 / nexus-pyn35 (closes nexus-ov0sw): MCP ``store_put`` must
+    forward the catalog tumbler (``catalog_doc_id``) as ``fire_document``'s
+    ``doc_id`` kwarg — the value the aspect-queue row stamps and the
+    RDR-156 FK ``aspect_extraction_queue.doc_id -> catalog_documents``
+    checks. Pre-fix it forwarded the ``t3.put`` chunk natural-id
+    (``sha256(content)[:32]``, never a tumbler), which 500s the service
+    enqueue while the best-effort hook swallows it — silent, total loss of
+    RDR-089 aspects in service mode.
+    """
+    import hashlib
+
+    from nexus.mcp.core import store_put
+    local_t3 = inject_local_t3
+
+    content = "# Paper: BFT consensus\n\nIntroduces a new approach to consensus."
+    captured: dict[str, str] = {}
+
+    def _capture_fire_document(
+        source_path: str, collection: str, doc_content: str,
+        *, doc_id: str = "", **_kw,
+    ) -> None:
+        captured["source_path"] = source_path
+        captured["doc_id"] = doc_id
+
+    with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
+         patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_document",
+               side_effect=_capture_fire_document), \
+         patch("nexus.mcp.core._catalog_auto_link", return_value=0):
+        result = store_put(
+            content=content,
+            collection="knowledge",
+            title="pyn35-tumbler-forward",
+            tags="rdr-172,test",
+        )
+    assert "Stored" in result, f"store_put failed: {result}"
+
+    # The catalog tumbler the store hook minted for this doc.
+    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+    rows = cat._db.execute(
+        "SELECT tumbler FROM documents WHERE title = 'pyn35-tumbler-forward'"
+    ).fetchall()
+    assert rows, "expected a catalog entry for the mcp-stored doc"
+    expected_tumbler = rows[0][0]
+    assert expected_tumbler, "expected a non-empty catalog tumbler"
+
+    # The t3.put chunk natural-id — the value the pre-fix code (wrongly)
+    # forwarded; it can never satisfy the doc_id -> catalog_documents FK.
+    chunk_id = hashlib.sha256(content.encode()).hexdigest()[:32]
+
+    assert captured.get("doc_id") == expected_tumbler, (
+        "store_put must forward the catalog tumbler as fire_document's "
+        f"doc_id kwarg; got {captured.get('doc_id')!r}, expected the tumbler "
+        f"{expected_tumbler!r}"
+    )
+    assert captured["doc_id"] != chunk_id, (
+        "regression guard (nexus-ov0sw): forwarding the t3.put chunk "
+        "natural-id as doc_id violates the RDR-156 FK and 500s the enqueue"
+    )
+
+
+def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
+    inject_local_t3: T3Database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-172 / nexus-pyn35: when no catalog tumbler was minted, store_put
+    forwards ``doc_id=''`` — the blank sentinel the service NULL-coerces
+    (``nullIfBlank``), which satisfies the FK and still extracts from the
+    queued content. It must NOT fall back to the chunk natural-id.
+    """
+    import hashlib
+
+    from nexus.mcp.core import store_put
+    local_t3 = inject_local_t3
+
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
+
+    content = "# No-catalog finding\n\nNo tumbler should be minted here."
+    captured: dict[str, str] = {}
+
+    def _capture_fire_document(
+        source_path: str, collection: str, doc_content: str,
+        *, doc_id: str = "", **_kw,
+    ) -> None:
+        captured["doc_id"] = doc_id
+
+    with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
+         patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_document",
+               side_effect=_capture_fire_document), \
+         patch("nexus.mcp.core._catalog_auto_link", return_value=0):
+        result = store_put(
+            content=content,
+            collection="knowledge",
+            title="pyn35-no-catalog",
+            tags="test",
+        )
+    assert "Stored" in result, f"store_put failed: {result}"
+
+    chunk_id = hashlib.sha256(content.encode()).hexdigest()[:32]
+    assert captured.get("doc_id") == "", (
+        "no-catalog path must forward an empty doc_id (the blank->NULL "
+        f"sentinel), got {captured.get('doc_id')!r}"
+    )
+    assert captured.get("doc_id") != chunk_id, (
+        "must not fall back to the chunk natural-id when no tumbler exists"
+    )
+
+
 def test_mcp_store_put_doc_id_absent_when_catalog_uninitialized(
     inject_local_t3: T3Database,
     tmp_path: Path,
