@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import threading
 import time
 from pathlib import Path
@@ -1014,6 +1015,104 @@ def drain_worker(
 # ── Hook function (wired by hook_registry.install_default_hooks) ────────────
 
 
+#: A 32-char lowercase-hex chunk hash (the Chroma natural id). Note-backed
+#: aspect rows carry this as ``source_path`` by design (RDR-172 owns note
+#: identity via ``doc_id``); it is NOT a filesystem path, so Gap-2
+#: canonicalization skips it.
+_CHASH_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _resolve_catalog_reader():
+    """Return a best-effort read catalog (or ``None``). Indirection seam so
+    tests can inject a real tmp ``Catalog`` without env/service-mode coupling.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
+    return make_catalog_reader()
+
+
+def _canonicalize_source_path(collection: str, source_path: str) -> str:
+    """RDR-145 Gap-2: forward-only ``source_path`` canonicalization.
+
+    Resolves ``source_path`` against the catalog for ``collection``. On a
+    hit whose stored ``file_path`` is a *relative* form that differs, returns
+    that canonical relative path; on a miss, returns ``source_path`` unchanged
+    and emits a loud ``aspect_source_path_uncanonical`` warning. It NEVER
+    synthesizes or guesses a path — doing so would re-introduce the
+    ``nexus-3e4s`` CWD-anchoring contamination class. Best-effort and
+    fail-open: any catalog unavailability degrades to a no-op (the document
+    still enqueues; the one-time cleanup, RDR-145 Phase 2, handles legacy
+    rows).
+
+    Only file-backed (path-shaped) ``source_path`` values are considered.
+    Note-backed rows carry a 32-hex chash with no path separator and are
+    returned untouched so the probe never false-warns on a correct chash.
+
+    Reachability of the normalize branch (important — do not oversell this):
+    the catalog probe matches ``physical_collection AND (file_path = source_path
+    OR title = source_path)``. The documented contamination population
+    (RDR-145 Bucket B: ~177 absolute paths that MISMATCH the catalog's stored
+    *relative* ``file_path``) therefore MISSES the probe and lands in the WARN
+    branch — the loud ``aspect_source_path_uncanonical`` tripwire is the real
+    forward-only output for that population, not in-flight rewriting. The
+    normalize branch fires only when ``source_path`` already equals a stored
+    ``file_path``/``title``; correcting those Bucket-B rows is Phase 2's
+    one-time migration cleanup (``nexus-nx9nx``, migration-gated), not this
+    hook. In service mode the catalog reads are HTTP point-queries bounded by
+    the client's 30s timeout and fail-open; batch CLI ingest latency is a
+    tracked follow-up, not a regression.
+    """
+    # Skip note-backed (chash) and any non-path-shaped identifier (e.g. a
+    # bare slug/title) — there is nothing to canonicalize and no contamination
+    # risk for these by design.
+    if _CHASH_RE.match(source_path) or (
+        "/" not in source_path and os.sep not in source_path
+    ):
+        return source_path
+    try:
+        cat = _resolve_catalog_reader()
+    except Exception:  # noqa: BLE001 — best-effort catalog reader; any init failure degrades to no-op
+        cat = None
+    if cat is None:
+        # No catalog to canonicalize against — forward-only defense is a
+        # no-op (do not warn: absence of a catalog is not an uncanonical path).
+        return source_path
+    try:
+        doc_id = cat.lookup_doc_id_by_collection_and_path(collection, source_path)
+    except Exception:  # noqa: BLE001 — best-effort resolve; any query error degrades to no-op
+        doc_id = ""
+    if not doc_id:
+        _log.warning(
+            "aspect_source_path_uncanonical",
+            collection=collection,
+            source_path=source_path,
+        )
+        return source_path
+    # ``lookup_doc_id_by_collection_and_path`` returns either a legacy
+    # ``metadata.doc_id`` or the catalog ``tumbler``; resolve the entry via
+    # whichever the catalog honours (``by_doc_id`` keys on doc_id only).
+    entry = None
+    for getter in ("by_doc_id", "resolve"):
+        fn = getattr(cat, getter, None)
+        if fn is None:
+            continue
+        try:
+            entry = fn(doc_id)
+        except Exception:  # noqa: BLE001 — best-effort entry read; try the next resolver
+            entry = None
+        if entry is not None:
+            break
+    canonical = (getattr(entry, "file_path", "") or "") if entry is not None else ""
+    if canonical and not os.path.isabs(canonical) and canonical != source_path:
+        _log.info(
+            "aspect_source_path_canonicalized",
+            collection=collection,
+            was=source_path,
+            now=canonical,
+        )
+        return canonical
+    return source_path
+
+
 def aspect_extraction_enqueue_hook(
     source_path: str,
     collection: str,
@@ -1052,6 +1151,9 @@ def aspect_extraction_enqueue_hook(
     from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
     if select_config(collection) is None:
         return  # No extractor for this collection — nothing to enqueue.
+    # RDR-145 Gap-2: canonicalize a file-backed source_path against the
+    # catalog before persisting the queue row (forward-only; never guesses).
+    source_path = _canonicalize_source_path(collection, source_path)
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
     try:
         # RDR-128 P1 (kg8sj): route the enqueue through the daemon so the

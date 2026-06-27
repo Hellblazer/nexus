@@ -500,6 +500,229 @@ class TestEnqueueHook:
             stop_worker(timeout=2.0)
 
 
+class TestGap2SourcePathNormalization:
+    """RDR-145 Phase 1 (P1.2, nexus-syga3): forward-only ``source_path``
+    canonicalization in ``aspect_extraction_enqueue_hook``.
+
+    The hook resolves a file-backed ``source_path`` against the catalog
+    BEFORE writing the queue row. On a hit whose stored ``file_path`` is a
+    cleaner relative form it canonicalizes; on a miss it leaves the path
+    AS-IS and emits a loud ``aspect_source_path_uncanonical`` warning (the
+    tripwire — it NEVER synthesizes a path, which would re-introduce the
+    ``nexus-3e4s`` CWD-anchoring class). Note-backed rows (``source_path``
+    is a 32-hex chash, not a filesystem path) are skipped entirely so the
+    probe never false-warns on a correct chash.
+
+    Forward-only: existing ``document_aspects`` rows are never touched (that
+    is the one-time migration cleanup, RDR-145 Phase 2 / ``nexus-nx9nx``).
+    """
+
+    @staticmethod
+    def _seed_catalog(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        collection: str,
+        file_path: str,
+        title: str,
+    ) -> None:
+        """Build a real local catalog at a tmp dir, register one document,
+        and inject it into the hook via ``_resolve_catalog_reader``.
+
+        Injection (not env discovery) keeps the test hermetic and immune to
+        the ambient storage backend: ``make_catalog_reader()`` returns an HTTP
+        client to the live service whenever the shell is in service mode, so
+        env-seeding a tmp catalog would be silently ignored. The injected
+        object is a real :class:`Catalog`, so ``lookup_doc_id_by_collection_and_path``
+        and ``by_doc_id`` exercise production code, not a mock."""
+        import hashlib
+
+        import nexus.aspect_worker as mod
+        from nexus.catalog import Catalog
+
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        (cat_dir / "owners.jsonl").touch()
+        (cat_dir / "documents.jsonl").touch()
+        (cat_dir / "links.jsonl").touch()
+        repo_root = str(tmp_path / "repo")
+        (tmp_path / "repo").mkdir()
+        repo_hash = hashlib.sha256(repo_root.encode()).hexdigest()[:8]
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        owner = cat.register_owner(
+            "seed-repo", "repo", repo_hash=repo_hash, repo_root=repo_root,
+        )
+        cat.register(
+            owner, title, content_type="paper",
+            file_path=file_path, physical_collection=collection,
+        )
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: cat)
+
+    def test_resolving_absolute_path_normalizes_to_canonical_relative(
+        self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A file-backed absolute ``source_path`` that resolves to a catalog
+        entry whose stored ``file_path`` is the relative canonical form is
+        normalized to that relative form before the queue row is written.
+
+        CONTRIVANCE NOTE: this registers the doc with ``title == abs_path`` so
+        the catalog probe hits on its ``title = ?`` leg. The REAL Bucket-B
+        contamination population does NOT have a title equal to its absolute
+        path, so in production those rows MISS the probe and land in
+        ``test_unresolved_path_left_as_is_and_warns`` (the warn branch is the
+        realistic representative). This test exists to exercise the normalize
+        branch through real Catalog/T2/SQL — it is a branch-coverage test, not
+        evidence that normalization fires on real ingest."""
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        abs_path = "/Users/somebody/git/nexus-clone/papers/foo.md"
+        self._seed_catalog(
+            tmp_path, monkeypatch,
+            collection="knowledge__delos",
+            file_path="papers/foo.md",  # catalog canonical (relative)
+            title=abs_path,             # contrived: resolver hits on title probe
+        )
+        aspect_extraction_enqueue_hook(
+            source_path=abs_path, collection="knowledge__delos", content="x",
+        )
+        with T2Database(_isolate_t2) as db:
+            rows = db.aspect_queue.list_pending()
+        assert len(rows) == 1
+        assert rows[0].source_path == "papers/foo.md"
+
+    def test_unresolved_path_left_as_is_and_warns(
+        self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A file-backed ``source_path`` that does NOT resolve is left
+        unchanged and a loud ``aspect_source_path_uncanonical`` warning is
+        emitted (never silently rewritten to a guessed path)."""
+        from structlog.testing import capture_logs
+
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        self._seed_catalog(
+            tmp_path, monkeypatch,
+            collection="knowledge__delos",
+            file_path="papers/known.md",
+            title="papers/known.md",
+        )
+        stray = "/Users/nobody/git/nexus-ghost/papers/stray.md"
+        with capture_logs() as cap:
+            aspect_extraction_enqueue_hook(
+                source_path=stray, collection="knowledge__delos", content="x",
+            )
+        with T2Database(_isolate_t2) as db:
+            rows = db.aspect_queue.list_pending()
+        assert len(rows) == 1
+        assert rows[0].source_path == stray  # unchanged — never guessed
+        assert any(
+            e.get("event") == "aspect_source_path_uncanonical"
+            and e.get("source_path") == stray
+            and e.get("collection") == "knowledge__delos"
+            for e in cap
+        )
+
+    def test_note_backed_chash_source_path_untouched_no_warn(
+        self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A note-backed row whose ``source_path`` is a 32-hex chash is left
+        unchanged with NO uncanonical warning — chashes are not filesystem
+        paths (RDR-172 owns note identity via ``doc_id``)."""
+        from structlog.testing import capture_logs
+
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        self._seed_catalog(
+            tmp_path, monkeypatch,
+            collection="knowledge__knowledge",
+            file_path="",  # note-backed: no file_path
+            title="A session note",
+        )
+        chash = "a" * 32
+        with capture_logs() as cap:
+            aspect_extraction_enqueue_hook(
+                source_path=chash, collection="knowledge__knowledge", content="x",
+            )
+        with T2Database(_isolate_t2) as db:
+            rows = db.aspect_queue.list_pending()
+        assert len(rows) == 1
+        assert rows[0].source_path == chash
+        assert not any(
+            e.get("event") == "aspect_source_path_uncanonical" for e in cap
+        )
+
+    def test_catalog_reader_unavailable_is_silent_noop(
+        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If the catalog reader cannot be built (raises), the hook degrades
+        to a no-op: source_path unchanged, NO uncanonical warning (absence of
+        a catalog is not an uncanonical path)."""
+        from structlog.testing import capture_logs
+
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+
+        def _boom():
+            raise RuntimeError("catalog unavailable")
+
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", _boom)
+        path = "/Users/x/git/repo/papers/foo.md"
+        with capture_logs() as cap:
+            aspect_extraction_enqueue_hook(
+                source_path=path, collection="knowledge__delos", content="x",
+            )
+        with T2Database(_isolate_t2) as db:
+            rows = db.aspect_queue.list_pending()
+        assert len(rows) == 1
+        assert rows[0].source_path == path
+        assert not any(
+            e.get("event") == "aspect_source_path_uncanonical" for e in cap
+        )
+
+    def test_resolved_but_canonical_is_absolute_left_as_is(
+        self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A path that resolves but whose catalog file_path is itself absolute
+        is NOT normalized (we only canonicalize toward a relative form) — and
+        no uncanonical warning fires (it did resolve)."""
+        from structlog.testing import capture_logs
+
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        # Canonical file_path is absolute (but inside repo_root so it clears
+        # the register-time cross-project guard); the stray probe resolves via
+        # the title. canonical is absolute and DIFFERS -> the isabs leg blocks
+        # normalization and the path is left as-is.
+        abs_canonical = str(tmp_path / "repo" / "papers" / "canon.md")
+        stray = "/Users/x/git/clone/papers/stray.md"
+        self._seed_catalog(
+            tmp_path, monkeypatch,
+            collection="knowledge__delos",
+            file_path=abs_canonical, title=stray,
+        )
+        with capture_logs() as cap:
+            aspect_extraction_enqueue_hook(
+                source_path=stray, collection="knowledge__delos", content="x",
+            )
+        with T2Database(_isolate_t2) as db:
+            rows = db.aspect_queue.list_pending()
+        assert len(rows) == 1
+        assert rows[0].source_path == stray  # absolute canonical -> not normalized
+        assert not any(
+            e.get("event") == "aspect_source_path_uncanonical" for e in cap
+        )
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
