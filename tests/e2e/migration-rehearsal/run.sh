@@ -24,6 +24,8 @@ DO_BUILD=1
 GUIDED=0
 COLD=0
 COMPREHENSIVE=0
+STRESS=0
+FULLSTACK=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= the guided-upgrade version-pin floor and PASSES.
 # Derived from the product constant (REQUIRED_RELEASE_VERSION) so this stamp can
@@ -54,6 +56,8 @@ for a in "$@"; do
     --guided)     GUIDED=1 ;;   # RDR-002 ez5.13: drive nx guided-upgrade
     --cold)       COLD=1 ;;     # nexus-4mm24: cold-acquire from the published release
     --comprehensive) COMPREHENSIVE=1 ;;  # Phase D: daily-driver surface on the default rehearse.sh
+    --stress)     STRESS=1 ;;            # Phase E: concurrency + queue-drain stress on the default rehearse.sh
+    --fullstack)  FULLSTACK=1 ;;         # standalone: full topology (service + nx-mcp + claude) MCP-driven enqueue + worker drain
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -84,6 +88,8 @@ trap '_guided_restore' EXIT
 # --guided override the entrypoint (rehearse_cold.sh / rehearse_guided.sh) and so
 # never run Phase D. Reject the incoherent combination loudly.
 [ "$COMPREHENSIVE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ]; } && { echo "--comprehensive runs on the default rehearse path; it cannot combine with --cold/--guided (they override the entrypoint)" >&2; exit 2; }
+[ "$STRESS" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ]; } && { echo "--stress runs on the default rehearse path; it cannot combine with --cold/--guided (they override the entrypoint)" >&2; exit 2; }
+[ "$FULLSTACK" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ]; } && { echo "--fullstack is a standalone full-topology run (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 
 if [ "$GUIDED" = 1 ]; then
   # --guided force-rebuilds the native binary with the stamp baked in, so it is
@@ -147,6 +153,16 @@ if [ "$COLD" = 1 ]; then
   # the cold driver + seed travel in.
   cp "$HERE/Dockerfile.cold" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_cold.sh" "$HERE/seed_legacy.py" "$STAGE/"
+elif [ "$FULLSTACK" = 1 ]; then
+  # Full topology: native binary + the fullstack Dockerfile (adds linux claude) +
+  # the fullstack driver. Same native-binary staging as the default path.
+  mkdir -p "$STAGE/native"
+  cp service/target/nexus-service "$STAGE/native/"
+  if compgen -G "service/target/*.so" > /dev/null; then
+    cp service/target/*.so "$STAGE/native/"
+  fi
+  cp "$HERE/Dockerfile.fullstack" "$STAGE/Dockerfile"
+  cp "$HERE/rehearse_fullstack.sh" "$HERE/seed_legacy.py" "$STAGE/"
 else
   # The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
   # emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
@@ -175,7 +191,7 @@ fi
 
 docker build -q -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE" >/dev/null
 
-run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE")
+run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
 if [ "$COLD" = 1 ]; then
   # nexus-4mm24: tell the cold box which published release to acquire from.
   run_env+=(-e "NEXUS_SERVICE_TAG=$COLD_TAG")
@@ -193,7 +209,24 @@ fi
 # NOT `exec` — exec replaces this shell and would suppress the EXIT trap that
 # restores ~/.docker/config.json + release.properties and removes the staging
 # dir. Run as a child and propagate its exit code.
-if [ "$COLD" = 1 ]; then
+if [ "$FULLSTACK" = 1 ]; then
+  # Provide FRESH claude oauth so the in-container `claude -p` (MCP driver + real
+  # aspect extraction) authenticates. The ~/.claude/.credentials.json FILE goes
+  # stale within ~1h (oauth access tokens are short-lived + the refresh token
+  # rotates); the live token lives in the macOS keychain. Pull it at run time
+  # (same approach as tests/cc-validation), stage it (ephemeral, cleaned on exit),
+  # mount read-only. Real, billed calls; data/PG stay container-isolated.
+  FRESHCREDS="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || true)"
+  if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
+    echo "      (keychain miss — falling back to ~/.claude/.credentials.json, may be stale)" >&2
+    FRESHCREDS="$(cat "$HOME/.claude/.credentials.json")"
+  fi
+  [ -n "$FRESHCREDS" ] || { echo "--fullstack needs claude oauth (keychain 'Claude Code-credentials' or ~/.claude/.credentials.json)" >&2; exit 1; }
+  printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"; chmod 600 "$STAGE/.claude-credentials.json"
+  docker run --rm "${run_env[@]}" \
+    -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
+    "$IMAGE"
+elif [ "$COLD" = 1 ]; then
   # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"
 elif [ "$GUIDED" = 1 ]; then

@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+# Full-stack isolated shakeout box (nexus-* harness).
+#
+# The REAL deployment topology in one ephemeral container: PG16 + pgvector + the
+# native nexus-service (T2+T3) + the conexus wheel (nx + nx-mcp) + the linux
+# `claude` CLI. rehearse_fullstack.sh then drives the surfaces THROUGH the nexus
+# MCP via `claude -p`, so the post-store hooks ENQUEUE aspects and the MCP-hosted
+# worker DRAINS them with REAL extraction — the path the bare-CLI box could not
+# exercise (no MCP, no claude).
+#
+# Auth: the host's ~/.claude/.credentials.json (oauth) is mounted read-only at
+# run time (run.sh --fullstack); real, billed claude calls. Data/PG stay
+# container-isolated. NOT DinD: PG is provisioned in-box by `nx init --service`.
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg lsb-release \
+        python3 python3-venv python3-pip \
+        git \
+    && install -d /etc/apt/keyrings /usr/share/postgresql-common/pgdg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        postgresql-16 postgresql-16-pgvector \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash nexus
+ENV PATH="/home/nexus/.local/bin:/home/nexus/nxenv/bin:/usr/lib/postgresql/16/bin:${PATH}"
+RUN pip3 install --no-cache-dir --break-system-packages uv
+
+USER nexus
+WORKDIR /home/nexus
+
+# Linux `claude` CLI (native install to ~/.local/bin). The MCP worker shells to
+# `claude -p` for real aspect extraction; nx_answer dispatches it too.
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && /home/nexus/.local/bin/claude --version
+
+COPY conexus-*.whl /tmp/
+RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
+    uv venv --python 3.12 /home/nexus/nxenv \
+    && uv pip install --python /home/nexus/nxenv /tmp/conexus-*.whl \
+    && nx --version
+
+COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
+
+COPY rehearse_fullstack.sh /home/nexus/rehearse_fullstack.sh
+COPY seed_legacy.py /home/nexus/seed_legacy.py
+
+ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_fullstack.sh"]
