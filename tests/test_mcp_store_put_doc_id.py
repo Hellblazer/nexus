@@ -219,7 +219,23 @@ def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
     ) -> None:
         captured["doc_id"] = doc_id
 
-    with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
+    # Spy on the real hook so we can distinguish the LEGITIMATE no-catalog
+    # return ('' because Catalog.is_initialized is False) from a swallowed
+    # exception that would ALSO leave catalog_doc_id='' (substantive-critic
+    # finding): both forward doc_id='', so without this spy a future refactor
+    # that broke the hook would pass vacuously.
+    from nexus.catalog.store_hook import catalog_store_hook as _real_hook
+    spy: dict[str, object] = {}
+
+    def _spy_hook(*a, **k):
+        rv = _real_hook(*a, **k)
+        spy["calls"] = spy.get("calls", 0) + 1  # type: ignore[operator]
+        spy["ret"] = rv
+        return rv
+
+    with patch("nexus.catalog.store_hook.catalog_store_hook",
+               side_effect=_spy_hook), \
+         patch("nexus.mcp.core._get_t3", return_value=local_t3), \
          patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
          patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
          patch("nexus.mcp.core._hooks.fire_document",
@@ -233,6 +249,13 @@ def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
         )
     assert "Stored" in result, f"store_put failed: {result}"
 
+    # The hook actually RAN and RETURNED '' — this is the no-catalog path,
+    # not a never-called or raised path that defaulted to '' by accident.
+    assert spy.get("calls") == 1, "catalog_store_hook must actually run once"
+    assert spy.get("ret") == "", (
+        f"hook must return '' on the no-catalog path, got {spy.get('ret')!r}"
+    )
+
     chunk_id = hashlib.sha256(content.encode()).hexdigest()[:32]
     assert captured.get("doc_id") == "", (
         "no-catalog path must forward an empty doc_id (the blank->NULL "
@@ -240,6 +263,60 @@ def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
     )
     assert captured.get("doc_id") != chunk_id, (
         "must not fall back to the chunk natural-id when no tumbler exists"
+    )
+
+
+def test_mcp_store_put_forwards_blank_doc_id_when_catalog_hook_raises(
+    inject_local_t3: T3Database,
+    catalog_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-172 / nexus-pyn35: when ``catalog_store_hook`` RAISES (the
+    best-effort boundary catch in store_put), ``catalog_doc_id`` stays the
+    pre-initialized '' and store_put forwards ``doc_id=''`` — never the
+    chunk natural-id, never a crash. Distinct from the no-catalog path
+    (LOW-2 / substantive-critic Significant: the swallow must degrade to
+    the blank sentinel, which the service NULL-coerces).
+    """
+    import hashlib
+
+    from nexus.mcp.core import store_put
+    local_t3 = inject_local_t3
+
+    content = "# Hook-raises finding\n\nThe catalog hook will blow up."
+    captured: dict[str, str] = {}
+
+    def _capture_fire_document(
+        source_path: str, collection: str, doc_content: str,
+        *, doc_id: str = "", **_kw,
+    ) -> None:
+        captured["doc_id"] = doc_id
+
+    with patch("nexus.catalog.store_hook.catalog_store_hook",
+               side_effect=RuntimeError("catalog boom")), \
+         patch("nexus.mcp.core._get_t3", return_value=local_t3), \
+         patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_document",
+               side_effect=_capture_fire_document), \
+         patch("nexus.mcp.core._catalog_auto_link", return_value=0):
+        result = store_put(
+            content=content,
+            collection="knowledge",
+            title="pyn35-hook-raises",
+            tags="test",
+        )
+    assert "Stored" in result, (
+        f"store_put must not crash when catalog_store_hook raises: {result}"
+    )
+
+    chunk_id = hashlib.sha256(content.encode()).hexdigest()[:32]
+    assert captured.get("doc_id") == "", (
+        "swallowed catalog_store_hook exception must degrade to doc_id='' "
+        f"(blank->NULL sentinel), got {captured.get('doc_id')!r}"
+    )
+    assert captured.get("doc_id") != chunk_id, (
+        "must not fall back to the chunk natural-id on hook failure"
     )
 
 
