@@ -103,6 +103,78 @@ unset NX_SERVICE_URL NX_SERVICE_PORT NX_SERVICE_HOST 2>/dev/null || true
 [ -n "${NX_SERVICE_TOKEN:-}" ] && ok "NX_SERVICE_TOKEN present (from pg_credentials)" \
   || bad "NX_SERVICE_TOKEN absent — guided migrate requires it (pg_credentials did not carry it)"
 
+# ── Phase D: comprehensive daily-driver surface (COMPREHENSIVE=1) ─────────────
+# Proves 6.0.0 replaces the day-to-day nexus surface through the REAL service
+# (PG16+pgvector+bge-768), fully isolated. Deterministic, no API creds: the
+# bge-768 knowledge path + T2 memory + T1 scratch + catalog + doctor are HARD
+# assertions; the LLM-composition verbs (nx_answer, nx enrich aspects) and code
+# indexing (voyage-code-3) are creds-gated and reported as NOTED-SKIP, never
+# faked green. Runs on the clean service BEFORE the migration phases mutate it.
+if [ "${COMPREHENSIVE:-0}" = 1 ]; then
+  say "Phase D — daily-driver surface (deterministic bge-768 local; no API creds)"
+  MARK="ddmark$$"
+  DD=/tmp/dd.out
+  _why() { note "↳ $(tail -4 "$DD" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')"; }
+
+  # T2 memory (FTS5): put -> search round-trip
+  if nx memory put "comprehensive shakeout $MARK widget sprocket note" -p ddshakeout -t "note-$MARK" --tags rehearsal >"$DD" 2>&1; then
+    if nx memory search "$MARK" 2>/dev/null | grep -q "$MARK"; then ok "T2 memory put+search round-trip"
+    else bad "T2 memory search did not surface the put"; fi
+  else bad "nx memory put failed"; _why; fi
+
+  # T1 scratch: T1 is MCP-session working memory (RDR-105). Service-backed T1
+  # requires a MINTED session token (the MCP lifespan mints it via /v1/sessions/
+  # start); a bare CLI cannot, so it uses the in-process ephemeral store. Force
+  # ephemeral (env -u beats the container's NX_STORAGE_BACKEND_T1=service, which
+  # otherwise wins over NX_T1_ISOLATED) and assert the CLI write+list path; note
+  # that persistent/cross-process T1 is MCP-session-scoped, not a bare-CLI property.
+  if env -u NX_STORAGE_BACKEND -u NX_STORAGE_BACKEND_T1 NX_T1_ISOLATED=1 \
+       nx scratch put "scratch shakeout $MARK" >"$DD" 2>&1 \
+     && env -u NX_STORAGE_BACKEND -u NX_STORAGE_BACKEND_T1 NX_T1_ISOLATED=1 \
+       nx scratch list >"$DD" 2>&1; then
+    ok "T1 scratch CLI write+list (ephemeral; persistent T1 is MCP-session-scoped, RDR-105)"
+  else bad "nx scratch CLI failed"; _why; fi
+
+  # T3 knowledge (bge-768): store put -> semantic search round-trip
+  if printf 'Comprehensive shakeout knowledge doc %s. The quick brown fox indexes widgets and sprockets deterministically for bge-768 retrieval.\n' "$MARK" \
+       | nx store put - -t "shakeout-$MARK" --tags rehearsal >"$DD" 2>&1; then
+    if nx search "widgets and sprockets for retrieval" --corpus knowledge -m 5 2>/dev/null | grep -q "$MARK"; then
+      ok "T3 store put + bge-768 semantic search round-trip"
+    else bad "T3 semantic search did not surface the stored doc"; fi
+  else bad "nx store put failed"; _why; fi
+
+  # T3 collection listing reflects the new knowledge collection
+  if nx collection list 2>/dev/null | grep -qi "knowledge"; then ok "nx collection list shows the knowledge collection"
+  else bad "nx collection list did not show a knowledge collection"; fi
+
+  # Catalog surface responds (service-mode catalog over PG)
+  if nx catalog list 2>/dev/null >/dev/null; then ok "catalog surface responds (nx catalog list)"
+  else bad "nx catalog list failed"; fi
+
+  # doctor: SERVICE + schema health only. npx-not-found and MinerU-unreachable are
+  # expected in the minimal container (no node, no MinerU server) — advisory, not a
+  # 6.0.0 readiness signal. Fail only on a real service/schema/pgvector problem.
+  nx doctor >"$DD" 2>&1 || true
+  if grep -qiE "service.*(unreachable|down|not running)|schema.*(mismatch|behind|drift)|pgvector.*(missing|unreachable)|database.*(unreachable|locked)" "$DD"; then
+    bad "nx doctor: service/schema problem"; _why
+  else ok "nx doctor: service+schema healthy (npx/MinerU advisories ignored in the minimal box)"; fi
+
+  # index repo (code): voyage-code-3 is creds-gated in this no-voyage box — attempt,
+  # but NOTE (do not fail) if the model-identity guard blocks it. Honest coverage.
+  ddrepo="/tmp/dd-corpus-$$"
+  mkdir -p "$ddrepo"
+  printf 'def widget_sprocket():\n    """Deterministic fixture %s."""\n    return 42\n' "$MARK" > "$ddrepo/mod.py"
+  ( cd "$ddrepo" && git init -q && git add -A && git -c user.email=r@n.local -c user.name=r commit -qm seed ) 2>/dev/null || true
+  if nx index repo "$ddrepo" >/tmp/dd_index.txt 2>&1; then
+    ok "nx index repo succeeded (code embedding available in this box)"
+  else
+    note "nx index repo NOT exercised here (voyage-code-3 creds-gated in the no-API-key box) — expected; covered by the credentialed/cloud path, not this airtight leg"
+  fi
+  rm -rf "$ddrepo" "$DD" /tmp/dd_index.txt 2>/dev/null || true
+
+  note "Phase D covers the DETERMINISTIC surface; nx_answer + nx enrich aspects (LLM/Voyage dispatch) are intentionally OUT of the airtight leg (need API creds) — not faked."
+fi
+
 # ── Phase B: seed legacy Chroma + migrate-to-service ─────────────────────────
 say "Phase B — seed legacy Chroma + migrate-to-service"
 

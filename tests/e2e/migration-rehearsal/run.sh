@@ -23,6 +23,7 @@ WITH_CLOUD=0
 DO_BUILD=1
 GUIDED=0
 COLD=0
+COMPREHENSIVE=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= the guided-upgrade version-pin floor and PASSES.
 # Derived from the product constant (REQUIRED_RELEASE_VERSION) so this stamp can
@@ -52,6 +53,7 @@ for a in "$@"; do
     --no-build)   DO_BUILD=0 ;;
     --guided)     GUIDED=1 ;;   # RDR-002 ez5.13: drive nx guided-upgrade
     --cold)       COLD=1 ;;     # nexus-4mm24: cold-acquire from the published release
+    --comprehensive) COMPREHENSIVE=1 ;;  # Phase D: daily-driver surface on the default rehearse.sh
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -78,6 +80,10 @@ trap '_guided_restore' EXIT
 # leg. Use --guided alone for the local bge-768 MVV.
 [ "$GUIDED" = 1 ] && [ "$WITH_CLOUD" = 1 ] && { echo "--guided and --with-cloud are incoherent (guided seeds local bge-768 targets; cloud is voyage-only); run --guided alone" >&2; exit 2; }
 [ "$COLD" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--cold always rebuilds the wheel + cold-acquires the binary; --no-build is irrelevant" >&2; exit 2; }
+# --comprehensive adds Phase D to the DEFAULT rehearse.sh entrypoint; --cold and
+# --guided override the entrypoint (rehearse_cold.sh / rehearse_guided.sh) and so
+# never run Phase D. Reject the incoherent combination loudly.
+[ "$COMPREHENSIVE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ]; } && { echo "--comprehensive runs on the default rehearse path; it cannot combine with --cold/--guided (they override the entrypoint)" >&2; exit 2; }
 
 if [ "$GUIDED" = 1 ]; then
   # --guided force-rebuilds the native binary with the stamp baked in, so it is
@@ -169,7 +175,7 @@ fi
 
 docker build -q -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE" >/dev/null
 
-run_env=(-e "WITH_CLOUD=$WITH_CLOUD")
+run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE")
 if [ "$COLD" = 1 ]; then
   # nexus-4mm24: tell the cold box which published release to acquire from.
   run_env+=(-e "NEXUS_SERVICE_TAG=$COLD_TAG")
