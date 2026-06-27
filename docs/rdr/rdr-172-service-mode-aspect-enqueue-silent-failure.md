@@ -138,16 +138,18 @@ values are checked." A non-NULL, non-tumbler value (the chunk hash) raises SQLST
 (`service/.../AspectRepository.java:230`; same at lines 500/715/1070 for the other insert
 paths; `nullIfBlank` defined at :1522). The CLI ingest path passes `doc_id=''` → coerced to
 NULL → FK satisfied. `store_put` passes a non-blank chunk hash → not coerced, non-NULL,
-non-tumbler → FK violation. **Impact:** Approach 2 is a narrow extension of existing
-behavior — "NULL if blank **or not a registered tumbler**" — the runtime mirror of the
-migration's one-time orphan-nullify pre-flight (fk-001 Step 2).
+non-tumbler → FK violation. **Impact:** the existing `nullIfBlank` (blank → NULL) is the
+correct, sufficient server coercion and stays unchanged; a *non-blank* FK failure is a client
+bug (RF-8) that the server surfaces loudly as a typed 4xx (revised Approach 1/2), never
+silently NULLs.
 
 ### RF-4 (Verified): the worker tolerates NULL/empty `doc_id` — NULL-coercion is extraction-safe
 
 `src/nexus/aspect_worker.py:574`: `queued_doc_id = getattr(row, "doc_id", "") or ""`; an
 empty `doc_id` passes through and the `doc_id_lookup` falls back to the document text carried
-on the queue row (RDR-089 P0.1 content-sourcing contract). **Impact:** Approach 2 causes no
-extraction regression; a NULL-`doc_id` row still extracts from row content.
+on the queue row (RDR-089 P0.1 content-sourcing contract). **Impact:** the legitimate
+blank → NULL path (CLI ingest, and any no-catalog-id case) extracts fine from row content —
+NULL `doc_id` is not an extraction regression.
 
 ### RF-5 (Verified): `AspectHandler` bare-500s any non-`IllegalArgumentException`
 
