@@ -1394,6 +1394,35 @@ class TestDocumentShapeClassifier:
         )
         assert _classify_document_shape(text) == "prose"
 
+    def test_rdr172_fullstack_workload_doc_a_classifies_as_paper(self):
+        """RDR-172 P2.2 (nexus-jr84c): pin that the --fullstack harness's
+        paper-shaped workload doc (a) actually routes to scholarly-paper-v1.
+
+        The harness asserts ``document_aspects > 0`` after storing this doc;
+        the assertion is only the intended *paper-shaped* non-vacuous signal
+        if this string still classifies as a paper. The classifier threshold
+        is 2 and this string scores exactly 2 ("we propose"/"in this paper" +
+        "et al."), so a tightening of _PAPER_SHAPE_SIGNALS/_THRESHOLD would
+        silently downgrade the workload to prose — this test fails loudly
+        instead. KEEP IN SYNC with rehearse_fullstack.sh doc (a)."""
+        from nexus.aspect_extractor import (
+            _SCHOLARLY_PAPER_CONFIG,
+            _classify_document_shape,
+            _resolve_config_for_document,
+            select_config,
+        )
+
+        doc_a = (
+            "We propose a widget-assembly index. In this paper we present a "
+            "method for mechanical-part retrieval, evaluated against the prior "
+            "approach of Gear et al. (2021). fsmark12345 widget paper fragment."
+        )
+        assert _classify_document_shape(doc_a) == "paper"
+        routed = _resolve_config_for_document(
+            "knowledge__knowledge", doc_a, select_config("knowledge__knowledge"),
+        )
+        assert routed is _SCHOLARLY_PAPER_CONFIG
+
     def test_resolver_only_substitutes_for_scholarly(self):
         """rdr-frontmatter (and any non-scholarly base) is never re-routed."""
         from nexus.aspect_extractor import (
