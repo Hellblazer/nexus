@@ -2,11 +2,12 @@
 title: "Unified nx init and Service-Supervisor Lifecycle: Collapse the Install to One Command and Close the Reboot-Persistence Gap"
 id: RDR-174
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-28
+accepted_date: 2026-06-28
 related_issues: []
 related_rdrs: [RDR-144, RDR-152, RDR-155, RDR-157, RDR-158, RDR-160, RDR-161, RDR-165, RDR-166]
 supersedes: []
