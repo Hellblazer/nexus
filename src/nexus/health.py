@@ -97,7 +97,8 @@ def format_health_for_cli(
             )
         else:
             lines.append(
-                "\nRun 'nx config init' to set up credentials and provision the database automatically."
+                "\nRun 'nx config init' to configure managed-service credentials, "
+                "or 'nx init --service' to provision a local service stack."
             )
 
     return "\n".join(lines), failed
@@ -557,8 +558,7 @@ def _check_t3_cloud() -> list[HealthResult]:
     )
     if not chroma_database:
         r.fix_suggestions = [
-            "nx config init                           (interactive wizard, also provisions database)",
-            "nx config set chroma_database <name>",
+            "nx config set chroma_database <name>     (migration-source database; legacy/Chroma only)",
             "e.g. nx config set chroma_database nexus",
         ]
     results.append(r)

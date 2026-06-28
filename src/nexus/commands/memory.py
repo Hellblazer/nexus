@@ -288,7 +288,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             ]
             if missing:
                 raise click.ClickException(
-                    f"{', '.join(missing)} not set — run: nx config init"
+                    f"{', '.join(missing)} not set — run: nx config set <key> <value>"
                 )
 
         # nexus-hmxi: probe T3 so promote targets land in the same

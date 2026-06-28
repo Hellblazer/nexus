@@ -30,7 +30,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 | `local.embed_model` | (auto-select) | The embedder `nx init` recorded (`BAAI/bge-base-en-v1.5` or `all-MiniLM-L6-v2`). Absent = legacy auto-select (bge if the `[local]` extra is importable, else MiniLM). |
 | `local.fastembed_cache_path` | `~/.local/share/nexus/fastembed_cache` (XDG-aware) | Stable cache dir for the bge-768 model so it is not re-downloaded to a volatile `$TMPDIR` on every reboot. |
 
-**Auto-detection**: When either `CHROMA_API_KEY` or `VOYAGE_API_KEY` is absent, local mode activates, both are required for cloud mode. Set `NX_LOCAL=1` to force local mode even with cloud credentials.
+**Mode selection**: As of 6.0, managed-cloud mode activates when `NX_SERVICE_URL` (+ `NX_SERVICE_TOKEN`) is set — the client routes T3 through the hosted service (see [Managed-Cloud Credentials](#managed-cloud-credentials) below). Otherwise local mode is used. Set `NX_LOCAL=1` to force local mode even with service credentials present. (The legacy `CHROMA_API_KEY`/`VOYAGE_API_KEY` auto-detect predates the service substrate and applies only to pre-6.0 installs that have not migrated.)
 
 **Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install `uv tool install "conexus[local]"` for tier 1 (bge-base-en-v1.5, 768d, better quality; downloads the model on first embed). To add the extra to an existing install: `uv tool install --reinstall "conexus[local]"`. Upgrade later with `uv tool upgrade conexus`, which preserves the extra — never `uv tool install --force`, which drops it.
 
@@ -42,7 +42,7 @@ When you switch local tiers via `nx init` (the common 384 → bge-768 upgrade), 
 
 ## Managed-Cloud Credentials
 
-As of 6.0, managed-cloud mode points `nx` at a hosted nexus service that owns its cloud Postgres + pgvector and embeds with Voyage server-side. The client credentials are the service URL and a bearer token, read **from the environment** (not `nx config set` — these are not config-file credential keys):
+As of 6.0, managed-cloud mode points `nx` at a hosted nexus service that owns its cloud Postgres + pgvector and embeds with Voyage server-side. The client credentials are the service URL and a bearer token. Both resolve **env first, then `config.yml`**: set them interactively with `nx config init` (or `nx config set service_url/service_token`), or export the env vars below — the environment always takes precedence:
 
 | Env var | Required | Notes |
 |---|---|---|

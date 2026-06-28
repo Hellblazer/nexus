@@ -240,11 +240,14 @@ def test_config_init_writes_service_credentials(runner, fake_home) -> None:
 def test_config_init_does_not_provision_chroma(runner, fake_home) -> None:
     # 6.0: Chroma is retired from serving. A fresh wizard must NOT provision a
     # ChromaDB Cloud database (the pre-6.0 foot-gun) nor mention it as setup.
-    with patch("nexus.commands._provision._cloud_admin_client") as mock_admin:
-        result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\n")
+    # Assert on output rather than a mock: config_init no longer imports the
+    # provisioning helpers, so a patch on them would pass vacuously. The output
+    # guards are real tripwires — they fail if provisioning is reintroduced.
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\n")
     assert result.exit_code == 0, result.output
-    mock_admin.assert_not_called()
     assert "chromadb" not in result.output.lower()
+    assert "provision" not in result.output.lower()
+    assert "trychroma.com" not in result.output.lower()
 
 
 def test_config_init_shows_service_endpoint_hint(runner, fake_home) -> None:

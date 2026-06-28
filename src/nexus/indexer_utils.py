@@ -479,7 +479,7 @@ def check_credentials(voyage_key: str, chroma_key: str) -> None:
         missing.append("chroma_api_key")
     if missing:
         raise CredentialsMissingError(
-            f"{', '.join(missing)} not set — run: nx config init"
+            f"{', '.join(missing)} not set — run: nx config set <key> <value>"
         )
 
 

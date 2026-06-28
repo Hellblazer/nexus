@@ -32,7 +32,7 @@ def _t3() -> T3Database:
             )
         if not database:
             raise click.ClickException(
-                "chroma_database not set — run: nx config init"
+                "chroma_database not set — run: nx config set chroma_database <name>"
             )
     try:
         return make_t3()
