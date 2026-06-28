@@ -227,44 +227,38 @@ def test_config_list_shows_non_secret_settings(runner, fake_home) -> None:
 # ── nx config init ──────────────────────────────────────────────────────────
 
 
-def test_config_init_writes_provided_values(runner, fake_home) -> None:
-    result = runner.invoke(main, ["config", "init"], input="chroma-key\nmy-db\nvoyage-key\n")
+def test_config_init_writes_service_credentials(runner, fake_home) -> None:
+    # 6.0 managed onboarding: the wizard collects the service endpoint + token
+    # (RDR-166), not Chroma credentials.
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\n")
     assert result.exit_code == 0, result.output
     creds = _read_config(fake_home).get("credentials", {})
-    assert creds.get("chroma_api_key") == "chroma-key"
-    assert creds.get("chroma_database") == "my-db"
-    assert creds.get("voyage_api_key") == "voyage-key"
+    assert creds.get("service_url") == "https://svc.example.com"
+    assert creds.get("service_token") == "bearer-tok"
 
 
-def test_config_init_provisions_databases_success(runner, fake_home) -> None:
-    mock_admin = MagicMock()
-    with patch("nexus.commands._provision._cloud_admin_client", return_value=mock_admin), \
-         patch("nexus.commands._provision.ensure_databases", return_value={"mydb": True}):
-        result = runner.invoke(main, ["config", "init"], input="ck-key\nmydb\nvoyage-key\n")
+def test_config_init_does_not_provision_chroma(runner, fake_home) -> None:
+    # 6.0: Chroma is retired from serving. A fresh wizard must NOT provision a
+    # ChromaDB Cloud database (the pre-6.0 foot-gun) nor mention it as setup.
+    with patch("nexus.commands._provision._cloud_admin_client") as mock_admin:
+        result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\n")
     assert result.exit_code == 0, result.output
-    assert "mydb" in result.output
-    assert "created" in result.output
+    mock_admin.assert_not_called()
+    assert "chromadb" not in result.output.lower()
 
 
-def test_config_init_provisioning_failure_is_warning(runner, fake_home) -> None:
-    with patch("nexus.commands._provision._cloud_admin_client",
-               side_effect=Exception("network timeout")):
-        result = runner.invoke(main, ["config", "init"], input="ck-key\nmydb\nvoyage-key\n")
-    assert result.exit_code == 0, result.output
-    assert "warning" in result.output.lower() or "could not" in result.output.lower()
-
-
-def test_config_init_shows_signup_urls(runner, fake_home) -> None:
-    result = runner.invoke(main, ["config", "init"], input="\n\n\n")
-    output = result.output
-    assert "trychroma.com" in output or "chromadb" in output.lower()
-    assert "voyageai.com" in output or "voyage" in output.lower()
+def test_config_init_shows_service_endpoint_hint(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "init"], input="\n\n")
+    output = result.output.lower()
+    assert "service" in output
+    # No stale Chroma/Voyage signup pointers in the managed wizard.
+    assert "trychroma.com" not in output
 
 
 def test_config_init_skips_keys_already_in_env(runner, fake_home, monkeypatch) -> None:
-    monkeypatch.setenv("CHROMA_API_KEY", "env-chroma")
-    result = runner.invoke(main, ["config", "init"], input="\n\n\n")
-    assert "env-chroma" in result.output or "already set" in result.output.lower() or "environment" in result.output.lower()
+    monkeypatch.setenv("NX_SERVICE_URL", "https://env.example.com")
+    result = runner.invoke(main, ["config", "init"], input="\n\n")
+    assert "already set" in result.output.lower() or "environment" in result.output.lower()
 
 
 # ── get_credential() fallback ───────────────────────────────────────────────

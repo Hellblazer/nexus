@@ -33,11 +33,8 @@ def _get_config_value(dotted_key: str) -> str | None:
 # ── Signup hints shown during `nx config init` ────────────────────────────────
 
 _SIGNUP = {
-    "chroma_api_key":  "https://trychroma.com  →  Cloud  →  API Keys",
-    "chroma_database": (
-        "Choose a database name (e.g. 'nexus'). Nexus will provision this database in ChromaDB Cloud."
-    ),
-    "voyage_api_key":  "https://voyageai.com   →  Dashboard  →  API Keys",
+    "service_url":   "Your managed nexus service endpoint, e.g. https://api.conexus-nexus.com (or your provider's URL).",
+    "service_token": "Bearer token issued by your service operator.",
 }
 
 
@@ -166,20 +163,23 @@ _SEP = "─" * 60
 
 @config_group.command("init")
 def config_init() -> None:
-    """Interactive wizard to configure all required credentials.
+    """Interactive wizard to configure managed-service (cloud) credentials.
 
-    Skips any credential already present in the environment.
-    Saves to ~/.config/nexus/config.yml.
+    Collects the managed nexus service endpoint + bearer token (RDR-166).
+    Skips any credential already present in the environment. Saves to
+    ~/.config/nexus/config.yml.
+
+    Local mode does not use this wizard: run ``nx init`` to choose a local
+    embedder, or ``nx init --service`` to provision the local service stack.
     """
     config_path = _global_config_path()
-    click.echo("Nexus setup wizard\n")
+    click.echo("Nexus managed-service setup wizard\n")
     click.echo(f"Credentials are stored in {config_path}")
-    click.echo("Environment variables (CHROMA_API_KEY, etc.) always take precedence.\n")
+    click.echo("Environment variables (NX_SERVICE_URL, NX_SERVICE_TOKEN) always take precedence.\n")
 
     _required = [
-        ("chroma_api_key",  "ChromaDB Cloud API key"),
-        ("chroma_database", "ChromaDB database name"),
-        ("voyage_api_key",  "Voyage AI API key"),
+        ("service_url",   "Managed service URL"),
+        ("service_token", "Managed service token"),
     ]
 
     for key, label in _required:
@@ -213,23 +213,6 @@ def config_init() -> None:
     click.echo(_SEP)
     click.echo(f"\nCredentials saved to {config_path}")
 
-    # Auto-provision the T3 database if both required credentials are now set.
-    api_key = get_credential("chroma_api_key")
-    database = get_credential("chroma_database")
-    if api_key and database:
-        click.echo(f"\nProvisioning ChromaDB Cloud database '{database}'…")
-        try:
-            from nexus.commands._provision import _cloud_admin_client, ensure_databases  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-            admin = _cloud_admin_client(api_key)
-            created = ensure_databases(admin, base=database)
-            for db_name, was_created in sorted(created.items()):
-                icon = "+" if was_created else "·"
-                status = "created" if was_created else "already exists"
-                click.echo(f"  {icon} {db_name}: {status}")
-        except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-            click.echo(f"\n  Warning: could not auto-provision database ({exc}).")
-            click.echo(f"  Create '{database}' manually in the ChromaDB Cloud dashboard.")
-
     click.echo("\nNext steps:")
-    click.echo("  nx doctor          — verify all services are reachable")
+    click.echo("  nx doctor          — probe the managed service (reachability + version)")
     click.echo("  nx index repo .    — index your current repository")

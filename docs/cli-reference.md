@@ -1270,7 +1270,7 @@ nx config init
 
 | Subcommand | Description |
 |------------|-------------|
-| `init` | Interactive credential wizard |
+| `init` | Interactive managed-service (cloud) credential wizard — collects `service_url` + `service_token`. Local mode uses `nx init` instead. |
 | `list` | Show all config values |
 | `get KEY` | Get single value (masked by default) |
 | `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form |
@@ -1911,6 +1911,14 @@ Create tenant `NAME` and mint its first bound service token. The token is printe
 
 Storage-service administration.
 
+### nx service probe
+
+```
+nx service probe [--url URL]
+```
+
+Probe a managed nexus service for reachability and version compatibility. `--url` defaults to `NX_SERVICE_URL` (or the `service_url` credential). Reports the endpoint, `release_version`, `app_version`, and embedding mode; exits non-zero when the service is unreachable.
+
 ### nx service token issue
 
 ```
@@ -2106,3 +2114,33 @@ nx storage migrate vectors [--local-path PATH | --cloud] [--collections A,B] [--
 Migrate Chroma vector collections into pgvector (RDR-155 Phase 5). Two legs, run separately: the default local leg reads the on-disk store the retired T3 daemon served (`--local-path`, default `~/.config/nexus/chroma`); `--cloud` reads via the ChromaCloud REST/auth API using the configured `chroma_*` credentials. Chunk text, chash, and metadata transfer verbatim and the service re-embeds server-side; collection names are preserved verbatim so `topic_assignments.source_collection` references stay valid. `--rollback` deletes from pgvector exactly the chashes present in the source collections, leaving the source untouched. Exits non-zero when any collection failed or was skipped (non-conformant name with data present). Non-conformant collections with **zero** chunks receive status `skipped-empty` and do not redden the run — nothing can be lost by definition, so empty legacy collections (e.g. `tuples__*`) no longer force `--collections` hand-pinning.
 
 Run the ETL with indexing paused (the post-write count verification assumes a quiescent window). Cutover validation sequence after both legs complete: run `manifest_backfill_sql()` then `manifest_orphan_sql(dim)` for each of 384/768/1024 (from `nexus.migration.vector_etl`) via psql as a superuser/admin role — zero orphan rows per dim is the pass condition. See the module docstring for the rationale (direct SQL, never the repository read API).
+
+---
+
+## nx tier-status
+
+```
+nx tier-status [--session SESSION_ID] [--last N] [--since ISO8601] [--json]
+```
+
+Audit tier-write activity (T1 scratch, T2 memory/plans, T3 store) for a session. Defaults to the current session (`NX_SESSION_ID`); `--last N` aggregates the most recent N sessions, `--since` bounds by timestamp, `--json` emits structured output instead of the human table. Phase 1B (nexus-a52i).
+
+---
+
+## nx command-context
+
+Generates the agent-relay preamble context that the conexus skills consume (RDR-130 P2). Each subcommand mirrors a skill (`analyze-code`, `architecture`, `create-plan`, `implement`, `debug`, `deep-analysis`, `enrich-plan`, `knowledge-tidy`, `pdf-process`, `plan-audit`, and more) and prints the working-directory, project-type, git-branch, and ready-bead context blocks the agent needs. Run `nx command-context --help` for the full subcommand list. Primarily invoked by tooling, not by hand.
+
+---
+
+## nx rdr
+
+RDR (Research-Design-Review) authoring helpers.
+
+| Subcommand | Description |
+|------------|-------------|
+| `lint` | Lint RDR frontmatter/structure; reports findings per file |
+| `set-status STATUS` | Flip an RDR's `status:` frontmatter field |
+| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`) |
+
+Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.
