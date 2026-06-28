@@ -28,6 +28,21 @@ from nexus.db.local_ef import _TIER1_MODEL
 _FAKE_LEASE = object()
 
 
+def _fake_caps(url: str = "https://m.example"):  # noqa: ANN202
+    """A ManagedCapabilities the patched probe returns on success."""
+    from nexus.db.managed_endpoint import ManagedCapabilities
+
+    return ManagedCapabilities(
+        base_url=url,
+        app_version="1.2.3",
+        release_version="0.1.9",
+        embedding_mode="voyage",
+        embedding_models=["voyage-context-3"],
+        schema_latest_id=None,
+        schema_changeset_count=None,
+    )
+
+
 def _read_config(cfg_dir: Path) -> dict:
     p = cfg_dir / "config.yml"
     if not p.exists():
@@ -48,29 +63,35 @@ def cfg_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestManagedMode:
-    """RDR-174 P1.3: when ``_resolve_init_mode()`` resolves MANAGED, plain
-    ``nx init`` provisions nothing locally — it prints the managed-endpoint
-    informational block (folded from the old cloud-mode early return; the
-    RDR-166 credential wizard lands in P1.2) and returns.
+    """RDR-174 P1.2/P1.3: when ``_resolve_init_mode()`` resolves MANAGED, plain
+    ``nx init`` provisions nothing locally — it runs the reused RDR-166 wizard
+    (creds) + service probe and returns. Full onboarding behaviour is covered by
+    TestManagedOnboardingP12; this asserts only the no-local-provisioning +
+    no-local.embed_model invariant.
     """
 
     def test_managed_mode_provisions_nothing_local(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """NX_LOCAL=0 → MANAGED: no provisioning, informational message, no
-        local.embed_model written."""
+        """NX_LOCAL=0 + creds present → MANAGED: probe runs, no local
+        provisioning, no local.embed_model written."""
         monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
         called: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.init.provision_and_start_service",
             lambda embedder=None: called.append("provisioned"),
+        )
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: _fake_caps(),
         )
 
         result = CliRunner().invoke(init_cmd, [])
 
         assert result.exit_code == 0, result.output
         assert called == [], "MANAGED mode must not provision locally"
-        assert "managed" in result.output.lower()
         assert "local" not in _read_config(cfg_dir)
 
 
@@ -156,10 +177,16 @@ class TestServiceProvisioningFlag:
         In MANAGED mode it stays a no-op even when set to 'service'."""
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
         monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
         called: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.init.provision_and_start_service",
             lambda embedder=None: called.append("provisioned"),
+        )
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: _fake_caps(),
         )
 
         result = CliRunner().invoke(init_cmd, [])
@@ -603,8 +630,15 @@ class TestLocalDispatchP13:
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``--yes`` is retained for compatibility but is a no-op; passing it
-        emits an explicit notice rather than silently changing semantics."""
-        monkeypatch.setenv("NX_LOCAL", "0")  # managed → no provisioning side effects
+        emits an explicit notice rather than silently changing semantics. The
+        notice prints before dispatch, so a probe-OK managed run still shows it."""
+        monkeypatch.setenv("NX_LOCAL", "0")  # managed → no local provisioning
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: _fake_caps(),
+        )
         result = CliRunner().invoke(init_cmd, ["--yes"])
         assert result.exit_code == 0, result.output
         assert "no-op" in result.output.lower()
@@ -626,6 +660,153 @@ class TestLocalDispatchP13:
 
         assert called == ["served"]
         assert result is _FAKE_LEASE
+
+
+class TestManagedOnboardingP12:
+    """RDR-174 P1.2: managed-path dispatch — RDR-166 credential wizard (reused)
+    + nx service probe, then STOP (no local provisioning).
+
+    Tests patch ``nexus.db.managed_endpoint.probe_managed_service`` (the source
+    module). Production reaches it via a deferred local import inside
+    ``_managed_onboarding``, so the patch binds at call time — if that import is
+    ever hoisted to module level, retarget to ``nexus.commands.init.*``.
+    """
+
+    def test_missing_creds_runs_wizard_and_persists_then_probes(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MANAGED with no creds → the reused RDR-166 wizard prompts and persists
+        service_url + service_token, then the probe runs against the CONFIGURED
+        url (not the default); no local provisioning."""
+        monkeypatch.setenv("NX_LOCAL", "0")  # force MANAGED
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        provisioned: list[str] = []
+        probed: list[str | None] = []
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: provisioned.append("x"),
+        )
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: (probed.append(kw.get("base_url")), _fake_caps())[1],
+        )
+
+        result = CliRunner().invoke(
+            init_cmd, [], input="https://m.example\ntoken123\n"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert provisioned == [], "managed path must not provision locally"
+        creds = _read_config(cfg_dir).get("credentials", {})
+        assert creds.get("service_url") == "https://m.example"
+        assert creds.get("service_token") == "token123"
+        # SIG-3: the probe must target the configured URL, not the default.
+        assert probed == ["https://m.example"]
+
+    def test_empty_wizard_input_fails_loud_no_default_probe(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SIG-1 regression: entering nothing in the wizard must NOT silently
+        fall back to the default public endpoint and green-light init. It exits
+        non-zero with a remedy and never probes."""
+        monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        probed: list[str | None] = []
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: (probed.append(kw.get("base_url")), _fake_caps())[1],
+        )
+
+        # Empty input for both wizard prompts.
+        result = CliRunner().invoke(init_cmd, [], input="\n\n")
+
+        assert result.exit_code != 0, result.output
+        assert probed == [], "must not probe a default endpoint after empty input"
+        assert "service_url" in result.output.lower()
+
+    def test_url_set_but_token_empty_fails_loud(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The managed branch ensures BOTH creds: a URL with an empty token must
+        fail loud rather than probe the unauthenticated /version and exit 0 with
+        no bearer configured."""
+        monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        probed: list[str | None] = []
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: (probed.append(kw.get("base_url")), _fake_caps())[1],
+        )
+
+        # URL entered, token left empty.
+        result = CliRunner().invoke(init_cmd, [], input="https://m.example\n\n")
+
+        assert result.exit_code != 0, result.output
+        assert probed == [], "must not probe with an unset token"
+        assert "service_token" in result.output.lower()
+
+    def test_probe_success_exits_zero_no_provision(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Creds present + probe OK → exit 0, reachable message, no provisioning."""
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+        provisioned: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: provisioned.append("x"),
+        )
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: _fake_caps(),
+        )
+
+        result = CliRunner().invoke(init_cmd, [])
+
+        assert result.exit_code == 0, result.output
+        assert provisioned == []
+        assert "reachable" in result.output.lower()
+
+    def test_probe_failure_exits_nonzero_with_actionable_message(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Probe failure → non-zero exit + actionable remedy (fail loud)."""
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+        from nexus.db.managed_endpoint import ManagedServiceUnreachable
+
+        def _boom(**kw):  # noqa: ANN003, ANN202
+            raise ManagedServiceUnreachable("connect timeout to https://m.example")
+
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service", _boom
+        )
+
+        result = CliRunner().invoke(init_cmd, [])
+
+        assert result.exit_code != 0, result.output
+        out = result.output.lower()
+        assert "timeout" in out or "probe" in out
+        assert "nx config init" in out or "re-run" in out
+
+    def test_creds_present_skips_wizard(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both creds already set → wizard is skipped. With no stdin supplied,
+        a resurrected prompt would abort non-zero; exit 0 proves the skip."""
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: _fake_caps(),
+        )
+
+        result = CliRunner().invoke(init_cmd, [])  # no input — would hang if prompted
+
+        assert result.exit_code == 0, result.output
 
 
 class TestResolveInitMode:

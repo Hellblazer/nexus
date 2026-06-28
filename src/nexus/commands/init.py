@@ -372,6 +372,76 @@ def _resolve_init_mode() -> str:
     return "managed" if _config.get_credential("service_url") else "local"
 
 
+def _managed_onboarding(ctx: click.Context) -> None:
+    """RDR-174 P1.2 managed-path onboarding: ensure RDR-166 creds, then probe.
+
+    Reuses (does not re-implement) the RDR-166 managed-onboarding wizard
+    (``nx config init``) and the ``nx service probe`` core
+    (``probe_managed_service`` — the click ``probe`` command is itself a thin
+    wrapper over it). The managed path NEVER provisions locally: it returns on
+    probe success and fails loud (SystemExit 1, actionable remedy) on failure.
+    """
+    from nexus.commands.config_cmd import config_init  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.managed_endpoint import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        ManagedServiceError,
+        probe_managed_service,
+        resolve_managed_endpoint,
+    )
+
+    # Ensure both credentials are set; prompt via the RDR-166 wizard only when
+    # one is missing (the wizard itself skips env-provided values).
+    if not (
+        _config.get_credential("service_url")
+        and _config.get_credential("service_token")
+    ):
+        ctx.invoke(config_init)
+
+    # Fail loud if the wizard left service_url unset (the user entered nothing).
+    # Without this guard resolve_managed_endpoint silently falls back to
+    # DEFAULT_MANAGED_SERVICE_URL and we would probe — and green-light — the
+    # public default endpoint the user never configured (no silent fallback for
+    # a correctness-critical value; substantive-critic SIG-1).
+    missing = [
+        name
+        for name in ("service_url", "service_token")
+        if not _config.get_credential(name)
+    ]
+    if missing:
+        click.echo(
+            f"\nManaged setup incomplete: {', '.join(missing)} not set. Re-run "
+            "`nx config init` and enter the missing value(s), then re-run "
+            "`nx init`.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    base = resolve_managed_endpoint(require_token=False)[0]
+    try:
+        caps = probe_managed_service(base_url=base)
+    except ManagedServiceError as exc:
+        # We call the probe CORE (the same function the `nx service probe`
+        # command wraps) rather than ctx.invoke(probe) so we can attach an
+        # init-specific remedy — intentionally more actionable than probe's bare
+        # ClickException (the error-format divergence is deliberate).
+        click.echo(f"\nManaged service probe FAILED: {exc}", err=True)
+        click.echo(
+            "Fix the endpoint/token (`nx config init`) or check connectivity, "
+            "then re-run `nx init`.",
+            err=True,
+        )
+        raise SystemExit(1)
+    # Success output mirrors `nx service probe`'s fields to avoid drift.
+    click.echo(f"\n✓ Managed nexus service reachable: {caps.base_url}")
+    click.echo(
+        f"  release_version: {caps.release_version}  "
+        f"app_version: {caps.app_version}"
+    )
+    click.echo(f"  embedding_mode:  {caps.embedding_mode}")
+    if caps.embedding_models:
+        click.echo(f"  models:          {', '.join(caps.embedding_models)}")
+    click.echo("Indexing/search route to the managed service — no local stack to start.")
+
+
 @click.command("init")
 @click.option(
     "--embedder",
@@ -400,7 +470,13 @@ def _resolve_init_mode() -> str:
         "~/.config/nexus/pg_credentials. Idempotent: safe to re-run."
     ),
 )
-def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) -> None:
+@click.pass_context
+def init_cmd(
+    ctx: click.Context,
+    embedder: str | None,
+    assume_yes: bool,
+    provision_service: bool,
+) -> None:
     """Guided first-run setup — one command that provisions the right backend.
 
     RDR-174 §1/§3 collapse: ``nx init`` is mode-detecting. ``_resolve_init_mode``
@@ -443,15 +519,10 @@ def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) ->
         # (nexus-r2auz) replaces the MANAGED arm with the RDR-166 credential
         # wizard + ``nx service`` probe.
         if mode == "managed":
-            click.echo("Nexus is configured for MANAGED mode (remote nexus service).")
-            click.echo(
-                "Every tier is served remotely — there is no local model or "
-                "cluster to provision."
-            )
-            click.echo(
-                "Set or update the managed endpoint with "
-                "`nx config set service_url` / `service_token`."
-            )
+            # MANAGED: ensure RDR-166 creds (reused wizard) + probe the remote
+            # service, then STOP. _managed_onboarding exits non-zero on probe
+            # failure and never reaches local provisioning.
+            _managed_onboarding(ctx)
         else:
             click.echo("Nexus is configured for CLOUD mode (Voyage embeddings).")
             click.echo(
