@@ -3,8 +3,23 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # Skip the full matrix for changes that cannot affect test outcomes
+    # (docs + changelogs). Conservative on purpose: NOT a blanket **/*.md —
+    # plugin-structure tests validate skill/agent markdown frontmatter, so
+    # only clearly-non-code prose paths are listed. A push touching any code,
+    # config, or manifest still runs CI in full.
+    paths-ignore:
+      - 'CHANGELOG.md'
+      - 'conexus/CHANGELOG.md'
+      - 'README.md'
+      - 'docs/**'
   pull_request:
     branches: [main, develop]
+    paths-ignore:
+      - 'CHANGELOG.md'
+      - 'conexus/CHANGELOG.md'
+      - 'README.md'
+      - 'docs/**'
 
 concurrency:
   group: ci-${{ github.ref }}
