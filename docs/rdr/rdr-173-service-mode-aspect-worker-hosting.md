@@ -141,57 +141,67 @@ process-group kill on `TimeoutExpired`. Method: source search (2026-06-28).
 
 ## Decision
 
-> To be locked at gate. The decision space (candidate hosting models) below is the
-> brainstorming surface, not a locked choice.
+**Chosen: a leased aspect-worker daemon** (Hal, 2026-06-28). Host the extraction loop in a
+long-running Python process supervised by the **existing** RDR-149 leased service-registry
+substrate (`service_registry.py`) — the same lease / heartbeat / single-flight discipline that
+already governs the T1/T2/T3 daemons. This is *not* a new bespoke daemon class; it is one more
+leased tier on the unified substrate (RF-7 confirmed the registry is reusable). That framing is
+what reconciles the choice with RDR-152's "one strict service, no extra daemons" intent: the
+aspect worker joins the **existing** lifecycle substrate rather than a hand-rolled supervisor
+(the bug class RDR-149 unified). Extraction stays Python because it must (`claude -p`, RF-6) —
+the Java service cannot host it.
 
-**Candidate A — persistent Python worker daemon (service-mode).** A long-running supervised
-Python process that hosts the extraction worker and a `reclaim_stale` loop, independent of
-any storing process. Mirrors the RDR-149 leased-registry / RDR-140 single-flight supervision
-patterns. Pro: extraction is already Python (`claude -p`); decouples from MCP/CLI lifetime.
-Con: a new always-on daemon in the post-RDR-152 "one strict service" world (re-introduces a
-lifecycle class RDR-152 worked to retire).
+The daemon owns, independent of any storing process:
+1. **the extraction loop** — claim from the service queue (`HttpAspectQueue.claim_batch`),
+   `extract_aspects` (`claude -p`), upsert `document_aspects`, `mark_done`;
+2. **the `reclaim_stale` loop** — the reclaim owner that closes RF-5 (a stranded `in_progress`
+   row is reset to `pending` on the daemon's interval, so a worker death no longer permanently
+   blocks the migration gate).
 
-**Candidate B — service-aware `nx aspects drain` + explicit post-ingest drain.** Make
-`drain_worker`/`nx aspects drain` service-aware (drain the PG queue, not local sqlite), and
-have ingest paths (or a periodic trigger) call it. Pro: no always-on daemon; reuses the
-worker logic. Con: someone must call it; interactive MCP sessions still rely on the in-process
-worker; batch/CLI must opt in.
+The enqueue hook stops spawning an in-process daemon thread; instead it **ensures the leased
+daemon is up** (spawn-if-absent via the registry's single-flight election), exactly as the
+other tiers are discovered/spawned. Extraction therefore completes for **every** store path —
+short-lived CLI / one-shot / batch included — because it no longer depends on the storing
+process's lifetime (RF-4).
 
-**Candidate C — Java-service-hosted orchestration. REFUTED (RF-6).** The Java service spawns
-no Python/Claude subprocess and `extract_aspects` is fundamentally `claude -p` — the extraction
-loop cannot live in the Java service. Off the table.
+### Why not the alternatives
+- **B / D (in-process + drain trigger)** — leaves the worker tied to the storing process's
+  lifetime; short-lived paths still depend on *someone* triggering a drain, and the reclaim gap
+  (RF-5) is unaddressed. A only needs the lease the substrate already provides.
+- **C (Java-hosted)** — refuted (RF-6): no Python/Claude subprocess path in the service.
 
-**Candidate D — accept in-session-only + make the gap loud.** Keep the in-process worker as
-the only host, but (a) document that short-lived paths do not extract, (b) fail loud (a
-metric/warning) when a process exits with undrained owned rows, (c) provide a manual
-service-aware drain. Pro: minimal. Con: leaves the user-visible symptom (no aspects for
-CLI/headless/batch) unfixed.
-
-**Needed REGARDLESS of the hosting model (RF-5, RF-7):**
-- **Service-mode reclaim ownership** — a scheduled `reclaimStale` (e.g. a second
-  `scheduleAtFixedRate` in `NexusService.java` beside the T1 sweep, or a periodic Python
-  caller of `POST /queue/reclaim_stale`). Without it any worker death permanently strands an
-  `in_progress` row and blocks the migration drain gate.
-- **A service-aware `drain_worker`** — the one-branch fix (use `HttpAspectQueue` when
-  `aspect_queue` backend is SERVICE) so the migration gate and operators have a working drain.
+### Carried regardless (RF-5, RF-7), now folded into A
+- the daemon's `reclaim_stale` loop is the reclaim owner (closes RF-5);
+- **service-aware `drain_worker`** (the one-branch fix, RF-7) still ships so the migration gate
+  and operators have a working drain against the service queue. Open: with the daemon as the
+  reclaim owner, decide whether a *second* scheduled `reclaimStale` in the Java service is
+  redundant (likely yes — the daemon suffices; revisit at planning).
 
 ## Approach
 
-> Candidate; refine in rdr-research, lock at gate.
+> Candidate phasing for the leased aspect-worker daemon; refine + lock the bead plan at accept.
 
-1. **Spike RF-4 first**: confirm whether a persistent service-mode MCP session actually drains
-   (store_put → wait → `document_aspects>0`). This decides whether the gap is "all short-lived
-   paths" or "all service-mode paths".
-2. **Resolve RF-5**: establish reclaim ownership in service mode (does anything reset stranded
-   `in_progress`?); decide where it lives.
-3. **Choose a hosting model** (A–D) against the evidence; bias to the smallest change that
-   makes extraction complete for the real store paths without re-introducing a daemon-lifecycle
-   bug class.
-4. **Service-aware drain** regardless of model: `nx aspects drain` must operate on the PG queue
-   (the local-sqlite `drain_worker` is inert in service mode) so the migration drain gate and
-   operators have a working tool.
-5. **`--fullstack` validation**: the harness must be able to drive the chosen host to a real
-   `document_aspects>0` (closes RDR-172 P2.5 / nexus-8zog5).
+1. **Lease the worker on the existing registry.** Register an aspect-worker tier on
+   `service_registry.py` (lease key, heartbeat, single-flight election) mirroring the T2/T3
+   daemon registration. Define the lease scope (per-host vs per-tenant — see Open Questions) and
+   the spawn entrypoint (a small `nx`-internal daemon process hosting `AspectExtractionWorker`).
+2. **Spawn-if-absent from the enqueue hook.** Replace the in-process `ensure_worker_started()`
+   thread spawn with a registry discover/spawn: the hook ensures the leased daemon is running
+   (election guarantees one), then returns. No extraction work happens in the storing process.
+3. **Reclaim loop in the daemon.** Run `reclaim_stale` against the service queue on an interval
+   (matching the old `stale_timeout_seconds` window) so a daemon/worker death self-heals
+   (closes RF-5). Decide whether the Java-side scheduled `reclaimStale` is then redundant.
+4. **Service-aware `drain_worker`** (RF-7): branch at `aspect_worker.py:964-967` to drive +
+   poll the SERVICE queue (`HttpAspectQueue.is_drained()`) when the aspect-queue backend is
+   SERVICE, so `nx aspects drain` and the migration gate work.
+5. **Observability** (per the failure-mode requirement): emit a structured signal/metric when a
+   process enqueues but the leased daemon is unreachable, and when the daemon resets a stranded
+   row — make the previously-silent store-time failure loud.
+6. **(Decide) SIGKILL-orphan hardening** (RF-8): `start_new_session=True` + process-group kill
+   on `TimeoutExpired` in `extract_aspects` — ship here or as a separate fix (Open Question).
+7. **`--fullstack` validation**: with the daemon hosting extraction, the harness's one-shot
+   `claude -p` workload must reach `document_aspects>0` (closes RDR-172 P2.5 / nexus-8zog5),
+   proving the storing-process lifetime no longer gates extraction.
 
 ## Failure mode / observability (today, broken)
 
@@ -237,10 +247,13 @@ migration time" is the target — the opposite of today.
   construction (RF-4); an empirical container spike remains optional confirmation.
 - ~~RF-5: who owns `reclaim_stale` in service mode?~~ Answered: **nobody** (RF-5) — must be
   closed regardless of the hosting model.
-- **Hosting model choice (A vs B vs D):** does the RDR-152 "one strict service, no extra
-  daemons" principle permit a leased Python worker daemon (Candidate A, viable per RF-7), or
-  should hosting stay in-process (D) + a service-aware drain (B) trigger extraction for
-  short-lived paths? This is the core remaining decision for the gate.
+- ~~Hosting model choice (A vs B vs D)~~ **Decided: A** (leased aspect-worker daemon on the
+  existing RDR-149 registry).
+- **Lease scope** for the aspect-worker daemon: per-host single daemon vs per-tenant. (planning)
+- With the daemon owning `reclaim_stale`, is a *second* Java-side scheduled `reclaimStale`
+  redundant? (likely yes — planning)
+- Does the leased daemon replace the in-process worker in **local** mode too, or service-mode
+  only? (unifying on the daemon is cleaner; weigh against local-mode simplicity — planning)
 - Is fast batch ingest (`nx index`) also affected, and does it need the same host?
 - Should the SIGKILL-orphan hardening (RF-8: `start_new_session` + group-kill) ship with this
   RDR or as a separate fix?
@@ -260,3 +273,9 @@ migration time" is the target — the opposite of today.
   is reusable for a Python worker daemon. **RF-8** — SIGKILL orphans the `claude -p` and strands
   the row (no process group). Two fixes are needed regardless of the hosting model: service-mode
   reclaim ownership + a service-aware drain. Evidence: T2 `nexus_rdr/173-research-1`.
+- 2026-06-28: **Decision locked — Candidate A** (Hal): a leased aspect-worker daemon on the
+  existing RDR-149 service-registry substrate, owning the extraction loop + a reclaim_stale loop,
+  spawned-if-absent by the enqueue hook. Decouples extraction from the storing process (closes
+  the short-lived-path gap, RF-4) and gives reclaim an owner (RF-5). C refuted (RF-6); B/D
+  rejected (still process-lifetime-bound). Carried: service-aware drain (RF-7), observability,
+  optional SIGKILL-orphan hardening (RF-8). Approach phased; ready for the gate.
