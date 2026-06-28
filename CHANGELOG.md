@@ -59,6 +59,12 @@ migration tool; the Chroma source remains the immutable migration origin
 - Supporting substrate work: RDR-152 (Postgres + Java service + thin HTTP
   bridge), RDR-156 (vector-store capability leverage), RDR-160 (bge-768 local
   embedder), RDR-162 (cross-model migrate for legacy collections).
+- **`nx aspects requeue-failed`: bulk recovery for failed aspect-extraction
+  rows** (nexus-2c51v). Requeues failed rows back to pending: all, or scoped by
+  `--collection`, paced with `--limit`, previewed with `--dry-run`.
+- **`nx doctor --check-t3-legacy-metadata`** (nexus-1714): flags pre-RDR-103
+  legacy T3 collection-metadata shapes so an operator can spot a collection that
+  predates the conformant `<content_type>__<owner>__<model>__v<n>` naming.
 
 ### Fixed
 
@@ -73,6 +79,18 @@ migration tool; the Chroma source remains the immutable migration origin
   target, which a cloud service cannot serve. This unblocks the mixed migrant
   (ran locally, migrates onto a voyage service); the dry-run preview names the
   actual target and estimates its rate (nexus-gilf2).
+- **Service-mode aspect extraction no longer fails silently** (RDR-172). The
+  enqueue path now carries a stable client identity, the server returns typed
+  4xx on a rejected enqueue instead of an opaque error, and a loudness tripwire
+  surfaces a dropped enqueue rather than swallowing it.
+- **`nx aspects drain` is service-aware** (RDR-173 P4.1). In service mode it
+  polls the Postgres aspect queue (`HttpAspectQueue`) instead of a local SQLite
+  handle, skips the MCP-worker lock, and on a crashed-worker timeout (rows stuck
+  `in_progress` with zero pending) surfaces an honest hint pointing at
+  `nx aspects reclaim-stale` instead of the generic re-run message.
+- **Service-mode catalog conformance + indexing repair** (RDR-168). 19
+  `HttpCatalogClient` signatures were reconciled to the canonical catalog
+  interface, repairing service-mode indexing that diverged from the local path.
 
 ### Known limitations / upgrade notes
 
@@ -84,6 +102,12 @@ migration tool; the Chroma source remains the immutable migration origin
   `xattr -d com.apple.quarantine`.
 - **`nx guided-upgrade` is idempotent but not a no-op after success** — re-running
   re-copies at full cost (the Chroma source is intact, so it is re-detected).
+- **Service-mode aspect extraction needs a persistent host.** In service mode,
+  aspects enqueued by a short-lived store path are not drained until a persistent
+  MCP session runs the extraction loop; the leased aspect-worker daemon that
+  hosts extraction unconditionally (RDR-173) ships in a later release. Until
+  then, enqueue is loud and correct (RDR-172) and a persistent session or an
+  explicit `nx aspects drain` is what extracts them.
 
 ## [5.10.6] - 2026-06-07
 
