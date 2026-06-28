@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nx init — guided first-run onboarding (RDR-144).
+"""nx init — guided first-run onboarding (RDR-144, collapsed by RDR-174).
 
-Makes the local embedder a guided, informed choice rather than a silent
-packaging default. ``nx init`` is a NEW top-level verb, distinct from the
-credentials wizard ``nx config init`` (gate-locked, RDR-144).
+``nx init`` is a single mode-detecting command (RDR-174 §1/§3). It resolves
+LOCAL vs MANAGED via :func:`_resolve_init_mode` and either provisions and
+starts the local service stack (Postgres + the bge-768 Java service) or runs
+the reused RDR-166 managed-onboarding wizard + service probe. It is distinct
+from the credentials-only wizard ``nx config init``.
 
-Phase 2 scope: detect cloud-vs-local, present the choice, persist it to
-``config.yml``. The model fetch and ``[local]`` extra-add are P3; the
-config-key → embedding-function wiring lands with P3 (where the extra is
-guaranteed present). This module performs NO network or install work.
+This module DOES perform network and install work on the LOCAL path (PG
+provisioning, native-binary acquisition, bge-768 ONNX download) — the RDR-144
+non-service embedder picker it once hosted was removed in RDR-174 P1.3 (no
+non-service local T3 path survives RDR-155/158).
 """
 from __future__ import annotations
 
@@ -552,8 +554,15 @@ def init_cmd(
         raise SystemExit(1)
     if lease is None:
         # provision_and_start_service resolved cloud-internal (is_local_mode
-        # False): embeddings run server-side via Voyage, no local service to
-        # start.
+        # False — e.g. an explicit ``--service`` with NX_LOCAL=0): Postgres was
+        # provisioned but no local service started. Say so rather than exit
+        # silently (CRE LOW-2).
+        click.echo(
+            "\nPostgres is provisioned, but no local service was started: this "
+            "host resolves to cloud/remote serving (is_local_mode is false). Set "
+            "NX_LOCAL=1 to force a local service, or configure a managed endpoint "
+            "with `nx config init`."
+        )
         return
     # RDR-157 P4.1 / RDR-174 §3: one command left the user with a running backend.
     return

@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-144 P2: `nx init` guided onboarding verb (skeleton + detect + persist).
+"""`nx init` mode-detecting onboarding (RDR-144, collapsed by RDR-174).
 
-Phase 2 scope is intentionally narrow: detect cloud-vs-local, present the
-local embedder choice (bge-768 recommended, one-time download cost stated,
-minilm-384 as the explicit alternative), and persist the choice to
-config.yml. NO model fetch and NO extra-add happen here — that is P3.
-
-Cloud-path tests pin ``nexus.config.is_local_mode`` because CI runners lack
-cloud credentials and ``is_local_mode()`` defaults to True there
-(mem:feedback_pin_local_mode_in_cloud_tests).
+Covers the RDR-174 dispatch: ``_resolve_init_mode`` precedence, the LOCAL path
+(plain ``nx init`` provisions the local service stack; the RDR-144 embedder
+picker was removed in P1.3), and the MANAGED path (reused RDR-166 wizard +
+service probe). Dispatch is steered by NX_LOCAL / NX_SERVICE_URL env state;
+the ``cfg_dir`` fixture clears those for isolation. The genuine-cloud arm still
+pins ``nexus.config.is_local_mode`` (mem:feedback_pin_local_mode_in_cloud_tests).
 """
 from __future__ import annotations
 
@@ -55,6 +53,11 @@ def cfg_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     d = tmp_path / "cfg"
     d.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(d))
+    # Self-isolate dispatch-steering env so ambient CI/dev values can't bleed in
+    # (CRE LOW-3; mirrors the f15f6d45 fix to the fake_home fixture). Individual
+    # tests re-set these as needed.
+    for _var in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+        monkeypatch.delenv(_var, raising=False)
     return d
 
 
@@ -625,6 +628,23 @@ class TestLocalDispatchP13:
 
         assert result.exit_code == 0, result.output
         assert called == [None], "--service must force provisioning regardless of mode"
+
+    def test_service_with_nx_local_0_reports_no_local_service(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CRE LOW-2: ``--service`` with NX_LOCAL=0 provisions PG but
+        provision_and_start_service returns None (is_local_mode False), so no
+        local service starts. init must SAY so rather than exit silently."""
+        monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step", lambda: None
+        )
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+
+        result = CliRunner().invoke(init_cmd, ["--service"])
+
+        assert result.exit_code == 0, result.output
+        assert "no local service was started" in result.output.lower()
 
     def test_yes_flag_emits_noop_notice(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
