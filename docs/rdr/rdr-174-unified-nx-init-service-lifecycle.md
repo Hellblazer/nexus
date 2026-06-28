@@ -95,9 +95,11 @@ Target end state: `uv tool install conexus && nx init && nx index`.
 
 ## Approach (numbered, for phase-review cross-walk)
 
-1. **Mode detection in `nx init`** keyed on service-URL presence (NOT
-   `is_local_mode()`, which has the open `service_url`-blind bug — see Open
-   Questions). Tests: managed path vs local path dispatch.
+1. **Mode detection in `nx init`** keyed on `get_credential("service_url")` (NOT
+   `is_local_mode()`, which is `service_url`-blind across 57 callers — RF-5).
+   Tests: managed path vs local path dispatch. Also **remove the `_auto_service`
+   side-channel** (`init.py:641-644`): once plain local `nx init` always
+   provisions, that silent second path is dead weight (RF-1 risk).
 2. **Managed path**: fold the RDR-166 credential wizard + `nx service probe`
    into `nx init` when managed. Test: missing-creds prompt; probe success/failure
    exit codes.
@@ -126,22 +128,21 @@ Target end state: `uv tool install conexus && nx init && nx index`.
 
 ## Open Questions
 
-1. **`is_local_mode()` is service-URL-blind** (filed bead, this session): a
-   managed user with `service_url` but no chroma/voyage key is mis-detected as
-   local across ~15 call sites. `nx init` must use an authoritative
-   service-mode gate (`storage_mode()` / `NX_SERVICE_URL` presence), and this RDR
-   should decide whether to fix `is_local_mode()` itself or formally deprecate it
-   in favor of `storage_mode()`/`is_vector_service_mode()`.
-2. **RDR-158 interaction**: if the SQLite T2 backend is fully retired, the T2
-   daemon commands (`nx daemon t2 *`) may be removable entirely, not merely
-   demoted from the install path. Sequence against RDR-158.
-3. **Reboot-persistence mechanism**: does the service supervisor get a direct
-   launchd/systemd unit, or does an existing always-on daemon (e.g. the
-   service-registry lease owner) relaunch it? Decide the ownership before
-   implementing Gap 3.
-4. **World-blocked?** This touches the RDR-152/155 service substrate. Confirm
-   whether the implementation is pre- or post-cutover; if post-cutover, this RDR
-   is design-now / implement-after-cutover like RDR-173's daemon arc.
+1. **RESOLVED (RF-5).** `is_local_mode()` is service-URL-blind (57 call sites).
+   Scope: `nx init` dispatches on `get_credential("service_url")`, NOT
+   `is_local_mode()`. The global `is_local_mode()` blindness is filed as a
+   separate bead, out of scope for this RDR.
+2. **OPEN — RDR-158 interaction**: RDR-174 only *demotes* `nx daemon t2 install`
+   from the install path (needs no gate; default config never uses it). Full
+   *deletion* of `nx daemon t2 *` is RDR-158 P4 (two-release window). Confirm at
+   gate that demotion-now / delete-at-P4 is the agreed sequence.
+3. **RESOLVED (RF-3).** Reboot-persistence is a direct launchd/systemd unit via
+   `installer.py` (`_render_for_service` + service constants + templates), same
+   substrate as t2/t3. The supervisor's `start --foreground` contract is already
+   unit-amenable. No registry-relaunch indirection needed.
+4. **RESOLVED (RF-7).** Not world-blocked. The luxe6 boundary blocks releasing,
+   not implementing; RDR-174 touches only init CLI flow, a new OS unit, a
+   deprecation notice, and docs (release-prep scope). Implement-now.
 
 ## Consequences
 
@@ -155,7 +156,79 @@ Target end state: `uv tool install conexus && nx init && nx index`.
 
 ## Research findings
 
-(To be added during `/conexus:rdr-research`. Codebase evidence already gathered
-this session: `storage_mode.py` default-SERVICE flip; `nx daemon service` lacks
-`install --autostart`; `provision_and_start_service()` is the shared local-init
-body reused by guided-upgrade; `is_local_mode()` service-URL-blindness.)
+Codebase-deep-analyzer pass, 2026-06-28, file:line-grounded.
+
+**RF-1 — Current `nx init` dispatch** (`src/nexus/commands/init.py`). `init_cmd`
+at line 627; options `--embedder` (603), `--yes` (609), `--service` (613-626).
+Dispatch: `_auto_service` side-channel (641-644) fires service provisioning when
+`NX_STORAGE_BACKEND` contains "service" even without `--service`; `if
+provision_service or _auto_service:` (645-668) calls `provision_and_start_service`,
+cloud returns `None` early (661-664); plain `nx init` cloud-mode (672-676) prints
+Voyage lines and returns; plain `nx init` local-mode (678-720) runs the embedder
+picker only — **no PG/service start**, so T3 is unusable after plain `nx init`.
+Confirms Gap 1. RISK: `_auto_service` becomes dead weight once plain `nx init`
+always provisions in local mode — remove it, don't leave a silent second path.
+
+**RF-2 — `provision_and_start_service()`** (`init.py:567-599`) is the shared
+local-init body: `_provision_postgres_step` → `is_local_mode` early-return for
+cloud (585) → `_provision_service_embedder_step` (bge-768 lock + ONNX fetch,
+fail-loud) → `_ensure_service_binary_step` (acquire signed binary) →
+`_start_service_step` (`ensure_storage_supervisor`). Reused by guided-upgrade
+(`migration/guided_upgrade.py:417-420`, `_default_serve`). Every step idempotent
+→ safe to call from a default `nx init`.
+
+**RF-3 — No service autostart; substrate to reuse** (`commands/daemon.py`).
+`nx daemon service` has only start (1567) / install-binary (1649) / stop (1738) /
+status (1938) — **no `install --autostart`**. Gap 3 verified. T2's
+`install --autostart` (1405-1455) wraps `nexus.daemon.installer.install_autostart`
+(`installer.py:136-212`) using shared `_autostart_install_dir` /
+`_render_template` / `_resolve_nx_bin` / `_activate_cmd`. The supervisor runs via
+`nx daemon service start --foreground` (1618-1624) → `run_storage_supervisor`,
+blocking until SIGTERM — identical contract to `t3 start --foreground`, so it is
+fully amenable to a launchd/systemd unit. A new service autostart should add:
+`_render_for_service()` in installer.py (mirror `_render_for_t2` at 93-115),
+constants `_SERVICE_PLIST_NAME`/`_SERVICE_LAUNCHD_LABEL` (mirror 57-59), and
+templates `com.nexus.service.plist` + `nexus-service.service` in
+`_resources/daemon/`. Go through installer.py (in-process callable), not the T3
+inline pattern (tech debt).
+
+**RF-4 — T2 default = SERVICE** (`db/storage_mode.py:122-180`).
+`storage_backend_for` hard-defaults SERVICE for all stores except `t1` (which
+returns SQLITE as a "local marker" but routes to Chroma `T1Database`, not
+`memory.db`). In default config (no `NX_STORAGE_BACKEND*`), **no T2 store resolves
+to SQLite**, so `nx daemon t2 install` is fully vestigial — only reachable via an
+explicit `NX_STORAGE_BACKEND[_<store>]=sqlite` opt-out. Confirms Gap 2.
+
+**RF-5 — Mode detection: use `get_credential("service_url")`, not
+`is_local_mode()`** (`config.py:562-578`). `is_local_mode()` keys only on
+chroma+voyage creds and ignores `NX_SERVICE_URL`/`service_url`, so a managed user
+is mis-detected as local (would wrongly hit the embedder picker / local
+provisioning). It has **57 call sites** — do NOT mass-patch it for this RDR.
+`get_credential("service_url")` (reads `NX_SERVICE_URL` env or config.yml
+`service_url`) is the correct, scoped dispatch key for `init_cmd`. The
+`is_local_mode()` guard inside `provision_and_start_service` (585) stays as
+defense-in-depth; the managed path must exit before reaching it. (Open Question 1
+resolved: scope the fix to init, file the global `is_local_mode()` question
+separately — already a bead.)
+
+**RF-6 — RDR-158 interaction** (`docs/rdr/rdr-158-*`, status accepted). PG service
+becomes the only T2 backend; SQLite source deleted in P4 (same N+1 window as
+RDR-155 P4b). P3 (remove `=sqlite`, hard-error) is luxe6-gated; P4 (deletion) is
+two-release-window-gated. **Demoting** the T2-daemon step from the install path
+needs no gate (default config already never uses it); **deleting** `nx daemon t2 *`
+waits for RDR-158 P4. The two moves are independent — RDR-174 does the demotion
+now.
+
+**RF-7 — NOT world-blocked.** The luxe6 boundary blocks *releasing*, not
+*implementing* (RDR-173's service-substrate arc was built on this branch under the
+same freeze). RDR-174 touches only init CLI flow, a new OS-unit template + install
+subcommand, a `--service` deprecation notice, and docs — no T3 cutover, no SQLite
+deletion, no schema/migration. It is release-prep scope, squarely buildable on the
+6.0.0 branch. (Open Question 4 resolved: implement-now, not post-cutover.)
+
+**Net effect on the draft:** all three gaps confirmed; Open Questions 1 and 4
+resolved (scoped service_url dispatch; not world-blocked). Remaining for gate:
+Open Question 2 (sequence T2-daemon *deletion* vs RDR-158 P4 — RDR-174 only
+demotes) and Open Question 3 (autostart ownership — RF-3 answers it: a direct
+launchd/systemd unit via installer.py, same as t2/t3). New risk to carry: remove
+the `_auto_service` side-channel when unifying.
