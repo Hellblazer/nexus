@@ -946,8 +946,6 @@ def drain_worker(
         for.  This handles the quiescent case (e.g., the caller's process
         never ran the worker, or the worker finished and was reset).
     """
-    from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred to avoid circular import (db.t2 queue)
-
     # SIG-5: detect active MCP-process workers before stopping the local
     # singleton.  A live MCP worker in another process drains its own
     # queue independently; the migration must not run while that worker is
@@ -964,7 +962,22 @@ def drain_worker(
     queue_path = Path(queue_path)
     deadline = time.monotonic() + timeout
 
-    queue = AspectExtractionQueue(queue_path)
+    # RDR-173 P4.1 (nexus-4st62): in SERVICE mode the authoritative
+    # aspect_extraction_queue is PG, reached via ``HttpAspectQueue``. The
+    # local-sqlite ``AspectExtractionQueue`` is empty/stale there, so polling it
+    # yields a spurious "drained" — leaving ``nx aspects drain`` and the
+    # migration drain gate inert in service mode. Poll the SERVICE queue's
+    # ``is_drained()`` instead. (Local/SQLite mode is unchanged.)
+    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+        StorageBackend,
+        storage_backend_for,
+    )
+    if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred (optional service dep)
+        queue = HttpAspectQueue()
+    else:
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred to avoid circular import (db.t2 queue)
+        queue = AspectExtractionQueue(queue_path)
 
     def _join_worker_thread(w: AspectExtractionWorker) -> None:
         """Join the worker thread; log a warning if it does not exit in 2s.

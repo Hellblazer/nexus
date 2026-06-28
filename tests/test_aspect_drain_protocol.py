@@ -110,6 +110,55 @@ class TestIsDrained:
         # doc2 is still pending
         assert queue.is_drained() is False
 
+
+# -- RDR-173 P4.1 (nexus-4st62): service-aware drain ---------------------------
+
+
+class TestServiceModeDrain:
+    """drain_worker must poll the SERVICE queue (HttpAspectQueue.is_drained())
+    when the aspect-queue backend is SERVICE — not a local-sqlite
+    AspectExtractionQueue, which is empty/stale in service mode and yields a
+    spurious 'drained' (the nx aspects drain / migration-gate inertness gap)."""
+
+    def test_drain_polls_http_queue_in_service_mode(
+        self, monkeypatch, locks_dir: Path, tmp_path: Path,
+    ) -> None:
+        from nexus.aspect_worker import drain_worker
+        from nexus.db import storage_mode as smod
+        from nexus.db.t2 import http_aspect_queue as hmod
+        from nexus.db.t2 import aspect_extraction_queue as sqmod
+
+        monkeypatch.setattr(
+            smod, "storage_backend_for",
+            lambda key: smod.StorageBackend.SERVICE
+            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
+        )
+        calls = {"http_is_drained": 0, "http_closed": False, "http_built": 0}
+
+        class _FakeHttpQueue:
+            def __init__(self, *a, **k) -> None:
+                calls["http_built"] += 1
+
+            def is_drained(self) -> bool:
+                calls["http_is_drained"] += 1
+                return True
+
+            def close(self) -> None:
+                calls["http_closed"] = True
+
+        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
+        # Guard: the local sqlite queue must NOT be opened in service mode.
+        def _boom(*a, **k):
+            raise AssertionError("service mode must not open local AspectExtractionQueue")
+        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
+
+        # queue_path is irrelevant in service mode; pass an unused path.
+        drain_worker(tmp_path / "unused.db", _locks_dir=locks_dir, timeout=1.0)
+
+        assert calls["http_built"] == 1, "service mode must construct HttpAspectQueue"
+        assert calls["http_is_drained"] >= 1, "must poll the SERVICE queue's is_drained()"
+        assert calls["http_closed"] is True, "must close the http queue"
+
     def test_only_failed_rows_is_drained(self, queue) -> None:
         queue.enqueue("knowledge__test", "/doc1.pdf")
         queue.enqueue("knowledge__test", "/doc2.pdf")
