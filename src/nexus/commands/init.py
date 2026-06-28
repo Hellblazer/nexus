@@ -13,8 +13,6 @@ guaranteed present). This module performs NO network or install work.
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 from pathlib import Path
 
 import click
@@ -22,264 +20,13 @@ import structlog
 
 import nexus.config as _config
 from nexus.config import set_config_value
-from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL, _fastembed_available
+from nexus.db.local_ef import _TIER1_MODEL
 
 _log = structlog.get_logger(__name__)
-
-#: User-facing choice token → canonical model id understood by
-#: ``LocalEmbeddingFunction(model_name=...)``.
-_CHOICE_TO_MODEL: dict[str, str] = {
-    "bge-768": _TIER1_MODEL,
-    "minilm-384": _TIER0_MODEL,
-}
 
 #: Config key the choice is persisted under. Read by the EF selection path
 #: in P3 (consumer wiring deferred — P2 only records the choice).
 _EMBED_MODEL_KEY = "local.embed_model"
-
-#: Approximate one-time download size for the bge-768 ONNX model, stated up
-#: front so the user makes an informed choice.
-_BGE_DOWNLOAD_HINT = "~140 MB"
-
-
-# ── P3 (A) extra-add, editable-safe ───────────────────────────────────────────
-
-
-def _local_extra_installed() -> bool:
-    """True when the ``[local]`` extra (fastembed) is importable in-process."""
-    return _fastembed_available()
-
-
-def _uv_receipt_path() -> Path | None:
-    """Return the uv-tool install receipt path, or None when this is not a
-    uv-tool install (dev/editable tree, or ``uv`` not on PATH).
-
-    Presence of ``$(uv tool dir)/conexus/uv-receipt.toml`` is the signal that
-    a ``uv tool install --reinstall`` is safe (it won't clobber a dev tree).
-    """
-    if shutil.which("uv") is None:
-        return None
-    try:
-        out = subprocess.run(
-            ["uv", "tool", "dir"], capture_output=True, text=True, timeout=10, check=True
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    receipt = Path(out.stdout.strip()) / "conexus" / "uv-receipt.toml"
-    return receipt if receipt.is_file() else None
-
-
-def _ensure_local_extra() -> bool:
-    """Install the ``[local]`` extra when safe.
-
-    uv-tool install (receipt present) → shell an editable-safe reinstall that
-    adds ``[local]``. Dev/editable tree (no receipt) → print the manual
-    instruction and do NOT shell anything (clobber-a-dev-tree guard, CA-2).
-
-    Returns True when a reinstall was shelled (the model fetches on first
-    embed of the freshly-installed venv), False when the user must act.
-    """
-    receipt = _uv_receipt_path()
-    if receipt is None:
-        click.echo(
-            "\nThe local embedder needs the [local] extra. This looks like a "
-            "dev/editable tree, so install it manually:"
-        )
-        click.echo("  pip install 'conexus[local]'   # or: uv sync --extra local")
-        return False
-
-    click.echo("\nInstalling the [local] extra (fastembed) …")
-    try:
-        subprocess.run(
-            ["uv", "tool", "install", "--reinstall", "--from", "conexus[local]", "conexus"],
-            check=True,
-            timeout=300,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        _log.warning("local_extra_install_failed", error=str(exc))
-        click.echo(f"\nFailed to install the [local] extra: {exc}", err=True)
-        click.echo(
-            "Install it manually: uv tool install --reinstall 'conexus[local]' conexus",
-            err=True,
-        )
-        return False
-    click.echo(
-        "Installed. The bge-768 model fetches automatically on first local "
-        "embed — or re-run `nx init` to provision it now."
-    )
-    return True
-
-
-# ── P4 existing-384 detection + SAFE cleanup/reindex ─────────────────────────
-
-
-def _offer_stale_migration(assume_yes: bool) -> None:
-    """Detect 384-dim collections under the now-active 768 embedder and
-    offer the gate-locked safe migration (RDR-144 P4 / CA-3).
-
-    The protocol is dry-run preview -> double-confirm -> reindex-first ->
-    delete-after-verify. ``code__`` and sourceless collections are reported
-    with their remediation but never auto-deleted (no source to reindex
-    from = deleting is pure loss). Any detection failure is non-fatal:
-    ``nx init`` must still complete.
-    """
-    from nexus.db.embed_migrate import detect_stale_local_collections  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.local_ef import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-        _MODEL_DIMS,
-        _MODEL_TOKENS,
-        _resolve_local_model,
-    )
-
-    # Derive dim AND token from the SAME model resolution so a future
-    # caller (e.g. P5a's doctor hint, or a third local model) cannot probe
-    # with one model's dimension while naming another's token.
-    active_model = _resolve_local_model(warn=False)
-    active_token = _MODEL_TOKENS.get(active_model, "bge-base-en-v15-768")
-    active_dim = _MODEL_DIMS.get(active_model, 768)
-
-    try:
-        from nexus.commands.store import _t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-        db = _t3()
-        stale = detect_stale_local_collections(
-            db, active_dim=active_dim, active_token=active_token
-        )
-    except Exception as exc:  # noqa: BLE001 — detection must never block init
-        _log.debug("stale_detection_failed", error=str(exc))
-        return
-
-    if not stale:
-        return
-
-    # A reindexable collection with sourceless chunks (e.g. indexed files +
-    # manual store_put notes) can only be migrated with explicit acceptance
-    # of the note loss — keep it separate from the clean reindexable set.
-    clean = [s for s in stale if s.kind == "reindexable" and s.sourceless == 0]
-    mixed = [s for s in stale if s.kind == "reindexable" and s.sourceless > 0]
-
-    click.echo(
-        f"\nFound {len(stale)} collection(s) indexed with a different "
-        f"embedder than bge-768 — search returns nothing for these:"
-    )
-    for s in stale:
-        if s.kind == "reindexable" and s.sourceless == 0:
-            click.echo(
-                f"  • {s.name} ({s.count} chunks) -> reindex into {s.target_name}"
-            )
-        elif s.kind == "reindexable":  # mixed
-            click.echo(
-                f"  • {s.name} ({s.count} chunks, including {s.sourceless} manual "
-                f"note(s) with no source) -> reindexes files only; the manual "
-                f"notes CANNOT be re-embedded"
-            )
-        elif s.kind == "code":
-            click.echo(
-                f"  • {s.name} ({s.count} chunks) -> reindex manually: "
-                f"nx index repo <path>"
-            )
-        else:  # sourceless
-            click.echo(
-                f"  • {s.name} ({s.count} chunks) -> manual entries, no source "
-                f"to reindex (left as-is; `nx collection delete {s.name}` to remove)"
-            )
-
-    if not clean and not mixed:
-        click.echo(
-            "\nNothing can be migrated automatically — see the manual steps above."
-        )
-        return
-
-    # Double-confirm: the old collections are DELETED after a verified
-    # reindex. Make the destructive step explicit and ask twice.
-    if clean:
-        if not assume_yes:
-            if not click.confirm(
-                f"\nReindex {len(clean)} collection(s) into bge-768 now?",
-                default=True,
-            ):
-                click.echo("Skipped. Run `nx init` again any time to migrate.")
-                return
-            if not click.confirm(
-                "This DELETES each old collection after its reindex is verified. "
-                "Proceed?",
-                default=False,
-            ):
-                click.echo("Skipped. Run `nx init` again any time to migrate.")
-                return
-        for s in clean:
-            _run_migration(db, s, allow_sourceless_loss=False)
-
-    # Mixed collections lose their manual notes on migration. Never under
-    # --yes (we cannot auto-confirm a lossy delete); interactive only, with
-    # a dedicated confirmation that names the loss.
-    for s in mixed:
-        if assume_yes:
-            click.echo(
-                f"\n{s.name}: {s.sourceless} manual note(s) cannot be "
-                f"re-embedded — skipped to avoid silent loss. Re-run `nx init` "
-                f"interactively (without --yes) to migrate it and accept the "
-                f"note loss, or export the notes first.",
-                err=True,
-            )
-            continue
-        if click.confirm(
-            f"\n{s.name} has {s.sourceless} manual note(s) that will be "
-            f"PERMANENTLY LOST (only file-backed chunks can be re-embedded). "
-            f"Migrate and accept that loss?",
-            default=False,
-        ):
-            _run_migration(db, s, allow_sourceless_loss=True)
-        else:
-            click.echo(f"Skipped {s.name}.")
-
-
-def _run_migration(db, stale, *, allow_sourceless_loss: bool) -> None:
-    """Run one migration and report the outcome (RDR-144 P4)."""
-    from nexus.db.embed_migrate import migrate_collection_safe  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    click.echo(f"\nReindexing {stale.name} -> {stale.target_name} …")
-    outcome = migrate_collection_safe(
-        db, stale, dry_run=False, allow_sourceless_loss=allow_sourceless_loss
-    )
-    if outcome.status == "migrated":
-        click.echo(
-            f"  Done: {outcome.after} chunks in {stale.target_name}; "
-            f"old collection removed."
-        )
-    else:
-        click.echo(f"  {outcome.status.upper()}: {outcome.reason}", err=True)
-
-
-# ── P3 (B) model pre-fetch warmup, offline-safe ───────────────────────────────
-
-
-def _warmup_bge() -> None:
-    """Pre-fetch the bge-768 model by running one warmup embed through the P1
-    chokepoint (lands in the stable XDG cache, not $TMPDIR).
-
-    Wrapped so an offline / cache-miss never crashes or wedges first search:
-    fastembed logs an error and returns None on a failed download, which would
-    otherwise None-deref (CA-1 Refinement B). Convert any failure into an
-    actionable message naming the cache path.
-    """
-    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    click.echo(f"\nFetching bge-768 ({_BGE_DOWNLOAD_HINT}) — one-time download …")
-    try:
-        ef = LocalEmbeddingFunction(model_name=_TIER1_MODEL)
-        vectors = ef(["warmup"])
-        if not vectors:
-            raise RuntimeError("embedder returned no vectors")
-        click.echo("Done — bge-768 is cached and ready.")
-    except Exception as exc:  # noqa: BLE001 — any failure must stay actionable
-        cache = _config.fastembed_cache_dir()
-        _log.warning("bge_warmup_failed", error=str(exc), cache=str(cache))
-        click.echo(
-            f"Could not fetch the bge-768 model (offline or download failed): {exc}\n"
-            f"It will be retried automatically on your next local search/index.\n"
-            f"Cache location: {cache}",
-            err=True,
-        )
 
 
 # ── P3 service-embedder provisioning (RDR-160 P3.1 / P3.2) ────────────────────
@@ -298,7 +45,7 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
     * **P3.1:** the CLI fetches the STANDARD un-fused bge ONNX (NOT fastembed's
       optimized cache, which onnxruntime-java cannot load) to the stable
       Java-read path; the service only reads the file. Offline failure is loud
-      (no silent fallback), mirroring :func:`_warmup_bge`.
+      (no silent fallback).
     """
     from nexus.db.service_bge_model import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         SERVICE_BGE_DOWNLOAD_HINT,
@@ -327,8 +74,8 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
         dest = fetch_service_bge_onnx()
         click.echo(f"Done — service bge-768 model ready at {dest}.")
     except Exception as exc:  # noqa: BLE001 — must stay actionable
-        # Fail loud AND fatal: unlike the Python fastembed path (_warmup_bge),
-        # which auto-fetches on first use, the Java service has NO retry — it
+        # Fail loud AND fatal: unlike a Python fastembed path that auto-fetches
+        # on first use, the Java service has NO retry — it
         # fail-loud-crashes at boot without this file. So a swallowed failure
         # would make `nx init --service` look successful while leaving an
         # un-bootable service. Surface it as a hard error; re-run when online
@@ -630,14 +377,17 @@ def _resolve_init_mode() -> str:
     "--embedder",
     type=click.Choice(["bge-768", "minilm-384"]),
     default=None,
-    help="Select the local embedder non-interactively (skips the prompt).",
+    help=(
+        "Local service embedder selector (minilm-384 gets an advisory — the "
+        "Java service embeds with bge-768 only)."
+    ),
 )
 @click.option(
     "--yes",
     "-y",
     "assume_yes",
     is_flag=True,
-    help="Accept the recommended default (bge-768 for local) without prompting.",
+    help="Accepted for compatibility; provisioning is non-interactive (no-op).",
 )
 @click.option(
     "--service",
@@ -651,99 +401,88 @@ def _resolve_init_mode() -> str:
     ),
 )
 def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) -> None:
-    """Guided first-run setup: choose your local embedding model.
+    """Guided first-run setup — one command that provisions the right backend.
 
-    In cloud mode there is no local model to provision — embeddings run
-    server-side via Voyage. In local mode this records your embedder choice
-    so subsequent indexing/search uses it. The model itself is fetched later
-    (``nx init`` does not download or install anything in this phase).
+    RDR-174 §1/§3 collapse: ``nx init`` is mode-detecting. ``_resolve_init_mode``
+    decides LOCAL vs MANAGED (NX_LOCAL wins; otherwise on a configured
+    ``service_url``). In LOCAL mode a plain ``nx init`` provisions and starts the
+    local service stack (Postgres + the bge-768 Java service, RDR-160) — the
+    same body the now-deprecated ``--service`` flag drives. In MANAGED mode a
+    remote nexus service serves every tier, so there is nothing to provision
+    locally (the credential wizard for that path lands in P1.2, nexus-r2auz).
 
-    Pass ``--service`` to also provision the local Postgres cluster required
-    by the RDR-152 Java service backend.
+    ``--embedder`` selects bge-768 vs minilm-384 for the local service-embedder
+    step (minilm-384 gets an advisory — the Java service is bge-768 only).
+    ``--service`` is still accepted (it forces local provisioning) and is slated
+    for a deprecation notice in P3.1.
     """
-    # Postgres provisioning: run only on the explicit ``--service`` flag.
-    # RDR-174 P1.1 removed the ``_auto_service`` side-channel that fired the
-    # service path whenever ``NX_STORAGE_BACKEND`` contained 'service' (even
-    # without ``--service``) — a silent second provisioning path (RF-1, OBS-2).
-    # P1.1 only lays down ``_resolve_init_mode`` (the gate-locked precedence
-    # primitive) and deletes the side-channel; the helper is NOT yet wired into
-    # this dispatch. The mode-detecting dispatch that consumes it lands in P1.2
-    # (managed path, nexus-r2auz) and P1.3 (local path always provisions,
-    # nexus-5kdia). Interim — between P1.1 and P1.3 — only ``--service`` reaches
-    # the provisioner; this is the gate-locked phase ordering, not a silent drop.
-    if provision_service:
-        from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-        try:
-            lease = provision_and_start_service(embedder)
-        except StorageServiceStartError:
-            # No native binary available and none acquirable. PG is provisioned
-            # and _ensure_service_binary_step already printed an actionable
-            # install instruction; do NOT start (the legacy JVM path is expunged,
-            # RDR-161 P3 — starting without a binary fails loud, CRE C1). Exit
-            # non-zero so the incomplete setup is not mistaken for serving.
-            click.echo(
-                "\nService NOT started: no native binary available. Install one "
-                "(see above), then re-run `nx init --service` to finish.",
-                err=True,
-            )
-            raise SystemExit(1)
-        if lease is None:
-            # Cloud mode + service backend: embeddings run server-side via Voyage,
-            # no local service to start.
-            return
-        # RDR-157 P4.1: one command left the user with a running backend. The
-        # interactive local-embedder prompt below is for the non-service Python
-        # (fastembed) path only.
-        return
-
-    # Import-site call so tests can patch ``nexus.config.is_local_mode``
-    # (mem:feedback_pin_local_mode_in_cloud_tests).
-    if not _config.is_local_mode():
-        click.echo("Nexus is configured for CLOUD mode (Voyage embeddings).")
-        click.echo("Embeddings run server-side — there is no local model to provision.")
-        click.echo("Manage cloud credentials with `nx config init`.")
-        return
-
-    click.echo("Nexus local mode — choose your on-device embedding model.\n")
-    click.echo(
-        "  bge-768     BAAI/bge-base-en-v1.5 (768-dim) — RECOMMENDED. Materially"
-    )
-    click.echo(
-        f"              better local search quality. One-time {_BGE_DOWNLOAD_HINT} "
-        "model download on first use."
-    )
-    click.echo(
-        "  minilm-384  all-MiniLM-L6-v2 (384-dim) — bundled, instant, lower quality.\n"
-    )
-
-    choice = embedder
-    if choice is None:
-        choice = (
-            "bge-768"
-            if assume_yes
-            else click.prompt(
-                "Embedder",
-                type=click.Choice(["bge-768", "minilm-384"]),
-                default="bge-768",
-            )
+    if assume_yes:
+        # RDR-174 P1.3: the interactive embedder picker is gone, so there is no
+        # prompt left to auto-accept. The flag is retained for CLI/script
+        # compatibility (formal deprecation tracked with --service in P3.1) but
+        # is now a no-op — say so rather than silently change its semantics.
+        click.echo(
+            "[--yes/-y is a no-op since the embedder picker was removed; "
+            "provisioning is non-interactive]",
+            err=True,
         )
 
-    model = _CHOICE_TO_MODEL[choice]
-    set_config_value(_EMBED_MODEL_KEY, model)
-    click.echo(f"\nSaved: {_EMBED_MODEL_KEY} = {model}")
-
-    if choice != "bge-768":
-        # minilm-384 is bundled — nothing to fetch or install.
+    # RDR-174 P1.3 dispatch. PRIMARY oracle is the gate-locked mode helper
+    # (_resolve_init_mode — service_url-based, NOT is_local_mode which is
+    # service_url-blind across 57 callers, RF-5). We additionally honour the
+    # genuine cloud case (is_local_mode False — Voyage server-side embeddings,
+    # cloud keys present, no service_url) as a SECONDARY no-provision guard: such
+    # a user must NOT have a local Postgres cluster silently provisioned (that
+    # would be a regression vs the pre-P1.3 cloud early-return). NX_LOCAL=1 still
+    # forces local provisioning even with cloud keys (migration/rehearsal). An
+    # explicit ``--service`` forces local provisioning regardless of mode.
+    mode = _resolve_init_mode()
+    if not provision_service and (mode == "managed" or not _config.is_local_mode()):
+        # Data plane served remotely — nothing local to provision. The old
+        # cloud-mode early return is FOLDED here (not orphaned). P1.2
+        # (nexus-r2auz) replaces the MANAGED arm with the RDR-166 credential
+        # wizard + ``nx service`` probe.
+        if mode == "managed":
+            click.echo("Nexus is configured for MANAGED mode (remote nexus service).")
+            click.echo(
+                "Every tier is served remotely — there is no local model or "
+                "cluster to provision."
+            )
+            click.echo(
+                "Set or update the managed endpoint with "
+                "`nx config set service_url` / `service_token`."
+            )
+        else:
+            click.echo("Nexus is configured for CLOUD mode (Voyage embeddings).")
+            click.echo(
+                "Embeddings run server-side — there is no local model to provision."
+            )
+            click.echo("Manage cloud credentials with `nx config init`.")
         return
 
-    # bge-768: provision the extra + model. If fastembed is already importable
-    # in THIS process, warmup now. Otherwise add the extra (a fresh venv the
-    # running process can't import from) and let first-embed fetch the model.
-    if _local_extra_installed():
-        _warmup_bge()
-        # bge is now the active embedder in this process; any pre-existing
-        # 384-dim collections are now stale and silently unsearchable.
-        # Offer the gate-locked safe migration (P4 / CA-3).
-        _offer_stale_migration(assume_yes)
-    else:
-        _ensure_local_extra()
+    # LOCAL (or explicit ``--service``): plain ``nx init`` now provisions and
+    # starts the local service stack. provision_and_start_service forces bge-768
+    # (RDR-160) and is the SAME body ``nx init --service`` and
+    # guided_upgrade._default_serve invoke — signature/behaviour unchanged.
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    try:
+        lease = provision_and_start_service(embedder)
+    except StorageServiceStartError:
+        # No native binary available and none acquirable. PG is provisioned and
+        # _ensure_service_binary_step already printed an actionable install
+        # instruction; do NOT start (legacy JVM path expunged, RDR-161 P3 —
+        # starting without a binary fails loud, CRE C1). Exit non-zero so the
+        # incomplete setup is not mistaken for serving.
+        click.echo(
+            "\nService NOT started: no native binary available. Install one "
+            "(see above), then re-run `nx init` to finish.",
+            err=True,
+        )
+        raise SystemExit(1)
+    if lease is None:
+        # provision_and_start_service resolved cloud-internal (is_local_mode
+        # False): embeddings run server-side via Voyage, no local service to
+        # start.
+        return
+    # RDR-157 P4.1 / RDR-174 §3: one command left the user with a running backend.
+    return

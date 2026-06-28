@@ -12,8 +12,9 @@ CRITICAL (CA-1 / RF-160-1): this is NOT fastembed's cached
 ``model_optimized.onnx``. That export uses the fused MS contrib op
 ``SkipLayerNormalization`` which onnxruntime-java 1.20.0 cannot execute. We fetch
 the standard transformers.js export (``Xenova/bge-base-en-v1.5`` ``onnx/model.onnx``,
-fp32, ~416 MB) instead. The fastembed cache (``_warmup_bge`` in init.py) serves
-the *Python* local embedder and is a different artifact at a different path.
+fp32, ~416 MB) instead. The fastembed cache (the Python local-embedder warmup
+path) serves the *Python* local embedder and is a different artifact at a
+different path.
 
 The destination MUST match the Java side's ``Bge768Embedder.DEFAULT_MODEL_PATH``
 (``~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/{model.onnx,tokenizer.json}``);
