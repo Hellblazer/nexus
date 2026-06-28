@@ -556,23 +556,31 @@ class TestServiceProvisioningFlag:
         assert result.exit_code == 0, result.output
         assert called == [], "provisioning step must NOT be called without --service"
 
-    def test_service_flag_auto_triggered_by_nx_storage_backend_env(
+    def test_nx_storage_backend_env_no_longer_auto_triggers(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When ``NX_STORAGE_BACKEND=service`` is set, provisioning auto-triggers."""
+        """RDR-174 P1.1: the ``_auto_service`` side-channel is removed.
+
+        ``NX_STORAGE_BACKEND=service`` on a plain ``nx init`` (no ``--service``)
+        must NOT take the distinct silent service-provisioning branch. Dispatch
+        resolves on the explicit flag only; with no flag in local mode it falls
+        through to the embedder picker, never the provisioner."""
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
+        monkeypatch.delenv("NX_LOCAL", raising=False)
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._warmup_bge", lambda: None)
         called: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.init._provision_postgres_step",
             lambda: called.append("called"),
         )
 
-        result = CliRunner().invoke(init_cmd, [])
+        result = CliRunner().invoke(init_cmd, ["--yes"])
 
         assert result.exit_code == 0, result.output
-        assert called == ["called"], "auto-provisioning must fire when NX_STORAGE_BACKEND=service"
+        assert called == [], "NX_STORAGE_BACKEND=service must NOT auto-trigger after P1.1"
 
     def test_service_flag_no_auto_trigger_without_env(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -884,21 +892,23 @@ class TestServiceStartStep:
         assert result.exit_code == 0, result.output
         assert order == ["pg", "embed", "binary", "start"]
 
-    def test_auto_service_local_wires_start(
+    def test_nx_storage_backend_env_no_longer_wires_collapse(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """NX_STORAGE_BACKEND=service auto-trigger in LOCAL mode runs the full
-        collapse (pg -> embed -> start), not just provisioning. This is the
-        re-run path an operator hits after a first `nx init --service`."""
+        """RDR-174 P1.1: with ``_auto_service`` removed, ``NX_STORAGE_BACKEND=service``
+        on a plain ``nx init`` no longer runs the pg/embed/start collapse. None of
+        the heavy provisioning steps fire; init falls through to the embedder
+        picker. The collapse is reachable only via the explicit ``--service`` flag
+        (covered by ``test_init_service_local_wires_start_after_embedder``)."""
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.delenv("NX_LOCAL", raising=False)
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._warmup_bge", lambda: None)
         order: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.init._provision_postgres_step", lambda: order.append("pg")
-        )
-        monkeypatch.setattr(
-            "nexus.db.service_bge_model.fetch_service_bge_onnx",
-            lambda **kw: (order.append("embed"), Path("/fake/onnx"))[1],
         )
         monkeypatch.setattr(
             "nexus.commands.init._ensure_service_binary_step",
@@ -907,6 +917,55 @@ class TestServiceStartStep:
         monkeypatch.setattr(
             "nexus.commands.init._start_service_step", lambda: order.append("start")
         )
-        result = CliRunner().invoke(init_cmd, [])
+        result = CliRunner().invoke(init_cmd, ["--yes"])
         assert result.exit_code == 0, result.output
-        assert order == ["pg", "embed", "binary", "start"]
+        assert order == [], "no provisioning collapse without explicit --service after P1.1"
+
+
+class TestResolveInitMode:
+    """RDR-174 P1.1: explicit mode-detection precedence for init dispatch.
+
+    Precedence (gate-locked, critic SIG-1): NX_LOCAL is orthogonal and WINS;
+    otherwise dispatch on ``get_credential('service_url')``. Never ``is_local_mode``.
+    """
+
+    def test_nx_local_1_forces_local_even_with_service_url(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NX_LOCAL=1 forces LOCAL even with a (stale) service_url set —
+        preserves the migration / rollback-rehearsal pattern."""
+        from nexus.commands.init import _resolve_init_mode
+
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setenv("NX_SERVICE_URL", "https://managed.example/api")
+        assert _resolve_init_mode() == "local"
+
+    def test_nx_local_0_forces_managed_without_service_url(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NX_LOCAL=0 forces MANAGED even when no service_url is configured."""
+        from nexus.commands.init import _resolve_init_mode
+
+        monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        assert _resolve_init_mode() == "managed"
+
+    def test_unset_nx_local_with_service_url_resolves_managed(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset NX_LOCAL + service_url present → MANAGED."""
+        from nexus.commands.init import _resolve_init_mode
+
+        monkeypatch.delenv("NX_LOCAL", raising=False)
+        monkeypatch.setenv("NX_SERVICE_URL", "https://managed.example/api")
+        assert _resolve_init_mode() == "managed"
+
+    def test_unset_nx_local_without_service_url_resolves_local(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset NX_LOCAL + no service_url → LOCAL."""
+        from nexus.commands.init import _resolve_init_mode
+
+        monkeypatch.delenv("NX_LOCAL", raising=False)
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        assert _resolve_init_mode() == "local"

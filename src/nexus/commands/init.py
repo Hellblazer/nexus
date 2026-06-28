@@ -599,6 +599,32 @@ def provision_and_start_service(embedder: str | None = None):  # noqa: ANN201
     return _start_service_step()
 
 
+def _resolve_init_mode() -> str:
+    """Resolve the init dispatch mode with explicit precedence (RDR-174 P1.1).
+
+    Returns ``"local"`` or ``"managed"``. Precedence (critic SIG-1, gate-locked):
+
+      1. ``NX_LOCAL=1`` → ``"local"`` — orthogonal override, always wins. It wins
+         even with a stale ``service_url`` still in config, which preserves the
+         migration / rollback-rehearsal pattern (force-LOCAL provisioning while a
+         managed endpoint is still configured).
+      2. ``NX_LOCAL=0`` → ``"managed"``.
+      3. Otherwise dispatch on ``get_credential("service_url")`` (reads
+         ``NX_SERVICE_URL`` env or ``config.yml`` ``service_url``): present →
+         ``"managed"``, absent → ``"local"``.
+
+    Deliberately NOT ``is_local_mode()`` — that helper is ``service_url``-blind
+    across its 57 callers (RDR-174 RF-5). The global blindness is a separately
+    filed, out-of-scope bead; init must not route through it.
+    """
+    nx_local = os.environ.get("NX_LOCAL", "").strip()
+    if nx_local == "1":
+        return "local"
+    if nx_local == "0":
+        return "managed"
+    return "managed" if _config.get_credential("service_url") else "local"
+
+
 @click.command("init")
 @click.option(
     "--embedder",
@@ -635,14 +661,17 @@ def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) ->
     Pass ``--service`` to also provision the local Postgres cluster required
     by the RDR-152 Java service backend.
     """
-    # Postgres provisioning: run if --service flag passed, or if the global
-    # NX_STORAGE_BACKEND is already set to 'service' (operator re-running
-    # init to refresh a provisioned cluster).
-    _auto_service = (
-        not provision_service
-        and "service" in os.environ.get("NX_STORAGE_BACKEND", "").lower()
-    )
-    if provision_service or _auto_service:
+    # Postgres provisioning: run only on the explicit ``--service`` flag.
+    # RDR-174 P1.1 removed the ``_auto_service`` side-channel that fired the
+    # service path whenever ``NX_STORAGE_BACKEND`` contained 'service' (even
+    # without ``--service``) — a silent second provisioning path (RF-1, OBS-2).
+    # P1.1 only lays down ``_resolve_init_mode`` (the gate-locked precedence
+    # primitive) and deletes the side-channel; the helper is NOT yet wired into
+    # this dispatch. The mode-detecting dispatch that consumes it lands in P1.2
+    # (managed path, nexus-r2auz) and P1.3 (local path always provisions,
+    # nexus-5kdia). Interim — between P1.1 and P1.3 — only ``--service`` reaches
+    # the provisioner; this is the gate-locked phase ordering, not a silent drop.
+    if provision_service:
         from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         try:
             lease = provision_and_start_service(embedder)
