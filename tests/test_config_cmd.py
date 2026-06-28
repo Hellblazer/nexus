@@ -18,7 +18,8 @@ def runner() -> CliRunner:
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     for key in ("CHROMA_API_KEY", "VOYAGE_API_KEY", "MXBAI_API_KEY",
-                "CHROMA_TENANT", "CHROMA_DATABASE"):
+                "CHROMA_TENANT", "CHROMA_DATABASE",
+                "NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
         monkeypatch.delenv(key, raising=False)
     return tmp_path
 
