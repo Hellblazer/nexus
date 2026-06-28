@@ -549,6 +549,33 @@ class TestQueueMVV:
             }))
             assert done.status_code == 200
 
+    def test_claim_batch_client_roundtrip_real_service(self, service) -> None:
+        """nexus-575kd boundary guard: HttpAspectQueue.claim_batch (the CLIENT
+        method the aspect worker polls with) must parse the real service's
+        BARE-ARRAY /claim_batch response.
+
+        The pre-fix unit mock returned a {"rows":[...]} envelope the service
+        never sends, so it stayed green while the live service-mode worker
+        claimed nothing (claim_batch raised every poll -> document_aspects=0,
+        ALL service-mode aspect extraction dead). Only a real round-trip
+        through the client catches the contract — exactly the 'integration over
+        mocks' lesson. Isolated tenant so claim_batch is deterministic."""
+        import time as _time
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+
+        base_url, token, _ = service
+        tenant = f"queue-claimbatch-{_time.time_ns()}"
+        q = HttpAspectQueue(base_url=base_url, tenant=tenant, _token=token)
+        coll = "knowledge__claimbatch-inttest"
+        for i in range(3):
+            q.enqueue(coll, f"/cb/doc{i}.pdf", content_hash=f"h{i}", content="x")
+
+        rows = q.claim_batch(10)
+        assert len(rows) == 3, f"client claim_batch must return the 3 enqueued rows, got {rows}"
+        assert sorted(r.source_path for r in rows) == [
+            "/cb/doc0.pdf", "/cb/doc1.pdf", "/cb/doc2.pdf",
+        ]
+
     def test_j_etl_never_downgrade_in_progress(self, service) -> None:
         """j) import_queue_row never downgrades in_progress rows; GREATEST retry_count.
 

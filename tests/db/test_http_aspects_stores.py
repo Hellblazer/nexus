@@ -403,17 +403,38 @@ class TestHttpAspectQueue:
         assert store.claim_next() is None
 
     def test_claim_batch_returns_list(self):
+        # nexus-575kd: the Java service's /queue/claim_batch sends a BARE JSON
+        # ARRAY (AspectHandler.handleQueueClaimBatch -> writeValueAsString(rows)),
+        # NOT a {"rows":[...]} envelope. The prior version of this test mocked
+        # the envelope — i.e. the client's wrong assumption — so it stayed green
+        # while the real service-mode worker claimed nothing (claim_batch raised
+        # on every poll -> document_aspects=0). Mock what the service ACTUALLY
+        # sends so this pins the real contract.
         rows = [
             {"collection": "c", "source_path": f"doc{i}.pdf",
              "content_hash": "", "content": "", "retry_count": 0, "doc_id": ""}
             for i in range(3)
         ]
         store = self._queue({
-            "/v1/aspects/queue/claim_batch": {"rows": rows}
+            "/v1/aspects/queue/claim_batch": rows  # bare array, as the service sends
         })
         result = store.claim_batch(5)
         assert len(result) == 3
         assert all(isinstance(r, QueueRow) for r in result)
+        assert [r.source_path for r in result] == ["doc0.pdf", "doc1.pdf", "doc2.pdf"]
+
+    def test_claim_batch_tolerates_rows_envelope(self):
+        # Defensive: if a future engine ever wraps as {"rows":[...]} (matching
+        # claim_next's envelope), the client must still parse it. Locks the
+        # isinstance fallback branch.
+        rows = [{"collection": "c", "source_path": "d.pdf",
+                 "content_hash": "", "content": "", "retry_count": 0, "doc_id": ""}]
+        store = self._queue({
+            "/v1/aspects/queue/claim_batch": {"rows": rows}
+        })
+        result = store.claim_batch(5)
+        assert len(result) == 1
+        assert result[0].source_path == "d.pdf"
 
     def test_claim_batch_zero_limit_returns_empty(self):
         store = self._queue({})

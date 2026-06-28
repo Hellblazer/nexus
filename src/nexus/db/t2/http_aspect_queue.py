@@ -177,7 +177,14 @@ class HttpAspectQueue(RawHandleGuardMixin):
         if limit <= 0:
             return []
         r = self._post("/claim_batch", {"limit": limit})
-        rows = r.get("rows", [])
+        # nexus-575kd: the Java service sends a BARE JSON ARRAY here
+        # (AspectHandler.handleQueueClaimBatch -> writeValueAsString(rows)),
+        # unlike claim_next which is enveloped. Accept the array directly;
+        # tolerate a future {"rows":[...]} envelope defensively. The prior
+        # ``r.get("rows", [])`` raised AttributeError on the list every poll,
+        # so the service-mode worker claimed nothing and document_aspects never
+        # populated (all service-mode aspect extraction was dead).
+        rows = r if isinstance(r, list) else r.get("rows", [])
         return [_body_to_queue_row(row) for row in rows]
 
     def mark_done(
