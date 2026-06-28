@@ -735,7 +735,7 @@ Standard catalog management. Run `nx catalog COMMAND --help` for details.
 nx catalog backfill-collections [--dry-run]
 ```
 
-Populate the RDR-101 Phase 6 collections projection from existing state. Walks both T3 (live ChromaDB) and the catalog `documents.physical_collection` column, unions the two sets, and registers each name not already in the projection. The projector's `is_conformant_collection_name` regex decides each row's `legacy_grandfathered` flag automatically.
+Populate the RDR-101 Phase 6 collections projection from existing state. Walks both the live T3 vector store and the catalog `documents.physical_collection` column, unions the two sets, and registers each name not already in the projection. The projector's `is_conformant_collection_name` regex decides each row's `legacy_grandfathered` flag automatically.
 
 Idempotent. Conventional first invocation is `--dry-run` for operator review, then `--no-dry-run` to apply.
 
