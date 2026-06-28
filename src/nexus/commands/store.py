@@ -42,7 +42,7 @@ def _t3() -> T3Database:
 
 @click.group()
 def store() -> None:
-    """Permanent semantic knowledge store (local ChromaDB or Cloud + Voyage AI)."""
+    """Permanent semantic knowledge store (served by the native nexus-service: bge-768 locally, Voyage AI in cloud mode)."""
 
 
 @store.command("put")

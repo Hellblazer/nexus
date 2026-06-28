@@ -7,7 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 Target: **6.0.0** — the migration-capable release. The storage substrate moves
-from ChromaDB to Postgres 16 + pgvector behind a native service, and
+from ChromaDB to Postgres 17 + pgvector behind a native service, and
 `nx guided-upgrade` is the one-command, validated, rollback-safe path that
 carries an existing install across. This is the first of a two-release
 deprecation window: this release ships both the new substrate **and** the
@@ -16,7 +16,7 @@ migration tool; the Chroma source remains the immutable migration origin
 
 ### Changed (BREAKING)
 
-- **Permanent vector storage (T3) moves from ChromaDB to Postgres 16 + pgvector
+- **Permanent vector storage (T3) moves from ChromaDB to Postgres 17 + pgvector
   behind the native nexus-service (RDR-155).** The direct-Chroma serving paths
   are retired; search/store now route through the service stack. An installed
   user MUST migrate their existing Chroma data — `nx guided-upgrade` does this in
@@ -50,7 +50,7 @@ migration tool; the Chroma source remains the immutable migration origin
   validate → unlock) with taxonomy ref-remap and copy-not-move rollback safety.
   Voyage-capability and version pre-flights fail loud **before** any migration.
 - **One-command service install (RDR-157 / RDR-161).** The native engine-service
-  binary and a relocatable PG16 + pgvector bundle are published and
+  binary and a relocatable PG17 + pgvector bundle are published and
   cosign-signed; `nx daemon service install-binary <tag>` cold-acquires and
   verifies both, and `nx init --service` provisions Postgres, fetches the bge-768
   ONNX, and starts the service — no hand-assembly of PostgreSQL or a service JAR.

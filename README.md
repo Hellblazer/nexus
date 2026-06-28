@@ -42,7 +42,7 @@ For the full deployment story across all three surfaces (install, daemon lifecyc
 - **Semantic search** — index your code, docs, RDRs, and PDFs once; search by meaning afterward. Tree-sitter AST chunking across 23 languages, CCE prose chunking, PDF auto-routing.
 - **Typed document catalog** — Xanadu-inspired addressing with typed links (`cites`, `implements`, `supersedes`). Walk from a design doc to the code that implements it.
 - **RDR: Research-Design-Review** — write a spec before you code. Captures the problem, research, alternatives, and chosen approach. The corpus is searchable, so prior decisions surface during new design work.
-- **Local-first** — runs entirely on your machine: an on-device bge-768 ONNX embedder over a bundled Postgres 16 + pgvector service that `nx init --service` provisions for you. Voyage AI (server-side embeddings) is opt-in for the managed-cloud deployment.
+- **Local-first** — runs entirely on your machine: an on-device bge-768 ONNX embedder over a bundled Postgres 17 + pgvector service that `nx init --service` provisions for you. Voyage AI (server-side embeddings) is opt-in for the managed-cloud deployment.
 
 ## CLI quick-start
 
@@ -55,7 +55,7 @@ nx index repo .                          # index your repo + discover topics
 nx search "how does retry work"          # semantic search, fully local
 ```
 
-`nx init --service` provisions the bundled Postgres 16 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, and starts the persistent service supervisor. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically (see [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full service-install flow and the `nx daemon service install-binary` step).
+`nx init --service` provisions the bundled Postgres 17 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, and starts the persistent service supervisor. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically (see [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full service-install flow and the `nx daemon service install-binary` step).
 
 > **Upgrading from a pre-6.0 install?** 6.0 moves the permanent vector store from ChromaDB to the Postgres + pgvector service. After `uv tool upgrade conexus`, run **`nx guided-upgrade`** — one command detects your existing store, provisions and version-pins the service, and migrates your data with validation and copy-not-move rollback safety. Your ChromaDB data is left intact as the migration source.
 
