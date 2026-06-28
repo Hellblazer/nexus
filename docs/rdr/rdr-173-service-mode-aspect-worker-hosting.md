@@ -168,6 +168,20 @@ other tiers are discovered/spawned. Extraction therefore completes for **every**
 short-lived CLI / one-shot / batch included — because it no longer depends on the storing
 process's lifetime (RF-4).
 
+### Credential context (load-bearing — new vs the T2/T3 daemons)
+
+Unlike the T1/T2/T3 daemons (which manage SQLite/ChromaDB and need **no** LLM credentials), the
+aspect-worker daemon issues `claude -p` (`extract_aspects`) — it needs the `claude` binary on
+`PATH`, the claude config dir (`~/.claude`), and the Anthropic credential context. The
+substrate gives no precedent here. **Decision:** the daemon is spawned **as a child of the
+process that first triggers the enqueue** (the MCP server / CLI store process via the
+single-flight election), so it **inherits that process's environment** — exactly the context
+those store paths already use to run `claude -p`. This makes credential flow automatic for the
+normal paths and is the only spawn model permitted: a daemon started from a credential-bare
+context (e.g. a hypothetical `nx daemon aspect start` with no inherited env) MUST NOT be the
+spawn path unless credentials are explicitly plumbed. Stated as a hard prerequisite so the
+spawn entrypoint is designed for inherited-env, not discovered after auth failures.
+
 ### Why not the alternatives
 - **B / D (in-process + drain trigger)** — leaves the worker tied to the storing process's
   lifetime; short-lived paths still depend on *someone* triggering a drain, and the reclaim gap
@@ -234,8 +248,20 @@ migration time" is the target — the opposite of today.
 - Closes the last gap blocking the RDR-172 epic (P2.5).
 - Restores RDR-089 aspect extraction for all service-mode store paths (currently inert for
   short-lived ones — a silent product regression introduced by the RDR-152 topology shift).
-- Depending on the model, may add or avoid a persistent process; the choice must weigh the
-  RDR-152 "retire the daemon lifecycle class" intent against the need for a drain host.
+- **RDR-152 Phase 4 (`nexus-gmiaf.24`) must carve out `service_registry.py`.** That bead's
+  decommission scope is "delete `src/nexus/daemon/` (... `service_registry`, ...)". The
+  aspect-worker daemon is a **continuing consumer** of the leased registry, so Phase 4 must NOT
+  delete `service_registry.py` — either retain it (relocated out of `daemon/` if the rest of
+  the directory goes) or document it as the surviving leased-registry substrate. This is a
+  forward pointer that resolves the apparent contradiction, not a re-opening of RDR-152's
+  decision. Adds a cross-RDR dependency: RDR-173 must land (or its registry carve-out be
+  agreed) before RDR-152 Phase 4 executes.
+- The daemon's `reclaim_stale` loop is a **net improvement over today** even for the SIGKILL
+  case (RF-8): an orphaned `claude -p` may burn quota, but the stranded `in_progress` row is
+  eventually reset to `pending` and re-extracted — whereas today, in service mode, nothing
+  reclaims it (RF-5) and it blocks the migration gate forever.
+- Adds one leased tier to the existing substrate (not a new lifecycle class); the cost is the
+  registry's lease/heartbeat overhead, already paid by T1/T2/T3.
 
 ## Alternatives Considered
 
@@ -253,7 +279,16 @@ migration time" is the target — the opposite of today.
   closed regardless of the hosting model.
 - ~~Hosting model choice (A vs B vs D)~~ **Decided: A** (leased aspect-worker daemon on the
   existing RDR-149 registry).
-- **Lease scope** for the aspect-worker daemon: per-host single daemon vs per-tenant. (planning)
+- **Lease scope** for the aspect-worker daemon: per-host single daemon vs per-tenant.
+  **Constrained, not free (RDR-152):** a per-host daemon claiming across all tenants would have
+  to query without the `nexus.tenant` GUC set — which under RDR-152's RLS safe-default returns
+  zero rows — or hold `BYPASSRLS`, which RDR-152 **prohibits** for the service role. So
+  **per-tenant scope (one daemon per active tenant, each running with its tenant's GUC) is the
+  only RLS-compatible answer** and is the default planning assumption. (For v1's single default
+  tenant the practical difference is nil, but the constraint governs every later tenant.)
+- **claude -p fan-out cap (multi-tenant):** N active tenants × M docs ⇒ up to N×M concurrent
+  `claude -p` subprocesses. A per-tenant and/or global concurrency cap should be set at
+  planning (irrelevant for v1's one tenant). (planning)
 - With the daemon owning `reclaim_stale`, is a *second* Java-side scheduled `reclaimStale`
   redundant? (likely yes — planning)
 - Does the leased daemon replace the in-process worker in **local** mode too, or service-mode
@@ -283,3 +318,11 @@ migration time" is the target — the opposite of today.
   the short-lived-path gap, RF-4) and gives reclaim an owner (RF-5). C refuted (RF-6); B/D
   rejected (still process-lifetime-bound). Carried: service-aware drain (RF-7), observability,
   optional SIGKILL-orphan hardening (RF-8). Approach phased; ready for the gate.
+- 2026-06-28: Gate Layer-3 fixes (1 Critical + 2 Significant from the substantive-critic).
+  CRITICAL — added the credential-context decision (the daemon is spawned as a child of the
+  enqueue-triggering process and inherits its `claude -p` credentials; credential-bare spawn
+  paths are forbidden unless plumbed). SIGNIFICANT-1 — added the RDR-152 Phase-4
+  (`nexus-gmiaf.24`) carve-out for `service_registry.py` (continuing consumer) to Consequences.
+  SIGNIFICANT-2 — lease scope is RLS-constrained (per-host needs BYPASSRLS, prohibited by
+  RDR-152) → per-tenant is the only compatible scope, now the default planning assumption. Plus
+  the reclaim-improves-on-SIGKILL note and a fan-out concurrency-cap open question.
