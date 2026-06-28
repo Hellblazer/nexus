@@ -41,6 +41,14 @@ All three:
 - CLI ingest sites pass `content=""` as the contract signal that the hook may need to read `source_path` itself.
 - `aspect_extraction_enqueue_hook` persists `content` to the queue row when non-empty so the worker has the text without re-reading from disk; CLI rows where content was not in scope rely on the worker's source-path-read fallback.
 
+### Enqueue identity & loud-failure contract (RDR-172)
+
+The `doc_id` forwarded to the enqueue is the **catalog document id (tumbler)**, not the chunk hash. `store_put` forwards `catalog_doc_id` — the tumbler returned by `catalog_store_hook` when it registers the note-backed document (RDR-172 P1.1, `mcp/core.py`). Forwarding the chunk hash was the bug `nexus-ov0sw`: in service mode the chunk hash is not a registered `catalog_documents` tumbler, so the queue's `doc_id` FK rejected it.
+
+- **Blank `doc_id` → NULL.** The no-catalog case (no tumbler available) forwards `''`; the service `nullIfBlank`s it to a SQL `NULL`, which is a legitimate sentinel (no reference, no FK check) and lands a `pending` row with HTTP 200.
+- **Non-blank *unregistered* `doc_id` → typed 4xx, never silent.** A non-blank `doc_id` that is not a registered tumbler is a client bug (RF-8: no race). The service maps the resulting SQLSTATE class-23 integrity violation to a typed **409** (`{"error","sqlstate"}`) ahead of the generic 500 (RDR-172 P3.1, `AspectHandler.sqlState23`) — never a silent NULL coercion, never an opaque 500. The 409 body is sanitised (fixed message + sqlstate); the full driver detail goes to the server log only.
+- **Loud-failure tripwire.** The hook keeps the enqueue best-effort (never block ingest, RDR-089 P0.1), but its internal swallow would otherwise hide a failure from `hook_registry`'s recorder. It therefore persists its own `hook_failures` row (`hook_name='aspect_extraction_enqueue_hook'`, `chain='document'`) and logs `aspect_extraction_enqueue_failed` (RDR-172 P2.1). The `--fullstack` ingest E2E asserts **zero** such rows, so the silent-total-failure class cannot regress unobserved.
+
 ## Drift guard
 
 `tests/test_hook_drift_guard.py` uses `ast.walk` to enforce two guarded sets:
