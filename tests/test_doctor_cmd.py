@@ -881,6 +881,73 @@ class TestCheckTmpdirs:
         assert payload["candidates"][0]["path"].endswith("nx_t1_x")
         assert payload["reaped"] == 0
 
+    def test_detects_orphan_under_config_t1_not_only_os_temp(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """After nexus-ycwec Fix #1, orphans live under <config>/t1/ not OS-temp.
+
+        ``nx doctor --check-tmpdirs`` must scan <config>/t1/ so operators
+        see the real candidates.  The autouse fixture already patches
+        nexus_config_dir -> tmp_path, so we only need to create the
+        orphan under tmp_path/t1/ and ensure no OS-temp orphan is present.
+        """
+        import json as _json
+        import os as _os
+        import time as _time
+
+        # Point OS-temp at an empty dir — no legacy orphans there.
+        empty_ostmp = tmp_path / "ostmp_empty"
+        empty_ostmp.mkdir()
+
+        # Create an orphan under the config/t1/ location (new store path).
+        config_t1 = tmp_path / "t1"
+        config_t1.mkdir()
+        orphan = config_t1 / "nx_t1_config_orphan"
+        orphan.mkdir()
+        backdate = _time.time() - 30 * 3600
+        _os.utime(orphan, (backdate, backdate))
+
+        with patch("tempfile.gettempdir", return_value=str(empty_ostmp)):
+            result = runner.invoke(
+                main, ["doctor", "--check-tmpdirs", "--json"],
+            )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.stdout)
+        assert len(payload["candidates"]) == 1, (
+            "Expected 1 candidate from <config>/t1/ scan; "
+            "got zero — check-tmpdirs is not scanning config_dir/t1/"
+        )
+        assert "nx_t1_config_orphan" in payload["candidates"][0]["path"]
+        assert payload["reaped"] == 0
+
+    def test_reap_removes_orphan_under_config_t1(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """--reap-tmpdirs must delete orphans under <config>/t1/ via config_dir=."""
+        import os as _os
+        import time as _time
+
+        empty_ostmp = tmp_path / "ostmp_empty"
+        empty_ostmp.mkdir()
+
+        config_t1 = tmp_path / "t1"
+        config_t1.mkdir()
+        orphan = config_t1 / "nx_t1_reap_me"
+        orphan.mkdir()
+        backdate = _time.time() - 30 * 3600
+        _os.utime(orphan, (backdate, backdate))
+
+        with patch("tempfile.gettempdir", return_value=str(empty_ostmp)):
+            result = runner.invoke(
+                main, ["doctor", "--check-tmpdirs", "--reap-tmpdirs"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Reaped: 1" in result.output, (
+            "reap-tmpdirs did not reap config/t1/ orphan — "
+            "sweep_orphan_tmpdirs was likely called without config_dir="
+        )
+        assert not orphan.exists(), "orphan dir must be deleted after --reap-tmpdirs"
+
 
 # ── --check-t1 (RDR-105 P5 / nexus-ssdg) ─────────────────────────────────────
 

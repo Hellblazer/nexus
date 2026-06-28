@@ -408,7 +408,23 @@ class ServiceRegistry:
     def relinquish(self, record: LeaseRecord) -> None:
         """Release ``scope_key`` on graceful shutdown, but only if we still
         own it. A delayed shutdown from a fenced predecessor must not
-        unlink a successor's record (CA-4)."""
+        unlink a successor's record (CA-4).
+
+        nexus-ycwec GAP C: also removes the per-scope elect lock file after
+        releasing the flock so clean shutdowns leave no ``t1_elect.*.lock``
+        orphan. The unlink only fires when the addr record belongs to us
+        (owner_token match); a fenced predecessor leaves the successor's
+        lock intact. The lock is unlinked OUTSIDE the election context
+        (after the flock is released).  A process that opens the path
+        AFTER the unlink gets a fresh inode and starts a new election.
+        A process that already holds the old-inode fd still acquires
+        LOCK_EX (the kernel inode survives until all fds close), but any
+        write it attempts is caught by generation fencing: the os.replace
+        + generation counter in ``_write_record_atomic`` will raise
+        StaleOwnerError on the mismatched generation.  Inode freshness is
+        therefore NOT the safety mechanism -- generation fencing is.
+        """
+        _we_owned = False
         with self._elect(record.scope_key):
             current = self._read_record(record.scope_key)
             if current is None:
@@ -417,6 +433,254 @@ class ServiceRegistry:
                 return  # a successor owns it now; leave it alone
             with contextlib.suppress(OSError):
                 self._record_path(record.scope_key).unlink()
+            _we_owned = True
+        # Unlink the elect lock only when WE owned the scope.  Done AFTER the
+        # flock is released.  Openers after the unlink get a fresh inode;
+        # openers holding the old inode's fd are harmless -- generation fencing
+        # (not inode freshness) is the correctness mechanism.
+        if _we_owned:
+            with contextlib.suppress(OSError):
+                self._election_path(record.scope_key).unlink()
+
+
+def sweep_dead_t1_holders(
+    *,
+    config_dir: "Path",
+) -> int:
+    """Remove stale T1 lease records whose owner processes are all dead.
+
+    Scans all ``t1_addr.*`` files in *config_dir* and removes any record
+    where BOTH the ``claude_pid`` (payload) AND the ``server_pid``
+    (payload/endpoint) are not alive. A record is left alone when either
+    pid is alive OR when ``claude_pid`` is absent (old/transient format;
+    insufficient info to verify fully).
+
+    CRITICAL SAFETY: a record is NEVER removed if ANY of the following:
+    - ``claude_pid`` is missing from the payload (cannot verify fully)
+    - ``claude_pid`` is alive
+    - ``server_pid`` is alive
+
+    Returns the exact count of records removed. Best-effort; errors on
+    individual records are logged and skipped. Caller must hold no election
+    flocks (this function takes its own under the shared primitive's rules).
+
+    This is the startup-sweep half of the nexus-ycwec Fix #3 lifecycle GC.
+    Session-end cleanup is :meth:`T1LeasePublisher.relinquish` (already in
+    t1_lease.py). Both halves live here or in the shared primitive per the
+    RDR-149 standing gate (daemon/AGENTS.md).
+
+    TOCTOU NOTE: the liveness-check → unlink sequence is a point-in-time
+    race.  OS PID reuse could in principle allow a newly started process to
+    inherit the same PID as the dead owner, causing the sweep to skip removal
+    (safe) or, if the PID wraps after the check, to unlink an addr file that
+    a different same-scope session just published.  The latter is bounded by
+    heartbeat self-heal: the owning MCP re-publishes its addr within one
+    heartbeat interval (~1 s); the in-process ``T1_ADDR`` state is unaffected
+    so the owner continues to function.  The only observable consequence is a
+    brief sibling-discovery miss -- never data loss.  The sweep intentionally
+    omits the election flock to avoid deadlock with live publishers.
+    """
+    from nexus.session import _is_pid_alive  # noqa: PLC0415 - branch-local; avoids circular at module import
+
+    config_path = Path(config_dir)
+    if not config_path.exists():
+        return 0
+
+    removed = 0
+    for addr_file in config_path.glob("t1_addr.*"):
+        if not addr_file.is_file():
+            continue
+        try:
+            text = addr_file.read_text(encoding="utf-8")
+            record = LeaseRecord.from_json(text)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            _log.debug(
+                "sweep_dead_t1_holders_skip_unreadable",
+                path=str(addr_file),
+            )
+            continue
+
+        payload = record.payload
+        # Safety gate: must have claude_pid to verify the holder.
+        claude_pid_raw = payload.get("claude_pid")
+        if claude_pid_raw is None:
+            _log.debug(
+                "sweep_dead_t1_holders_skip_no_claude_pid",
+                scope=record.scope_key,
+                path=str(addr_file),
+            )
+            continue
+
+        try:
+            claude_pid = int(claude_pid_raw)
+        except (TypeError, ValueError):
+            continue  # malformed payload — skip
+
+        # server_pid can live in payload or endpoint.
+        server_pid_raw = payload.get("server_pid") or record.endpoint.get("server_pid")
+        if server_pid_raw is None:
+            continue  # no server_pid — skip (insufficient info)
+
+        try:
+            server_pid = int(server_pid_raw)
+        except (TypeError, ValueError):
+            continue
+
+        # SAFETY: only remove when BOTH pids are dead.
+        claude_alive = _is_pid_alive(claude_pid)
+        server_alive = _is_pid_alive(server_pid)
+        if claude_alive or server_alive:
+            _log.debug(
+                "sweep_dead_t1_holders_skip_live",
+                scope=record.scope_key,
+                claude_pid=claude_pid,
+                server_pid=server_pid,
+                claude_alive=claude_alive,
+                server_alive=server_alive,
+            )
+            continue
+
+        # Both pids dead — remove the addr file.
+        with contextlib.suppress(OSError):
+            addr_file.unlink()
+
+        if not addr_file.exists():
+            removed += 1
+            _log.info(
+                "sweep_dead_t1_holders_removed",
+                scope=record.scope_key,
+                claude_pid=claude_pid,
+                server_pid=server_pid,
+            )
+
+    return removed
+
+
+def sweep_dead_t1_elect_locks(
+    *,
+    config_dir: "Path",
+) -> int:
+    """Remove stale T1 election lock files whose scope has no live owner.
+
+    Scans all ``t1_elect.*.lock`` files in *config_dir*. A lock is
+    considered orphaned (and is removed) when either of these holds:
+
+    1. No matching ``t1_addr.<scope>`` file exists — the scope is dead
+       and nothing holds the lock actively.
+    2. A matching ``t1_addr.<scope>`` file exists but its ``claude_pid``
+       and ``server_pid`` are BOTH dead (same invariant as
+       :func:`sweep_dead_t1_holders`).
+
+    CRITICAL SAFETY: a lock is NEVER removed when:
+    - Its scope has a live ``t1_addr`` record with ``claude_pid`` alive.
+    - Its scope has a live ``t1_addr`` record with ``server_pid`` alive.
+    - The ``t1_addr`` record cannot be parsed (insufficient info — skip).
+
+    Returns the exact count of locks removed. Best-effort; errors on
+    individual files are logged and skipped.
+
+    This is the elect-lock half of the nexus-ycwec Fix #3 lifecycle GC.
+    It runs alongside :func:`sweep_dead_t1_holders` in the startup sweep.
+
+    RACE WINDOW (narrow, safe): this sweep does NOT hold the election flock
+    while it checks for a matching ``t1_addr`` file.  A session that is
+    mid-publish at MCP startup can therefore appear orphaned: the elect lock
+    is O_CREAT'd before the addr file is written under the flock, so there
+    is a brief window where the lock exists but the addr file does not.  If
+    the sweep fires in that window it will unlink the lock.  This is safe
+    because generation fencing resolves any resulting double-elect: the
+    session that lost its lock re-creates it when it enters ``_elect``; the
+    concurrent sweeping process raises StaleOwnerError on its next heartbeat
+    and self-fences.  No data loss; the only consequence is an extra
+    election round.
+    """
+    from nexus.session import _is_pid_alive  # noqa: PLC0415 - branch-local; avoids circular at module import
+
+    config_path = Path(config_dir)
+    if not config_path.exists():
+        return 0
+
+    removed = 0
+    for lock_file in config_path.glob("t1_elect.*.lock"):
+        if not lock_file.is_file():
+            continue
+
+        # Extract scope key: t1_elect.<scope>.lock → scope = stem minus prefix
+        name = lock_file.name  # e.g. "t1_elect.my-session.lock"
+        # Strip "t1_elect." prefix and ".lock" suffix.
+        inner = name[len("t1_elect."):-len(".lock")]  # the scope_key
+        if not inner:
+            _log.debug("sweep_dead_t1_elect_locks_malformed_name", path=str(lock_file))
+            continue
+
+        addr_file = config_path / f"t1_addr.{inner}"
+        if not addr_file.exists():
+            # No matching addr file → scope is orphaned.
+            with contextlib.suppress(OSError):
+                lock_file.unlink()
+            if not lock_file.exists():
+                removed += 1
+                _log.info(
+                    "sweep_dead_t1_elect_locks_removed_no_addr",
+                    scope=inner,
+                    path=str(lock_file),
+                )
+            continue
+
+        # Addr file exists: check liveness of its owner pids.
+        try:
+            text = addr_file.read_text(encoding="utf-8")
+            record = LeaseRecord.from_json(text)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            # Cannot parse → insufficient info; leave the lock alone.
+            _log.debug(
+                "sweep_dead_t1_elect_locks_skip_unreadable_addr",
+                scope=inner,
+                path=str(lock_file),
+            )
+            continue
+
+        payload = record.payload
+        claude_pid_raw = payload.get("claude_pid")
+        server_pid_raw = payload.get("server_pid") or record.endpoint.get("server_pid")
+
+        if claude_pid_raw is None or server_pid_raw is None:
+            # Insufficient pid metadata — skip conservatively.
+            _log.debug(
+                "sweep_dead_t1_elect_locks_skip_no_pids",
+                scope=inner,
+            )
+            continue
+
+        try:
+            claude_pid = int(claude_pid_raw)
+            server_pid = int(server_pid_raw)
+        except (TypeError, ValueError):
+            continue
+
+        # Safety: only remove when BOTH pids are dead.
+        if _is_pid_alive(claude_pid) or _is_pid_alive(server_pid):
+            _log.debug(
+                "sweep_dead_t1_elect_locks_skip_live",
+                scope=inner,
+                claude_pid=claude_pid,
+                server_pid=server_pid,
+            )
+            continue
+
+        with contextlib.suppress(OSError):
+            lock_file.unlink()
+
+        if not lock_file.exists():
+            removed += 1
+            _log.info(
+                "sweep_dead_t1_elect_locks_removed",
+                scope=inner,
+                claude_pid=claude_pid,
+                server_pid=server_pid,
+            )
+
+    return removed
 
 
 class ServiceSupervisor:
