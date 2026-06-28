@@ -418,15 +418,19 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
     import time  # noqa: PLC0415 — deferred to keep CLI startup fast
     from pathlib import Path  # noqa: PLC0415 — deferred to keep CLI startup fast
 
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.session import sweep_orphan_tmpdirs  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+    config_dir = nexus_config_dir()
     tmpdir_root = Path(tempfile.gettempdir())
     cutoff_hours = 24.0
     cutoff = time.time() - cutoff_hours * 3600.0
 
-    candidates: list[dict] = []
-    if tmpdir_root.exists():
-        for d in sorted(tmpdir_root.glob("nx_t1_*")):
+    def _scan_root(root: Path) -> list[dict]:
+        results: list[dict] = []
+        if not root.exists():
+            return results
+        for d in sorted(root.glob("nx_t1_*")):
             if not d.is_dir():
                 continue
             try:
@@ -442,14 +446,20 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
                 ) / 1024.0
             except OSError:
                 size_kb = 0.0
-            candidates.append({
+            results.append({
                 "path": str(d),
                 "age_hours": round(age_h, 2),
                 "size_kb": round(size_kb, 1),
             })
+        return results
+
+    # Primary: new config-dir store location (nexus-ycwec Fix #1: <config>/t1/).
+    # Legacy: OS-temp root for pre-fix orphans placed there by older versions.
+    candidates: list[dict] = _scan_root(config_dir / "t1") + _scan_root(tmpdir_root)
 
     payload: dict = {
         "tmpdir_root": str(tmpdir_root),
+        "config_t1_root": str(config_dir / "t1"),
         "cutoff_hours": cutoff_hours,
         "candidates": candidates,
         "reaped": 0,
@@ -457,6 +467,7 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
 
     if reap:
         payload["reaped"] = sweep_orphan_tmpdirs(
+            config_dir=config_dir,
             tmpdir_root=tmpdir_root,
             max_age_hours=cutoff_hours,
         )
@@ -467,11 +478,12 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
         if not candidates:
             click.echo(
                 f"No orphan nx_t1_* tmpdirs older than {cutoff_hours}h "
-                f"under {tmpdir_root}."
+                f"under {config_dir / 't1'} or {tmpdir_root}."
             )
         else:
             click.echo(
-                f"Orphan nx_t1_* candidates under {tmpdir_root}: "
+                f"Orphan nx_t1_* candidates "
+                f"(scanned {config_dir / 't1'} + {tmpdir_root}): "
                 f"{len(candidates)}"
             )
             for c in candidates:

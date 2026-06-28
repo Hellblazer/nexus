@@ -251,6 +251,78 @@ def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
 
 
 from contextlib import asynccontextmanager
+from pathlib import Path as _Path
+
+
+def _run_mcp_startup_sweep(*, config_dir: "_Path") -> None:
+    """Best-effort orphan-cleanup sweep run at MCP startup (Branch 3).
+
+    Extracted into its own function so:
+    1. The lifespan can call it with a single ``try/except`` guard.
+    2. Tests can call it directly with a synthetic config_dir and spy on
+       the inner sweep calls (GAP A conformance test — nexus-ycwec).
+
+    Runs four sweeps in best-effort order; failures on any one are logged
+    at debug and never block startup.  Two surfaces already existed before
+    nexus-ycwec:
+
+    (a) ``sweep_orphan_tmpdirs`` — reaps chroma tmpdir leftovers after
+        ungraceful exit.
+    (b) ``sweep_orphan_resource_trackers`` — reaps PPID=1 multiprocessing
+        resource-tracker processes holding POSIX named semaphores.
+    (c) ``sweep_orphan_t1_chromadbs`` — stops orphaned chroma server
+        processes immediately (rather than waiting 24h for tmpdir reap).
+
+    Two new sweeps added by nexus-ycwec Fix #3 lifecycle GC:
+
+    (d) ``sweep_dead_t1_holders`` — removes ``t1_addr.*`` lease records
+        whose claude_pid AND server_pid are BOTH dead.
+    (e) ``sweep_dead_t1_elect_locks`` — removes ``t1_elect.*.lock`` files
+        whose scope has no live owner (addr absent or both pids dead).
+
+    See docs/rdr/rdr-149-*.md for the shared-primitive mandate.  RDR-149
+    standing gate: all lifecycle GC lives in the shared primitive
+    (service_registry.py) plus this wiring point (core.py), never in
+    per-tier copies.
+    """
+    from nexus.session import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+        sweep_orphan_resource_trackers,
+        sweep_orphan_t1_chromadbs,
+        sweep_orphan_tmpdirs,
+    )
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+        sweep_dead_t1_holders,
+        sweep_dead_t1_elect_locks,
+    )
+    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+
+    _sweep_log = structlog.get_logger(__name__)
+
+    # (a) tmpdirs
+    try:
+        sweep_orphan_tmpdirs(config_dir=config_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_orphan_tmpdirs_failed", error=str(exc))
+    # (b) resource_trackers
+    try:
+        sweep_orphan_resource_trackers()
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_orphan_resource_trackers_failed", error=str(exc))
+    # (c) orphan chroma servers
+    try:
+        sweep_orphan_t1_chromadbs()
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_orphan_t1_chromadbs_failed", error=str(exc))
+    # (d) dead T1 holder addr records (nexus-ycwec GAP A)
+    try:
+        sweep_dead_t1_holders(config_dir=config_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_dead_t1_holders_failed", error=str(exc))
+    # (e) dead T1 elect lock files (nexus-ycwec GAP B)
+    try:
+        sweep_dead_t1_elect_locks(config_dir=config_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_dead_t1_elect_locks_failed", error=str(exc))
 
 
 @asynccontextmanager
@@ -389,52 +461,22 @@ async def _t1_chroma_lifespan(_app: Any):
         return
 
     # Branch 3: spawn + publish.
-    from nexus.session import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-        start_t1_server,
-        sweep_orphan_resource_trackers,
-        sweep_orphan_t1_chromadbs,
-        sweep_orphan_tmpdirs,
-    )
+    from nexus.session import start_t1_server  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+    from nexus.session import _nexus_config_dir_at_import as _cfg_dir_fn  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 
-    # Best-effort orphan cleanup before we spawn. Two surfaces:
-    # (a) tmpdirs from chromas reaped before their cleanup completed,
-    # (b) multiprocessing resource_tracker processes re-parented to
-    #     init (PPID=1) holding POSIX named semaphores. (b) is
-    #     critical because the namespace is bounded
-    #     (kern.posix.sem.max=10000 on macOS); chronic accumulation
-    #     produces Errno 28 system-wide. Bead nexus-9h1s; live
-    #     shakeout 2026-05-08 cleared 3,314 trackers / 8,359
-    #     semaphores. (a) is bounded; failures are logged at debug and
-    #     never block startup. The sweep functions log per-file
-    #     outcomes themselves; this outer guard catches unexpected
-    #     sweep-level failures. RDR-149 P5: the bespoke T1 addr-file
-    #     orphan sweep is gone -- the leased registry ages stale lease
-    #     records out via their TTL, no pid-keyed sweep needed.
-    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-    _sweep_log = structlog.get_logger(__name__)
+    # Best-effort orphan cleanup before we spawn (nexus-ycwec, nexus-9h1s,
+    # nexus-aigkb). Five sweeps delegated to _run_mcp_startup_sweep:
+    # (a) tmpdirs, (b) resource_trackers, (c) chroma servers,
+    # (d) dead T1 addr records, (e) dead T1 elect lock files.
+    # The sweep comment above this block is preserved in the helper's docstring.
+    # RDR-149 P5 note: leased registry ages stale lease records out via TTL,
+    # but crash-reap scenarios leave pids-dead holders that only the explicit
+    # sweep catches -- that is what (d)+(e) fix.
     try:
-        sweep_orphan_tmpdirs()
+        _run_mcp_startup_sweep(config_dir=_cfg_dir_fn())
     except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        _sweep_log.debug("sweep_orphan_tmpdirs_failed", error=str(exc))
-    try:
-        sweep_orphan_resource_trackers()
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        _sweep_log.debug(
-            "sweep_orphan_resource_trackers_failed", error=str(exc)
-        )
-    # (d) orphan T1 chromadb servers (nexus-aigkb). When a Claude
-    # Code session exits ungracefully (SIGKILL, crash, lost
-    # SessionEnd hook), its per-session chromadb is re-parented to
-    # launchd and runs indefinitely, holding a TCP port and tmpdir.
-    # sweep_orphan_tmpdirs reaps the dirs only after 24h; this
-    # sweeps the processes immediately so the next start_t1_server
-    # has a clean slate.
-    try:
-        sweep_orphan_t1_chromadbs()
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        _sweep_log.debug(
-            "sweep_orphan_t1_chromadbs_failed", error=str(exc)
-        )
+        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+        structlog.get_logger(__name__).debug("mcp_startup_sweep_failed", error=str(exc))
 
     # Reset the ``_SHUTDOWN_IN_FLIGHT`` sentinel BEFORE
     # ``start_t1_server`` (which can take up to ``_SERVER_READY_TIMEOUT``
