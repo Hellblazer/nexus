@@ -142,15 +142,24 @@ class DrainTimeoutError(RuntimeError):
     drain after the queue is clear.
     """
 
-    def __init__(self, stuck_count: int, timeout: float) -> None:
+    def __init__(
+        self,
+        stuck_count: int,
+        timeout: float,
+        detail: str | None = None,
+    ) -> None:
         self.stuck_count = stuck_count
         self.timeout = timeout
-        super().__init__(
+        self.detail = detail
+        msg = (
             f"Drain timeout after {timeout:.1f}s: "
             f"{stuck_count} actionable row(s) remain in aspect_extraction_queue "
             f"(status pending or in_progress). "
             "Triage stuck workers before retrying the PK migration."
         )
+        if detail:
+            msg = f"{msg} {detail}"
+        super().__init__(msg)
 
 
 class DrainBlockedByActiveWorker(RuntimeError):
@@ -946,16 +955,32 @@ def drain_worker(
         for.  This handles the quiescent case (e.g., the caller's process
         never ran the worker, or the worker finished and was reset).
     """
-    from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred to avoid circular import (db.t2 queue)
+    # RDR-173 P4.1 (nexus-4st62): determine storage backend first so the
+    # lock-check and queue construction can both branch on it.
+    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+        StorageBackend,
+        storage_backend_for,
+    )
+    _is_service_mode = storage_backend_for("aspect_queue") == StorageBackend.SERVICE
 
     # SIG-5: detect active MCP-process workers before stopping the local
     # singleton.  A live MCP worker in another process drains its own
     # queue independently; the migration must not run while that worker is
     # alive or it will race against in_progress rows it cannot see.
+    #
+    # SERVICE mode: the MCP process writes a local aspect_worker lock via
+    # ensure_worker_started (the enqueue hook auto-spawns the singleton),
+    # but in SERVICE mode ALL workers share the same PG queue with
+    # FOR UPDATE SKIP LOCKED — cross-process claim safety is handled by PG,
+    # not by the file lock.  Checking the lock here would make drain always
+    # raise DrainBlockedByActiveWorker when the MCP server is running, which
+    # defeats the primary use case (drain during migration while MCP is live).
+    # Skip the local file-lock check in SERVICE mode.
     locks_dir = _locks_dir if _locks_dir is not None else (
         nexus_config_dir() / "locks"
     )
-    _check_mcp_worker_lock(locks_dir)
+    if not _is_service_mode:
+        _check_mcp_worker_lock(locks_dir)
 
     worker = get_worker()
     if worker is not None:
@@ -964,7 +989,18 @@ def drain_worker(
     queue_path = Path(queue_path)
     deadline = time.monotonic() + timeout
 
-    queue = AspectExtractionQueue(queue_path)
+    # RDR-173 P4.1 (nexus-4st62): in SERVICE mode the authoritative
+    # aspect_extraction_queue is PG, reached via ``HttpAspectQueue``. The
+    # local-sqlite ``AspectExtractionQueue`` is empty/stale there, so polling it
+    # yields a spurious "drained" — leaving ``nx aspects drain`` and the
+    # migration drain gate inert in service mode. Poll the SERVICE queue's
+    # ``is_drained()`` instead. (Local/SQLite mode is unchanged.)
+    if _is_service_mode:
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred (optional service dep)
+        queue = HttpAspectQueue()
+    else:
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred to avoid circular import (db.t2 queue)
+        queue = AspectExtractionQueue(queue_path)
 
     def _join_worker_thread(w: AspectExtractionWorker) -> None:
         """Join the worker thread; log a warning if it does not exit in 2s.
@@ -1003,11 +1039,41 @@ def drain_worker(
                 return
 
         # Timeout: count stuck rows for the error message.
-        stuck = queue.conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
-        ).fetchone()
-        stuck_count = stuck[0] if stuck else 0
-        raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout)
+        # SERVICE mode: HttpAspectQueue has no .conn; use pending_count() via
+        # HTTP.  pending_count() counts only 'pending' rows — NOT in_progress.
+        # A crashed worker leaves rows in in_progress with NO lock held (FOR
+        # UPDATE locks are transaction-scoped; they are released when the
+        # transaction ends, which happens when the worker process dies).  Those
+        # orphaned rows are recovered by reclaim_stale(), not by a held lock.
+        # Consequence: if the drain times out because rows are stuck
+        # in_progress (the common crashed-worker scenario), pending_count()
+        # returns 0 even though is_drained() is still False.  We detect this
+        # gap and include an honest operator hint in the error detail.
+        # LOCAL mode: keep the existing status != 'failed' count (pending +
+        # in_progress) via a direct SQLite query.
+        if _is_service_mode:
+            pending = queue.pending_count()
+            if pending == 0:
+                # is_drained() returned False at timeout, but pending_count()
+                # is 0 — rows are stuck in in_progress (crashed-worker case).
+                # pending_count() is a pending-only proxy and cannot see them.
+                detail = (
+                    "Note (service mode): pending_count is 0, but is_drained() "
+                    "is still False — rows may be stuck in in_progress from a "
+                    "crashed worker. Run 'nx aspects reclaim-stale' to reset "
+                    "them back to pending, then retry the drain."
+                )
+                stuck_count = 0
+            else:
+                detail = None
+                stuck_count = pending
+        else:
+            stuck = queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
+            ).fetchone()
+            stuck_count = stuck[0] if stuck else 0
+            detail = None
+        raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout, detail=detail)
     finally:
         queue.close()
 

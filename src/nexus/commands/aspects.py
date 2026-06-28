@@ -85,18 +85,27 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
     """
     from nexus.aspect_worker import DrainTimeoutError, drain_worker  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import
 
     mem_path = default_db_path()
-    click.echo(f"Draining aspect queue at {mem_path} (timeout={timeout}s)...")
+    if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
+        click.echo(f"Draining service aspect queue (timeout={timeout}s)...")
+    else:
+        click.echo(f"Draining aspect queue at {mem_path} (timeout={timeout}s)...")
 
     try:
         drain_worker(mem_path, timeout=timeout, poll_interval=poll_interval)
     except DrainTimeoutError as e:
-        click.echo(
-            f"Drain timeout: {e.stuck_count} row(s) still active after {timeout}s. "
-            "Re-run after the worker processes or times out its in-flight rows.",
-            err=True,
+        base = f"Drain timeout: {e.stuck_count} row(s) still active after {timeout}s."
+        # Honor the honest service-mode hint (e.g. crashed-worker rows stuck
+        # in_progress -> run reclaim-stale). Falls back to the generic re-run
+        # advice when no detail was attached.
+        suffix = (
+            f" {e.detail}"
+            if e.detail
+            else " Re-run after the worker processes or times out its in-flight rows."
         )
+        click.echo(base + suffix, err=True)
         raise SystemExit(1) from e
 
     click.echo("Aspect queue drained. Safe to run 'nx upgrade'.")

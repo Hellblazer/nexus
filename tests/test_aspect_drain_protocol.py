@@ -110,6 +110,55 @@ class TestIsDrained:
         # doc2 is still pending
         assert queue.is_drained() is False
 
+
+# -- RDR-173 P4.1 (nexus-4st62): service-aware drain ---------------------------
+
+
+class TestServiceModeDrain:
+    """drain_worker must poll the SERVICE queue (HttpAspectQueue.is_drained())
+    when the aspect-queue backend is SERVICE — not a local-sqlite
+    AspectExtractionQueue, which is empty/stale in service mode and yields a
+    spurious 'drained' (the nx aspects drain / migration-gate inertness gap)."""
+
+    def test_drain_polls_http_queue_in_service_mode(
+        self, monkeypatch, locks_dir: Path, tmp_path: Path,
+    ) -> None:
+        from nexus.aspect_worker import drain_worker
+        from nexus.db import storage_mode as smod
+        from nexus.db.t2 import http_aspect_queue as hmod
+        from nexus.db.t2 import aspect_extraction_queue as sqmod
+
+        monkeypatch.setattr(
+            smod, "storage_backend_for",
+            lambda key: smod.StorageBackend.SERVICE
+            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
+        )
+        calls = {"http_is_drained": 0, "http_closed": False, "http_built": 0}
+
+        class _FakeHttpQueue:
+            def __init__(self, *a, **k) -> None:
+                calls["http_built"] += 1
+
+            def is_drained(self) -> bool:
+                calls["http_is_drained"] += 1
+                return True
+
+            def close(self) -> None:
+                calls["http_closed"] = True
+
+        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
+        # Guard: the local sqlite queue must NOT be opened in service mode.
+        def _boom(*a, **k):
+            raise AssertionError("service mode must not open local AspectExtractionQueue")
+        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
+
+        # queue_path is irrelevant in service mode; pass an unused path.
+        drain_worker(tmp_path / "unused.db", _locks_dir=locks_dir, timeout=1.0)
+
+        assert calls["http_built"] == 1, "service mode must construct HttpAspectQueue"
+        assert calls["http_is_drained"] >= 1, "must poll the SERVICE queue's is_drained()"
+        assert calls["http_closed"] is True, "must close the http queue"
+
     def test_only_failed_rows_is_drained(self, queue) -> None:
         queue.enqueue("knowledge__test", "/doc1.pdf")
         queue.enqueue("knowledge__test", "/doc2.pdf")
@@ -118,6 +167,238 @@ class TestIsDrained:
         queue.claim_next()
         queue.mark_failed("knowledge__test", "/doc2.pdf", "err2")
         assert queue.is_drained() is True
+
+    def test_drain_timeout_raises_DrainTimeoutError_with_pending_count(
+        self, monkeypatch, locks_dir: Path, tmp_path: Path,
+    ) -> None:
+        """OBS-1 (timeout path): when is_drained() never returns True, drain_worker
+        must raise DrainTimeoutError with stuck_count from pending_count() -- NOT
+        AttributeError from queue.conn (HttpAspectQueue has no .conn).
+
+        This is the CRITICAL fix: the pre-fix code called queue.conn.execute(...)
+        unconditionally, which raises AttributeError on HttpAspectQueue.
+        """
+        from nexus.aspect_worker import DrainTimeoutError, drain_worker
+        from nexus.db import storage_mode as smod
+        from nexus.db.t2 import http_aspect_queue as hmod
+        from nexus.db.t2 import aspect_extraction_queue as sqmod
+
+        monkeypatch.setattr(
+            smod, "storage_backend_for",
+            lambda key: smod.StorageBackend.SERVICE
+            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
+        )
+        _STUCK = 3
+
+        class _FakeHttpQueue:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def is_drained(self) -> bool:
+                return False  # never drains -> timeout fires
+
+            def pending_count(self) -> int:
+                return _STUCK
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
+        def _boom(*a, **k):
+            raise AssertionError("service mode must not open local AspectExtractionQueue")
+        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
+
+        with pytest.raises(DrainTimeoutError) as exc_info:
+            drain_worker(
+                tmp_path / "unused.db",
+                _locks_dir=locks_dir,
+                timeout=0.15,
+                poll_interval=0.05,
+            )
+
+        err = exc_info.value
+        assert err.stuck_count == _STUCK, (
+            f"stuck_count must come from pending_count() ({_STUCK}), got {err.stuck_count}"
+        )
+        # Normal timeout path (pending > 0) must NOT attach the in_progress hint.
+        assert err.detail is None, (
+            f"detail must be None on the normal (pending>0) timeout path; got {err.detail!r}"
+        )
+
+    def test_drain_timeout_in_progress_only_gives_honest_message(
+        self, monkeypatch, locks_dir: Path, tmp_path: Path,
+    ) -> None:
+        """Service-mode timeout with pending_count()==0 but is_drained()==False.
+
+        The common crashed-worker scenario: all rows are in_progress (not
+        pending), so pending_count() returns 0 while is_drained() is still
+        False.  DrainTimeoutError must still be raised (timeout fires
+        correctly), and the error message / detail must mention 'in_progress'
+        and 'reclaim-stale' so the operator knows the recovery action.
+        """
+        from nexus.aspect_worker import DrainTimeoutError, drain_worker
+        from nexus.db import storage_mode as smod
+        from nexus.db.t2 import http_aspect_queue as hmod
+        from nexus.db.t2 import aspect_extraction_queue as sqmod
+
+        monkeypatch.setattr(
+            smod, "storage_backend_for",
+            lambda key: smod.StorageBackend.SERVICE
+            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
+        )
+
+        class _FakeHttpQueueInProgressOnly:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def is_drained(self) -> bool:
+                return False  # rows stuck in in_progress -> never drains
+
+            def pending_count(self) -> int:
+                return 0  # no pending rows; all stuck in in_progress
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueueInProgressOnly)
+        def _boom(*a, **k):
+            raise AssertionError("service mode must not open local AspectExtractionQueue")
+        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
+
+        with pytest.raises(DrainTimeoutError) as exc_info:
+            drain_worker(
+                tmp_path / "unused.db",
+                _locks_dir=locks_dir,
+                timeout=0.15,
+                poll_interval=0.05,
+            )
+
+        err = exc_info.value
+        assert err.stuck_count == 0, (
+            f"stuck_count must be 0 (pending_count() returns 0), got {err.stuck_count}"
+        )
+        msg = str(err)
+        assert "in_progress" in msg, (
+            f"error message must mention 'in_progress' for the crashed-worker hint; got: {msg!r}"
+        )
+        assert "reclaim" in msg, (
+            f"error message must mention 'reclaim' (reclaim-stale recovery); got: {msg!r}"
+        )
+
+    def test_drain_poll_loop_exits_when_is_drained_becomes_true(
+        self, monkeypatch, locks_dir: Path, tmp_path: Path,
+    ) -> None:
+        """OBS-1 (poll loop): drain_worker must keep polling until is_drained()
+        returns True — False x 2 then True must succeed without error."""
+        from nexus.aspect_worker import drain_worker
+        from nexus.db import storage_mode as smod
+        from nexus.db.t2 import http_aspect_queue as hmod
+        from nexus.db.t2 import aspect_extraction_queue as sqmod
+
+        monkeypatch.setattr(
+            smod, "storage_backend_for",
+            lambda key: smod.StorageBackend.SERVICE
+            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
+        )
+        _answers = iter([False, False, True])
+
+        class _FakeHttpQueue:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def is_drained(self) -> bool:
+                try:
+                    return next(_answers)
+                except StopIteration:
+                    return True  # safety valve
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
+        def _boom(*a, **k):
+            raise AssertionError("service mode must not open local AspectExtractionQueue")
+        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
+
+        # Must NOT raise: the loop should see False, False, True and return.
+        drain_worker(
+            tmp_path / "unused.db",
+            _locks_dir=locks_dir,
+            timeout=5.0,
+            poll_interval=0.05,
+        )
+
+    def test_drain_skips_mcp_lock_check_in_service_mode(
+        self, monkeypatch, locks_dir: Path, tmp_path: Path,
+    ) -> None:
+        """SIG-1: the MCP file-lock check must be skipped in SERVICE mode.
+
+        In service mode the MCP process writes a local aspect_worker lock via
+        ensure_worker_started. If _check_mcp_worker_lock ran, drain_worker would
+        always raise DrainBlockedByActiveWorker while the MCP server is running,
+        defeating the primary migration use case.
+
+        Write a PID-1 lock file (always-alive, always-foreign) — in local mode
+        this would block drain. In SERVICE mode drain must succeed.
+        """
+        from nexus.aspect_worker import drain_worker
+        from nexus.db import storage_mode as smod
+        from nexus.db.t2 import http_aspect_queue as hmod
+        from nexus.db.t2 import aspect_extraction_queue as sqmod
+
+        monkeypatch.setattr(
+            smod, "storage_backend_for",
+            lambda key: smod.StorageBackend.SERVICE
+            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
+        )
+
+        # Place a PID-1 lock file — would block drain in LOCAL mode.
+        (locks_dir / "aspect_worker.1").write_text("1")
+
+        class _FakeHttpQueue:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def is_drained(self) -> bool:
+                return True
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
+        def _boom(*a, **k):
+            raise AssertionError("service mode must not open local AspectExtractionQueue")
+        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
+
+        # Must NOT raise DrainBlockedByActiveWorker — lock is ignored in SERVICE mode.
+        drain_worker(tmp_path / "unused.db", _locks_dir=locks_dir, timeout=1.0)
+
+    def test_cli_drain_surfaces_detail_hint_on_timeout(self, monkeypatch) -> None:
+        """OBS / Medium-1: `nx aspects drain` must surface DrainTimeoutError.detail
+        (the reclaim-stale hint) to the operator — not swallow it behind the
+        generic 'Re-run...' message. The crashed-worker case (stuck_count==0
+        with a detail hint) is exactly when the operator needs the hint.
+        """
+        from click.testing import CliRunner
+        from nexus.aspect_worker import DrainTimeoutError
+        from nexus.commands import aspects as aspects_mod
+
+        hint = (
+            "Note (service mode): pending_count is 0 ... Run "
+            "'nx aspects reclaim-stale' to reset them back to pending."
+        )
+
+        def _raise(*a, **k):
+            raise DrainTimeoutError(stuck_count=0, timeout=1.0, detail=hint)
+
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: "/tmp/x.db")
+        monkeypatch.setattr("nexus.aspect_worker.drain_worker", _raise)
+
+        result = CliRunner().invoke(aspects_mod.aspects_drain, ["--timeout", "1"])
+        assert result.exit_code == 1
+        assert "reclaim-stale" in result.output, (
+            f"CLI must surface the reclaim-stale hint; got: {result.output!r}"
+        )
 
 
 # -- Stop signal --------------------------------------------------------------
