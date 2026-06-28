@@ -180,44 +180,43 @@ def _is_pid_alive(pid: int) -> bool:
     return True
 
 
+def _make_t1_store_dir(config_dir: Path) -> Path:
+    """Create and return a fresh per-session T1 chroma store dir under
+    *config_dir*/t1/.
+
+    Relocates the store out of the OS-managed temp directory (macOS reaps
+    ``$TMPDIR`` on idle-file purge + boot, causing SQLITE_CANTOPEN under
+    long-lived T1 daemons — nexus-ycwec Fix #1). The parent ``<config>/t1``
+    directory is created if absent (mode 0o700).
+
+    The returned directory name always contains ``nx_t1_`` so the
+    safe-kill gate in :func:`_parse_orphan_t1_chromadb_candidates` (which
+    requires ``"nx_t1_"`` in the chroma command) continues to match.
+    """
+    t1_parent = config_dir / "t1"
+    t1_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    store = Path(tempfile.mkdtemp(prefix="nx_t1_", dir=t1_parent))
+    store.chmod(0o700)
+    return store
 
 
 
-def sweep_orphan_tmpdirs(
-    tmpdir_root: Path | None = None,
-    max_age_hours: float = 24.0,
+
+
+def _sweep_one_tmpdir_root(
+    root: Path,
+    cutoff: float,
 ) -> int:
-    """Reap orphan ``nx_t1_*`` tmpdirs older than *max_age_hours*.
+    """Reap ``nx_t1_*`` dirs under *root* older than *cutoff* (epoch seconds).
 
-    Scans *tmpdir_root* (defaults to the system tempdir) for
-    directories matching ``nx_t1_*`` (the prefix used by
-    :func:`start_t1_server`). Reaps any whose mtime is older than
-    the cutoff (default 24h) so legitimate in-flight tmpdirs (active
-    chroma spawn between :func:`tempfile.mkdtemp` and the chroma
-    process becoming live) are not accidentally removed.
-
-    Returns the count of directories reaped. Best-effort cleanup
-    that runs at top-level MCP startup; failures are non-fatal.
-
-    Pre-RDR-105-P4 the sweep also took a ``sessions_dir`` parameter
-    and skipped any tmpdir referenced by a live ``<uuid>.session``
-    record. The session-record machinery is gone; mtime is the sole
-    protection gate. Any ``nx_t1_*`` tmpdir older than 24h with no
-    live owner is treated as an orphan; tests or operators that
-    need to keep an old tmpdir around must touch it (refresh
-    mtime) on a sub-24h cadence or move it outside the
-    ``nx_t1_*`` namespace.
+    Returns the count reaped. Silently skips missing roots and unreadable dirs.
     """
     import shutil  # noqa: PLC0415 - branch-local; deferred to call time
 
-    if tmpdir_root is None:
-        tmpdir_root = Path(tempfile.gettempdir())
-    if not tmpdir_root.exists():
+    if not root.exists():
         return 0
-
-    cutoff = time.time() - max_age_hours * 3600.0
     reaped = 0
-    for d in tmpdir_root.glob("nx_t1_*"):
+    for d in root.glob("nx_t1_*"):
         if not d.is_dir():
             continue
         try:
@@ -234,6 +233,50 @@ def sweep_orphan_tmpdirs(
                 path=str(d),
                 age_hours=round((time.time() - mtime) / 3600.0, 2),
             )
+    return reaped
+
+
+def sweep_orphan_tmpdirs(
+    tmpdir_root: Path | None = None,
+    max_age_hours: float = 24.0,
+    config_dir: Path | None = None,
+) -> int:
+    """Reap orphan ``nx_t1_*`` tmpdirs older than *max_age_hours*.
+
+    Primary scan: ``<config_dir>/t1/`` (the new store location after
+    nexus-ycwec Fix #1). Legacy migration scan: *tmpdir_root* (defaults
+    to the OS tempdir) is also scanned once to clean up any pre-fix
+    orphans that were placed under ``$TMPDIR`` by older versions.
+
+    If *config_dir* is ``None`` the primary scan is skipped and only the
+    legacy root is scanned (preserving backward compatibility with callers
+    that pass only *tmpdir_root*).
+
+    Returns the total count of directories reaped across both roots.
+    Best-effort cleanup that runs at top-level MCP startup; failures are
+    non-fatal.
+
+    Pre-RDR-105-P4 the sweep also took a ``sessions_dir`` parameter
+    and skipped any tmpdir referenced by a live ``<uuid>.session``
+    record. The session-record machinery is gone; mtime is the sole
+    protection gate. Any ``nx_t1_*`` tmpdir older than 24h with no
+    live owner is treated as an orphan; tests or operators that
+    need to keep an old tmpdir around must touch it (refresh
+    mtime) on a sub-24h cadence or move it outside the
+    ``nx_t1_*`` namespace.
+    """
+    cutoff = time.time() - max_age_hours * 3600.0
+    reaped = 0
+
+    # Primary: new config-dir root (nexus-ycwec Fix #1).
+    if config_dir is not None:
+        reaped += _sweep_one_tmpdir_root(config_dir / "t1", cutoff)
+
+    # Legacy migration: OS-temp root (pre-fix orphans).
+    if tmpdir_root is None:
+        tmpdir_root = Path(tempfile.gettempdir())
+    reaped += _sweep_one_tmpdir_root(tmpdir_root, cutoff)
+
     return reaped
 
 
@@ -563,11 +606,15 @@ def start_t1_server() -> tuple[str, int, int, str]:
 
     Returns *(host, port, server_pid, tmpdir)*.
 
+    The chroma backing store is created under ``<config>/t1/`` (not under
+    the OS-managed temp dir) so macOS idle-file reaping cannot destroy the
+    SQLite file out from under a live daemon (nexus-ycwec Fix #1).
+
     Raises ``RuntimeError`` if the chroma entry-point cannot be located or
     the server does not become ready within the timeout.  The caller is
     responsible for the fallback.
     """
-    import tempfile  # noqa: PLC0415 - branch-local; deferred to call time
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 - branch-local; deferred to avoid circular import at module load
 
     chroma = _find_chroma()
     if not chroma:
@@ -585,7 +632,11 @@ def start_t1_server() -> tuple[str, int, int, str]:
     port: int = sock.getsockname()[1]
     sock.close()
 
-    tmpdir = tempfile.mkdtemp(prefix="nx_t1_")
+    # nexus-ycwec Fix #1 + Fix #2: store lives under <config>/t1/ (not OS-temp)
+    # so it survives macOS reaping.  _make_t1_store_dir always creates a fresh
+    # dir (mkdir is idempotent-safe), so a missing dir is re-created at spawn
+    # time rather than bubbling SQLITE_CANTOPEN to the chroma server.
+    tmpdir = str(_make_t1_store_dir(nexus_config_dir()))
     # start_new_session=True isolates chroma + its multiprocessing workers
     # into their own process group so ``safe_killpg(pid, …)`` (defined in
     # ``nexus.util.process_group``) reaches the whole subtree at shutdown.

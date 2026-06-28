@@ -323,9 +323,10 @@ class T1Database:
             session_id=self._session_id,
         )
         raise T1ServerNotFoundError(
-            "T1 connection lost. Construct a new T1Database to "
-            "re-resolve via the four-branch hybrid-discovery gate "
-            "(env -> addr file -> isolation -> raise)."
+            "T1 connection lost. Use /clear or restart the MCP server "
+            "to re-resolve the T1 endpoint via the four-branch discovery gate "
+            "(env -> lease -> isolation -> raise). "
+            "In-place reconnect is unsupported by design (RDR-105 P4 nexus-jnx7)."
         )
 
     @property
