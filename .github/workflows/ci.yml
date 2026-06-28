@@ -206,6 +206,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          # Full history so dorny/paths-filter resolves the main...develop
+          # merge-base without --deepen, whose shallow-fetch loop races
+          # ("fatal: shallow file has changed since we read it") and flaked
+          # the linux CA-3 gate twice on a docs-only push (2026-06-28).
+          fetch-depth: 0
 
       # Path-gate the expensive PG-from-source build. The job ALWAYS runs (so the
       # required status check always reports), but the build/test/smoke steps run
@@ -363,6 +369,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
       # Path-gate the expensive native PG build (same rationale as the linux CA-3
       # job): the job always runs so the required check reports, but the build/test
@@ -495,6 +503,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
         id: changes
@@ -568,6 +578,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
       # SHA-pinned (not @v4): this filter's `seam` output gates whether EVERY
       # expensive step in a REQUIRED check runs. A floating tag compromised to
