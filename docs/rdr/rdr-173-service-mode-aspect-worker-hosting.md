@@ -25,7 +25,9 @@ silently never completes for any store path that does not keep a single process 
 the full extraction window. `document_aspects` is enqueued but never populated; nothing
 surfaces in logs or any green test.
 
-The root is a hosting gap. The aspect **extraction worker** — the loop that claims a row
+#### Gap 1: The aspect extraction worker has no persistent host
+
+The aspect **extraction worker** — the loop that claims a row
 from `aspect_extraction_queue`, runs `extract_aspects` (a `claude -p` subprocess, ~25s/doc
 on haiku), and upserts `document_aspects` — is spawned **lazily by the enqueue hook**. The
 *only* caller of `ensure_worker_started()` in the codebase is
@@ -49,11 +51,13 @@ Every short-lived store path strands its aspects:
 - fast batch ingest where the indexer exits before the worker drains,
 - any deployment where the storing process is not the long-running interactive session.
 
-**Secondary gap (reclaim ownership).** A worker killed mid-extraction leaves its claimed row
-in `in_progress`. In SQLite mode the T2 daemon's `reclaim_stale` loop (nexus-we61e) resets
-such rows to `pending`. In service mode the daemon is short-circuited — so it is unclear who,
-if anyone, runs `reclaim_stale` against the PG queue. A permanently-`in_progress` row blocks
-`is_drained()` and the drain-before-migration gate.
+#### Gap 2: No `reclaim_stale` owner in service mode
+
+A worker killed mid-extraction leaves its claimed row in `in_progress`. In SQLite mode the T2
+daemon's `reclaim_stale` loop (nexus-we61e) resets such rows to `pending`. In service mode the
+daemon is short-circuited — so it is unclear who, if anyone, runs `reclaim_stale` against the
+PG queue. A permanently-`in_progress` row blocks `is_drained()` and the drain-before-migration
+gate. (Confirmed a real gap — nobody reclaims — by RF-5.)
 
 ## Context
 
