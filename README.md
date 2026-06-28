@@ -13,9 +13,13 @@
 
 **Start here**: [**How I actually use Nexus**](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) — the conceptual overview and the shape of the substrate. Then [**Installing Nexus**](https://tensegrity.blog/2026/04/26/installing-nexus/) — a ten-minute hands-on walkthrough from `uv tool install` through your first search.
 
+## Prerequisites
+
+Python 3.12+, [`uv`](https://docs.astral.sh/uv/), `git`. For hybrid search, [`ripgrep`](https://github.com/BurntSushi/ripgrep). For the Claude Code plugin, [Node.js](https://nodejs.org/) (the bundled `sequential-thinking` and `context7` servers spawn via `npx`).
+
 ## Install for Claude
 
-Three surfaces share one host substrate. Pick the one that matches how you use Claude.
+Three surfaces share one host substrate: the `nx` CLI (the `conexus` package). Claude Desktop's `.mcpb` bundles it and resolves it on first launch; the Claude Code plugin and Cowork use a **separately-installed** CLI (`uv tool install conexus`). Pick the one that matches how you use Claude.
 
 ### Claude Desktop chat
 
@@ -24,11 +28,14 @@ Download `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/
 ### Claude Code (terminal)
 
 ```bash
-/plugin marketplace add Hellblazer/nexus
-/plugin install conexus@nexus-plugins
+uv tool install conexus                  # 1. the nx CLI (the plugin's MCP servers ARE this package)
+/plugin marketplace add Hellblazer/nexus # 2. add the marketplace
+/plugin install conexus@nexus-plugins    # 3. install the plugin
 ```
 
-The plugin ships 13 specialized agents, 43 skills (RDR lifecycle, plan-centric retrieval, dev workflows), and 36 MCP tools split across two focused servers. Session hooks load project context at startup.
+The plugin's MCP servers (`nx-mcp`, `nx-mcp-catalog`) are console-scripts from the `conexus` package, so **the `nx` CLI must be installed too**: `/plugin install` alone leaves the servers unable to launch. Install the CLI first (step 1; see [CLI quick-start](#cli-quick-start) to then provision the storage backend).
+
+The plugin ships 13 specialized agents, 45 skills (RDR lifecycle, plan-centric retrieval, dev workflows), and 50 MCP tools split across two focused servers. Session hooks load project context at startup.
 
 ### Claude Cowork
 
@@ -55,7 +62,7 @@ nx index repo .                          # index your repo + discover topics
 nx search "how does retry work"          # semantic search, fully local
 ```
 
-`nx init --service` provisions the bundled Postgres 17 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, and starts the persistent service supervisor. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically (see [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full service-install flow and the `nx daemon service install-binary` step).
+`nx init --service` provisions the bundled Postgres 17 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, and starts the persistent service supervisor. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically (see [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full service-install flow and the `nx daemon service install-binary` step). **First run only:** this downloads a few hundred MB (the signed ~134 MB service binary, the relocatable Postgres bundle, and the ~140 MB bge-768 model) and takes a few minutes; subsequent starts are fast.
 
 > **Upgrading from a pre-6.0 install?** 6.0 moves the permanent vector store from ChromaDB to the Postgres + pgvector service. After `uv tool upgrade conexus`, run **`nx guided-upgrade`** — one command detects your existing store, provisions and version-pins the service, and migrates your data with validation and copy-not-move rollback safety. Your ChromaDB data is left intact as the migration source.
 
@@ -86,10 +93,6 @@ When you update the **Claude Code plugin** (`/plugin update`), upgrade the CLI t
 | Read the conceptual story | [How I actually use Nexus](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) |
 | Walk through a fresh install | [Installing Nexus](https://tensegrity.blog/2026/04/26/installing-nexus/) |
 | Browse the full series | [Tensegrity blog](https://tensegrity.blog/) |
-
-## Prerequisites
-
-Python 3.12+, [`uv`](https://docs.astral.sh/uv/), `git`. For hybrid search, [`ripgrep`](https://github.com/BurntSushi/ripgrep). For the Claude Code plugin, [Node.js](https://nodejs.org/) (the bundled `sequential-thinking` and `context7` servers spawn via `npx`).
 
 ## License
 
