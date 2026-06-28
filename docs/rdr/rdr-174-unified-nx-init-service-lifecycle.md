@@ -95,19 +95,47 @@ Target end state: `uv tool install conexus && nx init && nx index`.
 
 ## Approach (numbered, for phase-review cross-walk)
 
-1. **Mode detection in `nx init`** keyed on `get_credential("service_url")` (NOT
-   `is_local_mode()`, which is `service_url`-blind across 57 callers — RF-5).
-   Tests: managed path vs local path dispatch. Also **remove the `_auto_service`
-   side-channel** (`init.py:641-644`): once plain local `nx init` always
-   provisions, that silent second path is dead weight (RF-1 risk).
+1. **Mode detection in `nx init`** with explicit precedence (gate-locked,
+   critic SIG-1): `NX_LOCAL` is orthogonal and wins over `service_url`.
+   `NX_LOCAL=1` → force local; `NX_LOCAL=0` → force managed; otherwise dispatch
+   on `get_credential("service_url")` (env `NX_SERVICE_URL` or config.yml) — NOT
+   `is_local_mode()`, which is `service_url`-blind across 57 callers (RF-5). This
+   preserves the migration/rollback-rehearsal pattern (`NX_LOCAL=1 nx init` with a
+   stale `service_url` in config still provisions local). Tests: each precedence
+   branch; managed vs local dispatch. Also **remove the `_auto_service`
+   side-channel** (`init.py:641-644`): the new default (plain local `nx init`
+   always provisions) subsumes the `NX_STORAGE_BACKEND=service` re-provision path,
+   so that silent second path is dead weight (RF-1 risk, OBS-2).
 2. **Managed path**: fold the RDR-166 credential wizard + `nx service probe`
    into `nx init` when managed. Test: missing-creds prompt; probe success/failure
    exit codes.
-3. **Local path**: `nx init` (no flag) calls `provision_and_start_service()`.
-   Test: local dispatch reaches provisioning (mock the heavy steps).
+3. **Local path**: `nx init` (no flag) calls `provision_and_start_service()`,
+   which forces bge-768 (RDR-160). **Embedder-picker disposition** (critic
+   OBS-1): RDR-144's interactive 384-vs-768 picker (`init.py:678-720`) is no
+   longer reached on the service path. Since T3 serving is service-only, decide at
+   accept whether to (a) remove the picker as deferred cleanup, or (b) keep it
+   reachable solely behind an explicit non-service escape hatch. Default
+   recommendation: remove it (no non-service local T3 path survives RDR-155/158);
+   `--embedder` stays only as the bge/minilm selector the service embedder step
+   already honors. Do not leave it as silent dead code. Test: local dispatch
+   reaches provisioning (mock the heavy steps).
 4. **Service-supervisor autostart**: new `nx daemon service install --autostart`
    on the RDR-149 installer substrate; `nx init` prompts (default yes) / `--yes` /
-   `--no-autostart`. Tests: unit written; prompt honored; skip honored.
+   `--no-autostart`. Two service-specific deltas the t2/t3 templates do NOT cover
+   (gate-locked, critic SIG-2 / SIG-3):
+   - **PG boot-ordering**: the supervisor connects to the local Postgres, so the
+     Linux unit needs `After=postgresql.service` (and `Wants=`); macOS launchd has
+     no ordering, so the unit must exec a thin wrapper that polls PG readiness
+     before launching the supervisor (avoids `Restart`/`KeepAlive` thrash on cold
+     boot). t2/t3 only declare `After=network.target` — diverge here.
+   - **Supervisor handoff (no double-spawn)**: the autostart unit owns the
+     lifecycle. When `nx init` installs the unit, it does NOT also leave its own
+     detached `ensure_storage_supervisor` subprocess racing the unit's
+     `RunAtLoad`/`--now` start. Model (a): on install, let the unit be the single
+     starter and have `nx init` poll for the lease to appear; do not spawn a
+     second supervisor. Define the single-writer/lease cleanup if both ever race.
+   Tests: unit written with PG ordering; prompt honored; skip honored; no
+   double-supervisor (one lease after install).
 5. **`--service` deprecation notice** (still functional). Test: notice emitted,
    behavior unchanged.
 6. **Remove the T2-daemon step** from `nx init` and the README; confirm default
