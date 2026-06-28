@@ -93,15 +93,51 @@ empirically by the `--fullstack` run (1 of 4 claimed, 0 extracted, process exite
 daemon does not run the extraction loop. In service mode `t2_index_write` short-circuits the
 daemon (`mcp_infra.py:350-354`), so even reclaim ownership in service mode is unestablished.
 
-### RF-4 (Assumed → verify): a persistent MCP session DOES drain
-The hypothesis that an interactive Claude Code session (long-lived nx-mcp) drains the queue
-because the worker lives for the session is plausible but **not yet empirically confirmed**.
-A spike (persistent service-mode MCP → store_put → wait → assert `document_aspects>0`) should
-verify this before any design assumes it.
+### RF-4 (Verified by construction): a persistent host DOES drain; the gap is short-lived paths
+The worker is a `daemon=True` thread (`aspect_worker.py:233-238`) with **no idle-stop or
+self-stop** — the poll loop (`aspect_worker.py:321-373`) runs until `stop()` is called or the
+host process dies (empty queue → `_stop_event.wait(poll_interval)` → loop). So it drains **iff
+its host process lives at least as long as all pending extractions (~25s/doc) plus claim
+latency**. A persistent interactive MCP session therefore **does** drain; the failure is
+scoped to **short-lived store paths** (CLI `nx store put`, one-shot `claude -p`, fast batch),
+**not** all service-mode paths. Method: source search (2026-06-28). An empirical container
+spike would confirm end-to-end but the mechanism is settled.
 
-### RF-5 (Open): reclaim ownership in service mode
-Who runs `reclaim_stale` against the PG queue in service mode is unestablished. If no one
-does, stranded `in_progress` rows are permanent and block `is_drained()`.
+### RF-5 (Verified): nobody reclaims `in_progress` rows in service mode — they strand permanently
+No process resets a stranded `in_progress` row to `pending` in service mode: (a) `t2_index_write`
+short-circuits to a transient `T2Database`, the daemon is never probed (`mcp_infra.py:342-354`);
+(b) the SQLite T2 daemon is **not started** in service mode, so its `_reclaim_stale_loop`
+(`t2_daemon.py:1224-1292`) never fires; (c) the Java service's only scheduled task is the T1
+scratch TTL sweep (`NexusService.java:264-281`) — **no scheduled `reclaimStale`**; (d) the
+`reclaimStale` SQL (`AspectRepository.java:894-904`) + endpoint `POST /queue/reclaim_stale`
+(`AspectHandler.java:544-551`) exist but are **never called**; (e) the worker poll explicitly
+does not reclaim (nexus-we61e). **Net:** a worker-process death strands the row permanently;
+`is_drained()` (`http_aspect_queue.py:241-244`) stays false → the drain-before-migration gate
+is permanently blocked. Method: source search (2026-06-28).
+
+### RF-6 (Verified): Java-hosted extraction is infeasible
+The Java service spawns no Python/Claude subprocess: the only `ProcessBuilder` is
+`LocalChromaServer.java:86` (the `chroma` binary). `extract_aspects` is fundamentally a
+`claude -p` subprocess, so the extraction loop cannot live inside the Java service. **Decision-
+space Candidate C (Java-hosted orchestration) is refuted.** Method: source search (2026-06-28).
+
+### RF-7 (Verified): the service-aware drain is a narrow fix; reclaim must be closed regardless
+`drain_worker` opens a **local SQLite** `AspectExtractionQueue(queue_path)` directly
+(`aspect_worker.py:964-967`) and polls `is_drained()` on it — spuriously "drained" while the PG
+queue has rows. The fix is one branch: when `storage_backend_for("aspect_queue") == SERVICE`,
+use `HttpAspectQueue()` for the drain poll (the worker-stop side and the claim path already
+route through `t2_index_write` → `HttpAspectQueue.claim_batch`). The RDR-149 leased registry
+(`service_registry.py`) is reusable as the host substrate for a leased Python worker daemon
+(Candidate A), mirroring the T2 daemon. Method: source search (2026-06-28).
+
+### RF-8 (Verified): a worker killed by SIGKILL orphans its `claude -p` and strands the row
+`extract_aspects` calls `subprocess.run(["claude","-p",...], timeout=180)`
+(`aspect_extractor.py:1531-1537` single; `1365-1371` batch) with **no process-group isolation**
+(no `start_new_session`/`setsid`). On host **SIGTERM** the child shares the process group, gets
+the signal, terminates (row stays `in_progress`). On host **SIGKILL** the child is **orphaned**
+(reparented to init), keeps running and consuming API quota, with the row stuck `in_progress`
+and no reclaimer (RF-5). Mitigation (separate hardening): `start_new_session=True` +
+process-group kill on `TimeoutExpired`. Method: source search (2026-06-28).
 
 ## Decision
 
@@ -121,16 +157,23 @@ have ingest paths (or a periodic trigger) call it. Pro: no always-on daemon; reu
 worker logic. Con: someone must call it; interactive MCP sessions still rely on the in-process
 worker; batch/CLI must opt in.
 
-**Candidate C — Java-service-hosted orchestration.** The Java service owns the
-claim/reclaim/scheduling and shells out to a Python extraction sidecar. Pro: one host, aligned
-with RDR-152. Con: extraction is `claude -p` (auth, subprocess) — awkward to host from Java;
-large surface.
+**Candidate C — Java-service-hosted orchestration. REFUTED (RF-6).** The Java service spawns
+no Python/Claude subprocess and `extract_aspects` is fundamentally `claude -p` — the extraction
+loop cannot live in the Java service. Off the table.
 
 **Candidate D — accept in-session-only + make the gap loud.** Keep the in-process worker as
 the only host, but (a) document that short-lived paths do not extract, (b) fail loud (a
 metric/warning) when a process exits with undrained owned rows, (c) provide a manual
 service-aware drain. Pro: minimal. Con: leaves the user-visible symptom (no aspects for
 CLI/headless/batch) unfixed.
+
+**Needed REGARDLESS of the hosting model (RF-5, RF-7):**
+- **Service-mode reclaim ownership** — a scheduled `reclaimStale` (e.g. a second
+  `scheduleAtFixedRate` in `NexusService.java` beside the T1 sweep, or a periodic Python
+  caller of `POST /queue/reclaim_stale`). Without it any worker death permanently strands an
+  `in_progress` row and blocks the migration drain gate.
+- **A service-aware `drain_worker`** — the one-branch fix (use `HttpAspectQueue` when
+  `aspect_queue` backend is SERVICE) so the migration gate and operators have a working drain.
 
 ## Approach
 
@@ -190,11 +233,17 @@ migration time" is the target — the opposite of today.
 
 ## Open Questions
 
-- RF-4: does a persistent service-mode MCP session drain end-to-end? (spike)
-- RF-5: who owns `reclaim_stale` in service mode?
-- Does the RDR-152 "one strict service, no extra daemons" principle permit a Python worker
-  daemon, or must hosting route through the Java service?
+- ~~RF-4: does a persistent service-mode MCP session drain end-to-end?~~ Settled by
+  construction (RF-4); an empirical container spike remains optional confirmation.
+- ~~RF-5: who owns `reclaim_stale` in service mode?~~ Answered: **nobody** (RF-5) — must be
+  closed regardless of the hosting model.
+- **Hosting model choice (A vs B vs D):** does the RDR-152 "one strict service, no extra
+  daemons" principle permit a leased Python worker daemon (Candidate A, viable per RF-7), or
+  should hosting stay in-process (D) + a service-aware drain (B) trigger extraction for
+  short-lived paths? This is the core remaining decision for the gate.
 - Is fast batch ingest (`nx index`) also affected, and does it need the same host?
+- Should the SIGKILL-orphan hardening (RF-8: `start_new_session` + group-kill) ship with this
+  RDR or as a separate fix?
 
 ## History
 
@@ -202,3 +251,12 @@ migration time" is the target — the opposite of today.
   `claim_batch` contract fix (nexus-575kd) unmasked it, the run showed the worker claims but
   cannot drain before a short-lived process exits. Confirmed the worker has exactly one spawn
   site (the enqueue hook) and no persistent host. Filed as nexus-tih7j; escalated to RDR.
+- 2026-06-28: Research pass 1 (source analysis). **RF-4 settled by construction** — the worker
+  is a daemon thread with no idle-stop, so a persistent host drains; the gap is short-lived
+  paths only. **RF-5 VERIFIED as a gap** — nobody reclaims `in_progress` rows in service mode
+  (daemon not started; Java has no scheduled reclaim; endpoint never called), so a stranded row
+  blocks the migration gate permanently. **RF-6** — Java-hosted extraction infeasible
+  (Candidate C refuted). **RF-7** — service-aware drain is a one-branch fix; the leased registry
+  is reusable for a Python worker daemon. **RF-8** — SIGKILL orphans the `claude -p` and strands
+  the row (no process group). Two fixes are needed regardless of the hosting model: service-mode
+  reclaim ownership + a service-aware drain. Evidence: T2 `nexus_rdr/173-research-1`.
