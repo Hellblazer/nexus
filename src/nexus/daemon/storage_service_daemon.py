@@ -56,6 +56,7 @@ No direct-mode fallback — a service/PG outage is always fatal for callers.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import errno
 import os
 import re
@@ -92,6 +93,46 @@ _REGISTRY_TIER: str = "storage_service"
 
 #: The host the Java service binds to (loopback-only, no cross-host federation).
 _SERVICE_HOST: str = "127.0.0.1"
+
+#: PR_SET_PDEATHSIG (linux/prctl.h): deliver a signal to THIS process when its
+#: parent dies. nexus-03bcg / f9y78: the supervisor spawns the JVM as a child;
+#: arming pdeathsig makes the JVM die WITH its supervisor, so an OOM-killed
+#: supervisor leaves NO orphaned-but-serving JVM. That removes the double-JVM
+#: hazard at heal-on-next-use WITHOUT a pid-keyed addr file or orphan sweep
+#: (both banned by the RDR-149 lifecycle gate — liveness stays lease-TTL).
+_PR_SET_PDEATHSIG: int = 1
+
+#: libc handle for the prctl(2) call, loaded ONCE at import (not in preexec_fn —
+#: only the pre-loaded function pointer is async-signal-safe to call post-fork).
+#: ``CDLL(None)`` resolves already-loaded symbols (works on glibc AND musl);
+#: ``None`` on non-Linux platforms, where PR_SET_PDEATHSIG does not exist.
+_LIBC: ctypes.CDLL | None
+if sys.platform.startswith("linux"):
+    try:
+        _LIBC = ctypes.CDLL(None, use_errno=True)
+    except OSError:  # pragma: no cover — libc must load on Linux, but never crash import
+        _LIBC = None
+else:
+    _LIBC = None
+
+
+def _set_pdeathsig_preexec() -> None:
+    """``preexec_fn`` for the JVM child: arm PR_SET_PDEATHSIG so the JVM dies
+    when its supervisor (parent) dies — no orphaned service, no double-JVM on
+    heal-on-next-use (nexus-03bcg, RDR-149-aligned).
+
+    Runs in the child after ``fork()``, before ``exec()``. Async-signal-safe:
+    only the pre-loaded ``_LIBC.prctl`` + ``os.getppid`` + ``os._exit``. No-op
+    off Linux. Closes the fork-vs-parent-death race: if the supervisor already
+    died before prctl ran, the signal was missed, so a reparented child
+    (``getppid()`` no longer the supervisor) exits immediately rather than
+    orphaning.
+    """
+    if _LIBC is None:  # non-Linux: PR_SET_PDEATHSIG unavailable
+        return
+    _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
+    if os.getppid() == 1:  # reparented → parent already dead → don't orphan
+        os._exit(0)
 
 #: Path suffix of the spawn lock file inside config_dir.
 _SPAWN_LOCK_FILE: str = "storage_service_spawn.lock"
@@ -566,6 +607,9 @@ class StorageServiceSupervisor:
                 stdout=svc_log,
                 stderr=svc_log,
                 start_new_session=True,
+                # nexus-03bcg: die with the supervisor (Linux PR_SET_PDEATHSIG) so
+                # an OOM-killed supervisor leaves no orphaned JVM. None off Linux.
+                preexec_fn=_set_pdeathsig_preexec if _LIBC is not None else None,
             )
         finally:
             # The child holds its own duplicated fd; the parent's handle is

@@ -1390,6 +1390,89 @@ class TestLeaseTtlAndHeapBound:
         assert not any(a.startswith("-Xmx") for a in captured["argv"][1:])
 
 
+class TestPdeathsigOrphanPrevention:
+    """nexus-03bcg / f9y78 root cause: an OOM-killed supervisor left an
+    orphaned-but-serving JVM whose lease aged out — and a naive heal-on-next-use
+    would then double-spawn a JVM. RDR-149-aligned fix (no pid-file, no orphan
+    sweep): the JVM dies WITH its supervisor via PR_SET_PDEATHSIG, so a dead
+    supervisor leaves NO orphan to double-spawn against."""
+
+    def test_spawn_service_wires_pdeathsig_on_linux(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        monkeypatch.setattr(ssd_mod, "_LIBC", object())  # simulate Linux libc loaded
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured.update(kw)
+            return _FakeProc(pid=49201)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+        sup._spawn_service()
+        assert captured.get("preexec_fn") is ssd_mod._set_pdeathsig_preexec, (
+            "on Linux the JVM must be spawned with the PR_SET_PDEATHSIG preexec_fn"
+        )
+
+    def test_spawn_service_no_pdeathsig_off_linux(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        monkeypatch.setattr(ssd_mod, "_LIBC", None)  # non-Linux: no prctl
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured.update(kw)
+            return _FakeProc(pid=49202)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+        sup._spawn_service()
+        assert captured.get("preexec_fn") is None, (
+            "PR_SET_PDEATHSIG is Linux-only; preexec_fn must be None elsewhere"
+        )
+
+    @pytest.mark.skipif(
+        not __import__("sys").platform.startswith("linux"),
+        reason="PR_SET_PDEATHSIG is Linux-only",
+    )
+    def test_pdeathsig_orphan_dies_with_parent(self) -> None:
+        """Integration proof (Linux): a child spawned with the pdeathsig
+        preexec_fn is killed when its parent dies, leaving no orphan."""
+        import subprocess as _sp
+        import sys as _sys
+        import textwrap
+        import time as _t
+
+        from nexus.daemon.storage_service_daemon import _pid_is_alive
+
+        parent_src = textwrap.dedent(
+            """
+            import subprocess, sys
+            from nexus.daemon.storage_service_daemon import _set_pdeathsig_preexec
+            p = subprocess.Popen(["sleep", "30"], preexec_fn=_set_pdeathsig_preexec)
+            sys.stdout.write(str(p.pid) + "\\n")
+            sys.stdout.flush()
+            # parent exits here → the child must receive SIGKILL via PR_SET_PDEATHSIG
+            """
+        )
+        parent = _sp.Popen([_sys.executable, "-c", parent_src], stdout=_sp.PIPE, text=True)
+        child_pid = int(parent.stdout.readline().strip())
+        parent.wait(timeout=10)
+        # give the kernel a moment to deliver the parent-death signal
+        deadline = _t.monotonic() + 5.0
+        while _t.monotonic() < deadline and _pid_is_alive(child_pid):
+            _t.sleep(0.1)
+        assert not _pid_is_alive(child_pid), (
+            "the child must die with its parent (PR_SET_PDEATHSIG); orphan survived"
+        )
+
+
 # ---------------------------------------------------------------------------
 # RDR-174 P2.2 (nexus-exfns): boot-robustness — the supervisor self-manages PG.
 #
