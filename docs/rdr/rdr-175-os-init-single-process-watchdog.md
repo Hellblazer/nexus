@@ -228,6 +228,23 @@ PG; the Java service stays alive through a PG-only restart, unchanged from today
   `ensure_storage_supervisor` session detach. Exactly one supervisor in either
   branch.
 
+  > **DEFERRED 2026-06-28 (implementation-time premise check).** Gap 3 assumed
+  > `nx init` already prompts for autostart and installs a unit (RDR-174 P2.4)
+  > whose ordering needs reworking. Implementation-time verification found P2.4
+  > was **never landed**: `init.py:523-530` is a placeholder comment only; `nx
+  > init` has no autostart prompt and never installs a unit (it unconditionally
+  > session-detaches via `ensure_storage_supervisor`). The standalone `nx daemon
+  > service install --autostart` command exists but `init` does not call it.
+  > There is therefore no extant ordering to rework, and the "two-supervisor
+  > situation" cannot occur in current code (init never starts a unit). The
+  > double-spawn root cause (Gap 2) was the `--foreground` → `_respawn` chain,
+  > already removed in Step 1. Building a decide-first autostart prompt in `init`
+  > from scratch is net-new feature scope (effectively implementing RDR-174 P2.4)
+  > and is preventive hardening for a path that does not yet exist. Deferred to a
+  > follow-up bead, to be implemented together with the autostart-in-init prompt
+  > if/when that lands. The heal-on-next-use hardening (the bullet above) and
+  > Steps 1 + 2 are unaffected and shipped.
+
 ### Technical Design
 
 Interfaces / contracts (verify signatures at implementation):
@@ -363,8 +380,11 @@ via the rendered-unit test that BOTH `StartLimitIntervalSec=0` and the existing
 directive).
 
 #### Step 3: Decide-autostart-first ordering (Gap 3) + heal-on-next-use hardening
-Rework the init P2.4 dispatch; add the dead-lease liveness check to
-`ensure_storage_supervisor`'s discover path.
+Add the dead-lease liveness check to `ensure_storage_supervisor`'s discover path
+(SHIPPED). The decide-autostart-first init ordering rework is **DEFERRED** to a
+follow-up bead — see the DEFERRED note in §Approach: RDR-174 P2.4 (the
+autostart-in-init prompt this would reorder) was never implemented, so there is
+no extant ordering to rework and no two-supervisor path in current code.
 
 ### Phase 2: Operational Activation
 

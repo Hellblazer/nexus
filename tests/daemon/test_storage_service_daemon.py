@@ -1236,6 +1236,60 @@ class TestEnsureStorageSupervisor:
             with pytest.raises(StorageServiceStartError):
                 daemon_mod.ensure_storage_supervisor(config_dir)
 
+    def test_dead_supervisor_pid_relinquishes_and_respawns(
+        self, config_dir: Path
+    ) -> None:
+        """RDR-175 heal-on-next-use: a hard-crashed supervisor (OOM-kill, no
+        relinquish) can leave a still-fresh (TTL-live) lease whose
+        ``supervisor_pid`` points at a dead process. The discover path must
+        detect the dead pid, relinquish the stale lease, and re-spawn — rather
+        than returning a dead endpoint for up to the lease TTL window."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.commands import daemon as daemon_mod
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        # A fresh, supervised lease (payload carries supervisor_pid). Patch
+        # _pid_is_alive False so the guard treats that supervisor as dead.
+        self._publish_fresh_lease(config_dir, port=18093)
+        scope = str(os.getuid())
+        assert ServiceRegistry(dir=config_dir, tier="storage_service").discover(scope) is not None
+
+        def _popen_publishes(*_a, **_k):
+            self._publish_fresh_lease(config_dir, port=18094)
+            return MagicMock()
+
+        with patch.object(ssd_mod, "_pid_is_alive", return_value=False), \
+             patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
+             patch.object(daemon_mod.subprocess, "Popen", side_effect=_popen_publishes) as popen:
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+
+        popen.assert_called_once()  # dead lease must trigger a re-spawn
+        assert rec is not None and rec.endpoint.get("port") == 18094
+
+    def test_absent_supervisor_pid_trusts_ttl_freshness(
+        self, config_dir: Path
+    ) -> None:
+        """A lease WITHOUT a supervisor_pid (legacy/non-supervised) must fall
+        through to the existing TTL-freshness short-circuit — no spurious
+        re-spawn — even when _pid_is_alive would report dead."""
+        import time as _time
+
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.commands import daemon as daemon_mod
+
+        # Publish a NON-supervised lease: payload {} → supervisor_pid absent.
+        sup = _make_supervisor(config_dir, lambda: _time.time(), supervised=False)
+        sup._proc = _FakeProc(pid=42778)
+        sup._service_port = 18095
+        sup._publish(18095)
+
+        with patch.object(ssd_mod, "_pid_is_alive", return_value=False), \
+             patch.object(daemon_mod.subprocess, "Popen") as popen:
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+
+        popen.assert_not_called()  # absent supervisor_pid → trust TTL, no re-spawn
+        assert rec is not None and rec.endpoint.get("port") == 18095
+
 
 # ---------------------------------------------------------------------------
 # nexus-lz3f2: lease-TTL margin + optional service heap bound

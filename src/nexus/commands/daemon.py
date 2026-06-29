@@ -1618,14 +1618,41 @@ def ensure_storage_supervisor(config_dir: Path):
 
     Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
     """
+    import contextlib  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
     from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    StorageServiceStartError = _ssd.StorageServiceStartError
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = str(os.getuid())
     existing = registry.discover(scope)
     if existing is not None:
-        return existing
+        # RDR-175 heal-on-next-use hardening: a fresh (TTL-live) lease whose
+        # ``supervisor_pid`` points at a DEAD process is a hard-crashed
+        # supervisor (OOM-kill / SIGKILL with no relinquish). Without the OS
+        # watchdog (no-autostart mode) nothing restarts it, and the lease would
+        # otherwise be returned as a live endpoint for up to the TTL window.
+        # Relinquish it and fall through to re-spawn. Reuses the exact guard from
+        # ``stop_storage_service`` — an ABSENT ``supervisor_pid`` (legacy /
+        # non-supervised lease) is left to the existing TTL-freshness
+        # short-circuit, never re-spawned spuriously. (RDR-149-gate-safe: this is
+        # in the storage-specific caller, not service_registry.discover.)
+        supervisor_pid = existing.payload.get("supervisor_pid")
+        if (
+            isinstance(supervisor_pid, int)
+            and supervisor_pid > 0
+            and not _ssd._pid_is_alive(supervisor_pid)
+        ):
+            _log.warning(
+                "storage_service_dead_lease_reclaim",
+                supervisor_pid=supervisor_pid,
+                msg="fresh lease held by a dead supervisor; relinquishing + re-spawning",
+            )
+            with contextlib.suppress(Exception):
+                registry.relinquish(existing)
+        else:
+            return existing
 
     argv = [
         *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
