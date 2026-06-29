@@ -7,19 +7,21 @@ git clone https://github.com/Hellblazer/nexus.git
 cd nexus
 uv sync
 scripts/reinstall-tool.sh           # install nx CLI (preserves optional extras)
-nx daemon t2 install --autostart    # T2 daemon at login (RDR-120, 4.34.0+)
+nx init                              # provision + start the local service backend (RDR-174 collapsed flow)
 nx hooks install                     # auto-index this repo on every commit
 ```
 
-The `nx daemon t2 install --autostart` step writes a LaunchAgent (macOS)
-or systemd user-unit (Linux) so the T2 daemon starts at login and
-survives across dev-machine reboots. Without it the unit suite and
-many CLI commands fail loud with `T2DaemonNotReachableError`. For an
-explicit one-shot start, use `nx daemon t2 ensure-running` instead.
+The unit suite is self-contained — `uv run pytest` uses an in-process
+`chromadb.EphemeralClient` and a tmp-path SQLite, so it needs **no** running
+daemon or service. `nx init` is only required for shell CLI usage
+(`nx memory`, `nx index`, `nx search`) against persistent state; it provisions
+and starts the nexus-service that serves every tier in the default config, and
+offers to register the OS autostart unit (accept it, or use `--no-autostart`
+for a session-only supervisor).
 
-If you're hacking on the daemon itself, you'll want to manually stop
-the LaunchAgent-managed instance and run `nx daemon t2 start` in the
-foreground:
+If you work with the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`) and
+want to hack on the T2 daemon itself, stop the autostart-managed instance and
+run it in the foreground:
 
 ```bash
 launchctl bootout gui/$(id -u)/com.nexus.t2     # macOS
