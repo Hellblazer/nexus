@@ -34,12 +34,15 @@ logic lives in the shared primitive, not here. This module:
    When the service is alive but ``/health`` returns non-200 for
    ``_MAX_UNHEALTHY_HEARTBEATS`` consecutive beats (stuck process: connection-pool
    exhaustion, internal deadlock), ``heartbeat_once()`` returns ``(False, pg_ok)``
-   to force a respawn — treating a stuck process identically to a process death.
+   so the run loop exits non-zero — treating a stuck process identically to a
+   process death and letting the OS watchdog restart the whole supervisor.
 6. ``mark_shutting_down()`` BEFORE ``os.killpg`` (RDR-151 P1.3 ordering).
-7. Auto-restarts on service death with a strictly higher generation (the primitive
-   handles generation/fencing). ``_restart_count`` is windowed: reset to 0
-   after ``_RESTART_WINDOW_HEARTBEATS`` clean heartbeats so transient clusters
-   of failures don't permanently exhaust the budget.
+7. RDR-175: OS init (launchd/systemd, RDR-174) is the single process watchdog.
+   On service death OR the stuck-process threshold, the supervisor EXITS non-zero
+   (3=service-unrecoverable, 4=PG-unrecoverable) and the OS restarts the whole
+   process — there is no in-process respawn mechanism. PG-only death (service
+   still alive) is the lone in-place recovery: the run loop restarts PG without
+   bouncing the JVM.
 8. LOUD failure when the service stays unreachable: ``StorageServiceStartError``
    (structured log + exception, no silent fall-through).
 
@@ -102,12 +105,6 @@ _READY_POLL_INTERVAL: float = 0.5
 #: After SIGTERM, wait this long before escalating to SIGKILL.
 _GRACEFUL_STOP_TIMEOUT: float = 5.0
 
-#: Max auto-restart attempts in a window before giving up.
-_MAX_RESTART_ATTEMPTS: int = 3
-
-#: Delay between restart attempts.
-_RESTART_BACKOFF: float = 2.0
-
 #: Short HTTP timeout for /health probes.
 _HEALTH_TIMEOUT: float = 2.0
 
@@ -121,17 +118,15 @@ _HEALTH_TIMEOUT: float = 2.0
 #: window — the old lease lingers until TTL — from 3s to 15s; the client re-spawn
 #: backstop nexus-03bcg is what closes that window for a dead supervisor.
 
-#: Number of clean heartbeats after a restart before the restart budget resets.
-#: Prevents lifetime-cumulative exhaustion from transient failure clusters.
-#: At DEFAULT_HEARTBEAT_INTERVAL=1s, 300 heartbeats ≈ 5 minutes.
-_RESTART_WINDOW_HEARTBEATS: int = 300
-
 #: Consecutive heartbeats where the process is alive but /health returns
-#: non-200 before triggering a forced respawn. Handles stuck-but-alive states
-#: (connection-pool exhaustion, GC pause, internal deadlock) that are the
-#: most common partial-failure mode. 3 beats at 1s interval = a 3s
-#: grace window before respawn — large enough to absorb transient GC pauses,
-#: small enough to recover quickly from real deadlocks.
+#: non-200 before the supervisor exits non-zero for an OS restart. Handles
+#: stuck-but-alive states (connection-pool exhaustion, GC pause, internal
+#: deadlock) that are the most common partial-failure mode — and which the OS
+#: watchdog (RDR-175) cannot catch on its own, since it only sees process
+#: death. 3 beats at 1s interval = a 3s grace window before exit — large
+#: enough to absorb transient GC pauses, small enough to recover quickly from
+#: real deadlocks. RDR-175 retired the in-process respawn mechanism; this
+#: DETECTION is retained but its action is now exit-for-OS-restart, not respawn.
 _MAX_UNHEALTHY_HEARTBEATS: int = 3
 
 
@@ -370,12 +365,11 @@ class StorageServiceSupervisor:
     - PG-only death (service still alive): ``_ensure_pg_running()`` called
       directly from the run loop without a full service respawn.
     - ``mark_shutting_down()`` BEFORE ``os.killpg`` (RDR-151 P1.3).
-    - Auto-restart on service death: respawn + republish (higher generation).
-    - ``_restart_count`` is windowed (reset after _RESTART_WINDOW_HEARTBEATS
-      clean heartbeats) so transient failure clusters don't permanently
-      exhaust the budget.
+    - Service death or stuck-process threshold: the supervisor EXITS non-zero
+      (RDR-175) and the OS watchdog (RDR-174 launchd/systemd units) restarts the
+      whole process. No in-process respawn mechanism.
     - NX_SERVICE_TOKEN included in the lease endpoint so clients can
-      re-read the token after an auto-restart.
+      re-read the token after an OS restart.
     - LOUD failure: cannot bring up the service -> ``StorageServiceStartError``.
 
     Postgres ownership: the supervisor starts PG on demand and restarts it
@@ -429,12 +423,10 @@ class StorageServiceSupervisor:
         self._proc: subprocess.Popen[bytes] | None = None
         self._registry: ServiceRegistry | None = None
         self._supervisor: ServiceSupervisor | None = None
-        self._restart_count: int = 0
-        # Windowed restart budget: counts clean heartbeats since the last restart.
-        self._clean_heartbeats_since_restart: int = 0
         # Consecutive unhealthy heartbeats counter: process alive but /health
         # non-200. When this reaches _MAX_UNHEALTHY_HEARTBEATS the run loop
-        # treats the stuck process like a process death and triggers _respawn().
+        # treats the stuck process like a process death and exits non-zero so
+        # the OS watchdog (RDR-175) restarts the whole supervisor.
         self._consecutive_unhealthy_heartbeats: int = 0
         # Persistent root bearer token (gmiaf.32.5). Read from pg_credentials
         # (or the env override); NOT derived from DB passwords. Stable across
@@ -711,61 +703,12 @@ class StorageServiceSupervisor:
                 safe_killpg(pid, signal.SIGKILL)
         self._proc = None
 
-    def _respawn(self) -> None:
-        """Spawn and re-publish after a process death or stuck-process respawn.
-
-        SIGNIFICANT-2 fix: ``_restart_count`` is windowed — reset to 0 after
-        ``_RESTART_WINDOW_HEARTBEATS`` clean heartbeats following a restart.
-
-        ROUND-3 fix: stop the old process group BEFORE spawning the replacement.
-        On the natural process-death path the process is already gone, so
-        ``_stop_service()`` is a guarded no-op (it checks ``_pid_is_alive``). On
-        the stuck-process path (``heartbeat_once`` signals respawn while the
-        process is still physically alive) this is load-bearing: without it the
-        old process is orphaned, keeps its Postgres connections open, and
-        accumulates one leak per respawn cycle. Stopping first also covers the
-        budget-exhausted raise path so we never leave a stuck process behind
-        when giving up.
-        """
-        self._stop_service()
-        self._restart_count += 1
-        self._clean_heartbeats_since_restart = 0  # reset the clean window
-        if self._restart_count > _MAX_RESTART_ATTEMPTS:
-            raise StorageServiceStartError(
-                f"Storage service auto-restart failed {self._restart_count} times "
-                f"in the current restart window (max={_MAX_RESTART_ATTEMPTS}). "
-                "Giving up. Check service logs and Postgres status."
-            )
-        _log.warning(
-            "storage_service_restarting",
-            attempt=self._restart_count,
-            max_attempts=_MAX_RESTART_ATTEMPTS,
-        )
-        time.sleep(_RESTART_BACKOFF)
-        proc, port = self._spawn_service()
-        self._proc = proc
-        self._wait_for_service_ready(proc, port)
-        # Republish — ServiceRegistry.publish() under the election flock bumps
-        # the generation monotonically, providing the higher-generation fencing
-        # the RDR-149 conformance battery requires.
-        self._publish(port)
-
-    def _maybe_reset_restart_budget(self) -> None:
-        """After a clean heartbeat following a restart, advance the window counter.
-
-        If the window threshold is reached, reset _restart_count to 0 so
-        isolated bursts of failures don't permanently exhaust the budget.
-        """
-        if self._restart_count > 0:
-            self._clean_heartbeats_since_restart += 1
-            if self._clean_heartbeats_since_restart >= _RESTART_WINDOW_HEARTBEATS:
-                _log.info(
-                    "storage_service_restart_budget_reset",
-                    previous_count=self._restart_count,
-                    window=_RESTART_WINDOW_HEARTBEATS,
-                )
-                self._restart_count = 0
-                self._clean_heartbeats_since_restart = 0
+    # RDR-175: the in-process respawn mechanism (``_respawn`` + the windowed
+    # restart budget ``_maybe_reset_restart_budget``) was retired. OS init
+    # (RDR-174 launchd/systemd units) is now the single process watchdog: on
+    # service death or the stuck-process threshold the supervise loop exits
+    # non-zero and the OS restarts the whole process. The ``(True, False)``
+    # PG-only arm restarts PG in place (see ``_supervise_until_stopped``).
 
     # -- Public lifecycle API -----------------------------------------------
 
@@ -903,17 +846,21 @@ class StorageServiceSupervisor:
         """Re-stamp the lease iff service is alive AND healthy AND PG reachable.
 
         Returns (service_running, pg_ok) so the run loop can handle PG-only
-        failure without triggering a service respawn:
+        failure without exiting the supervisor:
 
         - (False, _)    — process exited OR stuck-process threshold crossed;
-                          caller should call _respawn(). When the process is
-                          physically alive but /health has returned non-200 for
-                          _MAX_UNHEALTHY_HEARTBEATS consecutive beats, this
-                          method returns (False, pg_ok) to force a respawn —
-                          a stuck-but-alive process (connection-pool exhaustion,
-                          internal deadlock) is treated like a process death.
-        - (True, False) — process alive and healthy, PG down; caller should call
-                          _ensure_pg_running() directly.
+                          the run loop EXITS non-zero so the OS watchdog
+                          (RDR-175) restarts the whole supervisor. When the
+                          process is physically alive but /health has returned
+                          non-200 for _MAX_UNHEALTHY_HEARTBEATS consecutive
+                          beats, this method returns (False, pg_ok) to force
+                          that exit — a stuck-but-alive process (connection-pool
+                          exhaustion, internal deadlock) is treated like a
+                          process death (the OS watchdog cannot see it
+                          otherwise, since the process never dies).
+        - (True, False) — process alive and healthy, PG down; the run loop calls
+                          _ensure_pg_running() directly (PG restart in place,
+                          no supervisor exit, JVM untouched).
         - (True, True)  — everything healthy; lease re-stamped. NOTE: the
                           (True, True) path is the ONLY path that re-stamps
                           the lease. The (True, False) path does NOT re-stamp
@@ -936,7 +883,7 @@ class StorageServiceSupervisor:
                 returncode=rc,
                 service_log=str(self._config_dir / "logs" / f"{self._svc_log_name}.log"),
             )
-            return False, False  # process exited; signal the run loop to respawn
+            return False, False  # process exited; signal the run loop to exit
 
         service_alive = _pid_is_alive(self._proc.pid)
         service_ok = self._service_healthy()
@@ -958,11 +905,12 @@ class StorageServiceSupervisor:
                 threshold=_MAX_UNHEALTHY_HEARTBEATS,
             )
             if self._consecutive_unhealthy_heartbeats >= _MAX_UNHEALTHY_HEARTBEATS:
-                # Stuck process: treat like a death so the run loop calls _respawn().
+                # Stuck process: treat like a death so the run loop exits
+                # non-zero and the OS watchdog restarts the whole supervisor.
                 _log.warning(
-                    "storage_service_stuck_respawn",
+                    "storage_service_stuck_exit",
                     consecutive_unhealthy=self._consecutive_unhealthy_heartbeats,
-                    msg="Stuck process threshold reached; signalling respawn",
+                    msg="Stuck process threshold reached; signalling supervisor exit",
                 )
                 self._consecutive_unhealthy_heartbeats = 0
                 return False, pg_ok
@@ -988,7 +936,6 @@ class StorageServiceSupervisor:
                 "storage_service_lease_fenced",
                 scope=self._scope,
             )
-        self._maybe_reset_restart_budget()
         return True, True
 
     def stop(self) -> None:
@@ -1087,20 +1034,16 @@ def run_storage_supervisor(
     it gracefully shuts down.
 
     PG-only failure: when heartbeat_once() returns (True, False), the run loop
-    calls _ensure_pg_running() directly — a PG restart without a service respawn.
+    calls _ensure_pg_running() directly — a PG restart in place without bouncing
+    the JVM (the lone in-process recovery retained under the OS-watchdog model).
 
-    Simultaneous service+PG death (False, False): PG is restarted FIRST, then the
-    service respawns (nexus-14k0m) — a respawn against a dead PG can never pass
-    /health and would burn the restart budget with no PG attempt. If PG is
-    unrecoverable the supervisor exits 4 without consuming respawn budget.
-
-    Service failure or stuck process: when heartbeat_once() returns (False, _),
-    auto-restart up to _MAX_RESTART_ATTEMPTS times in the current window.
-    The (False, _) signal is raised both when the service process exits AND when
-    it is alive but /health has returned non-200 for _MAX_UNHEALTHY_HEARTBEATS
-    consecutive beats (stuck process). On exhaustion, returns non-zero so the
-    process supervisor (launchd / systemd) can restart the *supervisor process*.
-    Returns the intended process exit code.
+    Service failure or stuck process (RDR-175): when heartbeat_once() returns
+    (False, _), the supervisor EXITS non-zero so the OS process watchdog
+    (launchd / systemd, RDR-174) restarts the whole supervisor — there is no
+    in-process respawn. The (False, _) signal is raised both when the service
+    process exits AND when it is alive but /health has returned non-200 for
+    _MAX_UNHEALTHY_HEARTBEATS consecutive beats (stuck process). Exit codes:
+    3 = service-unrecoverable, 4 = PG-unrecoverable. Returns the exit code.
     """
     if config_dir is None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
@@ -1170,7 +1113,15 @@ def _supervise_until_stopped(
     flush_logging: Callable[[], None],
 ) -> int:
     """The supervise loop body of ``run_storage_supervisor`` (split out so
-    the crash backstop wraps start() and the loop uniformly)."""
+    the crash backstop wraps start() and the loop uniformly).
+
+    RDR-175: OS init is the single process watchdog. The loop is start →
+    heartbeat → die-non-zero. On service death OR the stuck-process threshold
+    (``service_running`` falsey) the supervisor exits 3 and the OS restarts the
+    whole process (which re-runs ``start()`` — including a fresh PG bring-up),
+    instead of an in-process respawn. The lone in-place recovery is the
+    ``(True, False)`` PG-only arm: PG is restarted directly while the alive JVM
+    keeps running (the OS supervises the supervisor process, not PG)."""
     sup.start()
 
     exit_code = 0
@@ -1178,56 +1129,27 @@ def _supervise_until_stopped(
         service_running, pg_ok = sup.heartbeat_once()
 
         if not service_running:
-            # Service exited (or stuck-process threshold hit) — auto-restart.
-            if not pg_ok:
-                # nexus-14k0m: simultaneous service+PG death. _respawn() never
-                # starts PG, and the `elif not pg_ok` branch below only fires
-                # while the service is ALIVE — so without this, the respawned
-                # service's /health could never pass and the restart budget
-                # burned down with zero pg_ctl attempts. Restart PG FIRST;
-                # if PG is unrecoverable, respawning the service is futile —
-                # exit 4 (the PG-unrecoverable contract) with budget intact.
-                # Covers BOTH routes into service_running=False (process exit
-                # hardcodes pg_ok=False; stuck-process carries a live probe) —
-                # _ensure_pg_running() re-probes, so a hardcoded False with
-                # PG actually up is a cheap no-op, never a false exit 4.
-                # Loop invariant: heartbeat_once() returned (False, False)
-                # with _proc/_supervisor still set (stop() only runs after
-                # the loop) — do not call sup.stop() mid-loop.
-                _log.warning(
-                    "storage_service_and_pg_died",
-                    msg="service process and PG both down; restarting PG before respawn",
-                )
-                try:
-                    sup._ensure_pg_running()
-                    _log.info("storage_service_pg_restarted_before_respawn")
-                except StorageServiceStartError as exc:
-                    _log.error(
-                        "storage_service_and_pg_restart_failed",
-                        error=str(exc),
-                        msg="Could not restart PG; supervisor exiting",
-                    )
-                    exit_code = 4
-                    break
+            # Service process exited OR the stuck-process detection threshold
+            # was breached (wedged-but-alive JVM). Under the OS-watchdog model
+            # (RDR-175) the supervisor no longer respawns in-process: it exits
+            # non-zero so the OS init unit (launchd/systemd) restarts the whole
+            # supervisor, which re-runs start() — including a fresh
+            # _ensure_pg_running(). A both-down (False, False) beat is covered
+            # by the same exit: the OS restart brings PG back up via start().
+            # 3 = service-unrecoverable.
             _log.warning(
                 "storage_service_exited",
-                msg="service child gone; attempting restart",
+                msg="service child gone or wedged; exiting non-zero for OS restart",
+                pg_ok=pg_ok,
             )
-            try:
-                sup._respawn()
-                _log.info("storage_service_restarted_successfully")
-            except StorageServiceStartError as exc:
-                _log.error(
-                    "storage_service_restart_exhausted",
-                    error=str(exc),
-                    msg="Max restart attempts reached; supervisor exiting",
-                )
-                exit_code = 3
-                break
+            exit_code = 3
+            break
 
-        elif not pg_ok:
+        if not pg_ok:
             # PG died independently while the service is still alive — restart
-            # PG directly without triggering a service respawn.
+            # PG directly without bouncing the JVM (PRESERVED under the OS
+            # watchdog: the OS supervises the supervisor process, not PG).
+            # 4 = PG-unrecoverable.
             _log.warning(
                 "storage_service_pg_died_independently",
                 msg="PG unreachable while service alive; attempting PG restart",
