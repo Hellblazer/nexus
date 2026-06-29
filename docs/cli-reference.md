@@ -1759,6 +1759,12 @@ fast`).
 | `--json` | (`status`) Raw JSON output. |
 | `--with-pg` | (`stop`) Also stop the nx-managed Postgres cluster. |
 
+**Memory-constrained hosts.** Set `NX_SERVICE_MAX_HEAP` (e.g. `NX_SERVICE_MAX_HEAP=1g`)
+to cap the native service's JVM heap. On low-RAM laptops and containers the
+combined peak (service binary + bge-768 ONNX + Postgres + supervisor) can trip
+the OS OOM-killer at first start; capping the heap reduces that risk. Default is
+unset (no cap).
+
 ### nx daemon service install --autostart
 
 ```

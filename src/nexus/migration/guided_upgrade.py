@@ -341,6 +341,31 @@ class ServiceReadiness:
     health: "HealthGateResult | None"
 
 
+def _default_discover_gate() -> bool:
+    """Confirm a LIVE, discoverable ``storage_service`` lease exists.
+
+    nexus-f9y78: ``/health`` hits the service process directly, so it stays 200
+    even when the inline-provisioned supervisor died (e.g. OOM-killed) leaving an
+    orphaned-but-serving JVM whose lease aged out (15s TTL). Every env-unpinned
+    consumer then resolves the endpoint via lease discovery and races expiry.
+
+    This is a pure DISCOVERABILITY CHECK against the PG-arch canonical resolver
+    (``service_endpoint.discover_lease`` — the same path the downstream migration
+    legs / T2 / T3 / catalog consumers use): a missing lease means the supervisor
+    is gone and downstream discovery would fail, so readiness fails fast. It does
+    NOT re-spawn — routing a dead-lease-but-live-JVM case through
+    ``ensure_storage_supervisor`` would spawn a SECOND JVM alongside the orphaned
+    one (``discover()`` returns ``None`` so the dead-pid guard never fires),
+    worsening the OOM that caused the bug. The adopt-live-service heal and the
+    resolver-layer backstop that would close the general class for *all*
+    consumers (not just guided-upgrade) are tracked under nexus-03bcg.
+    """
+    from nexus.db import service_endpoint  # noqa: PLC0415 — deferred import — heavy dep loaded only on this path
+
+    base_url, _token = service_endpoint.discover_lease()
+    return base_url is not None
+
+
 def establish_verified_service(
     *,
     timeout_s: float = 30.0,
@@ -348,20 +373,25 @@ def establish_verified_service(
     provision: Callable[[], "ProvisionResult"] | None = None,
     health_gate: Callable[..., "HealthGateResult"] | None = None,
     verify_version: Callable[[str], VersionPinOutcome] | None = None,
+    discover_gate: Callable[[], bool] | None = None,
 ) -> ServiceReadiness:
-    """Provision -> health-gate -> version-pin; emit a verified url iff all pass.
+    """Provision -> health-gate -> version-pin -> discoverability-gate; emit a
+    verified url iff all pass.
 
     Order: stand up the service (ez5.6), then BOUNDED health-gate it (ez5.5 —
     a not-ready service short-circuits before the version probe), then version-
-    pin it (ez5.4 seam). The verified ``service_url`` is emitted ONLY when the
-    service is both health-ready AND version-pinned.
+    pin it (ez5.4 seam), then confirm a LIVE, DISCOVERABLE lease (nexus-f9y78 —
+    ``/health`` alone passes on an orphaned JVM whose supervisor died and whose
+    lease aged out). The verified ``service_url`` is emitted ONLY when the
+    service is health-ready AND version-pinned AND its lease is discoverable.
 
-    All three steps are injection seams for tests; ``verify_version`` defaults
-    to the fail-closed placeholder until ez5.4 lands.
+    All steps are injection seams for tests; ``verify_version`` defaults to the
+    fail-closed placeholder until ez5.4 lands.
     """
     _provision = provision if provision is not None else provision_and_serve
     _health = health_gate if health_gate is not None else wait_for_service_health
     _verify = verify_version if verify_version is not None else verify_service_version
+    _discover = discover_gate if discover_gate is not None else _default_discover_gate
 
     prov = _provision()
 
@@ -386,6 +416,27 @@ def establish_verified_service(
         return ServiceReadiness(
             ready=False, service_url=None, reason=pin.reason,
             version_ok=False, provision=prov, health=health,
+        )
+
+    if not _discover():
+        # health + version passed, but the lease is not discoverable — the inline
+        # supervisor likely died (OOM) leaving an orphaned /health-green service.
+        # Emitting the url here would hand downstream legs an endpoint that
+        # env-unpinned consumers cannot discover (they race the 15s TTL). Fail
+        # closed. (nexus-f9y78)
+        reason = (
+            f"storage service at {prov.service_url} is health-ready and "
+            "version-pinned but its lease is NOT discoverable — the inline "
+            "supervisor likely died (e.g. OOM-killed) leaving an orphaned "
+            "service; consumers that resolve the endpoint via lease discovery "
+            "would race expiry. On a memory-constrained host, set "
+            "NX_SERVICE_MAX_HEAP (e.g. 1g) to cap the service heap and reduce "
+            "OOM risk, then re-run."
+        )
+        _log.warning("guided_upgrade_not_ready", stage="discover", reason=reason)
+        return ServiceReadiness(
+            ready=False, service_url=None, reason=reason,
+            version_ok=True, provision=prov, health=health,
         )
 
     _log.info("guided_upgrade_service_verified", service_url=prov.service_url)

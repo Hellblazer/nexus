@@ -56,7 +56,8 @@ def _pin_bad(service_url: str) -> VersionPinOutcome:
 class TestEstablishVerifiedService:
     def test_ready_only_when_healthy_and_pinned(self) -> None:
         result = establish_verified_service(
-            provision=_prov, health_gate=_healthy, verify_version=_pin_ok
+            provision=_prov, health_gate=_healthy, verify_version=_pin_ok,
+            discover_gate=lambda: True,  # lease discoverable (real gate covered separately)
         )
         assert isinstance(result, ServiceReadiness)
         assert result.ready is True
@@ -94,6 +95,93 @@ class TestEstablishVerifiedService:
             provision=_prov, health_gate=_unhealthy, verify_version=verify
         )
         assert pinned == []  # version never probed on an unhealthy service
+
+    def test_not_ready_when_lease_undiscoverable_though_health_ok(self) -> None:
+        """nexus-f9y78: /health hits the service process directly, so it stays 200
+        even when the inline supervisor died (OOM) and its lease aged out — every
+        env-unpinned consumer then races lease expiry. Readiness must also require
+        a LIVE, discoverable lease; a non-discoverable one is NOT ready and emits
+        NO url, even though health + version passed."""
+        result = establish_verified_service(
+            provision=_prov,
+            health_gate=_healthy,
+            verify_version=_pin_ok,
+            discover_gate=lambda: False,  # lease reaped while /health stays 200
+        )
+        assert result.ready is False
+        assert result.service_url is None
+        assert result.version_ok is True  # version DID pass; discoverability did not
+        assert result.reason is not None and "discoverable" in result.reason.lower()
+
+    def test_ready_when_lease_discoverable(self) -> None:
+        result = establish_verified_service(
+            provision=_prov,
+            health_gate=_healthy,
+            verify_version=_pin_ok,
+            discover_gate=lambda: True,
+        )
+        assert result.ready is True
+        assert result.service_url == _URL
+
+    def test_discover_gate_checked_after_version_pin(self) -> None:
+        """The discover gate must not run on an unhealthy / version-mismatched
+        service (those short-circuit first)."""
+        gate_calls: list[int] = []
+
+        establish_verified_service(
+            provision=_prov, health_gate=_unhealthy, verify_version=_pin_ok,
+            discover_gate=lambda: gate_calls.append(1) or True,
+        )
+        assert gate_calls == [], "discover gate must not run on an unhealthy service"
+
+        establish_verified_service(
+            provision=_prov, health_gate=_healthy, verify_version=_pin_bad,
+            discover_gate=lambda: gate_calls.append(1) or True,
+        )
+        assert gate_calls == [], "discover gate must not run on a version mismatch"
+
+    def test_default_discover_gate_fails_when_lease_undiscoverable(
+        self, monkeypatch
+    ) -> None:
+        """The default gate is a pure discoverability check against the canonical
+        resolver (service_endpoint.discover_lease) — NOT a re-spawn (that would
+        double-spawn a JVM onto the orphaned one; nexus-03bcg). (None, None) →
+        not ready; a resolvable lease → ready. Covers BOTH arms of the default
+        gate so a sign-error could not pass silently (code-review H-1)."""
+        import nexus.db.service_endpoint as se
+
+        monkeypatch.setattr(se, "discover_lease", lambda: (None, None))
+        not_ready = establish_verified_service(
+            provision=_prov, health_gate=_healthy, verify_version=_pin_ok
+        )
+        assert not_ready.ready is False and not_ready.service_url is None
+        assert "discoverable" in (not_ready.reason or "").lower()
+        assert "NX_SERVICE_MAX_HEAP" in (not_ready.reason or "")
+
+        monkeypatch.setattr(se, "discover_lease", lambda: (_URL, "tok"))
+        ready = establish_verified_service(
+            provision=_prov, health_gate=_healthy, verify_version=_pin_ok
+        )
+        assert ready.ready is True and ready.service_url == _URL
+
+    def test_default_discover_gate_does_not_respawn(self, monkeypatch) -> None:
+        """Regression guard for the double-JVM hazard (substantive-critic SIG-1):
+        the default gate must NOT call ensure_storage_supervisor (which would
+        spawn a second JVM when discover() is None and the JVM is still alive)."""
+        import nexus.commands.daemon as daemon_mod
+        import nexus.db.service_endpoint as se
+
+        spawned: list[int] = []
+        monkeypatch.setattr(
+            daemon_mod, "ensure_storage_supervisor",
+            lambda config_dir: spawned.append(1),
+        )
+        monkeypatch.setattr(se, "discover_lease", lambda: (None, None))
+
+        establish_verified_service(
+            provision=_prov, health_gate=_healthy, verify_version=_pin_ok
+        )
+        assert spawned == [], "the discoverability gate must not re-spawn (no double-JVM)"
 
     def test_default_version_pin_is_the_real_verifier(self) -> None:
         # With no verify_version injected, the default IS the real RDR-002
