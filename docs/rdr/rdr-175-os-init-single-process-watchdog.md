@@ -2,12 +2,15 @@
 title: "OS-Init as the Single Process Watchdog: Retire the In-Process Storage-Supervisor Respawn Layer"
 id: RDR-175
 type: Technical Debt
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-28
 accepted_date: 2026-06-28
+closed_date: 2026-06-28
+close_reason: implemented
+post_mortem: docs/rdr/post-mortem/175-os-init-single-process-watchdog.md
 related_issues: [nexus-1brzs]
 related_rdrs: [RDR-149, RDR-152, RDR-161, RDR-174]
 supersedes: []
@@ -499,3 +502,8 @@ escape hatch removal (~103 lines) is deliberately excluded to keep focus.
 
 - 2026-06-28 — draft created from the RDR-174 P2.3 supervisor-minimization
   analysis (brainstorming-gate approved; heal-on-next-use contract chosen by Hal).
+- 2026-06-28 — gate PASSED (0 crit, 3 sig addressed); accepted.
+- 2026-06-28 — Phase 1 implemented + stacked review + phase-gate + test-validator;
+  CLOSED (close_reason: implemented). Material divergence: Gap 3 / Step 3A dropped
+  as VOID (premise error — RDR-174 P2.4 was never implemented, so there is no
+  two-supervisor ordering to rework). See post-mortem.
