@@ -106,11 +106,20 @@ _PR_SET_PDEATHSIG: int = 1
 #: only the pre-loaded function pointer is async-signal-safe to call post-fork).
 #: ``CDLL(None)`` resolves already-loaded symbols (works on glibc AND musl);
 #: ``None`` on non-Linux platforms, where PR_SET_PDEATHSIG does not exist.
+#: The pid of the process that imported this module — the supervisor, for the
+#: ``nx daemon service start --foreground`` process. Used by the pdeathsig race
+#: guard (below) to detect fork-vs-parent-death reparenting in a way that is
+#: subreaper-agnostic (``getppid()==1`` misses systemd/container subreapers,
+#: which reparent to themselves, not init).
+_SUPERVISOR_PID: int = os.getpid()
+
 _LIBC: ctypes.CDLL | None
 if sys.platform.startswith("linux"):
     try:
         _LIBC = ctypes.CDLL(None, use_errno=True)
-    except OSError:  # pragma: no cover — libc must load on Linux, but never crash import
+        _LIBC.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong]
+        _LIBC.prctl.restype = ctypes.c_int
+    except (OSError, AttributeError):  # pragma: no cover — libc/prctl must exist on Linux, but never crash import
         _LIBC = None
 else:
     _LIBC = None
@@ -122,16 +131,29 @@ def _set_pdeathsig_preexec() -> None:
     heal-on-next-use (nexus-03bcg, RDR-149-aligned).
 
     Runs in the child after ``fork()``, before ``exec()``. Async-signal-safe:
-    only the pre-loaded ``_LIBC.prctl`` + ``os.getppid`` + ``os._exit``. No-op
-    off Linux. Closes the fork-vs-parent-death race: if the supervisor already
-    died before prctl ran, the signal was missed, so a reparented child
-    (``getppid()`` no longer the supervisor) exits immediately rather than
-    orphaning.
+    only the import-time-loaded ``_LIBC.prctl``, ``os.getppid``, ``os.write``,
+    and ``os._exit`` (NO structlog / allocation post-fork). No-op off Linux.
+
+    Two robustness details:
+    - A failed prctl (seccomp/SELinux/ancient kernel) is surfaced via an
+      async-signal-safe ``os.write`` to fd 2 — otherwise the orphan hazard would
+      silently reinstate with no diagnostic.
+    - Closes the fork-vs-parent-death race: if the supervisor died before prctl
+      ran, the signal was missed; ``getppid() != _SUPERVISOR_PID`` (the supervisor
+      that forked us) means we were reparented, so exit rather than orphan. This
+      is subreaper-agnostic (unlike a ``getppid()==1`` check).
+
+    NOTE (macOS / non-Linux): PR_SET_PDEATHSIG has no equivalent, so the
+    orphaned-JVM hazard persists on the inline/no-autostart path there; under
+    launchd the supervisor is restarted but a prior OOM orphan is NOT killed (it
+    lingers as a port-less, lease-less zombie until reboot). The Linux container
+    OOM scenario — the one this targets — is fully covered.
     """
     if _LIBC is None:  # non-Linux: PR_SET_PDEATHSIG unavailable
         return
-    _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
-    if os.getppid() == 1:  # reparented → parent already dead → don't orphan
+    if _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL) != 0:
+        os.write(2, b"nexus: prctl(PR_SET_PDEATHSIG) failed; JVM will not die with supervisor\n")
+    if os.getppid() != _SUPERVISOR_PID:  # reparented → supervisor already dead → don't orphan
         os._exit(0)
 
 #: Path suffix of the spawn lock file inside config_dir.

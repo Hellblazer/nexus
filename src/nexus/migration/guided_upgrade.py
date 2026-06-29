@@ -356,9 +356,14 @@ def _default_discover_gate() -> bool:
     NOT re-spawn — routing a dead-lease-but-live-JVM case through
     ``ensure_storage_supervisor`` would spawn a SECOND JVM alongside the orphaned
     one (``discover()`` returns ``None`` so the dead-pid guard never fires),
-    worsening the OOM that caused the bug. The adopt-live-service heal and the
-    resolver-layer backstop that would close the general class for *all*
-    consumers (not just guided-upgrade) are tracked under nexus-03bcg.
+    worsening the OOM that caused the bug.
+
+    On LINUX the orphan scenario is now closed at the source: the JVM is armed
+    with PR_SET_PDEATHSIG (storage_service_daemon, nexus-03bcg), so a dead
+    supervisor leaves no orphaned-but-serving JVM. This gate remains a correct
+    belt-and-suspenders (and covers macOS/non-Linux, where the orphan can still
+    linger). Any remaining resolver-layer heal for the macOS-without-autostart
+    path is tracked under nexus-03bcg.
     """
     from nexus.db import service_endpoint  # noqa: PLC0415 — deferred import — heavy dep loaded only on this path
 
