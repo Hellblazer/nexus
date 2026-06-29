@@ -1526,17 +1526,23 @@ consumers — host CLI + Cowork sessions + dev containers + the
 nx-mcp server — share one arbitrated SQLite writer instead of
 each opening their own connection.
 
-The daemons are infrastructure: start them once at login and
-leave them running. For a brand-new install the recommended setup
-sequence is:
+For a brand-new install the recommended setup is the collapsed flow
+(RDR-174 — one provisioning command, no separate T2-daemon step):
 
 ```
-uv tool install conexus                    # the nx CLI
-nx daemon t2 install --autostart           # the T2 (notes/plans) daemon: writes LaunchAgent/systemd unit
-nx daemon t2 status                        # confirm running
+uv tool install conexus                                    # the nx CLI
 nx daemon service install-binary <engine-service-vX.Y.Z>   # acquire the signed native service binary + PG bundle
-nx init --service                          # provision Postgres+pgvector, fetch bge-768, start the T3 service
+nx init                                                     # provision Postgres+pgvector, fetch bge-768, start the service, offer autostart
 ```
+
+`nx init` provisions and starts the service backend and offers to register the
+OS autostart unit (prompt, default yes; `--yes` accepts, `--no-autostart`
+declines — see [nx init](#nx-init)). In the default all-SERVICE config T2
+(notes/plans) is served by the same service, so there is **no** separate
+`nx daemon t2 install` step. The deprecated `nx init --service` flag still works
+but plain `nx init` is the path now. (`nx daemon t2 install --autostart` remains
+available as an explicit opt-in for a SQLite T2 backend, e.g.
+`NX_STORAGE_BACKEND=sqlite`.)
 
 Upgrade later with `uv tool upgrade conexus` (preserves extras like `[local]`); avoid `uv tool install --force`, which resets the environment and drops them.
 

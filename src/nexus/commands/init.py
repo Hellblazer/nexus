@@ -307,17 +307,18 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
         return None
 
     config_dir = _config.nexus_config_dir()
-    click.echo("\nRegistering the storage service autostart unit …")
     try:
-        installer.install_autostart(tier="service")
+        result = installer.install_autostart(tier="service")
     except installer.ActivationError as exc:
         # Headless / no session bus: the unit could not be ACTIVATED, so nothing
         # was started — falling back to a session supervisor is coexistence-safe
-        # and leaves the user with a serving backend.
+        # and leaves the user with a serving backend. (Installation is idempotent
+        # — PG and the binary are not re-provisioned on a later retry.)
         click.echo(
             f"\nCould not activate the autostart unit ({exc}); starting the "
             "service for this session instead. Re-run `nx daemon service install "
-            "--autostart` once a login session bus is available to persist it.",
+            "--autostart` once a login session bus is available to persist it "
+            "(idempotent — PG and the binary are not re-provisioned).",
             err=True,
         )
         return _start_service_step()
@@ -333,12 +334,32 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
         )
         raise SystemExit(1)
 
+    # Idempotent re-run (substantive-critic SIG-2): when the unit was ALREADY
+    # present we must not present it as freshly registered, and a not-yet-ready
+    # lease is NOT a failure — the OS unit owns bring-up. Only a FRESH install
+    # that never serves is an error.
+    already_present = result.status is installer.InstallStatus.ALREADY_PRESENT
+    click.echo(
+        "\nStorage service autostart unit already registered."
+        if already_present
+        else f"\nRegistered the storage service autostart unit ({result.dest})."
+    )
+
     lease = _poll_service_lease(config_dir)
     if lease is None:
-        # Unit installed but the service never published a lease in the window —
-        # NOT confirmed serving. Exit non-zero (parity with the no-binary path)
-        # so automation chaining `nx init && …` does not proceed against an
-        # unavailable backend. The OS unit will keep retrying independently.
+        if already_present:
+            # The unit was already there; the service simply has not (re)published
+            # a lease yet (e.g. a re-run right after reboot while it activates).
+            # Nothing for init to fix — exit 0; the OS unit brings it up.
+            click.echo(
+                "  The service has not published a lease yet; the autostart unit "
+                "will bring it up. Check `nx daemon service status`.",
+                err=True,
+            )
+            return None
+        # FRESH install that never served: NOT confirmed serving. Exit non-zero
+        # (parity with the no-binary path) so automation chaining init with later
+        # steps does not proceed against an unavailable backend.
         click.echo(
             "\nAutostart unit installed, but the service did not become ready in "
             "time — NOT confirmed serving. The OS will keep retrying; check "
@@ -697,10 +718,12 @@ def init_cmd(
     # ⚠ CROSS-PHASE INVARIANT (autostart): BOTH no-provision exits below — the
     # managed arm and the cloud arm (mode=="local" yet is_local_mode() False) —
     # must remain reachable WITHOUT ever starting a local service or registering
-    # an autostart unit. The autostart decision (P2.4) fires ONLY inside the
-    # LOCAL block below, after a successful provision. Do not collapse this guard
-    # to `_resolve_init_mode()`-only — that would route cloud-Voyage users into
-    # provisioning.
+    # an autostart unit. The autostart decision (P2.4) is made decide-first at
+    # the TOP of the LOCAL block below, BEFORE any supervisor is started or
+    # provisioning runs (RDR-175 Gap 3 — never start a session supervisor under a
+    # unit; do NOT move the `_decide_autostart` call later). Do not collapse this
+    # guard to `_resolve_init_mode()`-only — that would route cloud-Voyage users
+    # into provisioning.
     mode = _resolve_init_mode()
     if not provision_service and (mode == "managed" or not _config.is_local_mode()):
         # Data plane served remotely — nothing local to provision. The old

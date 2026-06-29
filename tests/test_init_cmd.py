@@ -295,8 +295,14 @@ class TestAutostartPrompt:
             lambda: calls.__setitem__("session", calls["session"] + 1) or _FakeLeaseEP(),
         )
 
+        from nexus.daemon import installer
+
         def _fake_install(*, tier: str, force: bool = False):  # noqa: ARG001
             calls["install"] += 1
+            return installer.InstallResult(
+                status=installer.InstallStatus.NEWLY_INSTALLED,
+                dest=Path("/tmp/nexus-service.service"),
+            )
 
         monkeypatch.setattr("nexus.daemon.installer.install_autostart", _fake_install)
         return calls
@@ -428,6 +434,53 @@ class TestAutostartPrompt:
         assert calls["install"] == 1
         assert calls["session"] == 0, "lease-timeout must NOT session-fall-back"
         assert "not confirmed serving" in result.output.lower()
+
+    def _seams_already_present(self, monkeypatch: pytest.MonkeyPatch, calls: dict) -> None:
+        """Override install_autostart to report ALREADY_PRESENT (re-run)."""
+        from nexus.daemon import installer
+
+        def _fake(*, tier: str, force: bool = False):  # noqa: ARG001
+            calls["install"] += 1
+            return installer.InstallResult(
+                status=installer.InstallStatus.ALREADY_PRESENT,
+                dest=Path("/tmp/nexus-service.service"),
+            )
+
+        monkeypatch.setattr("nexus.daemon.installer.install_autostart", _fake)
+
+    def test_rerun_already_present_with_lease_succeeds(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Idempotent re-run (SIG-2): unit ALREADY_PRESENT + live lease → exit 0,
+        reported as already registered (not 'Registered …')."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        self._seams_already_present(monkeypatch, calls)
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "already registered" in result.output.lower()
+
+    def test_rerun_already_present_lease_not_yet_published_exits_zero(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Idempotent re-run (SIG-2): unit ALREADY_PRESENT but the service has
+        not published a lease yet (e.g. right after reboot) → exit 0, NOT 1. The
+        OS unit owns bring-up; init has nothing to fix. (Contrast a FRESH install
+        that never serves, which exits 1.)"""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        self._seams_already_present(monkeypatch, calls)
+        monkeypatch.setattr(
+            "nexus.commands.init._poll_service_lease", lambda config_dir, **kw: None
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert calls["session"] == 0, "must NOT session-fall-back on an existing unit"
+        assert "not published a lease yet" in result.output.lower()
 
     def test_install_conflict_exits_nonzero_no_fallback(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch

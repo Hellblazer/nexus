@@ -1676,6 +1676,7 @@ def ensure_storage_supervisor(config_dir: Path):
     try:
         subprocess.Popen(
             argv,
+            stdin=subprocess.DEVNULL,  # detached daemon: never inherit a TTY stdin (avoids read-block / dangling fd)
             stdout=spawn_log,
             stderr=spawn_log,
             start_new_session=True,
