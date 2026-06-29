@@ -6,6 +6,111 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.0.0] - 2026-06-29
+
+The migration-capable release. The storage substrate moves
+from ChromaDB to Postgres 17 + pgvector behind a native service, and
+`nx guided-upgrade` is the one-command, validated, rollback-safe path that
+carries an existing install across. This is the first of a two-release
+deprecation window: this release ships both the new substrate **and** the
+migration tool; the Chroma source remains the immutable migration origin
+(copy-not-move) and is removed only in the following release.
+
+### Changed (BREAKING)
+
+- **Permanent vector storage (T3) moves from ChromaDB to Postgres 17 + pgvector
+  behind the native nexus-service (RDR-155).** The direct-Chroma serving paths
+  are retired; search/store now route through the service stack. An installed
+  user MUST migrate their existing Chroma data — `nx guided-upgrade` does this in
+  one command. Chroma is kept intact as the migration **source** (copy-not-move)
+  and is not read for serving.
+
+### Added
+
+- **`nx uninstall` (RDR-165): first-class, service-aware teardown.** Dry-run by
+  default (`--yes` to act); auto-detects both install shapes. A local install
+  stops the engine-service + Postgres stack (`service stop --with-pg`) + the T2
+  daemon, removes the autostart unit and first-run marker, with an opt-in
+  `--remove-data`; a managed-only client clears `service_url`/`service_token`
+  from config.yml and never touches the remote tenant. See
+  [docs/operations/agent-lifecycle.md](docs/operations/agent-lifecycle.md).
+- **Agent Lifecycle & Operations doc (RDR-165).** One operator-facing map of
+  install → provision → run → upgrade → uninstall with a state model and the
+  three operational walkthroughs (`docs/operations/agent-lifecycle.md`).
+- **Managed-service consumer journeys (RDR-166).** Greenfield onboarding
+  (`nx config set service_url/service_token` → probe → first store) and the
+  local→managed migration; same-model voyage collections migrate by vector
+  passthrough (no billed re-embed). Docs:
+  [docs/managed-onboarding.md](docs/managed-onboarding.md). pgvector→managed
+  cross-deployment migration is a documented limitation (not supported).
+- **`nx guided-upgrade` (RDR-159): one command from a pre-upgrade install to a
+  migrated service stack.** Detects the legacy footprint, provisions and starts
+  the engine-service, version-pins it (its `/version` `release_version` must be
+  present — from engine-service v0.1.6+; the code floor is v0.1.5 but earlier
+  binaries omit the field and fail closed),
+  bounded health-gates it, then drives `migrate-to-service` (detect → ETL →
+  validate → unlock) with taxonomy ref-remap and copy-not-move rollback safety.
+  Voyage-capability and version pre-flights fail loud **before** any migration.
+- **One-command service install (RDR-157 / RDR-161).** The native engine-service
+  binary and a relocatable PG17 + pgvector bundle are published and
+  cosign-signed; `nx daemon service install-binary <tag>` cold-acquires and
+  verifies both, and `nx init --service` provisions Postgres, fetches the bge-768
+  ONNX, and starts the service — no hand-assembly of PostgreSQL or a service JAR.
+- **engine-service version handshake.** `/version` exposes a dedicated
+  `release_version` (stamped from the release tag); nx clients pin against it.
+- Supporting substrate work: RDR-152 (Postgres + Java service + thin HTTP
+  bridge), RDR-156 (vector-store capability leverage), RDR-160 (bge-768 local
+  embedder), RDR-162 (cross-model migrate for legacy collections).
+- **`nx aspects requeue-failed`: bulk recovery for failed aspect-extraction
+  rows** (nexus-2c51v). Requeues failed rows back to pending: all, or scoped by
+  `--collection`, paced with `--limit`, previewed with `--dry-run`.
+- **`nx doctor --check-t3-legacy-metadata`** (nexus-1714): flags pre-RDR-103
+  legacy T3 collection-metadata shapes so an operator can spot a collection that
+  predates the conformant `<content_type>__<owner>__<model>__v<n>` naming.
+
+### Fixed
+
+- **Relocatable PG bundle on a minimal base.** nx provisioning now points the
+  dynamic loader at the bundle's own `lib/` so the bundled `initdb`/`pg_ctl`
+  resolve `libpq.so.5` etc. on a stripped image (nexus-4mm24; the durable
+  RPATH-in-bundle-build fix is tracked separately).
+- **Guided-upgrade cross-model remap target is embedding-mode-aware** (RDR-162).
+  A guided upgrade onto a voyage-mode (cloud) service now re-embeds legacy
+  local-model collections into the content-type-appropriate voyage model
+  (`voyage-code-3` / `voyage-context-3`) instead of an unconditional bge-768
+  target, which a cloud service cannot serve. This unblocks the mixed migrant
+  (ran locally, migrates onto a voyage service); the dry-run preview names the
+  actual target and estimates its rate (nexus-gilf2).
+- **Service-mode aspect extraction no longer fails silently** (RDR-172). The
+  enqueue path now carries a stable client identity, the server returns typed
+  4xx on a rejected enqueue instead of an opaque error, and a loudness tripwire
+  surfaces a dropped enqueue rather than swallowing it.
+- **`nx aspects drain` is service-aware** (RDR-173 P4.1). In service mode it
+  polls the Postgres aspect queue (`HttpAspectQueue`) instead of a local SQLite
+  handle, skips the MCP-worker lock, and on a crashed-worker timeout (rows stuck
+  `in_progress` with zero pending) surfaces an honest hint pointing at
+  `nx aspects reclaim-stale` instead of the generic re-run message.
+- **Service-mode catalog conformance + indexing repair** (RDR-168). 19
+  `HttpCatalogClient` signatures were reconciled to the canonical catalog
+  interface, repairing service-mode indexing that diverged from the local path.
+
+### Known limitations / upgrade notes
+
+- **Cloud (managed) embedding is server-side** with the operator's Voyage key;
+  tenants supply only `NX_SERVICE_TOKEN`, never a Voyage key (no per-tenant key).
+- **The macOS engine-service binary is ad-hoc signed** (not Developer-ID /
+  notarized). It runs via `nx daemon service install-binary` (no quarantine); a
+  copy downloaded through a browser is Gatekeeper-blocked — clear it with
+  `xattr -d com.apple.quarantine`.
+- **`nx guided-upgrade` is idempotent but not a no-op after success** — re-running
+  re-copies at full cost (the Chroma source is intact, so it is re-detected).
+- **Service-mode aspect extraction needs a persistent host.** In service mode,
+  aspects enqueued by a short-lived store path are not drained until a persistent
+  MCP session runs the extraction loop; the leased aspect-worker daemon that
+  hosts extraction unconditionally (RDR-173) ships in a later release. Until
+  then, enqueue is loud and correct (RDR-172) and a persistent session or an
+  explicit `nx aspects drain` is what extracts them.
+
 ## [5.10.6] - 2026-06-07
 
 Hotfix: the RDR-080 agent-replacement MCP tools regressed when Claude Code

@@ -71,10 +71,10 @@ def _t1_version() -> str:
     T2/T3 discovery payloads.
     """
     try:
-        from importlib.metadata import version
+        from importlib.metadata import version  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
         return version("conexus")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort version read; falls back to 0.0.0
         return "0.0.0"
 
 
@@ -250,7 +250,7 @@ class T1LeasePublisher:
         if transient_record is not None:
             try:
                 self._registry.relinquish(transient_record)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort relinquish; logged at debug, never crash tick
                 _log.debug(
                     "t1_lease_transient_relinquish_failed",
                     scope=self._transient_key,
@@ -282,7 +282,7 @@ class T1LeasePublisher:
     def _resolve(self) -> Optional[str]:
         try:
             sid = self._resolver()
-        except Exception as exc:  # resolver is best-effort; never crash a tick
+        except Exception as exc:  # resolver is best-effort; never crash a tick  # noqa: BLE001 — resolver is best-effort; logged at debug, never crash tick
             _log.debug("t1_lease_session_resolve_failed", error=str(exc))
             return None
         if sid is None:

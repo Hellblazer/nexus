@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -101,7 +102,7 @@ def _preamble_resolve_repo() -> tuple[str, str]:
             stderr=subprocess.DEVNULL, text=True,
         ).strip()
         repo_name = Path(repo_root).name
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort cwd derivation; falls back to working dir on failure
         repo_root = str(Path.cwd())
         repo_name = Path(repo_root).name
     return repo_root, repo_name
@@ -117,7 +118,7 @@ def _preamble_rdr_dir(repo_root: str) -> str:
             d = yaml.safe_load(content) or {}
             paths = (d.get("indexing") or {}).get("rdr_paths", ["docs/rdr"])
             rdr_dir = paths[0] if paths else "docs/rdr"
-        except Exception:
+        except Exception:  # noqa: BLE001 — fallback parse path; tries alternate regex extraction on failure
             m_yml = (
                 re.search(r"rdr_paths[^\[]*\[([^\]]+)\]", content)
                 or re.search(r"rdr_paths:\s*\n\s+-\s*(.+)", content)
@@ -139,7 +140,7 @@ def _preamble_parse_frontmatter(filepath: Path) -> tuple[dict, str]:
             block = parts[1]
             try:
                 meta = yaml.safe_load(block) or {}
-            except Exception:
+            except Exception:  # noqa: BLE001 — fallback parse path; degrades to line-by-line parsing
                 for line in block.splitlines():
                     if ":" in line:
                         k, _, v = line.partition(":")
@@ -212,8 +213,8 @@ def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
     """Read RDR list from T2; return [] if T2 is unavailable or empty."""
     rdrs: list[dict] = []
     try:
-        from nexus.commands._helpers import default_db_path
-        from nexus.db.t2 import T2Database
+        from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         with T2Database(default_db_path()) as db:  # epsilon-allow: short-lived read-only preamble CLI
             entries = db.get_all(project=f"{repo_name}_rdr")
             for entry in entries:
@@ -232,7 +233,7 @@ def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
                         or f"{rdr_dir}/{title}-*.md"
                     ),
                 })
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort RDR scan; returns whatever was collected
         pass
     return rdrs
 
@@ -301,6 +302,179 @@ def lint(paths: tuple[Path, ...], root: Path | None) -> None:
         sys.exit(1)
 
     click.echo(f"clean: {len(targets)} file(s) scanned")
+
+
+# ---------------------------------------------------------------------------
+# set-status — code-enforced frontmatter flip (RDR-165/166 ledger-drift fix)
+# ---------------------------------------------------------------------------
+
+#: Status words recognised in the README index status cell, so the cell can be
+#: rewritten without assuming a fixed column position.
+_KNOWN_STATUSES: frozenset[str] = frozenset({
+    "draft", "proposed", "accepted", "closed", "deferred", "superseded",
+    "scrapped", "abandoned", "revised", "locked", "final",
+})
+
+#: status -> the date-stamp frontmatter key it should carry.
+_STATUS_DATE_KEY: dict[str, str] = {
+    "accepted": "accepted_date",
+    "closed": "closed_date",
+}
+
+
+def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
+    """Return *text* with the frontmatter ``status:`` set to *new_status*.
+
+    Operates on the raw frontmatter block (only the first two ``---`` fences)
+    so existing key order and formatting are preserved and a ``---`` horizontal
+    rule inside the body is never mistaken for the fence. When *new_status* maps
+    to a date key (accepted/closed): if the key is absent it is inserted
+    immediately after the ``status:`` line; if the key is present but blank
+    (``accepted_date:`` with no value, as the RDR template ships it) it is
+    filled with *date*; an existing key that already carries a value is left
+    untouched (never overwritten). (nexus-re3nm: the present-but-blank case
+    previously left the date empty, forcing a hand-edit.)
+    """
+    if not text.startswith("---"):
+        raise ValueError("RDR file has no YAML frontmatter fence")
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        raise ValueError("RDR file frontmatter fence is malformed")
+    fm = parts[1]
+
+    if not re.search(r"^status:", fm, re.MULTILINE):
+        raise ValueError("RDR frontmatter has no `status:` key")
+    # ``.*?\r?`` keeps a CRLF file's carriage return out of the rewritten line
+    # (``.*`` would greedily swallow it, leaving a lone ``\n`` line in an
+    # otherwise ``\r\n`` file). ``re.sub`` replacement is via a callable so a
+    # status value is never interpreted as a backreference.
+    fm = re.sub(
+        r"^status:.*?(\r?)$",
+        lambda m: f"status: {new_status}{m.group(1)}",
+        fm,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+    date_key = _STATUS_DATE_KEY.get(new_status)
+    if date_key:
+        # Present-but-blank (``accepted_date:`` with no value) -> fill it.
+        blank_pat = rf"^{date_key}:[ \t]*(\r?)$"
+        if re.search(blank_pat, fm, re.MULTILINE):
+            fm = re.sub(
+                blank_pat,
+                lambda m: f"{date_key}: {date}{m.group(1)}",
+                fm,
+                count=1,
+                flags=re.MULTILINE,
+            )
+        elif not re.search(rf"^{date_key}:", fm, re.MULTILINE):
+            # Absent -> insert immediately after the ``status:`` line.
+            fm = re.sub(
+                r"^(status:.*?)(\r?)$",
+                lambda m: f"{m.group(1)}{m.group(2)}\n{date_key}: {date}{m.group(2)}",
+                fm,
+                count=1,
+                flags=re.MULTILINE,
+            )
+
+    return "---" + fm + "---" + parts[2]
+
+
+def _update_readme_status_row(readme: Path, rdr_filename: str, new_status: str) -> bool:
+    """Update the README index-row status cell for *rdr_filename*.
+
+    Returns True if a row was found and rewritten. Matches the row by the RDR
+    filename link and replaces the first cell whose content is a known status
+    word, so the rewrite is robust to the index table's column ordering.
+    """
+    if not readme.exists():
+        return False
+    lines = readme.read_text(encoding="utf-8").splitlines(keepends=True)
+    target_cell = new_status.capitalize()
+    changed = False
+    for idx, line in enumerate(lines):
+        if rdr_filename not in line or "|" not in line:
+            continue
+        cells = line.split("|")
+        for i, cell in enumerate(cells):
+            if cell.strip().lower() in _KNOWN_STATUSES:
+                cells[i] = f" {target_cell} "
+                changed = True
+                break
+        if changed:
+            lines[idx] = "|".join(cells)
+            break
+    if changed:
+        readme.write_text("".join(lines), encoding="utf-8")
+    return changed
+
+
+@rdr.command("set-status")
+@click.argument("rdr_id")
+@click.argument("new_status")
+@click.option(
+    "--date",
+    default=None,
+    help="Date for accepted_date/closed_date (default: today, UTC).",
+)
+@click.option(
+    "--root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repo root (default: git toplevel / cwd).",
+)
+def set_status(
+    rdr_id: str, new_status: str, date: str | None, root: Path | None
+) -> None:
+    """Flip an RDR's file frontmatter status (and README index row).
+
+    The code-enforced half of the accept/close lifecycle: the skills call this
+    instead of hand-editing frontmatter, closing the ledger-drift class where
+    T2 was advanced to ``accepted``/``closed`` but the RDR file stayed ``draft``
+    (RDR-165 / RDR-166). Pure filesystem; no T2 dependency.
+    """
+    new_status = new_status.strip().lower()
+    if new_status not in _KNOWN_STATUSES:
+        click.echo(
+            f"unknown status '{new_status}'. Valid statuses: "
+            f"{', '.join(sorted(_KNOWN_STATUSES))}",
+            err=True,
+        )
+        sys.exit(2)
+    if root is not None:
+        repo_root = str(root)
+    else:
+        repo_root, _ = _preamble_resolve_repo()
+    rdr_dir = _preamble_rdr_dir(repo_root)
+    rdr_path = Path(repo_root) / rdr_dir
+
+    rdr_file = _preamble_find_rdr_file(rdr_path, rdr_id)
+    if rdr_file is None:
+        click.echo(f"RDR not found for ID: {rdr_id} (in {rdr_path})", err=True)
+        sys.exit(1)
+
+    if date is None:
+        date = datetime.now(timezone.utc).date().isoformat()
+
+    text = rdr_file.read_text(encoding="utf-8")
+    try:
+        new_text = _rewrite_frontmatter_status(text, new_status, date)
+    except ValueError as exc:
+        click.echo(f"cannot set status on {rdr_file.name}: {exc}", err=True)
+        sys.exit(1)
+
+    if new_text != text:
+        rdr_file.write_text(new_text, encoding="utf-8")
+
+    readme = rdr_path / "README.md"
+    readme_updated = _update_readme_status_row(readme, rdr_file.name, new_status)
+
+    click.echo(f"set {rdr_file.name} status -> {new_status}")
+    if readme_updated:
+        click.echo(f"updated README index row -> {new_status.capitalize()}")
+    else:
+        click.echo("README index row not found (skipped)", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +606,7 @@ def preamble_rdr_create(args: tuple[str, ...]) -> None:
         )
         bd_out = (result.stdout or "").strip()
         print(bd_out if bd_out else "No in-progress beads")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — optional beads integration; absence reported, command continues
         print(f"Beads not available: {exc}")
     print()
 
@@ -508,7 +682,7 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
                 )
                 t2_out = (t2_result.stdout or "").strip()
                 print(t2_out if t2_out else f"No T2 record for RDR {t2_key}")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — optional T2 lookup; absence reported, command continues
                 print(f"T2 not available: {exc}")
             print()
 
@@ -526,7 +700,7 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
                 ]
                 print("\n".join(research_lines) if research_lines
                       else "No research findings recorded")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — optional T2 lookup; absence reported, command continues
                 print(f"T2 not available: {exc}")
             print()
 
@@ -544,7 +718,7 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
                 ]
                 print("\n".join(matching) if matching
                       else "No beads linked (check epic_bead in T2)")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — optional beads integration; absence reported, command continues
                 print(f"Beads not available: {exc}")
         else:
             print(f"> RDR not found for: `{args_str}`")
@@ -822,6 +996,16 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     print()
     print(f"**RDR file path:** `{rdr_file}`")
     print()
+    print("### Flip the file frontmatter (code-enforced — do NOT hand-edit)")
+    print()
+    print(
+        "After the T2 write, run this to flip the RDR file frontmatter + README "
+        "index row atomically (closes the RDR-165/166 ledger-drift class where "
+        "T2 advanced but the file stayed `draft`):"
+    )
+    print()
+    print(f"    nx rdr set-status {t2_key} accepted")
+    print()
 
     # Step count auto-detection
     plan_headers = [
@@ -847,6 +1031,12 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         ))
         if step_count == 0:
             step_count = len(re.findall(r"^### \d", plan_section, re.MULTILINE))
+        if step_count == 0:
+            # nexus RDR convention: numbered implementation steps live as a
+            # top-level numbered list directly under ## Approach (no ###
+            # subheadings). Count only top-level items (no leading indent) so
+            # nested/prose-numbered sub-lists are not double-counted.
+            step_count = len(re.findall(r"^\d+\.\s", plan_section, re.MULTILINE))
 
     print("### Planning Handoff")
     print(f"**Step count detected:** {step_count}")
@@ -1079,7 +1269,7 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
                      "--tags", f"rdr-close-active,rdr-{t2_key}"],
                     capture_output=True, timeout=5,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort optional lookup; ignored if unavailable
                 pass
 
     # T2 metadata
@@ -1088,6 +1278,17 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
         f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\" "
         "to retrieve T2 metadata."
     )
+    print()
+
+    # Code-enforced frontmatter flip (RDR-165/166 ledger-drift fix)
+    print("### Flip the file frontmatter (code-enforced — do NOT hand-edit)")
+    print()
+    print(
+        "When closing, flip the RDR file frontmatter + README index row "
+        "atomically with the CLI instead of editing by hand:"
+    )
+    print()
+    print(f"    nx rdr set-status {t2_key} closed")
     print()
 
     # Bead status advisory
@@ -1112,7 +1313,7 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
             print(bd_out)
         else:
             print("No open or in-progress beads.")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — optional beads integration; absence reported, command continues
         print(f"Beads not available: {exc}")
 
     # S3: WARNING block — required by feedback_rdr_close_protocol (original rdr_close.py:335-341)
@@ -1191,7 +1392,7 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
                     "\n".join(research_lines) if research_lines
                     else "No research findings recorded yet"
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — optional T2 lookup; absence reported, command continues
                 print(f"T2 not available: {exc}")
         else:
             print(f"> RDR not found for ID: `{id_match.group(0)}`")
@@ -1248,7 +1449,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
                     name = name[:-4]
                 if name:
                     return name
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort git lookup; falls back to next strategy
             pass
         try:
             root = subprocess.check_output(
@@ -1257,7 +1458,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             ).strip()
             if root:
                 return Path(root).name
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort git lookup; falls back to cwd name
             pass
         return Path.cwd().name
 
@@ -1366,21 +1567,33 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 
 def _prg_extract_approach_section(text: str) -> str:
-    """Extract content under §Approach (handles ### and ## variants)."""
-    for pat in [
-        r"\n### Approach[^\n]*\n",
-        r"\n## Approach[^\n]*\n",
-        r"\n#### Approach[^\n]*\n",
-    ]:
-        m = re.search(pat, text)
-        if m:
-            start = m.end()
-            heading_depth = len(
-                re.match(r"(#+)", m.group(0).strip()).group(1)
-            )
-            end_pat = r"\n#{1," + str(heading_depth) + r"} "
-            nxt = re.search(end_pat, text[start:])
-            return text[start: start + nxt.start()] if nxt else text[start:]
+    """Extract the phase-structure section to cross-walk.
+
+    Recognises §Approach plus the common synonym headings RDRs use to
+    structure phased work — ``Implementation Plan`` (e.g. conexus RDR-001),
+    ``Phases``, and plain ``Plan`` — at ``##``/``###``/``####`` level,
+    case-insensitively. Returns the earliest such section in the document
+    (nexus-2pw1x).
+
+    ``Approach`` / ``Implementation Plan`` / ``Phases`` tolerate trailing
+    heading text (``### Approach (two tracks)``) but are word-anchored so
+    they do not match longer words. Bare ``Plan`` is matched ONLY as the
+    whole heading name (optionally trailing whitespace) so it does NOT
+    false-positive on ``## Planned Work`` / ``## Planning`` (prefix) or
+    ``## Plan Optimization`` (a differently-scoped section) — review
+    findings on the first cut of this fix.
+    """
+    heading = re.search(
+        r"\n(#{2,4})[ \t]+(?:(?:Approach|Implementation Plan|Phases)\b[^\n]*|Plan[ \t]*)\r?\n",
+        text,
+        re.IGNORECASE,
+    )
+    if heading:
+        start = heading.end()
+        heading_depth = len(heading.group(1))
+        end_pat = r"\n#{1," + str(heading_depth) + r"} "
+        nxt = re.search(end_pat, text[start:])
+        return text[start: start + nxt.start()] if nxt else text[start:]
     return ""
 
 
@@ -1589,8 +1802,11 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
     # Extract §Approach items
     approach_text = _prg_extract_approach_section(text)
     if not approach_text.strip():
-        print("> **ERROR**: No `### Approach` section found in this RDR.")
-        print("> Phase-review gate requires §Approach to cross-walk against closing beads.")
+        print(
+            "> **ERROR**: No `### Approach` (or `## Implementation Plan` / "
+            "`## Phases` / `## Plan`) section found in this RDR."
+        )
+        print("> Phase-review gate requires a phase-structure section to cross-walk against closing beads.")
         return
 
     items = _prg_parse_approach_items(approach_text)
@@ -1684,12 +1900,12 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
             ],
             capture_output=True, timeout=5,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort sentinel write (RDR-121 P2); ignored on failure
         pass
 
     # Write phase_review_sentinel (best-effort, RDR-121 P2 co-requirement)
     try:
-        from nexus.phase_review_sentinel import write_sentinel
+        from nexus.phase_review_sentinel import write_sentinel  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         write_sentinel(rdr_id_label, str(phase_arg or "1"))
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort sentinel write (RDR-121 P2); ignored on failure
         pass

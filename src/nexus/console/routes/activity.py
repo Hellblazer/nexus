@@ -16,7 +16,7 @@ def _catalog_dir() -> Path:
     """Return the catalog directory path."""
     # Delegate to the canonical resolver so NEXUS_CONFIG_DIR and
     # NEXUS_CATALOG_PATH redirections land consistently.
-    from nexus.config import catalog_path
+    from nexus.config import catalog_path  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     return catalog_path()
 
@@ -42,7 +42,7 @@ def _read_recent_events(
             # in memory. Each route call used to ``path.read_text()``
             # the full JSONL, blocking the event loop on any large
             # catalog. This loop stays O(limit) instead of O(file).
-            from collections import deque
+            from collections import deque  # noqa: PLC0415 - branch-local; deferred to call time
 
             with path.open("r", encoding="utf-8") as fh:
                 tail: deque[str] = deque(maxlen=max(limit * 4, 400))

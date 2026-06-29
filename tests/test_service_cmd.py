@@ -129,6 +129,7 @@ def _sample_managed_caps():
     return me.ManagedCapabilities(
         base_url="https://api.conexus-nexus.com",
         app_version="1.0-SNAPSHOT",
+        release_version="0.1.8",
         embedding_mode="voyage",
         embedding_models=["voyage-context-3"],
         schema_latest_id="vectors-002",

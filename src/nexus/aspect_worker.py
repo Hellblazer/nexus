@@ -53,6 +53,8 @@ worker spawn).
 from __future__ import annotations
 
 import os
+import random
+import re
 import threading
 import time
 from pathlib import Path
@@ -71,6 +73,62 @@ from nexus.config import nexus_config_dir
 
 _log = structlog.get_logger(__name__)
 
+# ── Bounded backoff-retry ladder (RDR-163 P1, nexus-ztpt6) ──────────────────
+#
+# A transient failure re-queues the row with a backoff interval the WORKER
+# chooses; the service stamps the absolute next_retry_at = now()+interval
+# server-side. retry_count is monotonic and is the cap's source of truth, so
+# termination is guaranteed even under the ±1 race of concurrent reclaim.
+_RETRY_MAX_ATTEMPTS: int = 5          # terminal mark_failed once retry_count >= cap
+_RETRY_BASE_SECONDS: float = 30.0     # interval = base * 2**retry_count, jittered
+_RETRY_JITTER_FRACTION: float = 0.2   # ±20% — spreads re-claims when a wide outage clears
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True if *exc* is a transient failure class worth a backoff retry.
+
+    Reuses BOTH ``retry.py`` transient predicates: the ChromaDB class
+    (sqlite3 'database is locked', transport errors, HTTP 429/502/503/504) AND
+    the Voyage class (API overload/timeout). Everything else — ValueError, type
+    errors, malformed records, programming bugs — is non-retryable and
+    terminal-fails immediately (no wasted retries). A classifier dependency that
+    itself raises (e.g. the lazy ``voyageai`` import) must not break routing, so
+    each predicate is guarded and defaults to "not retryable".
+    """
+    from nexus.retry import (  # noqa: PLC0415 — deferred to avoid import cost at module load
+        _is_retryable_chroma_error,
+        _is_retryable_voyage_error,
+    )
+    for predicate in (_is_retryable_chroma_error, _is_retryable_voyage_error):
+        try:
+            if predicate(exc):
+                return True
+        except Exception as cls_exc:  # noqa: BLE001 — a classifier dependency must not break routing
+            # Observable signal: e.g. voyageai not installed makes the voyage
+            # predicate raise, which would silently route all API-overload
+            # failures to terminal. Log so an operator can see why.
+            _log.debug(
+                "aspect_worker_retry_classifier_unavailable",
+                predicate=getattr(predicate, "__name__", repr(predicate)),
+                error=str(cls_exc),
+            )
+            continue
+    return False
+
+
+def _backoff_interval_seconds(retry_count: int, *, rng=random.random) -> int:
+    """Worker-chosen backoff for the next retry, in integer seconds.
+
+    ``base * 2**retry_count`` with ±``_RETRY_JITTER_FRACTION`` jitter. The
+    service stamps the absolute ``next_retry_at = now()+interval``; only the
+    interval is chosen here. ``rng`` is injectable so the jitter is deterministic
+    under test without patching the global ``random`` module.
+    """
+    raw = _RETRY_BASE_SECONDS * (2 ** max(0, retry_count))
+    jitter = 1.0 + (rng() - 0.5) * 2.0 * _RETRY_JITTER_FRACTION
+    return max(0, int(raw * jitter))
+
+
 # ── Drain protocol exceptions ───────────────────────────────────────────────
 
 
@@ -84,15 +142,24 @@ class DrainTimeoutError(RuntimeError):
     drain after the queue is clear.
     """
 
-    def __init__(self, stuck_count: int, timeout: float) -> None:
+    def __init__(
+        self,
+        stuck_count: int,
+        timeout: float,
+        detail: str | None = None,
+    ) -> None:
         self.stuck_count = stuck_count
         self.timeout = timeout
-        super().__init__(
+        self.detail = detail
+        msg = (
             f"Drain timeout after {timeout:.1f}s: "
             f"{stuck_count} actionable row(s) remain in aspect_extraction_queue "
             f"(status pending or in_progress). "
             "Triage stuck workers before retrying the PK migration."
         )
+        if detail:
+            msg = f"{msg} {detail}"
+        super().__init__(msg)
 
 
 class DrainBlockedByActiveWorker(RuntimeError):
@@ -257,9 +324,9 @@ class AspectExtractionWorker:
         All exceptions inside the loop are caught and recorded; the
         worker thread itself never dies from a row's failure.
         """
-        from nexus.db.t2.aspect_extraction_queue import QueueRow
-        from nexus.mcp_infra import t2_index_write
-        from nexus.migration.state import is_migrating as _migration_in_progress
+        from nexus.db.t2.aspect_extraction_queue import QueueRow  # noqa: PLC0415 — deferred to avoid circular import (db.t2 <-> aspect_worker)
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra <-> aspect_worker)
+        from nexus.migration.state import is_migrating as _migration_in_progress  # noqa: PLC0415 — deferred to avoid circular import (migration.state)
         while not self._stop_event.is_set():
             # RDR-159 P1c (S2 quiesce): while a guided upgrade migration holds
             # the migration.state sentinel, SUSPEND the claim/extract cycle.
@@ -300,7 +367,7 @@ class AspectExtractionWorker:
                     r if isinstance(r, QueueRow) else QueueRow(**r)
                     for r in rows
                 ]
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort claim loop: must not crash worker thread, logged + retried
                 _log.warning("aspect_worker_claim_failed", exc_info=True)
                 self._stop_event.wait(self._poll_interval)
                 continue
@@ -324,16 +391,18 @@ class AspectExtractionWorker:
         P5.1 / nexus-8g79.34 — the batch path now mirrors the
         single-doc extractor's read contract).
         """
-        import dataclasses
+        import dataclasses  # noqa: PLC0415 — stdlib import deferred to method scope (rare branch)
 
-        from nexus.aspect_extractor import select_config
-        from nexus.mcp_infra import t2_index_write
+        from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
 
-        # extract_aspects_batch requires every input to share a single
-        # ExtractorConfig. claim_batch grabs FIFO across collections, so
-        # a knowledge__ row enqueued before an rdr__ row lands in the
-        # same claim and crosses the homogeneity boundary. Fall back to
-        # per-row processing instead of marking the whole batch failed.
+        # extract_aspects_batch now supports mixed configs internally
+        # (nexus-kmbys: it partitions by per-document resolved config and
+        # runs deterministic parser_fn configs inline). This pre-filter is
+        # retained as a conservative simplification: a claim mixing prefix
+        # configs (knowledge__ + rdr__) falls back to per-row processing
+        # rather than relying on the batch partition path for cross-prefix
+        # mixes. Same-prefix claims (the common case) go through the batch.
         configs = {select_config(row.collection) for row in rows}
         if len(configs - {None}) > 1:
             _log.info(
@@ -351,10 +420,10 @@ class AspectExtractionWorker:
         # _process_row's pattern at lines 406-411).
         manifest_lookup = None
         try:
-            from nexus.commands.enrich import _build_catalog_manifest_lookup
+            from nexus.commands.enrich import _build_catalog_manifest_lookup  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
             manifest_lookup = _build_catalog_manifest_lookup()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
+            _log.debug("aspect_worker_manifest_lookup_unavailable", error=str(exc))
 
         items: list[tuple[str, str, str, str]] = [
             (row.collection, row.source_path, row.content,
@@ -364,7 +433,7 @@ class AspectExtractionWorker:
 
         try:
             records = _extract_aspects_batch(items, manifest_lookup=manifest_lookup)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — batch extract is best-effort; failure logged and rows re-queued
             _log.warning(
                 "aspect_worker_batch_extract_raised",
                 row_count=len(rows),
@@ -378,7 +447,7 @@ class AspectExtractionWorker:
                     )
             try:
                 t2_index_write(_fail_all)
-            except Exception:
+            except Exception:  # noqa: BLE001 — persist of mark-failed is best-effort; logged via log.warning
                 _log.warning(
                     "aspect_worker_batch_mark_failed_persist_failed",
                     exc_info=True,
@@ -415,7 +484,7 @@ class AspectExtractionWorker:
                 db.complete_aspect(dataclasses.asdict(record))
         try:
             t2_index_write(_persist_all)
-        except Exception:
+        except Exception:  # noqa: BLE001 — batch persist best-effort; failure logged via log.warning
             _log.warning(
                 "aspect_worker_batch_persist_failed",
                 exc_info=True,
@@ -431,16 +500,62 @@ class AspectExtractionWorker:
         contended), ``reclaim_stale`` recovers the row; we log and move on
         without killing the worker thread.
         """
-        from nexus.mcp_infra import t2_index_write
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
         try:
             t2_index_write(
                 lambda db: db.aspect_queue.mark_failed(
                     row.collection, row.source_path, error=error,
                 )
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — mark-failed persist best-effort; logged via log.warning
             _log.warning(
                 "aspect_worker_mark_failed_persist_failed",
+                collection=row.collection,
+                source_path=row.source_path,
+                exc_info=True,
+            )
+
+    def _mark_retry_or_fail_routed(self, row, exc: BaseException) -> None:
+        """Route a failed row to a backed-off retry, or terminal-fail it
+        (RDR-163 P1, nexus-ztpt6).
+
+        Decision:
+        * non-retryable exception (programming bug / malformed record) →
+          terminal ``mark_failed``;
+        * retry budget exhausted (``retry_count >= _RETRY_MAX_ATTEMPTS``) →
+          terminal ``mark_failed``;
+        * otherwise → ``mark_retry`` with a worker-chosen backoff interval; the
+          service stamps ``next_retry_at = now()+interval`` so the claim gate
+          holds the row back until the backoff elapses.
+
+        Routed through ``t2_index_write`` (nexus-zir76) so the worker never opens
+        ``memory.db`` directly. A routing failure is logged and falls to
+        ``reclaim_stale`` rather than killing the worker thread — the same
+        best-effort posture as ``_mark_failed_routed``.
+        """
+        retry_count = getattr(row, "retry_count", 0) or 0
+        if not _is_retryable(exc) or retry_count >= _RETRY_MAX_ATTEMPTS:
+            self._mark_failed_routed(row, str(exc))
+            return
+
+        interval = _backoff_interval_seconds(retry_count)
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+        try:
+            t2_index_write(
+                lambda db: db.aspect_queue.mark_retry(
+                    row.collection, row.source_path, interval_seconds=interval,
+                )
+            )
+            _log.info(
+                "aspect_worker_retry_scheduled",
+                collection=row.collection,
+                source_path=row.source_path,
+                retry_count=retry_count + 1,
+                interval_seconds=interval,
+            )
+        except Exception:  # noqa: BLE001 — retry persist best-effort; reclaim_stale backstops; logged
+            _log.warning(
+                "aspect_worker_mark_retry_persist_failed",
                 collection=row.collection,
                 source_path=row.source_path,
                 exc_info=True,
@@ -454,9 +569,9 @@ class AspectExtractionWorker:
         never opens ``memory.db`` directly and cannot contend with the
         daemon for the single WAL writer lock.
         """
-        import dataclasses
+        import dataclasses  # noqa: PLC0415 — stdlib import deferred to method scope (rare branch)
 
-        from nexus.mcp_infra import t2_index_write
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
         try:
             # Content was captured at enqueue time when in scope (MCP
             # store_put). For CLI rows where content was not in scope
@@ -477,10 +592,10 @@ class AspectExtractionWorker:
             # dropped chunk_index metadata field.
             manifest_lookup = None
             try:
-                from nexus.commands.enrich import _build_catalog_manifest_lookup
+                from nexus.commands.enrich import _build_catalog_manifest_lookup  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
                 manifest_lookup = _build_catalog_manifest_lookup()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
+                _log.debug("aspect_worker_manifest_lookup_unavailable", error=str(exc))
             record = _extract_aspects(
                 content=row.content,
                 source_path=row.source_path,
@@ -488,14 +603,14 @@ class AspectExtractionWorker:
                 doc_id_lookup=doc_id_lookup,
                 manifest_lookup=manifest_lookup,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — extract is best-effort; failure logged via log.warning
             _log.warning(
                 "aspect_worker_extract_raised",
                 collection=row.collection,
                 source_path=row.source_path,
                 exc_info=True,
             )
-            self._mark_failed_routed(row, str(exc))
+            self._mark_retry_or_fail_routed(row, exc)
             return
 
         try:
@@ -535,14 +650,14 @@ class AspectExtractionWorker:
             t2_index_write(
                 lambda db: db.complete_aspect(dataclasses.asdict(record))
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — persist is best-effort; failure logged via log.warning
             _log.warning(
                 "aspect_worker_persist_failed",
                 collection=row.collection,
                 source_path=row.source_path,
                 exc_info=True,
             )
-            self._mark_failed_routed(row, str(exc))
+            self._mark_retry_or_fail_routed(row, exc)
 
 
 # ── Module-level singleton ──────────────────────────────────────────────────
@@ -565,7 +680,7 @@ def _worker_lock_path(locks_dir: Path | None = None) -> Path:
     SIG-5 (nexus-1091): the MCP server writes this file when its worker
     starts so that CLI-side ``drain_worker`` can detect the conflict.
     """
-    import os
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     base = locks_dir if locks_dir is not None else (
         nexus_config_dir() / "locks"
@@ -583,7 +698,7 @@ def _sweep_dead_worker_locks(locks_dir: Path) -> None:
     pileup. Live locks (including this process's own) are left intact;
     non-PID-shaped files are ignored. Best-effort — never raises.
     """
-    import os
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     if not locks_dir.exists():
         return
@@ -601,7 +716,7 @@ def _sweep_dead_worker_locks(locks_dir: Path) -> None:
             try:
                 lock_file.unlink(missing_ok=True)
                 _log.info("aspect_worker_stale_lock_swept", pid=pid)
-            except Exception:
+            except Exception:  # noqa: BLE001 — liveness probe of foreign pid is best-effort; treat unknown as stale
                 pass
         except PermissionError:
             # Alive under another user — leave it.
@@ -617,14 +732,14 @@ def _write_worker_lock(locks_dir: Path | None = None) -> None:
     is advisory; a missing file merely means ``drain_worker`` from another
     process will not detect this worker.
     """
-    import os
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     try:
         lock = _worker_lock_path(locks_dir)
         lock.parent.mkdir(parents=True, exist_ok=True)
         _sweep_dead_worker_locks(lock.parent)
         lock.write_text(str(os.getpid()))
-    except Exception:
+    except Exception:  # noqa: BLE001 — lock-file write is best-effort; failure logged via log.warning
         _log.warning("aspect_worker_lock_write_failed", exc_info=True)
 
 
@@ -635,7 +750,7 @@ def _remove_worker_lock(locks_dir: Path | None = None) -> None:
     """
     try:
         _worker_lock_path(locks_dir).unlink(missing_ok=True)
-    except Exception:
+    except Exception:  # noqa: BLE001 — lock-file remove is best-effort; failure logged via log.warning
         _log.warning("aspect_worker_lock_remove_failed", exc_info=True)
 
 
@@ -710,7 +825,7 @@ def live_foreign_worker_pids(locks_dir: Path) -> list[int]:
     RDR-159 migration quiesce pre-gate (which needs the FULL offending-pid set).
     Returns an empty list when ``locks_dir`` does not exist.
     """
-    import os
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     if not locks_dir.exists():
         return []
@@ -840,16 +955,32 @@ def drain_worker(
         for.  This handles the quiescent case (e.g., the caller's process
         never ran the worker, or the worker finished and was reset).
     """
-    from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+    # RDR-173 P4.1 (nexus-4st62): determine storage backend first so the
+    # lock-check and queue construction can both branch on it.
+    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+        StorageBackend,
+        storage_backend_for,
+    )
+    _is_service_mode = storage_backend_for("aspect_queue") == StorageBackend.SERVICE
 
     # SIG-5: detect active MCP-process workers before stopping the local
     # singleton.  A live MCP worker in another process drains its own
     # queue independently; the migration must not run while that worker is
     # alive or it will race against in_progress rows it cannot see.
+    #
+    # SERVICE mode: the MCP process writes a local aspect_worker lock via
+    # ensure_worker_started (the enqueue hook auto-spawns the singleton),
+    # but in SERVICE mode ALL workers share the same PG queue with
+    # FOR UPDATE SKIP LOCKED — cross-process claim safety is handled by PG,
+    # not by the file lock.  Checking the lock here would make drain always
+    # raise DrainBlockedByActiveWorker when the MCP server is running, which
+    # defeats the primary use case (drain during migration while MCP is live).
+    # Skip the local file-lock check in SERVICE mode.
     locks_dir = _locks_dir if _locks_dir is not None else (
         nexus_config_dir() / "locks"
     )
-    _check_mcp_worker_lock(locks_dir)
+    if not _is_service_mode:
+        _check_mcp_worker_lock(locks_dir)
 
     worker = get_worker()
     if worker is not None:
@@ -858,7 +989,18 @@ def drain_worker(
     queue_path = Path(queue_path)
     deadline = time.monotonic() + timeout
 
-    queue = AspectExtractionQueue(queue_path)
+    # RDR-173 P4.1 (nexus-4st62): in SERVICE mode the authoritative
+    # aspect_extraction_queue is PG, reached via ``HttpAspectQueue``. The
+    # local-sqlite ``AspectExtractionQueue`` is empty/stale there, so polling it
+    # yields a spurious "drained" — leaving ``nx aspects drain`` and the
+    # migration drain gate inert in service mode. Poll the SERVICE queue's
+    # ``is_drained()`` instead. (Local/SQLite mode is unchanged.)
+    if _is_service_mode:
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred (optional service dep)
+        queue = HttpAspectQueue()
+    else:
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred to avoid circular import (db.t2 queue)
+        queue = AspectExtractionQueue(queue_path)
 
     def _join_worker_thread(w: AspectExtractionWorker) -> None:
         """Join the worker thread; log a warning if it does not exit in 2s.
@@ -897,16 +1039,144 @@ def drain_worker(
                 return
 
         # Timeout: count stuck rows for the error message.
-        stuck = queue.conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
-        ).fetchone()
-        stuck_count = stuck[0] if stuck else 0
-        raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout)
+        # SERVICE mode: HttpAspectQueue has no .conn; use pending_count() via
+        # HTTP.  pending_count() counts only 'pending' rows — NOT in_progress.
+        # A crashed worker leaves rows in in_progress with NO lock held (FOR
+        # UPDATE locks are transaction-scoped; they are released when the
+        # transaction ends, which happens when the worker process dies).  Those
+        # orphaned rows are recovered by reclaim_stale(), not by a held lock.
+        # Consequence: if the drain times out because rows are stuck
+        # in_progress (the common crashed-worker scenario), pending_count()
+        # returns 0 even though is_drained() is still False.  We detect this
+        # gap and include an honest operator hint in the error detail.
+        # LOCAL mode: keep the existing status != 'failed' count (pending +
+        # in_progress) via a direct SQLite query.
+        if _is_service_mode:
+            pending = queue.pending_count()
+            if pending == 0:
+                # is_drained() returned False at timeout, but pending_count()
+                # is 0 — rows are stuck in in_progress (crashed-worker case).
+                # pending_count() is a pending-only proxy and cannot see them.
+                detail = (
+                    "Note (service mode): pending_count is 0, but is_drained() "
+                    "is still False — rows may be stuck in in_progress from a "
+                    "crashed worker. Run 'nx aspects reclaim-stale' to reset "
+                    "them back to pending, then retry the drain."
+                )
+                stuck_count = 0
+            else:
+                detail = None
+                stuck_count = pending
+        else:
+            stuck = queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
+            ).fetchone()
+            stuck_count = stuck[0] if stuck else 0
+            detail = None
+        raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout, detail=detail)
     finally:
         queue.close()
 
 
 # ── Hook function (wired by hook_registry.install_default_hooks) ────────────
+
+
+#: A 32-char lowercase-hex chunk hash (the Chroma natural id). Note-backed
+#: aspect rows carry this as ``source_path`` by design (RDR-172 owns note
+#: identity via ``doc_id``); it is NOT a filesystem path, so Gap-2
+#: canonicalization skips it.
+_CHASH_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _resolve_catalog_reader():
+    """Return a best-effort read catalog (or ``None``). Indirection seam so
+    tests can inject a real tmp ``Catalog`` without env/service-mode coupling.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
+    return make_catalog_reader()
+
+
+def _canonicalize_source_path(collection: str, source_path: str) -> str:
+    """RDR-145 Gap-2: forward-only ``source_path`` canonicalization.
+
+    Resolves ``source_path`` against the catalog for ``collection``. On a
+    hit whose stored ``file_path`` is a *relative* form that differs, returns
+    that canonical relative path; on a miss, returns ``source_path`` unchanged
+    and emits a loud ``aspect_source_path_uncanonical`` warning. It NEVER
+    synthesizes or guesses a path — doing so would re-introduce the
+    ``nexus-3e4s`` CWD-anchoring contamination class. Best-effort and
+    fail-open: any catalog unavailability degrades to a no-op (the document
+    still enqueues; the one-time cleanup, RDR-145 Phase 2, handles legacy
+    rows).
+
+    Only file-backed (path-shaped) ``source_path`` values are considered.
+    Note-backed rows carry a 32-hex chash with no path separator and are
+    returned untouched so the probe never false-warns on a correct chash.
+
+    Reachability of the normalize branch (important — do not oversell this):
+    the catalog probe matches ``physical_collection AND (file_path = source_path
+    OR title = source_path)``. The documented contamination population
+    (RDR-145 Bucket B: ~177 absolute paths that MISMATCH the catalog's stored
+    *relative* ``file_path``) therefore MISSES the probe and lands in the WARN
+    branch — the loud ``aspect_source_path_uncanonical`` tripwire is the real
+    forward-only output for that population, not in-flight rewriting. The
+    normalize branch fires only when ``source_path`` already equals a stored
+    ``file_path``/``title``; correcting those Bucket-B rows is Phase 2's
+    one-time migration cleanup (``nexus-nx9nx``, migration-gated), not this
+    hook. In service mode the catalog reads are HTTP point-queries bounded by
+    the client's 30s timeout and fail-open; batch CLI ingest latency is a
+    tracked follow-up, not a regression.
+    """
+    # Skip note-backed (chash) and any non-path-shaped identifier (e.g. a
+    # bare slug/title) — there is nothing to canonicalize and no contamination
+    # risk for these by design.
+    if _CHASH_RE.match(source_path) or (
+        "/" not in source_path and os.sep not in source_path
+    ):
+        return source_path
+    try:
+        cat = _resolve_catalog_reader()
+    except Exception:  # noqa: BLE001 — best-effort catalog reader; any init failure degrades to no-op
+        cat = None
+    if cat is None:
+        # No catalog to canonicalize against — forward-only defense is a
+        # no-op (do not warn: absence of a catalog is not an uncanonical path).
+        return source_path
+    try:
+        doc_id = cat.lookup_doc_id_by_collection_and_path(collection, source_path)
+    except Exception:  # noqa: BLE001 — best-effort resolve; any query error degrades to no-op
+        doc_id = ""
+    if not doc_id:
+        _log.warning(
+            "aspect_source_path_uncanonical",
+            collection=collection,
+            source_path=source_path,
+        )
+        return source_path
+    # ``lookup_doc_id_by_collection_and_path`` returns either a legacy
+    # ``metadata.doc_id`` or the catalog ``tumbler``; resolve the entry via
+    # whichever the catalog honours (``by_doc_id`` keys on doc_id only).
+    entry = None
+    for getter in ("by_doc_id", "resolve"):
+        fn = getattr(cat, getter, None)
+        if fn is None:
+            continue
+        try:
+            entry = fn(doc_id)
+        except Exception:  # noqa: BLE001 — best-effort entry read; try the next resolver
+            entry = None
+        if entry is not None:
+            break
+    canonical = (getattr(entry, "file_path", "") or "") if entry is not None else ""
+    if canonical and not os.path.isabs(canonical) and canonical != source_path:
+        _log.info(
+            "aspect_source_path_canonicalized",
+            collection=collection,
+            was=source_path,
+            now=canonical,
+        )
+        return canonical
+    return source_path
 
 
 def aspect_extraction_enqueue_hook(
@@ -944,10 +1214,13 @@ def aspect_extraction_enqueue_hook(
         carries the empty string; worker falls back to
         ``Path(source_path).read_text()``.
     """
-    from nexus.aspect_extractor import select_config
+    from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
     if select_config(collection) is None:
         return  # No extractor for this collection — nothing to enqueue.
-    from nexus.mcp_infra import t2_index_write
+    # RDR-145 Gap-2: canonicalize a file-backed source_path against the
+    # catalog before persisting the queue row (forward-only; never guesses).
+    source_path = _canonicalize_source_path(collection, source_path)
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
     try:
         # RDR-128 P1 (kg8sj): route the enqueue through the daemon so the
         # indexer process does not open memory.db directly to write it.
@@ -957,13 +1230,39 @@ def aspect_extraction_enqueue_hook(
                 doc_id=doc_id,
             )
         )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — enqueue is best-effort; failure logged via log.warning
         _log.warning(
             "aspect_extraction_enqueue_failed",
             source_path=source_path,
             collection=collection,
             exc_info=True,
         )
+        # RDR-172 P2.1 (nexus-hlkvj): loudness tripwire. Keeping the enqueue
+        # best-effort (never block ingest, RDR-089 P0.1) also hides this
+        # failure from hook_registry's hook_failures recorder — the hook
+        # swallows it here, so fire_document sees success. Persist a structured
+        # hook_failures row directly so CI / --fullstack can assert ZERO
+        # enqueue failures across an ingest E2E (the fail-closed recurrence
+        # guard, RF-7 — the nexus-ov0sw silent-total-failure class). The
+        # persist is itself best-effort: a telemetry-write failure (T2 down,
+        # service 5xx) must never block ingest either.
+        try:
+            t2_index_write(
+                lambda t2: t2.telemetry.record_hook_failure(
+                    doc_id=source_path,
+                    collection=collection,
+                    hook_name="aspect_extraction_enqueue_hook",
+                    error=str(exc)[:2000],  # match hook_registry's truncation
+                    chain="document",
+                )
+            )
+        except Exception:  # noqa: BLE001 — tripwire persist is best-effort; never block ingest
+            _log.warning(
+                "aspect_enqueue_tripwire_persist_failed",
+                source_path=source_path,
+                collection=collection,
+                exc_info=True,
+            )
         # Enqueue failure is non-fatal — ingest is never blocked.
         # The document_aspects row will simply not be populated until
         # a manual re-enqueue triggers extraction.

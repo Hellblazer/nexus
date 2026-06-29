@@ -42,10 +42,22 @@ def _check(label: str, ok: bool, detail: str = "") -> str:
 
 def _run_check_schema() -> None:
     """Validate T2 database schema and report pending migrations (RDR-076)."""
-    import sqlite3
+    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.migrations import MIGRATIONS, _parse_version
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.migrations import MIGRATIONS, _parse_version, expected_t2_schema_version  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    # nexus-p0clh: in service mode the T2 schema lives in Postgres and is
+    # Liquibase-managed by the nexus-service (applied at startup), not the local
+    # SQLite migrations checked below. Report N/A honestly instead of the
+    # misleading "T2 database not found" (which reads as an error).
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        click.echo(
+            "T2 schema is service-backed (Postgres, Liquibase-managed) — "
+            "local SQLite schema check N/A in service mode."
+        )
+        return
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -123,19 +135,17 @@ def _run_check_schema() -> None:
         ).fetchone()
         if row:
             stored = row[0]
-            try:
-                from importlib.metadata import version as _pkg_version
-
-                cli_ver = _pkg_version("conexus")
-            except Exception:
-                cli_ver = "0.0.0"
+            # RDR-170: report the canonical schema version (registry-aware),
+            # the same value apply_pending targets/stamps, and gate pending on
+            # the lower bound ONLY. The old upper bound (`<= cli_t`) made
+            # --check-schema report "Schema version: OK" while apply_pending was
+            # actively applying an ahead-of-release step on a frozen branch.
+            cli_ver = expected_t2_schema_version()
             stored_t = _parse_version(stored)
-            cli_t = _parse_version(cli_ver)
             pending = [
                 m
                 for m in MIGRATIONS
                 if _parse_version(m.introduced) > stored_t
-                and _parse_version(m.introduced) <= cli_t
             ]
             if pending:
                 all_ok = False
@@ -219,8 +229,8 @@ def _scan_mcp_log_jsonl(
     ``session_id``, and ``log_file`` for cross-referencing against
     mcp.log + watchdog.log.
     """
-    import json as _json
-    import datetime as _dt
+    import json as _json  # noqa: PLC0415 — deferred to keep CLI startup fast
+    import datetime as _dt  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     silent_deaths: list[dict] = []
     tool_failures: list[dict] = []
@@ -293,8 +303,8 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
     the cache is a Claude Code CLI implementation detail, not part
     of the MCP protocol.
     """
-    import json as _json
-    import time
+    import json as _json  # noqa: PLC0415 — deferred to keep CLI startup fast
+    import time  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     cache_dir = _resolve_claude_cache_dir()
     cutoff_epoch = time.time() - hours * 3600.0
@@ -403,20 +413,24 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
     tmpdirs`` was passed (so the operator can spot a no-op run in
     automation).
     """
-    import json
-    import tempfile
-    import time
-    from pathlib import Path
+    import json  # noqa: PLC0415 — deferred to keep CLI startup fast
+    import tempfile  # noqa: PLC0415 — deferred to keep CLI startup fast
+    import time  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from pathlib import Path  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    from nexus.session import sweep_orphan_tmpdirs
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.session import sweep_orphan_tmpdirs  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+    config_dir = nexus_config_dir()
     tmpdir_root = Path(tempfile.gettempdir())
     cutoff_hours = 24.0
     cutoff = time.time() - cutoff_hours * 3600.0
 
-    candidates: list[dict] = []
-    if tmpdir_root.exists():
-        for d in sorted(tmpdir_root.glob("nx_t1_*")):
+    def _scan_root(root: Path) -> list[dict]:
+        results: list[dict] = []
+        if not root.exists():
+            return results
+        for d in sorted(root.glob("nx_t1_*")):
             if not d.is_dir():
                 continue
             try:
@@ -432,14 +446,20 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
                 ) / 1024.0
             except OSError:
                 size_kb = 0.0
-            candidates.append({
+            results.append({
                 "path": str(d),
                 "age_hours": round(age_h, 2),
                 "size_kb": round(size_kb, 1),
             })
+        return results
+
+    # Primary: new config-dir store location (nexus-ycwec Fix #1: <config>/t1/).
+    # Legacy: OS-temp root for pre-fix orphans placed there by older versions.
+    candidates: list[dict] = _scan_root(config_dir / "t1") + _scan_root(tmpdir_root)
 
     payload: dict = {
         "tmpdir_root": str(tmpdir_root),
+        "config_t1_root": str(config_dir / "t1"),
         "cutoff_hours": cutoff_hours,
         "candidates": candidates,
         "reaped": 0,
@@ -447,6 +467,7 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
 
     if reap:
         payload["reaped"] = sweep_orphan_tmpdirs(
+            config_dir=config_dir,
             tmpdir_root=tmpdir_root,
             max_age_hours=cutoff_hours,
         )
@@ -457,11 +478,12 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
         if not candidates:
             click.echo(
                 f"No orphan nx_t1_* tmpdirs older than {cutoff_hours}h "
-                f"under {tmpdir_root}."
+                f"under {config_dir / 't1'} or {tmpdir_root}."
             )
         else:
             click.echo(
-                f"Orphan nx_t1_* candidates under {tmpdir_root}: "
+                f"Orphan nx_t1_* candidates "
+                f"(scanned {config_dir / 't1'} + {tmpdir_root}): "
                 f"{len(candidates)}"
             )
             for c in candidates:
@@ -496,9 +518,9 @@ def _run_check_plan_library() -> None:
     loader never seeded (typically ``nx catalog setup`` was never
     re-run after the RDR-078 loader landed).
     """
-    import sqlite3
+    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    from nexus.commands._helpers import default_db_path
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -571,9 +593,13 @@ def _run_check_plan_library() -> None:
 
 
 def _run_trim_telemetry(days: int) -> None:
-    """Delete search_telemetry rows older than *days* (RDR-087 Phase 2.4)."""
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2.telemetry import Telemetry
+    """Delete aged audit-log rows older than *days* (RDR-087 P2.4; nexus-7365x).
+
+    Trims both ``search_telemetry`` (RDR-087) and ``hook_failures`` (RDR-164 P0
+    audit-table TTL parity) — the two age-reaped, no-cascade audit tables.
+    """
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2.telemetry import Telemetry  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -581,13 +607,16 @@ def _run_trim_telemetry(days: int) -> None:
         return
     telemetry = Telemetry(db_path)
     try:
-        deleted = telemetry.trim_search_telemetry(days=days)
+        deleted_search = telemetry.trim_search_telemetry(days=days)
+        deleted_hooks = telemetry.trim_hook_failures(days=days)
     finally:
         telemetry.close()
-    noun = "row" if deleted == 1 else "rows"
-    click.echo(
-        f"Trimmed {deleted} search_telemetry {noun} older than {days} days."
-    )
+    for table, deleted in (
+        ("search_telemetry", deleted_search),
+        ("hook_failures", deleted_hooks),
+    ):
+        noun = "row" if deleted == 1 else "rows"
+        click.echo(f"Trimmed {deleted} {table} {noun} older than {days} days.")
 
 
 # ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────
@@ -603,8 +632,8 @@ def _run_check_aspect_queue() -> None:
     enqueued_at as a lag indicator, (d) failed rows with their last
     error so a stuck worker is visible.
     """
-    import sqlite3 as _sqlite3
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
+    import sqlite3 as _sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance (nexus.commands._helpers)
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -680,6 +709,116 @@ def _run_check_aspect_queue() -> None:
         conn.close()
 
 
+# ── --check-t3-legacy-metadata (nexus-1714) ──────────────────────────────────
+
+
+def _legacy_fields_present(collection, fields: tuple[str, ...]) -> set[str]:
+    """Return the subset of *fields* present (non-empty) on any chunk.
+
+    Chroma cannot answer "does any chunk carry key X" via a ``where`` filter:
+    ``{X: {'$ne': ''}}`` also matches chunks that *lack* the key entirely
+    (verified on chromadb 1.5.x), so it cannot distinguish a legacy chunk from
+    a Phase-3-clean one. Instead we page the collection's metadata
+    (``include=["metadatas"]``, ``limit<=300`` per the quota) and inspect the
+    keys Python-side, short-circuiting as soon as every field is found.
+    """
+    found: set[str] = set()
+    offset = 0
+    page = 300  # chroma_quotas._PAGE ceiling
+    while True:
+        res = collection.get(limit=page, offset=offset, include=["metadatas"])
+        metas = res.get("metadatas") or []
+        if not metas:
+            break
+        for m in metas:
+            for f in fields:
+                if f not in found and m.get(f):
+                    found.add(f)
+        if len(found) == len(fields) or len(metas) < page:
+            break
+        offset += page
+    return found
+
+
+def _run_check_t3_legacy_metadata(*, strict: bool = False) -> None:
+    """Report local T3 collections still carrying legacy chunk metadata.
+
+    RDR-108 Phase 3 retired ``doc_id`` / ``source_path`` from chunk metadata
+    (the catalog ``document_chunks`` manifest is authoritative). Tolerance
+    branches in ``mcp/core.py``, ``indexer_utils.py``, and ``search_engine.py``
+    still read those fields for pre-Phase-3 chunks; this check tells an operator
+    whether the corpus is fully pruned so those branches can be removed
+    (nexus-1714).
+
+    Scope (deliberate, not silent): this is a local-Chroma concern. The RDR-155
+    pgvector service path stores chunks under a different schema and does not
+    expose arbitrary-metadata ``where`` filters, so the check reports *not
+    applicable* in service mode rather than producing a misleading result.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if not is_local_mode():
+        click.echo(
+            "T3 legacy-metadata check: not applicable in service/cloud mode "
+            "(legacy doc_id/source_path chunk metadata is a local-Chroma "
+            "concern; the pgvector service path uses a different schema)."
+        )
+        return
+
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    try:
+        db = make_t3()
+    except Exception as exc:  # noqa: BLE001 — diagnostic: report unavailability, never crash doctor
+        click.echo(f"T3 legacy-metadata check: T3 unavailable ({exc}).")
+        return
+
+    cols = db.list_collections()
+    if not cols:
+        click.echo("T3 legacy-metadata check: no collections found.")
+        return
+
+    click.echo(
+        "T3 legacy-metadata check (RDR-108 Phase 3 retired doc_id + "
+        "source_path):"
+    )
+    offenders: list[str] = []
+    for c in sorted(cols, key=lambda c: c["name"]):
+        name = c["name"]
+        total = c.get("count", 0)
+        try:
+            col = db.get_collection(name)
+            present = _legacy_fields_present(col, ("doc_id", "source_path"))
+        except Exception as exc:  # noqa: BLE001 — per-collection probe failure is reported, scan continues
+            click.echo(f"  {name}: probe failed ({exc})")
+            continue
+        has_doc_id = "doc_id" in present
+        has_source_path = "source_path" in present
+        legacy = has_doc_id or has_source_path
+        marker = "  ⚠ LEGACY" if legacy else ""
+        click.echo(
+            f"  {name}: {total} chunk(s); "
+            f"doc_id={'yes' if has_doc_id else 'no'} "
+            f"source_path={'yes' if has_source_path else 'no'}{marker}"
+        )
+        if legacy:
+            offenders.append(name)
+
+    if offenders:
+        click.echo(
+            f"\n{len(offenders)} collection(s) still carry legacy chunk "
+            "metadata. These gate removal of the legacy tolerance branches "
+            "(mcp/core.py, indexer_utils.py, search_engine.py)."
+        )
+        if strict:
+            sys.exit(1)
+    else:
+        click.echo(
+            "\nAll collections are Phase-3 clean (no doc_id/source_path "
+            "chunk metadata)."
+        )
+
+
 # ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────
 
 
@@ -694,12 +833,12 @@ def _run_check_tier_discipline() -> None:
     Heuristic only — does NOT exit non-zero. Visibility, not
     enforcement.
     """
-    import os as _os
-    import sqlite3 as _sqlite3
-    from pathlib import Path as _Path
+    import os as _os  # noqa: PLC0415 — deferred to keep CLI startup fast
+    import sqlite3 as _sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from pathlib import Path as _Path  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    from nexus.commands._helpers import default_db_path as _default_db_path
-    from nexus.session import read_claude_session_id as _read_claude_session_id
+    from nexus.commands._helpers import default_db_path as _default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.session import read_claude_session_id as _read_claude_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     session_id = (
         _os.environ.get("NX_SESSION_ID", "").strip()
@@ -714,6 +853,19 @@ def _run_check_tier_discipline() -> None:
     if not _Path(db_path).exists():
         click.echo("Tier-discipline check:")
         click.echo(f"  T2 database not found at {db_path} (skip).")
+        return
+
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+        # nexus-wyu1g: in service mode tier_writes go to the service-backed
+        # telemetry store (Postgres), not local SQLite. Reading the empty local
+        # table here reported a false-clean "no writes seen"; report the
+        # backend honestly instead.
+        click.echo("Tier-discipline check:")
+        click.echo(
+            "  service-backed telemetry (Postgres) — local inspection N/A; "
+            "tier writes are recorded in the nexus-service, not local SQLite."
+        )
         return
 
     conn = _sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only tier_writes inspection
@@ -788,7 +940,7 @@ def _run_check_post_store_hooks() -> None:
       * Smoke after upgrade: does the install factory still wire the
         expected default consumers?
     """
-    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415
+    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance (nexus.hook_registry)
 
     registry = HookRegistry()
     install_default_hooks(registry)
@@ -827,10 +979,10 @@ def _run_check_storage_boundary(
     reads this on each subsequent phase and asserts monotonic
     non-increase across phases.
     """
-    import sys as _sys
-    from pathlib import Path as _Path
+    import sys as _sys  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from pathlib import Path as _Path  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    from nexus.storage_boundary_lint import scan_repo
+    from nexus.storage_boundary_lint import scan_repo  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     log = structlog.get_logger(__name__)
 
@@ -854,7 +1006,7 @@ def _run_check_storage_boundary(
 
     result = scan_repo(repo_root=repo_root)
 
-    from nexus.storage_boundary_lint import CATALOG_CONSTRUCTION_BASELINE
+    from nexus.storage_boundary_lint import CATALOG_CONSTRUCTION_BASELINE  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     catalog_over_baseline = (
         result.catalog_constructions > CATALOG_CONSTRUCTION_BASELINE
@@ -900,7 +1052,7 @@ def _run_check_storage_boundary(
             # RDR-128 P3 (nexus-sbxbe.3): route the phase-metric write
             # through the daemon so `nx doctor` does not open memory.db
             # directly. memory.put is a routable store op.
-            from nexus.mcp_infra import t2_index_write
+            from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
             t2_index_write(
                 lambda db: db.memory.put(
@@ -911,7 +1063,7 @@ def _run_check_storage_boundary(
                     ttl=None,  # permanent
                 )
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — telemetry metric write must not crash the lint check; logged
             log.warning(
                 "storage_boundary_lint_metric_write_failed",
                 error=str(exc),
@@ -947,8 +1099,8 @@ def _run_check_mineru() -> None:
     actionable error before they try to use the feature.
     """
     try:
-        from mineru.cli.common import do_parse  # noqa: PLC0415
-    except Exception as exc:
+        from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
+    except Exception as exc:  # noqa: BLE001 — boundary catch of optional MinerU import failure; surfaced via click.echo
         click.echo(_check("MinerU import", False, f"{type(exc).__name__}: {exc}"))
         click.echo(
             "  ↳ MinerU is required since nexus-2fyb. Reinstall with "
@@ -969,13 +1121,13 @@ def _run_check_mineru() -> None:
     # Optional: surface server-side state. The mineru-api server is opt-in;
     # not running is fine. Just report status.
     try:
-        from nexus.config import get_mineru_server_url  # noqa: PLC0415
+        from nexus.config import get_mineru_server_url  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
         url = get_mineru_server_url()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort config read; falls back to None
         url = None
     if url:
         try:
-            import httpx  # noqa: PLC0415
+            import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
             with httpx.Client(timeout=2.0) as client:
                 r = client.get(f"{url}/health")
             if r.status_code == 200:
@@ -985,7 +1137,7 @@ def _run_check_mineru() -> None:
                     "MinerU server", False,
                     f"{url} returned HTTP {r.status_code}",
                 ))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — boundary catch of health-probe failure; surfaced via click.echo
             click.echo(_check(
                 "MinerU server", False,
                 f"{url} unreachable: {type(exc).__name__}",
@@ -1212,6 +1364,25 @@ def _run_check_mineru() -> None:
          "session-id resolves but the lease is missing or unreachable.",
 )
 @click.option(
+    "--check-t3-legacy-metadata",
+    "check_t3_legacy_metadata",
+    is_flag=True,
+    default=False,
+    help="Survey local (Chroma) T3 collections for chunks still carrying "
+         "legacy doc_id / source_path metadata (RDR-108 Phase 3 retired "
+         "both). Gates removal of the tolerance branches in mcp/core.py, "
+         "indexer_utils.py, search_engine.py. Not applicable in service "
+         "mode. nexus-1714.",
+)
+@click.option(
+    "--strict-legacy-metadata",
+    "strict_legacy_metadata",
+    is_flag=True,
+    default=False,
+    help="Make --check-t3-legacy-metadata exit non-zero when any "
+         "collection still carries legacy metadata (default: warn only).",
+)
+@click.option(
     "--days",
     "days",
     default=30,
@@ -1232,6 +1403,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_post_store_hooks: bool,
                check_aspect_queue: bool,
                check_t1: bool,
+               check_t3_legacy_metadata: bool,
+               strict_legacy_metadata: bool,
                check_tier_discipline: bool,
                check_storage_boundary: bool,
                fail_on_violation: bool,
@@ -1248,7 +1421,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if check_search:
-        from nexus.doctor_search import run_check_search
+        from nexus.doctor_search import run_check_search  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         run_check_search(json_out=json_out)
         return
 
@@ -1292,6 +1465,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         _run_check_aspect_queue()
         return
 
+    if check_t3_legacy_metadata:
+        _run_check_t3_legacy_metadata(strict=strict_legacy_metadata)
+        return
+
     if check_t1:
         _run_check_t1()
         return
@@ -1301,9 +1478,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if fix:
-        from nexus.config import is_local_mode
-        from nexus.db import make_t3
-        from nexus.db.t3 import apply_hnsw_ef
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.db.t3 import apply_hnsw_ef  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         if not is_local_mode():
             click.echo("SPANN defaults adequate — no HNSW tuning needed (cloud mode)")
             return
@@ -1323,7 +1500,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if clean_checkpoints:
-        from nexus.checkpoint import scan_orphaned_checkpoints
+        from nexus.checkpoint import scan_orphaned_checkpoints  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         deleted = scan_orphaned_checkpoints(delete=True)
         if deleted:
             click.echo(f"Deleted {len(deleted)} orphaned checkpoint(s).")
@@ -1332,7 +1509,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if clean_pipelines:
-        from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB
+        from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         if not PIPELINE_DB_PATH.exists():
             click.echo("No pipeline database found.")
             return
@@ -1345,12 +1522,12 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if fix_paths:
-        from nexus.catalog import Catalog
-        from nexus.catalog.catalog import make_relative
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-        from nexus.catalog.tumbler import Tumbler
-        from nexus.config import catalog_path
-        from nexus.db import make_t3
+        from nexus.catalog import Catalog  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.config import catalog_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         cat_p = catalog_path()
         if not Catalog.is_initialized(cat_p):
@@ -1446,7 +1623,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     # ── Health check path — delegates to nexus.health ─────────────────────────
-    from nexus.health import run_health_checks, format_health_for_cli
+    from nexus.health import run_health_checks, format_health_for_cli  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     results, is_local = run_health_checks()
     output, failed = format_health_for_cli(results, local_mode=is_local)
@@ -1467,9 +1644,9 @@ def _probe_semaphore_namespace() -> tuple[bool, str]:
 
     Separated from the CLI handler so tests can monkeypatch it.
     """
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred to keep CLI startup fast
     try:
-        from _multiprocessing import SemLock  # type: ignore[attr-defined]
+        from _multiprocessing import SemLock  # type: ignore[attr-defined]  # noqa: PLC0415 — deferred to keep CLI startup fast
     except ImportError:
         return True, "SemLock probe unavailable on this platform"
     probe_name = f"/nx-doctor-probe-{_os.getpid()}"
@@ -1494,9 +1671,9 @@ def _count_orphan_trackers() -> int | None:
     imminent SemLock failure even when the live probe still passes.
     """
     try:
-        import subprocess
+        import subprocess  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-        from nexus.session import _parse_orphan_tracker_candidates
+        from nexus.session import _parse_orphan_tracker_candidates  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         ps_output = subprocess.check_output(
             ["ps", "-eo", "pid,ppid,etime,command"],
@@ -1504,7 +1681,7 @@ def _count_orphan_trackers() -> int | None:
             stderr=subprocess.DEVNULL,
         )
         return len(_parse_orphan_tracker_candidates(ps_output))
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort helper; returns None on any failure
         return None
 
 
@@ -1605,9 +1782,9 @@ def _run_check_t1() -> None:
       * 0: healthy or "no session-id resolves" (informational).
       * 1: session-id resolves but the lease is absent or unreachable.
     """
-    from nexus.daemon.t1_lease import discover_t1_lease
-    from nexus.mcp.core import _tcp_probe_alive
-    from nexus.session import (
+    from nexus.daemon.t1_lease import discover_t1_lease  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.mcp.core import _tcp_probe_alive  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.session import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         _nexus_config_dir_at_import,
         resolve_active_session_id,
     )
@@ -1683,8 +1860,8 @@ def _collect_quota_report() -> dict:
     counters give operators the most actionable signal — "backed off N
     times, slept Xs total" — without new plumbing.
     """
-    from nexus.db.chroma_quotas import QUOTAS
-    from nexus.retry import get_retry_stats
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.retry import get_retry_stats  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     chromadb_limits = {
         "max_embedding_dimensions": QUOTAS.MAX_EMBEDDING_DIMENSIONS,
@@ -1706,8 +1883,8 @@ def _collect_quota_report() -> dict:
     t3_reachable = False
     t3_detail = ""
     try:
-        from nexus.config import is_local_mode
-        from nexus.db import make_t3
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         if is_local_mode():
             t3_reachable = True
@@ -1716,7 +1893,7 @@ def _collect_quota_report() -> dict:
             make_t3()
             t3_reachable = True
             t3_detail = "cloud tenant reachable"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort T3 probe; failure surfaced in detail string
         t3_detail = f"unreachable: {type(exc).__name__}: {str(exc)[:80]}"
 
     # Embedder limits. In cloud mode the three Voyage models we use
@@ -1725,7 +1902,7 @@ def _collect_quota_report() -> dict:
     # Phase 2: report what's actually embedding, not what the canonical
     # cloud schema would suggest.
     if is_local_mode():
-        from nexus.db.local_ef import (  # noqa: PLC0415
+        from nexus.db.local_ef import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.local_ef)
             LocalEmbeddingFunction,
             local_model_token,
         )
@@ -1764,10 +1941,10 @@ def _collect_quota_report() -> dict:
             "api_key_set": False,
         }
     try:
-        from nexus.config import get_credential
+        from nexus.config import get_credential  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         voyage_limits["api_key_set"] = bool(get_credential("voyage_api_key"))
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort retry-stat read; falls back to defaults
         pass
 
     # Observed retry load — cumulative this process. Zero on fresh
@@ -1776,7 +1953,7 @@ def _collect_quota_report() -> dict:
     retry = dict(get_retry_stats())
 
     # RDR-109 Phase 3: cross-encoder substrate availability + active backend.
-    from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415
+    from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
     cross_encoder_info = {
         "available": cross_encoder_available(),
         "backend": "voyage-rerank-2.5" if not is_local_mode() else "onnx-local",
@@ -1870,9 +2047,9 @@ def _run_check_taxonomy() -> None:
     ``assign_topic`` directly — or a test fixture that seeds rows — will
     silently re-break the invariant. This check detects the drift.
     """
-    import sqlite3
+    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    from nexus.commands._helpers import default_db_path
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -1975,7 +2152,7 @@ def _run_check_quotas(*, json_out: bool = False) -> None:
     report without a client connection is not actionable. Local mode
     and a reachable cloud tenant both exit 0.
     """
-    import json as _json
+    import json as _json  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     report = _collect_quota_report()
     if json_out:

@@ -567,7 +567,7 @@ def synthesize_t3_chunks(
 
     try:
         collections = list(client.list_collections())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort T3 collection list; failure logged via log.warning, synth skipped
         _log.warning("synthesizer_t3_list_collections_failed", error=str(exc))
         return
 
@@ -583,12 +583,12 @@ def synthesize_t3_chunks(
     # page-order (handled inside ``_synthesize_collection_chunks``).
     _cat: Any = None
     try:
-        from nexus.catalog import Catalog as _Catalog
-        from nexus.config import catalog_path as _catalog_path
+        from nexus.catalog import Catalog as _Catalog  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+        from nexus.config import catalog_path as _catalog_path  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
         _cat_path = _catalog_path()
         if _Catalog.is_initialized(_cat_path):
             _cat = _Catalog(_cat_path, _cat_path / ".catalog.db")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog handle; falls back to None, walk continues
         _cat = None
 
     for col in collections:
@@ -603,7 +603,7 @@ def synthesize_t3_chunks(
                 manifest_position_cache=manifest_position_cache,
                 catalog=_cat,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-collection walk must not abort whole synth; logged via log.warning
             _log.warning(
                 "synthesizer_t3_collection_walk_failed",
                 collection=coll_name, error=str(exc),
@@ -645,7 +645,7 @@ def _synthesize_collection_chunks(
         if doc_id not in manifest_position_cache:
             try:
                 rows = _cat.get_manifest(doc_id)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort manifest row fetch; falls back to empty rows
                 rows = []
             # Both 32-char and 64-char chash keys so we can match
             # legacy chunks (full hash) and post-D1 chunks (truncated)
@@ -788,7 +788,7 @@ def build_live_catalog_content_hash_map(
     if not db_path.exists():
         return {}
     mapping: dict[str, str] = {}
-    from nexus.db.t2.catalog import CatalogStore
+    from nexus.db.t2.catalog import CatalogStore  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
 
     store = CatalogStore(db_path)
     try:

@@ -110,6 +110,10 @@ class CatalogRepositoryTest {
                 su.createStatement().execute(
                     "GRANT SELECT ON nexus." + ct + " TO " + SVC_ROLE);
             }
+            // RDR-164 P3: renameCollection re-homes every denorm-collection table in one txn;
+            // grant write broadly so the coherent rename can move children off the old name.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -197,6 +201,37 @@ class CatalogRepositoryTest {
         assertThat(found).isNull();
     }
 
+    @Test @Order(99)
+    void owner_serverSideAllocatesPrefix_whenAbsent() {
+        // nexus-0cy4b: the HTTP client (Catalog.ensure_owner_for_repo) sends NO
+        // tumbler_prefix and expects the server to assign one (the column is
+        // NOT NULL). Fresh tenant -> RLS-clean owner space -> deterministic
+        // 1.1, 1.2, and idempotent reuse by repo_hash.
+        final String T = "cat-tenant-alloc";
+        repo.upsertOwner(T, Map.of(
+            "name", "repoA", "owner_type", "repo", "repo_hash", "hashA",
+            "repo_root", "/x/a"));
+        repo.upsertOwner(T, Map.of(
+            "name", "repoB", "owner_type", "repo", "repo_hash", "hashB",
+            "repo_root", "/x/b"));
+
+        var a = repo.ownerByRepoHash(T, "hashA");
+        var b = repo.ownerByRepoHash(T, "hashB");
+        assertThat(a).isNotNull();
+        assertThat(b).isNotNull();
+        assertThat(a.get("tumbler_prefix")).isEqualTo("1.1");
+        assertThat(b.get("tumbler_prefix")).isEqualTo("1.2");
+
+        // Re-register repoA with no prefix -> idempotent (reuses 1.1, not 1.3).
+        repo.upsertOwner(T, Map.of(
+            "name", "repoA-renamed", "owner_type", "repo", "repo_hash", "hashA",
+            "repo_root", "/x/a"));
+        var a2 = repo.ownerByRepoHash(T, "hashA");
+        assertThat(a2.get("tumbler_prefix")).isEqualTo("1.1");
+        assertThat(a2.get("name")).isEqualTo("repoA-renamed");
+        assertThat(repo.listOwners(T)).hasSize(2);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // DOCUMENTS
     // ══════════════════════════════════════════════════════════════════════════
@@ -263,6 +298,13 @@ class CatalogRepositoryTest {
         var doc = repo.getDocument(TENANT_A, "2.1");
         assertThat(doc.get("title")).isEqualTo("New Title");
         assertThat(doc.get("year")).isEqualTo(2025);
+
+        // RDR-168 nexus-njrcn.7: a "meta" object field must be JSON-encoded into the
+        // jsonb metadata column, not bound as a raw Map (which threw
+        // "LinkedHashMap is not supported in dialect POSTGRES" → 500).
+        int metaUpdated = repo.updateDocument(
+            TENANT_A, "2.1", Map.of("meta", Map.of("content_hash", "abc123")));
+        assertThat(metaUpdated).isEqualTo(1);
     }
 
     @Test @Order(14)
@@ -409,7 +451,9 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "lnk.2", "title", "Link Target",
             "content_type", "paper", "corpus", "knowledge"));
 
-        repo.upsertLink(TENANT_A, Map.of(
+        // RDR-168 nexus-njrcn.3: upsertLink returns true=created on first insert,
+        // false=merged on the ON CONFLICT path (the created-vs-merged signal).
+        boolean created = repo.upsertLink(TENANT_A, Map.of(
             "from_tumbler", "lnk.1",
             "to_tumbler", "lnk.2",
             "link_type", "cites",
@@ -418,7 +462,14 @@ class CatalogRepositoryTest {
             "created_by", "user",
             "created_at", "2026-06-01T00:00:00Z"
         ));
-        var links = repo.linksFrom(TENANT_A, "lnk.1", null);
+        assertThat(created).as("first upsert inserts → created").isTrue();
+        boolean merged = repo.upsertLink(TENANT_A, Map.of(
+            "from_tumbler", "lnk.1", "to_tumbler", "lnk.2", "link_type", "cites",
+            "from_span", "", "to_span", "", "created_by", "user2",
+            "created_at", "2026-06-02T00:00:00Z"
+        ));
+        assertThat(merged).as("second upsert conflicts → merged").isFalse();
+        var links = repo.linksFrom(TENANT_A, "lnk.1", (java.util.List<String>) null);
         assertThat(links).hasSize(1);
         assertThat(links.get(0).get("to_tumbler")).isEqualTo("lnk.2");
         assertThat(links.get(0).get("link_type")).isEqualTo("cites");
@@ -426,7 +477,7 @@ class CatalogRepositoryTest {
 
     @Test @Order(31)
     void link_linksTo() {
-        var links = repo.linksTo(TENANT_A, "lnk.2", null);
+        var links = repo.linksTo(TENANT_A, "lnk.2", (java.util.List<String>) null);
         assertThat(links).hasSize(1);
         assertThat(links.get(0).get("from_tumbler")).isEqualTo("lnk.1");
     }
@@ -441,13 +492,20 @@ class CatalogRepositoryTest {
             "created_by", "user",
             "created_at", "2026-06-01T00:00:00Z"
         ));
-        var citesLinks = repo.linksFrom(TENANT_A, "lnk.1", "cites");
+        var citesLinks = repo.linksFrom(TENANT_A, "lnk.1", java.util.List.of("cites"));
         assertThat(citesLinks).hasSize(1);
         assertThat(citesLinks.get(0).get("link_type")).isEqualTo("cites");
 
-        var implLinks = repo.linksFrom(TENANT_A, "lnk.1", "implements");
+        var implLinks = repo.linksFrom(TENANT_A, "lnk.1", java.util.List.of("implements"));
         assertThat(implLinks).hasSize(1);
         assertThat(implLinks.get(0).get("link_type")).isEqualTo("implements");
+
+        // RDR-168 njrcn.5: server-side IN filter over a SET of link types.
+        var bothTypes = repo.linksFrom(TENANT_A, "lnk.1", java.util.List.of("cites", "implements"));
+        assertThat(bothTypes).hasSize(2);
+        var onlyCites = repo.linksFrom(TENANT_A, "lnk.1", java.util.List.of("cites", "relates"));
+        assertThat(onlyCites).hasSize(1);
+        assertThat(onlyCites.get(0).get("link_type")).isEqualTo("cites");
     }
 
     @Test @Order(33)
@@ -460,10 +518,10 @@ class CatalogRepositoryTest {
             "from_tumbler", "del.1", "to_tumbler", "del.2",
             "link_type", "cites", "created_by", "user", "created_at", "2026-06-01T00:00:00Z"
         ));
-        assertThat(repo.linksFrom(TENANT_A, "del.1", null)).hasSize(1);
+        assertThat(repo.linksFrom(TENANT_A, "del.1", (java.util.List<String>) null)).hasSize(1);
         int deleted = repo.deleteLink(TENANT_A, "del.1", "del.2", "cites");
         assertThat(deleted).isEqualTo(1);
-        assertThat(repo.linksFrom(TENANT_A, "del.1", null)).isEmpty();
+        assertThat(repo.linksFrom(TENANT_A, "del.1", (java.util.List<String>) null)).isEmpty();
     }
 
     @Test @Order(34)
@@ -604,6 +662,88 @@ class CatalogRepositoryTest {
         assertThat(doc.get("chunk_count")).isEqualTo(3);
     }
 
+    // ── nexus-7lm3q: batch manifest/resolve endpoints ────────────────────────
+
+    @Test @Order(55)
+    void manifest_getManifestMany_batchFetchesAllDocs() {
+        // Seed two docs each with two chunks
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.1", "title", "GMM Doc1",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.writeManifest(TENANT_A, "gmm.1", List.of(
+            Map.<String, Object>of("position", 0, "chash", "gmm1aa00000000000000000000000000", "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", "gmm1bb00000000000000000000000000", "chunk_index", 1)
+        ));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.2", "title", "GMM Doc2",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.writeManifest(TENANT_A, "gmm.2", List.of(
+            Map.<String, Object>of("position", 0, "chash", "gmm2cc00000000000000000000000000", "chunk_index", 0)
+        ));
+
+        var result = repo.getManifestMany(TENANT_A, List.of("gmm.1", "gmm.2", "gmm.nonexistent"));
+
+        // Two docs found, one absent (not keyed to empty list)
+        assertThat(result).containsOnlyKeys("gmm.1", "gmm.2");
+        assertThat(result.get("gmm.1")).hasSize(2);
+        assertThat(result.get("gmm.2")).hasSize(1);
+        // Ordered by position within each doc
+        assertThat(result.get("gmm.1").get(0).get("chash")).isEqualTo("gmm1aa00000000000000000000000000");
+        assertThat(result.get("gmm.1").get(1).get("chash")).isEqualTo("gmm1bb00000000000000000000000000");
+        assertThat(result.get("gmm.2").get(0).get("chash")).isEqualTo("gmm2cc00000000000000000000000000");
+    }
+
+    @Test @Order(56)
+    void manifest_getManifestMany_emptyInput_returnsEmptyMap() {
+        var result = repo.getManifestMany(TENANT_A, List.of());
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(56)
+    void manifest_getManifestMany_tenantIsolation() {
+        // nexus-7lm3q review (CR High-1): getManifestMany routes through
+        // withTenant + RLS just like resolveMany; assert a TENANT_B manifest
+        // never leaks into a TENANT_A batch query (mirrors
+        // resolveMany_tenantIsolation @Order 59).
+        repo.upsertDocument(TENANT_B, Map.of("tumbler", "gmmiso.1", "title", "Tenant B Doc",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.writeManifest(TENANT_B, "gmmiso.1", List.of(
+            Map.<String, Object>of("position", 0, "chash", "gmmisob000000000000000000000000a", "chunk_index", 0)
+        ));
+        var result = repo.getManifestMany(TENANT_A, List.of("gmmiso.1"));
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(57)
+    void resolveMany_batchFetchesDocuments() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "rmany.1", "title", "Resolve Many 1",
+            "content_type", "code", "corpus", "code",
+            "file_path", "/src/nexus/search_engine.py"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "rmany.2", "title", "Resolve Many 2",
+            "content_type", "paper", "corpus", "knowledge",
+            "file_path", "/papers/test.pdf"));
+
+        var result = repo.resolveMany(TENANT_A, List.of("rmany.1", "rmany.2", "rmany.absent"));
+
+        assertThat(result).containsOnlyKeys("rmany.1", "rmany.2");
+        assertThat(result.get("rmany.1").get("file_path")).isEqualTo("/src/nexus/search_engine.py");
+        assertThat(result.get("rmany.1").get("content_type")).isEqualTo("code");
+        assertThat(result.get("rmany.2").get("file_path")).isEqualTo("/papers/test.pdf");
+    }
+
+    @Test @Order(58)
+    void resolveMany_emptyInput_returnsEmptyMap() {
+        var result = repo.resolveMany(TENANT_A, List.of());
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(59)
+    void resolveMany_tenantIsolation() {
+        // A doc in TENANT_B must not appear when querying TENANT_A
+        repo.upsertDocument(TENANT_B, Map.of("tumbler", "rmiso.1", "title", "Tenant B Doc",
+            "content_type", "paper", "corpus", "knowledge"));
+        var result = repo.resolveMany(TENANT_A, List.of("rmiso.1"));
+        assertThat(result).isEmpty();
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // COLLECTIONS
     // ══════════════════════════════════════════════════════════════════════════
@@ -719,10 +859,40 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "rn.1", "title", "Rename Test",
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__old__v1"));
-        int updated = repo.renameCollection(TENANT_A, "knowledge__old__v1", "knowledge__new__v1");
-        assertThat(updated).isEqualTo(1); // 1 document updated
+        var counts = repo.renameCollection(TENANT_A, "knowledge__old__v1", "knowledge__new__v1");
+        assertThat(counts.get("catalog_documents")).as("1 document re-homed").isEqualTo(1);
+        assertThat(counts.get("catalog_collections_inserted")).as("registry Y inserted").isEqualTo(1);
+        assertThat(counts.get("catalog_collections_deleted")).as("registry X deleted").isEqualTo(1);
         var doc = repo.getDocument(TENANT_A, "rn.1");
         assertThat(doc.get("physical_collection")).isEqualTo("knowledge__new__v1");
+    }
+
+    @Test @Order(66)
+    void collection_rename_crossModel_targetPreRegistered_repointsDocsNoCollision() {
+        // RDR-162 cross-model migrate is COPY-not-move: the bge-768 TARGET is ALREADY
+        // registered in catalog_collections (the vector upsert pre-registers it so its
+        // chunks' FK is satisfied). Renaming the SOURCE registry row into that name
+        // would collide on the (tenant_id, name) PK -> 500 (the bug the cross-model
+        // ref-remap hit). The rename must instead repoint the catalog documents only,
+        // leaving the (already-correct) target registry row untouched.
+        String src = "knowledge__xmrn__minilm-l6-v2-384__v1";
+        String tgt = "knowledge__xmrn__bge-base-en-v15-768__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "xmrn.1", "title", "Cross-model Rename",
+            "content_type", "knowledge", "corpus", "knowledge",
+            "physical_collection", src));
+        // The target is pre-registered (simulating the vector upsert's auto-registration).
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", tgt, "content_type", "knowledge", "owner_id", "nexus-1-1",
+            "embedding_model", "bge-base-en-v15-768", "model_version", "v1"));
+
+        // Pre-RDR-162 this threw a 500 (PK collision on the registry rename). The cross-model
+        // COPY branch (target exists) repoints catalog_documents only and returns just that key.
+        var counts = repo.renameCollection(TENANT_A, src, tgt);
+        assertThat(counts).as("cross-model branch returns only catalog_documents").containsOnlyKeys("catalog_documents");
+        assertThat(counts.get("catalog_documents")).isEqualTo(1);
+        assertThat(repo.getDocument(TENANT_A, "xmrn.1").get("physical_collection")).isEqualTo(tgt);
+        // The pre-registered target row is intact (not collided, not duplicated).
+        assertThat(repo.getCollection(TENANT_A, tgt)).isNotNull();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -813,7 +983,7 @@ class CatalogRepositoryTest {
         );
         repo.importLink(etlTenant, lnk);
         repo.importLink(etlTenant, lnk); // second import: no error, no duplicate
-        var links = repo.linksFrom(etlTenant, "elA", null);
+        var links = repo.linksFrom(etlTenant, "elA", (java.util.List<String>) null);
         assertThat(links).hasSize(1); // exactly one, not two
     }
 
@@ -2008,5 +2178,116 @@ class CatalogRepositoryTest {
         // IS NULL guard never re-stamps an already-stamped row.
         long second = repo.manifestBackfill(TENANT_MIG);
         assertThat(second).isEqualTo(0L);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SPAN / CHASH RESOLUTION  (nexus-njrcn.4)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private static final String SPAN_TENANT     = "span-tenant-a";
+    // 32-char hex chash — catalog-002-2-chash-checks constraint (RDR-108 D1)
+    private static final String SPAN_CHASH      = "abcd1234abcd1234abcd1234abcd1234";
+    private static final String SPAN_COLLECTION = "knowledge__span__bge-768__v1";
+    private static final String SPAN_DOC_ID     = "span.1";
+
+    /**
+     * Seed: register the collection FK target, then insert a chunk row via raw
+     * SQL (no vector column required when using zero-fill embedding).
+     *
+     * <p>The chunks_768 table has a FK to catalog_collections (COLLECTION col);
+     * we must upsert the collection row BEFORE inserting the chunk.  The catalog_document_chunks
+     * row links chash → doc_id for the resolveChash doc_id assertion.
+     */
+    @Test @Order(210)
+    void resolveSpan_returnsChunkTextAndMetadata() throws Exception {
+        // 1. Register the collection (FK prerequisite).
+        repo.upsertCollection(SPAN_TENANT, Map.of(
+            "name",            SPAN_COLLECTION,
+            "content_type",    "knowledge",
+            "owner_id",        "span-owner",
+            "embedding_model", "bge-base-en-v15-768",
+            "model_version",   "v1"
+        ));
+
+        // 2. Insert a chunk row with a zero-filled 768-dim embedding via raw SQL.
+        //    The embedding column is vector(768): we cast a text literal.
+        try (var su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "SET nexus.tenant = '" + SPAN_TENANT + "'"
+            );
+            // Build a zero-vector literal: '[0,0,...,0]' with 768 zeros.
+            String zeroVec = "[" + "0,".repeat(767) + "0]";
+            var ps = su.prepareStatement(
+                "INSERT INTO nexus.chunks_768"
+                + " (tenant_id, collection, chash, chunk_text, embedding, metadata)"
+                + " VALUES (?, ?, ?, ?, ?::vector, ?::jsonb)"
+                + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING"
+            );
+            ps.setString(1, SPAN_TENANT);
+            ps.setString(2, SPAN_COLLECTION);
+            ps.setString(3, SPAN_CHASH);
+            ps.setString(4, "hello span text");
+            ps.setString(5, zeroVec);
+            ps.setString(6, "{\"lang\":\"en\"}");
+            ps.executeUpdate();
+        }
+
+        // 3. resolveSpan — keyed by (collection, chash).
+        var result = repo.resolveSpan(SPAN_TENANT, SPAN_COLLECTION, SPAN_CHASH);
+        assertThat(result).isNotNull();
+        assertThat(result.get("chunk_text")).isEqualTo("hello span text");
+        assertThat(result.get("chunk_hash")).isEqualTo(SPAN_CHASH);
+        @SuppressWarnings("unchecked")
+        var meta = (Map<String, Object>) result.get("metadata");
+        assertThat(meta).containsEntry("lang", "en");
+    }
+
+    @Test @Order(211)
+    void resolveSpan_miss_returnsNull() {
+        // Query for a chash that does not exist in the collection.
+        var result = repo.resolveSpan(SPAN_TENANT, SPAN_COLLECTION, "0000000000000000000000000000dead");
+        assertThat(result).isNull();
+    }
+
+    @Test @Order(212)
+    void resolveChash_returnsCollectionAndDocId() throws Exception {
+        // Seed a catalog_document_chunks row linking SPAN_CHASH → SPAN_DOC_ID.
+        repo.upsertDocument(SPAN_TENANT, Map.of(
+            "tumbler",      SPAN_DOC_ID,
+            "title",        "Span Test Doc",
+            "content_type", "knowledge",
+            "corpus",       "knowledge",
+            "physical_collection", SPAN_COLLECTION
+        ));
+        repo.writeManifest(SPAN_TENANT, SPAN_DOC_ID, List.of(
+            Map.<String, Object>of("position", 0, "chash", SPAN_CHASH, "chunk_index", 0)
+        ));
+
+        // resolveChash — global lookup with prefer_collection hint.
+        var result = repo.resolveChash(SPAN_TENANT, SPAN_CHASH, SPAN_COLLECTION);
+        assertThat(result).isNotNull();
+        assertThat(result.get("chash")).isEqualTo(SPAN_CHASH);
+        assertThat(result.get("chunk_hash")).isEqualTo(SPAN_CHASH);
+        assertThat(result.get("physical_collection")).isEqualTo(SPAN_COLLECTION);
+        assertThat(result.get("chunk_text")).isEqualTo("hello span text");
+        assertThat(result.get("doc_id")).isEqualTo(SPAN_DOC_ID);
+        @SuppressWarnings("unchecked")
+        var meta = (Map<String, Object>) result.get("metadata");
+        assertThat(meta).containsEntry("lang", "en");
+    }
+
+    @Test @Order(213)
+    void resolveChash_miss_returnsNull() {
+        // Chash that was never inserted — must return null, not throw.
+        var result = repo.resolveChash(SPAN_TENANT, "ffffffff000000000000000000000000", null);
+        assertThat(result).isNull();
+    }
+
+    @Test @Order(214)
+    void resolveChash_tenantIsolation() {
+        // SPAN_CHASH belongs to SPAN_TENANT; querying from another tenant must return null.
+        var result = repo.resolveChash(TENANT_B, SPAN_CHASH, null);
+        assertThat(result).isNull();
     }
 }

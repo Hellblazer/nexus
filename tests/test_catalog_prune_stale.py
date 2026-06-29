@@ -88,7 +88,7 @@ def _register(
 
 
 def test_rdr_prefix_of_extracts_three_digit_id() -> None:
-    from nexus.commands.catalog import _rdr_prefix_of
+    from nexus.commands.catalog_cmds.remediation import _rdr_prefix_of
 
     assert _rdr_prefix_of("rdr-066-enrichment-time.md") == "rdr-066-"
     assert _rdr_prefix_of("rdr-090-bench.md") == "rdr-090-"
@@ -97,13 +97,13 @@ def test_rdr_prefix_of_extracts_three_digit_id() -> None:
 
 def test_rdr_prefix_of_handles_four_digit_id() -> None:
     """RDR numbering may extend past 999; the regex must accept 3+ digits."""
-    from nexus.commands.catalog import _rdr_prefix_of
+    from nexus.commands.catalog_cmds.remediation import _rdr_prefix_of
 
     assert _rdr_prefix_of("rdr-1042-future.md") == "rdr-1042-"
 
 
 def test_rdr_prefix_of_returns_empty_for_non_rdr() -> None:
-    from nexus.commands.catalog import _rdr_prefix_of
+    from nexus.commands.catalog_cmds.remediation import _rdr_prefix_of
 
     assert _rdr_prefix_of("paper.pdf") == ""
     assert _rdr_prefix_of("README.md") == ""

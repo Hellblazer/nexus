@@ -4,10 +4,12 @@
 
 Extracts all existing ``ALTER TABLE`` / FTS-rebuild migrations from domain
 stores into module-level functions, each accepting ``sqlite3.Connection``.
-A version-gated runner (``apply_pending``) executes only the migrations
-introduced between the last-seen CLI version and the current version.
+A registry-gated runner (``apply_pending``) executes every migration
+introduced AFTER the last-seen CLI version (lower bound only; RDR-170). The
+``current_version`` argument is used for the post-run version stamp and the
+downgrade guard, NOT as an upper bound on which migrations run.
 
-RDR-076 (nexus-6cn).
+RDR-076 (nexus-6cn). RDR-170 (nexus-j25po).
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -153,6 +156,56 @@ class Migration:
     introduced: str  # package version that introduced this migration
     name: str  # human-readable description
     fn: Callable[[sqlite3.Connection], None]  # idempotent, module-level function
+    #: RDR-142 P1.1 (nexus-aaz1r): optional READ-ONLY precondition classifier.
+    #: Returns whether this step WOULD succeed / defer / gate, WITHOUT any DDL
+    #: or row writes — the resolver primitive that lets ``nx upgrade --dry-run``
+    #: and ``nx doctor --check-schema`` tell the truth about deferred/gated work.
+    #: Steps with no defer/gate path leave this ``None`` (treated as would-succeed).
+    precondition: Callable[[sqlite3.Connection], "PreconditionVerdict"] | None = None
+
+
+# ── RDR-142 P1.1: read-only migration step-resolver primitive ────────────────
+
+
+class StepOutcome(str, Enum):
+    """What a pending migration step WOULD do if ``apply_pending`` ran now."""
+
+    WOULD_SUCCEED = "would-succeed"
+    WOULD_DEFER = "would-defer"   # raises MigrationRetry (non-fatal; retried next open)
+    WOULD_GATE = "would-gate"     # raises MigrationError (fatal; needs operator action)
+
+
+@dataclass(frozen=True)
+class PreconditionVerdict:
+    """Return type of a :class:`Migration` precondition classifier."""
+
+    outcome: StepOutcome
+    detail: str = ""        # human reason (for defer/gate)
+    remediation: str = ""   # operator next-step (for gate)
+    #: A WOULD_GATE that ``apply_pending`` may clear automatically (e.g. the
+    #: aspect_extraction_queue undrained gate — the real wrapper attempts
+    #: ``drain_worker`` first). Consumers should present these as informational
+    #: ("run nx aspects drain"), NOT as a hard blocking failure.
+    informational: bool = False
+
+
+@dataclass(frozen=True)
+class StepResolution:
+    """One entry from :func:`resolve_pending_steps` — a step + its read-only verdict."""
+
+    name: str
+    introduced: str
+    outcome: StepOutcome
+    detail: str = ""
+    remediation: str = ""
+    informational: bool = False
+    #: True when the step is in ``apply_pending``'s eligible set (``introduced >
+    #: last_seen``) — i.e. it WILL run on the next upgrade / daemon start. False
+    #: for supplementary :func:`resolve_blocking_steps` entries whose version gate
+    #: has already passed: ``apply_pending`` will NOT re-run them; a non-succeed
+    #: verdict there signals an incomplete table state with RUNTIME impact, not a
+    #: next-start crash.
+    eligible: bool = True
 
 
 # ── Module-level migration functions ────────────────────────────────────────
@@ -710,14 +763,21 @@ def migrate_hook_failures_batch_columns(conn: sqlite3.Connection) -> None:
     if row is None:
         return
     cols = {r[1] for r in conn.execute("PRAGMA table_info(hook_failures)").fetchall()}
+    changed = False
     if "batch_doc_ids" not in cols:
         conn.execute("ALTER TABLE hook_failures ADD COLUMN batch_doc_ids TEXT")
+        changed = True
     if "is_batch" not in cols:
         conn.execute(
             "ALTER TABLE hook_failures ADD COLUMN is_batch INTEGER NOT NULL DEFAULT 0"
         )
-    conn.commit()
-    _log.info("Migrated: hook_failures.batch_doc_ids + is_batch (RDR-095)")
+        changed = True
+    # Commit + log only on an actual schema change: record_hook_failure calls
+    # this on every write, so an unconditional commit/log would spam the
+    # structured log with spurious "Migrated" events (nexus-9613q review H1).
+    if changed:
+        conn.commit()
+        _log.info("Migrated: hook_failures.batch_doc_ids + is_batch (RDR-095)")
 
 
 def migrate_hook_failures_chain_column(conn: sqlite3.Connection) -> None:
@@ -765,8 +825,11 @@ def migrate_hook_failures_chain_column(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE hook_failures SET chain='batch' WHERE is_batch=1"
             )
-    conn.commit()
-    _log.info("Migrated: hook_failures.chain enum column (RDR-089)")
+        # Commit + log only on an actual schema change: record_hook_failure
+        # calls this on every write, so an unconditional commit/log would spam
+        # the structured log with spurious "Migrated" events (nexus-9613q H1).
+        conn.commit()
+        _log.info("Migrated: hook_failures.chain enum column (RDR-089)")
 
 
 def migrate_document_aspects_table(conn: sqlite3.Connection) -> None:
@@ -1500,44 +1563,38 @@ def _backfill_doc_ids_via_catalog(
     conn.commit()
 
 
-def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
-    """Raise ``MigrationError`` if any non-fixture collection has >threshold
-    unmapped rows (doc_id still '').
+def _high_volume_orphan_threshold() -> int:
+    """OBS-4: the high-volume-orphan gate threshold, read from
+    ``NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD`` (default
+    ``_HIGH_VOLUME_ORPHAN_THRESHOLD`` = 10) on every call.
 
-    OBS-4: Threshold read from ``NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD`` env
-    var (default ``_HIGH_VOLUME_ORPHAN_THRESHOLD`` = 10) on every call so
-    operators can lower it for small installs without rebuilding.
-
-    SIG-4: The error message includes a ``nx catalog rename-collection`` command
-    template per orphan collection so operators have an actionable next step.
+    RDR-142 P1.1: shared by the real gate (:func:`_check_high_volume_orphans`)
+    and the read-only resolver classifier so the two cannot drift on the cutoff.
     """
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
-    threshold = int(
+    return int(
         _os.environ.get(
             "NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD",
             str(_HIGH_VOLUME_ORPHAN_THRESHOLD),
         )
     )
 
-    rows = conn.execute(f"""
-        SELECT collection, COUNT(*) AS n
-        FROM {table}
-        WHERE doc_id = ''
-        GROUP BY collection
-        HAVING n > {threshold}
-        ORDER BY n DESC
-    """).fetchall()
 
-    if not rows:
-        return
+def _orphan_gate_message(rows: list, *, table: str) -> str:
+    """SIG-4: build the operator-facing high-volume-orphan gate message.
 
+    RDR-142 P1.1: shared by the real gate and the resolver classifier so the
+    remediation text the operator sees is identical whether it comes from a
+    crashed ``apply_pending`` or a ``--dry-run`` / ``--check-schema`` report.
+    *rows* is a list of ``(collection, n)`` pairs.
+    """
     detail = "; ".join(f"{coll} ({n} rows)" for coll, n in rows)
     remediation_lines = "\n".join(
         f"  nx catalog rename-collection {coll} <new-collection-name> --yes"
         for coll, _ in rows
     )
-    raise MigrationError(
+    return (
         f"RDR-108 Phase 1c: {table} has high-volume unmapped orphan collection(s): "
         f"{detail}.\n"
         f"\n"
@@ -1554,6 +1611,28 @@ def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
         f"the gate threshold for this run:\n"
         f"   NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD=100000 nx upgrade"
     )
+
+
+def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
+    """Raise ``MigrationError`` if any collection has >threshold unmapped rows
+    (``doc_id`` still ``''``).
+
+    RDR-142 P1.1: the cutoff (:func:`_high_volume_orphan_threshold`) and the
+    operator message (:func:`_orphan_gate_message`) are shared with the
+    read-only resolver classifier so the gate and its prediction cannot drift.
+    """
+    threshold = _high_volume_orphan_threshold()
+    rows = conn.execute(f"""
+        SELECT collection, COUNT(*) AS n
+        FROM {table}
+        WHERE doc_id = ''
+        GROUP BY collection
+        HAVING n > {threshold}
+        ORDER BY n DESC
+    """).fetchall()
+    if not rows:
+        return
+    raise MigrationError(_orphan_gate_message(rows, table=table))
 
 
 def _hard_delete_unmapped(conn: sqlite3.Connection, *, table: str) -> int:
@@ -1902,7 +1981,7 @@ def _catalog_db_path_from_conn(conn: sqlite3.Connection) -> Path:
             return config_dir / "catalog" / ".catalog.db"
 
     # Fallback: use NEXUS_CONFIG_DIR env or default
-    import os
+    import os  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
     override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
     if override:
         return Path(override) / "catalog" / ".catalog.db"
@@ -1998,15 +2077,313 @@ def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None
     # Attempt to drain in-flight rows before the drain precondition check.
     # Imports lazily to avoid a circular import at module load time.
     try:
-        import nexus.aspect_worker as _aw  # noqa: PLC0415
+        import nexus.aspect_worker as _aw  # noqa: PLC0415 — circular-dep avoidance (nexus.aspect_worker)
         memory_path = catalog_path.parent.parent / "memory.db"
         _aw.drain_worker(memory_path, timeout=30)
-    except Exception as _drain_err:  # noqa: BLE001
+    except Exception as _drain_err:  # noqa: BLE001 — best-effort pre-drain; failure logged via _log.warning and the drain precondition check proceeds
         _log.warning(
             "migrate_aspect_queue_drain_attempt_failed",
             error=str(_drain_err),
         )
     migrate_aspect_extraction_queue_pk_to_doc_id(conn, catalog_db_path=catalog_path)
+
+
+# ── RDR-142 P1.1: read-only precondition classifiers + resolver ──────────────
+#
+# Each classifier runs the SAME probes the real migration fn runs (catalog
+# presence, PRAGMA table_info, drain COUNT, orphan COUNT) but does NO DDL and NO
+# row writes — it reports a verdict instead of mutating or raising. The real fn
+# and the classifier share the gate cutoff + message helpers; an agreement test
+# (tests/test_rdr142_step_resolver.py) runs both on identical fixtures and
+# asserts the verdicts match, the load-bearing anti-drift guard.
+
+
+def _predict_orphan_collections_readonly(
+    conn: sqlite3.Connection, *, table: str, catalog_db_path: Path
+) -> "list[tuple[str, int]]":
+    """READ-ONLY prediction of the high-volume-orphan gate.
+
+    Mirrors :func:`_backfill_doc_ids_via_catalog` (Pass 1 direct match + Pass 2
+    one-hop ``collections.superseded_by``) as a ``NOT EXISTS`` SELECT counting,
+    per collection, the rows that WOULD remain unmapped — without running the
+    backfill UPDATEs. Returns ``[(collection, n), ...]`` for collections over
+    the shared threshold, or ``[]``. Considers only rows the backfill would
+    consider (``doc_id = ''`` when the column exists; all rows otherwise).
+    """
+    threshold = _high_volume_orphan_threshold()
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    # Restrict to backfill-considered rows, exactly as the real passes do.
+    unmapped_clause = "t.doc_id = ''" if "doc_id" in cols else "1=1"
+    _attach_catalog(conn, catalog_db_path)
+    try:
+        try:
+            rows = conn.execute(f"""
+                SELECT t.collection, COUNT(*) AS n
+                FROM {table} t
+                WHERE {unmapped_clause}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM cat_db.documents d
+                      WHERE t.collection = d.physical_collection
+                        AND t.source_path = d.file_path
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM cat_db.documents d
+                      JOIN cat_db.collections c
+                        ON d.physical_collection = c.superseded_by
+                      WHERE c.superseded_by != ''
+                        AND c.name = t.collection
+                        AND d.file_path = t.source_path
+                  )
+                GROUP BY t.collection
+                HAVING n > {threshold}
+                ORDER BY n DESC
+            """).fetchall()
+        except sqlite3.OperationalError as exc:
+            _log.warning(
+                "orphan_predict_catalog_join_fallback",
+                table=table,
+                error=str(exc),
+                note="catalog schema unusable for the accurate JOIN; using conservative unmapped-row count (may over-count mappable rows)",
+            )
+            # Catalog missing the expected documents/collections schema (corrupt
+            # / partially-initialised). Rather than crash the READ-ONLY resolver —
+            # which would make ``nx upgrade --dry-run`` / ``--check-schema`` fail
+            # where they should report — fall back to the legacy simple
+            # unmapped-row count (the pre-resolver ``_check_deferred_migrations``
+            # probe). Over-counts mappable rows but never crashes; a well-formed
+            # catalog takes the accurate JOIN above.
+            rows = conn.execute(f"""
+                SELECT t.collection, COUNT(*) AS n
+                FROM {table} t
+                WHERE {unmapped_clause}
+                GROUP BY t.collection
+                HAVING n > {threshold}
+                ORDER BY n DESC
+            """).fetchall()
+    finally:
+        _detach_catalog(conn)
+    return rows
+
+
+def _precondition_document_aspects_pk(conn: sqlite3.Connection) -> "PreconditionVerdict":
+    """Read-only verdict for ``_migrate_document_aspects_pk_via_apply_pending``.
+
+    Order: already-migrated / table-absent → would-succeed FIRST (a completed or
+    nonexistent table is done regardless of catalog presence — checking catalog
+    first would falsely report a migrated-but-catalog-absent table as deferred,
+    and such a table is never in apply_pending's eligible set anyway). Then
+    catalog-absent → defer, then the orphan gate — mirroring the real wrapper for
+    every UNMIGRATED-table state (where catalog-absent does defer).
+    """
+    if _is_already_migrated(conn, table="document_aspects"):
+        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
+    if not cols:
+        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)  # table absent → no-op
+    catalog_path = _catalog_db_path_from_conn(conn)
+    if not catalog_path.exists():
+        return PreconditionVerdict(
+            StepOutcome.WOULD_DEFER,
+            detail=f"catalog absent — retry deferred until catalog exists: {catalog_path}",
+        )
+    orphans = _predict_orphan_collections_readonly(
+        conn, table="document_aspects", catalog_db_path=catalog_path
+    )
+    if orphans:
+        return PreconditionVerdict(
+            StepOutcome.WOULD_GATE,
+            detail="; ".join(f"{c} ({n} rows)" for c, n in orphans),
+            remediation=_orphan_gate_message(orphans, table="document_aspects"),
+        )
+    return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+
+
+def _precondition_aspect_queue_pk(conn: sqlite3.Connection) -> "PreconditionVerdict":
+    """Read-only verdict for ``_migrate_aspect_queue_pk_via_apply_pending``.
+
+    Order: already-migrated / table-absent → would-succeed first (see the
+    document_aspects classifier), then catalog-absent → defer, then the undrained
+    gate (read-only COUNT, no drain), then the orphan gate.
+    """
+    if _is_already_migrated(conn, table="aspect_extraction_queue"):
+        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(aspect_extraction_queue)").fetchall()}
+    if not cols:
+        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+    catalog_path = _catalog_db_path_from_conn(conn)
+    if not catalog_path.exists():
+        return PreconditionVerdict(
+            StepOutcome.WOULD_DEFER,
+            detail=f"catalog absent — retry deferred until catalog exists: {catalog_path}",
+        )
+    # Undrained gate: the real wrapper attempts a drain FIRST, so this is a SOFT
+    # gate — apply_pending may clear it automatically. Marked informational so the
+    # dry-run presents "run nx aspects drain", not a hard BLOCKED failure.
+    actionable = conn.execute(
+        "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
+    ).fetchone()
+    if (actionable[0] if actionable else 0) > 0:
+        return PreconditionVerdict(
+            StepOutcome.WOULD_GATE,
+            detail=f"{actionable[0]} pending/in_progress queue row(s) — not drained",
+            remediation="apply_pending attempts drain_worker(timeout=30) first; run 'nx aspects drain' if it persists",
+            informational=True,
+        )
+    orphans = _predict_orphan_collections_readonly(
+        conn, table="aspect_extraction_queue", catalog_db_path=catalog_path
+    )
+    if orphans:
+        return PreconditionVerdict(
+            StepOutcome.WOULD_GATE,
+            detail="; ".join(f"{c} ({n} rows)" for c, n in orphans),
+            remediation=_orphan_gate_message(orphans, table="aspect_extraction_queue"),
+        )
+    return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+
+
+def _precondition_drop_source_path(conn: sqlite3.Connection) -> "PreconditionVerdict":
+    """Read-only verdict for ``migrate_drop_source_path_column``.
+
+    Ordering mirrors the real fn: column-presence no-op → bad-source_uri gate →
+    source_path-in-PK defer.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
+    if not cols or "source_path" not in cols:
+        return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+    bad = conn.execute(
+        "SELECT COUNT(*) FROM document_aspects WHERE source_uri IS NULL OR source_uri = ''"
+    ).fetchone()[0]
+    if bad > 0:
+        return PreconditionVerdict(
+            StepOutcome.WOULD_GATE,
+            detail=f"{bad} row(s) with NULL/empty source_uri would become unaddressable",
+            remediation="run `nx aspects backfill-source-uri --apply`, then re-run nx upgrade",
+        )
+    pk_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()
+        if r[5] > 0
+    }
+    if "source_path" in pk_cols:
+        return PreconditionVerdict(
+            StepOutcome.WOULD_DEFER,
+            detail="source_path still in PRIMARY KEY — defer until je0b has run",
+        )
+    return PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+
+
+def _read_only_stored_version(conn: sqlite3.Connection) -> str:
+    """Read the recorded ``_nexus_version.cli_version`` WITHOUT writing.
+
+    Unlike :func:`bootstrap_version` (which CREATEs tables + seeds the row), the
+    resolver must be side-effect-free, so it reads directly and defaults to
+    ``0.0.0`` when the version table/row is absent (a not-yet-bootstrapped DB —
+    on which every registered step is trivially pending).
+    """
+    try:
+        row = conn.execute(
+            "SELECT value FROM _nexus_version WHERE key='cli_version'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return "0.0.0"  # _nexus_version table absent
+    return row[0] if row else "0.0.0"
+
+
+def resolve_pending_steps(
+    conn: sqlite3.Connection, current_version: str, *, last_seen: str | None = None
+) -> "list[StepResolution]":
+    """READ-ONLY report of which pending migration steps would succeed/defer/gate.
+
+    RDR-142 P1.1 (nexus-aaz1r). Iterates the SAME eligible set ``apply_pending``
+    uses — ``introduced > last_seen`` (lower bound only; RDR-170 dropped the
+    upper bound). For each eligible step it runs the step's read-only
+    precondition (or reports would-succeed when a step has none). Performs NO
+    DDL and NO row writes.
+
+    KNOWN DIVERGENCE — aspect_extraction_queue undrained gate: the real wrapper
+    attempts ``drain_worker(timeout=30)`` BEFORE the drain-count check, so a
+    queue with in-flight rows that the worker clears would actually SUCCEED. The
+    classifier never drains (read-only), so it reports WOULD_GATE on the current
+    non-empty state. A consumer (e.g. the future ``--dry-run`` rewire) should
+    present this as informational — "run ``nx aspects drain``" — not a hard
+    failure, to avoid crying wolf on every upgrade window with an active worker.
+
+    ``current_version`` does NOT cap the eligible set (RDR-170 made the upper
+    bound vacuous); it is accepted for signature stability with ``apply_pending``
+    and possible future use. ``last_seen`` overrides the stored version when the
+    caller already knows it (e.g. ``nx upgrade --force`` resets it to ``0.0.0``
+    to preview a full re-migration); when ``None`` it is read READ-ONLY from
+    ``_nexus_version`` (defaulting to ``0.0.0`` on an uninitialised DB, so every
+    registered step reports as pending — the set ``apply_pending`` would attempt).
+    """
+    _ = current_version  # intentionally not used for gating (see docstring)
+    effective = last_seen if last_seen is not None else _read_only_stored_version(conn)
+    last_seen_t = _parse_version(effective)
+    out: list[StepResolution] = []
+    for m in MIGRATIONS:
+        if _parse_version(m.introduced) > last_seen_t:
+            verdict = (
+                m.precondition(conn)
+                if m.precondition is not None
+                else PreconditionVerdict(StepOutcome.WOULD_SUCCEED)
+            )
+            out.append(
+                StepResolution(
+                    name=m.name,
+                    introduced=m.introduced,
+                    outcome=verdict.outcome,
+                    detail=verdict.detail,
+                    remediation=verdict.remediation,
+                    informational=verdict.informational,
+                    eligible=True,
+                )
+            )
+    return out
+
+
+def resolve_blocking_steps(
+    conn: sqlite3.Connection, current_version: str, *, last_seen: str | None = None
+) -> "list[StepResolution]":
+    """READ-ONLY report for ``nx upgrade --dry-run`` (RDR-142 P2.1): the
+    version-eligible steps (:func:`resolve_pending_steps`) PLUS any
+    precondition-bearing step that is NOT version-eligible but whose read-only
+    precondition still reports would-defer / would-gate.
+
+    The second set is the table-state safety the pre-resolver
+    ``_check_deferred_migrations`` stopgap provided: a defer/gate step whose
+    table is in an incomplete state (legacy PK, high-volume orphans, undrained
+    queue, ``source_path`` still present) even though the version row has
+    advanced past it. Such a step is not re-run by ``apply_pending``'s
+    version-gated loop, but it signals genuine incomplete migration work the
+    operator must see — so dry-run coverage never regresses below the stopgap.
+
+    Best-effort on the supplementary probe: a precondition that cannot evaluate
+    against an unusual / partial schema is skipped rather than crashing the
+    read-only dry-run.
+    """
+    eligible = resolve_pending_steps(conn, current_version, last_seen=last_seen)
+    seen = {s.name for s in eligible}
+    out = list(eligible)
+    for m in MIGRATIONS:
+        if m.precondition is None or m.name in seen:
+            continue
+        try:
+            verdict = m.precondition(conn)
+        except Exception as exc:  # noqa: BLE001 — supplementary state probe is best-effort; a precondition that cannot evaluate on a partial schema is skipped, not fatal to the read-only dry-run
+            _log.debug("resolve_blocking_state_probe_skipped", name=m.name, error=str(exc))
+            continue
+        if verdict.outcome != StepOutcome.WOULD_SUCCEED:
+            out.append(
+                StepResolution(
+                    name=m.name,
+                    introduced=m.introduced,
+                    outcome=verdict.outcome,
+                    detail=verdict.detail,
+                    remediation=verdict.remediation,
+                    informational=verdict.informational,
+                    eligible=False,  # version gate passed → runtime impact, not a next-start crash
+                )
+            )
+    return out
 
 
 MIGRATIONS: list[Migration] = [
@@ -2157,11 +2534,13 @@ MIGRATIONS: list[Migration] = [
         "4.30.0",
         "RDR-108 Phase 1c: PK switch document_aspects to doc_id (nexus-je0b)",
         _migrate_document_aspects_pk_via_apply_pending,
+        precondition=_precondition_document_aspects_pk,
     ),
     Migration(
         "4.30.0",
         "RDR-108 Phase 1c: PK switch aspect_extraction_queue to doc_id (nexus-je0b)",
         _migrate_aspect_queue_pk_via_apply_pending,
+        precondition=_precondition_aspect_queue_pk,
     ),
     # nexus-6xp2 reland of nexus-ocu9.11: drop document_aspects.source_path.
     # DocumentAspects.upsert/get/delete/list/rename_collection now branch
@@ -2173,6 +2552,7 @@ MIGRATIONS: list[Migration] = [
         "4.31.0",
         "RDR-096 P5.2: drop document_aspects.source_path column (nexus-ocu9.11)",
         migrate_drop_source_path_column,
+        precondition=_precondition_drop_source_path,
     ),
     Migration(
         "4.32.1",
@@ -2242,10 +2622,10 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
 
     RDR-075 RF-11.  Idempotent via ``INSERT OR IGNORE`` in ``assign_topic``.
     """
-    import sys
-    import time
+    import sys  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
+    import time  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
-    import structlog
+    import structlog  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     log = structlog.get_logger()
 
@@ -2255,7 +2635,7 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
         return
 
     n = len(collections)
-    print(
+    print(  # noqa: T201 — long-running upgrade progress to stderr; structured event emitted via log.info below
         f"  Backfilling projection across {n} collections "
         f"(~{n * (n - 1)} projection calls).",
         file=sys.stderr,
@@ -2285,27 +2665,27 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
                 )
             total_assigned += len(assignments)
             elapsed = time.monotonic() - t0
-            print(
+            print(  # noqa: T201 — long-running upgrade progress to stderr (per-collection tick)
                 f"  [{i}/{n}] {src}: "
                 f"{result.get('total_chunks', 0)} chunks, "
                 f"{len(result.get('matched_topics', []))} matches, "
                 f"{len(assignments)} attempted ({elapsed:.1f}s)",
                 file=sys.stderr,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — per-collection backfill must not abort migration; logged via log.warning
             log.warning("backfill_projection_collection_failed",
                         collection=src, exc_info=True)
-            print(f"  [{i}/{n}] {src}: SKIPPED ({type(e).__name__})",
+            print(f"  [{i}/{n}] {src}: SKIPPED ({type(e).__name__})",  # noqa: T201 — upgrade progress to stderr; structured event via log.warning above
                   file=sys.stderr)
 
     # Generate co-occurrence links from the new projection assignments
-    print("  Generating co-occurrence topic links...", file=sys.stderr)
+    print("  Generating co-occurrence topic links...", file=sys.stderr)  # noqa: T201 — long-running upgrade progress to stderr
     try:
         link_count = taxonomy.generate_cooccurrence_links()
-        print(f"  Generated {link_count} co-occurrence links.", file=sys.stderr)
-    except Exception:
+        print(f"  Generated {link_count} co-occurrence links.", file=sys.stderr)  # noqa: T201 — long-running upgrade progress to stderr
+    except Exception:  # noqa: BLE001 — co-occurrence link gen is best-effort; logged via log.warning
         log.warning("backfill_cooccurrence_failed", exc_info=True)
-        print("  Co-occurrence link generation: SKIPPED", file=sys.stderr)
+        print("  Co-occurrence link generation: SKIPPED", file=sys.stderr)  # noqa: T201 — upgrade progress to stderr; structured event via log.warning above
 
     total_elapsed = time.monotonic() - total_start
     # Count actual rows written (INSERT OR IGNORE deduplicates; the per-call
@@ -2316,7 +2696,7 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
         actual_written = taxonomy.conn.execute(
             "SELECT COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'"
         ).fetchone()[0]
-    print(
+    print(  # noqa: T201 — long-running upgrade progress to stderr; structured event emitted via log.info below
         f"  Backfill complete: {actual_written} projection assignments stored "
         f"({total_assigned} attempted) in {total_elapsed:.1f}s across {n} collections.",
         file=sys.stderr,
@@ -2333,22 +2713,40 @@ T3_UPGRADES: list[T3UpgradeStep] = [
 # ── Constants ───────────────────────────────────────────────────────────────
 
 def expected_t2_schema_version() -> str:
-    """Return the T2 schema version this client was built against.
+    """Return the highest T2 schema version this client's code can produce.
 
     RDR-120 P3b (nexus-e9x4l): T2Client surfaces this to the daemon
     during the connection handshake; the daemon compares against the
     schema version recorded in its own ``_nexus_version`` row and
-    fails loud on mismatch. Derived from the installed ``conexus``
-    package version (the same source ``apply_pending`` uses to gate
-    pending migrations) so client + daemon agree by construction
-    when running the same wheel.
+    fails loud on mismatch.
+
+    RDR-170: this is ``max(package_version, max(MIGRATIONS introduced))`` —
+    the **registry**, not the package string, is the authority on the schema
+    this code can produce. On a frozen / ahead-of-release branch (e.g. develop
+    pinned at ``5.10.6`` while the registry already carries an ``introduced=
+    5.10.7`` step) the package version understates the schema ``apply_pending``
+    actually applies and stamps. Reporting the registry max keeps the daemon
+    stamp, the client↔daemon handshake (``t2_client._do_handshake``), and the
+    cold-start fast path (``_cold_start_is_current_and_wal``) in agreement.
+
+    Same-wheel client and daemon read the identical ``MIGRATIONS`` list and so
+    compute the identical value — the RDR-120 P3b "agree when running the same
+    wheel" invariant is preserved, just sourced from the registry. A genuinely
+    older wheel computes a lower registry max and still mismatches a newer
+    daemon, so cross-wheel skew detection is intact. On a released build, where
+    ``package_version >= registry_max``, this is a no-op.
     """
     try:
-        from importlib.metadata import version as _pkg_version
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
-        return _pkg_version("conexus")
-    except Exception:
-        return "0.0.0"
+        pkg = _pkg_version("conexus")
+    except Exception:  # noqa: BLE001 — best-effort version read; falls back to 0.0.0
+        pkg = "0.0.0"
+    # Version-aware max — NOT string max ("5.5.0" > "5.10.7" lexically).
+    registry_max = max(
+        (m.introduced for m in MIGRATIONS), key=_parse_version, default="0.0.0"
+    )
+    return registry_max if _parse_version(registry_max) > _parse_version(pkg) else pkg
 
 
 PRE_REGISTRY_VERSION = "4.1.2"
@@ -2475,7 +2873,15 @@ def bootstrap_version(conn: sqlite3.Connection) -> str:
 
 
 def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
-    """Run all migrations introduced between last-seen and *current_version*.
+    """Run every migration introduced AFTER last-seen (lower bound only).
+
+    RDR-170: ``current_version`` is NOT an upper bound on which migrations
+    execute — it is used only for the post-run ``_nexus_version`` stamp and the
+    downgrade guard. The ``MIGRATIONS`` registry ships in the same wheel as this
+    runner (a client can never hold a registered migration newer than its own
+    code), so an upper bound only ever fired on a frozen / ahead-of-release
+    branch, where it WRONGLY suppressed a migration whose implementation is
+    present (nexus-j25po).
 
     Idempotent — every migration function has column/table-existence guards.
 
@@ -2488,7 +2894,7 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     entered under the released lock would see the path as "done" and
     proceed against a half-initialised schema (storage review C-1).
     """
-    import time as _time
+    import time as _time  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     path_key = _connection_path_key(conn)
     with _upgrade_lock:
@@ -2516,7 +2922,15 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
         any_skipped = False
         for m in MIGRATIONS:
             m_ver = _parse_version(m.introduced)
-            if m_ver > last_seen_t and m_ver <= current_t:
+            # RDR-170: gate on the lower bound ONLY. The MIGRATIONS registry
+            # ships in the same wheel as this runner, so a client can never hold
+            # a registered migration newer than its own code; the old upper
+            # bound (``m_ver <= current_t``) therefore only ever fired on a
+            # frozen / ahead-of-release branch (e.g. develop pinned below the
+            # next release), where it WRONGLY suppressed a migration whose
+            # implementation is present and intended to run. ``current_version``
+            # is retained only for the post-run version stamp + guards below.
+            if m_ver > last_seen_t:
                 _t_step = _time.monotonic()
                 _log.info(
                     "migration_step_start",
@@ -2587,7 +3001,7 @@ def _connection_path_key(conn: sqlite3.Connection) -> str:
     ``Path.resolve()`` to match the canonicalisation used by
     ``T2Database.__init__()`` and ``_run_upgrade()``.
     """
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     row = conn.execute("PRAGMA database_list").fetchone()
     if row and row[2]:
@@ -2617,10 +3031,10 @@ def _create_base_tables(conn: sqlite3.Connection) -> None:
     Lazy imports avoid circular dependencies between migrations.py and
     domain store modules.
     """
-    from nexus.db.t2.catalog_taxonomy import _TAXONOMY_SCHEMA_SQL
-    from nexus.db.t2.memory_store import _MEMORY_SCHEMA_SQL
-    from nexus.db.t2.plan_library import _PLANS_SCHEMA_SQL
-    from nexus.db.t2.telemetry import _TELEMETRY_SCHEMA_SQL
+    from nexus.db.t2.catalog_taxonomy import _TAXONOMY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
+    from nexus.db.t2.memory_store import _MEMORY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
+    from nexus.db.t2.plan_library import _PLANS_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
+    from nexus.db.t2.telemetry import _TELEMETRY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     conn.executescript(_MEMORY_SCHEMA_SQL)
     conn.executescript(_PLANS_SCHEMA_SQL)

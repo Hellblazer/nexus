@@ -14,19 +14,17 @@ CHROMA INTERACTION NOTE (RDR-152 P2.4):
     The taxonomy PG migration handles only the *relational* tables: topics,
     taxonomy_meta, topic_assignments, topic_links.
 
-    Chroma operations remain Python-side:
-    - The ``taxonomy__centroids`` ChromaDB collection (centroid vectors) is
-      NOT migrated to PG in this bead.  Phase 3 (Seam B) will address the
-      vector-store surface.
-    - ``delete_topic`` and ``merge_topics`` return the collection name so the
-      *caller* (CatalogTaxonomy or the orchestrator) can still call
-      ``chroma_client.get_collection(name).delete(...)`` against the centroid
-      collection locally.
-    - ``assign_topic`` never touches Chroma — centroid assignment is purely
-      relational (doc_id ↔ topic_id + similarity score).
-    - All callers that need to clean Chroma centroid rows after a delete/merge
-      must continue to do so from Python.  This store does NOT suppress the
-      Chroma half; it simply does not duplicate it.
+    Centroid vectors live in the service-backed centroid store (the pgvector
+    ``/v1/taxonomy/centroids`` routes, RDR-156 nexus-t1hnc), reached lazily via
+    ``self._centroid``:
+    - ``delete_topic`` and ``merge_topics`` self-clean the affected topic's
+      centroid via ``self._centroid.delete_ids(collection, [topic_id])`` after
+      the relational write (nexus-cugrk). This replaces the earlier "return the
+      collection name so the caller removes the centroid" contract, which leaked
+      orphan centroids that kept attracting chunks (ghost assignments to deleted
+      topics). The collection name is still returned for compatibility.
+    - ``assign_topic`` never touches the centroid store — centroid assignment is
+      purely relational (doc_id ↔ topic_id + similarity score).
 
 Interface parity (bead nexus-gmiaf.14, RDR-152 P2.4):
     get_topics, get_all_topics, get_topic_by_id, resolve_label,
@@ -70,7 +68,8 @@ DEFAULT_TENANT: str = "default"
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 
 
 def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
@@ -92,7 +91,7 @@ def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
 # ── HttpTaxonomyStore ──────────────────────────────────────────────────────────
 
 
-class HttpTaxonomyStore:
+class HttpTaxonomyStore(RawHandleGuardMixin):
     """CatalogTaxonomy drop-in that delegates to the RDR-152 Java HTTP service.
 
     Uses a keep-alive :class:`httpx.Client` connection pool.  Reads
@@ -123,8 +122,7 @@ class HttpTaxonomyStore:
                     )
             self._base_url = base_url.rstrip("/")
         else:
-            host, port, token = _resolve_config()
-            self._base_url = f"http://{host}:{port}"
+            self._base_url, token = _resolve_endpoint()
             _token = token
 
         self._tenant = tenant
@@ -149,7 +147,7 @@ class HttpTaxonomyStore:
     def _centroid(self) -> Any:
         """The service-backed centroid port (lazy; shares this store's config)."""
         if self._centroid_store is None:
-            from nexus.db.t2.http_centroid_store import HttpCentroidStore
+            from nexus.db.t2.http_centroid_store import HttpCentroidStore  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
             self._centroid_store = HttpCentroidStore(
                 base_url=self._base_url, tenant=self._tenant, _token=self._token,
@@ -282,29 +280,60 @@ class HttpTaxonomyStore:
         """Update review_status."""
         self._post("/topics/mark_reviewed", {"topic_id": topic_id, "status": status})
 
+    def _delete_centroid(self, collection: str, topic_id: int) -> None:
+        """Best-effort removal of a topic's centroid from the service-backed
+        centroid store (nexus-cugrk).
+
+        Leaving the orphan centroid behind keeps it attracting chunks in
+        ``project_against`` / ``assign_single`` until the next full rebuild —
+        persistent ghost assignments to a topic the user just deleted/merged.
+        Self-cleaning here closes that leak for every caller, replacing the
+        Chroma-era "caller removes the centroid" contract.
+
+        Failures are logged, never raised: the relational delete/merge has
+        already committed, and raising post-commit would surface a confusing
+        error for a non-authoritative side effect. The trade-off is that a
+        centroid-store outage during this window silently leaks the orphan —
+        it is cleared only by a subsequent full rebuild that purges-then-
+        recomputes the collection's centroids (not guaranteed to run soon), so
+        the failure is logged at WARNING with a traceback to keep the leak
+        detectable via log scraping.
+        """
+        try:
+            deleted = self._centroid.delete_ids(collection, [topic_id])
+            _log.debug(
+                "http_taxonomy_store.centroid_cleanup",
+                collection=collection, topic_id=topic_id, deleted=deleted,
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort side effect
+            _log.warning(
+                "http_taxonomy_store.centroid_cleanup_failed",
+                collection=collection, topic_id=topic_id, error=str(exc),
+                exc_info=True,
+            )
+
     def delete_topic(self, topic_id: int, *, chroma_client: Any = None) -> str | None:
-        """Delete a topic (relational tables only).
+        """Delete a topic, its assignments, and its centroid.
 
-        Returns the collection name for chroma centroid cleanup.
+        Deletes the relational rows via the service, then removes the topic's
+        centroid from the service-backed centroid store (nexus-cugrk) so it
+        stops attracting chunks. Returns the collection name.
 
-        CHROMA BOUNDARY: the caller is responsible for removing centroid
-        vectors from the ``taxonomy__centroids`` ChromaDB collection using
-        the returned collection name.  This store only handles the PG side.
+        The ``chroma_client`` parameter is retained for signature parity with
+        :class:`CatalogTaxonomy` but is unused on the service path — the
+        centroid lives in the pgvector centroid store, not Chroma.
         """
         try:
             r = self._post("/topics/delete", {"topic_id": topic_id})
             collection = r.get("collection")
-            _log.debug(
-                "http_taxonomy_store.delete_topic",
-                topic_id=topic_id,
-                collection=collection,
-                chroma_cleanup_required=chroma_client is not None,
-            )
-            return collection
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return None
             raise
+        _log.debug("http_taxonomy_store.delete_topic", topic_id=topic_id, collection=collection)
+        if collection:
+            self._delete_centroid(collection, topic_id)
+        return collection
 
     def merge_topics(
         self,
@@ -313,19 +342,32 @@ class HttpTaxonomyStore:
         *,
         chroma_client: Any = None,
     ) -> str | None:
-        """Merge source topic into target (relational tables only).
+        """Merge source topic into target, deleting the source and its centroid.
 
-        Returns the source topic's collection name for chroma centroid cleanup.
+        Reassigns the source's docs to the target via the service, then removes
+        the SOURCE topic's centroid from the service-backed centroid store
+        (nexus-cugrk) — the source no longer exists, so its centroid must not
+        keep attracting chunks. The target's centroid is left untouched,
+        matching the local-store behaviour: it still reflects the target's
+        pre-merge doc set and is only recomputed on the next full rebuild, so
+        the merged target is in a stale attract-state until then. Not
+        recomputing here is the accepted trade-off (cheap, consistent with the
+        existing design) — an immediate recompute would need the merged
+        embeddings this relational-only path does not have.
 
-        CHROMA BOUNDARY: same as ``delete_topic``.
+        Returns the source topic's collection name. ``chroma_client`` is unused
+        on the service path (see :meth:`delete_topic`).
         """
         try:
             r = self._post("/topics/merge", {"source_id": source_id, "target_id": target_id})
-            return r.get("collection")
+            collection = r.get("collection")
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return None
             raise
+        if collection:
+            self._delete_centroid(collection, source_id)
+        return collection
 
     # ── Assignments ────────────────────────────────────────────────────────────
 
@@ -862,7 +904,7 @@ class HttpTaxonomyStore:
                 self.persist_cross_links(
                     self.compute_cross_links(collection_name, new_centroids, new_metas)
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
                 _log.debug("discover_cross_links_failed", exc_info=True)
 
         self.record_discover_count(collection_name, len(doc_ids))
@@ -924,6 +966,80 @@ class HttpTaxonomyStore:
         self.record_discover_count(collection_name, len(doc_ids))
         return len(topic_ids)
 
+    @staticmethod
+    def _svc_fetch_by_ids(t3: Any, collection: str, doc_ids: list[str]):
+        """Fetch (ids, texts, embeddings) for specific doc_ids via the service.
+
+        nexus-9pqoj. Texts come from the service store-get (`stub.get(ids=...)`),
+        embeddings server-side via `t3.get_embeddings` (the collection's native
+        space). Returns the aligned subset that resolved; ``embeddings`` is
+        ``None`` when the service could not align vectors to the fetched ids
+        (count skew → refuse rather than mis-pair).
+        """
+        stub = t3.get_or_create_collection(collection)
+        ids: list[str] = []
+        texts: list[str] = []
+        _PAGE = 250
+        for i in range(0, len(doc_ids), _PAGE):
+            batch = doc_ids[i:i + _PAGE]
+            # The service store-get path ignores `include` and always returns
+            # the full {ids, documents, metadatas} envelope (VectorHandler P4a.2,
+            # nexus-1k8s1); we pass include for intent only.
+            res = stub.get(ids=batch, include=["documents"])
+            for fid, fdoc in zip(res.get("ids") or [], res.get("documents") or []):
+                if fdoc:
+                    ids.append(fid)
+                    texts.append(fdoc)
+        if not ids:
+            return [], [], None
+        embs = t3.get_embeddings(collection, ids)
+        if embs is None or len(embs) != len(ids):
+            _log.warning(
+                "taxonomy_svc_fetch_by_ids_misalign",
+                collection=collection, want=len(ids),
+                got=0 if embs is None else len(embs),
+            )
+            return ids, texts, None
+        return ids, texts, np.asarray(embs, dtype=np.float32)
+
+    @staticmethod
+    def _svc_fetch_all_embeddings(t3: Any, collection: str):
+        """Fetch (ids, embeddings) for ALL chunks in a collection via the service.
+
+        nexus-9pqoj — the project source-side equivalent of
+        :meth:`_svc_fetch_by_ids`. Returns ``(ids, None)`` on count skew.
+        """
+        try:
+            n = t3.count(collection)
+        except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
+            return [], None
+        if n == 0:
+            return [], np.empty((0, 0), dtype=np.float32)
+        stub = t3.get_or_create_collection(collection)
+        ids: list[str] = []
+        offset = 0
+        _PAGE = 300
+        while offset < n:
+            page = stub.get(include=[], limit=_PAGE, offset=offset)
+            pids = page.get("ids") or []
+            if not pids:
+                break
+            ids.extend(pids)
+            offset += len(pids)
+            if len(pids) < _PAGE:
+                break
+        if not ids:
+            return [], np.empty((0, 0), dtype=np.float32)
+        embs = t3.get_embeddings(collection, ids)
+        if embs is None or len(embs) != len(ids):
+            _log.warning(
+                "taxonomy_svc_fetch_all_misalign",
+                collection=collection, want=len(ids),
+                got=0 if embs is None else len(embs),
+            )
+            return ids, None
+        return ids, np.asarray(embs, dtype=np.float32)
+
     def split_topic(
         self,
         topic_id: int,
@@ -937,7 +1053,7 @@ class HttpTaxonomyStore:
         HYBRID: chunk text reads stay on chroma_client (T3); centroids via port.
         Returns the number of children created (0 on any short-circuit).
         """
-        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         if k < 2:
             return 0
@@ -949,27 +1065,42 @@ class HttpTaxonomyStore:
             return 0
 
         collection_name = topic["collection"]
-        try:
-            coll = chroma_client.get_collection(collection_name, embedding_function=None)
-        except Exception:
-            _log.warning("split_collection_not_found", collection=collection_name)
-            return 0
 
-        _PAGE = 250
-        fetched_ids: list[str] = []
-        texts: list[str] = []
-        for i in range(0, len(doc_ids), _PAGE):
-            batch = doc_ids[i:i + _PAGE]
-            result = coll.get(ids=batch, include=["documents"])
-            for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
-                if fdoc:
-                    fetched_ids.append(fid)
-                    texts.append(fdoc)
-        if len(texts) < k:
-            return 0
+        # nexus-9pqoj: service-backed source reads. When the handle is the
+        # HttpVectorClient (service-mode CLI), pull the topic's STORED vectors
+        # via the service — NOT a MiniLM-384 re-embed, because parent and child
+        # centroids must share the collection's bge-768 / voyage space for ANN
+        # assignment to work. Raw chroma handles keep the legacy re-embed path.
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        embeddings = np.array(ef(texts), dtype=np.float32)
+        if is_service_backed(chroma_client):
+            fetched_ids, texts, embeddings = self._svc_fetch_by_ids(
+                chroma_client, collection_name, doc_ids,
+            )
+            if not fetched_ids or len(texts) < k or embeddings is None:
+                return 0
+        else:
+            try:
+                coll = chroma_client.get_collection(collection_name, embedding_function=None)
+            except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
+                _log.warning("split_collection_not_found", collection=collection_name)
+                return 0
+
+            _PAGE = 250
+            fetched_ids = []
+            texts = []
+            for i in range(0, len(doc_ids), _PAGE):
+                batch = doc_ids[i:i + _PAGE]
+                result = coll.get(ids=batch, include=["documents"])
+                for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
+                    if fdoc:
+                        fetched_ids.append(fid)
+                        texts.append(fdoc)
+            if len(texts) < k:
+                return 0
+
+            ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+            embeddings = np.array(ef(texts), dtype=np.float32)
 
         split_result = self.compute_split(
             topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
@@ -1019,29 +1150,46 @@ class HttpTaxonomyStore:
             "matched_topics": [], "novel_chunks": [],
             "total_chunks": 0, "total_centroids": 0,
         }
-        # 1. Source chunk embeddings from T3 (chroma_client), paginated.
-        try:
-            src_coll = chroma_client.get_collection(source_collection, embedding_function=None)
-        except Exception:
-            return dict(_empty)
-        _PAGE = 300
-        src_ids: list[str] = []
-        src_emb_pages: list[np.ndarray] = []
-        offset = 0
-        while True:
-            page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
-            page_ids = page.get("ids", [])
-            page_embs = page.get("embeddings")
-            if not page_ids or page_embs is None:
-                break
-            src_ids.extend(page_ids)
-            src_emb_pages.append(np.array(page_embs, dtype=np.float32))
-            if len(page_ids) < _PAGE:
-                break
-            offset += _PAGE
-        if not src_ids:
-            return dict(_empty)
-        src_embs = np.concatenate(src_emb_pages)
+        # 1. Source chunk embeddings. nexus-9pqoj: via the service when the
+        # handle is the HttpVectorClient (the stub's get() drops embeddings, so
+        # we must use get_embeddings); raw chroma keeps the legacy include path.
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+        if is_service_backed(chroma_client):
+            src_ids, src_embs = self._svc_fetch_all_embeddings(
+                chroma_client, source_collection,
+            )
+            # nexus-9pqoj S1: distinguish an INCOMPLETE fetch (service could not
+            # align embeddings to ids) from a legitimately empty collection.
+            # Silent-zero on a fetch failure looks like 'no matches' to the user;
+            # flag it so the CLI surfaces it (feedback_no_silent_fallbacks).
+            if src_embs is None:
+                return {**_empty, "incomplete_fetch": True}
+            if not src_ids or src_embs.size == 0:
+                return dict(_empty)
+        else:
+            try:
+                src_coll = chroma_client.get_collection(source_collection, embedding_function=None)
+            except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
+                return dict(_empty)
+            _PAGE = 300
+            src_ids = []
+            src_emb_pages: list[np.ndarray] = []
+            offset = 0
+            while True:
+                page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
+                page_ids = page.get("ids", [])
+                page_embs = page.get("embeddings")
+                if not page_ids or page_embs is None:
+                    break
+                src_ids.extend(page_ids)
+                src_emb_pages.append(np.array(page_embs, dtype=np.float32))
+                if len(page_ids) < _PAGE:
+                    break
+                offset += _PAGE
+            if not src_ids:
+                return dict(_empty)
+            src_embs = np.concatenate(src_emb_pages)
 
         # 2. Target centroids from the centroid-port ($in target_collections).
         ctr_raw: list[list[float]] = []
@@ -1362,7 +1510,7 @@ class HttpTaxonomyStore:
         computes quantiles and stopword matching Python-side for exact parity
         with CatalogTaxonomy.audit_collection.
         """
-        from nexus.corpus import default_projection_threshold
+        from nexus.corpus import default_projection_threshold  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         resolved_threshold = (
             threshold if threshold is not None

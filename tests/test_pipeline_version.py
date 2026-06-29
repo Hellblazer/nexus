@@ -163,3 +163,26 @@ def test_doctor_pipeline_sweep_retired_on_service_handle():
     assert "sweep retired with the Chroma serving path" in result.output
     # The sweep must not report a failure for what is a deliberate retire.
     assert "check failed" not in result.output
+
+
+def test_stamp_collection_version_noop_on_service_stub() -> None:
+    """nexus-kwkkz: a service-backed collection has no Chroma `modify`; stamping
+    must no-op instead of raising AttributeError (it crashed `nx index repo`)."""
+    from nexus.indexer import stamp_collection_version
+
+    class _ServiceStub:  # no `modify`, like _ServiceCollectionStub
+        metadata = {}
+
+    stamp_collection_version(_ServiceStub())  # must not raise
+
+
+def test_stamp_collection_version_calls_modify_when_available() -> None:
+    from unittest.mock import MagicMock
+    from nexus.indexer import stamp_collection_version, PIPELINE_VERSION
+
+    col = MagicMock()
+    col.metadata = {"existing": "v"}
+    stamp_collection_version(col)
+    col.modify.assert_called_once_with(
+        metadata={"existing": "v", "pipeline_version": PIPELINE_VERSION}
+    )

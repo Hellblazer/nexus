@@ -56,7 +56,7 @@ class TestUpgradeAdvisory:
             patch("nexus.commands.upgrade._db_path", return_value=db_path),
             patch("nexus.commands.upgrade.T3_UPGRADES", []),
             patch(
-                "nexus.commands.catalog._run_name_vs_embed_dim",
+                "nexus.commands.catalog_cmds.doctor._run_name_vs_embed_dim",
                 return_value=clean_report,
             ),
         ):
@@ -87,7 +87,7 @@ class TestUpgradeAdvisory:
             patch("nexus.commands.upgrade._db_path", return_value=db_path),
             patch("nexus.commands.upgrade.T3_UPGRADES", []),
             patch(
-                "nexus.commands.catalog._run_name_vs_embed_dim",
+                "nexus.commands.catalog_cmds.doctor._run_name_vs_embed_dim",
                 return_value=dirty_report,
             ),
         ):
@@ -116,7 +116,7 @@ class TestUpgradeAdvisory:
             patch("nexus.commands.upgrade._db_path", return_value=db_path),
             patch("nexus.commands.upgrade.T3_UPGRADES", []),
             patch(
-                "nexus.commands.catalog._run_name_vs_embed_dim",
+                "nexus.commands.catalog_cmds.doctor._run_name_vs_embed_dim",
                 return_value=dirty_report,
             ),
         ):
@@ -139,7 +139,7 @@ class TestUpgradeAdvisory:
             patch("nexus.commands.upgrade._db_path", return_value=db_path),
             patch("nexus.commands.upgrade.T3_UPGRADES", []),
             patch(
-                "nexus.commands.catalog._run_name_vs_embed_dim",
+                "nexus.commands.catalog_cmds.doctor._run_name_vs_embed_dim",
                 side_effect=_boom,
             ),
         ):

@@ -28,10 +28,10 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Set up GraalVM JDK 25
-        uses: graalvm/setup-graalvm@v1
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
         with:
           java-version: '25'
           distribution: 'graalvm'
@@ -43,7 +43,7 @@ jobs:
         # all-MiniLM-L6-v2 model from ~/.cache/chroma. Mirror the SAME
         # cache key as ci.yml (the Python suite) so this Java-only runner
         # restores the model the Python workflow already downloaded.
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ~/.cache/chroma
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -68,30 +68,12 @@ jobs:
             echo "ONNX model restored from cache."
           fi
 
-      - name: Cache bge-768 ONNX model
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # RDR-160: Bge768ParityTest (the parity go/no-go gate) loads the STANDARD
         # fp32 bge ONNX; priming it here makes the gate RUN on CI instead of
-        # skipping. STABLE key (immutable upstream export) — one cold download,
-        # restored thereafter, shared with the native-smoke job.
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/nexus/onnx_models/bge-base-en-v1.5
-          key: bge-onnx-standard-${{ runner.os }}-v1
-
-      - name: Prime bge-768 ONNX on cache miss
-        run: |
-          MODEL_DIR="$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx"
-          if [ ! -f "$MODEL_DIR/model.onnx" ]; then
-            echo "bge ONNX not in cache; downloading the standard fp32 export (~416MB)."
-            mkdir -p "$MODEL_DIR"
-            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx \
-              -o "$MODEL_DIR/model.onnx"
-            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json \
-              -o "$MODEL_DIR/tokenizer.json"
-            test -f "$MODEL_DIR/model.onnx" || { echo "bge model.onnx missing after download"; exit 1; }
-          else
-            echo "bge ONNX restored from cache."
-          fi
+        # skipping. Centralised in .github/actions/prime-bge-onnx (self-hosted
+        # release asset, no HuggingFace 429 dependency).
+        uses: ./.github/actions/prime-bge-onnx
 
       # jOOQ codegen now runs INSIDE the build (bead nexus-9qvam): the
       # testcontainers-jooq-codegen-maven-plugin generates into
@@ -116,10 +98,10 @@ jobs:
     timeout-minutes: 40
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Set up GraalVM 25.0.3
-        uses: graalvm/setup-graalvm@v1
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
         with:
           # >= 25.0.2 REQUIRED: the bundled jOOQ 3.20.0 / liquibase reachability
           # metadata use GraalVM's unified reachability-metadata SCHEMA, which
@@ -129,32 +111,12 @@ jobs:
           distribution: 'graalvm'
           cache: 'maven'
 
-      - name: Cache bge-768 ONNX model
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # RDR-160: in local mode the native binary constructs Bge768Embedder,
         # which loads the STANDARD fp32 bge-base-en-v1.5 ONNX from
-        # ~/.cache/nexus (NOT MiniLM, NOT fastembed's fused optimized export).
-        # STABLE key — the model is an immutable upstream export, so it
-        # downloads ONCE on a cold cache and restores on every later run; bump
-        # the -v suffix only if the model SOURCE changes.
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/nexus/onnx_models/bge-base-en-v1.5
-          key: bge-onnx-standard-${{ runner.os }}-v1
-
-      - name: Prime bge-768 ONNX on cache miss
-        run: |
-          MODEL_DIR="$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx"
-          if [ ! -f "$MODEL_DIR/model.onnx" ]; then
-            echo "bge ONNX not in cache; downloading the standard fp32 export (~416MB)."
-            mkdir -p "$MODEL_DIR"
-            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx \
-              -o "$MODEL_DIR/model.onnx"
-            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json \
-              -o "$MODEL_DIR/tokenizer.json"
-            test -f "$MODEL_DIR/model.onnx" || { echo "bge model.onnx missing after download"; exit 1; }
-          else
-            echo "bge ONNX restored from cache."
-          fi
+        # ~/.cache/nexus. Centralised in .github/actions/prime-bge-onnx
+        # (self-hosted release asset, no HuggingFace 429 dependency).
+        uses: ./.github/actions/prime-bge-onnx
 
       - name: Build native image
         working-directory: service

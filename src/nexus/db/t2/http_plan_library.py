@@ -41,13 +41,14 @@ DEFAULT_TENANT: str = "default"
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 
 
 # ── HttpPlanLibrary ────────────────────────────────────────────────────────────
 
 
-class HttpPlanLibrary:
+class HttpPlanLibrary(RawHandleGuardMixin):
     """PlanLibrary drop-in that delegates to the RDR-152 Java HTTP service.
 
     Uses a keep-alive :class:`httpx.Client` connection pool. Reads
@@ -77,8 +78,7 @@ class HttpPlanLibrary:
                     )
             self._base_url = base_url.rstrip("/")
         else:
-            host, port, token = _resolve_config()
-            self._base_url = f"http://{host}:{port}"
+            self._base_url, token = _resolve_endpoint()
             _token = token
 
         self._tenant = tenant
@@ -133,7 +133,7 @@ class HttpPlanLibrary:
         verb/name/scope in Python), this client sends ``match_text`` built
         here so the service stores the correct FTS payload.
         """
-        from nexus.db.t2.plan_library import (
+        from nexus.db.t2.plan_library import (  # noqa: PLC0415 — deferred to avoid circular import (plan_library)
             _synthesize_match_text,
             _infer_scope_tags,
             _normalize_scope_string,
@@ -400,7 +400,7 @@ class HttpPlanLibrary:
             return
         try:
             detail = resp.json().get("error", resp.text)
-        except Exception:
+        except Exception:  # noqa: BLE001 — error-body decode best-effort; fall back to resp.text before re-raise
             detail = resp.text
         raise httpx.HTTPStatusError(
             f"HttpPlanLibrary.{op} failed: HTTP {resp.status_code}: {detail}",

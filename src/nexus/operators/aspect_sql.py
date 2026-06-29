@@ -194,7 +194,7 @@ def _is_service_mode() -> bool:
     Used by ``try_filter`` and by the ``_query_*`` SQL-execution helpers to
     pick the HTTP service path (nexus-l9hd8) vs the local SQLite path.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
     return storage_backend_for("document_aspects") == StorageBackend.SERVICE
 
 
@@ -206,8 +206,8 @@ def _get_http_aspects_client():
 
     Tenant resolution order: ``NX_SERVICE_TENANT`` env → ``"default"``.
     """
-    import os
-    from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
+    import os  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+    from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — deferred to avoid circular import
     tenant = os.environ.get("NX_SERVICE_TENANT", "default")
     return HttpDocumentAspectsStore(tenant=tenant)
 
@@ -539,9 +539,9 @@ def _query_filter(
     URI on the way back. The rationale's ``id`` field stays as the
     source_path string for caller back-compat.
     """
-    from nexus.aspect_readers import uri_for
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import
 
     pred_sql, pred_params = _build_filter_predicate(field, query)
 
@@ -562,7 +562,7 @@ def _query_filter(
     matches: dict[tuple[str, str], bool] = {}
     uris: dict[tuple[str, str], str] = {}
     if ident_to_uri:
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
         if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
             # nexus-l9hd8: service mode — call the real HTTP endpoint.
             # The predicate pattern mirrors _build_filter_predicate output;
@@ -593,7 +593,7 @@ def _query_filter(
             # Batch in 300s to leave plenty of headroom under SQLite's
             # 999-param default cap.
             with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-                conn = db.document_aspects.conn
+                conn = db.document_aspects.conn  # epsilon-allow: SQLite-only branch; service path handled above via storage_backend_for (nexus-l9hd8)
                 uri_list = list(ident_to_uri.values())
                 for chunk_start in range(0, len(uri_list), 300):
                     batch = uri_list[chunk_start:chunk_start + 300]
@@ -637,8 +637,8 @@ def _query_groupby(
     idents: list[tuple[str, str]], field: str,
 ) -> dict[str, list[tuple[str, str]]]:
     """Execute the groupby SQL. Return {key_value: [idents]}."""
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import
 
     if field.startswith("extras."):
         extras_key = field[len("extras."):]
@@ -657,7 +657,7 @@ def _query_groupby(
     # (collection, source_path) for back-compat; derive each ident's
     # URI via ``aspect_readers.uri_for`` and use the URI for both
     # the WHERE and the round-trip mapping.
-    from nexus.aspect_readers import uri_for
+    from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred to avoid circular import
 
     groups: dict[str, list[tuple[str, str]]] = {}
     fetched: dict[tuple[str, str], Any] = {}
@@ -670,7 +670,7 @@ def _query_groupby(
         ident_to_uri[(c, sp)] = u
         uri_to_ident[u] = (c, sp)
 
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
         # nexus-l9hd8: service mode — call the real HTTP endpoint.
         _log.debug("aspect_sql.groupby_service_path", field=field)
@@ -689,7 +689,7 @@ def _query_groupby(
                 fetched[ident] = uri_to_value[u]
     else:
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-            conn = db.document_aspects.conn
+            conn = db.document_aspects.conn  # epsilon-allow: SQLite-only branch; service path handled above via storage_backend_for (nexus-l9hd8)
             uri_list = list(ident_to_uri.values())
             for chunk_start in range(0, len(uri_list), 300):
                 batch = uri_list[chunk_start:chunk_start + 300]
@@ -737,8 +737,8 @@ def _query_confidence_aggregate(
     across batches and divides at the end (single pass, exact
     arithmetic on floats).
     """
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import
 
     op_map = {
         "avg_confidence": "AVG",
@@ -751,7 +751,7 @@ def _query_confidence_aggregate(
     # nexus-ocu9.11: source_path column dropped; key the WHERE on
     # source_uri. Confidence aggregate doesn't need the round-trip
     # mapping (it folds into a scalar), so we just collect URIs.
-    from nexus.aspect_readers import uri_for
+    from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred to avoid circular import
 
     sum_acc = 0.0
     count_acc = 0
@@ -764,7 +764,7 @@ def _query_confidence_aggregate(
         if u:
             uris_for_query.append(u)
 
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
         # nexus-l9hd8: service mode — call the real HTTP endpoint.
         _log.debug("aspect_sql.confidence_aggregate_service_path", reducer_kind=reducer_kind)
@@ -781,7 +781,7 @@ def _query_confidence_aggregate(
         finally:
             client.close()
     with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-        conn = db.document_aspects.conn
+        conn = db.document_aspects.conn  # epsilon-allow: SQLite-only branch; service path handled above via storage_backend_for (nexus-l9hd8)
         for chunk_start in range(0, len(uris_for_query), 300):
             batch = uris_for_query[chunk_start:chunk_start + 300]
             placeholders = ",".join(["?"] * len(batch))

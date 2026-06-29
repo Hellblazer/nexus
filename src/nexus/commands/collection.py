@@ -22,7 +22,7 @@ def _doc_id_to_file_path(doc_id: str) -> str:
     returns "" and the caller treats the chunk as sourceless.
     """
     try:
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         cat = make_catalog_reader()
         if cat is None:
@@ -31,7 +31,7 @@ def _doc_id_to_file_path(doc_id: str) -> str:
         if entry is None:
             return ""
         return entry.file_path or ""
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort metadata read for display; empty string on any failure
         return ""
 
 
@@ -62,9 +62,9 @@ def info_cmd(name: str) -> None:
     if match is None:
         raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
 
-    from nexus.config import is_local_mode
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     if is_local_mode():
-        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         ef = LocalEmbeddingFunction()
         query_model = idx_model = f"{ef.model_name} (local)"
     else:
@@ -108,7 +108,7 @@ def delete_cmd(name: str, yes: bool) -> None:
     # with the 384->768 migration so both leave the same clean state.
     # nexus-lub: a T3 delete may find the collection already absent (a prior
     # half-delete); the cascade still runs to clean the orphan rows.
-    from nexus.db.collection_purge import purge_collection_cascade
+    from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     cascade = purge_collection_cascade(_t3(), name)
     if cascade.t3_absent:
@@ -236,10 +236,10 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
 @click.option("--force", is_flag=True, help="Force reindex even if sourceless entries exist")
 def reindex_cmd(name: str, force: bool) -> None:
     """Delete and re-index a collection from its source files."""
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
-    from nexus.db.t3 import verify_collection_deep
-    from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf
+    from nexus.db.t3 import verify_collection_deep  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     db = _t3()
 
@@ -272,9 +272,9 @@ def reindex_cmd(name: str, force: bool) -> None:
     # Build a one-shot catalog handle for the manifest fallback.
     _cat = None
     try:
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         _cat = make_catalog_reader()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort chash index probe; falls through to per-chunk path
         pass
     while True:
         batch = col.get(limit=300, offset=offset, include=["metadatas"])
@@ -289,7 +289,7 @@ def reindex_cmd(name: str, force: bool) -> None:
         if _cat is not None and page_chashes_nonempty:
             try:
                 by_chash = _cat.docs_for_chashes(page_chashes_nonempty)
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort batch chash resolution; empty map on failure
                 by_chash = {}
             for c, doc_ids in by_chash.items():
                 if doc_ids:
@@ -382,7 +382,7 @@ def reindex_cmd(name: str, force: bool) -> None:
                 batch_index_markdowns(
                     rdr_files, corpus=corpus, collection_name=name, force=True
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — boundary catch surfacing re-index failure to user via click.echo + Exit
                 click.echo(
                     f"Re-indexing failed: {exc}\n"
                     f"Collection '{name}' was deleted. Re-run 'nx collection reindex {name}' "
@@ -404,7 +404,7 @@ def reindex_cmd(name: str, force: bool) -> None:
                 else:
                     index_markdown(p, corpus=corpus, collection_name=name, force=True)
                 indexed += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — per-file re-index failure surfaced as warning; loop continues
                 click.echo(f"  Warning: failed to re-index {p.name}: {exc}", err=True)
 
     else:
@@ -436,7 +436,7 @@ def reindex_cmd(name: str, force: bool) -> None:
                 f" (distance: {result.distance:.4f})" if result.distance is not None else ""
             )
             click.echo(f"Verify: {result.status}{dist_str}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — verify failure surfaced to user via click.echo, non-fatal
             click.echo(f"Verify failed: {exc}", err=True)
 
     # GH #369: run the same post-processing chain ``nx index repo``
@@ -450,7 +450,7 @@ def reindex_cmd(name: str, force: bool) -> None:
     # point.
     if indexed > 0:
         try:
-            from nexus.commands.index import run_collection_postprocessing
+            from nexus.commands.index import run_collection_postprocessing  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
             # Resolve repo_path from the registry when available so the
             # L1 context refresh fires; falls back to ``None`` for
             # collections with no registered owner (the L1 step is the
@@ -462,8 +462,8 @@ def reindex_cmd(name: str, force: bool) -> None:
             # has no row for this collection (pre-Phase-1.5a installs).
             repo_path: Path | None = None
             try:
-                from nexus.catalog.factory import make_catalog_reader
-                from nexus.config import nexus_config_dir
+                from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+                from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
                 cat = make_catalog_reader()
                 if cat is not None:
                     # nexus-xnz0o: replaced two chained _db.execute calls with
@@ -475,7 +475,7 @@ def reindex_cmd(name: str, force: bool) -> None:
                 if repo_path is None:
                     # Fallback: legacy registry walk for pre-Phase-1.5a
                     # installs where collections.owner_id is empty.
-                    from nexus.repos import _read_repos_json
+                    from nexus.repos import _read_repos_json  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
                     for rp_str, info in _read_repos_json(
                         nexus_config_dir() / "repos.json"
                     ).items():
@@ -492,10 +492,10 @@ def reindex_cmd(name: str, force: bool) -> None:
                         ):
                             repo_path = Path(rp_str)
                             break
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort repo-path resolution; non-fatal
                 pass  # repo-path resolution is best-effort
             run_collection_postprocessing([name], repo_path=repo_path)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — post-processing failure surfaced via click.echo, non-fatal
             click.echo(
                 f"Note: post-processing (taxonomy / links / context) "
                 f"failed: {exc}. Run `nx index repo <path>` to retry.",
@@ -508,7 +508,7 @@ def reindex_cmd(name: str, force: bool) -> None:
 @click.option("--deep", is_flag=True, help="Run embedding probe query to verify index health")
 def verify_cmd(name: str, deep: bool) -> None:
     """Verify a collection exists and report its document count."""
-    from nexus.db.t3 import verify_collection_deep
+    from nexus.db.t3 import verify_collection_deep  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     db = _t3()
     cols = db.list_collections()
@@ -518,7 +518,7 @@ def verify_cmd(name: str, deep: bool) -> None:
         # resolve when the on-disk collection is the conformant
         # auto-promoted form (``foo__voyage-context-3__v1``). Same
         # fallback as ``resolve_corpus`` in nexus.corpus.
-        from nexus.corpus import resolve_corpus
+        from nexus.corpus import resolve_corpus  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         candidates = resolve_corpus(name, [c["name"] for c in cols])
         if len(candidates) == 1:
@@ -538,7 +538,7 @@ def verify_cmd(name: str, deep: bool) -> None:
         result = verify_collection_deep(db, name)
     except KeyError:
         raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — embedding-probe failure surfaced to user via click.echo + Exit
         click.echo(
             f"embedding probe failed for '{name}': {exc} — check voyage_api_key with: nx config get voyage_api_key",
             err=True,
@@ -626,8 +626,8 @@ def _backfill_chunk_text_hash(
     if getattr(col, "name", "") in _DOCUMENTLESS_COLLECTIONS:
         return (0, 0, 0)
 
-    from nexus.db.t2.chash_index import dual_write_chash_index
-    from nexus.db.t3 import _normalize_for_write
+    from nexus.db.t2.chash_index import dual_write_chash_index  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t3 import _normalize_for_write  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     # Pass 1: collect every chunk id. Lightweight payload (no metadata,
     # no documents, no embeddings); offset is stable because pass 1 only
@@ -776,9 +776,9 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     # RDR-086 Phase 1.3: open a single long-lived ChashIndex connection for
     # the whole backfill run so each collection reuses it instead of opening
     # a fresh sqlite3 connection per chunk batch.
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2.chash_index import ChashIndex
-    from tqdm import tqdm
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from tqdm import tqdm  # noqa: PLC0415 — heavy/optional dep deferred
 
     chash_index = ChashIndex(default_db_path())
     try:
@@ -786,7 +786,7 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
         for i, col_name in enumerate(sorted(targets), 1):
             try:
                 col = db._client.get_collection(col_name)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — per-collection resolution failure surfaced via click.echo, loop continues
                 click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
                 continue
 
@@ -794,7 +794,7 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
             # failure, fall back to an indeterminate bar.
             try:
                 col_total = col.count()
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort count() for progress bar; indeterminate bar on failure
                 col_total = 0
 
             # disable=None lets tqdm auto-detect TTY — bar shows in an
@@ -852,12 +852,12 @@ def _reembed_collection(
     (``voyage-context-3``) requires sliding-window context across chunks
     and is intentionally out of scope; the CLI rejects it up front.
     """
-    from nexus.db.chroma_quotas import QUOTAS
-    from nexus.retry import _voyage_with_retry
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.retry import _voyage_with_retry  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     try:
         col = db._client.get_collection(col_name)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch re-raised as ClickException with context
         raise click.ClickException(
             f"collection {col_name!r}: {type(exc).__name__}: {exc}"
         )
@@ -868,7 +868,7 @@ def _reembed_collection(
 
     voyage_client = None
     if not dry_run:
-        from nexus.config import get_credential
+        from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         key = get_credential("voyage_api_key")
         if not key:
@@ -876,7 +876,7 @@ def _reembed_collection(
                 "VOYAGE_API_KEY not set; cannot re-embed without it. "
                 "(Dry-run only requires read access.)"
             )
-        import voyageai  # noqa: PLC0415
+        import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
 
         voyage_client = voyageai.Client(api_key=key)  # epsilon-allow: Phase-4 deletion target — collection re-embed CLI utility
 
@@ -941,7 +941,7 @@ def _reembed_collection(
             # taxonomy_assign, manifest_write) re-touch existing rows
             # idempotently.
             if hooks is None:
-                from nexus.hook_registry import HookRegistry, install_default_hooks
+                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
                 hooks = HookRegistry()
                 install_default_hooks(hooks)
 
@@ -1053,7 +1053,7 @@ def rewrite_metadata_cmd(
       nx collection rewrite-metadata knowledge__delos --source-path paper.pdf
       nx collection rewrite-metadata --all --dry-run
     """
-    from nexus.db.t3 import _rewrite_collection_metadata
+    from nexus.db.t3 import _rewrite_collection_metadata  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if not name and not all_collections:
         raise click.ClickException("specify a collection name or use --all")
@@ -1076,7 +1076,7 @@ def rewrite_metadata_cmd(
                 source_path=source_path,
                 dry_run=dry_run,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-collection failure surfaced via click.echo, loop continues
             click.echo(
                 f"  [{i}/{len(targets)}] {col_name}: "
                 f"{type(exc).__name__}: {exc}",
@@ -1129,7 +1129,7 @@ def health_cmd(sort_by: str, fmt: str) -> None:
     Folds catalog, T2 telemetry, and topic-assignment signals into one
     row per collection. Use ``--format=json`` for agents and dashboards.
     """
-    from nexus.collection_health import run_collection_health
+    from nexus.collection_health import run_collection_health  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     click.echo(run_collection_health(sort_by=sort_by, fmt=fmt))
 
@@ -1171,7 +1171,7 @@ def audit_cmd(name: str, fmt: str, live: bool, live_n: int) -> None:
     orphan chunks (>30d, no incoming links), top-10 cross-collection
     hub topic assignments, chash_index coverage.
     """
-    from nexus.collection_audit import (
+    from nexus.collection_audit import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         format_audit_human,
         format_audit_json,
         run_collection_audit,
@@ -1237,7 +1237,7 @@ def merge_candidates_cmd(
             "--create-link is deferred per RDR-087 §bridge-link workflow. "
             "Use `nx catalog link` manually after reviewing the candidates."
         )
-    from nexus.merge_candidates import run_merge_candidates
+    from nexus.merge_candidates import run_merge_candidates  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     click.echo(
         run_merge_candidates(

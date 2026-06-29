@@ -140,7 +140,7 @@ def load_seed_directory(
         except PlanTemplateSchemaError as exc:
             result.errors.append((source, str(exc)))
             continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             result.errors.append((source, f"{type(exc).__name__}: {exc}"))
             continue
 

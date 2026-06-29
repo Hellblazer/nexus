@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    fk-002-validate.xml — RDR-156 P0.3 (bead nexus-70r3c.3)
+
+    Completes the fk-002 collection-registry FK spine by VALIDATEing the five
+    NOT VALID FKs that fk-002-collection-registry.xml (P0.2, nexus-70r3c.2)
+    added in the deliberately-deferred-validation shape:
+
+      chunks_384_collection_fk        FK (tenant_id, collection)
+      chunks_768_collection_fk        FK (tenant_id, collection)
+      chunks_1024_collection_fk       FK (tenant_id, collection)
+      chash_index_collection_fk       FK (tenant_id, physical_collection)
+      topic_assignments_collection_fk FK (tenant_id, source_collection) — nullable, ON UPDATE CASCADE
+
+    World-block lifted 2026-06-21: the gate predicate (RDR-153 migrate-all completes
+    with summary.total_failed==0) is SATISFIED — prod migrate-all report
+    migration-c67ae289 (2026-06-11, total_failed=0, total_written=782159). This is
+    the deferred-VALIDATE half of RDR-156 P0; the sibling of RDR-164 P1b
+    (fk-003-validate.xml), which validated the OTHER five collection FKs.
+
+    Why this is a SEPARATE changelog from P0.2 (same rationale as the fk-003 sibling):
+    VALIDATE CONSTRAINT must not sit on the implementation critical path, and it has a
+    hard data prerequisite that P0.2 does not — the P0.2 mandatory-registration guard
+    for these tables only takes effect once P0.2 DEPLOYS. Any production write to
+    chunks_*/chash_index/topic_assignments between the RDR-153 migrate-all run and the
+    P0.2 deploy had NO registration guard, so it may have created a row referencing an
+    unregistered collection. NOT VALID skipped retroactive validation of those rows;
+    VALIDATE CONSTRAINT does NOT — it errors loudly on any such orphan.
+
+    Therefore this changelog does TWO things, in order:
+
+      1. fk-002-6-reconcile: re-run the idempotent STUB-REGISTER backfill (the same
+         five INSERT ... ON CONFLICT DO NOTHING statements fk-002-0 ran) against
+         CURRENT data. This catches the gap-window rows: every collection name still
+         referenced by a child table but not yet registered is stub-registered now, so
+         the subsequent VALIDATE has a valid parent for it. No-data-loss arm: the INSERT
+         is unconditional over DISTINCT child values, so after it every non-null
+         referenced (tenant_id, collection) has a parent.
+
+         The Q5 "DELETE genuinely-orphaned" arm (b) is deliberately NOT implemented here,
+         and unlike the fk-003 sibling it should NOT be: fk-002 tables (chunks_*,
+         chash_index, topic_assignments) are the PRIMARY vector-serving layer, where an
+         orphan chunk is real data, not lifecycle debris — deleting it would be data loss.
+         Stub-register + defer cleanup to the deleteCollection cascade (RDR-164 P2) is the
+         correct no-data-loss choice. (Follow-up bead nexus-ht7yq tracks arm (b) for the
+         fk-003 LIFECYCLE tables only — dangling annotations/queue rows — and is NOT in
+         scope for fk-002.) topic_assignments contributes
+         only non-null, non-empty source_collection values (null rows escape the FK via
+         MATCH SIMPLE); an empty-string (non-null) source_collection is therefore a
+         stub-unsatisfiable orphan that — by design — makes VALIDATE FAIL LOUD rather
+         than admit bad data (the Q5 fail-loud arm; mirrors the document_highlights case
+         in the fk-003 sibling).
+
+      2. fk-002-7..11: VALIDATE CONSTRAINT for each of the five FKs. Each takes a SHARE
+         UPDATE EXCLUSIVE lock on its table (concurrent reads/writes proceed), scans
+         existing rows once, and on success flips pg_constraint.convalidated to true.
+         Idempotent: VALIDATE on an already-validated constraint is a no-op.
+
+    Deploy note (NOT a release gate — the luxe6 freeze gates user-facing PyPI/plugin
+    distribution, not applying liquibase migrations to the engine's own PG): safe to
+    ship to develop now. On a fresh DB (CI / testcontainers) there are no rows, so
+    reconcile is a no-op and VALIDATE trivially passes. On live prod it should be
+    applied deliberately with the migration report in hand, because a genuinely-
+    orphaned, stub-unsatisfiable row would (correctly) fail the migration loudly.
+
+    Must come after fk-002-collection-registry.xml (the NOT VALID FKs it validates)
+    in db.changelog-master.xml.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset fk-002-6-reconcile: fresh idempotent stub-register ────────── -->
+    <!--
+        Repeats the same five fk-002-0-backfill-stubs SQL statements (inline section
+        comments aside), re-run against current data to catch any collection referenced
+        by a child table between the 2026-06-11 migration and the P0.2 registration-guard
+        deploy. ON CONFLICT DO NOTHING keeps it
+        idempotent and safe to re-apply. topic_assignments contributes only non-null,
+        non-empty source_collection values (null rows escape the FK).
+    -->
+    <changeSet id="fk-002-6-reconcile" author="nexus-70r3c.3">
+        <comment>
+            Re-stub-register catalog_collections rows for every collection referenced by
+            chunks_384, chunks_768, chunks_1024, chash_index, and topic_assignments
+            (non-null) that is not already registered — the gap-window reconcile that
+            precedes VALIDATE. Idempotent (ON CONFLICT DO NOTHING).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.chunks_384
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.chunks_768
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.chunks_1024
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, physical_collection
+FROM nexus.chash_index
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, source_collection
+FROM nexus.topic_assignments
+WHERE source_collection IS NOT NULL
+  AND source_collection != ''
+ON CONFLICT (tenant_id, name) DO NOTHING;
+        </sql>
+        <rollback>
+            <!-- No rollback: stub rows are inert and may now be referenced. The FKs being
+                 validated next own their own DROP CONSTRAINT rollbacks in fk-002. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-7: VALIDATE chunks_384_collection_fk ────────────────── -->
+    <changeSet id="fk-002-7" author="nexus-70r3c.3">
+        <comment>
+            VALIDATE chunks_384_collection_fk — retroactively check pre-existing rows now
+            that the gap-window reconcile has registered their collections.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_384 VALIDATE CONSTRAINT chunks_384_collection_fk;
+        </sql>
+        <rollback>
+            <!-- VALIDATE cannot be un-done (no INVALIDATE in PG); the constraint itself is
+                 dropped by fk-002-1's rollback. No-op here. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-8: VALIDATE chunks_768_collection_fk ────────────────── -->
+    <changeSet id="fk-002-8" author="nexus-70r3c.3">
+        <comment>VALIDATE chunks_768_collection_fk.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_768 VALIDATE CONSTRAINT chunks_768_collection_fk;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-9: VALIDATE chunks_1024_collection_fk ───────────────── -->
+    <changeSet id="fk-002-9" author="nexus-70r3c.3">
+        <comment>VALIDATE chunks_1024_collection_fk.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_1024 VALIDATE CONSTRAINT chunks_1024_collection_fk;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-10: VALIDATE chash_index_collection_fk ──────────────── -->
+    <changeSet id="fk-002-10" author="nexus-70r3c.3">
+        <comment>VALIDATE chash_index_collection_fk (FK on physical_collection).</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chash_index VALIDATE CONSTRAINT chash_index_collection_fk;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <!-- ── Changeset fk-002-11: VALIDATE topic_assignments_collection_fk ────────── -->
+    <changeSet id="fk-002-11" author="nexus-70r3c.3">
+        <comment>
+            VALIDATE topic_assignments_collection_fk (FK on source_collection). Null
+            source_collection rows are skipped by MATCH SIMPLE; the FK carries ON UPDATE
+            CASCADE so a later collection rename propagates automatically.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments VALIDATE CONSTRAINT topic_assignments_collection_fk;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

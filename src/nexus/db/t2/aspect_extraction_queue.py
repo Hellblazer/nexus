@@ -458,12 +458,20 @@ class AspectExtractionQueue:
                 )
                 self.conn.commit()
 
-    def mark_retry(self, collection: str, source_path: str) -> None:
+    def mark_retry(self, collection: str, source_path: str,
+                   interval_seconds: int = 0) -> None:
         """Reset the row to ``pending`` and increment ``retry_count``.
 
         Used by the worker when a single attempt failed transiently
         and the retry budget has not been exhausted. The next
         ``claim_next`` call will pick it up.
+
+        ``interval_seconds`` is accepted for signature parity with the
+        strategic PG/Java backend (RDR-163 P1, nexus-ztpt6) but IGNORED
+        here: this SQLite path has no ``next_retry_at`` column and is
+        retired (RDR-158) / deleted (RDR-152 P4.2). It will not gain the
+        backoff ladder — the parameter only keeps the store-contract
+        tripwire green until the class is removed.
         """
         with self.rename_lock:
             with self._lock:
@@ -599,6 +607,34 @@ class AspectExtractionQueue:
                 content=co, retry_count=rc,
             )
             for c, sp, ch, co, rc in rows
+        ]
+
+    def list_failed(self, collection: str | None = None) -> list[QueueRow]:
+        """Return terminal-``failed`` rows, optionally scoped to one collection.
+
+        Drives ``nx aspects requeue-failed`` (nexus-2c51v): the operator
+        inspects/bulk-recovers rows that exhausted the retry ladder or hit a
+        non-retryable error. ``doc_id`` is selected so a re-enqueue preserves
+        the catalog identity. Ordered oldest-first for stable output.
+        """
+        sql = (
+            "SELECT collection, source_path, content_hash, content, retry_count, doc_id "
+            "FROM aspect_extraction_queue "
+            "WHERE status = 'failed'"
+        )
+        params: tuple = ()
+        if collection:
+            sql += " AND collection = ?"
+            params = (collection,)
+        sql += " ORDER BY enqueued_at ASC, source_path ASC"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [
+            QueueRow(
+                collection=c, source_path=sp, content_hash=ch,
+                content=co, retry_count=rc, doc_id=did or "",
+            )
+            for c, sp, ch, co, rc, did in rows
         ]
 
     def rename_collection(self, *, old: str, new: str) -> int:

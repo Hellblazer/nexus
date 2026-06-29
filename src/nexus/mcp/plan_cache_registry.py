@@ -119,13 +119,13 @@ class PlanCacheRegistry:
             with self._lock:
                 if self._cache is None:
                     try:
-                        from nexus.mcp_infra import get_t1
-                        from nexus.plans.session_cache import PlanSessionCache
+                        from nexus.mcp_infra import get_t1  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+                        from nexus.plans.session_cache import PlanSessionCache  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                         t1, _ = get_t1()
                         self._cache = PlanSessionCache(
                             client=t1._client, session_id=t1.session_id,
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
                         self._cache = _UNAVAILABLE
         if self._cache is _UNAVAILABLE:
             return None
@@ -148,7 +148,7 @@ class PlanCacheRegistry:
                     # unchanged so the next call retries the populate.
                     try:
                         self._cache.populate(populate_from)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
                         _log.warning(
                             "plan_cache_populate_failed",
                             library=str(populate_from),

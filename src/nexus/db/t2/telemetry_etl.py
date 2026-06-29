@@ -266,7 +266,7 @@ def _migrate_relevance_log(
                 timestamp=row.get("timestamp", ""),
             )
             written_n += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
             _log.error(
                 "telemetry_etl.relevance_log.row_failed",
                 query_prefix=str(row.get("query", ""))[:40],
@@ -310,7 +310,7 @@ def _migrate_search_telemetry(
                 threshold=row.get("threshold"),
             )
             written_n += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
             _log.error(
                 "telemetry_etl.search_telemetry.row_failed",
                 ts=str(row.get("ts", ""))[:30],
@@ -357,7 +357,7 @@ def _migrate_tier_writes(
                 target_title=_nullable_str(row.get("target_title")),
             )
             written_n += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
             _log.error(
                 "telemetry_etl.tier_writes.row_failed",
                 ts=str(row.get("ts", ""))[:30],
@@ -428,7 +428,7 @@ def _migrate_nx_answer_runs(
                 created_at=row.get("created_at", ""),
             )
             written_n += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
             _log.error(
                 "telemetry_etl.nx_answer_runs.row_failed",
                 question_prefix=str(row.get("question", ""))[:40],
@@ -471,7 +471,7 @@ def _normalize_timestamp(raw: str) -> tuple[str, bool]:
     variants inflating 'handled' is acceptable and honest (the stored
     value DID change).
     """
-    from datetime import UTC as _UTC, datetime as _dt
+    from datetime import UTC as _UTC, datetime as _dt  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
     parsed = _dt.fromisoformat(raw)
     if parsed.tzinfo is None:
@@ -531,7 +531,7 @@ def _migrate_hook_failures(
                 chain=_nullable_str(row.get("chain")),
             )
             written_n += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
             _log.error(
                 "telemetry_etl.hook_failures.row_failed",
                 hook_name=str(row.get("hook_name", "")),
@@ -574,7 +574,7 @@ def _migrate_frecency(
                 last_hit_at=_nullable_str(row.get("last_hit_at")),
             )
             written_n += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
             _log.error(
                 "telemetry_etl.frecency.row_failed",
                 chunk_id=str(row.get("chunk_id", ""))[:32],

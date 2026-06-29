@@ -30,7 +30,7 @@ _STOP_TIMEOUT_SECONDS = 10
 
 
 def _pid_file_path() -> Path:
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     return nexus_config_dir() / "mineru.pid"
 
@@ -79,7 +79,7 @@ def _mineru_output_root() -> Path:
 
 def _server_env(output_root: Path) -> dict[str, str]:
     """Build environment variables for the mineru-api subprocess."""
-    from nexus.config import get_mineru_table_enable
+    from nexus.config import get_mineru_table_enable  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     env = os.environ.copy()
     env.update({
@@ -192,17 +192,31 @@ def start(port: int) -> None:
         raise click.exceptions.Exit(1)
     cmd = [mineru_bin, "--host", "127.0.0.1", "--port", str(port)]
     output_root = _mineru_output_root()
+    # RDR-148 Gap 4: the mineru-api server is long-lived; DEVNULL discarded
+    # its startup banner and crash tracebacks, the only record of WHY it
+    # died (same silent-death class as the chroma/storage-service children,
+    # nexus-ovbr7). Route stdout+stderr to a rotated child log instead.
+    from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — branch-local; only when spawning the server child
+
+    # config_dir defaults to None (the global config dir): the mineru
+    # subsystem is not config-dir-parameterized — _pid_file_path(),
+    # _server_env() and _mineru_output_root() all resolve the default dir —
+    # so unlike the daemon precedent (self._config_dir) None is correct here.
+    server_log = open_child_log_or_devnull("mineru_server")
     try:
         proc = subprocess.Popen(
             cmd,
             env=_server_env(output_root),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=server_log,
+            stderr=server_log,
             start_new_session=True,
         )
     except (FileNotFoundError, PermissionError):
         click.echo("Error: mineru-api not found on PATH. Install MinerU first.", err=True)
         raise click.exceptions.Exit(1)
+    finally:
+        if not isinstance(server_log, int):
+            server_log.close()
 
     # Write PID file with 0o600 + record output_root so stop can clean up
     # the per-user extraction artifact directory.
@@ -286,7 +300,7 @@ def stop() -> None:
     # killable pgid.
     # Both signals go through safe_killpg for mock-guard + error-swallow
     # consistency with every other subprocess cleanup site.
-    from nexus.util.process_group import safe_killpg
+    from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     if not safe_killpg(pid, signal.SIGTERM):
         # Process group already gone — nothing to do.
@@ -319,10 +333,10 @@ def stop() -> None:
     output_root = info.get("output_root") if info else None
     if output_root:
         try:
-            import shutil
+            import shutil  # noqa: PLC0415 — deferred to keep CLI startup fast
 
             shutil.rmtree(output_root, ignore_errors=True)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort output cleanup; logged at debug
             _log.debug("mineru_output_cleanup_failed", path=output_root, exc_info=True)
 
     _log.info("mineru_stopped", pid=pid)

@@ -83,20 +83,29 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
       0  Queue is drained (or was already empty).
       1  Timeout: queue still has active rows after --timeout seconds.
     """
-    from nexus.aspect_worker import DrainTimeoutError, drain_worker
-    from nexus.commands._helpers import default_db_path
+    from nexus.aspect_worker import DrainTimeoutError, drain_worker  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import
 
     mem_path = default_db_path()
-    click.echo(f"Draining aspect queue at {mem_path} (timeout={timeout}s)...")
+    if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
+        click.echo(f"Draining service aspect queue (timeout={timeout}s)...")
+    else:
+        click.echo(f"Draining aspect queue at {mem_path} (timeout={timeout}s)...")
 
     try:
         drain_worker(mem_path, timeout=timeout, poll_interval=poll_interval)
     except DrainTimeoutError as e:
-        click.echo(
-            f"Drain timeout: {e.stuck_count} row(s) still active after {timeout}s. "
-            "Re-run after the worker processes or times out its in-flight rows.",
-            err=True,
+        base = f"Drain timeout: {e.stuck_count} row(s) still active after {timeout}s."
+        # Honor the honest service-mode hint (e.g. crashed-worker rows stuck
+        # in_progress -> run reclaim-stale). Falls back to the generic re-run
+        # advice when no detail was attached.
+        suffix = (
+            f" {e.detail}"
+            if e.detail
+            else " Re-run after the worker processes or times out its in-flight rows."
         )
+        click.echo(base + suffix, err=True)
         raise SystemExit(1) from e
 
     click.echo("Aspect queue drained. Safe to run 'nx upgrade'.")
@@ -140,9 +149,9 @@ def aspects_gc(apply: bool) -> None:
     \b
     Filed under nexus-urj4 (RDR-108 Phase 5 follow-up).
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.config import catalog_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     mem_path = default_db_path()
     cat_db = catalog_path() / ".catalog.db"
@@ -210,8 +219,8 @@ def aspects_gc_fixtures(yes: bool) -> None:
     high-volume unmapped collection that matches one of the fixture
     patterns. RDR-120 §A8 / nexus-yulol.
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     mem_path = default_db_path()
     if not mem_path.exists():
@@ -220,7 +229,7 @@ def aspects_gc_fixtures(yes: bool) -> None:
 
     verb = "deleted" if yes else "would delete"
     any_rows = False
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
         raise click.UsageError(
             "gc-fixtures requires sqlite mode "
@@ -237,8 +246,8 @@ def aspects_gc_fixtures(yes: bool) -> None:
         # post-RDR-108; older installs may not have it yet, so guard the
         # presence check via PRAGMA.
         stores = [
-            ("document_aspects", db.document_aspects.conn),
-            ("aspect_extraction_queue", db.aspect_queue.conn),
+            ("document_aspects", db.document_aspects.conn),  # epsilon-allow: guarded by storage_backend_for service-mode UsageError above (gmiaf.37)
+            ("aspect_extraction_queue", db.aspect_queue.conn),  # epsilon-allow: guarded by storage_backend_for service-mode UsageError above (gmiaf.37)
         ]
         for table, conn in stores:
             present = conn.execute(
@@ -320,9 +329,9 @@ def aspects_backfill_source_uri(apply: bool) -> None:
     ``migrate_document_aspects_source_uri`` and
     ``migrate_document_aspects_source_uri_backfill_empty``.
     """
-    import sqlite3
-    from nexus.aspect_readers import uri_for
-    from nexus.commands._helpers import default_db_path
+    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     mem_path = default_db_path()
     if not mem_path.exists():
@@ -472,8 +481,8 @@ def aspects_gc_pre_rdr096(apply: bool) -> None:
     RDR-120 §A8 / nexus-6y2a9: carved out of
     ``migrate_drop_null_aspect_rows``.
     """
-    import sqlite3
-    from nexus.commands._helpers import default_db_path
+    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     mem_path = default_db_path()
     if not mem_path.exists():
@@ -518,3 +527,106 @@ def aspects_gc_pre_rdr096(apply: bool) -> None:
             )
     finally:
         conn.close()
+
+
+@aspects_group.command(name="requeue-failed")
+@click.option(
+    "--collection",
+    default=None,
+    help="Only re-enqueue failed rows in this collection (default: all).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Re-enqueue at most this many rows (oldest-enqueued first). Use to "
+    "pace recovery of a large backlog and avoid a thundering herd of workers "
+    "hammering a just-restored API quota.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Report the rows that would be re-enqueued without writing.",
+)
+def aspects_requeue_failed(
+    collection: str | None, limit: int | None, dry_run: bool,
+) -> None:
+    """Bulk re-enqueue terminal-``failed`` aspect-queue rows (nexus-2c51v).
+
+    A row reaches ``failed`` after exhausting the backoff-retry ladder
+    (RDR-163) or on a non-retryable error. Once the operator fixes the
+    root cause (restored API quota, repaired source identity), this verb
+    re-enqueues each failed row at its ``(collection, source_path)`` key,
+    resetting it to ``pending`` with ``retry_count=0`` (the exhaustion depth
+    shown in ``--dry-run`` is discarded) so the worker picks it up again.
+    The write is daemon-routed (nexus-zir76); reads use the active backend
+    (SQLite or the PG service).
+
+    \b
+    Rows are processed oldest-``enqueued_at``-first (enqueue order, NOT
+    most-recently-failed). ``--limit`` caps how many are re-enqueued.
+
+    \b
+    Examples:
+      nx aspects requeue-failed                       # all failed rows
+      nx aspects requeue-failed --collection knowledge__x
+      nx aspects requeue-failed --limit 100           # pace a large backlog
+      nx aspects requeue-failed --dry-run             # report only, no writes
+
+    \b
+    Operator note: single-operator recovery verb. It only touches ``failed``
+    rows (a terminal state no worker writes), so it is safe to re-run; but do
+    not run two instances concurrently — the read-snapshot / per-row-write
+    split has no cross-row transaction, so concurrent runs could redundantly
+    re-enqueue the same rows.
+
+    \b
+    Pairs with the RDR-163 ladder: the ladder reduces how often rows reach
+    terminal; this clears the ones that still do. Failed-backlog visibility
+    is ``nx doctor --check-aspect-queue``.
+    """
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if limit is not None and limit <= 0:
+        click.echo("--limit must be a positive integer.", err=True)
+        raise SystemExit(1)
+
+    mem_path = default_db_path()
+    if not mem_path.exists():
+        click.echo("aspect_extraction_queue: T2 database not found.")
+        return
+
+    # Read is concurrent-safe (no single-writer concern); the facade routes
+    # to the active backend (SQLite reader or the PG-service HTTP client).
+    with T2Database(mem_path) as db:  # epsilon-allow: read-only failed-row inspection for requeue-failed; routes to active backend, no WAL writer contention
+        failed = db.aspect_queue.list_failed(collection)
+
+    if limit is not None:
+        failed = failed[:limit]
+
+    scope = f" in {collection}" if collection else ""
+    if not failed:
+        click.echo(f"aspect_extraction_queue: no failed rows{scope}.")
+        return
+
+    if dry_run:
+        click.echo(f"Would re-enqueue {len(failed)} failed row(s){scope}:")
+        for row in failed:
+            click.echo(f"  {row.collection}  {row.source_path}  (retry_count={row.retry_count})")
+        click.echo("Re-run without --dry-run to re-enqueue.")
+        return
+
+    for row in failed:
+        # Daemon-routed write (nexus-zir76); INSERT OR REPLACE resets the row
+        # to pending / retry_count=0 / clears any stale next_retry_at backoff.
+        t2_index_write(
+            lambda db, _r=row: db.aspect_queue.enqueue(
+                _r.collection, _r.source_path,
+                content_hash=_r.content_hash, content=_r.content,
+                doc_id=_r.doc_id,
+            )
+        )
+    click.echo(f"Re-enqueued {len(failed)} failed row(s){scope} to pending.")

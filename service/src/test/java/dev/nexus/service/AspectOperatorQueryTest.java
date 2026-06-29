@@ -85,6 +85,10 @@ class AspectOperatorQueryTest {
                 su.createStatement().execute(
                     "GRANT USAGE ON SEQUENCE nexus." + table + "_id_seq TO " + SVC_ROLE);
             }
+            // RDR-164 P1a: aspect writes ensure-register their collection (catalog_collections
+            // stub) to satisfy the new fk-003 collection FKs.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
 

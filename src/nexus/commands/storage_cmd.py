@@ -60,9 +60,9 @@ def migration_report_show_cmd(report_file: Path) -> None:
     ``summary.total_failed == 0``. Exits non-zero when the gate fails so
     the verdict is scriptable.
     """
-    import json as _json
+    import json as _json  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
-    from nexus.migration.migration_report import ACTION_SEVERITY, load_report
+    from nexus.migration.migration_report import ACTION_SEVERITY, load_report  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     try:
         report = load_report(report_file)
@@ -228,7 +228,7 @@ def migrate_memory_cmd(
         )
 
     if dry_run:
-        from nexus.db.t2.memory_etl import count_source_rows
+        from nexus.db.t2.memory_etl import count_source_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         try:
             count = count_source_rows(resolved_db)
@@ -238,7 +238,7 @@ def migrate_memory_cmd(
         return
 
     # Construct the HttpMemoryStore
-    from nexus.db.t2.http_memory_store import HttpMemoryStore
+    from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     token = os.environ.get("NX_SERVICE_TOKEN", "")
     if not token:
@@ -256,15 +256,15 @@ def migrate_memory_cmd(
         raise click.ClickException(str(exc))
 
     # Run the ETL
-    from nexus.db.t2.memory_etl import migrate_memory_rows
+    from nexus.db.t2.memory_etl import migrate_memory_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    from nexus.migration.migration_report import IssueCollector
+    from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     collector = IssueCollector()
     click.echo(f"Migrating memory store from {resolved_db} ...")
     try:
         result = migrate_memory_rows(resolved_db, store, collector=collector)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2): the report is
         # written even on a mid-run crash, so the operator always has a
         # triage artifact covering everything the run recorded.
@@ -366,7 +366,7 @@ def migrate_plans_cmd(
         )
 
     if dry_run:
-        from nexus.db.t2.plan_etl import count_source_rows
+        from nexus.db.t2.plan_etl import count_source_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         try:
             count = count_source_rows(resolved_db)
@@ -375,7 +375,7 @@ def migrate_plans_cmd(
         click.echo(f"Dry run: source has {count} plan rows (no writes performed).")
         return
 
-    from nexus.db.t2.http_plan_library import HttpPlanLibrary
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     token = os.environ.get("NX_SERVICE_TOKEN", "")
     if not token:
@@ -392,15 +392,15 @@ def migrate_plans_cmd(
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
-    from nexus.db.t2.plan_etl import migrate_plan_rows
+    from nexus.db.t2.plan_etl import migrate_plan_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    from nexus.migration.migration_report import IssueCollector
+    from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     _collector = IssueCollector()
     click.echo(f"Migrating plans store from {resolved_db} ...")
     try:
         result = migrate_plan_rows(resolved_db, store, collector=_collector)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
         _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
@@ -504,7 +504,7 @@ def migrate_telemetry_cmd(
         )
 
     if dry_run:
-        from nexus.db.t2.telemetry_etl import count_source_rows
+        from nexus.db.t2.telemetry_etl import count_source_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         try:
             counts = count_source_rows(resolved_db)
@@ -517,7 +517,7 @@ def migrate_telemetry_cmd(
         click.echo("(no writes performed)")
         return
 
-    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     token = os.environ.get("NX_SERVICE_TOKEN", "")
     if not token:
@@ -534,15 +534,15 @@ def migrate_telemetry_cmd(
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
-    from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
+    from nexus.db.t2.telemetry_etl import migrate_telemetry_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    from nexus.migration.migration_report import IssueCollector
+    from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     _collector = IssueCollector()
     click.echo(f"Migrating telemetry stores from {resolved_db} ...")
     try:
         results = migrate_telemetry_rows(resolved_db, store, collector=_collector)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
         _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
@@ -662,7 +662,7 @@ def migrate_taxonomy_cmd(
         )
 
     if dry_run:
-        from nexus.db.t2.taxonomy_etl import count_source_rows
+        from nexus.db.t2.taxonomy_etl import count_source_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         try:
             counts = count_source_rows(resolved_db)
@@ -675,7 +675,7 @@ def migrate_taxonomy_cmd(
         click.echo("(no writes performed)")
         return
 
-    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     token = os.environ.get("NX_SERVICE_TOKEN", "")
     if not token:
@@ -692,15 +692,15 @@ def migrate_taxonomy_cmd(
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
-    from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows
+    from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    from nexus.migration.migration_report import IssueCollector
+    from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     _collector = IssueCollector()
     click.echo(f"Migrating taxonomy stores from {resolved_db} ...")
     try:
         results = migrate_taxonomy_rows(resolved_db, store, collector=_collector)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
         _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
@@ -811,7 +811,7 @@ def migrate_chash_cmd(
         # Dry run (count only, no writes):
         nx storage migrate chash --dry-run
     """
-    import sqlite3
+    import sqlite3  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
     resolved_db = _resolve_db_path(db_path)
     if not resolved_db.exists():
@@ -826,11 +826,11 @@ def migrate_chash_cmd(
         try:
             row = conn.execute("SELECT COUNT(*) FROM chash_index").fetchone()
             source_count = int(row[0]) if row else 0
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort count query; degrades to 0, conn closed in finally
             source_count = 0
         finally:
             conn.close()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         raise click.ClickException(f"Cannot open SQLite db: {exc}")
 
     click.echo(f"Source: {resolved_db} ({source_count} row(s) in chash_index)")
@@ -846,20 +846,20 @@ def migrate_chash_cmd(
             "Set it to the bearer token configured in the nexus-service."
         )
 
-    from nexus.db.t2.http_chash_index import HttpChashIndex
+    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     if service_url:
         store = HttpChashIndex(base_url=service_url)
     else:
         store = HttpChashIndex()
 
-    from nexus.db.t2.chash_etl import migrate_chash_rows
-    from nexus.migration.migration_report import IssueCollector
+    from nexus.db.t2.chash_etl import migrate_chash_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     _collector = IssueCollector()
     try:
         results = migrate_chash_rows(resolved_db, store, collector=_collector)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
         _emit_store_report(_collector, resolved_db, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
@@ -964,7 +964,7 @@ def migrate_catalog_cmd(
         )
 
     if dry_run:
-        from nexus.db.t2.catalog_etl import count_source_rows
+        from nexus.db.t2.catalog_etl import count_source_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         try:
             counts = count_source_rows(resolved_catalog)
@@ -977,7 +977,7 @@ def migrate_catalog_cmd(
         click.echo("(no writes performed)")
         return
 
-    from nexus.catalog.factory import make_catalog_client_for_migration
+    from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     token = os.environ.get("NX_SERVICE_TOKEN", "")
     if not token:
@@ -991,15 +991,15 @@ def migrate_catalog_cmd(
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
-    from nexus.db.t2.catalog_etl import migrate_catalog
+    from nexus.db.t2.catalog_etl import migrate_catalog  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    from nexus.migration.migration_report import IssueCollector
+    from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     _collector = IssueCollector()
     click.echo(f"Migrating catalog from {resolved_catalog} ...")
     try:
         results = migrate_catalog(resolved_catalog, client, collector=_collector)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
         _emit_store_report(_collector, resolved_catalog, report_path)
         raise click.ClickException(f"ETL failed: {exc}")
@@ -1008,7 +1008,7 @@ def migrate_catalog_cmd(
 
     _emit_store_report(_collector, resolved_catalog, report_path)
 
-    from nexus.db.t2.catalog_etl import IMPORT_TABLE_KEYS
+    from nexus.db.t2.catalog_etl import IMPORT_TABLE_KEYS  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     total_read    = sum(results[k]["read"]    for k in IMPORT_TABLE_KEYS if k in results)
     total_written = sum(results[k]["written"] for k in IMPORT_TABLE_KEYS if k in results)
@@ -1141,31 +1141,31 @@ def migrate_vectors_cmd(
     if service_url:
         os.environ["NX_SERVICE_URL"] = service_url
     if not dry_run:
-        from nexus.db.http_vector_client import _resolve_endpoint
+        from nexus.db.http_vector_client import _resolve_endpoint  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         try:
             _resolve_endpoint()
         except RuntimeError as exc:
             raise click.ClickException(str(exc))
 
-    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     vector_client = HttpVectorClient()
     collections = [c.strip() for c in collections_csv.split(",") if c.strip()] or None
 
     if local_path is None:
-        from nexus.config import nexus_config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         local_path = nexus_config_dir() / "chroma"
 
-    from nexus.migration.vector_etl import (
+    from nexus.migration.vector_etl import (  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         migrate_cloud,
         migrate_local,
         rollback_collections,
     )
 
     if rollback:
-        from nexus.migration.chroma_read import (
+        from nexus.migration.chroma_read import (  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             open_cloud_read_client,
             open_local_read_client,
         )
@@ -1177,7 +1177,7 @@ def migrate_vectors_cmd(
             deleted = rollback_collections(
                 read_client, vector_client, collections=collections
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
             raise click.ClickException(f"rollback failed: {exc}")
         for name, count in sorted(deleted.items()):
             click.echo(f"rolled-back  {name}: {count} chunk(s) removed from pgvector")
@@ -1209,7 +1209,7 @@ def migrate_vectors_cmd(
                 local_path, vector_client, collections=collections,
                 dry_run=dry_run, on_result=_echo_progress,
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         raise click.ClickException(f"ETL failed: {exc}")
 
     _echo_summary_table(report)
@@ -1257,13 +1257,13 @@ def _echo_summary_table(report) -> None:
 def _default_report_path(migration_id: str) -> Path:
     """``<config>/migration-reports/migration-<id>.json`` — a run ALWAYS
     produces an artifact, even when the operator forgets ``--report``."""
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     return nexus_config_dir() / "migration-reports" / f"migration-{migration_id}.json"
 
 
 def _write_report(report: dict, path: Path) -> None:
-    import json as _json
+    import json as _json  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_json.dumps(report, indent=2, sort_keys=True))
@@ -1293,9 +1293,9 @@ def _emit_store_report(
     A report is ALWAYS written (default path when the flag is omitted) —
     the run must leave a triage artifact.
     """
-    import uuid as _uuid
+    import uuid as _uuid  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
-    from nexus.migration.migration_report import build_report
+    from nexus.migration.migration_report import build_report  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     migration_id = str(_uuid.uuid4())
     report = build_report(
@@ -1344,8 +1344,8 @@ def migrate_all_cmd(
     Post-run count verification is LOUD when it cannot run (nexus-r0esi:
     never SKIP-then-'all passed').
     """
-    from nexus.migration.etl_registry import EtlSources
-    from nexus.migration.orchestrator import migrate_all
+    from nexus.migration.etl_registry import EtlSources  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.migration.orchestrator import migrate_all  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     sources = EtlSources(
         sqlite_path=_resolve_db_path(db_path),
@@ -1445,7 +1445,7 @@ def _resolve_catalog_db_path(explicit: Path | None) -> Path:
     env_path = os.environ.get("NX_CATALOG_DB_PATH", "")
     if env_path:
         return Path(env_path)
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     return nexus_config_dir() / "catalog" / ".catalog.db"
 
 
@@ -1463,5 +1463,5 @@ def _resolve_db_path(explicit: Path | None) -> Path:
     env_path = os.environ.get("NX_DB_PATH", "")
     if env_path:
         return Path(env_path)
-    from nexus.config import default_db_path
+    from nexus.config import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     return default_db_path()

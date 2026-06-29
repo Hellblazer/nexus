@@ -118,7 +118,7 @@ def _fire_store_chains_grouped_by_doc(
     the chunks correctly. Insertion order within each group is
     preserved so ``chunk_index`` re-injection sees a stable position.
     """
-    from collections import defaultdict
+    from collections import defaultdict  # noqa: PLC0415 — stdlib import kept branch-local
 
     groups: dict[str, list[int]] = defaultdict(list)
     for i, m in enumerate(metadatas):
@@ -313,7 +313,7 @@ def import_collection(
     t0 = time.monotonic()
     remaps = remaps or []
     if hooks is None:
-        from nexus.hook_registry import HookRegistry, install_default_hooks
+        from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         hooks = HookRegistry()
         install_default_hooks(hooks)
 

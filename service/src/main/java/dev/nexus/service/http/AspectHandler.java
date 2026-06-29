@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -55,6 +56,7 @@ import java.util.Optional;
  *   GET   /v1/aspects/queue/pending_count         count pending rows
  *   GET   /v1/aspects/queue/is_drained            check drained
  *   GET   /v1/aspects/queue/list_pending          list pending (limit= optional)
+ *   GET   /v1/aspects/queue/list_failed           list terminal-failed (collection= optional)
  *   POST  /v1/aspects/queue/rename_collection     rename collection in queue
  *   POST  /v1/aspects/queue/import                ETL import of queue row
  *
@@ -129,6 +131,7 @@ public final class AspectHandler implements HttpHandler {
                 case "/queue/pending_count"             -> handleQueuePendingCount(exchange, tenant, method);
                 case "/queue/is_drained"                -> handleQueueIsDrained(exchange, tenant, method);
                 case "/queue/list_pending"              -> handleQueueListPending(exchange, tenant, method);
+                case "/queue/list_failed"               -> handleQueueListFailed(exchange, tenant, method);
                 case "/queue/rename_collection"         -> handleQueueRenameCollection(exchange, tenant, method);
                 case "/queue/import"                    -> handleQueueImport(exchange, tenant, method);
                 // ── aspect_promotion_log ──────────────────────────────────────
@@ -141,9 +144,60 @@ public final class AspectHandler implements HttpHandler {
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + HttpUtil.jsonString(e.getMessage()) + "}");
         } catch (Exception e) {
-            log.error("event=aspects_handler_error op={} error={}", op, e.getMessage(), e);
-            HttpUtil.send(exchange, 500, "{\"error\":" + HttpUtil.jsonString(e.getMessage()) + "}");
+            String sqlState = sqlState23(e);
+            if (sqlState != null) {
+                // RDR-172 P3.1 (nexus-gfl3y): a SQLSTATE class-23 integrity violation —
+                // e.g. the aspect_extraction_queue.doc_id FK rejecting a non-blank but
+                // UNREGISTERED doc_id (bug nexus-ov0sw) — is a CLIENT error, not a server
+                // fault. Map it to a typed 409 AHEAD of the generic 500 so the caller sees
+                // a loud, actionable failure instead of an opaque 500 (and never a silent
+                // 200). jOOQ wraps the driver PSQLException in a DataAccessException, so the
+                // violation surfaces as a cause, not the top-level throwable. RF-5 / RF-8.
+                // Full driver message (the parameterised SQL + PG detail) goes to the
+                // server log for operators; the client body is sanitised to a fixed
+                // message + the sqlstate. The 409 is client-triggerable (a bad doc_id),
+                // so echoing the raw jOOQ SQL would leak schema/constraint shape to any
+                // caller — return only the programmatic signal (sqlstate).
+                log.warn("event=aspects_handler_integrity_violation op={} sqlstate={} error={}",
+                    op, sqlState, e.getMessage());
+                HttpUtil.send(exchange, 409,
+                    "{\"error\":\"integrity constraint violation\",\"sqlstate\":"
+                    + HttpUtil.jsonString(sqlState) + "}");
+            } else {
+                log.error("event=aspects_handler_error op={} error={}", op, e.getMessage(), e);
+                HttpUtil.send(exchange, 500, "{\"error\":" + HttpUtil.jsonString(e.getMessage()) + "}");
+            }
         }
+    }
+
+    /**
+     * Walk the cause chain for a {@link SQLException} whose SQLSTATE is class 23
+     * (integrity-constraint violation: 23502 not-null, 23503 foreign-key, 23505
+     * unique, 23514 check). Returns the offending SQLSTATE string, or {@code null}
+     * if no class-23 cause exists.
+     *
+     * <p>jOOQ wraps the driver exception in a {@code DataAccessException}, so the
+     * constraint violation is a cause of the thrown runtime exception, not the
+     * top-level throwable — hence the chain walk. The walk is depth-bounded to
+     * tolerate a malformed (self- or mutually-referential) cause chain.
+     *
+     * <p>Walks the {@link Throwable#getCause()} chain only — correct for the
+     * PostgreSQL JDBC driver, which wraps via {@code initCause()}. It does NOT
+     * traverse {@link SQLException#getNextException()} (used by some other
+     * drivers for chained violations); generalise here if a non-PG driver is
+     * ever introduced.
+     */
+    static String sqlState23(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof SQLException se) {
+                String state = se.getSQLState();
+                if (state != null && state.startsWith("23")) {
+                    return state;
+                }
+            }
+        }
+        return null;
     }
 
     // ── document_aspects handlers ──────────────────────────────────────────────
@@ -477,7 +531,13 @@ public final class AspectHandler implements HttpHandler {
     private void handleQueueMarkRetry(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
         Map<String, Object> body = readBody(ex);
-        repo.markRetry(tenant, (String) body.get("collection"), (String) body.get("source_path"));
+        // RDR-163 P1 (nexus-ztpt6): worker passes interval_seconds; the service
+        // stamps next_retry_at = now()+interval server-side. Default 0 (ready now)
+        // keeps any legacy caller behaving as the pre-backoff reset.
+        long intervalSeconds = body.containsKey("interval_seconds")
+            ? ((Number) body.get("interval_seconds")).longValue() : 0L;
+        repo.markRetry(tenant, (String) body.get("collection"), (String) body.get("source_path"),
+            intervalSeconds);
         HttpUtil.send(ex, 200, "{\"ok\":true}");
     }
 
@@ -505,6 +565,12 @@ public final class AspectHandler implements HttpHandler {
         String limitStr = parseQuery(ex.getRequestURI()).get("limit");
         int limit = limitStr != null ? Integer.parseInt(limitStr) : 0;
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(repo.listPending(tenant, limit)));
+    }
+
+    private void handleQueueListFailed(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}"); return; }
+        String collection = parseQuery(ex.getRequestURI()).get("collection");
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(repo.listFailed(tenant, collection)));
     }
 
     private void handleQueueRenameCollection(HttpExchange ex, String tenant, String method) throws IOException {

@@ -397,7 +397,7 @@ class TestAutoDetectRouting:
         ):
             result = extractor.extract(dummy_pdf, extractor="auto")
         assert result.metadata["extraction_method"] == "mineru"
-        m.assert_called_once_with(dummy_pdf, formula_count=10, on_page=None)
+        m.assert_called_once_with(dummy_pdf, formula_count=10, on_page=None, on_formula_oom="fail")
 
     def test_auto_raises_when_mineru_import_fails_on_formula_pdf(self, extractor, dummy_pdf):
         """nexus-2fyb: ImportError branch — mineru is a default dep, so the

@@ -12,6 +12,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def find_repo_root(path: Path) -> Path | None:
         )
         if result.returncode == 0 and result.stdout.strip():
             return Path(result.stdout.strip())
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         pass
     return None
 
@@ -129,7 +130,7 @@ def detect_git_metadata(path: Path) -> dict[str, str]:
             r = subprocess.run(
                 args, cwd=repo, capture_output=True, text=True, timeout=10,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             return ""
         return r.stdout.strip() if r.returncode == 0 else ""
 
@@ -214,7 +215,7 @@ def load_ignore_patterns(repo_root: Path | None = None) -> list[str]:
 
     When *repo_root* is provided, picks up the per-repo config.
     """
-    from nexus.config import load_config
+    from nexus.config import load_config  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     cfg = load_config(repo_root=repo_root)
     cfg_patterns: list[str] = cfg.get("server", {}).get("ignorePatterns", [])
     return list(dict.fromkeys(_DEFAULT_IGNORE + cfg_patterns))
@@ -232,7 +233,7 @@ def is_gitignored(path: Path, repo_root: Path) -> bool:
             cwd=repo_root, capture_output=True, timeout=10,
         )
         return result.returncode == 0  # 0 = ignored, 1 = not ignored
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return False
 
 
@@ -294,10 +295,10 @@ def build_staleness_cache(col: object) -> StalenessCache:
         # Local import to avoid a circular dependency at module-load
         # time. ``_paginated_get`` lives in nexus.indexer (the
         # orchestrator), which itself imports from this module.
-        from nexus.indexer import _paginated_get
+        from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         all_chunks = _paginated_get(col, include=["metadatas"])
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         # nexus-lrhg (RDR-108 audit finding 6): pre-fix this swallowed
         # ``_paginated_get`` failures with a bare ``except: pass`` and
         # returned an empty cache. The caller fell back to the per-file
@@ -307,7 +308,7 @@ def build_staleness_cache(col: object) -> StalenessCache:
         # the collection identity so a recurring outage (network blip,
         # cloud throttle) surfaces in production logs instead of
         # silently melting the embedder budget.
-        import structlog
+        import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         structlog.get_logger(__name__).warning(
             "build_staleness_cache_paginated_get_failed",
             collection=getattr(col, "name", "<unknown>"),
@@ -330,20 +331,20 @@ def build_staleness_cache(col: object) -> StalenessCache:
     ]
     if needed_chashes:
         try:
-            from nexus.catalog.factory import make_catalog_reader
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
             _cat = make_catalog_reader()
             if _cat is not None:
                 by_chash = _cat.docs_for_chashes(list(set(needed_chashes)))
                 for c, doc_ids in by_chash.items():
                     if doc_ids:
                         chash_to_doc[c] = sorted(doc_ids)[0]
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
             # nexus-8g79.8: pre-fix this swallowed the whole chash→doc_id
             # resolution silently, leaving every result without doc_id
             # in metadata (catalog-aware retrieval gated on doc_id then
             # no-ops). WARNING with the chash count so a recurring
             # catalog outage surfaces in production logs.
-            import structlog
+            import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
             structlog.get_logger(__name__).warning(
                 "docs_for_chashes_failed",
                 chash_count=len(needed_chashes),
@@ -478,7 +479,7 @@ def check_credentials(voyage_key: str, chroma_key: str) -> None:
         missing.append("chroma_api_key")
     if missing:
         raise CredentialsMissingError(
-            f"{', '.join(missing)} not set — run: nx config init"
+            f"{', '.join(missing)} not set — run: nx config set <key> <value>"
         )
 
 
@@ -488,7 +489,7 @@ def check_local_path_writable() -> None:
     Raises:
         CredentialsMissingError: When the local path cannot be written to.
     """
-    from nexus.config import _default_local_path
+    from nexus.config import _default_local_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     local_path = _default_local_path()
     try:
         local_path.mkdir(parents=True, exist_ok=True)
@@ -533,3 +534,33 @@ def build_context_prefix(
         f"  Class: {class_name}  Method: {method_name}"
         f"  Lines: {line_start}-{line_end}"
     )
+
+
+def build_doc_id_resolver(
+    file_to_doc_id: Mapping[Path, str],
+) -> Callable[[Path], str]:
+    """Return a resolver mapping an indexed file path to its catalog doc_id.
+
+    Lifted from ``indexer._run_index`` (nexus-kgyoz seam 2). The orchestrator
+    builds *file_to_doc_id* from the pre-index catalog registration map, then
+    wires the returned callable into :attr:`IndexContext.doc_id_resolver` so
+    per-file indexers stamp the catalog cross-reference into chunk metadata at
+    chunk-write time. Files absent from the map resolve to ``""`` — the legacy
+    / no-doc_id signal that ``metadata_schema.normalize`` Step 4c then drops.
+
+    The returned callable closes over *file_to_doc_id* by reference (no
+    snapshot): later mutations to the passed mapping are visible through the
+    resolver. The orchestrator builds it once from a finalised registration
+    map and does not mutate afterward, so this is a non-issue at the call
+    site; callers needing a frozen view should pass a copy.
+
+    Args:
+        file_to_doc_id: Mapping of indexed file path to catalog ``doc_id``.
+
+    Returns:
+        A callable ``(path) -> doc_id`` closing over *file_to_doc_id*.
+    """
+    def _resolver(path: Path) -> str:
+        return file_to_doc_id.get(path, "")
+
+    return _resolver

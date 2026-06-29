@@ -102,7 +102,7 @@ def _attach_doc_ids_from_catalog(
         return
     try:
         chash_to_docs = catalog.docs_for_chashes(nonempty)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort catalog lookup; failure logged at debug, doc_id attach skipped
         _log.debug("attach_doc_ids_lookup_failed", exc_info=True)
         return
     if not chash_to_docs:
@@ -136,8 +136,48 @@ def _attach_doc_ids_from_catalog(
             r.metadata["doc_id"] = docs[0]
             resolved_doc_ids[chash] = docs[0]
 
-    # Per-doc manifest cache so multi-chunk docs only fetch once.
+    # Batch-fetch manifests for all resolved doc_ids in one call when the
+    # catalog backend supports get_manifests() (nexus-7lm3q).  Falls back
+    # to the per-doc loop for older/local catalogs that lack that method.
+    distinct_doc_ids = list({
+        did
+        for chash in chashes
+        if chash
+        for did in [resolved_doc_ids.get(chash) or ""]
+        if did
+    })
     manifest_cache: dict[str, list[Any]] = {}
+    _get_manifests_batch = getattr(catalog, "get_manifests", None)
+    if _get_manifests_batch is not None and distinct_doc_ids:
+        try:
+            batch_result = _get_manifests_batch(distinct_doc_ids)
+            # nexus-7lm3q review (CR Low-1): ``update(... or {})`` makes an
+            # empty/None response a clean no-op instead of routing it through a
+            # falsy guard, so "all doc_ids genuinely absent" and "skipped" are
+            # not conflated at the call site.
+            manifest_cache.update(batch_result or {})
+        except Exception:  # noqa: BLE001 — best-effort batch manifest lookup; failure logged at debug, chunk_count dropped for set (see comment)
+            _log.debug(
+                "attach_chunk_count_batch_failed",
+                doc_ids=distinct_doc_ids, exc_info=True,
+            )
+            # Degradation granularity (CR Med-2 / critic obs): a single batch
+            # failure leaves manifest_cache empty, so chunk_count/chunk_index
+            # are dropped for the WHOLE result set, not per-doc. This is a
+            # deliberate trade (one round-trip vs N) — the batch call replaces
+            # the per-doc loop wholesale; we do not re-fan-out on failure.
+    else:
+        # Legacy per-doc loop for catalogs without get_manifests().
+        for doc_id in distinct_doc_ids:
+            try:
+                manifest_cache[doc_id] = catalog.get_manifest(doc_id)
+            except Exception:  # noqa: BLE001 — best-effort per-doc manifest lookup; failure logged at debug, this doc degrades to empty manifest
+                _log.debug(
+                    "attach_chunk_count_lookup_failed",
+                    doc_id=doc_id, exc_info=True,
+                )
+                manifest_cache[doc_id] = []
+
     for r, chash in zip(results, chashes):
         if not chash:
             continue
@@ -145,16 +185,6 @@ def _attach_doc_ids_from_catalog(
         if not doc_id:
             continue
         manifest = manifest_cache.get(doc_id)
-        if manifest is None:
-            try:
-                manifest = catalog.get_manifest(doc_id)
-            except Exception:
-                _log.debug(
-                    "attach_chunk_count_lookup_failed",
-                    doc_id=doc_id, exc_info=True,
-                )
-                manifest = []
-            manifest_cache[doc_id] = manifest
         if not manifest:
             continue
         # Only inject when absent (legacy chunks may have these).
@@ -162,8 +192,16 @@ def _attach_doc_ids_from_catalog(
             r.metadata["chunk_count"] = len(manifest)
         if "chunk_index" not in r.metadata:
             for row in manifest:
-                if getattr(row, "chash", "") == chash:
-                    r.metadata["chunk_index"] = int(getattr(row, "position", 0))
+                row_chash = (
+                    row.get("chash", "") if isinstance(row, dict)
+                    else getattr(row, "chash", "")
+                )
+                if row_chash == chash:
+                    pos = (
+                        row.get("position", 0) if isinstance(row, dict)
+                        else getattr(row, "position", 0)
+                    )
+                    r.metadata["chunk_index"] = int(pos)
                     break
 
 
@@ -196,16 +234,33 @@ def _attach_display_paths(
     }
     if not doc_ids:
         return
-    # Single-pass cache so repeated doc_ids (multi-chunk results) only
-    # hit the catalog once.
+    # Batch-resolve all doc_ids in one call when the catalog backend
+    # supports resolve_many() (nexus-7lm3q).  Falls back to the per-doc
+    # by_doc_id() loop for older/local catalogs that lack the method.
     cache: dict[str, str] = {}
-    for did in doc_ids:
+    _resolve_many = getattr(catalog, "resolve_many", None)
+    if _resolve_many is not None:
         try:
-            entry = catalog.by_doc_id(did)
-        except Exception:
-            continue
-        if entry is not None and entry.file_path:
-            cache[did] = entry.file_path
+            batch = _resolve_many(list(doc_ids))
+            for did, entry in (batch or {}).items():
+                if entry is not None and entry.file_path:
+                    cache[did] = entry.file_path
+        except Exception:  # noqa: BLE001 — best-effort batch resolve; failure logged at debug, display path dropped for set (see comment)
+            _log.debug("attach_display_paths_batch_failed", exc_info=True)
+            # Degradation granularity (CR Med-1 / critic obs): a single
+            # resolve_many failure leaves the cache empty, so _display_path is
+            # dropped for the WHOLE result set, not per-doc. Deliberate trade
+            # (one round-trip vs N) — the batch replaces the per-doc loop
+            # wholesale; we do not re-fan-out on failure.
+    else:
+        # Legacy per-doc loop for catalogs without resolve_many().
+        for did in doc_ids:
+            try:
+                entry = catalog.by_doc_id(did)
+            except Exception:  # noqa: BLE001 — best-effort per-doc resolve; any failure skips this doc's display path
+                continue
+            if entry is not None and entry.file_path:
+                cache[did] = entry.file_path
     if not cache:
         return
     for r in results:
@@ -338,7 +393,7 @@ def _prefilter_from_catalog(
         # Get the raw sqlite3 connection from CatalogDB wrapper
         conn = getattr(db, "_conn", db)
         doc_ids = _catalog_doc_ids_for_predicates(conn, mappable)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort prefilter; failure logged at debug, returns None to skip prefilter
         _log.debug("catalog_prefilter_failed", exc_info=True)
         return None
 
@@ -440,7 +495,7 @@ def search_cross_corpus(
                 # Too many — post-filter after search
                 topic_doc_ids = set(ids)
                 _log.debug("topic_prefilter_post_filter", topic=topic, n_ids=len(ids))
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort topic prefilter; failure logged at debug, falls through to unfiltered search
             _log.debug("topic_prefilter_failed", exc_info=True)
 
     # Thresholds are calibrated for Voyage AI embeddings.
@@ -479,13 +534,25 @@ def search_cross_corpus(
     # Per-collection raw min-distance accumulator for search_telemetry rows.
     # Distinct from ``min_dropped_distance`` which covers only dropped items.
     min_raw_per_collection: dict[str, float | None] = {}
-    for col in collections:
+    # nexus-o51et: parallelize the per-collection fan-out. The previous serial
+    # loop issued one blocking ``t3.search`` round-trip per collection; for
+    # ``corpus=all`` (~thousands of collections) that serialized the dominant
+    # p95 network cost. Mirror the ThreadPoolExecutor(max_workers<=8) pattern
+    # already used by ``T3Database.list_collections`` for the count fan-out,
+    # staying within the ChromaDB ``MAX_CONCURRENT_READS=10`` quota. Each
+    # collection's result processing runs inside the worker; the merge below
+    # walks the deterministic ``collections`` order so result ordering and the
+    # diagnostic/telemetry accumulators are independent of completion order.
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — branch-local; only when fan-out search runs
+
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local search helper import
+
+    def _search_one(col: str) -> dict:
         mult = _overfetch_multiplier(col)
         # Search review I-3: cap per_k at MAX_QUERY_RESULTS=300. Without
         # this, a large ``offset`` fed into ``fetch_n = offset + limit``
         # upstream multiplies by ``mult`` (up to 4×) and the per-collection
         # n_results punches through the ChromaDB Cloud quota.
-        from nexus.db.chroma_quotas import QUOTAS
         per_k = min(max(5, n_results * mult), QUOTAS.MAX_QUERY_RESULTS)
         if not apply_thresholds:
             threshold = None
@@ -499,13 +566,8 @@ def search_cross_corpus(
             # nexus-pebfx.8: one unservable collection (embedding-space
             # mismatch → service-side HTTP 400) must not sink the whole
             # cross-corpus search. Skip it, keep the rest.
-            failed_collections[col] = str(exc)
-            _log.warning(
-                "collection_search_failed",
-                collection=col,
-                error=str(exc),
-            )
-            continue
+            return {"col": col, "error": str(exc)}
+        results: list[SearchResult] = []
         dropped = 0
         # Minimum distance among dropped items — best-of-dropped, used by
         # SearchDiagnostics.worst_offender() for the "threshold bump" hint.
@@ -524,7 +586,7 @@ def search_cross_corpus(
                 if min_dropped_distance is None or distance < min_dropped_distance:
                     min_dropped_distance = distance
                 continue
-            all_results.append(SearchResult(
+            results.append(SearchResult(
                 id=r["id"],
                 content=r["content"],
                 distance=distance,
@@ -532,16 +594,51 @@ def search_cross_corpus(
                 metadata={k: v for k, v in r.items()
                           if k not in {"id", "content", "distance"}},
             ))
-        diag_per_collection[col] = (len(raw), dropped, threshold, min_dropped_distance)
-        min_raw_per_collection[col] = min_raw_distance
-        total_raw += len(raw)
-        total_dropped += dropped
-        if dropped:
+        return {
+            "col": col,
+            "error": None,
+            "results": results,
+            "raw_count": len(raw),
+            "dropped": dropped,
+            "threshold": threshold,
+            "min_dropped_distance": min_dropped_distance,
+            "min_raw_distance": min_raw_distance,
+        }
+
+    # ThreadPoolExecutor.map preserves input order and re-raises any
+    # non-``VectorServiceError`` from a worker (fail-loud, matching the prior
+    # serial behaviour where such errors bubbled out of the loop).
+    workers = min(8, len(collections))
+    if workers <= 1:
+        partials = [_search_one(c) for c in collections]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            partials = list(pool.map(_search_one, collections))
+
+    for part in partials:
+        col = part["col"]
+        if part.get("error") is not None:
+            failed_collections[col] = part["error"]
+            _log.warning(
+                "collection_search_failed",
+                collection=col,
+                error=part["error"],
+            )
+            continue
+        all_results.extend(part["results"])
+        diag_per_collection[col] = (
+            part["raw_count"], part["dropped"], part["threshold"],
+            part["min_dropped_distance"],
+        )
+        min_raw_per_collection[col] = part["min_raw_distance"]
+        total_raw += part["raw_count"]
+        total_dropped += part["dropped"]
+        if part["dropped"]:
             _log.debug(
                 "threshold_filtered",
                 collection=col,
-                dropped=dropped,
-                threshold=threshold,
+                dropped=part["dropped"],
+                threshold=part["threshold"],
             )
 
     if failed_collections and len(failed_collections) == len(collections):
@@ -565,8 +662,8 @@ def search_cross_corpus(
     # ``.nexus.yml`` values surface a structured warning instead of
     # silently coercing to a truthy string.
     if telemetry is not None and get_telemetry_config(cfg=cfg).search_enabled:
-        import hashlib
-        from datetime import UTC, datetime
+        import hashlib  # noqa: PLC0415 — branch-local; only on telemetry-enabled path
+        from datetime import UTC, datetime  # noqa: PLC0415 — branch-local; only on telemetry-enabled path
 
         ts = datetime.now(UTC).isoformat()
         query_hash = hashlib.sha256(query.encode()).hexdigest()[:64]
@@ -580,7 +677,7 @@ def search_cross_corpus(
         ]
         try:
             telemetry.log_search_batch(rows)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort telemetry write; must not crash the search; failure logged at debug
             _log.debug("search_telemetry_write_failed", exc_info=True)
 
     # Topic post-filter: keep only results in the requested topic
@@ -597,7 +694,7 @@ def search_cross_corpus(
 
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:
-        from nexus.scoring import apply_link_boost
+        from nexus.scoring import apply_link_boost  # noqa: PLC0415 — branch-local; only when link_boost enabled
         all_results = apply_link_boost(all_results, catalog)
 
     # Compute topic assignments once for both boost and grouping (RDR-070)
@@ -606,7 +703,7 @@ def search_cross_corpus(
         try:
             result_ids = [r.id for r in all_results]
             _topic_assignments = taxonomy.get_assignments_for_docs(result_ids)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort topic assignment; failure logged at debug, boost/grouping skipped
             _log.debug("topic_assignments_failed", exc_info=True)
 
     # Fetch embeddings once if either contradiction detection OR clustering
@@ -642,7 +739,7 @@ def search_cross_corpus(
                         assigned=len(assignments),
                         total=len(all_results),
                     )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort topic grouping; failure logged at debug, falls back to Ward clustering
                 _log.debug("topic_grouping_failed", exc_info=True)
 
         # Fall back to Ward clustering if topic grouping didn't fire
@@ -661,7 +758,7 @@ def search_cross_corpus(
     # distance-based group ordering is not contaminated by the boost.
     if _topic_assignments and all_results:
         try:
-            from nexus.scoring import apply_topic_boost
+            from nexus.scoring import apply_topic_boost  # noqa: PLC0415 — branch-local; only when topic assignments present
 
             # Read cached topic links for linked-topic boost
             topic_links: dict[tuple[int, int], int] | None = None
@@ -672,7 +769,7 @@ def search_cross_corpus(
             all_results = apply_topic_boost(
                 all_results, _topic_assignments, topic_links=topic_links,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort topic boost; failure logged at debug, results returned unboosted
             _log.debug("topic_boost_failed", exc_info=True)
 
     # RDR-109 Phase 5: salience boost. Opt-in via .nexus.yml flag
@@ -688,7 +785,7 @@ def search_cross_corpus(
                 query=query,
                 weight=float(ag_cfg.get("weight", 0.025)),
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort salience boost; failure logged at debug, results returned unboosted
             _log.debug("salience_boost_failed", exc_info=True)
 
     # nexus-1qed: catalog-resolved display path attached as metadata
@@ -717,7 +814,7 @@ def _fetch_embeddings_for_results(
     (contradiction check, clustering) continues for successfully-fetched
     collections rather than being suppressed entirely (R3-1 fix).
     """
-    import numpy as np
+    import numpy as np  # noqa: PLC0415 — deferred heavy dep; only when embeddings actually fetched
 
     col_groups: dict[str, list[int]] = {}
     for idx, r in enumerate(results):
@@ -734,7 +831,7 @@ def _fetch_embeddings_for_results(
         ids = [results[i].id for i in indices]
         try:
             col_emb = t3.get_embeddings(col, ids)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-collection isolation; failure logged, indices marked failed, other collections proceed
             _log.warning(
                 "embedding_fetch_failed",
                 collection=col,
@@ -804,7 +901,7 @@ def _flag_contradictions(
     zero-filled placeholders from the shared fetch helper and must not be
     compared against valid rows.
     """
-    import numpy as np
+    import numpy as np  # noqa: PLC0415 — deferred heavy dep; branch-local to feature processing
 
     failed_indices = failed_indices or set()
     col_groups: dict[str, list[int]] = {}
@@ -888,9 +985,9 @@ def _apply_salience_boost(
     Results without ``doc_id`` or whose document has no salient
     sentences fall through unchanged.
     """
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
-    from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415
-    from nexus.salience import token_overlap_boost  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+    from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415 — circular-dep avoidance (nexus.db.t2.document_aspects)
+    from nexus.salience import token_overlap_boost  # noqa: PLC0415 — circular-dep avoidance (nexus.salience)
 
     targeted = [
         r for r in results
@@ -932,7 +1029,7 @@ def _apply_clustering(
     Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
     duplicate ChromaDB round-trips when contradiction detection also runs.
     """
-    from nexus.search_clusterer import cluster_results
+    from nexus.search_clusterer import cluster_results  # noqa: PLC0415 — branch-local; only when clustering applied
 
     # Convert SearchResults to dicts for cluster_results API
     result_dicts = [

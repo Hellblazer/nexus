@@ -125,7 +125,7 @@ def promote_extras_field(
             f"got {sql_type!r}",
         )
 
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
         raise NotImplementedError(
             "promote_extras_field not yet supported on the service backend "
@@ -133,8 +133,8 @@ def promote_extras_field(
             "ALTER TABLE + backfill. Track: nexus-gmiaf.35"
         )
 
-    conn = db.document_aspects.conn
-    lock = db.document_aspects._lock
+    conn = db.document_aspects.conn  # epsilon-allow: guarded by storage_backend_for service-mode NotImplementedError above (gmiaf.35)
+    lock = db.document_aspects._lock  # epsilon-allow: guarded by storage_backend_for service-mode NotImplementedError above (gmiaf.35)
     now = datetime.now(UTC).isoformat()
 
     with lock:
@@ -204,7 +204,7 @@ def list_promotions(db) -> list[dict]:
     aspects-promote-field --history`` flag and by anyone
     auditing the schema's evolution.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
         raise NotImplementedError(
             "list_promotions not yet supported on the service backend "
@@ -212,8 +212,8 @@ def list_promotions(db) -> list[dict]:
             "table. Track: nexus-gmiaf.35"
         )
 
-    conn = db.document_aspects.conn
-    lock = db.document_aspects._lock
+    conn = db.document_aspects.conn  # epsilon-allow: guarded by storage_backend_for service-mode NotImplementedError above (gmiaf.35)
+    lock = db.document_aspects._lock  # epsilon-allow: guarded by storage_backend_for service-mode NotImplementedError above (gmiaf.35)
     _ensure_audit_table(conn, lock)
     with lock:
         rows = conn.execute(
@@ -316,8 +316,8 @@ def _record_promotion_audit(db, result: PromotionResult) -> None:
     so that if the outer guard is ever removed a failing audit is visible rather
     than silent.
     """
-    conn = db.document_aspects.conn
-    lock = db.document_aspects._lock
+    conn = db.document_aspects.conn  # epsilon-allow: guarded by storage_backend_for service-mode NotImplementedError above (gmiaf.35)
+    lock = db.document_aspects._lock  # epsilon-allow: guarded by storage_backend_for service-mode NotImplementedError above (gmiaf.35)
     try:
         _ensure_audit_table(conn, lock)
         with lock:
@@ -336,5 +336,5 @@ def _record_promotion_audit(db, result: PromotionResult) -> None:
                 ),
             )
             conn.commit()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         _log.warning("aspect_promotion_audit_failed", exc_info=True)

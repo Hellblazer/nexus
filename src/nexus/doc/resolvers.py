@@ -255,7 +255,7 @@ def _parse_frontmatter(block: str) -> dict[str, Any]:
     Sufficient for the RDR frontmatter schema; falls back to PyYAML
     when available for anything more complex (lists, nested maps)."""
     try:
-        import yaml
+        import yaml  # noqa: PLC0415 — heavy/optional dep (yaml) deferred to call time to keep module import cheap
         data = yaml.safe_load(block) or {}
         return data if isinstance(data, dict) else {}
     except ImportError:

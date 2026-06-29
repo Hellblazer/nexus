@@ -97,7 +97,7 @@ def _render_for_t2() -> tuple[Path, str]:
     import to avoid an import cycle, since ``daemon`` imports this module
     to back its thin CLI wrappers).
     """
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     install_dir = _daemon._autostart_install_dir()
     install_dir.mkdir(parents=True, exist_ok=True)
@@ -115,8 +115,42 @@ def _render_for_t2() -> tuple[Path, str]:
     return install_dir / template_name, rendered
 
 
+def _render_for_service() -> tuple[Path, str]:
+    """Resolve the destination path and rendered unit body for the storage
+    SERVICE tier (RDR-174 P2.1) — mirrors :func:`_render_for_t2`, swapping the
+    template filename. The unit execs ``nx daemon service start --foreground``.
+    """
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    install_dir = _daemon._autostart_install_dir()
+    install_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = _daemon._autostart_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    template_name = _daemon._autostart_filename_service()
+    nx_bin = _daemon._resolve_nx_bin()
+    rendered = _daemon._render_template(
+        template_name,
+        nx_bin=nx_bin,
+        log_dir=str(log_dir),
+        path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    )
+    return install_dir / template_name, rendered
+
+
+def _render_for(tier: str) -> tuple[Path, str]:
+    """Dispatch the per-tier render. ``install_autostart`` is tier-generic; the
+    render path is the only tier-specific seam on the INSTALL side (activation
+    is dest-based and tier-agnostic)."""
+    if tier == "t2":
+        return _render_for_t2()
+    if tier == "service":
+        return _render_for_service()
+    raise ValueError(f"unknown autostart tier {tier!r}")
+
+
 def _activate_cmd(dest: Path) -> list[str]:
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     if _daemon._autostart_platform() == "darwin":
         uid = os.getuid()
@@ -124,17 +158,42 @@ def _activate_cmd(dest: Path) -> list[str]:
     return ["systemctl", "--user", "enable", "--now", dest.name]
 
 
-def _deactivate_cmd(dest: Path) -> list[str]:
-    from nexus.commands import daemon as _daemon
+def _deactivate_cmd(dest: Path, *, tier: str = "t2") -> list[str]:
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     if _daemon._autostart_platform() == "darwin":
         uid = os.getuid()
-        return ["launchctl", "bootout", f"gui/{uid}/{_daemon._T2_LAUNCHD_LABEL}"]
+        # The launchd bootout target is the unit LABEL, which is tier-specific
+        # (the Linux disable path is dest.name and tier-agnostic). RDR-174 P2.1:
+        # a hardcoded T2 label here would no-op or boot out the wrong unit for
+        # the service tier.
+        label = (
+            _daemon._SERVICE_LAUNCHD_LABEL
+            if tier == "service"
+            else _daemon._T2_LAUNCHD_LABEL
+        )
+        return ["launchctl", "bootout", f"gui/{uid}/{label}"]
     return ["systemctl", "--user", "disable", "--now", dest.name]
 
 
-def install_autostart(*, force: bool = False) -> InstallResult:
-    """Install the T2 daemon OS autostart unit for the current user.
+def _autostart_filename_for(tier: str) -> str:
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if tier == "t2":
+        return _daemon._autostart_filename_t2()
+    if tier == "service":
+        return _daemon._autostart_filename_service()
+    raise ValueError(f"unknown autostart tier {tier!r}")
+
+
+def install_autostart(*, tier: str = "t2", force: bool = False) -> InstallResult:
+    """Install a daemon OS autostart unit for the current user.
+
+    ``tier`` selects which unit is rendered: ``"t2"`` (default — the historical
+    callers ``mcp._first_run`` / ``daemon_uninstall`` / the t2 CLI rely on this
+    default) or ``"service"`` (RDR-174 P2.1 — the storage service that serves
+    every tier). The activation path is tier-agnostic (dest-based); only the
+    rendered unit differs.
 
     The OS unit is the source of truth. If the destination already holds
     the freshly-rendered content, returns ``ALREADY_PRESENT`` without
@@ -152,7 +211,7 @@ def install_autostart(*, force: bool = False) -> InstallResult:
     Under ``force`` an activation failure is downgraded to a warning on
     the returned :class:`InstallResult` rather than raised.
     """
-    dest, rendered = _render_for_t2()
+    dest, rendered = _render_for(tier)
 
     if dest.is_symlink():
         raise SymlinkRefusedError(
@@ -189,7 +248,7 @@ def install_autostart(*, force: bool = False) -> InstallResult:
         msg = f"{cmd[0]} not found on PATH; file installed but not activated ({exc})."
         if not force:
             raise ActivationError(msg) from exc
-        _log.warning("t2_install_activation_not_found", dest=str(dest), error=str(exc))
+        _log.warning(f"{tier}_install_activation_not_found", dest=str(dest), error=str(exc))
         return InstallResult(
             status=InstallStatus.NEWLY_INSTALLED, dest=dest, detail=msg, warnings=(msg,)
         )
@@ -198,7 +257,7 @@ def install_autostart(*, force: bool = False) -> InstallResult:
         msg = f"{' '.join(cmd)} exited {result.returncode}: {detail}"
         if not force:
             raise ActivationError(msg)
-        _log.warning("t2_install_activation_failed", dest=str(dest), returncode=result.returncode)
+        _log.warning(f"{tier}_install_activation_failed", dest=str(dest), returncode=result.returncode)
         warnings = (msg,)
         return InstallResult(
             status=InstallStatus.NEWLY_INSTALLED, dest=dest, detail=msg, warnings=warnings
@@ -225,6 +284,16 @@ class DaemonUninstallReport:
     daemon_stopped: bool
     warnings: tuple[str, ...]
     message: str
+    #: RDR-165 eu4u4: whether the engine-service/PG stack was stopped
+    #: (`nx daemon service stop --with-pg`). Best-effort, like ``daemon_stopped``.
+    #: Defaulted so the MCP daemon_uninstall dry-run path needn't set it.
+    service_stopped: bool = False
+    #: Status/dest of the SERVICE-tier autostart unit removal. uninstall_daemon
+    #: stops the engine-service + PG stack, so it must also remove the SERVICE
+    #: autostart unit (else the OS watchdog restarts the just-stopped service).
+    #: ``unit_status``/``unit_dest`` remain the T2 unit for back-compat.
+    service_unit_status: UninstallStatus = UninstallStatus.NOT_INSTALLED
+    service_unit_dest: Path | None = None
 
 
 def _stop_daemon_best_effort() -> tuple[bool, str | None]:
@@ -236,7 +305,7 @@ def _stop_daemon_best_effort() -> tuple[bool, str | None]:
     a subprocess). Depends on ``nx`` being resolvable; failure is
     best-effort and surfaced as a warning, never raised.
     """
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     cmd = [*_daemon._resolve_nx_bin(), "daemon", "t2", "stop"]
     try:
@@ -249,6 +318,31 @@ def _stop_daemon_best_effort() -> tuple[bool, str | None]:
     return True, None
 
 
+def _stop_service_stack_best_effort() -> tuple[bool, str | None]:
+    """Best-effort ``nx daemon service stop --with-pg``. Returns (stopped, warning).
+
+    RDR-165 eu4u4: the complete teardown must stop the engine-service + embedded
+    Postgres, not only the T2 daemon (the installer.py gap where uninstall only
+    ran ``nx daemon t2 stop``). Same shell-out rationale as
+    :func:`_stop_daemon_best_effort` (lifecycle is daemon-command territory, not
+    installer logic; RDR-126 §2) and routes through the existing service-stop
+    command, which relinquishes the storage_service lease via the shared
+    ``service_registry.py`` primitive (RDR-149 — no duplicated lifecycle here).
+    A no-running-service exit is reported as a warning, never raised.
+    """
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    cmd = [*_daemon._resolve_nx_bin(), "daemon", "service", "stop", "--with-pg"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+    except Exception as exc:  # noqa: BLE001 — stop is best-effort
+        return False, f"service stop failed: {type(exc).__name__}: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        return False, f"service stop exited {result.returncode}: {detail}"
+    return True, None
+
+
 def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> DaemonUninstallReport:
     """Orchestrate full daemon removal for the ``daemon_uninstall`` MCP tool.
 
@@ -258,16 +352,23 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     first-run marker. With ``remove_data=True`` it additionally wipes the
     nexus config / data directory (``nexus_config_dir()``).
     """
-    from nexus.commands import daemon as _daemon
-    from nexus.config import nexus_config_dir
-    from nexus.mcp._first_run import _first_run_marker_path
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+    from nexus.mcp._first_run import _first_run_marker_path  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
-    unit_dest = _daemon._autostart_install_dir() / _daemon._autostart_filename_t2()
+    install_dir = _daemon._autostart_install_dir()
+    unit_dest = install_dir / _daemon._autostart_filename_t2()
+    service_unit_dest = install_dir / _daemon._autostart_filename_service()
     data_dir = nexus_config_dir()
     marker = _first_run_marker_path()
 
     if not confirm:
-        parts = [f"the autostart unit at {unit_dest}", "stop the running daemon"]
+        parts = [
+            f"the service autostart unit at {service_unit_dest}",
+            f"the T2 autostart unit at {unit_dest}",
+            "stop the engine-service + Postgres stack (service stop --with-pg)",
+            "stop the running T2 daemon",
+        ]
         if marker.exists():
             parts.append(f"the first-run marker at {marker}")
         if remove_data:
@@ -279,6 +380,10 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
                 UninstallStatus.REMOVED if unit_dest.exists() else UninstallStatus.NOT_INSTALLED
             ),
             unit_dest=unit_dest,
+            service_unit_status=(
+                UninstallStatus.REMOVED if service_unit_dest.exists() else UninstallStatus.NOT_INSTALLED
+            ),
+            service_unit_dest=service_unit_dest,
             marker_removed=False,
             data_removed=False,
             data_dir=data_dir,
@@ -292,16 +397,29 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
 
     warnings: list[str] = []
 
-    # 1. Remove the OS autostart unit.
+    # 1. Remove BOTH OS autostart units. The SERVICE unit is the one that
+    #    actually restarts the stack (it is the OS watchdog), so removing it is
+    #    load-bearing — leaving it would re-start the service stopped in step 2.
+    #    The legacy T2 unit is removed too. Both are best-effort (NOT_INSTALLED
+    #    is graceful).
+    service_unit_result = uninstall_autostart(tier="service")
+    warnings.extend(service_unit_result.warnings)
     unit_result = uninstall_autostart()
     warnings.extend(unit_result.warnings)
 
-    # 2. Stop the running daemon (best-effort).
+    # 2. Stop the engine-service + Postgres stack (best-effort) — RDR-165 eu4u4.
+    #    Stop the service BEFORE the T2 daemon so a complete teardown leaves no
+    #    running storage backend; both are best-effort and never raise.
+    service_stopped, service_warning = _stop_service_stack_best_effort()
+    if service_warning:
+        warnings.append(service_warning)
+
+    # 3. Stop the running T2 daemon (best-effort).
     daemon_stopped, stop_warning = _stop_daemon_best_effort()
     if stop_warning:
         warnings.append(stop_warning)
 
-    # 3. Remove the first-run marker so a reinstall re-shows the banner.
+    # 4. Remove the first-run marker so a reinstall re-shows the banner.
     marker_removed = False
     if marker.exists():
         try:
@@ -310,10 +428,10 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         except OSError as exc:
             warnings.append(f"could not remove first-run marker: {exc}")
 
-    # 4. Optionally wipe all nexus data.
+    # 5. Optionally wipe all nexus data.
     data_removed = False
     if remove_data and data_dir.exists():
-        import shutil
+        import shutil  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         # Path-safety guard (review H2): a misconfigured NEXUS_CONFIG_DIR
         # (e.g. "/", "/Users", or a bare home dir) must never let rmtree
@@ -337,7 +455,11 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             except OSError as exc:
                 warnings.append(f"could not remove data dir {data_dir}: {exc}")
 
-    summary = [f"autostart unit: {unit_result.status.value}"]
+    summary = [
+        f"service autostart unit: {service_unit_result.status.value}",
+        f"T2 autostart unit: {unit_result.status.value}",
+    ]
+    summary.append("service stack stopped" if service_stopped else "service stop not confirmed")
     summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
     if marker_removed:
         summary.append("first-run marker removed")
@@ -347,33 +469,37 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         confirmed=True,
         unit_status=unit_result.status,
         unit_dest=unit_result.dest,
+        service_unit_status=service_unit_result.status,
+        service_unit_dest=service_unit_result.dest,
         marker_removed=marker_removed,
         data_removed=data_removed,
         data_dir=data_dir,
         daemon_stopped=daemon_stopped,
+        service_stopped=service_stopped,
         warnings=tuple(warnings),
         message="Daemon uninstall complete: " + "; ".join(summary) + ".",
     )
 
 
-def uninstall_autostart() -> UninstallResult:
-    """Remove the T2 daemon OS autostart unit for the current user.
+def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
+    """Remove a daemon OS autostart unit for the current user.
 
-    A non-zero / missing ``launchctl bootout`` / ``systemctl disable``
-    is downgraded to a warning and the file is removed anyway (mirrors
-    the original CLI: the unit file is the durable artifact). Returns
+    ``tier`` selects the unit: ``"t2"`` (default — ``daemon_uninstall`` and the
+    t2 CLI rely on it) or ``"service"`` (RDR-174 P2.1). A non-zero / missing
+    ``launchctl bootout`` / ``systemctl disable`` is downgraded to a warning and
+    the file is removed anyway (the unit file is the durable artifact). Returns
     ``NOT_INSTALLED`` when nothing is present.
     """
-    from nexus.commands import daemon as _daemon
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     install_dir = _daemon._autostart_install_dir()
-    dest = install_dir / _daemon._autostart_filename_t2()
+    dest = install_dir / _autostart_filename_for(tier)
 
     if not dest.exists():
         return UninstallResult(status=UninstallStatus.NOT_INSTALLED, dest=dest)
 
     warnings: list[str] = []
-    cmd = _deactivate_cmd(dest)
+    cmd = _deactivate_cmd(dest, tier=tier)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:

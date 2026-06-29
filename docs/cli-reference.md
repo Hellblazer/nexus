@@ -106,6 +106,7 @@ nx index repo ./my-project
 | `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich bib <collection>` for bulk backfill |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
+| `--on-formula-oom [fail\|docling]` | What to do when a single page reproducibly OOM-kills MinerU's formula model (default: `fail`). `fail` aborts the document (preserves the no-silent-fallback-for-formulas guarantee). `docling` degrades only that page to docling (formula-stripped) and continues |
 | `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs (crash-resilient); `never` forces the legacy batch+checkpoint path |
 
@@ -144,9 +145,23 @@ Or add to `.nexus.yml` (per-repo) or `~/.config/nexus/config.yml` (global) direc
 ```yaml
 pdf:
   extractor: mineru   # auto | docling | mineru
+  mineru_page_batch: 1          # pages per MinerU subprocess (memory isolation)
+  mineru_page_timeout_s: 180    # per-page wall-clock budget (× pages-in-range)
+  mineru_memory_ceiling_mb: 0   # 0 = disabled; Linux-only RLIMIT_AS cap (see below)
 ```
 
 The `--extractor` flag overrides the config when passed explicitly.
+
+**MinerU OOM resilience (RDR-148).** Formula-dense pages can OOM-kill MinerU's
+formula model. The recovery ladder: a failed multi-page batch bisects toward
+single pages; a single page that still OOMs either aborts the document
+(`--on-formula-oom fail`, the default) or degrades only that page to docling
+(`--on-formula-oom docling`). On **Linux** you can additionally set
+`mineru_memory_ceiling_mb` to cap the worker's address space (RLIMIT_AS) so a
+runaway page fails fast and catchably instead of thrashing; macOS does not honour
+RLIMIT_AS (the knob logs a warning and is ignored there). Note RLIMIT_AS caps
+**virtual** address space, not physical RAM; PyTorch/MinerU mmap weights
+aggressively, so set it generously (several GB).
 
 **Forcing a specific backend (one-off):**
 
@@ -509,6 +524,31 @@ The promotion is logged to `aspect_promotion_log` (registry-managed) for audit. 
 
 ---
 
+## nx aspects
+
+Aspect-extraction queue management (the async queue feeding the aspect-extraction worker). The group also provides `drain` (drain before a PK migration), `gc`, and `gc-fixtures`.
+
+### nx aspects requeue-failed
+
+Bulk re-enqueue terminal-`failed` aspect-queue rows. A row reaches `failed` after exhausting the backoff-retry ladder (RDR-163) or on a non-retryable error. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb re-enqueues every failed row at its `(collection, source_path)` key — resetting it to `pending` with `retry_count=0` and clearing any stale backoff — so the worker picks it up again. The write is daemon-routed; the failed-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
+
+| Flag | Description |
+|------|-------------|
+| `--collection NAME` | Only re-enqueue failed rows in this collection. Default: all collections |
+| `--limit N` | Re-enqueue at most N rows (oldest-`enqueued_at` first). Paces recovery of a large backlog so a burst of newly-pending rows doesn't immediately re-hammer a just-restored API quota |
+| `--dry-run` | Report the rows that would be re-enqueued without writing anything |
+
+Rows are processed oldest-`enqueued_at`-first (enqueue order, not most-recently-failed); re-enqueue resets `retry_count` to 0. This is a single-operator recovery verb — safe to re-run (it only touches the terminal `failed` state), but do not run two instances concurrently.
+
+```bash
+nx aspects requeue-failed                        # re-enqueue all failed rows
+nx aspects requeue-failed --collection knowledge__x
+nx aspects requeue-failed --limit 100            # pace a large backlog
+nx aspects requeue-failed --dry-run              # report only, no writes
+```
+
+---
+
 ## nx catalog
 
 Document catalog — track indexed documents and the relationships between them.
@@ -695,7 +735,7 @@ Standard catalog management. Run `nx catalog COMMAND --help` for details.
 nx catalog backfill-collections [--dry-run]
 ```
 
-Populate the RDR-101 Phase 6 collections projection from existing state. Walks both T3 (live ChromaDB) and the catalog `documents.physical_collection` column, unions the two sets, and registers each name not already in the projection. The projector's `is_conformant_collection_name` regex decides each row's `legacy_grandfathered` flag automatically.
+Populate the RDR-101 Phase 6 collections projection from existing state. Walks both the live T3 vector store and the catalog `documents.physical_collection` column, unions the two sets, and registers each name not already in the projection. The projector's `is_conformant_collection_name` regex decides each row's `legacy_grandfathered` flag automatically.
 
 Idempotent. Conventional first invocation is `--dry-run` for operator review, then `--no-dry-run` to apply.
 
@@ -744,7 +784,7 @@ Returns non-zero on any check failure. `--json` emits the per-check result for C
 
 ## nx t3
 
-T3 (ChromaDB) maintenance commands. Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
+T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 17 + pgvector behind the native nexus-service; these commands operate on that store through the vector client. (`nx t3 reidentify` was the RDR-108 ChromaDB natural-ID migration and is retained for legacy collections.) Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
 
 ### nx t3 prune-stale
 
@@ -875,7 +915,7 @@ taxonomy:
 ```yaml
 taxonomy:
   auto_label: true                    # label with Claude haiku after discover (default: true)
-  local_exclude_collections: []       # default: ["code__*"] — MiniLM clusters poorly on code
+  local_exclude_collections: []       # default: ["code__*"] — local embeddings cluster poorly on code
 ```
 
 **Upgrade path**: Run `nx upgrade` after upgrading to apply pending migrations and T3 upgrade steps (including cross-collection projection backfill). Run `nx taxonomy discover --all` to populate topics for new collections.
@@ -1054,7 +1094,7 @@ nx collection list
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
 | `backfill-hash [NAME]` | Add `chunk_text_hash` metadata to chunks missing it (no re-embedding) |
-| `rename OLD NEW` | In-place rename via ChromaDB `modify(name=)` + T2 + catalog cascade (4.8.0, nexus-1ccq) |
+| `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq) |
 | `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics, chash coverage (RDR-087 Phase 4) |
 | `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score, chash coverage (RDR-087 Phase 3.4) |
 | `delete NAME` | Delete collection (irreversible) |
@@ -1079,7 +1119,7 @@ The `reindex` command performs a pre-delete safety check before wiping the colle
 |------|-------------|
 | `--all` | Backfill all collections instead of a single named one |
 
-Reads each chunk's stored text from ChromaDB and computes `sha256(text.encode()).hexdigest()`, updating metadata in-place. Embeddings and documents are untouched — no API keys or re-embedding needed. Idempotent: chunks that already have `chunk_text_hash` are skipped. Also runs automatically during `nx catalog setup`.
+Reads each chunk's stored text from the T3 store and computes `sha256(text.encode()).hexdigest()`, updating metadata in-place. Embeddings and documents are untouched — no API keys or re-embedding needed. Idempotent: chunks that already have `chunk_text_hash` are skipped. Also runs automatically during `nx catalog setup`.
 
 **RDR-086 Phase 1.3 — T2 `chash_index` reconciliation.** The same per-chunk
 pass also populates the T2 `chash_index` table so `nx doc cite` and
@@ -1098,7 +1138,7 @@ takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
 |------|-------------|
 | `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`). Embedding-model spaces differ across prefixes, so the renamed collection is query-incompatible with its old clients — use only when you've deleted every downstream reader |
 
-Uses ChromaDB's native `modify(name=)` for an O(1) metadata update — no embedding re-upload, no Voyage cost, no ChromaDB egress. Cascades the new name through T2 taxonomy, `chash_index`, and catalog (JSONL + SQLite). The cascade is fail-open by design: T3 renames first; a T2 or catalog failure prints a `warn: …` line on stderr but leaves T3 renamed so the operation is recoverable by retrying the cascade alone.
+Renames the collection in the T3 vector store via `t3.rename_collection` (a metadata-only update on the pgvector service path — no embedding re-upload, no Voyage cost, no vector egress), and cascades the new name through T2 taxonomy, `chash_index`, and catalog (JSONL + SQLite). Ordering (SIG-8 / nexus-nhyh): the T2 cascade runs FIRST, then the T3 rename, so a partial failure is recoverable: if the T3 rename fails the T2/catalog rows can be re-pointed or the rename re-run; if T2 fails no T3 rename was attempted.
 
 **`audit` flags:**
 
@@ -1177,15 +1217,26 @@ Guided first-run setup for the local embedder (RDR-144). Distinct from
 provisions the on-device embedding model for local mode.
 
 ```
-nx init                       # interactive: prompt for the embedder
-nx init --yes                 # accept the recommended bge-768, no prompt
+nx init                       # local: provision + interactively offer autostart (default yes)
+nx init --yes                 # accept service-autostart registration, no prompt
+nx init --no-autostart        # provision + start a session supervisor only; register no unit
 nx init --embedder minilm-384 # pick a specific embedder, no prompt
+nx init --service             # DEPRECATED — plain `nx init` now does this by default
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--embedder [bge-768\|minilm-384]` | Select the embedder non-interactively (skips the prompt) |
-| `--yes` / `-y` | Accept the recommended default (bge-768) without prompting |
+| `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` waits for it to come up rather than also starting a session supervisor. |
+| `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
+| `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, locks the embedder to bge-768, acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. Acquire the binary + PG bundle first with `nx daemon service install-binary <engine-service-vX.Y.Z>`. |
+
+**Service autostart (RDR-174 P2.4, decide-first):** in local mode `nx init`
+decides autostart *before* starting any supervisor. Interactive runs prompt
+(default yes); `--yes` accepts, `--no-autostart` declines. A non-interactive run
+with neither flag declines — a system unit is **never** written without explicit
+consent. On yes the OS unit becomes the single process watchdog; on no (or a
+headless host where the unit can't activate) a session supervisor starts instead.
 
 **Local mode** presents the two on-device embedders and records the choice in
 `~/.config/nexus/config.yml` under `local.embed_model`:
@@ -1228,7 +1279,7 @@ nx config init
 
 | Subcommand | Description |
 |------------|-------------|
-| `init` | Interactive credential wizard |
+| `init` | Interactive managed-service (cloud) credential wizard — collects `service_url` + `service_token`. Local mode uses `nx init` instead. |
 | `list` | Show all config values |
 | `get KEY` | Get single value (masked by default) |
 | `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form |
@@ -1238,6 +1289,16 @@ nx config init
 | Flag | Description |
 |------|-------------|
 | `--show` | Reveal the full value instead of masking |
+
+**Managed-service credentials** (RDR-166 greenfield onboarding):
+
+| Key | Env var | Purpose |
+|-----|---------|---------|
+| `service_url` | `NX_SERVICE_URL` | Managed endpoint base URL (e.g. `https://api.conexus-nexus.com`) |
+| `service_token` | `NX_SERVICE_TOKEN` | Per-tenant bearer token (operator-provisioned) |
+
+Resolution is env first, then `config.yml`, for both. See
+[managed-onboarding.md](managed-onboarding.md) for the full greenfield journey.
 
 ---
 
@@ -1337,7 +1398,7 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks: ChromaDB API key, ChromaDB tenant, T3 database (`CHROMA_DATABASE`), Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention). The T2 integrity check now reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4).
+Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and the legacy on-disk Chroma store (reported as awaiting the migration ETL, not as the live backend). Then: Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention). The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The ChromaDB Cloud credential lines (`CHROMA_API_KEY` / `CHROMA_TENANT` / `CHROMA_DATABASE`) are still surfaced, but as of 6.0 they describe migration-source / pre-6.0 cloud config — the live T3 health surface is the vector-service probe above and `nx daemon service status`. A fresh local install with no Chroma keys is healthy.
 
 ```
 nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files
@@ -1356,6 +1417,24 @@ nx doctor --check-schema          # Validate T2 database schema and report pendi
 ```
 nx doctor --check-plan-library    # Report plan-library dimensional health (RDR-092 Phase 0c)
 ```
+
+```
+nx doctor --check-t3-legacy-metadata                        # Survey T3 for legacy doc_id/source_path chunk metadata
+nx doctor --check-t3-legacy-metadata --strict-legacy-metadata  # Exit non-zero if any collection still carries it
+```
+
+The `--check-t3-legacy-metadata` flag (nexus-1714) surveys local (Chroma)
+T3 collections and reports, per collection, whether any chunk still
+carries `doc_id` or `source_path` metadata — both retired by RDR-108
+Phase 3 in favour of the catalog `document_chunks` manifest. It gates
+removal of the legacy tolerance branches in `mcp/core.py`,
+`indexer_utils.py`, and `search_engine.py`: while any collection reports
+`LEGACY`, those branches must stay. Detection is a single cheap
+`get(where=…, limit=1)` presence probe per field per collection. Default
+behaviour is warn (exit 0); add `--strict-legacy-metadata` to exit
+non-zero when legacy metadata is found (for CI gating). The check is a
+local-Chroma concern and reports *not applicable* in service/cloud mode,
+where chunks use the RDR-155 pgvector schema.
 
 The `--check-plan-library` flag (introduced 4.9.13, nexus-4x9q) buckets
 every row in the `plans` table into **authored** (dimensions populated,
@@ -1380,7 +1459,7 @@ nx doctor --check-quotas            # Report ChromaDB Cloud + Voyage AI free-tie
 nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
 ```
 
-The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a three-section pre-flight report: (1) ChromaDB Cloud limits drawn from `nexus.db.chroma_quotas.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps) plus a live reachability probe of the configured tenant; (2) Voyage AI per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`) with `VOYAGE_API_KEY` presence check; (3) the cumulative retry accumulator from `nexus.retry.get_retry_stats()` so any transient-error backoffs observed in the current process surface alongside the static limits.
+The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a three-section pre-flight report: (1) the per-request limits drawn from `nexus.db.chroma_quotas.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps) which the managed-cloud path still honours, plus a reachability probe that fires only when a ChromaDB Cloud migration source is configured; (2) Voyage AI per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`) with `VOYAGE_API_KEY` presence check; (3) the cumulative retry accumulator from `nexus.retry.get_retry_stats()` so any transient-error backoffs observed in the current process surface alongside the static limits.
 
 Exit codes:
 - `0` — reachable cloud tenant or local-mode (limits are reference-only).
@@ -1447,29 +1526,38 @@ consumers — host CLI + Cowork sessions + dev containers + the
 nx-mcp server — share one arbitrated SQLite writer instead of
 each opening their own connection.
 
-The daemons are infrastructure: start them once at login and
-leave them running. For a brand-new install the recommended setup
-sequence is:
+For a brand-new install the recommended setup is the collapsed flow
+(RDR-174 — one provisioning command, no separate T2-daemon step):
 
 ```
-uv tool install conexus                    # or "conexus[local]" for the bge-768 local embedder
-nx daemon t2 install --autostart           # writes LaunchAgent/systemd unit
-nx daemon t2 status                        # confirm running
-# (local-mode T3 only)
-nx daemon t3 install --autostart
+uv tool install conexus                                    # the nx CLI
+nx daemon service install-binary <engine-service-vX.Y.Z>   # acquire the signed native service binary + PG bundle
+nx init                                                     # provision Postgres+pgvector, fetch bge-768, start the service, offer autostart
 ```
+
+`nx init` provisions and starts the service backend and offers to register the
+OS autostart unit (prompt, default yes; `--yes` accepts, `--no-autostart`
+declines — see [nx init](#nx-init)). In the default all-SERVICE config T2
+(notes/plans) is served by the same service, so there is **no** separate
+`nx daemon t2 install` step. The deprecated `nx init --service` flag still works
+but plain `nx init` is the path now. (`nx daemon t2 install --autostart` remains
+available as an explicit opt-in for a SQLite T2 backend, e.g.
+`NX_STORAGE_BACKEND=sqlite`.)
 
 Upgrade later with `uv tool upgrade conexus` (preserves extras like `[local]`); avoid `uv tool install --force`, which resets the environment and drops them.
 
-Cloud-mode T3 uses HTTP transport directly to ChromaDB Cloud and
-has no daemon; only `t2` is needed in that configuration.
+T3 (the permanent vector store) serves through the native nexus-service over
+Postgres + pgvector in **both** local and cloud mode (`nx daemon service`); the
+legacy `nx daemon t3` ChromaDB daemon is a retired serving path.
 
-When the conexus plugin is installed, the plugin's
-SessionStart hook auto-spawns the T2 daemon via
-`nx daemon t2 ensure-running` on every Claude Code session start,
-so first-session-after-install works without any manual incantation.
-For long-lived background daemons that survive across reboots
-independent of Claude Code, use `install --autostart` as above.
+On the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`), the conexus
+plugin's SessionStart hook auto-spawns the SQLite T2 daemon via
+`nx daemon t2 ensure-running` on every Claude Code session start (a silent
+no-op in the default service config, where T2 is served by the nexus-service).
+For a SQLite T2 daemon that survives reboots independent of Claude Code, use
+`nx daemon t2 install --autostart`. In the default service config the service's
+own autostart unit (`nx daemon service install --autostart`, or accepting the
+`nx init` prompt) covers reboot-persistence for every tier.
 
 ### nx daemon t2 start
 
@@ -1616,14 +1704,15 @@ Reverse of `install --autostart`: deactivate via
 
 ### nx daemon t3 start / stop / status / install / uninstall
 
-Same shape as the `t2` subcommands, applies to the T3 daemon.
-**Only used in local mode (`NX_LOCAL=1` or no cloud credentials).**
-Cloud-mode T3 talks directly to ChromaDB Cloud via HTTP and has no
-daemon process — `nx daemon t3` is a no-op there.
+> **Legacy / retired serving path (6.0).** T3 no longer serves from ChromaDB.
+> The permanent vector store now serves through the native nexus-service over
+> Postgres + pgvector — see `nx daemon service` below and `nx init`.
+> `nx daemon t3` (the managed `chroma run` subprocess) remains only for reading a
+> pre-6.0 ChromaDB store as the **migration source** (`nx guided-upgrade`).
 
-Local-mode T3 wraps the upstream `chroma run` server lifecycle
-under launchd / systemd supervision; templates ship as
-`com.nexus.t3.plist` / `nexus-t3.service`.
+Same shape as the `t2` subcommands, applies to the legacy T3 ChromaDB daemon.
+It wraps the upstream `chroma run` server lifecycle under launchd / systemd
+supervision (templates `com.nexus.t3.plist` / `nexus-t3.service`).
 
 ### nx daemon service start / stop / status
 
@@ -1633,7 +1722,7 @@ spawns the native binary (resolving `NX_VOYAGE_API_KEY` through the credential
 chain), waits for `/health`, and publishes the endpoint lease that clients
 auto-discover. The native binary is the sole launch artifact (RDR-161: the
 `java -jar` path is expunged); acquire it with `install-binary` (below) or
-`nx init --service`, which places and verifies it.
+`nx init`, which places and verifies it.
 
 `status` is the single is-the-stack-healthy surface: the lease (host, port,
 service pid, generation), supervisor pid, addr-file path, live `/health` probe,
@@ -1670,6 +1759,54 @@ fast`).
 | `--json` | (`status`) Raw JSON output. |
 | `--with-pg` | (`stop`) Also stop the nx-managed Postgres cluster. |
 
+**Memory-constrained hosts.** Set `NX_SERVICE_MAX_HEAP` (e.g. `NX_SERVICE_MAX_HEAP=1g`)
+to cap the native service's JVM heap. On low-RAM laptops and containers the
+combined peak (service binary + bge-768 ONNX + Postgres + supervisor) can trip
+the OS OOM-killer at first start; capping the heap reduces that risk. Default is
+unset (no cap).
+
+**Container reachability (`NX_SERVICE_BIND`, since engine-service v0.1.11).** The
+service binds `127.0.0.1` (loopback) by default. Set `NX_SERVICE_BIND=0.0.0.0`
+to bind all interfaces so a dev/CI container can reach a host-run service across
+its network namespace. **Security:** the service has **no TLS** — a non-loopback
+bind exposes a token-authed *plaintext* service (and unauthenticated `/health` /
+`/version`) on the LAN; use it only on trusted/host-private container networks,
+and never on an untrusted network. **Necessary but not sufficient:** the bind
+makes the service *reachable*, but a container still cannot *discover* it — the
+published lease host stays loopback by design (it is the host-side connect
+address), and the service port is OS-allocated. A container must therefore set
+`NX_SERVICE_HOST` / `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN` explicitly (it cannot
+read the host's lease file). A fixed/known-port mechanism for the full container
+flow is tracked in `nexus-ddvjy`. (This does **not** apply to Claude Cowork,
+which uses SDK transport to a host-resident MCP server per RDR-126.)
+
+### nx daemon service install --autostart
+
+```
+nx daemon service install --autostart
+nx daemon service install --autostart --force
+```
+
+Register the storage service to start at login/boot — writes a launchd
+LaunchAgent (macOS, `~/Library/LaunchAgents/com.nexus.service.plist`) or a
+systemd user unit (Linux, `~/.config/systemd/user/nexus-service.service`) that
+execs `nx daemon service start --foreground`. The OS init system is the single
+process watchdog (RDR-175), and the in-process respawn layer is retired. The
+systemd unit restarts on a non-zero exit (`Restart=on-failure` +
+`SuccessExitStatus=143` excludes a graceful SIGTERM stop; `StartLimitIntervalSec=0`
+removes the give-up threshold). The launchd plist uses `KeepAlive=true`, which
+restarts on any exit (including a clean `nx daemon service stop`) — stop it via
+`nx daemon service uninstall --autostart` (or `launchctl bootout`) when you want
+it to stay down. `nx init` runs this for you when you
+accept the autostart prompt (decide-first — the unit is the sole starter, no
+session supervisor underneath it). `--force` overwrites an existing unit whose
+content differs. Remove with `nx daemon service uninstall --autostart`.
+
+| Flag | Description |
+|------|-------------|
+| `--autostart` | Required. Install the OS autostart unit. |
+| `--force` | Overwrite an existing unit file even when its content differs. |
+
 ### nx daemon service install-binary
 
 ```
@@ -1681,7 +1818,7 @@ Download, verify, and install the signed native nexus-service binary (and,
 by default, the relocatable PostgreSQL bundle) from a GitHub release to the
 well-known location (`~/.config/nexus/service/`) with a provenance sidecar
 (version, tag, sha256, install metadata). Supervisor discovery and
-`nx init --service` use this location.
+`nx init` use this location.
 
 TAG is an EXPLICIT `engine-service-v*` release tag (e.g.
 `engine-service-v0.1.3`); there is no "latest" resolution. Each per-platform
@@ -1716,6 +1853,37 @@ nx upgrade --auto                 # Quiet mode for hook invocation (T2 only, exi
 **Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin. T2 migrations apply silently on every session start. T3 upgrade steps (e.g., cross-collection projection backfill) run only via explicit `nx upgrade`.
 
 **Adding new migrations**: Append a `Migration("x.y.z", "description", fn)` entry to the `MIGRATIONS` list in `src/nexus/db/migrations.py`. For T3 operations, use `T3UpgradeStep`.
+
+---
+
+## nx uninstall
+
+First-class agent teardown (RDR-165). See
+[docs/operations/agent-lifecycle.md](operations/agent-lifecycle.md) for the full
+install → upgrade → uninstall lifecycle map. Cleanly removes nexus, auto-detecting
+and handling BOTH install shapes — each branch is a no-op when its target is absent:
+
+- **Local service**: stops the engine-service + Postgres stack
+  (`nx daemon service stop --with-pg`), stops the T2 daemon, removes the OS
+  autostart unit, and clears the first-run marker.
+- **Managed-only client**: clears the managed endpoint config
+  (`service_url` + `service_token`) from `config.yml`. Skips service-stop (no
+  local service) and never touches the remote tenant's data.
+
+```
+nx uninstall                  # DRY RUN (default): preview what would be removed
+nx uninstall --yes            # Perform the teardown
+nx uninstall --yes --remove-data   # ALSO wipe the local data dir (notes + index)
+```
+
+| Flag | Description |
+|------|-------------|
+| `--yes` | Perform the teardown. Without it, `nx uninstall` only previews (dry-run default). |
+| `--remove-data` | Also wipe the local nexus data dir (notes + search index). Irreversible; only acts with `--yes`. **Does NOT touch a managed/remote tenant's data.** |
+
+**Managed env override:** if `NX_SERVICE_URL` / `NX_SERVICE_TOKEN` are exported in
+your shell (not just `config.yml`), `nx uninstall` clears `config.yml` and warns
+you to `unset` the shell export — it cannot unset the parent shell itself.
 
 ---
 
@@ -1808,6 +1976,14 @@ Create tenant `NAME` and mint its first bound service token. The token is printe
 
 Storage-service administration.
 
+### nx service probe
+
+```
+nx service probe [--url URL]
+```
+
+Probe a managed nexus service for reachability and version compatibility. `--url` defaults to `NX_SERVICE_URL` (or the `service_url` credential). Reports the endpoint, `release_version`, `app_version`, and embedding mode; exits non-zero when the service is unreachable.
+
 ### nx service token issue
 
 ```
@@ -1840,15 +2016,53 @@ nx service token list [--tenant TENANT]
 
 List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revoked`), label, expiry, and revocation time. Never prints the raw token. Use the id prefix with `nx service token revoke`.
 
+## nx guided-upgrade
+
+```
+nx guided-upgrade [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--timeout SECS] [--yes]
+```
+
+The **one-command upgrade from a pre-6.0 (ChromaDB) install to the service
+stack** (RDR-002). It is the recommended migration entry point — it stands up
+the service and then drives `nx migrate-to-service`, so you never hand-sequence
+provisioning + migration.
+
+Sequence: **pre-flight detect** (if there is no ChromaDB footprint to migrate it
+no-ops without provisioning) → **provision + serve** the local service (the full
+`nx init` path: Postgres + bge-768 ONNX + the native binary) — or, with
+`--service-url`, gate an already-running service → **version-pin** (`/version`
+`/version` must report a `release_version` — present from engine-service
+v0.1.6+, code floor v0.1.8; older/below-floor binaries fail closed) → **bounded
+health-gate** → **voyage-
+capability pre-flight** (if the footprint has voyage collections, the target
+service must be able to serve them — fail loud before migrating) → drive
+**`nx migrate-to-service`** (detect → ETL → validate → unlock) → advisory
+`nx doctor`.
+
+- `--service-url URL` migrates into an already-running service instead of
+  provisioning a local one; requires `NX_SERVICE_TOKEN` to be set.
+- `--timeout SECS` bounds the wait for the service to become healthy (default 120).
+- `--yes` / `-y` skips the confirmation prompt.
+
+A not-ready or wrong-version service **hard-fails before any migration**.
+Idempotent and safe to re-run, but **not a no-op after success** — a re-run
+re-copies at full cost (the ChromaDB source is intact, so it is re-detected). On
+a validation block it leaves the `migrated-failed` sentinel and offers a rollback
+command (copy-not-move; never auto-reverts). Operational narrative:
+[`docs/migration-runbook.md`](migration-runbook.md).
+
 ## nx migrate-to-service
 
 ```
 nx migrate-to-service [--dry-run] [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL]
 ```
 
-The single guided Chroma-to-service upgrade (RDR-159) — it wraps and sequences
-the proven `nx storage migrate` primitives into one survivable command so a
-user never hand-sequences the ~8-step gauntlet.
+The lower-level Chroma-to-service migration primitive (RDR-159) that
+`nx guided-upgrade` wraps. Use `nx guided-upgrade` for the full one-command
+experience; use this directly when the service is **already provisioned and
+running** and you only need the migration step. It sequences the proven
+`nx storage migrate` primitives into one survivable command so a user never
+hand-sequences the ~8-step gauntlet.
 
 - `--dry-run` ships the read-only front half: it classifies the Chroma
   footprint per collection (source leg × embedding model, resolved against the
@@ -1965,3 +2179,33 @@ nx storage migrate vectors [--local-path PATH | --cloud] [--collections A,B] [--
 Migrate Chroma vector collections into pgvector (RDR-155 Phase 5). Two legs, run separately: the default local leg reads the on-disk store the retired T3 daemon served (`--local-path`, default `~/.config/nexus/chroma`); `--cloud` reads via the ChromaCloud REST/auth API using the configured `chroma_*` credentials. Chunk text, chash, and metadata transfer verbatim and the service re-embeds server-side; collection names are preserved verbatim so `topic_assignments.source_collection` references stay valid. `--rollback` deletes from pgvector exactly the chashes present in the source collections, leaving the source untouched. Exits non-zero when any collection failed or was skipped (non-conformant name with data present). Non-conformant collections with **zero** chunks receive status `skipped-empty` and do not redden the run — nothing can be lost by definition, so empty legacy collections (e.g. `tuples__*`) no longer force `--collections` hand-pinning.
 
 Run the ETL with indexing paused (the post-write count verification assumes a quiescent window). Cutover validation sequence after both legs complete: run `manifest_backfill_sql()` then `manifest_orphan_sql(dim)` for each of 384/768/1024 (from `nexus.migration.vector_etl`) via psql as a superuser/admin role — zero orphan rows per dim is the pass condition. See the module docstring for the rationale (direct SQL, never the repository read API).
+
+---
+
+## nx tier-status
+
+```
+nx tier-status [--session SESSION_ID] [--last N] [--since ISO8601] [--json]
+```
+
+Audit tier-write activity (T1 scratch, T2 memory/plans, T3 store) for a session. Defaults to the current session (`NX_SESSION_ID`); `--last N` aggregates the most recent N sessions, `--since` bounds by timestamp, `--json` emits structured output instead of the human table. Phase 1B (nexus-a52i).
+
+---
+
+## nx command-context
+
+Generates the agent-relay preamble context that the conexus skills consume (RDR-130 P2). Each subcommand mirrors a skill (`analyze-code`, `architecture`, `create-plan`, `implement`, `debug`, `deep-analysis`, `enrich-plan`, `knowledge-tidy`, `pdf-process`, `plan-audit`, and more) and prints the working-directory, project-type, git-branch, and ready-bead context blocks the agent needs. Run `nx command-context --help` for the full subcommand list. Primarily invoked by tooling, not by hand.
+
+---
+
+## nx rdr
+
+RDR (Research-Design-Review) authoring helpers.
+
+| Subcommand | Description |
+|------------|-------------|
+| `lint` | Lint RDR frontmatter/structure; reports findings per file |
+| `set-status STATUS` | Flip an RDR's `status:` frontmatter field |
+| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`) |
+
+Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.

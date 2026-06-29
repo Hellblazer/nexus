@@ -400,3 +400,62 @@ class TestSupervisor:
             start_owner=lambda: calls.append("start"),
         )
         assert calls == ["stop", "start"]
+
+
+# ---------------------------------------------------------------------------
+# discover reap is flock-guarded + ownership-checked (nexus-2mpns TOCTOU)
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverReapToctou:
+    def test_discover_reaps_genuinely_stale_record(
+        self, registry: ServiceRegistry, clock: _FakeClock
+    ) -> None:
+        registry.publish("42", endpoint=_endpoint(), version="1", owner_token="A")
+        clock.advance(10.0)  # past ttl=3.0 → A is stale
+        assert registry.discover("42") is None
+        assert not registry._record_path("42").exists(), "stale record must be reaped"
+
+    def test_reap_leaves_successors_fresh_record(
+        self, registry: ServiceRegistry, clock: _FakeClock
+    ) -> None:
+        # T0: owner A publishes, then goes stale.
+        stale_a = registry.publish("42", endpoint=_endpoint(5000), version="1", owner_token="A")
+        clock.advance(10.0)  # A now stale
+
+        # Race: a successor B publishes a fresh, higher-generation live record
+        # in the window before the reap fires.
+        fresh_b = registry.publish("42", endpoint=_endpoint(6000), version="1", owner_token="B")
+        assert fresh_b.generation > stale_a.generation
+
+        # The blind-unlink bug would delete B's record by path here. The guarded
+        # reap must re-read under the flock, see owner_token != A, and leave it.
+        registry._reap_if_still_stale(stale_a)
+
+        survived = registry.discover("42")
+        assert survived is not None, "successor's fresh record must NOT be reaped"
+        assert survived.owner_token == "B"
+        assert survived.endpoint["port"] == 6000
+
+    def test_reap_removes_shutdown_marked_record(
+        self, registry: ServiceRegistry, clock: _FakeClock
+    ) -> None:
+        # A shutting_down record is never fresh (status check) even within TTL —
+        # the primary signal a stopping daemon sends before relinquish(). The
+        # reap must remove it so discoverers don't skip a dead marker forever.
+        record = registry.publish("42", endpoint=_endpoint(), version="1", owner_token="A")
+        registry.mark_shutting_down(record)
+        assert registry.discover("42") is None
+        assert not registry._record_path("42").exists(), "shutdown-marked record must be reaped"
+
+    def test_reap_no_op_when_record_re_stamped_fresh_by_same_owner(
+        self, registry: ServiceRegistry, clock: _FakeClock
+    ) -> None:
+        stale_a = registry.publish("42", endpoint=_endpoint(), version="1", owner_token="A")
+        clock.advance(10.0)
+        # Same owner heartbeats back to fresh (self-heal) under the lock before the reap.
+        registry.heartbeat(stale_a)
+        registry._reap_if_still_stale(stale_a)
+        live = registry.discover("42")
+        assert live is not None, "a re-stamped-fresh record must not be reaped"
+        assert live.owner_token == "A"

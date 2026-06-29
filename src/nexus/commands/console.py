@@ -16,7 +16,7 @@ _log = structlog.get_logger(__name__)
 def _config_dir() -> Path:
     # Delegate to the canonical nexus.config.nexus_config_dir() helper so
     # every call site resolves the dir through one source of truth.
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     return nexus_config_dir()
 
@@ -95,10 +95,10 @@ def _check_stale_pid_file(path: Path) -> None:
 @click.option("--host", type=str, default="127.0.0.1", help="Host to bind to.")
 def console(port: int, host: str) -> None:
     """Start the nx console web UI (foreground)."""
-    import uvicorn
+    import uvicorn  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    from nexus.console.app import create_app
-    from nexus.logging_setup import configure_logging
+    from nexus.console.app import create_app  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.logging_setup import configure_logging  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     configure_logging("console")
 

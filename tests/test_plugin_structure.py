@@ -840,6 +840,111 @@ class TestMarketplaceVersion:
         assert m.group(1) == pv, f"uv.lock {m.group(1)!r} != pyproject.toml {pv!r}"
 
 
+#: The release boundary at which ``PINNED_SERVICE_TAG`` must become non-None.
+#: Pre-6.0 the pin is intentionally ``None`` (no engine-service release exists
+#: yet); the first major that ships the service stack must carry a real pin.
+#: NOTE: this fires on ANY 6.x pyproject version, including dev/pre-release
+#: strings like ``6.0.0.dev0`` — ``_pyproject_major()`` parses the leading
+#: integer, so 6.x feature-branch work must carry a real pin from the first
+#: 6.x version bump, not only at the final release commit (substantive-critic
+#: SIG-2, 2026-06-23).
+_ENGINE_PIN_REQUIRED_MAJOR = 6
+
+
+def _pyproject_major() -> int:
+    with PYPROJECT_PATH.open("rb") as f:
+        version = tomllib.load(f)["project"]["version"]
+    return int(version.split(".", 1)[0])
+
+
+class TestEnginePinParity:
+    """nexus-3rq00 — extend the release parity gate across the Python/Java boundary.
+
+    conexus↔engine compatibility rides two hand-edited constants that sit
+    OUTSIDE the 7-manifest parity gate, with no cross-check between them:
+
+    * ``PINNED_SERVICE_TAG`` (``src/nexus/daemon/binary_install.py``) — the
+      ``engine-service-vX.Y.Z`` GitHub release tag this build auto-installs.
+      ``None`` by design pre-6.0 (no real engine-service release exists yet).
+    * ``REQUIRED_RELEASE_VERSION`` (``src/nexus/migration/guided_upgrade.py``)
+      — the minimum engine version the guided upgrade hands off to (RDR-002).
+
+    Without a cross-check, a release could ship a client pinned to an engine
+    tag whose numeric version is BELOW ``REQUIRED_RELEASE_VERSION`` — a client
+    that auto-installs an engine it then refuses as too old. These assertions
+    catch that, and gate the "pin must be set" requirement on the 6.0 release
+    boundary so the suite stays green pre-6.0 while the pin is legitimately
+    ``None``.
+    """
+
+    def test_pinned_tag_at_or_above_required_release(self) -> None:
+        """If a pin is set, its numeric version must be >= REQUIRED_RELEASE_VERSION.
+
+        Skipped only while ``PINNED_SERVICE_TAG is None`` (no engine-service
+        release pinned yet) — NOT keyed on the major version, so a pin set
+        during 5.x dev work is validated too. The ``engine-service-v``
+        namespace prefix is stripped before parsing — the pin format is
+        ``engine-service-vX.Y.Z``, not ``vX.Y.Z``.
+        """
+        from nexus.daemon.binary_install import PINNED_SERVICE_TAG, TAG_NAMESPACE_PREFIX
+        from nexus.migration.guided_upgrade import (
+            REQUIRED_RELEASE_VERSION,
+            _parse_semver,
+        )
+
+        if PINNED_SERVICE_TAG is None:
+            pytest.skip(
+                "PINNED_SERVICE_TAG is None — no engine-service-v* release pinned "
+                "yet (set when the first engine-service tag is cut)"
+            )
+
+        tag = PINNED_SERVICE_TAG
+        assert tag.startswith(TAG_NAMESPACE_PREFIX), (
+            f"PINNED_SERVICE_TAG {tag!r} must carry the "
+            f"{TAG_NAMESPACE_PREFIX!r} namespace prefix"
+        )
+        parsed = _parse_semver(tag[len(TAG_NAMESPACE_PREFIX):])
+        assert parsed is not None, (
+            f"PINNED_SERVICE_TAG {tag!r} is not a clean release semver "
+            f"(blank/SNAPSHOT/dev/pre-release are rejected fail-closed)"
+        )
+        assert parsed >= REQUIRED_RELEASE_VERSION, (
+            f"PINNED_SERVICE_TAG {tag!r} -> {parsed} is BELOW "
+            f"REQUIRED_RELEASE_VERSION {REQUIRED_RELEASE_VERSION}: the client "
+            f"would auto-install an engine it then refuses as too old. Bump "
+            f"PINNED_SERVICE_TAG to an engine-service release >= "
+            f"v{'.'.join(map(str, REQUIRED_RELEASE_VERSION))}."
+        )
+
+    @pytest.mark.xfail(
+        condition=_pyproject_major() < _ENGINE_PIN_REQUIRED_MAJOR,
+        reason=(
+            "nexus-3rq00: PINNED_SERVICE_TAG intentionally None on pre-6.0 builds "
+            "— no engine-service-v* release exists until 6.0. strict=True trips "
+            "this xfail if a pin gets set early (XPASS) so the deferral stays visible."
+        ),
+        strict=True,
+    )
+    def test_pin_is_set_at_release_boundary(self) -> None:
+        """At the 6.0 cut (and beyond), ``PINNED_SERVICE_TAG`` must be non-None.
+
+        xfail(strict=True) below ``_ENGINE_PIN_REQUIRED_MAJOR`` rather than a
+        plain skip: a skip is invisible in CI summaries, an xfail is a tracked,
+        searchable expected-failure that self-trips if the condition stops
+        holding. At 6.x the xfail lifts and this becomes a hard assertion — a
+        release that bumps pyproject to 6.x without a real pin trips it.
+        (nexus-3rq00 / blocks the Release-N readiness gate nexus-h3ilf;
+        substantive-critic SIG-1, 2026-06-23.)
+        """
+        from nexus.daemon.binary_install import PINNED_SERVICE_TAG
+
+        assert PINNED_SERVICE_TAG is not None, (
+            "PINNED_SERVICE_TAG must be a real engine-service-vX.Y.Z tag at the "
+            "6.0 release boundary — a release cut from develop with the service "
+            "stack must pin a compatible engine. See binary_install.py."
+        )
+
+
 # ── Plugin root manifest ─────────────────────────────────────────────────────
 
 REQUIRED_ROOT_FILES = ["registry.yaml", "README.md", "CHANGELOG.md", "hooks/hooks.json"]

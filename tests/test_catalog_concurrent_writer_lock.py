@@ -73,13 +73,24 @@ def _bootstrap_catalog(catalog_dir: Path, n_events: int) -> None:
     cat._db.close()
 
 
-def _hold_writer_for(db_path: Path, hold_seconds: float, ready: mp.Event) -> None:
-    """Open a raw SQLite connection, BEGIN IMMEDIATE, sleep, then commit.
+def _hold_writer_until_released(
+    db_path: Path, ready: mp.Event, release: mp.Event,
+) -> None:
+    """Open a raw SQLite connection, BEGIN IMMEDIATE, hold until released.
 
     Simulates the pre-fix MCP-side hold: a long-running write
-    transaction occupying the WAL writer slot. The ``ready`` event
-    is set once the BEGIN IMMEDIATE has acquired the slot so the
-    parent test can release the contender.
+    transaction occupying the WAL writer slot. The ``ready`` event is
+    set once the BEGIN IMMEDIATE has acquired the slot. The hold then
+    lasts until the parent sets ``release`` — NOT a fixed sleep.
+
+    nexus-k8s4v: a fixed ``time.sleep(15s)`` raced the contender's own
+    ``Catalog()`` rebuild (which can itself take ~15 s on a slow box):
+    when the contender's setup outlasted the hold, the slot was free by
+    the time it actually wrote, so no contention was observed and the
+    test flaked. Holding until the parent releases (after it has
+    collected the contender's outcome) makes the starvation window
+    deterministic. The generous wait cap is a backstop against a hung
+    test, not a timing parameter.
     """
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     try:
@@ -96,7 +107,9 @@ def _hold_writer_for(db_path: Path, hold_seconds: float, ready: mp.Event) -> Non
             ("nexus_wehp_test_lock_hold", "1"),
         )
         ready.set()
-        time.sleep(hold_seconds)
+        # Hold the slot until the parent has collected the contender's
+        # result. 60 s is a hung-test backstop, never a timing knob.
+        release.wait(timeout=60.0)
         conn.rollback()
     finally:
         conn.close()
@@ -137,39 +150,53 @@ def seeded_catalog_dir(tmp_path: Path) -> Path:
 
 
 @pytest.mark.slow
-def test_writer_lock_contention_is_observable(seeded_catalog_dir: Path) -> None:
+def test_writer_lock_contention_is_observable(
+    seeded_catalog_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Mechanism validation: the test harness can detect lock contention.
 
-    A child process holds the SQLite writer slot for longer than
-    ``busy_timeout`` (5 s). A second child opens a real Catalog and
-    attempts a write. The contender should fail with an
+    A child process holds the SQLite writer slot for the entire duration
+    of a second child's write attempt. The contender opens a real Catalog
+    and attempts a write; it should fail with an
     ``OperationalError: database is locked`` — confirming our
     multiprocessing harness reproduces the failure shape that
     nexus-wehp described.
+
+    nexus-k8s4v: the contender is given a SHORT catalog busy_timeout so it
+    fails fast and deterministically against the held slot. The default
+    serving busy_timeout is 30 s (SERVING_BUSY_TIMEOUT_MS), which made the
+    original fixed-sleep harness both slow and timing-fragile. The lowered
+    value is inherited by the forked contender; the holder uses a raw
+    connection and is unaffected.
 
     Marked ``slow`` because the holder must outlive both
     ``_ensure_consistent``'s busy_timeout *and* a subsequent
     ``register_collection`` busy_timeout (~10 s minimum hold,
     15 s with safety margin).
     """
+    # Lower the catalog busy_timeout BEFORE forking the contender so the
+    # forked child inherits it and fails fast against the held slot.
+    monkeypatch.setattr(
+        "nexus.db.t2.catalog.SERVING_BUSY_TIMEOUT_MS", 500,
+    )
+
     db_path = seeded_catalog_dir / "catalog.db"
     ready = _CTX.Event()
+    release = _CTX.Event()
     result_q: mp.Queue = _CTX.Queue()
 
-    # Hold the writer slot for 15 s. ``Catalog.__init__`` runs
-    # ``_ensure_consistent`` first; on this seeded catalog that
-    # triggers a bootstrap rebuild whose ``OperationalError`` is
-    # caught (``self.degraded = True``) after ~5 s of busy_timeout.
-    # ``register_collection`` then acquires the dir flock and calls
-    # ``projector.apply``, which executes ``INSERT INTO collections``
-    # on the same connection — that INSERT has no try/except wrapper
-    # and will propagate the OperationalError that nexus-wehp's stack
-    # trace recorded. We need the holder to still own the slot when
-    # the second INSERT busy_timeout exhausts: 5 s rebuild wait + 5 s
-    # INSERT wait = 10 s minimum hold, plus margin.
+    # nexus-k8s4v: the holder owns the writer slot until we explicitly
+    # release it — AFTER the contender's outcome is collected. The
+    # contender's ``Catalog.__init__`` runs ``_ensure_consistent`` (may
+    # rebuild) then ``register_collection`` executes ``INSERT INTO
+    # collections`` with no try/except; that INSERT propagates the
+    # OperationalError once its busy_timeout exhausts against our held
+    # slot. Because we never release before reading the result, the
+    # starvation is deterministic regardless of how long the contender's
+    # setup takes.
     holder = _CTX.Process(
-        target=_hold_writer_for,
-        args=(db_path, 15.0, ready),
+        target=_hold_writer_until_released,
+        args=(db_path, ready, release),
     )
     holder.start()
 
@@ -183,7 +210,10 @@ def test_writer_lock_contention_is_observable(seeded_catalog_dir: Path) -> None:
             args=(seeded_catalog_dir, "test-collection-during-hold", result_q),
         )
         contender.start()
-        contender.join(timeout=20.0)
+        # The contender must finish (hit busy_timeout and raise) while we
+        # still hold the slot. 30 s covers a slow rebuild plus the
+        # register busy_timeout window.
+        contender.join(timeout=30.0)
         assert not contender.is_alive(), "contender hung past timeout"
 
         outcome, payload = result_q.get(timeout=5.0)
@@ -195,6 +225,9 @@ def test_writer_lock_contention_is_observable(seeded_catalog_dir: Path) -> None:
             f"expected lock-contention error, got: {payload}"
         )
     finally:
+        # Release the holder only now that the contender's result is in
+        # hand (or we've failed) — never before.
+        release.set()
         holder.join(timeout=15.0)
         if holder.is_alive():
             holder.terminate()

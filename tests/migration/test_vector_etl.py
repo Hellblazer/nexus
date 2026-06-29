@@ -138,9 +138,10 @@ class _FakeCollectionHandle:
 class FakeVectorClient:
     """Hermetic stand-in for ``HttpVectorClient`` (same surface subset).
 
-    ``upsert_chunks`` deliberately has NO ``embeddings`` parameter: the
-    vector-identity decision (a) pins that no source vectors cross the ETL
-    — an implementation that forwards embeddings TypeErrors here.
+    ``upsert_chunks`` accepts the optional ``embeddings`` kwarg and RECORDS it
+    (``upsert_embeddings``): post-nexus-hxry2, source vectors cross the ETL ONLY
+    for the same-model voyage passthrough; every other path leaves it None. Tests
+    assert the recorded value to pin which path ran.
 
     ``count_delta`` simulates a lossy target (service wrote fewer rows than
     sent) so the ETL's post-write count verification can be proven
@@ -152,6 +153,8 @@ class FakeVectorClient:
         self.store: dict[str, dict[str, tuple[str, dict]]] = {}
         # (collection, [ids]) per upsert call, in call order
         self.upsert_calls: list[tuple[str, list[str]]] = []
+        # embeddings arg per upsert call, in call order (None = re-embed path)
+        self.upsert_embeddings: list[list[list[float]] | None] = []
         self._count_delta = count_delta or {}
 
     def upsert_chunks(
@@ -160,9 +163,12 @@ class FakeVectorClient:
         ids: list[str],
         documents: list[str],
         metadatas: list[dict] | None = None,
+        *,
+        embeddings: list[list[float]] | None = None,
     ) -> None:
         metas = metadatas or [{}] * len(ids)
         self.upsert_calls.append((collection, list(ids)))
+        self.upsert_embeddings.append(embeddings)
         col = self.store.setdefault(collection, {})
         for chunk_id, doc, meta in zip(ids, documents, metas):
             col[chunk_id] = (doc, dict(meta or {}))
@@ -205,7 +211,7 @@ class FailingUpsertClient(FakeVectorClient):
         super().__init__()
         self._fail_for = fail_for
 
-    def upsert_chunks(self, collection, ids, documents, metadatas=None):  # type: ignore[override]
+    def upsert_chunks(self, collection, ids, documents, metadatas=None, *, embeddings=None):  # type: ignore[override]
         if collection == self._fail_for:
             raise VectorServiceError(
                 f"POST /v1/vectors/upsert-chunks → HTTP 400: injected for {collection}"
@@ -216,22 +222,35 @@ class FailingUpsertClient(FakeVectorClient):
 # ── Source seeding ────────────────────────────────────────────────────────────
 
 
-def _seed_source(client, name: str, n: int, *, text_prefix: str = "chunk text") -> list[str]:
+def _seed_source(
+    client, name: str, n: int, *, text_prefix: str = "chunk text",
+    embedding_model: str | None = None,
+) -> list[str]:
     """Seed *n* chunks into a Chroma collection; returns the chash ids.
 
     Ids follow the chash convention (sha256(text)[:32]) so the migrated
     pgvector ``chash`` column round-trips the natural ID verbatim. Explicit
     tiny embeddings: the SOURCE vectors are never read by the ETL
     (decision (a)), so their dimension is deliberately nonsensical (2).
+
+    ``embedding_model`` (nexus-bfdri): when set, stamps each chunk's metadata
+    with the producing model id — the provenance the same-model passthrough
+    now verifies before trusting a stored vector for verbatim copy. Left
+    ``None`` for the cross-model / re-embed fixtures (whose vectors never cross
+    the ETL anyway) so their exact ``metadata`` assertions stay unchanged.
     """
     texts = [f"{text_prefix} {i:04d}" for i in range(n)]
     ids = [_chash(t) for t in texts]
     if n:
         col = client.get_or_create_collection(name)
+        meta = [{"position": i, "tag": "etl"} for i in range(n)]
+        if embedding_model is not None:
+            for m in meta:
+                m["embedding_model"] = embedding_model
         col.add(
             ids=ids,
             documents=texts,
-            metadatas=[{"position": i, "tag": "etl"} for i in range(n)],
+            metadatas=meta,
             embeddings=[[float(i), 1.0] for i in range(n)],
         )
     else:
@@ -308,21 +327,155 @@ class TestMigrateCollectionsUnit:
 
         assert [len(batch) for _, batch in fake.upsert_calls] == [3, 3, 1]
 
-    def test_no_embeddings_cross_the_etl(self, source_client) -> None:
-        """Decision (a) pin: the fake's ``upsert_chunks`` has no
-        ``embeddings`` parameter — an ETL forwarding source vectors would
-        TypeError. The target store holds (text, metadata) only."""
-        name = _coll("etlunit-noemb")
+    def test_cross_model_migration_forwards_no_embeddings(self, source_client) -> None:
+        """A cross-model collection (minilm, remapped) re-embeds server-side: NO
+        source vectors cross the ETL (embeddings stay None on every upsert) — the
+        source vectors are the wrong model. Same-model PASSTHROUGH (nexus-hxry2)
+        is the only path that forwards vectors — pinned separately below."""
+        name = _coll("etlunit-noemb")  # minilm-384 default → cross-model remapped
         _seed_source(source_client, name, 3)
         fake = FakeVectorClient()
 
         report = migrate_collections(source_client, fake, leg="local")
 
         assert report.ok is True
-        assert all(
-            isinstance(doc, str) and isinstance(meta, dict)
-            for doc, meta in fake.store[name].values()
+        assert all(emb is None for emb in fake.upsert_embeddings)
+
+    def test_same_model_bge_passthrough_forwards_vectors(self, source_client) -> None:
+        """nexus-hxry2 (LOCAL user): a bge-768 collection migrating same-model
+        copies its stored vectors instead of a wasted local ONNX recompute —
+        the ETL forwards them on the upsert, exactly like the voyage case."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("ptbge", model=_MODEL_768)
+        ids = _seed_source(source_client, name, 3, embedding_model=_MODEL_768)
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
         )
+
+        assert result.status == "migrated"
+        assert len(fake.upsert_embeddings) == 1
+        assert fake.upsert_embeddings[0] is not None
+        assert len(fake.upsert_embeddings[0]) == len(ids) == 3
+
+    def test_same_model_voyage_passthrough_forwards_vectors(self, source_client) -> None:
+        """nexus-hxry2: a voyage collection migrating SAME-model (target == name)
+        copies its stored vectors verbatim — the ETL fetches them and forwards
+        them on the upsert (so the service skips the billed re-embed)."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("ptvoyage", model="voyage-context-3")
+        ids = _seed_source(source_client, name, 3, embedding_model="voyage-context-3")
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+
+        assert result.status == "migrated"
+        # Exactly one batch; its embeddings were forwarded (passthrough), aligned
+        # 1:1 with the ids, NOT None (which would be the re-embed path).
+        assert len(fake.upsert_embeddings) == 1
+        forwarded = fake.upsert_embeddings[0]
+        assert forwarded is not None
+        assert len(forwarded) == len(ids) == 3
+        # The VALUES round-trip verbatim — _seed_source stored [float(i), 1.0].
+        # (chroma get order is not the seed order, so compare as a set.)
+        assert sorted(map(list, forwarded)) == [[0.0, 1.0], [1.0, 1.0], [2.0, 1.0]]
+
+    def test_cross_model_to_voyage_does_not_passthrough(self, source_client) -> None:
+        """A cross-model migration (target != name) MUST re-embed, never copy the
+        source vectors — they were produced by the wrong model. embeddings=None."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        source = _coll("xmvoyage", model=_MODEL_384)  # minilm source
+        target = _coll("xmvoyage", model="voyage-context-3")  # remapped target
+        _seed_source(source_client, source, 2)
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, source, dry_run=False, page=100, target_name=target
+        )
+
+        assert result.status == "migrated"
+        assert fake.upsert_calls[0][0] == target  # upserted into the TARGET
+        assert all(emb is None for emb in fake.upsert_embeddings)  # re-embed, no copy
+
+    def test_mislabeled_provenance_does_not_passthrough(self, source_client) -> None:
+        """nexus-bfdri: a collection whose NAME says bge-768 but whose chunk
+        metadata records a DIFFERENT producing model is mislabeled — its stored
+        768-dim vectors are NOT from the embedder the target is searched with.
+        Passthrough must REFUSE to copy them verbatim and re-embed instead
+        (embeddings=None), even though the name+dimension checks both pass. The
+        warn log surfaces the provenance_mismatch count for audit."""
+        from structlog.testing import capture_logs
+
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("mislabel", model=_MODEL_768)  # name declares bge-768
+        # ...but provenance says a different 768-dim embedder produced the vectors.
+        _seed_source(source_client, name, 3, embedding_model="other-768-embedder")
+        fake = FakeVectorClient()
+
+        with capture_logs() as logs:
+            result = _migrate_one(
+                source_client, fake, name, dry_run=False, page=100, target_name=name
+            )
+
+        assert result.status == "migrated"
+        # provenance mismatch → re-embed, never copy the contaminated vectors.
+        assert all(emb is None for emb in fake.upsert_embeddings)
+        # audit signal: the warn fires with exact counts — all 3 mis-provenanced,
+        # none merely missing.
+        rec = next(
+            e for e in logs
+            if e.get("event") == "vector_etl_passthrough_fallback_reembed"
+        )
+        assert rec["provenance_mismatch"] == 3
+        assert rec["missing_vectors"] == 0
+
+    def test_absent_provenance_passes_through_pre_factory(self, source_client) -> None:
+        """nexus-bfdri (MISMATCH-ONLY): a chunk with NO embedding_model in
+        metadata is a PRE-FACTORY collection (code_indexer didn't stamp it until
+        2026-04-26, but conformant code__*__voyage-code-3__v1 names existed from
+        2026-02-22) — its vectors DID come from the named embedder, just
+        unstamped. Absent provenance is TRUSTED (passed through verbatim), NOT
+        re-embedded: forcing a re-embed would silently revert the nexus-hxry2
+        optimization (billed Voyage / wasted ONNX) with no correctness gain.
+        Absent != mislabel; only present-and-wrong is evidence of contamination."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("noprov", model="voyage-context-3")
+        ids = _seed_source(source_client, name, 3)  # no embedding_model stamped
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+
+        assert result.status == "migrated"
+        # trusted -> vectors forwarded verbatim (passthrough), NOT re-embedded.
+        assert len(fake.upsert_embeddings) == 1
+        assert fake.upsert_embeddings[0] is not None
+        assert len(fake.upsert_embeddings[0]) == len(ids) == 3
+
+    def test_is_same_model_passthrough_helper(self) -> None:
+        from nexus.migration.vector_etl import _is_same_model_passthrough
+
+        v = "knowledge__acme__voyage-context-3__v1"
+        bge = "knowledge__acme__bge-base-en-v15-768__v1"
+        minilm = "knowledge__acme__minilm-l6-v2-384__v1"
+        # same-model voyage → passthrough (avoids the billed re-embed)
+        assert _is_same_model_passthrough(v, v) is True
+        # same-model bge → passthrough too (avoids a wasted local ONNX recompute)
+        assert _is_same_model_passthrough(bge, bge) is True
+        # cross-model (target differs) → re-embed, never copy wrong-model vectors
+        assert _is_same_model_passthrough(minilm, v) is False
+        # minilm "same-model" → NOT passthrough: the service wires no minilm
+        # embedder, so it must be remapped; copying would leave it unqueryable.
+        assert _is_same_model_passthrough(minilm, minilm) is False
 
     def test_nonconformant_collection_skipped_loud(self, source_client) -> None:
         """A non-four-segment name cannot dim-dispatch
@@ -684,6 +837,22 @@ class TestVerifyTaxonomyConsistencyUnit:
 
         assert verify_taxonomy_consistency(db, fake) == []
 
+    def test_cross_model_source_resolved_via_target_names(self, tmp_path) -> None:
+        """RDR-162 P2: a cross-model source collection's chunks migrated into a
+        bge-768 TARGET, so the SOURCE T2 still names the minilm collection while
+        pgvector has only the target. Without target_names it reads as an orphan;
+        WITH the map it resolves through source -> target."""
+        src = _coll("xm-note", model="minilm-l6-v2-384")
+        tgt = _coll("xm-note", model="bge-base-en-v15-768")
+        fake = FakeVectorClient()
+        fake.upsert_chunks(tgt, ["id1"], ["text"], [{}])  # only the TARGET migrated
+        db = _make_t2_with_assignments(tmp_path, [src])
+
+        # Without the map: false orphan (source name not in migrated set).
+        assert verify_taxonomy_consistency(db, fake) == [src]
+        # With the map: resolved (its bge target is migrated).
+        assert verify_taxonomy_consistency(db, fake, target_names={src: tgt}) == []
+
     def test_no_visible_collections_fails_loud(self, tmp_path) -> None:
         """P5.2 review fix (CRE M2, additive strengthening):
         ``list_collections()`` swallows service errors into ``[]`` — a down
@@ -1007,15 +1176,25 @@ def vec_etl_service(vec_etl_pg_instance):
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_VOYAGE_API_KEY", None)
 
+    # nexus-o06g4: write the JAR's startup output to a FILE, not undrained
+    # PIPEs. With stdout/stderr=PIPE and nobody draining them, the JAR's
+    # ~120-changeset Liquibase + Helidon boot output fills the 64KB pipe
+    # buffer, the JVM BLOCKS on write, never finishes startup, and never binds
+    # the port — _wait_tcp then times out (the real cause of the integration-run
+    # failures, NOT a too-short timeout). The production launcher
+    # (storage_service_daemon) redirects to log files for exactly this reason.
+    import tempfile
+    log_path = os.path.join(tempfile.gettempdir(), f"nexus-svc-vecetl-{svc_port}.log")
+    log_fh = open(log_path, "wb")
     proc = subprocess.Popen(
         [str(_JAVA), "-jar", str(_JAR)],
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=40.0)
+        _wait_tcp("127.0.0.1", svc_port, timeout=180.0)
         yield f"http://127.0.0.1:{svc_port}", token, proc
     finally:
         try:
@@ -1083,7 +1262,7 @@ class TestVectorEtlIntegration:
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlint1")
+        name = _coll("etlint1", model=_MODEL_768)
         store, ids, texts = _make_local_store(tmp_path, name, 5)
 
         report = migrate_local(store, vec_etl_vector_client)
@@ -1094,25 +1273,25 @@ class TestVectorEtlIntegration:
 
         # (a) exact row count, direct SQL.
         rows = _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert rows == ["5"]
         # (b) chash verbatim — pgvector chash set == source Chroma id set.
         chashes = _psql_rows(
-            pg, f"SELECT chash FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT chash FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert sorted(chashes) == sorted(ids)
         # (b) text byte-identical for a spot chunk.
         text = _psql_rows(
             pg,
-            "SELECT chunk_text FROM nexus.chunks_384"
+            "SELECT chunk_text FROM nexus.chunks_768"
             f" WHERE collection = '{name}' AND chash = '{ids[3]}'",
         )
         assert text == [texts[3]]
         # Collection name verbatim and tenant stamping.
         tenants = _psql_rows(
             pg,
-            "SELECT DISTINCT tenant_id FROM nexus.chunks_384"
+            "SELECT DISTINCT tenant_id FROM nexus.chunks_768"
             f" WHERE collection = '{name}'",
         )
         assert tenants == ["default"]
@@ -1121,16 +1300,16 @@ class TestVectorEtlIntegration:
         # float values.
         dims = _psql_rows(
             pg,
-            "SELECT DISTINCT vector_dims(embedding) FROM nexus.chunks_384"
+            "SELECT DISTINCT vector_dims(embedding) FROM nexus.chunks_768"
             f" WHERE collection = '{name}'",
         )
-        assert dims == ["384"]
+        assert dims == ["768"]
 
     def test_second_run_is_idempotent(
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlint2")
+        name = _coll("etlint2", model=_MODEL_768)
         store, _, _ = _make_local_store(tmp_path, name, 4)
 
         first = migrate_local(store, vec_etl_vector_client)
@@ -1139,14 +1318,14 @@ class TestVectorEtlIntegration:
         assert first.ok is True
         assert second.ok is True
         rows = _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert rows == ["4"]
 
     def test_copy_not_move_source_store_intact(
         self, vec_etl_vector_client, tmp_path
     ) -> None:
-        name = _coll("etlint3")
+        name = _coll("etlint3", model=_MODEL_768)
         store, ids, texts = _make_local_store(tmp_path, name, 3)
 
         migrate_local(store, vec_etl_vector_client)
@@ -1162,11 +1341,11 @@ class TestVectorEtlIntegration:
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlint4")
+        name = _coll("etlint4", model=_MODEL_768)
         store, _, _ = _make_local_store(tmp_path, name, 6)
         migrate_local(store, vec_etl_vector_client)
         assert _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         ) == ["6"]
 
         from nexus.migration.chroma_read import open_local_read_client
@@ -1177,7 +1356,7 @@ class TestVectorEtlIntegration:
 
         assert deleted == {name: 6}
         assert _psql_rows(
-            pg, f"SELECT count(*) FROM nexus.chunks_384 WHERE collection = '{name}'"
+            pg, f"SELECT count(*) FROM nexus.chunks_768 WHERE collection = '{name}'"
         ) == ["0"]
         client = chromadb.PersistentClient(path=str(store))
         assert client.get_collection(name).count() == 6
@@ -1195,14 +1374,21 @@ class TestManifestFkIntegration:
         self, vec_etl_pg_instance, vec_etl_vector_client, tmp_path
     ) -> None:
         pg = vec_etl_pg_instance
-        name = _coll("etlmanifest")
+        # nexus-l84aj: the MIGRATED collection is bge-768 (the service only
+        # embeds bge-768 since RDR-160). The cross-dim 384 collection is
+        # inserted via DIRECT SQL (not migrated) so the 384/768 orphan-scoping
+        # isolation stays non-vacuous.
+        name = _coll("etlmanifest", model=_MODEL_768)
+        name384 = f"docs__etlv__{_MODEL_384}__v1"
         store, ids, _ = _make_local_store(tmp_path, name, 5)
         try:
-            self._run_manifest_flow(pg, name, ids, store, vec_etl_vector_client)
+            self._run_manifest_flow(
+                pg, name, name384, ids, store, vec_etl_vector_client
+            )
         finally:
-            # The PG instance is module-scoped: clear the seeded catalog +
-            # 768-lane rows so the deliberate orphan cannot leak into any
-            # test added to this module later.
+            # The PG instance is module-scoped: clear the seeded catalog + both
+            # the migrated 768 rows and the direct-SQL 384 rows so the
+            # deliberate orphan cannot leak into a later test in this module.
             _psql_exec(
                 pg,
                 "DELETE FROM nexus.catalog_document_chunks"
@@ -1211,11 +1397,12 @@ class TestManifestFkIntegration:
                 " WHERE tumbler IN ('9000.1', '9000.2');"
                 " DELETE FROM nexus.catalog_owners"
                 " WHERE tumbler_prefix = '9000';"
-                " DELETE FROM nexus.chunks_768"
-                f" WHERE collection = 'docs__etlv__{_MODEL_768}__v1'",
+                f" DELETE FROM nexus.chunks_768 WHERE collection = '{name}';"
+                f" DELETE FROM nexus.chunks_384 WHERE collection = '{name384}';"
+                f" DELETE FROM nexus.catalog_collections WHERE name = '{name384}'",
             )
 
-    def _run_manifest_flow(self, pg, name, ids, store, vec_etl_vector_client) -> None:
+    def _run_manifest_flow(self, pg, name, name384, ids, store, vec_etl_vector_client) -> None:
         # Manifest fixture: owner -> document (physical_collection = the
         # migrated collection) -> 5 chunk rows, collection NOT yet
         # backfilled (NULL — the pre-Phase-5 state).
@@ -1250,39 +1437,48 @@ class TestManifestFkIntegration:
         )
         assert backfilled == ["5"]
 
-        # Clean state: zero orphans at 384.
-        assert _psql_rows(pg, manifest_orphan_sql(384)) == []
+        # Clean state: zero orphans at 768 (the migrated bge-768 dim).
+        assert _psql_rows(pg, manifest_orphan_sql(768)) == []
 
-        # Cross-dim scoping: a 768-collection manifest row resolved by a
-        # chunks_768 row must NOT appear as a 384 orphan (and is clean at
-        # its own dim).
-        name768 = f"docs__etlv__{_MODEL_768}__v1"
-        chash768 = _chash("a 768-lane chunk")
-        vec768 = "[" + ",".join(["0"] * 768) + "]"
+        # Cross-dim scoping: a 384-collection manifest row resolved by a
+        # chunks_384 row must NOT appear as a 768 orphan (and is clean at its
+        # own dim). The 384 lane is seeded by DIRECT SQL — the bge-768 service
+        # cannot embed a 384 collection (nexus-l84aj).
+        chash384 = _chash("a 384-lane chunk")
+        vec384 = "[" + ",".join(["0"] * 384) + "]"
+        # chunks_384 has an FK on (tenant_id, collection) -> catalog_collections.
+        # The migrated bge-768 collection's registry row is created by the
+        # service; the direct-SQL 384 lane needs it stamped manually.
+        _psql_exec(
+            pg,
+            "INSERT INTO nexus.catalog_collections (tenant_id, name)"
+            f" VALUES ('default', '{name384}')",
+        )
         _psql_exec(
             pg,
             "INSERT INTO nexus.catalog_documents"
             " (tenant_id, tumbler, title, physical_collection)"
-            f" VALUES ('default', '9000.2', 'ETL Doc 768', '{name768}')",
+            f" VALUES ('default', '9000.2', 'ETL Doc 384', '{name384}')",
         )
         _psql_exec(
             pg,
             "INSERT INTO nexus.catalog_document_chunks"
             " (tenant_id, doc_id, position, chash, collection)"
-            f" VALUES ('default', '9000.2', 0, '{chash768}', '{name768}')",
+            f" VALUES ('default', '9000.2', 0, '{chash384}', '{name384}')",
         )
         _psql_exec(
             pg,
-            "INSERT INTO nexus.chunks_768"
+            "INSERT INTO nexus.chunks_384"
             " (tenant_id, collection, chash, chunk_text, embedding)"
-            f" VALUES ('default', '{name768}', '{chash768}',"
-            f" 'a 768-lane chunk', '{vec768}')",
+            f" VALUES ('default', '{name384}', '{chash384}',"
+            f" 'a 384-lane chunk', '{vec384}')",
         )
-        assert _psql_rows(pg, manifest_orphan_sql(384)) == []
         assert _psql_rows(pg, manifest_orphan_sql(768)) == []
+        assert _psql_rows(pg, manifest_orphan_sql(384)) == []
 
         # Deliberate orphan: a manifest row whose chash was never migrated
-        # MUST be detected (non-vacuous validation).
+        # MUST be detected (non-vacuous validation) — in the migrated bge-768
+        # collection, so it surfaces at dim 768.
         bogus = "feedfacefeedfacefeedfacefeedface"
         _psql_exec(
             pg,
@@ -1290,9 +1486,26 @@ class TestManifestFkIntegration:
             " (tenant_id, doc_id, position, chash, collection)"
             f" VALUES ('default', '9000.1', 99, '{bogus}', '{name}')",
         )
-        orphans = _psql_rows(pg, manifest_orphan_sql(384))
+        orphans = _psql_rows(pg, manifest_orphan_sql(768))
         assert len(orphans) == 1
         assert bogus in orphans[0]
+
+        # Symmetric true-positive (review): a never-migrated chash in the 384
+        # lane MUST be detected at dim 384 — proving 384 orphan detection is
+        # non-vacuous (the other half of cross-dim scoping), not just that 384
+        # ignores 768-lane rows.
+        bogus384 = "0123456789abcdef0123456789abcdef"
+        _psql_exec(
+            pg,
+            "INSERT INTO nexus.catalog_document_chunks"
+            " (tenant_id, doc_id, position, chash, collection)"
+            f" VALUES ('default', '9000.2', 99, '{bogus384}', '{name384}')",
+        )
+        orphans384 = _psql_rows(pg, manifest_orphan_sql(384))
+        assert len(orphans384) == 1
+        assert bogus384 in orphans384[0]
+        # And each dim's query still surfaces only its own lane's orphan.
+        assert len(_psql_rows(pg, manifest_orphan_sql(768))) == 1
 
 
 @pytest.mark.integration
@@ -1304,8 +1517,8 @@ class TestTaxonomyConsistencyIntegration:
         """(d) against the real service: assignments pointing at the
         migrated collection resolve; a never-migrated collection is
         reported as exactly the unresolved set."""
-        name = _coll("etltaxint")
-        ghost = _coll("etltaxint-ghost")
+        name = _coll("etltaxint", model=_MODEL_768)
+        ghost = _coll("etltaxint-ghost", model=_MODEL_768)
         store, _, _ = _make_local_store(tmp_path, name, 3)
         migrate_local(store, vec_etl_vector_client)
 

@@ -23,14 +23,20 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import pytest
 
 
 def _current_version() -> str:
-    return _pkg_version("conexus")
+    # RDR-170: the fast path compares the stored row against the canonical
+    # (registry-aware) schema version — max(package, registry_max) — NOT the raw
+    # package version. The fixture must stamp the same value the production
+    # `_cold_start_is_current_and_wal` now reads, or a frozen/ahead branch
+    # (package 5.10.6, registry 5.10.7) would never short-circuit.
+    from nexus.db.migrations import expected_t2_schema_version
+
+    return expected_t2_schema_version()
 
 
 def _stored_version(db_path: Path) -> str:
@@ -176,9 +182,15 @@ class TestMigrationFastPath:
     def test_zero_zero_zero_current_version_returns_false(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
-        """A ``0.0.0`` current version (broken/editable install) must never
+        """An unresolvable canonical schema version (``0.0.0``) must never
         match a real stored version — the probe returns False so the full
-        path runs."""
+        path runs.
+
+        RDR-170: the canonical version is now registry-aware
+        (``max(package, registry_max)``), so an unresolvable *package* version
+        alone still yields the registry max — it no longer trips the guard.
+        Force the whole canonical version to ``0.0.0`` (the broken-install /
+        empty-registry case) to exercise it."""
         from nexus.db.t2 import _cold_start_is_current_and_wal
 
         db = tmp_path / "memory.db"
@@ -186,7 +198,9 @@ class TestMigrationFastPath:
         assert _stored_version(db) == _current_version()
         assert _journal_mode(db) == "wal"
 
-        monkeypatch.setattr("importlib.metadata.version", lambda _name: "0.0.0")
+        monkeypatch.setattr(
+            "nexus.db.migrations.expected_t2_schema_version", lambda: "0.0.0"
+        )
         assert _cold_start_is_current_and_wal(db) is False
 
     def test_stale_stored_version_still_runs_full_migration_path(

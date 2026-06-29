@@ -121,7 +121,7 @@ def ensure_installed_and_running() -> None:
         )
         return
 
-    from nexus.daemon import installer
+    from nexus.daemon import installer  # noqa: PLC0415 — circular-dep avoidance; daemon pulls heavy install deps
 
     status: InstallStatus
     dest: Path | None = None
@@ -142,7 +142,7 @@ def ensure_installed_and_running() -> None:
                 dest=str(result.dest),
                 warnings=list(result.warnings),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort first-run install; failure logged, session still works via ensure-running
             # installer raises typed InstallerError on symlink / content
             # diff / activation failure; all are best-effort here — the
             # session still works via ensure-running below.
@@ -179,7 +179,7 @@ def ensure_installed_and_running() -> None:
             [nx_bin, "daemon", "t2", "ensure-running", "--quiet"],
             capture_output=True, text=True, timeout=15, check=False,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort ensure-running; subprocess failure logged, must not crash MCP startup
         _log.warning(
             "first_run_ensure_running_exception",
             error=f"{type(exc).__name__}: {exc}",
@@ -205,13 +205,13 @@ def embedder_startup_notice() -> str | None:
     is missing, so the resolver silently fell back to 384). Cloud mode and a
     correctly-active bge return ``None``.
     """
-    from nexus.config import is_local_mode, local_embed_model_choice
+    from nexus.config import is_local_mode, local_embed_model_choice  # noqa: PLC0415 — branch-local; only on local-mode advisory path
 
     if not is_local_mode():
         return None
 
-    from nexus.db.local_ef import _resolve_local_model
-    from nexus.health import local_embedder_advisory
+    from nexus.db.local_ef import _resolve_local_model  # noqa: PLC0415 — branch-local; only reached in local mode
+    from nexus.health import local_embedder_advisory  # noqa: PLC0415 — branch-local; only reached in local mode
 
     active = _resolve_local_model(warn=False)
     advisory = local_embedder_advisory(local_embed_model_choice(), active)
@@ -272,7 +272,7 @@ def _first_run_marker_path() -> Path:
     """Location of the one-shot first-run marker. Lives under
     ``nexus_config_dir()`` so it honours ``NEXUS_CONFIG_DIR`` for tests
     and multi-profile installs."""
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — branch-local helper import
 
     return nexus_config_dir() / ".mcp_first_run_complete"
 
@@ -286,7 +286,7 @@ def maybe_banner(status: InstallStatus, dest: Path | None) -> BannerSpec | None:
     ALREADY_PRESENT -> "already configured at <path>". Both carry the
     in-chat uninstall instruction.
     """
-    from nexus.daemon.installer import InstallStatus
+    from nexus.daemon.installer import InstallStatus  # noqa: PLC0415 — circular-dep avoidance; daemon installer pulls heavy deps
 
     if _first_run_marker_path().exists():
         return None
@@ -461,7 +461,7 @@ def install_banner_dispatch_hook(server: object) -> bool:
     move, catching the breakage in CI rather than in production.
     """
     try:
-        from mcp import types  # type: ignore[import-not-found]
+        from mcp import types  # type: ignore[import-not-found]  # noqa: PLC0415 — deferred heavy dep; mcp SDK loaded only when patching handler
 
         low = server._mcp_server  # type: ignore[attr-defined]
         key = types.CallToolRequest

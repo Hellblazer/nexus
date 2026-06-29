@@ -332,8 +332,8 @@ def load_report(path: "Path | str") -> dict[str, Any]:
     Raises ``FileNotFoundError`` / ``json.JSONDecodeError`` loud — a gate
     that cannot read its input must never default to a pass.
     """
-    import json
-    from pathlib import Path as _Path
+    import json  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from pathlib import Path as _Path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     data = json.loads(_Path(path).read_text())
     if not isinstance(data, dict):

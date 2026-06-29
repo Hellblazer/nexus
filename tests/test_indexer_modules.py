@@ -166,6 +166,41 @@ def test_build_context_prefix(path, comment, cls, method, ls, le, expected):
     assert build_context_prefix(path, comment, cls, method, ls, le) == expected
 
 
+# ── build_doc_id_resolver (nexus-kgyoz seam 2 contract pins) ──────────────────
+
+def test_build_doc_id_resolver_hit_and_miss():
+    """Resolver returns the mapped doc_id on a hit and "" on a miss."""
+    from nexus.indexer_utils import build_doc_id_resolver
+
+    hit = Path("/repo/src/foo.py")
+    resolve = build_doc_id_resolver({hit: "1.2.3"})
+    assert resolve(hit) == "1.2.3"
+    assert resolve(Path("/repo/src/unregistered.py")) == ""
+
+
+def test_build_doc_id_resolver_empty_map():
+    """An empty registration map resolves every path to "" (legacy signal)."""
+    from nexus.indexer_utils import build_doc_id_resolver
+
+    resolve = build_doc_id_resolver({})
+    assert resolve(Path("/anything")) == ""
+
+
+def test_run_index_imports_lifted_doc_id_resolver():
+    """_run_index's module imports the lifted free fn as the same object.
+
+    Non-vacuous and reformat-robust: asserts the symbol is bound at module
+    level in nexus.indexer and IS indexer_utils.build_doc_id_resolver. Would
+    fail if seam 2 regressed by dropping the import or re-defining a local
+    shadow. Survives whitespace/arg-name churn that a source-text scan would
+    false-fire on.
+    """
+    from nexus import indexer
+    from nexus.indexer_utils import build_doc_id_resolver
+
+    assert getattr(indexer, "build_doc_id_resolver", None) is build_doc_id_resolver
+
+
 # ── _extract_context backward compatibility ───────────────────────────────────
 
 def test_extract_context_importable_from_nexus_indexer():

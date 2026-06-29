@@ -85,7 +85,7 @@ PY_SUITES=(
 # The Java tier tests: T3 pgvector serving + the RDR-156 stats view, AND the
 # repo-layer RLS contracts (incl. the unset-GUC fail-closed property that the
 # chash HTTP test_l delegates to — see test_http_chash_integration.py).
-JAVA_TESTS="PgVectorServingContractTest,PgVectorRepositoryContractTest,PgVectorHybridSearchContractTest,CollectionVectorStatsTest,SoftDeleteTest,ManifestFunctionsTest,VectorHybridHttpTest,ChashRepositoryTest,ChunksRlsBehavioralTest"
+JAVA_TESTS="PgVectorServingContractTest,PgVectorRepositoryContractTest,PgVectorHybridSearchContractTest,CollectionVectorStatsTest,SoftDeleteTest,ManifestFunctionsTest,VectorHybridHttpTest,ChashRepositoryTest,ChunksRlsBehavioralTest,PlanHandlerTest"
 
 rc=0
 

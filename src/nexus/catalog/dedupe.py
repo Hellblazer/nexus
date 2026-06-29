@@ -281,7 +281,7 @@ def apply_remove_plan(cat: "Catalog", op: OrphanPlan) -> tuple[int, int]:
         # 3. JSONL tombstones — documents, links, owner. Written in
         # both modes (no-op under ES rebuild but kept for the cutover
         # window).
-        import json as _json
+        import json as _json  # noqa: PLC0415 — stdlib import kept branch-local
         for r in rows:
             cat._append_jsonl(cat._documents_path, {
                 "tumbler": r[0], "title": r[1], "author": r[2], "year": r[3],
@@ -314,7 +314,7 @@ def apply_remove_plan(cat: "Catalog", op: OrphanPlan) -> tuple[int, int]:
             # catalog.py's private aliases — pre-fix this depended on
             # ``catalog.py`` re-exporting the underscore-prefixed
             # private names, a hidden cross-module coupling.
-            from nexus.catalog.events import (
+            from nexus.catalog.events import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
                 DocumentDeletedPayload,
                 LinkDeletedPayload,
                 OwnerDeletedPayload,

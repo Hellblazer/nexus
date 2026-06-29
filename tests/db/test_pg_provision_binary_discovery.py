@@ -54,3 +54,35 @@ class TestNexusPgBinEnvOverride:
         assert "/definitely/does/not/exist/pg/bin" in err, (
             "Error must name the misconfigured NEXUS_PG_BIN path"
         )
+
+
+class TestConfigDirBundleBootSafeDiscovery:
+    """RDR-174 P2.2 (nexus-exfns): the config-dir bundle is discovered with
+    NEXUS_PG_BIN unset — the boot-safe path the storage-service daemon's
+    _ensure_pg_running relies on at cold boot (no provisioning env). This is
+    why the autostart unit needs no external postgresql.service ordering."""
+
+    def test_bundle_under_config_dir_resolved_without_nexus_pg_bin(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import nexus.db.pg_bundle as pg_bundle
+
+        monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+        bundle_bin = tmp_path / "bundle" / "bin"
+        bundle_bin.mkdir(parents=True)
+        for name in ("initdb", "pg_ctl", "psql", "createdb"):
+            (bundle_bin / name).write_text("#!/bin/sh\n")
+            (bundle_bin / name).chmod(0o755)
+
+        # Force the config-dir bundle seam to resolve to our fake bundle,
+        # exactly as it would on a local-distribution machine at boot.
+        monkeypatch.setattr(pg_bundle, "extracted_bin_dir", lambda _cfg: bundle_bin)
+
+        bins = discover_pg_binaries()
+
+        assert bins.all_present(), "config-dir bundle must satisfy discovery at boot"
+        assert bins.initdb == bundle_bin / "initdb"
+        # Belt-and-suspenders: every binary resolved from the bundle, not a
+        # host PG that happens to be on PATH / in a candidate dir.
+        assert bins.initdb.parent == bundle_bin
+        assert bins.pg_ctl.parent == bundle_bin

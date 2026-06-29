@@ -108,6 +108,10 @@ class TestMigrationDataclass:
         assert len(MIGRATIONS) >= 30
 
     def test_migrations_ordered_by_version(self) -> None:
+        # RDR-170 step 6: introduced values must be NON-DECREASING (>=, not >):
+        # the registry legitimately carries multiple entries at the same version
+        # (e.g. four at 4.14.2). The runner now relies on registry order, not a
+        # version filter, for determinism. `sorted` allows ties.
         from nexus.db.migrations import MIGRATIONS, _parse_version
 
         versions = [_parse_version(m.introduced) for m in MIGRATIONS]
@@ -118,6 +122,71 @@ class TestMigrationDataclass:
 
         for m in MIGRATIONS:
             assert callable(m.fn), f"Migration {m.name!r} fn is not callable"
+
+
+class TestExpectedSchemaVersion:
+    """RDR-170: the canonical schema version is registry-aware —
+    ``max(package_version, max(MIGRATIONS introduced))``."""
+
+    def test_real_registry_max_is_a_floor(self) -> None:
+        """The non-vacuous nexus-j25po tripwire: the canonical version is
+        always >= the highest registered migration, so nothing in the registry
+        is dormant relative to a clean install. Fails if the package version is
+        frozen below the registry max WITHOUT the registry-aware fix."""
+        from nexus.db.migrations import (
+            MIGRATIONS,
+            _parse_version,
+            expected_t2_schema_version,
+        )
+
+        registry_max = max(
+            (m.introduced for m in MIGRATIONS), key=_parse_version
+        )
+        assert _parse_version(expected_t2_schema_version()) >= _parse_version(
+            registry_max
+        )
+
+    def test_registry_max_wins_when_package_is_frozen_below(
+        self, monkeypatch
+    ) -> None:
+        """develop case: package frozen below the registry max → registry max."""
+        from nexus.db import migrations
+        from nexus.db.migrations import Migration, expected_t2_schema_version
+
+        monkeypatch.setattr(
+            migrations, "MIGRATIONS", [Migration("9.9.9", "high", lambda c: None)]
+        )
+        monkeypatch.setattr("importlib.metadata.version", lambda _n: "1.0.0")
+        assert expected_t2_schema_version() == "9.9.9"
+
+    def test_package_wins_on_released_build(self, monkeypatch) -> None:
+        """Released build (package >= registry max): a no-op, package wins."""
+        from nexus.db import migrations
+        from nexus.db.migrations import Migration, expected_t2_schema_version
+
+        monkeypatch.setattr(
+            migrations, "MIGRATIONS", [Migration("5.0.0", "low", lambda c: None)]
+        )
+        monkeypatch.setattr("importlib.metadata.version", lambda _n: "5.10.99")
+        assert expected_t2_schema_version() == "5.10.99"
+
+    def test_unresolvable_package_falls_back_to_registry_max(
+        self, monkeypatch
+    ) -> None:
+        """A missing package version (editable/broken install) no longer means
+        an unknown schema version — the registry still provides it."""
+        from nexus.db import migrations
+        from nexus.db.migrations import Migration, expected_t2_schema_version
+
+        monkeypatch.setattr(
+            migrations, "MIGRATIONS", [Migration("7.7.7", "x", lambda c: None)]
+        )
+
+        def _raise(_name: str) -> str:
+            raise RuntimeError("no package metadata")
+
+        monkeypatch.setattr("importlib.metadata.version", _raise)
+        assert expected_t2_schema_version() == "7.7.7"
 
 
 # ── Module-level migration function tests ───────────────────────────────────
@@ -473,7 +542,36 @@ class TestApplyPending:
 
         migrations._upgrade_done.clear()
 
-    def test_fresh_db_seeds_zero(self) -> None:
+    @pytest.fixture
+    def clean_registry(self, monkeypatch) -> None:
+        """RDR-170: isolate apply_pending's version BOOKKEEPING from the real
+        registry's catalog-absent defer/gate steps (4.30.0/4.31.0).
+
+        These bookkeeping tests pass ``current_version="4.1.2"`` and assert a
+        clean stamp. Before RDR-170 the upper bound excluded the later
+        defer/gate migrations; now the lower-bound-only runner attempts them,
+        they ``MigrationRetry`` on the catalog-less test DB, set
+        ``any_skipped=True`` and suppress the stamp — failing assertions that
+        are really about bookkeeping, not the migration set. A minimal clean
+        registry (two idempotent no-ops) restores deterministic stamping while
+        the base-table/version-row logic under test is unchanged.
+        """
+        from nexus.db import migrations
+        from nexus.db.migrations import Migration
+
+        def _noop(conn: sqlite3.Connection) -> None:  # idempotent
+            conn.execute("CREATE TABLE IF NOT EXISTS rdr170_clean (x INTEGER)")
+
+        monkeypatch.setattr(
+            migrations,
+            "MIGRATIONS",
+            [
+                Migration("1.10.0", "clean-1", _noop),
+                Migration("4.0.0", "clean-2", _noop),
+            ],
+        )
+
+    def test_fresh_db_seeds_zero(self, clean_registry) -> None:
         """Empty DB → seeds '0.0.0', runs all migrations, creates _nexus_version."""
         from nexus.db.migrations import apply_pending
 
@@ -566,7 +664,7 @@ class TestApplyPending:
         assert row[0] == PRE_REGISTRY_VERSION
         conn.close()
 
-    def test_already_current_version_noop(self, tmp_path: Path) -> None:
+    def test_already_current_version_noop(self, tmp_path: Path, clean_registry) -> None:
         """DB already at current version → no migrations run."""
         from nexus.db.migrations import apply_pending
 
@@ -590,7 +688,7 @@ class TestApplyPending:
         assert row[0] == "4.1.2"
         conn.close()
 
-    def test_upgrade_done_fast_path(self, tmp_path: Path) -> None:
+    def test_upgrade_done_fast_path(self, tmp_path: Path, clean_registry) -> None:
         """Once apply_pending runs, subsequent calls on same path skip entirely."""
         from nexus.db.migrations import _upgrade_done, apply_pending
 
@@ -605,60 +703,112 @@ class TestApplyPending:
         apply_pending(conn, "4.1.2")  # no-op
         conn.close()
 
-    def test_version_filtering(self) -> None:
-        """Only migrations between last_seen and current_version execute."""
-        from nexus.db.migrations import apply_pending
+    def test_lower_bound_only_runs_step_above_current_version(
+        self, monkeypatch
+    ) -> None:
+        """RDR-170: apply_pending applies every registered migration with
+        ``introduced > last_seen`` — even when ``introduced`` EXCEEDS
+        ``current_version``.
 
-        conn = sqlite3.connect(":memory:")
+        This is the frozen-branch regression: develop pinned at 5.10.6 while a
+        registered step (slcn7) is stamped 5.10.7. The old upper bound
+        (``m_ver <= current_t``) silently dropped that step (nexus-j25po). This
+        test fails the moment the upper bound is re-introduced.
 
-        # First: apply up to version 2.0.0 — should run only migrate_memory_fts (1.10.0)
-        apply_pending(conn, "2.0.0")
-
-        row = conn.execute(
-            "SELECT value FROM _nexus_version WHERE key='cli_version'"
-        ).fetchone()
-        assert row[0] == "2.0.0"
-
-        # Clear fast path to test incremental upgrade
+        Uses a monkeypatched single-entry registry so the assertion is
+        deterministic and free of the real registry's defer/gate steps.
+        """
         from nexus.db import migrations
+        from nexus.db.migrations import Migration, apply_pending
 
+        ran: list[str] = []
+
+        def _sentinel(conn: sqlite3.Connection) -> None:
+            conn.execute("CREATE TABLE IF NOT EXISTS rdr170_sentinel (x INTEGER)")
+            ran.append("sentinel")
+
+        # introduced FAR above any plausible current_version.
+        monkeypatch.setattr(
+            migrations, "MIGRATIONS", [Migration("99.0.0", "rdr170 sentinel", _sentinel)]
+        )
         migrations._upgrade_done.clear()
 
-        # Now upgrade to 4.1.2 — should run remaining migrations
-        apply_pending(conn, "4.1.2")
+        conn = sqlite3.connect(":memory:")
+        # current_version is BELOW the step's introduced — the removed upper
+        # bound would have suppressed it.
+        apply_pending(conn, "5.0.0")
 
-        row = conn.execute(
-            "SELECT value FROM _nexus_version WHERE key='cli_version'"
-        ).fetchone()
-        assert row[0] == "4.1.2"
+        assert ran == ["sentinel"], "step with introduced > current_version must run"
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "rdr170_sentinel" in tables
+        conn.close()
 
-    def test_idempotent(self, tmp_path: Path) -> None:
-        """Running apply_pending twice with same version yields identical DB state."""
+    def test_lower_bound_still_skips_already_applied(self, monkeypatch) -> None:
+        """The lower bound (``introduced > last_seen``) is retained: a step at
+        or below last_seen does NOT re-run."""
+        from nexus.db import migrations
+        from nexus.db.migrations import Migration, apply_pending, bootstrap_version
+
+        ran: list[str] = []
+        monkeypatch.setattr(
+            migrations,
+            "MIGRATIONS",
+            [Migration("1.0.0", "old step", lambda c: ran.append("old"))],
+        )
+
+        conn = sqlite3.connect(":memory:")
+        # Seed last_seen ABOVE the step so it is treated as already applied.
+        bootstrap_version(conn)
+        conn.execute(
+            "UPDATE _nexus_version SET value='2.0.0' WHERE key='cli_version'"
+        )
+        conn.commit()
+        migrations._upgrade_done.clear()
+
+        apply_pending(conn, "3.0.0")
+        assert ran == [], "step with introduced <= last_seen must not re-run"
+        conn.close()
+
+    def test_idempotent(self, tmp_path: Path, clean_registry) -> None:
+        """Running apply_pending twice with same version yields identical DB
+        state — schema AND version row.
+
+        RDR-170: uses clean_registry so the stamp actually fires (the real
+        registry's catalog-absent defer steps would set any_skipped and suppress
+        the stamp, leaving the version-row idempotency assertion vacuously true)."""
         from nexus.db.migrations import apply_pending
+
+        def _snapshot(c: sqlite3.Connection) -> tuple:
+            schema = c.execute(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name"
+            ).fetchall()
+            ver = c.execute(
+                "SELECT value FROM _nexus_version WHERE key='cli_version'"
+            ).fetchone()
+            return schema, ver
 
         db_path = tmp_path / "test.db"
         conn = sqlite3.connect(str(db_path))
         apply_pending(conn, "4.1.2")
-
-        # Snapshot schema
-        schema1 = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name"
-        ).fetchall()
+        snap1 = _snapshot(conn)
 
         from nexus.db import migrations
 
         migrations._upgrade_done.clear()
 
         apply_pending(conn, "4.1.2")
+        snap2 = _snapshot(conn)
 
-        schema2 = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name"
-        ).fetchall()
-
-        assert schema1 == schema2
+        assert snap1 == snap2
+        assert snap1[1][0] == "4.1.2"  # version row stamped, not suppressed
         conn.close()
 
-    def test_concurrent_bootstrap(self, tmp_path: Path) -> None:
+    def test_concurrent_bootstrap(self, tmp_path: Path, clean_registry) -> None:
         """Two threads calling apply_pending simultaneously — no crash, version seeded once."""
         from nexus.db.migrations import apply_pending
 
@@ -698,7 +848,7 @@ class TestApplyPending:
         assert rows[0][0] == "4.1.2"
         conn.close()
 
-    def test_concurrent_apply_pending_runs_once(self, tmp_path: Path) -> None:
+    def test_concurrent_apply_pending_runs_once(self, tmp_path: Path, clean_registry) -> None:
         """_upgrade_lock prevents concurrent apply_pending double-execution."""
         from unittest.mock import patch as _patch
 
@@ -744,7 +894,7 @@ class TestApplyPending:
         # it already present and returns early before calling bootstrap_version.
         assert call_count["n"] == 1
 
-    def test_prerelease_version_not_stored(self, tmp_path: Path) -> None:
+    def test_prerelease_version_not_stored(self, tmp_path: Path, clean_registry) -> None:
         """Pre-release versions (parsed as (0,0,0)) must not be stored."""
         from nexus.db.migrations import apply_pending
 
@@ -766,7 +916,7 @@ class TestApplyPending:
         assert row[0] == "4.1.2"  # unchanged
         conn.close()
 
-    def test_version_downgrade_not_stored(self, tmp_path: Path) -> None:
+    def test_version_downgrade_not_stored(self, tmp_path: Path, clean_registry) -> None:
         """Calling apply_pending with a lower version must not lower stored version."""
         from nexus.db.migrations import apply_pending
 

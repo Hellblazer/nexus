@@ -46,8 +46,11 @@ from typing import Any, Literal
 
 import structlog
 
-from nexus.corpus import embedding_model_for_collection_name
-from nexus.migration.vector_etl import _dim_for_collection
+from nexus.corpus import (
+    embedding_model_for_collection_name,
+    voyage_model_for_collection,
+)
+from nexus.migration.vector_etl import _VOYAGE_MODELS, _dim_for_collection
 
 _log = structlog.get_logger(__name__)
 
@@ -58,11 +61,9 @@ _log = structlog.get_logger(__name__)
 #: service cannot serve it — such collections are UNSUPPORTED until re-indexed).
 _ONNX_MODEL: str = "bge-base-en-v15-768"
 
-#: The voyage models wired only in cloud mode (``NX_VOYAGE_API_KEY`` present).
-#: Mirrors ``EmbedderRouter``'s cloud-mode ``modelEmbedders`` keys.
-_VOYAGE_MODELS: frozenset[str] = frozenset(
-    {"voyage-code-3", "voyage-context-3", "voyage-3"}
-)
+#: The voyage models (``_VOYAGE_MODELS``) are imported from ``vector_etl`` (single
+#: source) so this module's billing decision and vector_etl's passthrough
+#: eligibility can never silently diverge on a new Voyage model (review).
 
 Leg = Literal["local", "cloud"]
 Support = Literal["supported-onnx", "supported-voyage-1024", "unsupported"]
@@ -170,6 +171,35 @@ def cross_model_remappable(c: "CollectionClassification") -> bool:
     return c.support == "unsupported"
 
 
+def cross_model_target_model(source: str, *, voyage_key_present: bool) -> str:
+    """The embedding model a cross-model remap should re-embed *source* into.
+
+    nexus-gilf2: the target must be a model the live deployment actually WIRES,
+    else the upsert hits the ``nexus-pebfx.2`` fail-loud guard (HTTP 422, no
+    embedder for the named model) and the migration blocks 0/N. The old
+    unconditional bge-768 target was correct for local mode but wrong for the
+    MIXED migrant — a deployment that ran local (minilm-384 collections) then
+    migrates onto a voyage-mode (cloud) service, where bge-768 is not wired.
+
+    Mode + content-type aware:
+
+    * cloud mode (``voyage_key_present``) → the content-type-appropriate voyage
+      model (prose ``docs__`` / ``rdr__`` / ``knowledge__`` → ``voyage-context-3``;
+      ``code__`` and any other prefix → ``voyage-code-3``), so the re-embedded
+      chunks land under a served model;
+    * local mode → ONNX (``bge-base-en-v15-768``), the only wired embedder.
+
+    The content-type dispatch reuses the READ-side
+    :func:`nexus.corpus.voyage_model_for_collection`. The remap only swaps the
+    model segment, leaving the content_type prefix intact, so the target's
+    served model equals what the read path will later dispatch for it — no
+    model/recall mismatch (RDR-059).
+    """
+    if voyage_key_present:
+        return voyage_model_for_collection(source)
+    return _ONNX_MODEL
+
+
 @dataclass(frozen=True)
 class CollectionClassification:
     """Per-collection detection result along both axes (RF-2).
@@ -195,6 +225,12 @@ class DetectionReport:
     """The classified Chroma footprint across all detected legs."""
 
     classifications: tuple[CollectionClassification, ...]
+    #: Whether the deployment wires the voyage embedders (cloud mode). Carried
+    #: so the dry-run preview can resolve the cross-model re-embed TARGET and its
+    #: throughput the same way the driver will (nexus-gilf2): voyage models in
+    #: cloud mode, bge-768 in local. Defaults False (local) for the many test
+    #: doubles that construct a report without a live mode signal.
+    voyage_key_present: bool = False
 
     @property
     def legs_with_data(self) -> frozenset[str]:
@@ -272,7 +308,10 @@ def classify_collections(
                 cloud_client, "cloud", voyage_key_present=voyage_key_present
             )
         )
-    report = DetectionReport(classifications=tuple(classifications))
+    report = DetectionReport(
+        classifications=tuple(classifications),
+        voyage_key_present=voyage_key_present,
+    )
     _log.info(
         "migration_detect_classified",
         total=len(report.classifications),
@@ -296,7 +335,7 @@ def voyage_key_available() -> bool:
     """
     if os.environ.get("NX_VOYAGE_API_KEY", "").strip():
         return True
-    from nexus.config import get_credential  # noqa: PLC0415
+    from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
     return bool(get_credential("voyage_api_key").strip())
 
@@ -313,8 +352,8 @@ def open_read_legs(
     (``FileNotFoundError`` / the cloud half-configured ``RuntimeError``) are
     swallowed; any other failure (a corrupt store) propagates loud.
     """
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
-    from nexus.migration.chroma_read import (  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+    from nexus.migration.chroma_read import (  # noqa: PLC0415 — circular-dep avoidance (nexus.migration.chroma_read)
         open_cloud_read_client,
         open_local_read_client,
     )
@@ -336,6 +375,26 @@ def open_read_legs(
     return local, cloud
 
 
+def close_read_client(client: Any | None) -> None:
+    """Close a Chroma read leg, swallowing absence/teardown failures.
+
+    The canonical leg-teardown primitive shared by the detection consumers
+    (:func:`classify_collections` callers and the guided-upgrade pre-flight):
+    a ``None`` leg or a client that exposes no callable ``close`` is a no-op,
+    and a close that raises is logged at DEBUG, never propagated — teardown
+    must not mask the detection result it follows.
+    """
+    if client is None:
+        return
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:  # noqa: BLE001 — teardown is best-effort
+        _log.debug("migration_read_client_close_failed", error=str(exc))
+
+
 # ── Dry-run preview (RDR-159 §Approach P0) ─────────────────────────────────
 #
 # The estimate is TOKEN-VOLUME + TIME only (decision 2026-06-13): no dollar
@@ -354,6 +413,15 @@ _EST_TOKENS_PER_CHUNK: int = 512
 _EST_VOYAGE_CHUNKS_PER_SEC: float = 200.0
 _EST_ONNX_CHUNKS_PER_SEC: float = 100.0
 
+#: Coarse Voyage re-embed price (USD per 1M tokens), for the cost guardrail
+#: (nexus-cewad / RDR-166 Gap 4). Order-of-magnitude planning figure across the
+#: voyage-context-3 / voyage-code-3 family — NOT a billing-accurate quote; the
+#: operator's actual invoice is set by Voyage's current pricing. Billed only for
+#: a cross-model→voyage RE-EMBED. Same-model voyage migrations use vector
+#: passthrough (nexus-hxry2) — stored vectors are copied, not re-embedded, so
+#: they do not bill. ONNX/bge re-embeds run locally and never bill.
+_VOYAGE_COST_USD_PER_1M_TOKENS: float = 0.12
+
 
 @dataclass(frozen=True)
 class ModelGroup:
@@ -369,10 +437,15 @@ class ModelGroup:
     est_tokens: int
     est_seconds: float
     #: RDR-162 P2: True when this is an ``unsupported`` group the migrate will
-    #: CROSS-MODEL re-embed into bge-768 (legacy minilm, etc.) rather than block.
-    #: It counts toward the migratable totals; ``support`` stays ``unsupported``
-    #: (its current name is unservable) but it is NOT in ``DryRunPreview.unsupported``.
+    #: CROSS-MODEL re-embed (legacy minilm, etc.) rather than block. It counts
+    #: toward the migratable totals; ``support`` stays ``unsupported`` (its
+    #: current name is unservable) but it is NOT in ``DryRunPreview.unsupported``.
     cross_model: bool = False
+    #: nexus-gilf2: the model the cross-model re-embed targets, resolved from the
+    #: deployment mode + content_type (voyage models in cloud, bge-768 in local).
+    #: ``None`` for non-cross-model groups. Carried so the preview names the
+    #: ACTUAL target (not a hard-coded bge-768) and estimates the right rate.
+    target_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -385,6 +458,21 @@ class DryRunPreview:
     migratable_chunks: int
     total_est_tokens: int
     est_seconds: float
+    #: nexus-cewad: token volume that will be RE-EMBEDDED through a Voyage model
+    #: and therefore billed to the operator key — counts cross-model→voyage
+    #: re-embed groups only. Same-model voyage migrations use vector passthrough
+    #: (nexus-hxry2: stored vectors copied, not re-embedded) and contribute zero,
+    #: as do ONNX/bge re-embeds (local).
+    billed_voyage_tokens: int = 0
+    #: Coarse USD estimate for ``billed_voyage_tokens`` at
+    #: :data:`_VOYAGE_COST_USD_PER_1M_TOKENS`. ``0.0`` when nothing is billed.
+    est_voyage_cost_usd: float = 0.0
+    #: nexus-hxry2: same-model voyage token volume that migrates FREE via vector
+    #: passthrough (stored vectors copied, not re-embedded). It is NOT billed —
+    #: but the dry-run can't see per-chunk vector presence, and any source chunk
+    #: lacking a stored vector re-embeds that batch (and bills). Surfaced as a
+    #: caveat so the ``$0`` estimate is honest about that fallback (review).
+    passthrough_voyage_tokens: int = 0
 
 
 def _throughput_for_support(support: Support) -> float:
@@ -401,25 +489,34 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     contribute nothing to the migratable totals — they would be BLOCKED, not
     migrated.
     """
-    buckets: dict[tuple[Leg, str | None, Support], list[CollectionClassification]] = {}
-    for c in report.classifications:
-        buckets.setdefault((c.leg, c.model, c.support), []).append(c)
+    # RDR-162 P2: a cross-model-remappable collection is migratable (re-embed),
+    # not blocked. nexus-gilf2: bucket cross-model groups by their RESOLVED
+    # target too — in cloud mode a single source model (minilm-384) splits into
+    # voyage-code-3 (code__) and voyage-context-3 (prose) targets, so one bucket
+    # would otherwise name only one of them. ``target`` is None for non-cross-
+    # model classifications, keeping supported/blocked buckets unchanged.
+    def _cross_target(c: CollectionClassification) -> str | None:
+        if not cross_model_remappable(c):
+            return None
+        return cross_model_target_model(
+            c.collection, voyage_key_present=report.voyage_key_present
+        )
 
-    # RDR-162 P2: a cross-model-remappable collection is migratable (re-embed to
-    # bge-768), not blocked. Decide per classification so a bucket is consistent.
-    remappable = {
-        id(c) for c in report.classifications if cross_model_remappable(c)
-    }
+    buckets: dict[
+        tuple[Leg, str | None, Support, str | None], list[CollectionClassification]
+    ] = {}
+    for c in report.classifications:
+        buckets.setdefault((c.leg, c.model, c.support, _cross_target(c)), []).append(c)
 
     groups: list[ModelGroup] = []
     migratable_chunks = 0
     total_est_tokens = 0
     est_seconds = 0.0
-    for (leg, model, support), members in buckets.items():
+    billed_voyage_tokens = 0
+    passthrough_voyage_tokens = 0
+    for (leg, model, support, target_model), members in buckets.items():
         chunk_count = sum(m.source_count for m in members)
-        is_cross_model = support == "unsupported" and all(
-            id(m) in remappable for m in members
-        )
+        is_cross_model = target_model is not None
         if support == "unsupported" and not is_cross_model:
             # Genuinely blocked (voyage-no-key, non-conformant) — zero estimate.
             groups.append(
@@ -427,22 +524,45 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
             )
             continue
         # Supported byte-for-byte OR cross-model re-embed: both migratable. The
-        # cross-model re-embed runs through the local ONNX (bge-768) path.
+        # cross-model re-embed runs through whatever embedder serves the TARGET
+        # name (voyage in cloud mode, ONNX in local) — estimate that rate.
         tokens = chunk_count * _EST_TOKENS_PER_CHUNK
-        rate = _EST_ONNX_CHUNKS_PER_SEC if is_cross_model else _throughput_for_support(support)
+        if is_cross_model:
+            rate = (
+                _EST_VOYAGE_CHUNKS_PER_SEC
+                if target_model in _VOYAGE_MODELS
+                else _EST_ONNX_CHUNKS_PER_SEC
+            )
+        else:
+            rate = _throughput_for_support(support)
         seconds = chunk_count / rate
         groups.append(
             ModelGroup(
                 leg, model, support, len(members), chunk_count, tokens, seconds,
                 cross_model=is_cross_model,
+                target_model=target_model,
             )
         )
         migratable_chunks += chunk_count
         total_est_tokens += tokens
         est_seconds += seconds
+        # Billed iff the migration RE-EMBEDS through a Voyage model:
+        #   * cross-model→voyage → re-embedded with the target voyage model → BILLED.
+        #   * same-model voyage (supported-voyage-1024) → vector PASSTHROUGH
+        #     (nexus-hxry2): the stored vectors are copied verbatim, NOT
+        #     re-embedded, so it no longer bills. (Best case: a same-model chunk
+        #     missing its source vector falls back to a billed re-embed per batch.)
+        #   * supported-onnx / cross-model→bge → local ONNX (bge-768) → free.
+        billed = is_cross_model and target_model in _VOYAGE_MODELS
+        if billed:
+            billed_voyage_tokens += tokens
+        elif not is_cross_model and support == "supported-voyage-1024":
+            # Same-model voyage → vector passthrough (free), barring missing-vector
+            # batch fallback. Tracked so the estimate can caveat the $0 (review).
+            passthrough_voyage_tokens += tokens
 
-    # Stable order: leg, then support, then model — deterministic preview text.
-    groups.sort(key=lambda g: (g.leg, g.support, g.model or ""))
+    # Stable order: leg, support, model, then target — deterministic preview text.
+    groups.sort(key=lambda g: (g.leg, g.support, g.model or "", g.target_model or ""))
     # Only GENUINELY-blocked collections remain in unsupported — cross-model
     # collections are migratable and must not gate the dry-run exit.
     blocked = tuple(
@@ -455,6 +575,9 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
         migratable_chunks=migratable_chunks,
         total_est_tokens=total_est_tokens,
         est_seconds=round(est_seconds, 1),
+        billed_voyage_tokens=billed_voyage_tokens,
+        est_voyage_cost_usd=billed_voyage_tokens / 1_000_000 * _VOYAGE_COST_USD_PER_1M_TOKENS,
+        passthrough_voyage_tokens=passthrough_voyage_tokens,
     )
 
 
@@ -481,7 +604,7 @@ def render_dry_run_preview(preview: DryRunPreview) -> str:
         lines.append("Would migrate (per leg / model):")
         for g in migratable:
             kind = (
-                f"{g.model} -> bge-768 cross-model re-embed"
+                f"{g.model} -> {g.target_model} cross-model re-embed"
                 if g.cross_model
                 else f"{g.model} ({g.support})"
             )
@@ -515,8 +638,49 @@ def render_dry_run_preview(preview: DryRunPreview) -> str:
         f"~{preview.total_est_tokens:,} tokens; ~{preview.est_seconds:.1f}s "
         "re-embed time."
     )
+    if preview.billed_voyage_tokens > 0:
+        lines.append(
+            f"Voyage re-embed cost (billed to the operator key): "
+            f"~{preview.billed_voyage_tokens:,} tokens, est. "
+            f"~${preview.est_voyage_cost_usd:.2f} "
+            f"(~${_VOYAGE_COST_USD_PER_1M_TOKENS:.2f}/1M tokens; a re-run re-embeds "
+            "at full cost — not deduplicated)."
+        )
+    if preview.passthrough_voyage_tokens > 0:
+        lines.append(
+            f"Voyage passthrough (free): ~{preview.passthrough_voyage_tokens:,} "
+            "tokens migrate same-model by copying stored vectors — no re-embed, "
+            "no charge. Caveat: any source chunk missing its stored vector "
+            "re-embeds that batch (and bills); the estimate assumes all vectors "
+            "are present."
+        )
     lines.append(
         "Estimates are coarse planning figures, not a binding commitment; the "
         "live run reports exact counts."
     )
     return "\n".join(lines)
+
+
+def render_cost_confirmation(preview: DryRunPreview) -> str | None:
+    """Operator-facing cost warning for a billed Voyage re-embed, or ``None``.
+
+    Returns ``None`` when the migration bills nothing (no cross-model→voyage
+    re-embed) — the caller then proceeds without a cost prompt. When there IS a
+    billed re-embed, returns a warning that surfaces (a) the coarse USD estimate
+    and the token volume it is based on, and (b) the re-run-at-full-cost
+    foot-gun (nexus-1sx01): this guardrail WARNS and CONFIRMS; it does NOT
+    deduplicate or avoid re-billing a repeated run (copy-not-move has no
+    server-side cost memory). Pure formatting — no I/O.
+    """
+    if preview.billed_voyage_tokens <= 0:
+        return None
+    return (
+        f"WARNING: this migration will RE-EMBED ~{preview.billed_voyage_tokens:,} tokens "
+        f"through a Voyage model, billed to the operator's Voyage key — an "
+        f"estimated ${preview.est_voyage_cost_usd:.2f} (coarse planning figure at "
+        f"~${_VOYAGE_COST_USD_PER_1M_TOKENS:.2f}/1M tokens; the real invoice "
+        f"follows Voyage's current pricing).\n"
+        f"   Re-running this migration re-embeds the same chunks again at full "
+        f"cost — the copy carries no server-side cost memory, so a repeat run is "
+        f"billed in full, not deduplicated."
+    )

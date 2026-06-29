@@ -2,13 +2,14 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-16 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+35 registered tools + 3 demoted (plain functions, no @mcp.tool()).
 """
 from __future__ import annotations
 
 import json
 from typing import Any
 
+import structlog
 from mcp.server.fastmcp import FastMCP
 
 from nexus.corpus import (
@@ -37,6 +38,52 @@ from nexus.mcp_infra import (
     t2_index_write as _t2_index_write,
 )
 from nexus.ttl import parse_ttl
+
+#: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
+#: string to the agent rather than raising; before returning an error they must
+#: ALSO emit a structured server-side log so a dead backing service is diagnosable.
+_log = structlog.get_logger(__name__)
+
+#: Substrings that mark a backing-service-unreachable failure. When an MCP tool
+#: error matches, the agent-facing return carries an actionable remediation hint
+#: instead of a bare exception repr. Kept narrow (no bare "connect") to avoid
+#: false-positive hints on unrelated errors that merely mention connecting
+#: (review 2026-06-23): ``ConnectionError``/``TimeoutError`` instances are matched
+#: by type below; these markers catch string-only wrappers (e.g. httpx).
+_CONNECTION_ERROR_MARKERS = (
+    "connection refused", "cannot connect", "broken pipe", "connection reset",
+    "max retries", "timed out", "no route to host", "connection aborted",
+)
+
+
+def _mcp_tool_error(tool: str, e: Exception) -> str:
+    """Log an MCP tool-handler exception structured, return an agent-facing string.
+
+    nexus-yttqr: the ~22 handlers in this module historically ended with
+    ``return f"Error: {e}"`` and emitted NO server-side log — a dead service gave
+    the agent a bare repr and left nothing to diagnose. This helper logs the
+    exception with ``exc_info`` (traceback stays server-side, never leaks into the
+    return string) and enriches the returned message with a remediation hint when
+    the failure looks like the backing service is unreachable.
+
+    The unreachable-service hint is gated narrowly: ``ConnectionError`` /
+    ``TimeoutError`` instances, or a marker substring. Bare ``OSError`` (which
+    includes ``PermissionError`` / ``FileNotFoundError`` — realistic on a locked
+    SQLite file, NOT a daemon-down condition) is deliberately NOT treated as a
+    connection failure, to avoid a misleading "restart the daemon" hint.
+    """
+    _log.error(f"mcp_{tool}_failed", error=str(e), exc_info=True)
+    text = str(e)
+    if isinstance(e, (ConnectionError, TimeoutError)) or any(
+        m in text.lower() for m in _CONNECTION_ERROR_MARKERS
+    ):
+        return (
+            f"Error: {text}\n"
+            "The nexus backing service may be unreachable — check the daemon is "
+            "running with `nx doctor` (and `nx daemon status`)."
+        )
+    return f"Error: {text}"
+
 
 #: Process-local HookRegistry constructed at MCP-server startup.
 #: The MCP server is a long-running entry point — the registry's
@@ -93,6 +140,17 @@ _SHUTDOWN_IN_FLIGHT: bool = False
 #: the T2 ``_reassert_task`` discipline). ``None`` when no owned T1 is live.
 _T1_HEARTBEAT_TASK: Any = None
 
+#: nexus-zgqxm: minimum seconds between in-process orphan-sweeps driven by the
+#: heartbeat loop. The startup sweeps (lifespan Branch 3) only reap the
+#: PREVIOUS leak before spawning a new chroma; a host losing many MCPs
+#: ungracefully but spawning few new ones never re-enters the sweep and can
+#: exhaust ``kern.posix.sem.max=10000`` (2026-05-08 shakeout cleared 8,359
+#: semaphores). This periodic sweep closes that gap by reaping PPID=1 orphan
+#: resource-trackers / chromadbs WHILE a long-lived MCP runs, not only at its
+#: next startup. 600 s keeps the ``ps`` cost negligible relative to the leak
+#: timescale (orphans accrue over hours/days, not seconds).
+_PERIODIC_SWEEP_INTERVAL_S: float = 600.0
+
 
 async def _t1_heartbeat_loop(publisher: Any, interval: float) -> None:
     """Re-stamp the T1 lease every ``interval`` seconds and lazily re-key the
@@ -101,23 +159,70 @@ async def _t1_heartbeat_loop(publisher: Any, interval: float) -> None:
     RDR-149 P4: this is T1's self-heal re-assert (the #1114 fix) and its
     RF-2/CA-3 re-key driver. A tick that raises is logged at debug and the
     loop continues; only cancellation (clean shutdown) stops it.
-    """
-    import asyncio
 
-    import structlog
+    nexus-zgqxm: the same loop also drives a periodic orphan sweep (every
+    ``_PERIODIC_SWEEP_INTERVAL_S``) so a long-lived MCP reaps PPID=1 orphan
+    resource-trackers / chromadbs continuously, not only at the next startup.
+    The live chroma's own ``server_pid`` is added to ``protected_pids`` so the
+    sweep can never target this session's own process.
+    """
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+    import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
     _hb_log = structlog.get_logger("nexus.mcp.core")
+    last_sweep = time.monotonic()
     while True:
         await asyncio.sleep(interval)
         try:
             publisher.tick()
-        except Exception as exc:  # never let a transient tick failure kill the loop
+        except Exception as exc:  # never let a transient tick failure kill the loop  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
             _hb_log.debug("t1_heartbeat_tick_failed", error=str(exc))
+        now = time.monotonic()
+        if now - last_sweep >= _PERIODIC_SWEEP_INTERVAL_S:
+            last_sweep = now
+            _periodic_orphan_sweep()
+
+
+def _periodic_orphan_sweep() -> None:
+    """Reap PPID=1 orphan resource-trackers / chromadbs while an MCP is live.
+
+    nexus-zgqxm: the startup sweeps (lifespan Branch 3) run spawn-only and so
+    only ever clean the PREVIOUS leak. Driving the same sweeps from the
+    heartbeat loop closes the "many ungraceful exits, few new spawns" gap that
+    can exhaust the POSIX semaphore namespace. The live chroma's ``server_pid``
+    is protected so the sweep cannot touch this session's own tracker; the
+    parser's PPID=1 + ``min_age_seconds`` gates already exclude live children.
+    Best-effort: every failure is logged at debug and never propagates into the
+    heartbeat loop.
+    """
+    from nexus.session import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+        sweep_orphan_resource_trackers,
+        sweep_orphan_t1_chromadbs,
+    )
+
+    server_pid = _OWNED_CHROMA.get("server_pid")
+    protected = {server_pid} if isinstance(server_pid, int) else set()
+    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+    _sweep_log = structlog.get_logger("nexus.mcp.core")
+    try:
+        n_trackers = sweep_orphan_resource_trackers(protected_pids=protected)
+        n_chromas = sweep_orphan_t1_chromadbs(protected_pids=protected)
+        if n_trackers or n_chromas:
+            _sweep_log.info(
+                "periodic_orphan_sweep",
+                trackers_reaped=n_trackers,
+                chromadbs_reaped=n_chromas,
+                protected_pid=server_pid,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("periodic_orphan_sweep_failed", error=str(exc))
 
 
 async def _cancel_t1_heartbeat_task() -> None:
     """Cancel and await the T1 heartbeat task if one is running. Idempotent."""
-    import asyncio
-    import contextlib
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+    import contextlib  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
     global _T1_HEARTBEAT_TASK
     task = _T1_HEARTBEAT_TASK
@@ -136,7 +241,7 @@ def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
     other diagnostic surfaces that probe a chroma address without
     constructing a full ``T1Database``.
     """
-    import socket
+    import socket  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -146,6 +251,78 @@ def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
 
 
 from contextlib import asynccontextmanager
+from pathlib import Path as _Path
+
+
+def _run_mcp_startup_sweep(*, config_dir: "_Path") -> None:
+    """Best-effort orphan-cleanup sweep run at MCP startup (Branch 3).
+
+    Extracted into its own function so:
+    1. The lifespan can call it with a single ``try/except`` guard.
+    2. Tests can call it directly with a synthetic config_dir and spy on
+       the inner sweep calls (GAP A conformance test — nexus-ycwec).
+
+    Runs four sweeps in best-effort order; failures on any one are logged
+    at debug and never block startup.  Two surfaces already existed before
+    nexus-ycwec:
+
+    (a) ``sweep_orphan_tmpdirs`` — reaps chroma tmpdir leftovers after
+        ungraceful exit.
+    (b) ``sweep_orphan_resource_trackers`` — reaps PPID=1 multiprocessing
+        resource-tracker processes holding POSIX named semaphores.
+    (c) ``sweep_orphan_t1_chromadbs`` — stops orphaned chroma server
+        processes immediately (rather than waiting 24h for tmpdir reap).
+
+    Two new sweeps added by nexus-ycwec Fix #3 lifecycle GC:
+
+    (d) ``sweep_dead_t1_holders`` — removes ``t1_addr.*`` lease records
+        whose claude_pid AND server_pid are BOTH dead.
+    (e) ``sweep_dead_t1_elect_locks`` — removes ``t1_elect.*.lock`` files
+        whose scope has no live owner (addr absent or both pids dead).
+
+    See docs/rdr/rdr-149-*.md for the shared-primitive mandate.  RDR-149
+    standing gate: all lifecycle GC lives in the shared primitive
+    (service_registry.py) plus this wiring point (core.py), never in
+    per-tier copies.
+    """
+    from nexus.session import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+        sweep_orphan_resource_trackers,
+        sweep_orphan_t1_chromadbs,
+        sweep_orphan_tmpdirs,
+    )
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+        sweep_dead_t1_holders,
+        sweep_dead_t1_elect_locks,
+    )
+    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+
+    _sweep_log = structlog.get_logger(__name__)
+
+    # (a) tmpdirs
+    try:
+        sweep_orphan_tmpdirs(config_dir=config_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_orphan_tmpdirs_failed", error=str(exc))
+    # (b) resource_trackers
+    try:
+        sweep_orphan_resource_trackers()
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_orphan_resource_trackers_failed", error=str(exc))
+    # (c) orphan chroma servers
+    try:
+        sweep_orphan_t1_chromadbs()
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_orphan_t1_chromadbs_failed", error=str(exc))
+    # (d) dead T1 holder addr records (nexus-ycwec GAP A)
+    try:
+        sweep_dead_t1_holders(config_dir=config_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_dead_t1_holders_failed", error=str(exc))
+    # (e) dead T1 elect lock files (nexus-ycwec GAP B)
+    try:
+        sweep_dead_t1_elect_locks(config_dir=config_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        _sweep_log.debug("sweep_dead_t1_elect_locks_failed", error=str(exc))
 
 
 @asynccontextmanager
@@ -191,9 +368,9 @@ async def _t1_chroma_lifespan(_app: Any):
     # routes T1 through HttpScratchStore. Chroma is NOT spawned; the session is
     # closed on exit via HttpScratchStore.close_session() so the UNLOGGED table
     # is reaped promptly rather than waiting for the 24-h TTL sweep backstop.
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     if storage_backend_for("t1") == StorageBackend.SERVICE:
-        import structlog as _structlog
+        import structlog as _structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         _svc_log = _structlog.get_logger(__name__)
         _svc_log.info("t1_service_path_active", backend="service")
 
@@ -208,7 +385,7 @@ async def _t1_chroma_lifespan(_app: Any):
         # a bare session id (it would 401 on every scratch op). With a resolvable session
         # id, mint failure is FATAL: we fail loud rather than ship a broken or silently
         # session-unscoped T1 (no silent fallback for a security-boundary input).
-        from nexus.session import resolve_active_session_id
+        from nexus.session import resolve_active_session_id  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
         _t1_session_id = (
             resolve_active_session_id()
             or _os.environ.get("NX_T1_SESSION_ID", "").strip()
@@ -230,7 +407,7 @@ async def _t1_chroma_lifespan(_app: Any):
                 "else is unavailable this process")
         else:
             try:
-                from nexus.db.t2.http_token_store import HttpTokenStore
+                from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
                 with HttpTokenStore() as _ts:
                     _minted = _ts.start_session(_t1_session_id)
                 _os.environ["NX_T1_SESSION"] = _minted["session_token"]
@@ -253,21 +430,21 @@ async def _t1_chroma_lifespan(_app: Any):
         yield
         # Teardown: close the scratch rows AND delete the minted session token.
         try:
-            from nexus.db.http_scratch_store import HttpScratchStore
+            from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             _svc_log.info("t1_service_session_close_start")
             store = HttpScratchStore()
             deleted = store.close_session()
             store.close()
             _svc_log.info("t1_service_session_close_done", deleted=deleted)
-        except Exception as _exc:
+        except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             _svc_log.warning("t1_service_session_close_failed", error=str(_exc))
         if _t1_session_id:
             try:
-                from nexus.db.t2.http_token_store import HttpTokenStore
+                from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
                 with HttpTokenStore() as _ts:
                     _ts.close_session(_t1_session_id)
                 _svc_log.info("t1_session_token_closed", session_id=_t1_session_id)
-            except Exception as _exc:
+            except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
                 _svc_log.warning("t1_session_token_close_failed", error=str(_exc))
         return
 
@@ -276,7 +453,7 @@ async def _t1_chroma_lifespan(_app: Any):
         yield
         return
 
-    from nexus.session import _t1_isolated_env
+    from nexus.session import _t1_isolated_env  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 
     if _t1_isolated_env():
         # Branch 2: explicit stateless ephemeral.
@@ -284,52 +461,22 @@ async def _t1_chroma_lifespan(_app: Any):
         return
 
     # Branch 3: spawn + publish.
-    from nexus.session import (
-        start_t1_server,
-        sweep_orphan_resource_trackers,
-        sweep_orphan_t1_chromadbs,
-        sweep_orphan_tmpdirs,
-    )
+    from nexus.session import start_t1_server  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+    from nexus.session import _nexus_config_dir_at_import as _cfg_dir_fn  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 
-    # Best-effort orphan cleanup before we spawn. Two surfaces:
-    # (a) tmpdirs from chromas reaped before their cleanup completed,
-    # (b) multiprocessing resource_tracker processes re-parented to
-    #     init (PPID=1) holding POSIX named semaphores. (b) is
-    #     critical because the namespace is bounded
-    #     (kern.posix.sem.max=10000 on macOS); chronic accumulation
-    #     produces Errno 28 system-wide. Bead nexus-9h1s; live
-    #     shakeout 2026-05-08 cleared 3,314 trackers / 8,359
-    #     semaphores. (a) is bounded; failures are logged at debug and
-    #     never block startup. The sweep functions log per-file
-    #     outcomes themselves; this outer guard catches unexpected
-    #     sweep-level failures. RDR-149 P5: the bespoke T1 addr-file
-    #     orphan sweep is gone -- the leased registry ages stale lease
-    #     records out via their TTL, no pid-keyed sweep needed.
-    import structlog
-    _sweep_log = structlog.get_logger(__name__)
+    # Best-effort orphan cleanup before we spawn (nexus-ycwec, nexus-9h1s,
+    # nexus-aigkb). Five sweeps delegated to _run_mcp_startup_sweep:
+    # (a) tmpdirs, (b) resource_trackers, (c) chroma servers,
+    # (d) dead T1 addr records, (e) dead T1 elect lock files.
+    # The sweep comment above this block is preserved in the helper's docstring.
+    # RDR-149 P5 note: leased registry ages stale lease records out via TTL,
+    # but crash-reap scenarios leave pids-dead holders that only the explicit
+    # sweep catches -- that is what (d)+(e) fix.
     try:
-        sweep_orphan_tmpdirs()
-    except Exception as exc:
-        _sweep_log.debug("sweep_orphan_tmpdirs_failed", error=str(exc))
-    try:
-        sweep_orphan_resource_trackers()
-    except Exception as exc:
-        _sweep_log.debug(
-            "sweep_orphan_resource_trackers_failed", error=str(exc)
-        )
-    # (d) orphan T1 chromadb servers (nexus-aigkb). When a Claude
-    # Code session exits ungracefully (SIGKILL, crash, lost
-    # SessionEnd hook), its per-session chromadb is re-parented to
-    # launchd and runs indefinitely, holding a TCP port and tmpdir.
-    # sweep_orphan_tmpdirs reaps the dirs only after 24h; this
-    # sweeps the processes immediately so the next start_t1_server
-    # has a clean slate.
-    try:
-        sweep_orphan_t1_chromadbs()
-    except Exception as exc:
-        _sweep_log.debug(
-            "sweep_orphan_t1_chromadbs_failed", error=str(exc)
-        )
+        _run_mcp_startup_sweep(config_dir=_cfg_dir_fn())
+    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+        structlog.get_logger(__name__).debug("mcp_startup_sweep_failed", error=str(exc))
 
     # Reset the ``_SHUTDOWN_IN_FLIGHT`` sentinel BEFORE
     # ``start_t1_server`` (which can take up to ``_SERVER_READY_TIMEOUT``
@@ -353,18 +500,18 @@ async def _t1_chroma_lifespan(_app: Any):
         "tmpdir": str(tmpdir),
     })
     try:
-        import asyncio
+        import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
-        from nexus.mcp import _t1_state
-        from nexus.daemon.service_registry import ServiceRegistry
-        from nexus.daemon.t1_lease import T1LeasePublisher
-        from nexus.session import (
+        from nexus.mcp import _t1_state  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+        from nexus.daemon.t1_lease import T1LeasePublisher  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+        from nexus.session import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
             _nexus_config_dir_at_import,
             find_immediate_claude_pid,
             resolve_active_session_id,
         )
 
-        import structlog
+        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         _spawn_log = structlog.get_logger()
 
         # RDR-149 P4: T1 rides the leased registry. Publish under a transient
@@ -443,10 +590,10 @@ def _t1_chroma_shutdown() -> None:
         return
     _SHUTDOWN_IN_FLIGHT = True
 
-    import shutil
+    import shutil  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
-    from nexus.mcp import _t1_state
-    from nexus.session import stop_t1_server
+    from nexus.mcp import _t1_state  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+    from nexus.session import stop_t1_server  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 
     server_pid = _OWNED_CHROMA.get("server_pid")
     tmpdir = _OWNED_CHROMA.get("tmpdir")
@@ -460,12 +607,12 @@ def _t1_chroma_shutdown() -> None:
     if publisher is not None:
         try:
             publisher.relinquish()
-        except Exception:
+        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
     if server_pid:
         try:
             stop_t1_server(int(server_pid))
-        except Exception:
+        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
     if tmpdir:
         try:
@@ -524,7 +671,7 @@ def _clamp_subagent_timeout(requested: float, tool_name: str) -> float:
     blocking the call.
     """
     if requested < _SUBAGENT_TIMEOUT_FLOOR:
-        import structlog
+        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().warning(
             "subagent_timeout_clamped",
             tool=tool_name,
@@ -602,8 +749,8 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
             limit=_TIDY_MAX_ENTRIES,
             structured=True,
         )
-    except Exception:
-        import structlog
+    except Exception:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().debug("tidy_prefetch_search_failed", exc_info=True)
         return "", 0
     if not isinstance(hits, dict):
@@ -621,15 +768,15 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
             max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY,
             structured=True,
         )
-    except Exception:
-        import structlog
+    except Exception:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().debug("tidy_prefetch_hydrate_failed", exc_info=True)
         return "", 0
     if isinstance(hydrated, dict) and hydrated.get("error"):
         # store_get_many caught an internal error and returned it as a
         # structured field rather than raising. Surface it at DEBUG so a
         # T3 outage during tidy is diagnosable instead of vanishing.
-        import structlog
+        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().debug(
             "tidy_prefetch_hydrate_error", error=hydrated["error"],
         )
@@ -649,6 +796,27 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
 
 
 # ── Tier-discipline telemetry (Phase 1A nexus-kren) ─────────────────────────
+
+
+# nexus-pyzk7: telemetry is best-effort (a failed write must never break a tool
+# call), but a SILENT drop is the exact bug this bead fixes. When the persist
+# raises — service 5xx/timeout, or a backend with no such store — log ONCE per
+# table so the loss is visible in the process log instead of vanishing.
+_telemetry_drop_warned: set[str] = set()
+
+
+def _warn_telemetry_drop(table: str, exc: BaseException) -> None:
+    if table in _telemetry_drop_warned:
+        return
+    _telemetry_drop_warned.add(table)
+    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+    structlog.get_logger(__name__).warning(
+        "telemetry_write_dropped",
+        table=table,
+        error=f"{type(exc).__name__}: {exc}",
+        note="telemetry row not persisted (best-effort); subsequent drops for "
+             "this table are suppressed this process (tracked: nexus-pyzk7).",
+    )
 
 
 def _record_tier_write(
@@ -678,31 +846,25 @@ def _record_tier_write(
     rather than frozen at module-import time.
     """
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
-        from nexus.db.migrations import migrate_tier_writes
-        from nexus.mcp_infra import t2_ctx
-        from nexus.session import resolve_active_session_id
+        from nexus.mcp_infra import t2_ctx  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+        from nexus.session import resolve_active_session_id  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 
         session_id = resolve_active_session_id() or "unknown"
         ts = datetime.now(timezone.utc).isoformat()
         with t2_ctx() as t2:
-            # Any domain conn points at the same SQLite file; reuse the
-            # taxonomy connection because it is constructed eagerly and
-            # carries the per-store lock semantics this insert needs.
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                migrate_tier_writes(conn)
-                conn.execute(
-                    "INSERT INTO tier_writes "
-                    "(session_id, ts, tool, tier, agent, project, target_title) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (session_id, ts, tool, tier, agent, project, target_title),
-                )
-                conn.commit()
-    except Exception:
-        # Best-effort. Telemetry breaking a tool call is the worst kind of regression.
-        pass
+            # nexus-pyzk7: route through the telemetry store, which persists to
+            # SQLite (raw) or the service (POST /v1/telemetry/tier_writes/record)
+            # depending on backend — no raw ``.conn`` reach, no silent drop.
+            t2.telemetry.record_tier_write(
+                session_id=session_id, ts=ts, tool=tool, tier=tier,
+                agent=agent, project=project, target_title=target_title,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
+        # Best-effort. Telemetry breaking a tool call is the worst kind of
+        # regression — but warn once so the drop is visible, not silent.
+        _warn_telemetry_drop("tier_writes", exc)
 
 
 # ── Post-store hooks (process-local registry constructed above) ─────────────
@@ -804,9 +966,9 @@ def search(
             threshold-drop on dense-prose collections.
     """
     try:
-        from nexus.config import load_config
-        from nexus.filters import sanitize_query
-        from nexus.search_engine import search_cross_corpus
+        from nexus.config import load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.filters import sanitize_query  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.search_engine import search_cross_corpus  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         cfg = load_config()
         if cfg.get("search", {}).get("query_sanitizer", True):
@@ -910,8 +1072,8 @@ def search(
                     query,
                     [(r.id, r.collection) for r in page],
                 )
-        except Exception:
-            import structlog
+        except Exception:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+            import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
             structlog.get_logger().debug("relevance_trace_record_failed", exc_info=True)
 
         # Structured return for plan-runner step output contract.
@@ -968,8 +1130,8 @@ def search(
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
 
         return "\n\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("search", e)
 
 
 def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
@@ -1048,7 +1210,7 @@ def search_metadata_scoped(
         structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
     """
     try:
-        from nexus.db.http_vector_client import is_service_backed
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         t3 = _get_t3()
         if not is_service_backed(t3):
@@ -1064,7 +1226,7 @@ def search_metadata_scoped(
         # into the bogus key "bib_year>" and drop the filter — nexus-889ff review).
         where_map: dict | None = None
         if where.strip():
-            from nexus.filters import parse_where_str
+            from nexus.filters import parse_where_str  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
             parsed = parse_where_str(where)
             if parsed and (
@@ -1120,8 +1282,8 @@ def search_metadata_scoped(
             f"\n{r.get('content', '')}"
             for r in rows
         )
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("search_metadata_scoped", e)
 
 
 @mcp.tool(
@@ -1158,7 +1320,7 @@ def search_topic_scoped(
         structured: Return ``{ids, tumblers, distances, collections}`` for the plan runner.
     """
     try:
-        from nexus.db.http_vector_client import is_service_backed
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         t3 = _get_t3()
         if not is_service_backed(t3):
@@ -1190,8 +1352,8 @@ def search_topic_scoped(
             f"\n{r.get('content', '')}"
             for r in merged
         )
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("search_topic_scoped", e)
 
 
 @mcp.tool(
@@ -1237,7 +1399,7 @@ def search_graph_hop(
         structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
     """
     try:
-        from nexus.db.http_vector_client import is_service_backed
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         t3 = _get_t3()
         if not is_service_backed(t3):
@@ -1289,8 +1451,8 @@ def search_graph_hop(
             f"\n{r.get('content', '')}"
             for r in rows
         )
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("search_graph_hop", e)
 
 
 @mcp.tool(
@@ -1346,9 +1508,9 @@ def query(
         subtree: Tumbler prefix to scope search to a subtree
     """
     try:
-        from nexus.config import load_config
-        from nexus.filters import sanitize_query
-        from nexus.search_engine import search_cross_corpus
+        from nexus.config import load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.filters import sanitize_query  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.search_engine import search_cross_corpus  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         cfg = load_config()
         if cfg.get("search", {}).get("query_sanitizer", True):
@@ -1361,7 +1523,7 @@ def query(
         has_catalog_params = author or content_type or follow_links or subtree
 
         if has_catalog_params:
-            from nexus.catalog.tumbler import Tumbler
+            from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             cat = _get_catalog()
             if cat is None:
                 return "Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'"
@@ -1386,7 +1548,7 @@ def query(
             # bib_venue/bib_citation_count per tumbler from CatalogEntry — the
             # Java catalog already serializes the bib_* columns
             # (CatalogRepository.docRowFromRecord), surfaced onto CatalogEntry.
-            from nexus.db.http_vector_client import is_service_backed
+            from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             _where_dict = _parse_where_str(where)
             # H2: follow_links + where — search_graph_hop has no `where` param.
             # Fall back to the dance path so the caller's where filter is
@@ -1521,7 +1683,7 @@ def query(
                     # Re-hydrate from catalog
                     try:
                         entry_svc = cat.resolve(Tumbler.parse(tumbler_str)) if tumbler_str else None
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                         entry_svc = None
                     title_svc = (entry_svc.title if entry_svc else tumbler_str or "")[:70]
                     # Mirror the dance path's bib richness: prefer bib_* (RDR-101
@@ -1532,7 +1694,7 @@ def query(
                     bib_citation_count_svc = entry_svc.bib_citation_count if entry_svc else 0
                     try:
                         chunk_count_svc = len(cat.get_manifest(tumbler_str)) if tumbler_str else 0
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                         chunk_count_svc = 0
                     snippet_svc = row.get("content", "")[:300].replace("\n", " ")
                     collection_svc = row.get("collection", "")
@@ -1708,7 +1870,7 @@ def query(
         doc_to_chunk_count: dict[str, int] = {}
         try:
             cat = _get_catalog()
-        except Exception:
+        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             cat = None
         if cat is not None:
             chashes_seen = sorted({
@@ -1719,7 +1881,7 @@ def query(
             if chashes_seen:
                 try:
                     by_chash = cat.docs_for_chashes(chashes_seen)
-                except Exception:
+                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                     by_chash = {}
                 # Same chash can appear in multiple docs (identical
                 # content); pick the first deterministically so chunks
@@ -1732,7 +1894,7 @@ def query(
             for doc_id in set(chash_to_doc.values()):
                 try:
                     doc_to_chunk_count[doc_id] = len(cat.get_manifest(doc_id))
-                except Exception:
+                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                     continue
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
         for r in results:
@@ -1824,8 +1986,8 @@ def query(
             lines.append(f"\n--- showing 1-{len(sorted_docs)} of {total} documents. Results are capped at limit={limit}.")
 
         return "\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("query", e)
 
 
 @mcp.tool(
@@ -1871,19 +2033,19 @@ def store_put(
         # chunk_chroma_id mirrors ``T3Database.put``'s natural-id
         # derivation (chunk_text_hash[:32] per RDR-108 D1 / nexus-kmb6;
         # for single-chunk MCP docs chunk_text == content).
-        import hashlib as _hl
+        import hashlib as _hl  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
         chunk_chroma_id = _hl.sha256(content.encode()).hexdigest()[:32]
         catalog_doc_id = ""
         try:
             # nexus-8g79.10 (V1): catalog_store_hook now lives under
             # nexus.catalog (lower layer). MCP infra no longer reaches
             # up into commands/ for this helper.
-            from nexus.catalog.store_hook import catalog_store_hook
+            from nexus.catalog.store_hook import catalog_store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             catalog_doc_id = catalog_store_hook(
                 title=title, doc_id=chunk_chroma_id, collection_name=col_name,
             )
-        except Exception:
-            import structlog
+        except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
+            import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
             structlog.get_logger().warning(
                 "catalog_store_hook_failed",
                 doc_id=chunk_chroma_id,
@@ -1909,8 +2071,8 @@ def store_put(
         # _catalog_auto_link.
         try:
             n = _catalog_auto_link(doc_id)
-        except Exception as auto_link_exc:
-            import structlog
+        except Exception as auto_link_exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
+            import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
             structlog.get_logger().warning(
                 "store_put_auto_link_failed",
                 doc_id=doc_id,
@@ -1919,7 +2081,7 @@ def store_put(
             )
         else:
             if n:
-                import structlog
+                import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
                 structlog.get_logger().debug(
                     "store_put_auto_linked", doc_id=doc_id, link_count=n,
                 )
@@ -1940,12 +2102,25 @@ def store_put(
         # store_put is `def`, not `async def`, so no await/to_thread).
         # content is the full document text already in scope; pass it
         # through literally per the P0.1 content-sourcing contract.
-        # source_path is doc_id here — there is no on-disk file at the
-        # MCP boundary, so the doc_id serves as the stable identifier
-        # the hook uses for failure attribution.
-        # nexus-tdgc: forward doc_id explicitly so the aspect-queue
-        # hook can store it on the queue row alongside source_path.
-        _hooks.fire_document(doc_id, col_name, content, doc_id=doc_id)
+        # source_path (1st positional) is the chunk natural-id here — there
+        # is no on-disk file at the MCP boundary, so it serves as the stable
+        # per-doc queue key + the identifier the hook uses for failure
+        # attribution. It is NOT foreign-keyed (RDR-156 fk-001: aspect_
+        # extraction_queue.source_path is a storage path, not a tumbler).
+        # nexus-tdgc: forward an explicit doc_id so the aspect-queue hook can
+        # stamp it on the queue row.
+        # RDR-172 / nexus-pyn35 (closes nexus-ov0sw): the queue row's doc_id
+        # carries a composite FK -> catalog_documents(tumbler) (RDR-156
+        # fk-001), so it MUST be the catalog tumbler (catalog_doc_id), NOT
+        # the t3.put chunk natural-id (sha256(content)[:32]) — a chunk hash
+        # is never a tumbler and 500s the service enqueue, which the best-
+        # effort hook then swallows (silent, total loss of RDR-089 aspects in
+        # service mode). When no tumbler was minted, catalog_doc_id is '' —
+        # the blank sentinel the service NULL-coerces (nullIfBlank), which
+        # satisfies the FK and still extracts from the queued content. This
+        # matches every other fire_document caller (doc_indexer, pipeline_
+        # stages, code_indexer, prose_indexer), which all pass catalog_doc_id.
+        _hooks.fire_document(doc_id, col_name, content, doc_id=catalog_doc_id)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.
@@ -1961,16 +2136,16 @@ def store_put(
                 ]
                 with _t2_ctx() as db:
                     db.log_relevance_batch(rows)
-        except Exception:
-            import structlog
+        except Exception:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+            import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
             structlog.get_logger().debug("relevance_log_store_failed", exc_info=True)
         _record_tier_write(
             tool="store_put", tier="T3",
             target_title=title or doc_id,
         )
         return f"Stored: {doc_id} -> {col_name}"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("store_put", e)
 
 
 @mcp.tool(
@@ -2026,8 +2201,8 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         lines.append("")
         lines.append(entry.get("content", ""))
         return "\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("store_get", e)
 
 
 @mcp.tool(
@@ -2186,7 +2361,7 @@ def store_get_many(
                 col_name = t3_collection_name(cand, t3=t3)
                 try:
                     entry = t3.get_by_id(col_name, doc_id)
-                except Exception:
+                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                     entry = None
                 if entry is not None:
                     break
@@ -2207,10 +2382,14 @@ def store_get_many(
         if missing:
             lines.append(f"Missing: {', '.join(missing[:10])}")
         return "\n".join(lines)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         if structured:
+            # Structured callers (plan-runner hydration) get a dict, not a string —
+            # but the failure must still be logged server-side (nexus-yttqr): a silent
+            # swallow here is exactly the diagnostic hole this bead closes.
+            _log.error("mcp_store_get_many_failed", error=str(e), exc_info=True)
             return {"contents": [], "missing": [], "error": f"store_get_many failed: {e}"}
-        return f"Error: {e}"
+        return _mcp_tool_error("store_get_many", e)
 
 
 @mcp.tool(
@@ -2253,7 +2432,7 @@ def store_list(
         if not page:
             return f"No entries at offset {offset} (total {total})."
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
-        from datetime import datetime, timedelta  # noqa: PLC0415
+        from datetime import datetime, timedelta  # noqa: PLC0415 — stdlib deferred to call site (datetime)
         for e in page:
             doc_id = e.get("id", "")[:32]
             title = (e.get("title") or "")[:40]
@@ -2278,8 +2457,8 @@ def store_list(
         else:
             lines.append(f"--- showing {offset + 1}-{shown_end} of {total} (end)")
         return "\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("store_list", e)
 
 
 def _store_list_docs(t3, col_name: str, total: int) -> str:
@@ -2368,7 +2547,7 @@ def memory_put(
         if session:
             session_arg: str | None = session
         else:
-            import os as _os
+            import os as _os  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
             session_arg = _os.environ.get("NX_SESSION_ID", "").strip() or None
         with _t2_ctx() as db:
             row_id = db.put(
@@ -2385,8 +2564,8 @@ def memory_put(
             agent=agent_arg, project=project, target_title=title,
         )
         return f"Stored: [{row_id}] {project}/{title}"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("memory_put", e)
 
 
 @mcp.tool(
@@ -2445,8 +2624,8 @@ def memory_get(project: str, title: str = "") -> str:
                 for e in entries:
                     lines.append(f"  [{e['id']}] {e['title']}  ({e.get('timestamp', '')[:10]})")
                 return "\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("memory_get", e)
 
 
 @mcp.tool(
@@ -2468,8 +2647,8 @@ def memory_delete(project: str, title: str) -> str:
         if deleted:
             return f"Deleted: {project}/{title}"
         return f"Not found: {project}/{title}"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("memory_delete", e)
 
 
 @mcp.tool(
@@ -2507,8 +2686,8 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
         return "\n\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("memory_search", e)
 
 
 @mcp.tool(
@@ -2612,8 +2791,8 @@ def memory_consolidate(
 
         else:
             return f"Error: unknown action {action!r}. Use: find-overlaps, merge, flag-stale"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("memory_consolidate", e)
 
 
 @mcp.tool(
@@ -2730,8 +2909,8 @@ def scratch(
 
         else:
             return f"Error: unknown action {action!r}. Use: put, search, list, get, delete"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("scratch", e)
 
 
 @mcp.tool(
@@ -2769,8 +2948,8 @@ def scratch_manage(
 
         else:
             return f"Error: unknown action {action!r}. Use: flag, promote"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("scratch_manage", e)
 
 
 @mcp.tool(
@@ -2788,8 +2967,8 @@ def collection_list() -> str:
             model = embedding_model_for_collection(c["name"])
             lines.append(f"{c['name']}  {c['count']:>6} docs  ({model})")
         return "\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("collection_list", e)
 
 
 @mcp.tool(
@@ -2845,8 +3024,8 @@ def plan_save(
             project=project, target_title=query[:80],
         )
         return f"Saved plan: [{row_id}] {query[:80]}"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("plan_save", e)
 
 
 @mcp.tool(
@@ -2888,8 +3067,8 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
         if has_more:
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
         return "\n\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("plan_search", e)
 
 
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────
@@ -2911,8 +3090,8 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         if deleted:
             return f"Deleted: {doc_id} from {col_name}"
         return f"Not found: {doc_id!r} in {col_name}"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("store_delete", e)
 
 
 def collection_info(name: str) -> str:
@@ -2951,8 +3130,8 @@ def collection_info(name: str) -> str:
                     lines.append(f"  - {title}")
 
         return "\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("collection_info", e)
 
 
 def collection_verify(name: str) -> str:
@@ -2979,8 +3158,8 @@ def collection_verify(name: str) -> str:
         if result.probe_doc_id:
             lines.append(f"Probe doc: {result.probe_doc_id}")
         return "\n".join(lines)
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("collection_verify", e)
 
 
 # ── Operator tools ───────────────────────────────────────────────────────────
@@ -2998,7 +3177,7 @@ async def operator_extract(inputs: str, fields: str, timeout: float = 300.0) -> 
         fields: Comma-separated field names to extract.
         timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     prompt = (
         f"Extract the following fields from each item: {fields}\n\n"
@@ -3029,7 +3208,7 @@ async def operator_rank(items: str, criterion: str, timeout: float = 300.0) -> d
         criterion: Natural-language ranking criterion.
         timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     prompt = (
         f"Rank the following items by {criterion}.\n"
@@ -3091,9 +3270,9 @@ async def operator_compare(
         label_a: Human-readable label for side A (default "A").
         label_b: Human-readable label for side B (default "B").
     """
-    import json as _json
+    import json as _json  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     def _fmt(v) -> str:
         if isinstance(v, (list, dict)):
@@ -3151,7 +3330,7 @@ async def operator_summarize(
         cited: If True, include a citations list in the output.
         timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     cite_clause = " Include citations as a list of source references." if cited else ""
     prompt = f"Summarize the following content concisely.{cite_clause}\n\n{content}"
@@ -3184,7 +3363,7 @@ async def operator_generate(
         cited: If True, include a citations list in the output.
         timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     cite_clause = " Include citations as a list of source references." if cited else ""
     prompt = (
@@ -3276,8 +3455,8 @@ async def operator_filter(
             ``"experimental_datasets"``, ``"extras.venue"``). Disables
             heuristic inference for this call.
     """
-    from nexus.operators.aspect_sql import try_filter
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.aspect_sql import try_filter  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     sql_result = try_filter(
         items, criterion, source=source, aspect_field=aspect_field,
@@ -3349,7 +3528,7 @@ async def operator_check(
             agree on the baseline numbers?").
         timeout: Seconds before the subprocess is killed. Default 300s.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     prompt = (
         f"Check whether the following items are consistent with this "
@@ -3402,7 +3581,7 @@ async def operator_verify(
             body. Not a collection of items.
         timeout: Seconds before the subprocess is killed. Default 300s.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     prompt = (
         f"Verify whether the following claim is grounded in the evidence "
@@ -3496,8 +3675,8 @@ async def operator_groupby(
         source: ``"auto"`` (default) | ``"aspects"`` | ``"llm"``.
         aspect_field: explicit ``document_aspects`` column override.
     """
-    from nexus.operators.aspect_sql import try_groupby
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.aspect_sql import try_groupby  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     sql_result = try_groupby(
         items, key, source=source, aspect_field=aspect_field,
@@ -3597,8 +3776,8 @@ async def operator_aggregate(
             recognised reducer vocabulary already disambiguates the
             target column); reserved for forward extensions.
     """
-    from nexus.operators.aspect_sql import try_aggregate
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.aspect_sql import try_aggregate  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     sql_result = try_aggregate(
         groups, reducer, source=source, aspect_field=aspect_field,
@@ -3677,7 +3856,7 @@ def traverse(
     Returns:
         ``{"tumblers": [...], "ids": [], "collections": [...]}``
     """
-    from nexus.plans.purposes import resolve_purpose
+    from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     # SC-16: mutual exclusion.
     if link_types and purpose:
@@ -3710,13 +3889,13 @@ def traverse(
     if catalog is None:
         return {"error": "traverse: catalog not available"}
 
-    from nexus.catalog.tumbler import Tumbler
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     seed_tumblers = []
     for s in seeds:
         try:
             seed_tumblers.append(Tumbler.parse(s))
-        except Exception:
+        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass  # drop unparseable seeds
 
     if not seed_tumblers:
@@ -3753,9 +3932,9 @@ def traverse(
                         if cid not in seen_ids:
                             seen_ids.add(cid)
                             chunk_ids.append(cid)
-                except Exception:
+                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                     pass  # degrade gracefully per node
-        except Exception:
+        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass  # T3 unavailable — ids stays empty
 
     return {"tumblers": tumblers, "ids": chunk_ids, "collections": collections}
@@ -4033,7 +4212,7 @@ def _infer_grown_plan_name(
     input returns ``"grown-plan"`` so a grown row always has an
     identifier.
     """
-    import re
+    import re  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
     tokens = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_]*", question.lower())
     content = [t for t in tokens if t not in _GROWN_PLAN_NAME_STOP_WORDS]
@@ -4043,7 +4222,7 @@ def _infer_grown_plan_name(
 
 def _nx_answer_classify_plan(match: Any) -> str:
     """Classify a matched plan: ``"single_query"`` | ``"retrieval_only"`` | ``"needs_operators"``."""
-    from nexus.plans.runner import _OPERATOR_TOOL_MAP
+    from nexus.plans.runner import _OPERATOR_TOOL_MAP  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     _OPERATOR_TOOLS = frozenset(_OPERATOR_TOOL_MAP.keys())
     try:
         plan = json.loads(match.plan_json)
@@ -4107,7 +4286,7 @@ def _maybe_unwrap_output_envelope(text: str, *, max_depth: int = 3) -> str:
 
 
 def _nx_answer_record_run(
-    conn: Any,
+    telemetry: Any,
     *,
     question: str,
     plan_id: int | None,
@@ -4118,19 +4297,25 @@ def _nx_answer_record_run(
     duration_ms: int,
     trace: bool,
 ) -> None:
-    """Write one row to ``nx_answer_runs``. Redacts when ``trace=False``."""
-    from nexus.db.migrations import migrate_nx_answer_runs
-    migrate_nx_answer_runs(conn)
+    """Persist one ``nx_answer_runs`` row via the telemetry store. Redacts when
+    ``trace=False``.
+
+    nexus-pyzk7: routes through ``telemetry.record_nx_answer_run`` (SQLite raw OR
+    the service's POST /v1/telemetry/nx_answer_runs/record), so it persists in
+    BOTH backends instead of reaching for a raw ``.conn`` the service lacks.
+    """
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
-    conn.execute(
-        """INSERT INTO nx_answer_runs
-           (question, plan_id, matched_confidence, step_count,
-            final_text, cost_usd, duration_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (q, plan_id, matched_confidence, step_count, text, cost_usd, duration_ms),
-    )
-    conn.commit()
+    try:
+        telemetry.record_nx_answer_run(
+            question=q, plan_id=plan_id, matched_confidence=matched_confidence,
+            step_count=step_count, final_text=text, cost_usd=cost_usd,
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
+        # Best-effort, but warn once so a service-mode drop is visible (the call
+        # sites also swallow; this makes the failure mode observable). nexus-pyzk7.
+        _warn_telemetry_drop("nx_answer_runs", exc)
 
 
 def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
@@ -4144,12 +4329,89 @@ def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
     try:
         with _t2_ctx() as db:
             db.plans.increment_run_outcome(plan_id, success=success)
-    except Exception:
-        import structlog as _slog
+    except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
+        import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         _slog.get_logger().warning(
             "nx_answer_plan_outcome_increment_failed",
             plan_id=plan_id, success=success, exc_info=True,
         )
+
+
+#: Max historical plans injected as few-shot examples into the inline
+#: planner on a miss (nexus-mhyf3 / CacheRAG R1). Three balances prompt
+#: cost against the demonstrated lift.
+_PLANNER_FEW_SHOT_MAX = 3
+#: Per-example plan-JSON character cap so a pathological stored plan can't
+#: blow the planner prompt budget.
+_PLANNER_FEW_SHOT_PLAN_CHARS = 1200
+#: Soft similarity floor for using a near-miss as an exemplar. Set BELOW the
+#: 0.40 hit gate (every match reaching the miss path is below the caller's
+#: effective threshold) but high enough to exclude near-random plans: a
+#: dissimilar exemplar teaches the planner the wrong structure and is worse
+#: than zero-shot (review finding). FTS5 fallback matches (confidence=None)
+#: are keyword hits, not semantic similarity, and are excluded outright.
+_PLANNER_FEW_SHOT_MIN_CONFIDENCE = 0.25
+#: Cap on the rendered example question (the stored plan ``description`` /
+#: ``query`` column). Collapsed to a single line + truncated so an
+#: agent-authored description cannot inject prompt instructions or crowd the
+#: budget (review finding).
+_PLANNER_FEW_SHOT_DESC_CHARS = 200
+
+
+def _format_plan_few_shot(matches: "list | None") -> str:
+    """Render the top similar historical plans as few-shot examples.
+
+    nexus-mhyf3 (CacheRAG R1): on a plan MISS the near-miss ``matches``
+    are still the nearest stored plans by similarity. Feeding the
+    sufficiently-similar ones to the inline planner as
+    ``Question -> {"steps": [...]}`` examples is the single highest-leverage
+    cache mechanism in CacheRAG's ablation.
+
+    Only matches with a cosine confidence >= ``_PLANNER_FEW_SHOT_MIN_CONFIDENCE``
+    are used; FTS5-fallback matches (``confidence is None``) are excluded
+    (keyword overlap is not structural similarity). Returns ``""`` when no
+    usable example exists so the planner falls back to the prior zero-shot
+    prompt unchanged. Only the ``steps`` of each example are shown — the
+    exact shape the planner must emit. The example question is collapsed to
+    one line and truncated to neutralise prompt-injection via a stored
+    description.
+    """
+    import json as _json  # noqa: PLC0415 — branch-local stdlib import; deferred to miss path
+
+    if not matches:
+        return ""
+    examples: list[str] = []
+    for m in matches:
+        if len(examples) >= _PLANNER_FEW_SHOT_MAX:
+            break
+        conf = getattr(m, "confidence", None)
+        if conf is None or conf < _PLANNER_FEW_SHOT_MIN_CONFIDENCE:
+            continue
+        description = (getattr(m, "description", "") or "").strip()
+        # Collapse ALL whitespace (incl. newlines) to single spaces, then
+        # truncate — neutralises injection + bounds the prompt cost.
+        description = " ".join(description.split())[:_PLANNER_FEW_SHOT_DESC_CHARS]
+        raw = getattr(m, "plan_json", "") or ""
+        try:
+            plan = _json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        steps = plan.get("steps") if isinstance(plan, dict) else None
+        if not description or not isinstance(steps, list) or not steps:
+            continue
+        rendered = _json.dumps({"steps": steps})
+        if len(rendered) > _PLANNER_FEW_SHOT_PLAN_CHARS:
+            continue
+        examples.append(f"Question: {description}\nPlan: {rendered}")
+    if not examples:
+        return ""
+    body = "\n\n".join(examples)
+    return (
+        "Here are similar questions that were previously answered with these "
+        "plans. Use them as a guide for tool choice and step structure; adapt "
+        "to THIS question rather than copying verbatim:\n\n"
+        f"{body}\n\n"
+    )
 
 
 async def _nx_answer_plan_miss(
@@ -4157,13 +4419,14 @@ async def _nx_answer_plan_miss(
     *,
     scope: str = "",
     max_steps: int = 6,
+    few_shot_matches: "list | None" = None,
 ) -> Any:
     """Decompose *question* into a plan via claude_dispatch, execute it,
     and return a synthetic Match for plan_run.
     """
-    from nexus.operators.dispatch import claude_dispatch
-    from nexus.plans.match import Match
-    from nexus.mcp_infra import get_collection_names
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
+    from nexus.plans.match import Match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    from nexus.mcp_infra import get_collection_names  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
 
     corpus_hint = f" Focus on the '{scope}' corpus." if scope else ""
 
@@ -4172,7 +4435,7 @@ async def _nx_answer_plan_miss(
     # tokens that may not match any collection in the caller's sandbox.
     try:
         available = get_collection_names()
-    except Exception:
+    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
         available = []
     corpus_names_hint = ""
     if available:
@@ -4185,9 +4448,26 @@ async def _nx_answer_plan_miss(
             "collection actually starts with that prefix."
         )
 
+    # nexus-mhyf3 (CacheRAG R1): inject the nearest stored plans as few-shot
+    # examples. On a miss these near-miss matches are still the most similar
+    # historical plans; demonstrating their structure measurably lifts plan
+    # quality over the prior zero-shot prompt.
+    few_shot_block = _format_plan_few_shot(few_shot_matches)
+    if few_shot_block:
+        import structlog as _slog2  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+        # One "\nPlan: " per example: each example is rendered as
+        # "Question: <one-line desc>\nPlan: <json>" and the description is
+        # whitespace-collapsed (no embedded "\nPlan: "), so this counts
+        # examples exactly.
+        _slog2.get_logger().info(
+            "nx_answer_planner_few_shot",
+            examples=few_shot_block.count("\nPlan: "),
+        )
+
     prompt = (
         f"Decompose this question into a retrieval-and-analysis plan "
         f"with at most {max_steps} steps:{corpus_hint}\n\n"
+        f"{few_shot_block}"
         f"Question: {question}\n"
         f"{corpus_names_hint}\n\n"
         f"{_PLANNER_TOOL_REFERENCE}\n"
@@ -4208,7 +4488,7 @@ async def _nx_answer_plan_miss(
     # (subprocess non-zero) and OperatorTimeoutError do NOT retry — those
     # are not transient. Halved timeout on retry so a single hang doesn't
     # double total wall time.
-    from nexus.operators.dispatch import OperatorOutputError as _OpOutputError
+    from nexus.operators.dispatch import OperatorOutputError as _OpOutputError  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
     payload = None
     last_output_error: _OpOutputError | None = None
     for attempt in range(2):
@@ -4220,7 +4500,7 @@ async def _nx_answer_plan_miss(
             break
         except _OpOutputError as exc:
             last_output_error = exc
-            import structlog as _slog
+            import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
             _slog.get_logger().warning(
                 "nx_answer_planner_output_error",
                 attempt=attempt + 1,
@@ -4271,7 +4551,7 @@ async def _nx_answer_plan_miss(
     _TOOL_ALIASES.update({
         k: v for k, v in _CATALOG_TOOL_REDIRECTS.items() if v is not None
     })
-    import structlog as _slog
+    import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
     _plog = _slog.get_logger()
     normalized = []
     dropped: list[str] = []
@@ -4323,7 +4603,7 @@ def _load_ad_hoc_ttl() -> int:
     """
     try:
         config = load_config()
-    except Exception:
+    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
         return 30
     plans_section = config.get("plans") if isinstance(config, dict) else None
     if not isinstance(plans_section, dict):
@@ -4419,12 +4699,12 @@ async def nx_answer(
         The final step's output — a string by default, or the envelope
         dict described above when ``structured=True``.
     """
-    import time
-    import structlog as _slog
+    import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+    import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
 
-    from nexus.mcp_infra import get_t1_plan_cache
-    from nexus.plans.matcher import plan_match as _plan_match
-    from nexus.plans.runner import plan_run as _plan_run
+    from nexus.mcp_infra import get_t1_plan_cache  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+    from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     _log = _slog.get_logger()
     start = time.monotonic()
@@ -4487,7 +4767,7 @@ async def nx_answer(
                     min_confidence=effective_min_confidence,
                     n=5,
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             return _result(f"Error during plan match: {exc}")
 
     if not matches or not _nx_answer_match_is_hit(
@@ -4499,19 +4779,22 @@ async def nx_answer(
             question=question[:100] if trace else "[redacted]",
         )
         try:
-            best = await _nx_answer_plan_miss(question, scope=scope, max_steps=max_steps)
-        except Exception as exc:
+            best = await _nx_answer_plan_miss(
+                question, scope=scope, max_steps=max_steps,
+                few_shot_matches=matches,
+            )
+        except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
             _log.warning("nx_answer_planner_failed", error=str(exc))
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=None,
+                        db.telemetry, question=question, plan_id=None,
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
                         cost_usd=0.0, duration_ms=elapsed_ms, trace=trace,
                     )
-            except Exception:
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
             # Search review I-5: propagate the planner's detail — e.g.
             # "planner returned only non-dispatchable tools: Bash, grep"
@@ -4540,7 +4823,7 @@ async def nx_answer(
         try:
             with _t2_ctx() as db:
                 db.plans.increment_run_started(best.plan_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             _log.warning(
                 "nx_answer_plan_use_increment_failed",
                 plan_id=best.plan_id, exc_info=True,
@@ -4613,12 +4896,12 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=best.plan_id,
+                        db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=str(result_text)[:2000], cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
                     )
-            except Exception:
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
             _nx_answer_record_outcome(best.plan_id, success=True)
             return _result(
@@ -4627,17 +4910,17 @@ async def nx_answer(
                 step_count=1,
                 chunks=chunks,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=best.plan_id,
+                        db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=f"Error: {exc}", cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
                     )
-            except Exception:
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
             _nx_answer_record_outcome(best.plan_id, success=False)
             return _result(
@@ -4653,7 +4936,7 @@ async def nx_answer(
             content=json.dumps({"question": question, "scope": scope, "plan_id": best.plan_id}),
             tags="link-context",
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
         pass
 
     # ── Step 4: execute plan ─────────────────────────────────────────────
@@ -4682,18 +4965,18 @@ async def nx_answer(
 
     try:
         result = await _plan_run(best, run_bindings)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
-                    db.telemetry.conn, question=question, plan_id=best.plan_id,
+                    db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=0,
                     final_text=f"Error: {exc}", cost_usd=0.0,
                     duration_ms=elapsed_ms, trace=trace,
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
         _nx_answer_record_outcome(best.plan_id, success=False)
         return _result(
@@ -4781,13 +5064,13 @@ async def nx_answer(
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
-                    db.telemetry.conn, question=question, plan_id=best.plan_id,
+                    db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
                     final_text=no_match[:2000], cost_usd=0.0,
                     duration_ms=elapsed_ms, trace=trace,
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
         return _result(
             no_match, plan_id=best.plan_id,
@@ -4812,7 +5095,7 @@ async def nx_answer(
         ttl_days = _load_ad_hoc_ttl()
         if ttl_days > 0:
             try:
-                from pathlib import Path as _Path
+                from pathlib import Path as _Path  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
                 project_name = _Path.cwd().name
                 # RDR-091 critic follow-up (nexus-dfok): anchor the grown
@@ -4825,7 +5108,7 @@ async def nx_answer(
                 # verb / name / dimensions so the grown row participates in
                 # the dimensional identity index instead of landing as a
                 # NULL-dimension legacy ghost.
-                from nexus.plans.schema import canonical_dimensions_json
+                from nexus.plans.schema import canonical_dimensions_json  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
                 grown_verb = _infer_grown_plan_verb(
                     caller_dimensions=dimensions,
@@ -4863,7 +5146,7 @@ async def nx_answer(
                             row = db.plans.get_plan(gid)
                             if row:
                                 cache.upsert(row)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
                         _log.debug("plan_grow_cache_upsert_failed", exc_info=True)
                     return gid
                 grown_id = _t2_index_write(_do_grow)
@@ -4873,19 +5156,19 @@ async def nx_answer(
                     ttl_days=ttl_days,
                     project=project_name,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
                 _log.warning("plan_grow_save_failed", error=str(exc))
 
     # ── Step 6: record run ───────────────────────────────────────────────
     try:
         with _t2_ctx() as db:
             _nx_answer_record_run(
-                db.telemetry.conn, question=question, plan_id=best.plan_id,
+                db.telemetry, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
                 final_text=final_text[:2000], cost_usd=0.0,
                 duration_ms=elapsed_ms, trace=trace,
             )
-    except Exception:
+    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
         pass
 
     return _result(
@@ -4933,7 +5216,7 @@ async def nx_tidy(
     Returns:
         Consolidated summary as a human-readable string.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     schema = {
         "type": "object",
@@ -4949,7 +5232,7 @@ async def nx_tidy(
     entries_block, n_entries = _tidy_prefetch(topic, collection)
     capped = n_entries >= _TIDY_MAX_ENTRIES
     if capped:
-        import structlog
+        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().info(
             "tidy_prefetch_capped",
             topic=topic, collection=collection, cap=_TIDY_MAX_ENTRIES,
@@ -5021,7 +5304,7 @@ async def nx_enrich_beads(
     Returns:
         Enriched bead markdown as a human-readable string.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     timeout = _clamp_subagent_timeout(timeout, "nx_enrich_beads")
     mcp_servers, allowed_tools = _subprocess_tool_grant()
@@ -5088,7 +5371,7 @@ async def nx_plan_audit(
     Returns:
         Audit verdict as a human-readable string.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
     timeout = _clamp_subagent_timeout(timeout, "nx_plan_audit")
     mcp_servers, allowed_tools = _subprocess_tool_grant()
@@ -5148,7 +5431,7 @@ def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
             entire nexus data directory (``~/.config/nexus/``) — your
             notes, plans, and search index. Irreversible.
     """
-    from nexus.daemon import installer
+    from nexus.daemon import installer  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 
     report = installer.uninstall_daemon(confirm=confirm, remove_data=remove_data)
     lines = [report.message]
@@ -5171,20 +5454,20 @@ def main():
     captured stderr (which is not surfaced through any user-visible
     path).
     """
-    import atexit
-    import os
-    import signal
+    import atexit  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+    import os  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+    import signal  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
-    import structlog
+    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
 
-    from nexus.logging_setup import configure_logging
-    from nexus.mcp._first_run import (
+    from nexus.logging_setup import configure_logging  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    from nexus.mcp._first_run import (  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
         apply_embedder_notice,
         apply_first_run_banner_instructions,
         ensure_installed_and_running,
         install_banner_dispatch_hook,
     )
-    from nexus.mcp_infra import check_version_compatibility
+    from nexus.mcp_infra import check_version_compatibility  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
 
     configure_logging("mcp")
     log = structlog.get_logger("nexus.mcp.core")

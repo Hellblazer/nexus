@@ -213,10 +213,25 @@ public final class VectorHandler implements HttpHandler {
         List<String> ids            = requireStringList(body, "ids");
         List<String> documents      = requireStringList(body, "documents");
         List<Map<String, Object>> metadatas = optMetadataList(body, "metadatas", ids.size());
+        List<float[]> embeddings = optEmbeddingsList(body, "embeddings");
 
         if (ids.size() != documents.size()) {
             throw new IllegalArgumentException(
                     "ids length " + ids.size() + " != documents length " + documents.size());
+        }
+
+        if (embeddings != null) {
+            // Same-model vector PASSTHROUGH (nexus-hxry2): store the supplied vectors
+            // verbatim, no embedder call (token usage 0). Dimension is validated
+            // against the dispatched table inside the repository (fail loud).
+            if (embeddings.size() != ids.size()) {
+                throw new IllegalArgumentException(
+                        "embeddings length " + embeddings.size() + " != ids length " + ids.size());
+            }
+            repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas);
+            emitTokenUsage(ex, 0L);
+            HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size(), "tokens", 0)));
+            return;
         }
 
         var upsertResult = repo.upsertChunksWithTokens(tenant, collection, ids, documents, metadatas);
@@ -239,6 +254,10 @@ public final class VectorHandler implements HttpHandler {
      * </pre>
      *
      * <p>Response 200: [{"id","content","distance","collection", ...metadata}]
+     *
+     * <p>Optional: {@code "include_source_uri": true} gates a catalog JOIN to populate
+     * {@code source_uri} on each row. Default false — omits the field entirely so default
+     * callers pay zero JOIN cost (RDR-169 G5, bead nexus-jkv85).
      */
     private void handleSearch(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -249,8 +268,10 @@ public final class VectorHandler implements HttpHandler {
         List<String> collections      = requireStringList(body, "collections");
         int nResults                  = optInt(body, "n_results", 10);
         Map<String, Object> where     = optMap(body, "where");
+        boolean includeSourceUri      = optBool(body, "include_source_uri", false);
 
-        var searchResult = repo.searchWithTokens(tenant, queryText, collections, nResults, where);
+        var searchResult = repo.searchWithTokens(tenant, queryText, collections, nResults, where,
+                                                 includeSourceUri);
         // Emit token count from the query-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, searchResult.tokens());
         HttpUtil.send(ex, 200, json(searchResult.value()));
@@ -262,6 +283,7 @@ public final class VectorHandler implements HttpHandler {
      * <p>The pgvector hybrid fusion query (tsvector + pg_trgm text gate, vector rank).
      * Request body matches /search:
      * {@code {"query": "...", "collections": [...], "n_results": 10, "where": {...}}}.
+     * Optional {@code "include_source_uri": true} gates the catalog JOIN (RDR-169 G5).
      */
     private void handleHybridSearch(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -272,8 +294,10 @@ public final class VectorHandler implements HttpHandler {
         List<String> collections  = requireStringList(body, "collections");
         int nResults              = optInt(body, "n_results", 10);
         Map<String, Object> where = optMap(body, "where");
+        boolean includeSourceUri  = optBool(body, "include_source_uri", false);
 
-        var hybridResult = repo.hybridSearchWithTokens(tenant, queryText, collections, nResults, where);
+        var hybridResult = repo.hybridSearchWithTokens(tenant, queryText, collections, nResults, where,
+                                                       includeSourceUri);
         // Emit token count from the query-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, hybridResult.tokens());
         HttpUtil.send(ex, 200, json(hybridResult.value()));
@@ -428,8 +452,9 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> where      = optMap(body, "where");
         int limit                      = optInt(body, "limit", 10);
         int offset                     = optInt(body, "offset", 0);
+        boolean includeSourceUri       = optBool(body, "include_source_uri", false);
 
-        var result = repo.getWhere(tenant, collection, where, limit, offset);
+        var result = repo.getWhere(tenant, collection, where, limit, offset, includeSourceUri);
         HttpUtil.send(ex, 200, json(result));
     }
 
@@ -457,12 +482,13 @@ public final class VectorHandler implements HttpHandler {
         List<String> ids   = optStringList(body, "ids");
         int limit          = optInt(body, "limit", 20);
         int offset         = optInt(body, "offset", 0);
+        boolean includeSourceUri = optBool(body, "include_source_uri", false);
 
         // No ids → paginated full fetch (same envelope); getWhere with no
         // predicates is exactly that shape.
         var result = (ids == null)
-                ? repo.getWhere(tenant, collection, null, limit, offset)
-                : repo.get(tenant, collection, ids, limit, offset);
+                ? repo.getWhere(tenant, collection, null, limit, offset, includeSourceUri)
+                : repo.get(tenant, collection, ids, limit, offset, includeSourceUri);
         HttpUtil.send(ex, 200, json(result));
     }
 
@@ -723,6 +749,37 @@ public final class VectorHandler implements HttpHandler {
         return result;
     }
 
+    /**
+     * Optional {@code embeddings} field: a list of numeric vectors (one per id),
+     * for the same-model vector-passthrough path (nexus-hxry2). Returns null when
+     * absent (the default server-side-embed path). Malformed shapes fail loud —
+     * a claimed passthrough that cannot be parsed must NOT silently fall back to
+     * re-embed (that would mask a client bug and re-bill).
+     */
+    private List<float[]> optEmbeddingsList(Map<String, Object> body, String key) {
+        Object val = body.get(key);
+        if (val == null) return null;
+        if (!(val instanceof List<?> rows)) {
+            throw new IllegalArgumentException("field '" + key + "' must be an array of vectors");
+        }
+        List<float[]> result = new ArrayList<>(rows.size());
+        for (Object row : rows) {
+            if (!(row instanceof List<?> nums)) {
+                throw new IllegalArgumentException("field '" + key + "' must be an array of numeric vectors");
+            }
+            float[] vec = new float[nums.size()];
+            for (int i = 0; i < nums.size(); i++) {
+                Object n = nums.get(i);
+                if (!(n instanceof Number num)) {
+                    throw new IllegalArgumentException("field '" + key + "' contains a non-numeric component");
+                }
+                vec[i] = num.floatValue();
+            }
+            result.add(vec);
+        }
+        return result;
+    }
+
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> optMetadataList(Map<String, Object> body, String key, int expectedSize) {
         Object val = body.get(key);
@@ -759,6 +816,14 @@ public final class VectorHandler implements HttpHandler {
         catch (NumberFormatException e) {
             throw new IllegalArgumentException("field '" + key + "' must be an integer");
         }
+    }
+
+    /** Optional boolean field; absent or null → {@code defaultValue}. */
+    private boolean optBool(Map<String, Object> body, String key, boolean defaultValue) {
+        Object val = body.get(key);
+        if (val == null) return defaultValue;
+        if (val instanceof Boolean b) return b;
+        return Boolean.parseBoolean(val.toString());
     }
 
     /** Optional string field; null/blank → null (no-filter semantics for combined queries). */

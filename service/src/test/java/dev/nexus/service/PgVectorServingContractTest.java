@@ -67,9 +67,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Open P4a.2 decisions deliberately NOT pinned here (recorded on nexus-1k8s1):
  * manifest-cleanup enforcement on delete (the fixture uses chunks with no manifest
- * rows), Chroma operator-form {@code where} filters on /get (only plain equality
- * is pinned — that is what the incremental-sync staleness check sends), and the
- * port-interface vs direct-rewrite choice for the handler.
+ * rows) and the port-interface vs direct-rewrite choice for the handler. The
+ * operator-form {@code where} gap is now closed for the common subset
+ * ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}) across the search and /get
+ * routes (nexus-05bfd); compound {@code $and}/{@code $or} and range operators
+ * remain untranslated and fail loud with 400.
  *
  * <p>Hermetic: Testcontainers pgvector/pgvector:pg17, FakeEmbedder unit vectors,
  * port 0, PER_CLASS. Ordered: the suite walks one collection through its
@@ -303,6 +305,43 @@ class PgVectorServingContractTest {
             .as("plain-equality where filter (the incremental-sync staleness "
                 + "check's shape) returns exactly the matching chunk")
             .containsExactly("p4a-c200000000000000000000000000");
+    }
+
+    @Test
+    @Order(5)
+    void search_operatorFormWhere_servesFilteredOverHttp() throws Exception {
+        // nexus-05bfd: operator-form $ne over the real HTTP search route (c2 is lang=py,
+        // c1/c3 are lang=java) — proves the bridge translates exclusion end-to-end.
+        var resp = post("/v1/vectors/search", TOKEN_A, Map.of(
+            "query", Q, "collections", List.of(COL), "n_results", 10,
+            "where", Map.of("lang", Map.of("$ne", "py"))));
+        assertThat(resp.statusCode())
+            .as("operator-form $ne must serve 200 (got: %s)", resp.body())
+            .isEqualTo(200);
+        List<Map<String, Object>> rows = MAPPER.readValue(resp.body(), List.class);
+        // Mutation-robust (this is an ordered class; an earlier store-put added a
+        // lang-less chunk that $ne correctly keeps): assert only the contract claim —
+        // the py chunk is excluded, both java chunks are kept.
+        assertThat(rows.stream().map(r -> r.get("id")).toList())
+            .as("{lang:{$ne:py}} drops the lang=py chunk, keeps the lang=java chunks")
+            .contains("p4a-c100000000000000000000000000", "p4a-c300000000000000000000000000")
+            .doesNotContain("p4a-c200000000000000000000000000");
+    }
+
+    @Test
+    @Order(5)
+    void search_unsupportedOperatorForm_returns400OverHttp() throws Exception {
+        // nexus-05bfd fail-loud contract pinned at the WIRE, not just the repo layer:
+        // an unsupported operator must surface HTTP 400 (was silently zero-hits before).
+        var resp = post("/v1/vectors/search", TOKEN_A, Map.of(
+            "query", Q, "collections", List.of(COL), "n_results", 10,
+            "where", Map.of("section_type", Map.of("$regex", ".*"))));
+        assertThat(resp.statusCode())
+            .as("unsupported operator-form must be rejected 400, never silently match nothing (got: %s)", resp.body())
+            .isEqualTo(400);
+        assertThat(resp.body())
+            .as("400 body carries an error message naming the bad operator")
+            .contains("error").contains("$regex");
     }
 
     @Test

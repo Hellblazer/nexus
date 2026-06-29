@@ -2,6 +2,25 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_INDEX;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_384;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_768;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Condition;
@@ -241,11 +260,41 @@ public final class CatalogRepository {
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
         tenantScope.withTenant(tenant, ctx -> {
+            // nexus-0cy4b: tumbler_prefix is NOT NULL. The SQLite catalog
+            // (Catalog.register_owner) assigns the owner prefix server-side; the
+            // HTTP client sends none and expects the same here. Mirror it: reuse
+            // the existing owner's prefix for this repo (idempotent), else
+            // allocate 1.{MAX+1}. An explicit prefix (ETL/import) is honoured.
+            String prefix = s(o, "tumbler_prefix");
+            if (prefix == null || prefix.isBlank()) {
+                String repoHash = s(o, "repo_hash");
+                if (repoHash != null && !repoHash.isBlank()) {
+                    prefix = ctx.select(F_OWN_PREFIX)
+                                .from(T_OWNERS)
+                                .where(F_OWN_REPO.eq(repoHash))
+                                .limit(1)
+                                .fetchOne(F_OWN_PREFIX);
+                }
+                if (prefix == null || prefix.isBlank()) {
+                    // Next owner number: MAX(int after the first dot) + 1 over
+                    // '1.%' owners. RLS scopes this to the tenant.
+                    Integer maxNum = ctx.select(
+                            DSL.coalesce(
+                                DSL.max(DSL.field(
+                                    "CAST(split_part(tumbler_prefix, '.', 2) AS INTEGER)",
+                                    Integer.class)),
+                                DSL.inline(0)))
+                        .from(T_OWNERS)
+                        .where(F_OWN_PREFIX.like("1.%"))
+                        .fetchOne(0, Integer.class);
+                    prefix = "1." + ((maxNum == null ? 0 : maxNum) + 1);
+                }
+            }
             ctx.insertInto(T_OWNERS,
                     F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
                     F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
                .values(tenant,
-                       s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
+                       prefix, s(o,"name"), s(o,"owner_type"),
                        s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
                        s(o,"head_hash"))
                .onConflict(F_OWN_TENANT, F_OWN_PREFIX)
@@ -487,6 +536,16 @@ public final class CatalogRepository {
                 if (e.getValue() == null) continue;
                 // Strip deleted_at — must not be settable via updateDocument
                 if ("deleted_at".equals(e.getKey())) continue;
+                // metadata is a jsonb column: callers pass it as an object (or JSON
+                // string) under "meta"/"metadata". A bare set() of a Map fails with
+                // "LinkedHashMap is not supported in dialect POSTGRES"; JSON-encode and
+                // bind as jsonb, mirroring upsertDocument (RDR-168 nexus-njrcn.7).
+                if ("meta".equals(e.getKey()) || "metadata".equals(e.getKey())) {
+                    more = (more == null)
+                        ? step.set(F_DOC_META, jsonbVal(jsonOrNull(e.getValue())))
+                        : more.set(F_DOC_META, jsonbVal(jsonOrNull(e.getValue())));
+                    continue;
+                }
                 @SuppressWarnings("unchecked")
                 Field<Object> f = (Field<Object>) DSL.field(DSL.name("catalog_documents", e.getKey()));
                 more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
@@ -782,11 +841,17 @@ public final class CatalogRepository {
     // LINKS
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** Insert a link. ON CONFLICT (tenant_id, from, to, type) update spans/created_by/metadata. */
-    public void upsertLink(String tenant, Map<String, Object> lnk) {
+    /**
+     * Upsert a link. Returns {@code true} when the row was newly INSERTed (created),
+     * {@code false} when the ON CONFLICT path merged into an existing link — the
+     * created-vs-merged signal the local {@code Catalog.link} returns (RDR-168
+     * nexus-njrcn.3). The {@code (xmax = 0)} RETURNING predicate is the standard Postgres
+     * idiom: a freshly inserted row has {@code xmax = 0}; a row reached via DO UPDATE does not.
+     */
+    public boolean upsertLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
-        tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(T_LINKS,
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rec = ctx.insertInto(T_LINKS,
                     F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
                     F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
                .values(DSL.val(tenant),
@@ -800,8 +865,9 @@ public final class CatalogRepository {
                .set(F_LNK_TSPAN, EX_LNK_TSPAN)
                .set(F_LNK_CRTBY, EX_LNK_CRTBY)
                .set(F_LNK_META,  EX_LNK_META)
-               .execute();
-            return null;
+               .returning(DSL.field("(xmax = 0)", Boolean.class))
+               .fetchOne();
+            return rec != null && Boolean.TRUE.equals(rec.get(0, Boolean.class));
         });
     }
 
@@ -815,10 +881,16 @@ public final class CatalogRepository {
     }
 
     /** Links from a tumbler, optionally filtered by link_type. */
-    public List<Map<String, Object>> linksFrom(String tenant, String fromTumbler, String linkType) {
+    /**
+     * Links from a tumbler, optionally filtered by a SET of link types (server-side IN).
+     * RDR-168 nexus-njrcn.5: lets multi-type callers filter in SQL instead of fetching
+     * every edge and filtering client-side (the high-fan-out over-fetch). Pass {@code null}
+     * (or empty) for no type filter, a singleton list for one type.
+     */
+    public List<Map<String, Object>> linksFrom(String tenant, String fromTumbler, List<String> linkTypes) {
         return tenantScope.withTenant(tenant, ctx -> {
             Condition where = F_LNK_FROM.eq(fromTumbler);
-            if (linkType != null && !linkType.isBlank()) where = where.and(F_LNK_TYPE.eq(linkType));
+            if (linkTypes != null && !linkTypes.isEmpty()) where = where.and(F_LNK_TYPE.in(linkTypes));
             return ctx.select(F_LNK_ID, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
                                F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
                       .from(T_LINKS).where(where).fetch()
@@ -827,11 +899,11 @@ public final class CatalogRepository {
         });
     }
 
-    /** Links to a tumbler, optionally filtered by link_type. */
-    public List<Map<String, Object>> linksTo(String tenant, String toTumbler, String linkType) {
+    /** Links to a tumbler, optionally filtered by a SET of link types (RDR-168 njrcn.5). */
+    public List<Map<String, Object>> linksTo(String tenant, String toTumbler, List<String> linkTypes) {
         return tenantScope.withTenant(tenant, ctx -> {
             Condition where = F_LNK_TO.eq(toTumbler);
-            if (linkType != null && !linkType.isBlank()) where = where.and(F_LNK_TYPE.eq(linkType));
+            if (linkTypes != null && !linkTypes.isEmpty()) where = where.and(F_LNK_TYPE.in(linkTypes));
             return ctx.select(F_LNK_ID, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
                                F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
                       .from(T_LINKS).where(where).fetch()
@@ -1041,6 +1113,70 @@ public final class CatalogRepository {
         );
     }
 
+    /**
+     * Batch-fetch manifest rows for multiple doc_ids (nexus-7lm3q).
+     *
+     * <p>Executes {@code SELECT ... FROM catalog_document_chunks WHERE doc_id IN (?)}
+     * once for all requested doc_ids, returning a per-doc-id map of manifest rows.
+     * Doc_ids with no rows are absent from the result map. Mirrors the shape of
+     * {@link #getManifest} but for N docs in one DB round-trip instead of N round-trips.
+     *
+     * @return {@code {docId -> [manifest rows ordered by position]}}
+     */
+    public Map<String, List<Map<String, Object>>> getManifestMany(String tenant, List<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) return Map.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
+                                  F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN)
+                          .from(T_CHUNKS)
+                          .where(F_CHK_DOC.in(docIds))
+                          .orderBy(F_CHK_DOC, F_CHK_POS)
+                          .fetch();
+            Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                String docId = r.value1();
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("doc_id",      docId);
+                m.put("position",    r.value2());
+                m.put("chash",       r.value3());
+                m.put("chunk_index", r.value4());
+                m.put("line_start",  r.value5());
+                m.put("line_end",    r.value6());
+                m.put("char_start",  r.value7());
+                m.put("char_end",    r.value8());
+                result.computeIfAbsent(docId, k -> new ArrayList<>()).add(m);
+            }
+            return result;
+        });
+    }
+
+    /**
+     * Batch-resolve multiple doc_ids to full document entries (nexus-7lm3q).
+     *
+     * <p>Executes {@code SELECT ... FROM catalog_documents WHERE tumbler IN (?)}
+     * once for all requested doc_ids, returning a per-doc-id map of document rows
+     * (same shape as {@link #getDocument}). Doc_ids with no matching document are
+     * absent from the result map.
+     *
+     * @return {@code {docId -> document row dict}}
+     */
+    public Map<String, Map<String, Object>> resolveMany(String tenant, List<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) return Map.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(documentFields())
+                          .from(T_DOCS)
+                          .where(F_DOC_TUMBLER.in(docIds).and(F_DOC_DELETED_AT.isNull()))
+                          .fetch();
+            Map<String, Map<String, Object>> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                Map<String, Object> doc = docRowFromRecord(r.intoMap());
+                String tumbler = (String) doc.get("tumbler");
+                if (tumbler != null) result.put(tumbler, doc);
+            }
+            return result;
+        });
+    }
+
     /** Resync chunk_count on catalog_documents from manifest row count. */
     public int resyncChunkCount(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -1048,6 +1184,137 @@ public final class CatalogRepository {
                            .fetchOne(0, Integer.class);
             return ctx.update(T_DOCS).set(F_DOC_CHUNKS, count).where(F_DOC_TUMBLER.eq(docId)).execute();
         });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SPAN / CHASH RESOLUTION  (nexus-njrcn.4)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Resolve a chash within a specific collection to chunk_text + metadata.
+     *
+     * <p>Queries {@code nexus.chunks_768}, {@code nexus.chunks_384}, and
+     * {@code nexus.chunks_1024} in sequence (first match wins). The chash
+     * must be the 32-char natural ID (chunk_text_hash[:32]) — the same
+     * convention used by the catalog_document_chunks manifest (RDR-108 D1).
+     *
+     * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
+     *
+     * @param tenant     tenant identifier
+     * @param collection physical collection name (e.g. {@code knowledge__o__bge-768__v1})
+     * @param chash      32-char hex chash (chunk_text_hash[:32])
+     * @return {@code {chunk_text, metadata, chunk_hash}} or {@code null} on miss
+     */
+    public Map<String, Object> resolveSpan(String tenant, String collection, String chash) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Query the three dim tables in order; stop at first hit.
+            // Raw SQL UNION ALL would need casting across schemas; sequential jOOQ
+            // selects with early-return is cleaner and avoids cross-table JOIN complexity.
+            var r768 = ctx.select(CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA)
+                          .from(CHUNKS_768)
+                          .where(CHUNKS_768.COLLECTION.eq(collection).and(CHUNKS_768.CHASH.eq(chash)))
+                          .limit(1).fetchOne();
+            if (r768 != null) return chunkRow(chash, r768.value1(), r768.value2());
+
+            var r384 = ctx.select(CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA)
+                          .from(CHUNKS_384)
+                          .where(CHUNKS_384.COLLECTION.eq(collection).and(CHUNKS_384.CHASH.eq(chash)))
+                          .limit(1).fetchOne();
+            if (r384 != null) return chunkRow(chash, r384.value1(), r384.value2());
+
+            var r1024 = ctx.select(CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA)
+                           .from(CHUNKS_1024)
+                           .where(CHUNKS_1024.COLLECTION.eq(collection).and(CHUNKS_1024.CHASH.eq(chash)))
+                           .limit(1).fetchOne();
+            if (r1024 != null) return chunkRow(chash, r1024.value1(), r1024.value2());
+            return null;
+        });
+    }
+
+    /**
+     * Resolve a chash globally (across all collections), with optional tie-break.
+     *
+     * <p>Executes a {@code UNION ALL} across the three dim tables filtering on
+     * {@code chash = ?}, ordered so {@code prefer_collection} sorts first, then
+     * newest {@code created_at}. Takes the winning row, then looks up
+     * {@code doc_id} from {@code catalog_document_chunks}.
+     *
+     * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
+     *
+     * @param tenant            tenant identifier
+     * @param chash             32-char hex chash
+     * @param preferCollection  preferred collection name (may be null)
+     * @return {@code {chash, chunk_hash, physical_collection, doc_id, chunk_text,
+     *         metadata}} or {@code null} on miss
+     */
+    public Map<String, Object> resolveChash(String tenant, String chash, String preferCollection) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Raw SQL: UNION ALL wrapped in a subquery so the outer ORDER BY can
+            // use expressions (PostgreSQL rejects expressions in UNION ORDER BY;
+            // wrapping in FROM avoids that restriction).
+            // prefer_collection is a bind parameter — never inlined into SQL.
+            String pref = preferCollection != null ? preferCollection : "";
+            String sql =
+                "SELECT collection, chunk_text, metadata, created_at FROM ("
+                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_768"
+                + "  WHERE chash = ?"
+                + " UNION ALL"
+                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_384"
+                + "  WHERE chash = ?"
+                + " UNION ALL"
+                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_1024"
+                + "  WHERE chash = ?"
+                + ") sub"
+                // Third key `collection ASC` matches the canonical _sort_key
+                // (preferred, newest created_at, deterministic name) so a chash in two
+                // collections with equal created_at resolves stably (njrcn.4 review).
+                + " ORDER BY (collection = ?) DESC, created_at DESC, collection ASC LIMIT 1";
+
+            var result = ctx.fetch(sql, chash, chash, chash, pref);
+            if (result.isEmpty()) return null;
+
+            var row     = result.get(0);
+            String col  = row.get("collection", String.class);
+            String text = row.get("chunk_text",  String.class);
+            String metaJson = row.get("metadata", String.class);
+
+            // Lookup doc_id from catalog_document_chunks. ORDER BY doc_id for a
+            // deterministic winner when a chash is referenced by multiple docs (dedup).
+            String docId = "";
+            var docRow = ctx.select(F_CHK_DOC).from(T_CHUNKS)
+                            .where(F_CHK_CHASH.eq(chash))
+                            .orderBy(F_CHK_DOC.asc()).limit(1).fetchOne();
+            if (docRow != null) docId = docRow.value1();
+
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("chash",               chash);
+            m.put("chunk_hash",          chash);
+            m.put("physical_collection", col);
+            m.put("doc_id",              docId);
+            m.put("chunk_text",          text);
+            m.put("metadata",            metaJson != null ? parseMetaJson(metaJson) : Map.of());
+            return m;
+        });
+    }
+
+    /** Build a span-resolution result map from chunk row values. */
+    private static Map<String, Object> chunkRow(String chash, String chunkText,
+                                                  org.jooq.JSONB metadata) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("chunk_text",  chunkText);
+        m.put("metadata",    metadata != null ? parseMetaJson(metadata.data()) : Map.of());
+        m.put("chunk_hash",  chash);
+        return m;
+    }
+
+    /** Parse a JSON metadata string into a Map. Returns empty map on null/error. */
+    private static Map<String, Object> parseMetaJson(String json) {
+        if (json == null || json.isBlank()) return Map.of();
+        try {
+            return MAPPER.readValue(json, MAP_TYPE);
+        } catch (Exception e) {
+            return Map.of();
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1102,11 +1369,67 @@ public final class CatalogRepository {
         );
     }
 
-    /** Delete a collection projection row. */
-    public int deleteCollection(String tenant, String name) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(T_COLLS).where(F_COL_NAME.eq(name)).execute()
-        );
+    /**
+     * Atomically delete a collection and ALL its derived in-Postgres state in ONE
+     * tenant-scoped transaction (RDR-164 P2). Replaces the SQLite-era client-side
+     * {@code purge_collection_cascade} fan-out for the service path: the explicit
+     * ordered DELETE removes every lifecycle table's rows in dependency order, with
+     * the {@code catalog_collections} registry row LAST so the {@code ON DELETE
+     * RESTRICT} child FKs (fk-002 / fk-003) act as a safety net rather than a blocker.
+     *
+     * <p>Order (children → registry): chunks_* → chash_index → topic_assignments →
+     * topics → taxonomy_centroids_* → document_aspects → document_highlights →
+     * aspect_extraction_queue → catalog_documents (fk-001 cascades any doc-rooted
+     * aspect/highlight/queue/manifest remainder) → catalog_collections.
+     *
+     * <p>This is where RDR-164 closes <strong>nexus-tquoj</strong> (the client cascade
+     * never purged {@code aspect_extraction_queue}; the explicit DELETE here catches it,
+     * including doc-less {@code doc_id=''} rows the fk-001 document cascade cannot reach)
+     * and the service-mode <strong>nexus-cugrk</strong> centroid leak ({@code
+     * taxonomy_centroids_*} have no FK to {@code topics}, CA-6 — purged by explicit
+     * {@code DELETE WHERE collection=?} in the same txn).
+     *
+     * <p>RLS scopes every DELETE to the caller's tenant via the {@code nexus.tenant}
+     * GUC, so a same-named collection under another tenant is untouched. Returns a
+     * per-table deleted-row count map (preserves the {@code CascadeCounts} / CLI-render
+     * + telemetry contract); no {@code failures} list — the operation is all-or-nothing.
+     *
+     * <p>Out of scope (stays client-side, RDR-164 CA-4/CA-5): the {@code pipeline.db}
+     * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
+     */
+    public Map<String, Integer> deleteCollection(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            // 1. T3 chunk vectors (registry children, fk-002 RESTRICT).
+            counts.put("chunks_384",  ctx.deleteFrom(CHUNKS_384).where(CHUNKS_384.COLLECTION.eq(name)).execute());
+            counts.put("chunks_768",  ctx.deleteFrom(CHUNKS_768).where(CHUNKS_768.COLLECTION.eq(name)).execute());
+            counts.put("chunks_1024", ctx.deleteFrom(CHUNKS_1024).where(CHUNKS_1024.COLLECTION.eq(name)).execute());
+            // 2. chash index (physical_collection; fk-002-4 RESTRICT).
+            counts.put("chash_index", ctx.deleteFrom(CHASH_INDEX).where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(name)).execute());
+            // 3. taxonomy: projection assignments by source_collection (fk-002-5 RESTRICT),
+            //    then topics (fk-003 RESTRICT) — deleting topics cascades any remaining
+            //    assignments via topic_assignments.topic_id -> topics(id) ON DELETE CASCADE.
+            counts.put("topic_assignments", ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(name)).execute());
+            counts.put("topics", ctx.deleteFrom(TOPICS).where(TOPICS.COLLECTION.eq(name)).execute());
+            // 3b. taxonomy_meta (fk-003-4 RESTRICT; PK (tenant_id, collection) — explicit DELETE).
+            //     topic_links clears via topics(id) ON DELETE CASCADE in step 3, so it needs no row here.
+            counts.put("taxonomy_meta", ctx.deleteFrom(TAXONOMY_META).where(TAXONOMY_META.COLLECTION.eq(name)).execute());
+            // 4. centroids (CA-6: no FK to topics — explicit DELETE; the cugrk fix).
+            counts.put("taxonomy_centroids_384",  ctx.deleteFrom(TAXONOMY_CENTROIDS_384).where(TAXONOMY_CENTROIDS_384.COLLECTION.eq(name)).execute());
+            counts.put("taxonomy_centroids_768",  ctx.deleteFrom(TAXONOMY_CENTROIDS_768).where(TAXONOMY_CENTROIDS_768.COLLECTION.eq(name)).execute());
+            counts.put("taxonomy_centroids_1024", ctx.deleteFrom(TAXONOMY_CENTROIDS_1024).where(TAXONOMY_CENTROIDS_1024.COLLECTION.eq(name)).execute());
+            // 5. aspect family (fk-003 RESTRICT). Explicit collection delete catches
+            //    doc-less (doc_id='') rows fk-001's document cascade cannot reach — the tquoj fix.
+            counts.put("document_aspects",        ctx.deleteFrom(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.COLLECTION.eq(name)).execute());
+            counts.put("document_highlights",     ctx.deleteFrom(DOCUMENT_HIGHLIGHTS).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(name)).execute());
+            counts.put("aspect_extraction_queue", ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(name)).execute());
+            // 6. catalog documents for this physical collection; fk-001 cascades any
+            //    doc-rooted aspect/highlight/queue/manifest rows still present.
+            counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
+            // 7. registry row LAST (RESTRICT children are now gone).
+            counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
+            return counts;
+        });
     }
 
     /**
@@ -1141,13 +1464,100 @@ public final class CatalogRepository {
         });
     }
 
-    /** Rename a collection across documents + collections. */
-    public int renameCollection(String tenant, String oldName, String newName) {
+    /** True if a (tenant, name) collection registry row exists. RLS-scoped. */
+    public boolean collectionExists(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> ctx.fetchExists(
+            ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name))));
+    }
+
+    /**
+     * Rename a collection X-&gt;Y, re-homing every in-Postgres denorm-collection table in
+     * one RLS-scoped transaction (RDR-164 P3, bead nexus-77vve). Returns per-table re-home
+     * counts.
+     *
+     * <p><b>Mechanism (canonical rename, target absent).</b> The fk-002/fk-003 collection
+     * FKs are {@code ON UPDATE NO ACTION}, so a bare {@code UPDATE catalog_collections SET
+     * name=Y} is BLOCKED by any child row (proven: CollectionRegistryFkTest group-12). The
+     * coherent re-home therefore never touches {@code catalog_collections.name}; instead it:
+     * <ol>
+     *   <li>INSERTs a new registry row Y, copying X's metadata;</li>
+     *   <li>UPDATEs every child denorm collection X-&gt;Y (Y now exists, FK satisfied);</li>
+     *   <li>DELETEs the old registry row X (no child references X now, RESTRICT satisfied).</li>
+     * </ol>
+     * Telemetry tables (search_telemetry, hook_failures) have no FK but ARE re-homed — a
+     * rename is not a delete, audit rows follow the new name.
+     *
+     * <p><b>Cross-model COPY branch (RDR-162, target already exists).</b> When Y is already
+     * registered (the bge-768 cross-model migrate registers the target via its chunk upsert),
+     * renaming the source registry row would collide on the (tenant_id, name) PK. In that case
+     * we repoint {@code catalog_documents.physical_collection} ONLY and leave both registry
+     * rows untouched — preserving pre-RDR-164 RDR-162 behavior.
+     */
+    public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
         return tenantScope.withTenant(tenant, ctx -> {
-            int docs = ctx.update(T_DOCS).set(F_DOC_PCOLL, newName)
-                          .where(F_DOC_PCOLL.eq(oldName)).execute();
-            ctx.update(T_COLLS).set(F_COL_NAME, newName).where(F_COL_NAME.eq(oldName)).execute();
-            return docs;
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            boolean targetExists = ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(newName)));
+
+            if (targetExists) {
+                // RDR-162 cross-model COPY branch: repoint catalog_documents only; leave
+                // both registry rows (renaming the source would collide on the name PK).
+                counts.put("catalog_documents",
+                    ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName)
+                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());
+                return counts;
+            }
+
+            // 1. New registry row Y, copying X's metadata (so children can re-home onto it).
+            counts.put("catalog_collections_inserted",
+                ctx.insertInto(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                        CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                        CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                        CATALOG_COLLECTIONS.CREATED_AT)
+                    .select(ctx.select(
+                            CATALOG_COLLECTIONS.TENANT_ID, DSL.val(newName),
+                            CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                            CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                            CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                            CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                            CATALOG_COLLECTIONS.CREATED_AT)
+                        .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)))
+                    .execute());
+
+            // 2. Re-home every child denorm-collection table X->Y (Y now exists, FK satisfied).
+            //    T3 chunk vectors (fk-002 RESTRICT).
+            counts.put("chunks_384",  ctx.update(CHUNKS_384).set(CHUNKS_384.COLLECTION, newName).where(CHUNKS_384.COLLECTION.eq(oldName)).execute());
+            counts.put("chunks_768",  ctx.update(CHUNKS_768).set(CHUNKS_768.COLLECTION, newName).where(CHUNKS_768.COLLECTION.eq(oldName)).execute());
+            counts.put("chunks_1024", ctx.update(CHUNKS_1024).set(CHUNKS_1024.COLLECTION, newName).where(CHUNKS_1024.COLLECTION.eq(oldName)).execute());
+            //    chash index (physical_collection; fk-002-4 RESTRICT).
+            counts.put("chash_index", ctx.update(CHASH_INDEX).set(CHASH_INDEX.PHYSICAL_COLLECTION, newName).where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(oldName)).execute());
+            //    taxonomy: assignments (source_collection, fk-002-5 RESTRICT), topics (fk-003 RESTRICT), meta (fk-003-4 RESTRICT).
+            counts.put("topic_assignments", ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, newName).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldName)).execute());
+            counts.put("topics", ctx.update(TOPICS).set(TOPICS.COLLECTION, newName).where(TOPICS.COLLECTION.eq(oldName)).execute());
+            counts.put("taxonomy_meta", ctx.update(TAXONOMY_META).set(TAXONOMY_META.COLLECTION, newName).where(TAXONOMY_META.COLLECTION.eq(oldName)).execute());
+            //    centroids (no FK to topics — explicit re-home).
+            counts.put("taxonomy_centroids_384",  ctx.update(TAXONOMY_CENTROIDS_384).set(TAXONOMY_CENTROIDS_384.COLLECTION, newName).where(TAXONOMY_CENTROIDS_384.COLLECTION.eq(oldName)).execute());
+            counts.put("taxonomy_centroids_768",  ctx.update(TAXONOMY_CENTROIDS_768).set(TAXONOMY_CENTROIDS_768.COLLECTION, newName).where(TAXONOMY_CENTROIDS_768.COLLECTION.eq(oldName)).execute());
+            counts.put("taxonomy_centroids_1024", ctx.update(TAXONOMY_CENTROIDS_1024).set(TAXONOMY_CENTROIDS_1024.COLLECTION, newName).where(TAXONOMY_CENTROIDS_1024.COLLECTION.eq(oldName)).execute());
+            //    aspect family (fk-003 RESTRICT; incl. doc-less rows).
+            counts.put("document_aspects",        ctx.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.COLLECTION, newName).where(DOCUMENT_ASPECTS.COLLECTION.eq(oldName)).execute());
+            counts.put("document_highlights",     ctx.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.COLLECTION, newName).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldName)).execute());
+            counts.put("aspect_extraction_queue", ctx.update(ASPECT_EXTRACTION_QUEUE).set(ASPECT_EXTRACTION_QUEUE.COLLECTION, newName).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(oldName)).execute());
+            //    catalog documents (physical_collection).
+            counts.put("catalog_documents", ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());
+            //    audit tables (no FK, but re-homed: audit rows follow the new name — RDR-164
+            //    §Approach Phase 3: relevance_log + search_telemetry + hook_failures).
+            counts.put("relevance_log",     ctx.update(RELEVANCE_LOG).set(RELEVANCE_LOG.COLLECTION, newName).where(RELEVANCE_LOG.COLLECTION.eq(oldName)).execute());
+            counts.put("search_telemetry", ctx.update(SEARCH_TELEMETRY).set(SEARCH_TELEMETRY.COLLECTION, newName).where(SEARCH_TELEMETRY.COLLECTION.eq(oldName)).execute());
+            counts.put("hook_failures",     ctx.update(HOOK_FAILURES).set(HOOK_FAILURES.COLLECTION, newName).where(HOOK_FAILURES.COLLECTION.eq(oldName)).execute());
+
+            // 3. Delete the old registry row X (RESTRICT children are now re-homed onto Y).
+            counts.put("catalog_collections_deleted",
+                ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)).execute());
+            return counts;
         });
     }
 

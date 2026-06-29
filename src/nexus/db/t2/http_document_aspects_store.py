@@ -37,7 +37,8 @@ DEFAULT_TENANT: str = "default"
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 
 
 def _record_to_body(record: AspectRecord) -> dict[str, Any]:
@@ -96,7 +97,7 @@ def _body_to_record(body: dict[str, Any]) -> AspectRecord:
     )
 
 
-class HttpDocumentAspectsStore:
+class HttpDocumentAspectsStore(RawHandleGuardMixin):
     """DocumentAspects drop-in that delegates to the RDR-152 Java HTTP service.
 
     NOTE: ``promote_extras_field`` and ``list_promotions`` in
@@ -130,8 +131,7 @@ class HttpDocumentAspectsStore:
                     )
             self._base_url = base_url.rstrip("/")
         else:
-            host, port, token = _resolve_config()
-            self._base_url = f"http://{host}:{port}"
+            self._base_url, token = _resolve_endpoint()
             _token = token
 
         self._tenant = tenant

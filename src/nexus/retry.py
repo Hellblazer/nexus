@@ -175,7 +175,7 @@ def _get_voyage_error_types() -> tuple[type, ...]:
     """
     global _VOYAGE_ERROR_TYPES
     if _VOYAGE_ERROR_TYPES is None:
-        import voyageai.error as _voyageai_error  # noqa: PLC0415
+        import voyageai.error as _voyageai_error  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
         _VOYAGE_ERROR_TYPES = (
             _voyageai_error.APIConnectionError,
             _voyageai_error.TryAgain,

@@ -102,7 +102,7 @@ class _WriteOps:
         commit per N calls).
         """
         cat = self._cat
-        from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
+        from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.synthesizer)
 
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
@@ -272,7 +272,7 @@ class _WriteOps:
         catalog writers use.
         """
         cat = self._cat
-        from datetime import UTC, datetime  # noqa: PLC0415
+        from datetime import UTC, datetime  # noqa: PLC0415 — stdlib deferred to call site (datetime)
 
         ts = datetime.now(UTC).isoformat()
         event = _cat_mod._make_event(
@@ -489,14 +489,14 @@ class _WriteOps:
                     ).fetchone()
                     if cnt_row is not None:
                         rec_dict["chunk_count"] = int(cnt_row[0])
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                     # nexus-zq79 F1: silent pass would invisibly revert the
                     # F4 chunk_count re-derive to the broken pre-fix
                     # behaviour. Surface failures at debug+ so they're
                     # discoverable via `nx doctor` and structured-log
                     # tooling. We still don't propagate — the public
                     # update() contract must remain best-effort here.
-                    import structlog
+                    import structlog  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
                     structlog.get_logger(__name__).debug(
                         "chunk_count_rederive_failed",
                         tumbler=rec_dict["tumbler"],
@@ -626,7 +626,7 @@ class _WriteOps:
                 "FROM documents WHERE physical_collection = ?",
                 (old,),
             ).fetchall()
-            from nexus.catalog.synthesizer import _owner_prefix_of as _opo
+            from nexus.catalog.synthesizer import _owner_prefix_of as _opo  # noqa: PLC0415 — deferred to avoid circular import
             for row in rows:
                 # Preserve source_mtime + source_uri + alias_of across
                 # the rename — JSONL is the rebuild source of truth, so
@@ -712,7 +712,7 @@ class _WriteOps:
             # already emitted + projected each event; skip the
             # shadow-emit loop to avoid duplicate writes.
             if cat._shadow_emit_enabled and not cat._event_sourced_enabled:
-                from nexus.catalog.synthesizer import _owner_prefix_of
+                from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415 — deferred to avoid circular import
                 for row in rows:
                     meta_dict = json.loads(row[11]) if row[11] else {}
                     cat._emit_shadow_event(_cat_mod._make_event(
@@ -1020,6 +1020,49 @@ class _WriteOps:
             )
             for row in rows
         ]
+
+    def get_manifests(self, doc_ids: list[str]) -> "dict[str, list[ManifestRow]]":
+        """Batch-fetch manifest rows for multiple doc_ids (nexus-7lm3q).
+
+        Executes a single ``SELECT ... WHERE doc_id IN (?)`` instead of
+        N per-doc ``get_manifest()`` calls. Returns a dict keyed by doc_id;
+        each value is the ordered list of ManifestRow objects (same shape
+        as ``get_manifest()``). Doc_ids with no rows are absent from the
+        result. Batched at 500 doc_ids per query to stay safely under
+        SQLite's ``SQLITE_LIMIT_VARIABLE_NUMBER``.
+        """
+        if not doc_ids:
+            return {}
+        cat = self._cat
+        result: dict[str, list[ManifestRow]] = {}
+        _BATCH = 500
+        for i in range(0, len(doc_ids), _BATCH):
+            batch = doc_ids[i : i + _BATCH]
+            placeholders = ", ".join(["?"] * len(batch))
+            rows = cat._db.execute(
+                f"SELECT doc_id, position, chash, chunk_index, "
+                f"line_start, line_end, char_start, char_end "
+                f"FROM document_chunks "
+                f"WHERE doc_id IN ({placeholders}) "
+                f"ORDER BY doc_id, position",
+                batch,
+            ).fetchall()
+            for row in rows:
+                doc_id = row[0]
+                if doc_id not in result:
+                    result[doc_id] = []
+                result[doc_id].append(
+                    ManifestRow(
+                        position=row[1],
+                        chash=row[2],
+                        chunk_index=row[3],
+                        line_start=row[4],
+                        line_end=row[5],
+                        char_start=row[6],
+                        char_end=row[7],
+                    )
+                )
+        return result
 
     def chashes_for_collection(self, physical_collection: str) -> set[str]:
         """Return the set of chunk natural IDs (chash[:32]) referenced by

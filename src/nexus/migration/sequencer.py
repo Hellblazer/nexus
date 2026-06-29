@@ -103,7 +103,7 @@ def run_sequenced_migration(
     """
     targets = cross_model_targets or {}
     if remap_refs is None:
-        from nexus.collection_rename import remap_collection_references  # noqa: PLC0415
+        from nexus.collection_rename import remap_collection_references  # noqa: PLC0415  — circular-dep avoidance (nexus.collection_rename)
 
         remap_refs = remap_collection_references
     total = sum(1 for c in detection.classifications if c.has_data)
@@ -149,7 +149,7 @@ def run_sequenced_migration(
     # 3. Quiesce write-lock audit (RF-6).
     try:
         quiesce_check()
-    except Exception as exc:  # MigrationQuiesceBlocked (or any audit failure)
+    except Exception as exc:  # noqa: BLE001 — MigrationQuiesceBlocked (or any audit failure); surfaced via log + _fail() to caller
         _log.warning("sequencer_quiesce_blocked", error=str(exc))
         return _fail(str(exc))
 
@@ -160,7 +160,7 @@ def run_sequenced_migration(
             voyage_key_present=voyage_key_present,
             exempt=frozenset(targets),
         )
-    except Exception as exc:  # ModelPreGateBlocked (or any gate failure)
+    except Exception as exc:  # noqa: BLE001 — ModelPreGateBlocked (or any gate failure); surfaced via log + _fail() to caller
         _log.warning("sequencer_model_gate_blocked", error=str(exc))
         return _fail(str(exc))
 

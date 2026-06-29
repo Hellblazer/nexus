@@ -18,7 +18,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 | Env var | Default | Description |
 |---|---|---|
 | `NX_LOCAL` | (auto) | `1` = force local, `0` = force cloud, unset = auto-detect |
-| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Override local ChromaDB storage path |
+| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to the legacy ChromaDB store. As of 6.0 this is read only as the **migration source** (`nx guided-upgrade`); T3 serves from the Postgres+pgvector service, not this path. |
 | `NX_LOCAL_EMBED_MODEL` | (auto) | Force a specific local embedding model name |
 | `NEXUS_CATALOG_PATH` | `~/.config/nexus/catalog` | Override catalog git repo location |
 | `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` | unset | Set to `1` to bypass the register-time cross-project source_uri guard. Emergency-only escape hatch for known-good recovery scripts that legitimately need to register rows across project boundaries; never the right answer for normal indexing |
@@ -30,26 +30,36 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 | `local.embed_model` | (auto-select) | The embedder `nx init` recorded (`BAAI/bge-base-en-v1.5` or `all-MiniLM-L6-v2`). Absent = legacy auto-select (bge if the `[local]` extra is importable, else MiniLM). |
 | `local.fastembed_cache_path` | `~/.local/share/nexus/fastembed_cache` (XDG-aware) | Stable cache dir for the bge-768 model so it is not re-downloaded to a volatile `$TMPDIR` on every reboot. |
 
-**Auto-detection**: When either `CHROMA_API_KEY` or `VOYAGE_API_KEY` is absent, local mode activates, both are required for cloud mode. Set `NX_LOCAL=1` to force local mode even with cloud credentials.
+**Mode selection**: As of 6.0, managed-cloud mode activates when `NX_SERVICE_URL` (+ `NX_SERVICE_TOKEN`) is set — the client routes T3 through the hosted service (see [Managed-Cloud Credentials](#managed-cloud-credentials) below). Otherwise local mode is used. Set `NX_LOCAL=1` to force local mode even with service credentials present. (The legacy `CHROMA_API_KEY`/`VOYAGE_API_KEY` auto-detect predates the service substrate and applies only to pre-6.0 installs that have not migrated.)
 
 **Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install `uv tool install "conexus[local]"` for tier 1 (bge-base-en-v1.5, 768d, better quality; downloads the model on first embed). To add the extra to an existing install: `uv tool install --reinstall "conexus[local]"`. Upgrade later with `uv tool upgrade conexus`, which preserves the extra — never `uv tool install --force`, which drops it.
 
-**Storage path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`. Override with `NX_LOCAL_CHROMA_PATH`.
+**Legacy ChromaDB store path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`, overridable with `NX_LOCAL_CHROMA_PATH`. As of 6.0 this path is read only as the **migration source** (`nx guided-upgrade`); live T3 serves from the Postgres+pgvector service.
 
 **Switching embedders or modes**: Changing the embedding model (switching local↔cloud, *or* switching local tiers 384-dim MiniLM ↔ 768-dim bge) makes the existing vectors incompatible (different dimensions/space). On the next `nx index repo .` the staleness check detects the model change and re-embeds into **new** collections under the new model token. **It does NOT automatically delete or migrate the old collections**: they remain behind under the previous token and silently return no results (their dimension no longer matches the active embedder).
 
 When you switch local tiers via `nx init` (the common 384 → bge-768 upgrade), `nx init` detects these stale collections and offers a safe, ordered migration (preview → double-confirm → reindex-first → delete-after-verify; old collections deleted only after the new ones are verified populated, so a failed reindex never loses data). `code__` and manual-note (`store_put`) collections are reported but never auto-deleted. Outside the `nx init` flow you can clean up manually: `nx doctor` flags the dimension mismatch, `nx collection reindex <name>` rebuilds one from source, and `nx collection delete <name>` removes an orphan.
 
-## Cloud Credentials
+## Managed-Cloud Credentials
 
-| Config key | Env var | Required | Notes |
-|---|---|---|---|
-| `chroma_api_key` | `CHROMA_API_KEY` | Cloud mode | ChromaDB Cloud API key |
-| `chroma_database` | `CHROMA_DATABASE` | Cloud mode | ChromaDB Cloud database name (e.g. `nexus`) |
-| `voyage_api_key` | `VOYAGE_API_KEY` | Cloud mode | Voyage AI embeddings key |
-| `chroma_tenant` | `CHROMA_TENANT` | No | Auto-inferred from API key; only needed for multi-workspace setups |
+As of 6.0, managed-cloud mode points `nx` at a hosted nexus service that owns its cloud Postgres + pgvector and embeds with Voyage server-side. The client credentials are the service URL and a bearer token. Both resolve **env first, then `config.yml`**: set them interactively with `nx config init` (or `nx config set service_url/service_token`), or export the env vars below — the environment always takes precedence:
 
-Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.config/nexus/config.yml`.
+| Env var | Required | Notes |
+|---|---|---|
+| `NX_SERVICE_URL` | No | Managed nexus service base URL. Defaults to `https://api.conexus-nexus.com`; override for a self-hosted or staging deployment. |
+| `NX_SERVICE_TOKEN` | Cloud mode | Bearer token for the managed service. |
+
+Export both in your shell profile or process manager. You do not supply a Voyage key in managed-cloud mode (the service owns it).
+
+### Migration-source credentials (pre-6.0 only)
+
+These ChromaDB Cloud keys are **not** used for live T3 serving in 6.0. They are read only when `nx guided-upgrade` / `nx migrate-to-service` needs to read an existing ChromaDB Cloud store as the migration source:
+
+| Config key | Env var | Notes |
+|---|---|---|
+| `chroma_api_key` | `CHROMA_API_KEY` | ChromaDB Cloud API key (migration source) |
+| `chroma_database` | `CHROMA_DATABASE` | ChromaDB Cloud database name, e.g. `nexus` (migration source) |
+| `chroma_tenant` | `CHROMA_TENANT` | Auto-inferred from the API key; only for multi-workspace setups |
 
 ## Semantic Scholar (Enrichment)
 
@@ -59,20 +69,20 @@ Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.co
 
 Used by `nx enrich bib` to fetch bibliographic metadata (year, venue, authors, citation count). Without the key, enrichment works but is ~50x slower due to rate limiting.
 
-**`chroma_database` is the database name.** Nexus connects to this single database on ChromaDB Cloud. All collection prefixes (`code__*`, `docs__*`, `rdr__*`, `knowledge__*`) coexist in it. Use `nx doctor` to check its status.
+The notes below apply only to a pre-6.0 ChromaDB Cloud store being read as a **migration source**. In 6.0 live T3 serving is the managed nexus service (`service_url` + `service_token` above); these no longer describe the active backend.
+
+**`chroma_database` is the database name** of the ChromaDB Cloud store the migration reads from. All collection prefixes (`code__*`, `docs__*`, `rdr__*`, `knowledge__*`) coexisted in it.
 
 **`chroma_tenant` is optional.** The ChromaDB `CloudClient` infers the tenant UUID directly from your API key. You only need to set it explicitly if you belong to multiple Chroma Cloud workspaces.
 
-**Database creation is automatic.** `nx config init` provisions the database on Chroma Cloud using your API key — no dashboard visit required. If provisioning fails (e.g., plan restrictions), create the database manually in the Chroma Cloud dashboard.
-
-**Single-database architecture.** RDR-037 (2026-03-14) consolidated the legacy four-database layout (`{base}_code` / `{base}_docs` / `{base}_rdr` / `{base}_knowledge`) into a single database with collection prefixes. The transitional auto-detect probe was retired in 4.14.2 once the migration window closed. Anyone still on the legacy layout should pin `conexus<4.14.2`, run the export documented in the 4.x.0 CHANGELOG entries, then upgrade.
+**Single-database architecture (history).** RDR-037 (2026-03-14) consolidated the legacy four-database layout (`{base}_code` / `{base}_docs` / `{base}_rdr` / `{base}_knowledge`) into a single database with collection prefixes. The transitional auto-detect probe was retired in 4.14.2 once the migration window closed.
 
 ## Settings
 
 | YAML path | Env var | Default | Description |
 |---|---|---|---|
 | `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | Voyage reranker for multi-corpus merge |
-| `client.host` | `NX_CLIENT_HOST` | `localhost` | Override ChromaDB host URL |
+| `client.host` | `NX_CLIENT_HOST` | `localhost` | Legacy ChromaDB host override; no-op as of 6.0 (the managed/local service URL is `NX_SERVICE_URL`). |
 | `pdf.extractor` | — | `auto` | PDF extraction backend: `auto`, `docling`, or `mineru`. Set globally with `nx config set pdf.extractor=mineru` |
 | `pdf.mineru_server_url` | — | `http://127.0.0.1:8010` | MinerU API server URL. Auto-updated when `nx mineru start` binds a port |
 | `pdf.mineru_table_enable` | — | `false` | Enable table extraction in MinerU. Slower; use when PDFs contain structured tables |
@@ -129,7 +139,7 @@ Topic taxonomy settings. Topics are auto-discovered after `nx index repo`.
 ```yaml
 taxonomy:
   auto_label: true                       # Generate labels via claude -p --model haiku (default)
-  local_exclude_collections: ["code__*"] # Skip code collections in local mode (MiniLM is poor for code)
+  local_exclude_collections: ["code__*"] # Skip code collections in local mode (general-purpose local embeddings are poor for code)
   collection_prefixes: [docs, code, knowledge, rdr]  # Prefixes recognized by nx taxonomy validate-refs (RDR-081)
 ```
 
@@ -142,19 +152,26 @@ taxonomy:
 ## Daemon environment variables
 
 Since conexus 4.34.0 (RDR-120 storage substrate split), the CLI and
-MCP server route through the T2 and (local-mode) T3 daemons. The
-daemons publish their address via discovery files at
-`~/.config/nexus/t2_addr.<uid>` and `t3_addr.<uid>`; clients also
-honour these env-var overrides:
+MCP server route T2 through the T2 daemon. The daemon publishes its
+address via a discovery file at `~/.config/nexus/t2_addr.<uid>`; T3
+routes through the native nexus-service (`nx daemon service`, RDR-155),
+discovered via `~/.config/nexus/storage_service_addr.<uid>` and
+overridden with `NX_SERVICE_URL` (see [Managed-Cloud Credentials](#managed-cloud-credentials)).
+Clients honour these env-var overrides:
 
 | Variable | Effect | Default |
 |----------|--------|---------|
 | `NX_T2_ADDR` | TCP `host:port` for the T2 daemon (e.g. `host.docker.internal:55459`). Used by dev containers reaching the host's loopback. | discovery file |
 | `NX_T2_SOCK` | UDS path for the T2 daemon (Linux-only when bind-mounted from the host into a container). Mutually exclusive with `NX_T2_ADDR`. | discovery file |
-| `NX_T3_ADDR` | TCP `host:port` for the local-mode T3 daemon. Cloud-mode T3 ignores this. | discovery file |
-| `NX_LOCAL` | Force local-mode T3 (ONNX MiniLM) even when cloud credentials exist. Local mode requires the T3 daemon. | unset (cloud mode if credentials present) |
+| `NX_SERVICE_URL` | Full base URL of the nexus-service (T3 vectors over `/v1/vectors`). Used by dev containers and managed-cloud clients. | `storage_service_addr.<uid>` lease, then `https://api.conexus-nexus.com` |
+| `NX_SERVICE_TOKEN` | Bearer token for the nexus-service. | local: from `pg_credentials`; managed: user-supplied |
+| `NX_STORAGE_BACKEND` | Global storage-backend switch (RDR-152). `service` routes T2 stores + T3 vectors through the Java/Postgres nexus-service; `sqlite` is the legacy local opt-out (SQLite + the T2 daemon, still supported per RDR-164 CA-5). | `service` (hard default since RDR-152/155) |
+| `NX_STORAGE_BACKEND_<STORE>` | Per-store override of `NX_STORAGE_BACKEND`, taking precedence over the global value. Known `<STORE>` suffixes: `T1`, `CATALOG`, `VECTORS`, `TAXONOMY`, `ASPECT_QUEUE` (e.g. `NX_STORAGE_BACKEND_VECTORS=service`). Each is `service` or `sqlite`. | inherits `NX_STORAGE_BACKEND` |
+| `NX_LOCAL` | Force local mode (local nexus-service, bge-768) even when cloud credentials exist. | unset (cloud mode if credentials present) |
 
-When all env vars are unset, the client falls back to the discovery
+> Note: the retired `nx daemon t3` ChromaDB path and its `NX_T3_ADDR` override no longer route T3 serving; T3 traffic goes to the nexus-service via `NX_SERVICE_URL`.
+
+When the T2 env vars are unset, the client falls back to the discovery
 file. If no daemon is reachable, the CLI raises
 `T2DaemonNotReachableError` with a hint to run
 `nx daemon t2 ensure-running` or `install --autostart`. See
@@ -163,10 +180,17 @@ operator-facing matrix of transport choices per platform.
 
 ## Storage Service (Postgres) Prerequisites
 
+> **Local installs: skip this section.** `nx init` provisions the
+> bundled relocatable Postgres + pgvector cluster, creates the roles, and enables
+> the extensions for you — no DBA, no manual `CREATE EXTENSION`. The prerequisites
+> below apply only when you bring your **own** Postgres (an operator pointing the
+> service at a managed/self-hosted cluster via `NX_DB_*`).
+
 The Java storage service (RDR-152/RDR-155) applies its Liquibase changelog at
 startup using the `NX_DB_ADMIN_*` credentials (falling back to `NX_DB_*` in
-single-role development setups). Two prerequisites must be satisfied by a DBA
-(superuser) before the first migration run:
+single-role development setups). When you bring your own Postgres, two
+prerequisites must be satisfied by a DBA (superuser) before the first migration
+run:
 
 1. **Extensions.** `CREATE EXTENSION IF NOT EXISTS vector;` and
    `CREATE EXTENSION IF NOT EXISTS pg_trgm;` — neither is a trusted extension,
@@ -283,7 +307,8 @@ If no marker file is found and no command is configured, the test check is skipp
 | File | Purpose |
 |---|---|
 | `~/.config/nexus/config.yml` | Global config and credentials |
-| `~/.local/share/nexus/chroma/` | Local T3 ChromaDB PersistentClient data (local mode) |
+| `~/.local/share/nexus/chroma/` | Legacy ChromaDB store — migration source only as of 6.0 (`nx guided-upgrade`); not live T3 data |
+| `~/.config/nexus/postgres/` | The nx-provisioned Postgres cluster the service serves T3 from (local `nx init`) |
 | `~/.config/nexus/memory.db` | T2 SQLite database |
 | `~/.config/nexus/catalog/.catalog.db` | Catalog: canonical repo→collection registration, documents, and links (`nx index repo` writes here). Replaced `repos.json` as the source of truth in 5.4.0 (RDR-137); a one-shot migration on `nx upgrade` folds any legacy `repos.json` into the catalog and removes it. |
 | `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |

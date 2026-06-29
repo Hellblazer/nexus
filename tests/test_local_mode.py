@@ -51,12 +51,19 @@ class TestIsLocalMode:
             pytest.param({"CHROMA_API_KEY": "k", "VOYAGE_API_KEY": "k"}, False, id="both_keys"),
             pytest.param({"CHROMA_API_KEY": "k"}, True, id="chroma_only"),
             pytest.param({"VOYAGE_API_KEY": "k"}, True, id="voyage_only"),
+            # nexus-3k43p: a managed 6.0 user (service_url set, no chroma/voyage
+            # key) must NOT be mis-detected as local. service_url presence wins
+            # over the legacy CHROMA/VOYAGE-absent heuristic; NX_LOCAL still wins
+            # over service_url.
+            pytest.param({"NX_SERVICE_URL": "https://m.example"}, False, id="service_url_is_managed"),
+            pytest.param({"NX_SERVICE_URL": "https://m.example", "NX_LOCAL": "1"}, True, id="nx_local_1_beats_service_url"),
+            pytest.param({"NX_SERVICE_URL": "https://m.example", "VOYAGE_API_KEY": "k"}, False, id="service_url_beats_legacy_heuristic"),
         ],
     )
     def test_is_local_mode(
         self, env: dict[str, str], expected: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        for var in ("NX_LOCAL", "CHROMA_API_KEY", "VOYAGE_API_KEY"):
+        for var in ("NX_LOCAL", "CHROMA_API_KEY", "VOYAGE_API_KEY", "NX_SERVICE_URL"):
             monkeypatch.delenv(var, raising=False)
         for k, v in env.items():
             monkeypatch.setenv(k, v)

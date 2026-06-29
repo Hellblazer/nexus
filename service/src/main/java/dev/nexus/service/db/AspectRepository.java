@@ -1,6 +1,7 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,6 +15,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+
+import static dev.nexus.service.jooq.nexus.Tables.*;
+import static org.jooq.impl.DSL.*;
 
 /**
  * RDR-152 bead nexus-gmiaf.15 — repository for aspects, highlights, queue, and promotion-log.
@@ -32,9 +36,6 @@ import java.util.Set;
  * {@code SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1} — atomically claims one
  * pending row per caller with no double-claim risk across concurrent workers.
  * This is the key contention fix that motivated RDR-152 for this store.
- *
- * <p>Uses raw SQL via DSLContext (same pattern as TaxonomyRepository) to avoid
- * dependency on jOOQ-generated classes for new tables not yet in codegen.
  */
 public final class AspectRepository {
 
@@ -51,6 +52,65 @@ public final class AspectRepository {
 
     /** Minimum confidence threshold (mirrors Python _MIN_CONFIDENCE = 0.3). */
     private static final double MIN_CONFIDENCE = 0.3;
+
+    // EXCLUDED pseudo-table fields used in ON CONFLICT DO UPDATE SET.
+    // ⚠ DRIFT RISK (RDR-164 review S4): these field("...") fragments embed literal column
+    // names (EXCLUDED.<col>, and qualified table cols in the COALESCE/GREATEST/LEAST/CASE
+    // constants below) that jOOQ codegen CANNOT type-check — jOOQ has no typed API for the
+    // EXCLUDED pseudo-table. If any referenced column is renamed in a Liquibase changelog
+    // (document_aspects.{problem_formulation,proposed_method,experimental_datasets,
+    // experimental_baselines,experimental_results,extras,confidence,extracted_at,model_version,
+    // extractor_name,source_uri,salient_sentences,doc_id}; aspect_extraction_queue.{status,
+    // retry_count,enqueued_at,last_attempt_at,last_error}), these strings compile but fail at
+    // runtime. Update them HERE when renaming those columns.
+    private static final Field<String>          EX_PROBLEM_FORMULATION    = field("EXCLUDED.problem_formulation",    String.class);
+    private static final Field<String>          EX_PROPOSED_METHOD        = field("EXCLUDED.proposed_method",        String.class);
+    private static final Field<String>          EX_EXPERIMENTAL_DATASETS  = field("EXCLUDED.experimental_datasets",  String.class);
+    private static final Field<String>          EX_EXPERIMENTAL_BASELINES = field("EXCLUDED.experimental_baselines", String.class);
+    private static final Field<String>          EX_EXPERIMENTAL_RESULTS   = field("EXCLUDED.experimental_results",   String.class);
+    private static final Field<String>          EX_EXTRAS                 = field("EXCLUDED.extras",                 String.class);
+    private static final Field<Double>          EX_CONFIDENCE             = field("EXCLUDED.confidence",             Double.class);
+    private static final Field<OffsetDateTime>  EX_EXTRACTED_AT           = field("EXCLUDED.extracted_at",           OffsetDateTime.class);
+    private static final Field<String>          EX_MODEL_VERSION          = field("EXCLUDED.model_version",          String.class);
+    private static final Field<String>          EX_EXTRACTOR_NAME         = field("EXCLUDED.extractor_name",         String.class);
+    private static final Field<String>          EX_SOURCE_URI             = field("EXCLUDED.source_uri",             String.class);
+    private static final Field<String>          EX_SALIENT_SENTENCES      = field("EXCLUDED.salient_sentences",      String.class);
+    private static final Field<String>          EX_DOC_ID                 = field("EXCLUDED.doc_id",                 String.class);
+
+    // COALESCE(EXCLUDED.x, table.x) fields for importAspect path
+    private static final Field<String>          EX_SOURCE_URI_COALESCE =
+        field("COALESCE(EXCLUDED.source_uri, document_aspects.source_uri)", String.class);
+    private static final Field<String>          EX_SALIENT_COALESCE =
+        field("COALESCE(EXCLUDED.salient_sentences, document_aspects.salient_sentences)", String.class);
+    private static final Field<String>          EX_DOC_ID_COALESCE =
+        field("COALESCE(EXCLUDED.doc_id, document_aspects.doc_id)", String.class);
+
+    // document_highlights EXCLUDED fields
+    private static final Field<String>          EX_HL_SOURCE_URI   = field("EXCLUDED.source_uri",    String.class);
+    private static final Field<String>          EX_HL_COLLECTION   = field("EXCLUDED.collection",    String.class);
+    private static final Field<String>          EX_HL_HIGHLIGHTS   = field("EXCLUDED.highlights_md", String.class);
+    private static final Field<String>          EX_HL_MENTIONS     = field("EXCLUDED.mentions_md",   String.class);
+    private static final Field<OffsetDateTime>  EX_HL_INGESTED_AT  = field("EXCLUDED.ingested_at",   OffsetDateTime.class);
+
+    // aspect_extraction_queue EXCLUDED fields
+    private static final Field<String>          EX_Q_DOC_ID          = field("EXCLUDED.doc_id",          String.class);
+    private static final Field<String>          EX_Q_CONTENT_HASH    = field("EXCLUDED.content_hash",    String.class);
+    private static final Field<String>          EX_Q_CONTENT         = field("EXCLUDED.content",         String.class);
+    private static final Field<OffsetDateTime>  EX_Q_ENQUEUED_AT     = field("EXCLUDED.enqueued_at",     OffsetDateTime.class);
+    private static final Field<String>          EX_Q_LAST_ERROR      = field("EXCLUDED.last_error",      String.class);
+    // Complex GREATEST/LEAST/CASE fields for importQueueRow
+    private static final Field<String>          EX_Q_STATUS_CASE =
+        field("CASE WHEN nexus.aspect_extraction_queue.status = 'in_progress' "
+            + "THEN nexus.aspect_extraction_queue.status ELSE EXCLUDED.status END", String.class);
+    private static final Field<Integer>         EX_Q_RETRY_GREATEST =
+        field("GREATEST(EXCLUDED.retry_count, nexus.aspect_extraction_queue.retry_count)", Integer.class);
+    private static final Field<OffsetDateTime>  EX_Q_ENQUEUED_LEAST =
+        field("LEAST(EXCLUDED.enqueued_at, nexus.aspect_extraction_queue.enqueued_at)", OffsetDateTime.class);
+    private static final Field<OffsetDateTime>  EX_Q_ATTEMPT_GREATEST =
+        field("GREATEST(EXCLUDED.last_attempt_at, nexus.aspect_extraction_queue.last_attempt_at)", OffsetDateTime.class);
+    private static final Field<String>          EX_Q_LAST_ERROR_CASE =
+        field("CASE WHEN EXCLUDED.status = 'failed' THEN EXCLUDED.last_error "
+            + "ELSE nexus.aspect_extraction_queue.last_error END", String.class);
 
     private final TenantScope tenantScope;
 
@@ -93,6 +153,23 @@ public final class AspectRepository {
      * <p>Conflict key: (tenant_id, collection, source_path). Returns the
      * surrogate id of the inserted/updated row, or -1 if rejected.
      */
+    /**
+     * RDR-164 P1a: ensure catalog_collections has a stub row for {@code collection}
+     * before any document_aspects / document_highlights / aspect_extraction_queue write,
+     * so the NOT VALID collection FKs (fk-003) cannot reject a live serving write whose
+     * collection has not yet been registered by the catalog ETL or a chunk upsert.
+     * Idempotent (ON CONFLICT DO NOTHING); a no-op for null/blank collection
+     * (document_highlights.collection is nullable — MATCH SIMPLE lets null escape the FK).
+     */
+    private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
+        if (collection == null || collection.isBlank()) return;
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .values(tenant, collection)
+           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .doNothing()
+           .execute();
+    }
+
     public long upsertAspect(String tenant, Map<String, Object> body) {
         double confidence = body.containsKey("confidence")
             ? ((Number) body.get("confidence")).doubleValue()
@@ -116,46 +193,62 @@ public final class AspectRepository {
         OffsetDateTime extractedAtTs = parseTs(extractedAt);
 
         return tenantScope.withTenant(tenant, ctx -> {
-            var result = ctx.fetch(
-                "INSERT INTO nexus.document_aspects "
-                + "(tenant_id, collection, source_path, problem_formulation, "
-                + " proposed_method, experimental_datasets, experimental_baselines, "
-                + " experimental_results, extras, confidence, extracted_at, "
-                + " model_version, extractor_name, source_uri, salient_sentences, doc_id) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?, ?, ?, ?, ?) "
-                + "ON CONFLICT (tenant_id, collection, source_path) DO UPDATE SET "
-                + "  problem_formulation    = EXCLUDED.problem_formulation, "
-                + "  proposed_method        = EXCLUDED.proposed_method, "
-                + "  experimental_datasets  = EXCLUDED.experimental_datasets, "
-                + "  experimental_baselines = EXCLUDED.experimental_baselines, "
-                + "  experimental_results   = EXCLUDED.experimental_results, "
-                + "  extras                 = EXCLUDED.extras, "
-                + "  confidence             = EXCLUDED.confidence, "
-                + "  extracted_at           = EXCLUDED.extracted_at, "
-                + "  model_version          = EXCLUDED.model_version, "
-                + "  extractor_name         = EXCLUDED.extractor_name, "
-                + "  source_uri             = EXCLUDED.source_uri, "
-                + "  salient_sentences      = EXCLUDED.salient_sentences, "
-                + "  doc_id                 = EXCLUDED.doc_id "
-                + "RETURNING id",
-                tenant,
-                collection,
-                sourcePath,
-                body.get("problem_formulation"),
-                body.get("proposed_method"),
-                body.get("experimental_datasets"),
-                body.get("experimental_baselines"),
-                body.get("experimental_results"),
-                body.get("extras"),
-                confidence,
-                formatTs(extractedAtTs),
-                modelVersion,
-                extractorName,
-                body.get("source_uri"),
-                body.get("salient_sentences"),
-                nullIfBlank((String) body.get("doc_id"))
-            );
-            return result.isEmpty() ? -1L : result.get(0).get(0, Long.class);
+            ensureCollectionRegistered(ctx, tenant, collection);
+            var result = ctx.insertInto(DOCUMENT_ASPECTS,
+                    DOCUMENT_ASPECTS.TENANT_ID,
+                    DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH,
+                    DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
+                    DOCUMENT_ASPECTS.PROPOSED_METHOD,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,
+                    DOCUMENT_ASPECTS.EXTRAS,
+                    DOCUMENT_ASPECTS.CONFIDENCE,
+                    DOCUMENT_ASPECTS.EXTRACTED_AT,
+                    DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                    DOCUMENT_ASPECTS.SOURCE_URI,
+                    DOCUMENT_ASPECTS.SALIENT_SENTENCES,
+                    DOCUMENT_ASPECTS.DOC_ID)
+                .values(
+                    tenant,
+                    collection,
+                    sourcePath,
+                    (String) body.get("problem_formulation"),
+                    (String) body.get("proposed_method"),
+                    (String) body.get("experimental_datasets"),
+                    (String) body.get("experimental_baselines"),
+                    (String) body.get("experimental_results"),
+                    (String) body.get("extras"),
+                    confidence,
+                    extractedAtTs,
+                    modelVersion,
+                    extractorName,
+                    (String) body.get("source_uri"),
+                    (String) body.get("salient_sentences"),
+                    nullIfBlank((String) body.get("doc_id")))
+                .onConflict(
+                    DOCUMENT_ASPECTS.TENANT_ID,
+                    DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH)
+                .doUpdate()
+                .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
+                .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
+                .set(DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,  EX_EXPERIMENTAL_DATASETS)
+                .set(DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES, EX_EXPERIMENTAL_BASELINES)
+                .set(DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,   EX_EXPERIMENTAL_RESULTS)
+                .set(DOCUMENT_ASPECTS.EXTRAS,                 EX_EXTRAS)
+                .set(DOCUMENT_ASPECTS.CONFIDENCE,             EX_CONFIDENCE)
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT,           EX_EXTRACTED_AT)
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION,          EX_MODEL_VERSION)
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME,         EX_EXTRACTOR_NAME)
+                .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI)
+                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_SENTENCES)
+                .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID)
+                .returning(DOCUMENT_ASPECTS.ID)
+                .fetch();
+            return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
         });
     }
 
@@ -164,14 +257,26 @@ public final class AspectRepository {
      */
     public Optional<Map<String, Object>> getAspect(String tenant, String collection, String sourcePath) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT collection, source_path, problem_formulation, proposed_method, "
-                + "       experimental_datasets, experimental_baselines, experimental_results, "
-                + "       extras, confidence, extracted_at, model_version, extractor_name, "
-                + "       source_uri, salient_sentences, doc_id "
-                + "FROM nexus.document_aspects "
-                + "WHERE collection = ? AND source_path = ?",
-                collection, sourcePath);
+            var rows = ctx.select(
+                    DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH,
+                    DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
+                    DOCUMENT_ASPECTS.PROPOSED_METHOD,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,
+                    DOCUMENT_ASPECTS.EXTRAS,
+                    DOCUMENT_ASPECTS.CONFIDENCE,
+                    DOCUMENT_ASPECTS.EXTRACTED_AT,
+                    DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                    DOCUMENT_ASPECTS.SOURCE_URI,
+                    DOCUMENT_ASPECTS.SALIENT_SENTENCES,
+                    DOCUMENT_ASPECTS.DOC_ID)
+                .from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
+                .fetch();
             if (rows.isEmpty()) return Optional.empty();
             return Optional.of(recordToMap(rows.get(0)));
         });
@@ -183,14 +288,25 @@ public final class AspectRepository {
     public Optional<Map<String, Object>> getAspectByDocId(String tenant, String docId) {
         if (docId == null || docId.isBlank()) return Optional.empty();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT collection, source_path, problem_formulation, proposed_method, "
-                + "       experimental_datasets, experimental_baselines, experimental_results, "
-                + "       extras, confidence, extracted_at, model_version, extractor_name, "
-                + "       source_uri, salient_sentences, doc_id "
-                + "FROM nexus.document_aspects "
-                + "WHERE doc_id = ?",
-                docId);
+            var rows = ctx.select(
+                    DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH,
+                    DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
+                    DOCUMENT_ASPECTS.PROPOSED_METHOD,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,
+                    DOCUMENT_ASPECTS.EXTRAS,
+                    DOCUMENT_ASPECTS.CONFIDENCE,
+                    DOCUMENT_ASPECTS.EXTRACTED_AT,
+                    DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                    DOCUMENT_ASPECTS.SOURCE_URI,
+                    DOCUMENT_ASPECTS.SALIENT_SENTENCES,
+                    DOCUMENT_ASPECTS.DOC_ID)
+                .from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
+                .fetch();
             if (rows.isEmpty()) return Optional.empty();
             return Optional.of(recordToMap(rows.get(0)));
         });
@@ -201,16 +317,26 @@ public final class AspectRepository {
      */
     public List<Map<String, Object>> listByCollection(String tenant, String collection, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT collection, source_path, problem_formulation, proposed_method, "
-                + "       experimental_datasets, experimental_baselines, experimental_results, "
-                + "       extras, confidence, extracted_at, model_version, extractor_name, "
-                + "       source_uri, salient_sentences, doc_id "
-                + "FROM nexus.document_aspects "
-                + "WHERE collection = ? "
-                + "ORDER BY source_path ASC "
-                + (limit > 0 ? "LIMIT " + limit + " OFFSET " + offset : ""),
-                collection);
+            var q = ctx.select(
+                    DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH,
+                    DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
+                    DOCUMENT_ASPECTS.PROPOSED_METHOD,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,
+                    DOCUMENT_ASPECTS.EXTRAS,
+                    DOCUMENT_ASPECTS.CONFIDENCE,
+                    DOCUMENT_ASPECTS.EXTRACTED_AT,
+                    DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                    DOCUMENT_ASPECTS.SOURCE_URI,
+                    DOCUMENT_ASPECTS.SALIENT_SENTENCES,
+                    DOCUMENT_ASPECTS.DOC_ID)
+                .from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection))
+                .orderBy(DOCUMENT_ASPECTS.SOURCE_PATH.asc());
+            var rows = (limit > 0 ? q.limit(limit).offset(offset) : q).fetch();
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) out.add(recordToMap(r));
             return out;
@@ -222,15 +348,27 @@ public final class AspectRepository {
      */
     public List<Map<String, Object>> listByExtractorVersion(String tenant, String extractorName, String maxVersion) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT collection, source_path, problem_formulation, proposed_method, "
-                + "       experimental_datasets, experimental_baselines, experimental_results, "
-                + "       extras, confidence, extracted_at, model_version, extractor_name, "
-                + "       source_uri, salient_sentences, doc_id "
-                + "FROM nexus.document_aspects "
-                + "WHERE extractor_name = ? AND model_version < ? "
-                + "ORDER BY collection, source_path",
-                extractorName, maxVersion);
+            var rows = ctx.select(
+                    DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH,
+                    DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
+                    DOCUMENT_ASPECTS.PROPOSED_METHOD,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,
+                    DOCUMENT_ASPECTS.EXTRAS,
+                    DOCUMENT_ASPECTS.CONFIDENCE,
+                    DOCUMENT_ASPECTS.EXTRACTED_AT,
+                    DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                    DOCUMENT_ASPECTS.SOURCE_URI,
+                    DOCUMENT_ASPECTS.SALIENT_SENTENCES,
+                    DOCUMENT_ASPECTS.DOC_ID)
+                .from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.EXTRACTOR_NAME.eq(extractorName)
+                    .and(DOCUMENT_ASPECTS.MODEL_VERSION.lt(maxVersion)))
+                .orderBy(DOCUMENT_ASPECTS.COLLECTION.asc(), DOCUMENT_ASPECTS.SOURCE_PATH.asc())
+                .fetch();
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) out.add(recordToMap(r));
             return out;
@@ -242,9 +380,10 @@ public final class AspectRepository {
      */
     public int deleteAspect(String tenant, String collection, String sourcePath) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute(
-                "DELETE FROM nexus.document_aspects WHERE collection = ? AND source_path = ?",
-                collection, sourcePath));
+            ctx.deleteFrom(DOCUMENT_ASPECTS)
+               .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+                   .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
+               .execute());
     }
 
     /**
@@ -252,15 +391,20 @@ public final class AspectRepository {
      */
     public int renameAspectCollection(String tenant, String oldColl, String newColl) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-164 P1a: register the new collection before re-pointing the denorm column
+            ensureCollectionRegistered(ctx, tenant, newColl);
             // Collision defense: delete conflicting new-side rows first
-            ctx.execute(
-                "DELETE FROM nexus.document_aspects "
-                + "WHERE collection = ? "
-                + "  AND source_path IN (SELECT source_path FROM nexus.document_aspects WHERE collection = ?)",
-                newColl, oldColl);
-            return ctx.execute(
-                "UPDATE nexus.document_aspects SET collection = ? WHERE collection = ?",
-                newColl, oldColl);
+            ctx.deleteFrom(DOCUMENT_ASPECTS)
+               .where(DOCUMENT_ASPECTS.COLLECTION.eq(newColl)
+                   .and(DOCUMENT_ASPECTS.SOURCE_PATH.in(
+                       select(DOCUMENT_ASPECTS.SOURCE_PATH)
+                           .from(DOCUMENT_ASPECTS)
+                           .where(DOCUMENT_ASPECTS.COLLECTION.eq(oldColl)))))
+               .execute();
+            return ctx.update(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.COLLECTION, newColl)
+                .where(DOCUMENT_ASPECTS.COLLECTION.eq(oldColl))
+                .execute();
         });
     }
 
@@ -270,9 +414,10 @@ public final class AspectRepository {
     public int setSalientSentences(String tenant, String docId, String sentencesJson) {
         if (docId == null || docId.isBlank()) return 0;
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute(
-                "UPDATE nexus.document_aspects SET salient_sentences = ? WHERE doc_id = ?",
-                sentencesJson, docId));
+            ctx.update(DOCUMENT_ASPECTS)
+               .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, sentencesJson)
+               .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
+               .execute());
     }
 
     /**
@@ -280,10 +425,11 @@ public final class AspectRepository {
      */
     public int setSalientSentencesByKey(String tenant, String collection, String sourcePath, String sentencesJson) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute(
-                "UPDATE nexus.document_aspects SET salient_sentences = ? "
-                + "WHERE collection = ? AND source_path = ?",
-                sentencesJson, collection, sourcePath));
+            ctx.update(DOCUMENT_ASPECTS)
+               .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, sentencesJson)
+               .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+                   .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
+               .execute());
     }
 
     /**
@@ -292,9 +438,10 @@ public final class AspectRepository {
     public String getSalientSentences(String tenant, String docId) {
         if (docId == null || docId.isBlank()) return null;
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT salient_sentences FROM nexus.document_aspects WHERE doc_id = ?",
-                docId);
+            var rows = ctx.select(DOCUMENT_ASPECTS.SALIENT_SENTENCES)
+                .from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
+                .fetch();
             if (rows.isEmpty()) return null;
             Object val = rows.get(0).get(0);
             return val == null ? null : val.toString();
@@ -315,45 +462,62 @@ public final class AspectRepository {
         String extractedAt = (String) body.get("extracted_at");
         OffsetDateTime extractedAtTs = parseTs(extractedAt);
 
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute(
-                "INSERT INTO nexus.document_aspects "
-                + "(tenant_id, collection, source_path, problem_formulation, "
-                + " proposed_method, experimental_datasets, experimental_baselines, "
-                + " experimental_results, extras, confidence, extracted_at, "
-                + " model_version, extractor_name, source_uri, salient_sentences, doc_id) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?, ?, ?, ?, ?) "
-                + "ON CONFLICT (tenant_id, collection, source_path) DO UPDATE SET "
-                + "  problem_formulation    = EXCLUDED.problem_formulation, "
-                + "  proposed_method        = EXCLUDED.proposed_method, "
-                + "  experimental_datasets  = EXCLUDED.experimental_datasets, "
-                + "  experimental_baselines = EXCLUDED.experimental_baselines, "
-                + "  experimental_results   = EXCLUDED.experimental_results, "
-                + "  extras                 = EXCLUDED.extras, "
-                + "  confidence             = EXCLUDED.confidence, "
-                + "  extracted_at           = EXCLUDED.extracted_at, "
-                + "  model_version          = EXCLUDED.model_version, "
-                + "  extractor_name         = EXCLUDED.extractor_name, "
-                + "  source_uri             = COALESCE(EXCLUDED.source_uri, document_aspects.source_uri), "
-                + "  salient_sentences      = COALESCE(EXCLUDED.salient_sentences, document_aspects.salient_sentences), "
-                + "  doc_id                 = COALESCE(EXCLUDED.doc_id, document_aspects.doc_id)",
-                tenant,
-                body.get("collection"),
-                body.get("source_path"),
-                body.get("problem_formulation"),
-                body.get("proposed_method"),
-                body.get("experimental_datasets"),
-                body.get("experimental_baselines"),
-                body.get("experimental_results"),
-                body.get("extras"),
-                confidence,
-                formatTs(extractedAtTs),
-                body.get("model_version"),
-                body.get("extractor_name"),
-                body.get("source_uri"),
-                body.get("salient_sentences"),
-                nullIfBlank((String) body.get("doc_id"))
-            ));
+        return tenantScope.withTenant(tenant, ctx -> {
+            ensureCollectionRegistered(ctx, tenant, (String) body.get("collection"));
+            return ctx.insertInto(DOCUMENT_ASPECTS,
+                    DOCUMENT_ASPECTS.TENANT_ID,
+                    DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH,
+                    DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
+                    DOCUMENT_ASPECTS.PROPOSED_METHOD,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES,
+                    DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,
+                    DOCUMENT_ASPECTS.EXTRAS,
+                    DOCUMENT_ASPECTS.CONFIDENCE,
+                    DOCUMENT_ASPECTS.EXTRACTED_AT,
+                    DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                    DOCUMENT_ASPECTS.SOURCE_URI,
+                    DOCUMENT_ASPECTS.SALIENT_SENTENCES,
+                    DOCUMENT_ASPECTS.DOC_ID)
+                .values(
+                    tenant,
+                    (String) body.get("collection"),
+                    (String) body.get("source_path"),
+                    (String) body.get("problem_formulation"),
+                    (String) body.get("proposed_method"),
+                    (String) body.get("experimental_datasets"),
+                    (String) body.get("experimental_baselines"),
+                    (String) body.get("experimental_results"),
+                    (String) body.get("extras"),
+                    confidence,
+                    extractedAtTs,
+                    (String) body.get("model_version"),
+                    (String) body.get("extractor_name"),
+                    (String) body.get("source_uri"),
+                    (String) body.get("salient_sentences"),
+                    nullIfBlank((String) body.get("doc_id")))
+                .onConflict(
+                    DOCUMENT_ASPECTS.TENANT_ID,
+                    DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH)
+                .doUpdate()
+                .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
+                .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
+                .set(DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,  EX_EXPERIMENTAL_DATASETS)
+                .set(DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES, EX_EXPERIMENTAL_BASELINES)
+                .set(DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,   EX_EXPERIMENTAL_RESULTS)
+                .set(DOCUMENT_ASPECTS.EXTRAS,                 EX_EXTRAS)
+                .set(DOCUMENT_ASPECTS.CONFIDENCE,             EX_CONFIDENCE)
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT,           EX_EXTRACTED_AT)
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION,          EX_MODEL_VERSION)
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME,         EX_EXTRACTOR_NAME)
+                .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI_COALESCE)
+                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
+                .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
+                .execute();
+        });
     }
 
     // ── document_highlights ────────────────────────────────────────────────────
@@ -375,20 +539,31 @@ public final class AspectRepository {
 
         OffsetDateTime ingestedAtTs = parseTs(ingestedAt);
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute(
-                "INSERT INTO nexus.document_highlights "
-                + "(tenant_id, doc_id, source_uri, collection, highlights_md, mentions_md, ingested_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?::timestamptz) "
-                + "ON CONFLICT (tenant_id, doc_id) DO UPDATE SET "
-                + "  source_uri    = EXCLUDED.source_uri, "
-                + "  collection    = EXCLUDED.collection, "
-                + "  highlights_md = EXCLUDED.highlights_md, "
-                + "  mentions_md   = EXCLUDED.mentions_md, "
-                + "  ingested_at   = EXCLUDED.ingested_at",
-                tenant, docId,
-                body.get("source_uri"),
-                body.get("collection"),
-                highlightsMd, mentionsMd, formatTs(ingestedAtTs));
+            ensureCollectionRegistered(ctx, tenant, (String) body.get("collection"));
+            ctx.insertInto(DOCUMENT_HIGHLIGHTS,
+                    DOCUMENT_HIGHLIGHTS.TENANT_ID,
+                    DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
+                    DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(
+                    tenant,
+                    docId,
+                    (String) body.get("source_uri"),
+                    (String) body.get("collection"),
+                    highlightsMd,
+                    mentionsMd,
+                    ingestedAtTs)
+                .onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
+                .doUpdate()
+                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION,    EX_HL_COLLECTION)
+                .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, EX_HL_HIGHLIGHTS)
+                .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
+                .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
+                .execute();
             return null;
         });
         return true;
@@ -399,10 +574,16 @@ public final class AspectRepository {
      */
     public Optional<Map<String, Object>> getHighlight(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT doc_id, source_uri, collection, highlights_md, mentions_md, ingested_at "
-                + "FROM nexus.document_highlights WHERE doc_id = ?",
-                docId);
+            var rows = ctx.select(
+                    DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
+                    DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId))
+                .fetch();
             if (rows.isEmpty()) return Optional.empty();
             return Optional.of(highlightToMap(rows.get(0)));
         });
@@ -413,10 +594,17 @@ public final class AspectRepository {
      */
     public Optional<Map<String, Object>> getHighlightBySourceUri(String tenant, String sourceUri) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT doc_id, source_uri, collection, highlights_md, mentions_md, ingested_at "
-                + "FROM nexus.document_highlights WHERE source_uri = ? LIMIT 1",
-                sourceUri);
+            var rows = ctx.select(
+                    DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
+                    DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.SOURCE_URI.eq(sourceUri))
+                .limit(1)
+                .fetch();
             if (rows.isEmpty()) return Optional.empty();
             return Optional.of(highlightToMap(rows.get(0)));
         });
@@ -427,11 +615,18 @@ public final class AspectRepository {
      */
     public List<Map<String, Object>> listHighlights(String tenant, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT doc_id, source_uri, collection, highlights_md, mentions_md, ingested_at "
-                + "FROM nexus.document_highlights "
-                + "ORDER BY ingested_at DESC LIMIT ? OFFSET ?",
-                limit, offset);
+            var rows = ctx.select(
+                    DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
+                    DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .from(DOCUMENT_HIGHLIGHTS)
+                .orderBy(DOCUMENT_HIGHLIGHTS.INGESTED_AT.desc())
+                .limit(limit)
+                .offset(offset)
+                .fetch();
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) out.add(highlightToMap(r));
             return out;
@@ -443,7 +638,9 @@ public final class AspectRepository {
      */
     public boolean deleteHighlight(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute("DELETE FROM nexus.document_highlights WHERE doc_id = ?", docId) > 0);
+            ctx.deleteFrom(DOCUMENT_HIGHLIGHTS)
+               .where(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId))
+               .execute() > 0);
     }
 
     /**
@@ -455,23 +652,33 @@ public final class AspectRepository {
         String ingestedAt = (String) body.get("ingested_at");
         OffsetDateTime ingestedAtTs = parseTs(ingestedAt);
 
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute(
-                "INSERT INTO nexus.document_highlights "
-                + "(tenant_id, doc_id, source_uri, collection, highlights_md, mentions_md, ingested_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?::timestamptz) "
-                + "ON CONFLICT (tenant_id, doc_id) DO UPDATE SET "
-                + "  source_uri    = EXCLUDED.source_uri, "
-                + "  collection    = EXCLUDED.collection, "
-                + "  highlights_md = EXCLUDED.highlights_md, "
-                + "  mentions_md   = EXCLUDED.mentions_md, "
-                + "  ingested_at   = EXCLUDED.ingested_at",
-                tenant, docId,
-                body.get("source_uri"),
-                body.get("collection"),
-                body.getOrDefault("highlights_md", ""),
-                body.getOrDefault("mentions_md", ""),
-                formatTs(ingestedAtTs)));
+        return tenantScope.withTenant(tenant, ctx -> {
+            ensureCollectionRegistered(ctx, tenant, (String) body.get("collection"));
+            return ctx.insertInto(DOCUMENT_HIGHLIGHTS,
+                    DOCUMENT_HIGHLIGHTS.TENANT_ID,
+                    DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
+                    DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(
+                    tenant,
+                    docId,
+                    (String) body.get("source_uri"),
+                    (String) body.get("collection"),
+                    (String) body.getOrDefault("highlights_md", ""),
+                    (String) body.getOrDefault("mentions_md", ""),
+                    ingestedAtTs)
+                .onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
+                .doUpdate()
+                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION,    EX_HL_COLLECTION)
+                .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, EX_HL_HIGHLIGHTS)
+                .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
+                .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
+                .execute();
+        });
     }
 
     // ── aspect_extraction_queue ────────────────────────────────────────────────
@@ -490,25 +697,45 @@ public final class AspectRepository {
         OffsetDateTime enqueuedAtTs = parseTs(enqueuedAt);
 
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute(
-                "INSERT INTO nexus.aspect_extraction_queue "
-                + "(tenant_id, collection, source_path, doc_id, content_hash, content, "
-                + " status, retry_count, enqueued_at, last_attempt_at, last_error) "
-                + "VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?::timestamptz, NULL, NULL) "
-                + "ON CONFLICT (tenant_id, collection, source_path) DO UPDATE SET "
-                + "  doc_id          = EXCLUDED.doc_id, "
-                + "  content_hash    = EXCLUDED.content_hash, "
-                + "  content         = EXCLUDED.content, "
-                + "  status          = 'pending', "
-                + "  retry_count     = 0, "
-                + "  enqueued_at     = EXCLUDED.enqueued_at, "
-                + "  last_attempt_at = NULL, "
-                + "  last_error      = NULL",
-                tenant, collection, sourcePath,
-                nullIfBlank((String) body.get("doc_id")),
-                body.getOrDefault("content_hash", ""),
-                body.getOrDefault("content", ""),
-                formatTs(enqueuedAtTs));
+            ensureCollectionRegistered(ctx, tenant, collection);
+            ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
+                    ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT,
+                    ASPECT_EXTRACTION_QUEUE.STATUS,
+                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                    ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
+                    ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
+                    ASPECT_EXTRACTION_QUEUE.LAST_ERROR)
+                .values(
+                    tenant, collection, sourcePath,
+                    nullIfBlank((String) body.get("doc_id")),
+                    (String) body.getOrDefault("content_hash", ""),
+                    (String) body.getOrDefault("content", ""),
+                    "pending", 0, enqueuedAtTs, null, null)
+                .onConflict(
+                    ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
+                .doUpdate()
+                .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,          EX_Q_DOC_ID)
+                .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
+                .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
+                .set(ASPECT_EXTRACTION_QUEUE.STATUS,          "pending")
+                .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,     0)
+                .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,     EX_Q_ENQUEUED_AT)
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      (String) null)
+                // RDR-163 P1 (nexus-ztpt6): a re-enqueue is a fresh request — it
+                // resets retry_count to 0, so it must also clear any stale backoff
+                // (next_retry_at) left by a prior mark_retry. Otherwise the claim
+                // gate would silently hold the re-enqueued row until the old
+                // backoff elapses (up to base*2^(cap-1) seconds).
+                .set(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT,   (OffsetDateTime) null)
+                .execute();
             return null;
         });
     }
@@ -524,28 +751,47 @@ public final class AspectRepository {
             // PG atomic claim: SELECT FOR UPDATE SKIP LOCKED picks exactly one
             // pending row, locks it, and the subsequent UPDATE is within the same
             // transaction — zero contention between concurrent workers.
-            var rows = ctx.fetch(
-                "SELECT id, collection, source_path, content_hash, content, retry_count, doc_id "
-                + "FROM nexus.aspect_extraction_queue "
-                + "WHERE status = 'pending' "
-                + "ORDER BY enqueued_at ASC, source_path ASC "
-                + "LIMIT 1 FOR UPDATE SKIP LOCKED");
+            var rows = ctx.select(
+                    ASPECT_EXTRACTION_QUEUE.ID,
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT,
+                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID)
+                .from(ASPECT_EXTRACTION_QUEUE)
+                // RDR-163 P0 (nexus-795gv) backoff gate: a row backed off to a
+                // future next_retry_at must not be claimed early. NULL = ready now.
+                // now() is the server (DB) clock — correct for both the co-located
+                // local deployment and the cloud deployment where the worker host
+                // clock would skew against a client-stamped comparison.
+                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending")
+                    .and(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT.isNull()
+                        .or(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT.le(
+                            field("now()", OffsetDateTime.class)))))
+                .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc())
+                .limit(1)
+                .forUpdate().skipLocked()
+                .fetch();
             if (rows.isEmpty()) return Optional.empty();
 
-            long id           = rows.get(0).get(0, Long.class);
-            String collection = (String) rows.get(0).get(1);
-            String sourcePath = (String) rows.get(0).get(2);
-            String contentHash= rows.get(0).get(3) == null ? "" : rows.get(0).get(3).toString();
-            String content    = rows.get(0).get(4) == null ? "" : rows.get(0).get(4).toString();
-            int retryCount    = rows.get(0).get(5, Integer.class);
-            String docId      = rows.get(0).get(6) == null ? "" : rows.get(0).get(6).toString();
+            long id           = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.ID);
+            String collection = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.COLLECTION);
+            String sourcePath = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH);
+            String contentHash= rows.get(0).get(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
+            contentHash = contentHash == null ? "" : contentHash;
+            String content    = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.CONTENT);
+            content = content == null ? "" : content;
+            int retryCount    = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT);
+            String docId      = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.DOC_ID);
+            docId = docId == null ? "" : docId;
 
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-            ctx.execute(
-                "UPDATE nexus.aspect_extraction_queue "
-                + "SET status = 'in_progress', last_attempt_at = ?::timestamptz "
-                + "WHERE id = ?",
-                formatTs(now), id);
+            ctx.update(ASPECT_EXTRACTION_QUEUE)
+               .set(ASPECT_EXTRACTION_QUEUE.STATUS, "in_progress")
+               .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, now)
+               .where(ASPECT_EXTRACTION_QUEUE.ID.eq(id))
+               .execute();
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("id", id);
@@ -580,15 +826,16 @@ public final class AspectRepository {
     public int markDone(String tenant, String docId, String collection, String sourcePath) {
         return tenantScope.withTenant(tenant, ctx -> {
             if (docId != null && !docId.isBlank()) {
-                return ctx.execute(
-                    "DELETE FROM nexus.aspect_extraction_queue WHERE doc_id = ?", docId);
+                return ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
+                    .where(ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(docId))
+                    .execute();
             }
             if ((collection != null && !collection.isBlank())
                     || (sourcePath != null && !sourcePath.isBlank())) {
-                return ctx.execute(
-                    "DELETE FROM nexus.aspect_extraction_queue "
-                    + "WHERE collection = ? AND source_path = ?",
-                    collection, sourcePath);
+                return ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
+                    .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection)
+                        .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+                    .execute();
             }
             return 0;
         });
@@ -599,26 +846,44 @@ public final class AspectRepository {
      */
     public void markFailed(String tenant, String collection, String sourcePath, String error) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute(
-                "UPDATE nexus.aspect_extraction_queue "
-                + "SET status = 'failed', retry_count = retry_count + 1, last_error = ? "
-                + "WHERE collection = ? AND source_path = ?",
-                error == null ? null : error.substring(0, Math.min(error.length(), 2000)),
-                collection, sourcePath);
+            ctx.update(ASPECT_EXTRACTION_QUEUE)
+               .set(ASPECT_EXTRACTION_QUEUE.STATUS, "failed")
+               .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                   field("retry_count + 1", Integer.class))
+               .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,
+                   error == null ? null : error.substring(0, Math.min(error.length(), 2000)))
+               .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection)
+                   .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+               .execute();
             return null;
         });
     }
 
     /**
-     * Reset a row to pending (transient retry).
+     * Reset a row to pending for a transient retry, backing it off for
+     * {@code intervalSeconds} (RDR-163 P1, nexus-ztpt6).
+     *
+     * <p>next_retry_at is stamped {@code now() + intervalSeconds} on the SERVER
+     * (DB) clock — the worker chooses the interval, the service stamps the
+     * absolute instant. This is the cloud clock-skew defense: the worker host is
+     * not the DB host, so a client-computed absolute timestamp would compare
+     * wrongly against the {@code now()}-based claim gate. {@code intervalSeconds
+     * = 0} means "ready immediately". retry_count is incremented (monotonic; the
+     * cap's source of truth); last_attempt_at is cleared.
      */
-    public void markRetry(String tenant, String collection, String sourcePath) {
+    public void markRetry(String tenant, String collection, String sourcePath, long intervalSeconds) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute(
-                "UPDATE nexus.aspect_extraction_queue "
-                + "SET status = 'pending', retry_count = retry_count + 1, last_attempt_at = NULL "
-                + "WHERE collection = ? AND source_path = ?",
-                collection, sourcePath);
+            ctx.update(ASPECT_EXTRACTION_QUEUE)
+               .set(ASPECT_EXTRACTION_QUEUE.STATUS, "pending")
+               .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                   field("retry_count + 1", Integer.class))
+               .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
+               .set(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT,
+                   field("now() + make_interval(secs => ?)", OffsetDateTime.class,
+                         (double) intervalSeconds))
+               .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection)
+                   .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+               .execute();
             return null;
         });
     }
@@ -629,32 +894,33 @@ public final class AspectRepository {
     public int reclaimStale(String tenant, int timeoutSeconds) {
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(timeoutSeconds);
-            return ctx.execute(
-                "UPDATE nexus.aspect_extraction_queue "
-                + "SET status = 'pending', last_attempt_at = NULL "
-                + "WHERE status = 'in_progress' AND last_attempt_at < ?::timestamptz",
-                formatTs(cutoff));
+            return ctx.update(ASPECT_EXTRACTION_QUEUE)
+                .set(ASPECT_EXTRACTION_QUEUE.STATUS, "pending")
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
+                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("in_progress")
+                    .and(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT.lt(cutoff)))
+                .execute();
         });
     }
 
     /** Count pending rows. */
     public int pendingCount(String tenant) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT COUNT(*) FROM nexus.aspect_extraction_queue WHERE status = 'pending'");
-            return rows.get(0).get(0, Integer.class);
-        });
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.selectCount()
+               .from(ASPECT_EXTRACTION_QUEUE)
+               .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending"))
+               .fetchOne(0, Integer.class));
     }
 
     /**
      * Is queue drained? (no non-failed rows).
      */
     public boolean isDrained(String tenant) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT COUNT(*) FROM nexus.aspect_extraction_queue WHERE status != 'failed'");
-            return rows.get(0).get(0, Integer.class) == 0;
-        });
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.selectCount()
+               .from(ASPECT_EXTRACTION_QUEUE)
+               .where(ASPECT_EXTRACTION_QUEUE.STATUS.ne("failed"))
+               .fetchOne(0, Integer.class) == 0);
     }
 
     /**
@@ -662,21 +928,70 @@ public final class AspectRepository {
      */
     public List<Map<String, Object>> listPending(String tenant, int limit) {
         return tenantScope.withTenant(tenant, ctx -> {
-            String limitClause = limit > 0 ? "LIMIT " + limit : "";
-            var rows = ctx.fetch(
-                "SELECT collection, source_path, content_hash, content, retry_count, doc_id "
-                + "FROM nexus.aspect_extraction_queue "
-                + "WHERE status = 'pending' "
-                + "ORDER BY enqueued_at ASC, source_path ASC " + limitClause);
+            var q = ctx.select(
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT,
+                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID)
+                .from(ASPECT_EXTRACTION_QUEUE)
+                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending"))
+                .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc());
+            var rows = (limit > 0 ? q.limit(limit) : q).fetch();
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) {
                 Map<String, Object> m = new LinkedHashMap<>();
-                m.put("collection",   r.get(0));
-                m.put("source_path",  r.get(1));
-                m.put("content_hash", r.get(2) == null ? "" : r.get(2).toString());
-                m.put("content",      r.get(3) == null ? "" : r.get(3).toString());
-                m.put("retry_count",  r.get(4, Integer.class));
-                m.put("doc_id",       r.get(5) == null ? "" : r.get(5).toString());
+                m.put("collection",   r.get(ASPECT_EXTRACTION_QUEUE.COLLECTION));
+                m.put("source_path",  r.get(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH));
+                String ch = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
+                m.put("content_hash", ch == null ? "" : ch);
+                String co = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT);
+                m.put("content",      co == null ? "" : co);
+                m.put("retry_count",  r.get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT));
+                String di = r.get(ASPECT_EXTRACTION_QUEUE.DOC_ID);
+                m.put("doc_id",       di == null ? "" : di);
+                out.add(m);
+            }
+            return out;
+        });
+    }
+
+    /**
+     * List terminal-{@code failed} rows, optionally scoped to one collection
+     * (mirrors AspectExtractionQueue.list_failed). Drives the
+     * {@code nx aspects requeue-failed} bulk-recovery CLI (nexus-2c51v).
+     * doc_id is included so a re-enqueue preserves the catalog identity.
+     */
+    public List<Map<String, Object>> listFailed(String tenant, String collection) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = ASPECT_EXTRACTION_QUEUE.STATUS.eq("failed");
+            if (collection != null && !collection.isBlank()) {
+                cond = cond.and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection));
+            }
+            var rows = ctx.select(
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT,
+                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID)
+                .from(ASPECT_EXTRACTION_QUEUE)
+                .where(cond)
+                .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc())
+                .fetch();
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (var r : rows) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("collection",   r.get(ASPECT_EXTRACTION_QUEUE.COLLECTION));
+                m.put("source_path",  r.get(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH));
+                String ch = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
+                m.put("content_hash", ch == null ? "" : ch);
+                String co = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT);
+                m.put("content",      co == null ? "" : co);
+                m.put("retry_count",  r.get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT));
+                String di = r.get(ASPECT_EXTRACTION_QUEUE.DOC_ID);
+                m.put("doc_id",       di == null ? "" : di);
                 out.add(m);
             }
             return out;
@@ -688,14 +1003,18 @@ public final class AspectRepository {
      */
     public int renameQueueCollection(String tenant, String oldColl, String newColl) {
         return tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute(
-                "DELETE FROM nexus.aspect_extraction_queue "
-                + "WHERE collection = ? "
-                + "  AND source_path IN (SELECT source_path FROM nexus.aspect_extraction_queue WHERE collection = ?)",
-                newColl, oldColl);
-            return ctx.execute(
-                "UPDATE nexus.aspect_extraction_queue SET collection = ? WHERE collection = ?",
-                newColl, oldColl);
+            ensureCollectionRegistered(ctx, tenant, newColl);
+            ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
+               .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(newColl)
+                   .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.in(
+                       select(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
+                           .from(ASPECT_EXTRACTION_QUEUE)
+                           .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(oldColl)))))
+               .execute();
+            return ctx.update(ASPECT_EXTRACTION_QUEUE)
+                .set(ASPECT_EXTRACTION_QUEUE.COLLECTION, newColl)
+                .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(oldColl))
+                .execute();
         });
     }
 
@@ -706,10 +1025,13 @@ public final class AspectRepository {
      * and no collision-defense DELETE is needed — a plain UPDATE suffices.
      */
     public int renameHighlightsCollection(String tenant, String oldColl, String newColl) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute(
-                "UPDATE nexus.document_highlights SET collection = ? WHERE collection = ?",
-                newColl, oldColl));
+        return tenantScope.withTenant(tenant, ctx -> {
+            ensureCollectionRegistered(ctx, tenant, newColl);
+            return ctx.update(DOCUMENT_HIGHLIGHTS)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION, newColl)
+                .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldColl))
+                .execute();
+        });
     }
 
     /**
@@ -729,35 +1051,47 @@ public final class AspectRepository {
         int retryCount = body.containsKey("retry_count")
             ? ((Number) body.get("retry_count")).intValue() : 0;
 
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute(
-                "INSERT INTO nexus.aspect_extraction_queue "
-                + "(tenant_id, collection, source_path, doc_id, content_hash, content, "
-                + " status, retry_count, enqueued_at, last_attempt_at, last_error) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz, ?) "
-                + "ON CONFLICT (tenant_id, collection, source_path) DO UPDATE SET "
+        return tenantScope.withTenant(tenant, ctx -> {
+            ensureCollectionRegistered(ctx, tenant, collection);
+            return ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
+                    ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT,
+                    ASPECT_EXTRACTION_QUEUE.STATUS,
+                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                    ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
+                    ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
+                    ASPECT_EXTRACTION_QUEUE.LAST_ERROR)
+                .values(
+                    tenant, collection, sourcePath,
+                    nullIfBlank((String) body.get("doc_id")),
+                    (String) body.getOrDefault("content_hash", ""),
+                    (String) body.getOrDefault("content", ""),
+                    status, retryCount,
+                    enqueuedAtTs,
+                    lastAttemptAtTs,
+                    (String) body.get("last_error"))
+                .onConflict(
+                    ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
+                .doUpdate()
                 // Never downgrade in_progress to pending from a stale ETL import
-                + "  status          = CASE WHEN nexus.aspect_extraction_queue.status = 'in_progress' "
-                + "                         THEN nexus.aspect_extraction_queue.status "
-                + "                         ELSE EXCLUDED.status END, "
-                + "  retry_count     = GREATEST(EXCLUDED.retry_count, nexus.aspect_extraction_queue.retry_count), "
+                .set(ASPECT_EXTRACTION_QUEUE.STATUS,          EX_Q_STATUS_CASE)
+                .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,     EX_Q_RETRY_GREATEST)
                 // Preserve earliest enqueue time
-                + "  enqueued_at     = LEAST(EXCLUDED.enqueued_at, nexus.aspect_extraction_queue.enqueued_at), "
+                .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,     EX_Q_ENQUEUED_LEAST)
                 // Keep latest attempt timestamp
-                + "  last_attempt_at = GREATEST(EXCLUDED.last_attempt_at, nexus.aspect_extraction_queue.last_attempt_at), "
-                + "  doc_id          = EXCLUDED.doc_id, "
-                + "  content_hash    = EXCLUDED.content_hash, "
-                + "  content         = EXCLUDED.content, "
-                + "  last_error      = CASE WHEN EXCLUDED.status = 'failed' THEN EXCLUDED.last_error "
-                + "                         ELSE nexus.aspect_extraction_queue.last_error END",
-                tenant, collection, sourcePath,
-                nullIfBlank((String) body.get("doc_id")),
-                body.getOrDefault("content_hash", ""),
-                body.getOrDefault("content", ""),
-                status, retryCount,
-                formatTs(enqueuedAtTs),
-                lastAttemptAtTs != null ? formatTs(lastAttemptAtTs) : null,
-                body.get("last_error")));
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, EX_Q_ATTEMPT_GREATEST)
+                .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,          EX_Q_DOC_ID)
+                .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
+                .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      EX_Q_LAST_ERROR_CASE)
+                .execute();
+        });
     }
 
     // ── aspect_promotion_log ───────────────────────────────────────────────────
@@ -778,11 +1112,17 @@ public final class AspectRepository {
         int pruned         = body.containsKey("pruned") && Boolean.TRUE.equals(body.get("pruned")) ? 1 : 0;
 
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute(
-                "INSERT INTO nexus.aspect_promotion_log "
-                + "(tenant_id, field_name, sql_type, column_added, rows_backfilled, rows_pruned, pruned, promoted_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?::timestamptz)",
-                tenant, fieldName, sqlType, columnAdded, rowsBackfilled, rowsPruned, pruned, formatTs(promotedAtTs));
+            ctx.insertInto(ASPECT_PROMOTION_LOG,
+                    ASPECT_PROMOTION_LOG.TENANT_ID,
+                    ASPECT_PROMOTION_LOG.FIELD_NAME,
+                    ASPECT_PROMOTION_LOG.SQL_TYPE,
+                    ASPECT_PROMOTION_LOG.COLUMN_ADDED,
+                    ASPECT_PROMOTION_LOG.ROWS_BACKFILLED,
+                    ASPECT_PROMOTION_LOG.ROWS_PRUNED,
+                    ASPECT_PROMOTION_LOG.PRUNED,
+                    ASPECT_PROMOTION_LOG.PROMOTED_AT)
+                .values(tenant, fieldName, sqlType, columnAdded, rowsBackfilled, rowsPruned, pruned, promotedAtTs)
+                .execute();
             return null;
         });
     }
@@ -792,20 +1132,27 @@ public final class AspectRepository {
      */
     public List<Map<String, Object>> listPromotions(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.fetch(
-                "SELECT field_name, sql_type, column_added, rows_backfilled, rows_pruned, pruned, promoted_at "
-                + "FROM nexus.aspect_promotion_log "
-                + "ORDER BY promoted_at ASC, id ASC");
+            var rows = ctx.select(
+                    ASPECT_PROMOTION_LOG.FIELD_NAME,
+                    ASPECT_PROMOTION_LOG.SQL_TYPE,
+                    ASPECT_PROMOTION_LOG.COLUMN_ADDED,
+                    ASPECT_PROMOTION_LOG.ROWS_BACKFILLED,
+                    ASPECT_PROMOTION_LOG.ROWS_PRUNED,
+                    ASPECT_PROMOTION_LOG.PRUNED,
+                    ASPECT_PROMOTION_LOG.PROMOTED_AT)
+                .from(ASPECT_PROMOTION_LOG)
+                .orderBy(ASPECT_PROMOTION_LOG.PROMOTED_AT.asc(), ASPECT_PROMOTION_LOG.ID.asc())
+                .fetch();
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) {
                 Map<String, Object> m = new LinkedHashMap<>();
-                m.put("field_name",       r.get(0));
-                m.put("sql_type",         r.get(1));
-                m.put("column_added",     r.get(2, Integer.class) != 0);
-                m.put("rows_backfilled",  r.get(3, Integer.class));
-                m.put("rows_pruned",      r.get(4, Integer.class));
-                m.put("pruned",           r.get(5, Integer.class) != 0);
-                OffsetDateTime ts = r.get(6, OffsetDateTime.class);
+                m.put("field_name",       r.get(ASPECT_PROMOTION_LOG.FIELD_NAME));
+                m.put("sql_type",         r.get(ASPECT_PROMOTION_LOG.SQL_TYPE));
+                m.put("column_added",     r.get(ASPECT_PROMOTION_LOG.COLUMN_ADDED) != 0);
+                m.put("rows_backfilled",  r.get(ASPECT_PROMOTION_LOG.ROWS_BACKFILLED));
+                m.put("rows_pruned",      r.get(ASPECT_PROMOTION_LOG.ROWS_PRUNED));
+                m.put("pruned",           r.get(ASPECT_PROMOTION_LOG.PRUNED) != 0);
+                OffsetDateTime ts = r.get(ASPECT_PROMOTION_LOG.PROMOTED_AT);
                 m.put("promoted_at", ts == null ? null : formatTs(ts));
                 out.add(m);
             }
@@ -827,14 +1174,25 @@ public final class AspectRepository {
         int pruned         = body.containsKey("pruned") && Boolean.TRUE.equals(body.get("pruned")) ? 1 : 0;
 
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute(
-                "INSERT INTO nexus.aspect_promotion_log "
-                + "(tenant_id, field_name, sql_type, column_added, rows_backfilled, rows_pruned, pruned, promoted_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?::timestamptz) "
-                + "ON CONFLICT (tenant_id, field_name, promoted_at) DO NOTHING",
-                tenant, fieldName,
-                body.getOrDefault("sql_type", "TEXT"),
-                columnAdded, rowsBackfilled, rowsPruned, pruned, formatTs(promotedAtTs)));
+            ctx.insertInto(ASPECT_PROMOTION_LOG,
+                    ASPECT_PROMOTION_LOG.TENANT_ID,
+                    ASPECT_PROMOTION_LOG.FIELD_NAME,
+                    ASPECT_PROMOTION_LOG.SQL_TYPE,
+                    ASPECT_PROMOTION_LOG.COLUMN_ADDED,
+                    ASPECT_PROMOTION_LOG.ROWS_BACKFILLED,
+                    ASPECT_PROMOTION_LOG.ROWS_PRUNED,
+                    ASPECT_PROMOTION_LOG.PRUNED,
+                    ASPECT_PROMOTION_LOG.PROMOTED_AT)
+                .values(
+                    tenant, fieldName,
+                    (String) body.getOrDefault("sql_type", "TEXT"),
+                    columnAdded, rowsBackfilled, rowsPruned, pruned, promotedAtTs)
+                .onConflict(
+                    ASPECT_PROMOTION_LOG.TENANT_ID,
+                    ASPECT_PROMOTION_LOG.FIELD_NAME,
+                    ASPECT_PROMOTION_LOG.PROMOTED_AT)
+                .doNothing()
+                .execute());
     }
 
     // ── Operator fast-path queries (RDR-152 bead nexus-l9hd8) ──────────────────
@@ -871,21 +1229,21 @@ public final class AspectRepository {
         List<String> result = new ArrayList<>();
         for (int start = 0; start < sourceUris.size(); start += 300) {
             List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
-            String placeholders = String.join(",", java.util.Collections.nCopies(batch.size(), "?"));
+            // fieldExpr is validated by fieldExpression() which only emits:
+            //   - a bare column name (from ALLOWED_ASPECT_COLUMNS, no injection risk)
+            //   - COALESCE(extras,'{}')::json#>>'{...}' (keys validated to [A-Za-z0-9_.]+)
             // ILIKE (case-insensitive) mirrors SQLite's default LIKE behaviour for ASCII.
-            String sql = "SELECT source_uri FROM nexus.document_aspects "
-                + "WHERE source_uri IN (" + placeholders + ") "
-                + "  AND " + fieldExpr + " ILIKE ?";
-            Object[] params = new Object[batch.size() + 1];
-            for (int i = 0; i < batch.size(); i++) params[i] = batch.get(i);
-            params[batch.size()] = predicate;
-
+            Field<String> fExpr = field(fieldExpr, String.class);
             List<String> matched = tenantScope.withTenant(tenant, ctx -> {
-                var rows = ctx.fetch(sql, params);
+                var rows = ctx.select(DOCUMENT_ASPECTS.SOURCE_URI)
+                    .from(DOCUMENT_ASPECTS)
+                    .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
+                        .and(condition("{0} ILIKE {1}", fExpr, inline(predicate))))
+                    .fetch();
                 List<String> out = new ArrayList<>();
                 for (var r : rows) {
-                    Object v = r.get(0);
-                    if (v != null) out.add(v.toString());
+                    String v = r.get(DOCUMENT_ASPECTS.SOURCE_URI);
+                    if (v != null) out.add(v);
                 }
                 return out;
             });
@@ -917,19 +1275,19 @@ public final class AspectRepository {
         Map<String, String> result = new java.util.LinkedHashMap<>();
         for (int start = 0; start < sourceUris.size(); start += 300) {
             List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
-            String placeholders = String.join(",", java.util.Collections.nCopies(batch.size(), "?"));
-            String sql = "SELECT source_uri, " + fieldExpr
-                + " FROM nexus.document_aspects "
-                + "WHERE source_uri IN (" + placeholders + ")";
-            Object[] params = batch.toArray();
+            // fieldExpr validated by fieldExpression() — safe to embed in DSL.field()
+            Field<String> fExpr = field(fieldExpr, String.class);
 
             tenantScope.withTenant(tenant, ctx -> {
-                var rows = ctx.fetch(sql, params);
+                var rows = ctx.select(DOCUMENT_ASPECTS.SOURCE_URI, fExpr)
+                    .from(DOCUMENT_ASPECTS)
+                    .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch))
+                    .fetch();
                 for (var r : rows) {
-                    Object uri = r.get(0);
-                    Object val = r.get(1);
+                    String uri = r.get(DOCUMENT_ASPECTS.SOURCE_URI);
+                    Object val = r.get(fExpr);
                     if (uri != null && val != null) {
-                        result.put(uri.toString(), val.toString());
+                        result.put(uri, val.toString());
                     }
                 }
                 return null;
@@ -975,38 +1333,47 @@ public final class AspectRepository {
 
         for (int start = 0; start < sourceUris.size(); start += 300) {
             List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
-            String placeholders = String.join(",", java.util.Collections.nCopies(batch.size(), "?"));
-            // For AVG we still need SUM+COUNT to fold across batches correctly.
-            // For MIN/MAX a single pass suffices; use the aggregate directly.
-            final String sql;
-            if ("AVG".equals(aggFunc)) {
-                sql = "SELECT SUM(confidence), COUNT(confidence) "
-                    + "FROM nexus.document_aspects "
-                    + "WHERE source_uri IN (" + placeholders + ") "
-                    + "  AND confidence IS NOT NULL";
-            } else {
-                sql = "SELECT " + aggFunc + "(confidence) "
-                    + "FROM nexus.document_aspects "
-                    + "WHERE source_uri IN (" + placeholders + ") "
-                    + "  AND confidence IS NOT NULL";
-            }
-            final Object[] params = batch.toArray();
 
             final double[] localSum = {0.0};
             final long[]   localCnt = {0L};
             final Double[] localVal = {null};
 
             tenantScope.withTenant(tenant, ctx -> {
-                var rows = ctx.fetch(sql, params);
-                if (rows.isEmpty()) return null;
                 if ("AVG".equals(aggFunc)) {
-                    Object sumVal = rows.get(0).get(0);
-                    Object cntVal = rows.get(0).get(1);
-                    if (sumVal != null) localSum[0] = ((Number) sumVal).doubleValue();
-                    if (cntVal != null) localCnt[0] = ((Number) cntVal).longValue();
+                    // For AVG we need SUM+COUNT to fold across batches correctly.
+                    var rows = ctx.select(
+                            sum(DOCUMENT_ASPECTS.CONFIDENCE),
+                            count(DOCUMENT_ASPECTS.CONFIDENCE))
+                        .from(DOCUMENT_ASPECTS)
+                        .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
+                            .and(DOCUMENT_ASPECTS.CONFIDENCE.isNotNull()))
+                        .fetch();
+                    if (!rows.isEmpty()) {
+                        Object sumVal = rows.get(0).get(0);
+                        Object cntVal = rows.get(0).get(1);
+                        if (sumVal != null) localSum[0] = ((Number) sumVal).doubleValue();
+                        if (cntVal != null) localCnt[0] = ((Number) cntVal).longValue();
+                    }
+                } else if ("MIN".equals(aggFunc)) {
+                    var rows = ctx.select(min(DOCUMENT_ASPECTS.CONFIDENCE))
+                        .from(DOCUMENT_ASPECTS)
+                        .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
+                            .and(DOCUMENT_ASPECTS.CONFIDENCE.isNotNull()))
+                        .fetch();
+                    if (!rows.isEmpty()) {
+                        Object val = rows.get(0).get(0);
+                        if (val != null) localVal[0] = ((Number) val).doubleValue();
+                    }
                 } else {
-                    Object val = rows.get(0).get(0);
-                    if (val != null) localVal[0] = ((Number) val).doubleValue();
+                    var rows = ctx.select(max(DOCUMENT_ASPECTS.CONFIDENCE))
+                        .from(DOCUMENT_ASPECTS)
+                        .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
+                            .and(DOCUMENT_ASPECTS.CONFIDENCE.isNotNull()))
+                        .fetch();
+                    if (!rows.isEmpty()) {
+                        Object val = rows.get(0).get(0);
+                        if (val != null) localVal[0] = ((Number) val).doubleValue();
+                    }
                 }
                 return null;
             });

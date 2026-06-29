@@ -101,6 +101,10 @@ class UpdatedAtTriggerTest {
             su.setAutoCommit(true);
             // Insert with a deliberately OLD updated_at (INSERT does not fire the
             // BEFORE UPDATE trigger), then UPDATE a single column.
+            // RDR-164 P1a: register collection 'c' (topics_collection_fk).
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'c') "
+                + "ON CONFLICT (tenant_id, name) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status, updated_at) "
                 + "VALUES ('" + TENANT + "', 'uat-topic', 'c', 0, now(), 'pending', '" + OLD_TS + "')");
@@ -122,6 +126,10 @@ class UpdatedAtTriggerTest {
     void documentAspects_partialUpdate_movesUpdatedAt() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-164 P1a: register collection 'c' (document_aspects_collection_fk).
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'c') "
+                + "ON CONFLICT (tenant_id, name) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.document_aspects "
                 + "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, salient_sentences, updated_at) "

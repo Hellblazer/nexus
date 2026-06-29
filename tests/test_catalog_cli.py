@@ -395,7 +395,7 @@ class TestLinksFilterCommand:
         then bare tumbler. Covers the register-via-API path where
         documents can carry a file_path with empty title."""
         from nexus.catalog.tumbler import Tumbler
-        from nexus.commands.catalog import _endpoint_label
+        from nexus.commands.catalog_cmds.links import _endpoint_label
 
         cat = initialized_catalog
         # Register programmatically to bypass the CLI --title requirement.
@@ -808,7 +808,7 @@ class TestStatsCommand:
                 similarity=0.8, source_collection="docs__src",
             )
 
-        import nexus.commands.catalog as catalog_mod
+        import nexus.commands.catalog_cmds.report as catalog_mod
 
         monkeypatch.setattr(
             catalog_mod, "_taxonomy_stats",
@@ -836,7 +836,7 @@ class TestStatsCommand:
     ):
         """--json output carries the taxonomy block under a top-level
         ``taxonomy`` key so machine readers can consume it."""
-        import nexus.commands.catalog as catalog_mod
+        import nexus.commands.catalog_cmds.report as catalog_mod
 
         monkeypatch.setattr(
             catalog_mod, "_taxonomy_stats",
@@ -861,7 +861,7 @@ class TestStatsCommand:
         text output must not include a Topics line and --json must not
         include a taxonomy key. Regression guard against accidental
         inclusion of a misleading empty block."""
-        import nexus.commands.catalog as catalog_mod
+        import nexus.commands.catalog_cmds.report as catalog_mod
 
         monkeypatch.setattr(catalog_mod, "_taxonomy_stats", lambda: None)
 
@@ -1631,3 +1631,670 @@ class TestCollectionNameCommand:
         ])
         assert result.exit_code == 0, result.output
         assert result.output.strip() == "rdr__1-1__voyage-context-3__v1"
+
+
+class TestSeam3OwnersCarve:
+    """Contract pins for the nexus-kgyoz seam 3 owners command carve.
+
+    Non-vacuous: each pin fails if the carve regresses — by re-inlining the
+    commands into ``commands.catalog``, dropping the ``register`` wiring, or
+    binding ``_get_catalog`` at import time (which would break the
+    ``patch("nexus.commands.catalog._get_catalog", …)`` test seam).
+
+    Note the two commands take different catalog-access paths: ``owners``
+    reads via ``_get_catalog()`` (defended by the patch seam below), while
+    ``dedupe-owners`` opens an admin catalog via ``make_catalog_admin()`` and
+    is NOT covered by that patch target — its behavioural coverage lives in
+    ``test_catalog_dedupe.py`` through ``NEXUS_CATALOG_PATH`` env plumbing.
+    """
+
+    def test_owner_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        assert "owners" in catalog_group.commands
+        assert "dedupe-owners" in catalog_group.commands
+
+    def test_owner_commands_defined_in_carved_module(self):
+        """The callbacks live in catalog_cmds.owners, not commands.catalog."""
+        from nexus.cli import main
+        from nexus.commands.catalog_cmds import owners as owners_mod
+        catalog_group = main.commands["catalog"]
+        assert catalog_group.commands["owners"].callback is owners_mod.owners_cmd.callback
+        assert (
+            catalog_group.commands["dedupe-owners"].callback
+            is owners_mod.dedupe_owners_cmd.callback
+        )
+
+    def test_owners_command_routes_get_catalog_through_module(self):
+        """Patching commands.catalog._get_catalog is observed by the carved
+        ``owners`` command — proves module-routed (not import-bound) access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        fake = MagicMock()
+        fake.list_owners.return_value = [
+            {"tumbler_prefix": "1.1", "owner_type": "repo", "name": "sentinel-owner"},
+        ]
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake):
+            result = CliRunner().invoke(main, ["catalog", "owners"])
+        assert result.exit_code == 0, result.output
+        assert "sentinel-owner" in result.output
+        fake.list_owners.assert_called_once()
+
+
+class TestKgyozBackfillCarve:
+    """Contract pins for the nexus-kgyoz backfill-owner-id command carve.
+
+    Non-vacuous: fails if the command is re-inlined into ``commands.catalog``,
+    if the ``register`` wiring is dropped, or if the carved module's lazy
+    service-mode guard / module-routed access regresses.
+    """
+
+    def test_backfill_command_registered_on_group(self):
+        from nexus.cli import main
+        assert "backfill-owner-id" in main.commands["catalog"].commands
+
+    def test_backfill_command_defined_in_carved_module(self):
+        from nexus.cli import main
+        from nexus.commands.catalog_cmds import backfill as backfill_mod
+        cmd = main.commands["catalog"].commands["backfill-owner-id"]
+        assert cmd.callback is backfill_mod.backfill_owner_id_cmd.callback
+
+    def test_backfill_service_mode_guard_fires_through_carved_module(self):
+        """End-to-end through the group: service mode is refused with a clear
+        error. Exercises the carved command's lazy imports and guard before
+        any catalog access — no real catalog needed."""
+        from unittest.mock import patch
+
+        from nexus.cli import main
+
+        with patch("nexus.catalog.factory._is_catalog_service_mode", return_value=True):
+            result = CliRunner().invoke(main, ["catalog", "backfill-owner-id"])
+        assert result.exit_code != 0
+        assert "not supported in service mode" in result.output
+
+
+class TestKgyozLinksCarve:
+    """Contract pins for the nexus-kgyoz links-family command carve.
+
+    Non-vacuous: fails if any link command is re-inlined into
+    ``commands.catalog``, if the ``register`` wiring is dropped, if the
+    moved link-only helpers regress, or if module-routed ``_get_catalog``
+    access is bound at import time.
+    """
+
+    LINK_COMMANDS = [
+        "link", "unlink", "links", "link-bulk-delete", "link-audit",
+        "links-for-file", "link-density", "suggest-links",
+        "generate-links", "link-generate",
+    ]
+
+    def test_all_link_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.LINK_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_link_commands_defined_in_carved_module(self):
+        """Every link command's callback lives in catalog_cmds.links."""
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.LINK_COMMANDS:
+            cmd = catalog_group.commands[name]
+            assert cmd.callback.__module__ == "nexus.commands.catalog_cmds.links", (
+                f"{name} callback not in carved module: {cmd.callback.__module__}"
+            )
+
+    def test_link_only_helpers_live_in_carved_module(self):
+        """The two link-render helpers moved with the commands."""
+        from nexus.commands.catalog_cmds import links as links_mod
+        assert hasattr(links_mod, "_endpoint_label")
+        assert hasattr(links_mod, "_unique_edges_by_target")
+
+    def test_link_audit_routes_get_catalog_through_module(self):
+        """End-to-end through the group: patching
+        commands.catalog._get_catalog is observed by the carved link-audit
+        command — proves module-routed (not import-bound) access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        fake = MagicMock()
+        fake.link_audit.return_value = {
+            "total": 7, "orphaned_count": 0, "duplicate_count": 0,
+            "by_type": {}, "by_creator": {}, "orphaned": [],
+        }
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake):
+            result = CliRunner().invoke(main, ["catalog", "link-audit", "--json"])
+        assert result.exit_code == 0, result.output
+        assert '"total": 7' in result.output
+        fake.link_audit.assert_called_once()
+
+    def test_links_flat_query_runs_through_carved_body(self):
+        """End-to-end through the group for the most complex carved command:
+        the `links` flat-query + JSON render path runs intact (guards against
+        an intra-body line drop that the __module__ pin would miss)."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        edge = MagicMock()
+        edge.to_dict.return_value = {"from": "1.1.1", "to": "1.2.1", "link_type": "cites"}
+        fake = MagicMock()
+        fake.link_query.return_value = [edge]
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake):
+            result = CliRunner().invoke(
+                main, ["catalog", "links", "--created-by", "bib_enricher", "--json"],
+            )
+        assert result.exit_code == 0, result.output
+        assert '"link_type": "cites"' in result.output
+        fake.link_query.assert_called_once()
+
+    def test_link_generate_delegates_to_registered_generate_links(self):
+        """link-generate's ctx.invoke target IS the object registered as
+        generate-links — pins the delegation across the carve."""
+        from nexus.cli import main
+        from nexus.commands.catalog_cmds import links as links_mod
+
+        catalog_group = main.commands["catalog"]
+        assert catalog_group.commands["generate-links"] is links_mod.generate_links_cmd
+
+
+class TestWhh61BackupsCarve:
+    """Contract pins for the nexus-whh61.4 backups command carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+
+    Note the two access paths: ``list-backups`` / ``vacuum-backups`` read via
+    ``_get_catalog()`` (defended by the patch-seam pins below), while
+    ``undelete`` opens an admin catalog via ``make_catalog_admin()`` — pinned
+    here by its daemon-live guard; its full restore round-trip lives in
+    ``test_catalog_backup_and_safety.py`` via ``NEXUS_CATALOG_PATH`` plumbing.
+    """
+
+    BACKUP_COMMANDS = ["list-backups", "undelete", "vacuum-backups"]
+
+    def test_backup_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.BACKUP_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_backup_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.BACKUP_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.backups"
+            ), f"{name} not in carved module"
+
+    def test_list_backups_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved list-backups command — proves module-routed access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        fake = MagicMock()
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
+                patch("nexus.catalog.catalog_backup.list_backups", return_value=[]) as lb:
+            result = CliRunner().invoke(main, ["catalog", "list-backups"])
+        assert result.exit_code == 0, result.output
+        assert "No backups found." in result.output
+        lb.assert_called_once_with(fake)
+
+    def test_vacuum_backups_routes_get_catalog_through_module(self):
+        """Symmetric to list-backups: vacuum-backups also routes _get_catalog
+        through the module object (would fail if bound at import time)."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        fake = MagicMock()
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
+                patch(
+                    "nexus.catalog.catalog_backup.vacuum_old_backups",
+                    return_value=(0, 0),
+                ) as vac:
+            result = CliRunner().invoke(main, ["catalog", "vacuum-backups"])
+        assert result.exit_code == 0, result.output
+        vac.assert_called_once()
+        assert vac.call_args.args[0] is fake
+
+    def test_undelete_surfaces_daemon_live_guard(self):
+        """undelete uses the admin path (make_catalog_admin), not _get_catalog.
+        Pin the CLI-layer guard: a live daemon surfaces as a ClickException."""
+        from unittest.mock import patch
+
+        from nexus.catalog.factory import CatalogAdminDaemonLiveError
+        from nexus.cli import main
+
+        with patch(
+            "nexus.catalog.factory.make_catalog_admin",
+            side_effect=CatalogAdminDaemonLiveError("daemon is live"),
+        ):
+            result = CliRunner().invoke(main, ["catalog", "undelete", "snap.jsonl"])
+        assert result.exit_code != 0
+        assert "daemon is live" in result.output
+
+
+class TestWhh61CollectionsCarve:
+    """Contract pins for the nexus-whh61.4 collections command carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+    """
+
+    COLLECTION_COMMANDS = [
+        "backfill-collections", "collection-name",
+        "rename-collection", "collection-gc",
+    ]
+
+    def test_collection_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.COLLECTION_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_collection_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.COLLECTION_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.collections"
+            ), f"{name} not in carved module"
+
+    def test_backfill_collections_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog + _get_catalog_writer
+        is observed by the carved backfill-collections command — proves
+        module-routed access. Empty T3 + empty catalog → nothing to backfill."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.distinct_doc_collections.return_value = []
+        cat.list_collections.return_value = []
+        t3 = MagicMock()
+        t3.list_collections.return_value = []
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()), \
+                patch("nexus.db.make_t3", return_value=t3):
+            result = CliRunner().invoke(main, ["catalog", "backfill-collections", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to backfill" in result.output
+        cat.distinct_doc_collections.assert_called()
+
+
+class TestWhh61MigrationCarve:
+    """Contract pins for the nexus-whh61.4 migration command carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+    The original used the DIRECT ``_get_catalog()`` form; the carve converts
+    it to the module-routed form — pin 3 proves the patch seam still fires.
+    """
+
+    def test_migrate_fallback_registered_on_group(self):
+        from nexus.cli import main
+        assert "migrate-fallback" in main.commands["catalog"].commands
+
+    def test_migrate_fallback_defined_in_carved_module(self):
+        from nexus.cli import main
+        cmd = main.commands["catalog"].commands["migrate-fallback"]
+        assert cmd.callback.__module__ == "nexus.commands.catalog_cmds.migration"
+
+    def test_migrate_fallback_routes_get_catalog_through_module(self):
+        """Patching commands.catalog._get_catalog is observed by the carved
+        migrate-fallback — proves the direct->module-routed conversion."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.get_collection.return_value = None  # -> ClickException before any write
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(main, ["catalog", "migrate-fallback", "docs__default"])
+        assert result.exit_code != 0
+        assert "not registered in the collections" in result.output
+        cat.get_collection.assert_called_once_with("docs__default")
+
+    def test_migrate_fallback_dry_run_emits_proposal_through_carved_body(self):
+        """Deeper pin: the dry-run proposal path runs intact through the
+        carved body (guards an intra-body line drop the early-exit pin and
+        __module__ pin would miss)."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        entry = MagicMock()
+        entry.tumbler = "1.1.1"
+        cat = MagicMock()
+        cat.get_collection.return_value = {"name": "docs__default"}  # non-None
+        cat.list_by_collection.return_value = [entry]
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(
+                main, ["catalog", "migrate-fallback", "docs__default", "--dry-run"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "docs__default: 1 doc(s) ->" in result.output
+        cat.list_by_collection.assert_called_once_with("docs__default")
+
+
+class TestWhh61MaintenanceCarve:
+    """Contract pins for the nexus-whh61.4 maintenance (gc + chash-reconcile) carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+    """
+
+    MAINT_COMMANDS = ["gc", "chash-reconcile"]
+
+    def test_maintenance_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.MAINT_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_maintenance_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.MAINT_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.maintenance"
+            ), f"{name} not in carved module"
+
+    def test_gc_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved gc command — proves module-routed access. Empty catalog →
+        no orphans."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.all_documents.return_value = []
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(main, ["catalog", "gc"])
+        assert result.exit_code == 0, result.output
+        assert "No orphan entries found." in result.output
+        cat.all_documents.assert_called()
+
+
+class TestWhh61RemediationCarve:
+    """Contract pins for the nexus-whh61.4 remediation carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, the six shared helpers not moving, or import-bound
+    (non-module-routed) ``_get_catalog``.
+    """
+
+    REMEDIATION_COMMANDS = ["remediate-paths", "prune-stale"]
+    MOVED_HELPERS = [
+        "_build_basename_index", "_entry_needs_remediation",
+        "_resolve_via_devonthink", "_resolve_candidate",
+        "_rdr_prefix_of", "_build_rdr_prefix_index",
+        # module constants that anchor the helpers, moved with them:
+        "_REMEDIATE_DEFAULT_EXTENSIONS", "_RDR_PREFIX_RE",
+    ]
+
+    def test_remediation_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.REMEDIATION_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_remediation_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.REMEDIATION_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.remediation"
+            ), f"{name} not in carved module"
+
+    def test_shared_helpers_relocated_to_remediation_module(self):
+        """The six private helpers moved out of commands.catalog into the
+        carved module (and the test files that import them were repointed)."""
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import remediation as rem_mod
+        for h in self.MOVED_HELPERS:
+            assert hasattr(rem_mod, h), f"{h} missing from remediation module"
+            assert not hasattr(cat_mod, h), f"{h} still in commands.catalog"
+
+    def test_prune_stale_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved prune-stale command — proves module-routed access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.all_documents.return_value = []
+        cat.owners_with_roots.return_value = {}
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(main, ["catalog", "prune-stale"])
+        assert result.exit_code == 0, result.output
+        assert "0 stale" in result.output
+        cat.all_documents.assert_called()
+
+
+class TestWhh61ReportCarve:
+    """Contract pins for the nexus-whh61.4 report carve.
+
+    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
+    ``register`` call, ``_taxonomy_stats`` not moving, or import-bound
+    (non-module-routed) ``_get_catalog``.
+    """
+
+    REPORT_COMMANDS = ["stats", "orphans", "session-summary", "coverage"]
+
+    def test_report_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.REPORT_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_report_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.REPORT_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.report"
+            ), f"{name} not in carved module"
+
+    def test_taxonomy_stats_relocated(self):
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import report as rep_mod
+        assert hasattr(rep_mod, "_taxonomy_stats")
+        assert not hasattr(cat_mod, "_taxonomy_stats")
+
+    def test_stats_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved stats command — proves module-routed access."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.stats.return_value = {
+            "owner_count": 3, "doc_count": 9, "link_count": 4, "chunk_count": 0,
+            "by_content_type": {}, "links_by_type": {},
+        }
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog_cmds.report._taxonomy_stats", return_value=None):
+            result = CliRunner().invoke(main, ["catalog", "stats"])
+        assert result.exit_code == 0, result.output
+        assert "Documents: 9" in result.output
+        cat.stats.assert_called()
+
+
+class TestWhh61IntegrityCarve:
+    """Contract pins for the nexus-whh61.4 integrity carve.
+
+    Non-vacuous: fails on re-inline, dropped ``register``, the four private
+    helpers not moving, ``_make_t3`` wrongly moving (it is SHARED and must
+    stay in commands.catalog), or import-bound ``_get_catalog``.
+    """
+
+    INTEGRITY_COMMANDS = ["audit-membership", "verify"]
+    MOVED_HELPERS = [
+        "_audit_membership_all", "_home_matches_root",
+        "_source_uri_home_key", "_heal_ghosts",
+        # module constants that moved with _source_uri_home_key:
+        "_EMPTY_HOME_KEY", "_DEVONTHINK_HOME_KEY",
+    ]
+
+    def test_integrity_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.INTEGRITY_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_integrity_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.INTEGRITY_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.integrity"
+            ), f"{name} not in carved module"
+
+    def test_private_helpers_relocated_but_make_t3_stays(self):
+        """The four exclusive helpers move; the SHARED _make_t3 stays in
+        commands.catalog (verify routes to it via the module object)."""
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import integrity as integ_mod
+        for h in self.MOVED_HELPERS:
+            assert hasattr(integ_mod, h), f"{h} missing from integrity module"
+            assert not hasattr(cat_mod, h), f"{h} still in commands.catalog"
+        # _make_t3 is shared (setup/consolidate/backfill) — must NOT move.
+        assert hasattr(cat_mod, "_make_t3")
+        assert not hasattr(integ_mod, "_make_t3")
+
+    def test_verify_routes_get_catalog_through_module(self):
+        """End-to-end: patching commands.catalog._get_catalog is observed by
+        the carved verify command — proves module-routed access. (The shared
+        _make_t3 routing is pinned structurally above and exercised by the
+        real verify suite, which reaches the t3 path with non-empty docs.)"""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.cli import main
+
+        cat = MagicMock()
+        cat.all_documents.return_value = []  # empty → clean early return
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+            result = CliRunner().invoke(main, ["catalog", "verify"])
+        assert result.exit_code == 0, result.output
+        cat.all_documents.assert_called()
+
+
+class TestWhh61DoctorCarve:
+    """Contract pins for the nexus-whh61.4 doctor carve (the final family).
+
+    Non-vacuous: fails on re-inline, dropped ``register``, the diagnostic
+    helpers not moving, or import-bound ``_get_catalog``.
+    """
+
+    DOCTOR_COMMANDS = ["doctor", "synthesize-log"]
+    SAMPLE_MOVED_HELPERS = [
+        "_run_replay_equality", "_snapshot_table", "_check_bootstrap_status",
+        "_run_name_vs_embed_dim", "_percentile", "_run_t3_doc_id_coverage",
+        "_run_collections_drift", "_run_chunk_size_distribution",
+        "_run_chunk_text_dedup", "_run_t3_vs_catalog",
+        "_print_replay_equality_text", "_expected_dim_for_model_token",
+        # threshold constants moved with the helpers:
+        "_MICRO_CHUNK_BYTES", "_VOYAGE_DIM", "_ORPHAN_RATIO_WARN_THRESHOLD",
+    ]
+
+    def test_prune_deprecated_keys_stayed_in_catalog(self):
+        """_PRUNE_DEPRECATED_KEYS is an indexer/normalisation constant, NOT a
+        diagnostic — it must stay in commands.catalog (indexer contract tests
+        import it from there), not get swept into the doctor module."""
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import doctor as doc_mod
+        assert hasattr(cat_mod, "_PRUNE_DEPRECATED_KEYS")
+        assert not hasattr(doc_mod, "_PRUNE_DEPRECATED_KEYS")
+
+    def test_doctor_commands_registered_on_group(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.DOCTOR_COMMANDS:
+            assert name in catalog_group.commands, f"{name} not registered"
+
+    def test_doctor_commands_defined_in_carved_module(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        for name in self.DOCTOR_COMMANDS:
+            assert catalog_group.commands[name].callback.__module__ == (
+                "nexus.commands.catalog_cmds.doctor"
+            ), f"{name} not in carved module"
+
+    def test_diagnostic_helpers_relocated(self):
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import doctor as doc_mod
+        for h in self.SAMPLE_MOVED_HELPERS:
+            assert hasattr(doc_mod, h), f"{h} missing from doctor module"
+            assert not hasattr(cat_mod, h), f"{h} still in commands.catalog"
+
+    def test_doctor_requires_a_check_flag(self):
+        """Behavioural: no flag → UsageError (exit 2), proving the carved
+        command runs through its arg-validation path."""
+        from nexus.cli import main
+        result = CliRunner().invoke(main, ["catalog", "doctor"])
+        assert result.exit_code == 2
+        assert "Pass a check flag" in result.output
+
+
+class TestWhh61OrphanBackfillCarve:
+    """Contract pins for the nexus-whh61.4 orphan-backfill subgroup carve.
+
+    Non-vacuous: fails on re-inline, dropped ``register``, ``_get_owner_for``
+    not moving, or import-bound ``_get_catalog``.
+    """
+
+    SUBCOMMANDS = ["dt-link", "synthetic", "dump-csv", "apply-csv", "link-existing"]
+
+    def test_orphan_backfill_group_registered(self):
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        assert "orphan-backfill" in catalog_group.commands
+        ob = catalog_group.commands["orphan-backfill"]
+        for sub in self.SUBCOMMANDS:
+            assert sub in ob.commands, f"{sub} missing from orphan-backfill group"
+
+    def test_orphan_backfill_defined_in_carved_module(self):
+        from nexus.cli import main
+        ob = main.commands["catalog"].commands["orphan-backfill"]
+        assert ob.callback.__module__ == "nexus.commands.catalog_cmds.orphan_backfill"
+        for sub in self.SUBCOMMANDS:
+            assert ob.commands[sub].callback.__module__ == (
+                "nexus.commands.catalog_cmds.orphan_backfill"
+            ), f"{sub} not in carved module"
+
+    def test_get_owner_for_relocated(self):
+        """_get_owner_for is orphan-backfill-exclusive and moved; the SHARED
+        _make_t3 / _make_registry / _backfill_repos stayed (used by setup)."""
+        import nexus.commands.catalog as cat_mod
+        from nexus.commands.catalog_cmds import orphan_backfill as ob_mod
+        assert hasattr(ob_mod, "_get_owner_for")
+        assert not hasattr(cat_mod, "_get_owner_for")
+        for shared in ("_make_t3", "_make_registry", "_backfill_repos"):
+            assert hasattr(cat_mod, shared), f"{shared} must stay in catalog (shared w/ setup)"
+
+    def test_orphan_backfill_subgroup_resolves_through_main_group(self):
+        """The carved subgroup is reachable as ``nx catalog orphan-backfill``
+        and its help lists every subcommand — proves the add_command wiring.
+        (Module-routed _get_catalog access is exercised end-to-end by
+        test_orphan_backfill.py.)"""
+        from nexus.cli import main
+
+        result = CliRunner().invoke(main, ["catalog", "orphan-backfill", "--help"])
+        assert result.exit_code == 0
+        for sub in self.SUBCOMMANDS:
+            assert sub in result.output, f"{sub} not listed in group help"

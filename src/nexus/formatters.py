@@ -176,7 +176,7 @@ def _format_with_bat(
     calls ``bat`` once per file.  Falls back to plain formatting per file
     on any subprocess error.
     """
-    from collections import defaultdict
+    from collections import defaultdict  # noqa: PLC0415 — deferred import — branch-local / circular-dep avoidance
 
     # Group results by display path (nexus-1qed: prefer catalog-resolved
     # _display_path, fall back to source_path / file_path for legacy chunks).

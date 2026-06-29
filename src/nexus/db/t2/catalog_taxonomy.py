@@ -150,7 +150,7 @@ def _check_centroid_dimension(embedding: "np.ndarray", centroid_coll: Any) -> bo
                 stored_dim=stored_dim,
             )
             return False
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return True
     return True
 
@@ -162,9 +162,12 @@ class CatalogTaxonomy:
     """Owns the ``topics`` and ``topic_assignments`` tables.
 
     RDR-070 (nexus-9k5): topic discovery uses sklearn HDBSCAN on
-    pre-computed embeddings. Centroids stored in ChromaDB
-    ``taxonomy__centroids`` collection. c-TF-IDF labels via
-    CountVectorizer + TfidfTransformer for c-TF-IDF labels.
+    pre-computed embeddings. Centroids historically lived in the Chroma
+    ``taxonomy__centroids`` collection; since RDR-155 P4a.2 the serving path
+    is pgvector via the nexus-service (the discover/rebuild centroid-write
+    helpers retain raw-Chroma access only for injected-client / legacy-ETL
+    paths, slated for removal in RDR-155 P4b). c-TF-IDF labels via
+    CountVectorizer + TfidfTransformer.
 
     Constructor takes a :class:`MemoryStore` reference for
     :meth:`get_topic_docs` JOIN resolution (RDR-063 §Cross-Domain
@@ -172,7 +175,7 @@ class CatalogTaxonomy:
     """
 
     def __init__(self, path: Path, memory: "MemoryStore") -> None:
-        import math
+        import math  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
         self._memory = memory
         self._lock = threading.Lock()
@@ -224,7 +227,7 @@ class CatalogTaxonomy:
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_topics
+        from nexus.db.migrations import migrate_topics  # noqa: PLC0415 — deferred to avoid circular import
 
         migrate_topics(self.conn)
 
@@ -234,7 +237,7 @@ class CatalogTaxonomy:
         RDR-070 (nexus-9k5). Lock-naive: caller must hold both locks.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_assigned_by
+        from nexus.db.migrations import migrate_assigned_by  # noqa: PLC0415 — deferred to avoid circular import
 
         migrate_assigned_by(self.conn)
 
@@ -244,7 +247,7 @@ class CatalogTaxonomy:
         RDR-070 (nexus-lbu). Lock-naive: caller must hold both locks.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_review_columns
+        from nexus.db.migrations import migrate_review_columns  # noqa: PLC0415 — deferred to avoid circular import
 
         migrate_review_columns(self.conn)
 
@@ -506,7 +509,7 @@ class CatalogTaxonomy:
         Raw ``similarity`` column values are used; ICF is applied only for
         the receiving-hub ICF reporting, never to mutate stored rows.
         """
-        from nexus.corpus import default_projection_threshold
+        from nexus.corpus import default_projection_threshold  # noqa: PLC0415 — deferred to avoid circular import
 
         resolved_threshold = (
             threshold if threshold is not None
@@ -1058,15 +1061,23 @@ class CatalogTaxonomy:
             self.conn.commit()
 
     def delete_topic(self, topic_id: int, *, chroma_client: Any = None) -> str | None:
-        """Delete a topic, its assignments, and its centroid.
+        """Delete a topic and its assignments. Returns the collection name.
 
-        Returns the collection name (needed by routed callers for chroma
-        centroid cleanup when ``chroma_client`` is not passed in).  When
-        ``chroma_client`` is provided the cleanup happens internally as
-        before (backward-compatible).  RDR-151 Phase 3 (nexus-uzay8):
-        the T2 DELETE part can now be routed through the daemon; the
-        caller performs the local chroma centroid delete using the
-        returned collection name.
+        RDR-164 P5 (nexus-c6vze, closes nexus-5kl1b obsolete): the old inline
+        Chroma ``taxonomy__centroids`` cleanup is removed. It was dead code:
+        NO caller ever passed ``chroma_client`` (grep-verified across the CLI +
+        MCP paths — review_cmd routes delete/merge through ``t2_index_write``
+        with no client), so the ``if chroma_client and collection`` guard never
+        fired. Removing it is therefore behaviour-preserving in every config,
+        including ``NX_STORAGE_BACKEND=sqlite``, where topic delete/merge already
+        did not clean Chroma centroids (a pre-existing gap, not introduced here).
+
+        Centroid lifecycle is owned by the service-backed taxonomy store
+        (:class:`HttpTaxonomyStore`, which self-cleans via its pgvector centroid
+        port — the cugrk service leg). ``chroma_client`` is retained only for
+        signature parity with that drop-in and is now ignored; the full Chroma
+        deletion (incl. the discover/rebuild centroid-write path) is RDR-155
+        P4b's scope, not this method's.
         """
         # Read collection before deleting the row
         with self._lock:
@@ -1079,15 +1090,6 @@ class CatalogTaxonomy:
             )
             self.conn.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
             self.conn.commit()
-        # Clean up centroid outside the lock
-        if chroma_client and collection:
-            try:
-                coll = chroma_client.get_collection(
-                    "taxonomy__centroids", embedding_function=None,
-                )
-                coll.delete(ids=[f"{collection}:{topic_id}"])
-            except Exception:
-                pass
         return collection
 
     def merge_topics(
@@ -1097,11 +1099,15 @@ class CatalogTaxonomy:
 
         Uses INSERT OR IGNORE to handle docs assigned to both topics
         (dedup). Updates target's doc_count to the actual assignment count.
-        Cleans up source centroid from ChromaDB when chroma_client provided.
+        Returns the source topic's collection name.
 
-        Returns the source topic's collection name (needed by routed callers
-        for chroma centroid cleanup).  RDR-151 Phase 3 (nexus-uzay8): the
-        T2 writes route through the daemon; caller does local centroid delete.
+        RDR-164 P5 (nexus-c6vze, closes nexus-5kl1b obsolete): the old inline
+        Chroma ``taxonomy__centroids`` source-centroid cleanup is removed. Like
+        :meth:`delete_topic`, it was dead code — no caller ever passed
+        ``chroma_client`` (grep-verified), so removal is behaviour-preserving in
+        every config. Centroid lifecycle is owned by the service-backed
+        :class:`HttpTaxonomyStore` drop-in (pgvector). ``chroma_client`` is
+        retained for signature parity and ignored.
         """
         if source_id == target_id:
             return None  # Self-merge is a no-op
@@ -1153,15 +1159,6 @@ class CatalogTaxonomy:
             # Delete source topic
             self.conn.execute("DELETE FROM topics WHERE id = ?", (source_id,))
             self.conn.commit()
-        # Clean up source centroid outside the lock
-        if chroma_client and collection:
-            try:
-                coll = chroma_client.get_collection(
-                    "taxonomy__centroids", embedding_function=None,
-                )
-                coll.delete(ids=[f"{collection}:{source_id}"])
-            except Exception:
-                pass
         return collection
 
     def get_topic_by_id(self, topic_id: int) -> dict[str, Any] | None:
@@ -1396,7 +1393,7 @@ class CatalogTaxonomy:
         c-TF-IDF labels, and reassigns docs. Returns number of children
         created, or 0 if too few docs.
         """
-        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid circular import
 
         if k < 2:
             return 0
@@ -1415,7 +1412,7 @@ class CatalogTaxonomy:
             coll = chroma_client.get_collection(
                 collection_name, embedding_function=None,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
             _log.warning("split_collection_not_found", collection=collection_name)
             return 0
 
@@ -1438,7 +1435,7 @@ class CatalogTaxonomy:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         # KMeans sub-clustering
-        from sklearn.cluster import KMeans
+        from sklearn.cluster import KMeans  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
         km = KMeans(n_clusters=k, n_init=10, random_state=42)
         labels = km.fit_predict(embeddings)
@@ -1516,7 +1513,7 @@ class CatalogTaxonomy:
         parent_centroid_id = f"{collection_name}:{topic_id}"
         try:
             centroid_coll.delete(ids=[parent_centroid_id])
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             pass  # Parent centroid may not exist
         if c_ids:
             self._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
@@ -1701,7 +1698,7 @@ class CatalogTaxonomy:
                 self._discover_cross_links(
                     collection_name, c_embs, c_metas, centroid_coll,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 _log.debug("discover_cross_links_failed", exc_info=True)
 
         # Record doc count for rebalance tracking
@@ -1953,7 +1950,7 @@ class CatalogTaxonomy:
                 where={"collection": {"$ne": collection_name}},
                 include=["embeddings", "metadatas"],
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return []
 
         other_embs_raw = other.get("embeddings")
@@ -2024,7 +2021,7 @@ class CatalogTaxonomy:
                 "taxonomy__centroids",
                 embedding_function=None,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return None
 
         if centroid_coll.count() == 0:
@@ -2044,7 +2041,7 @@ class CatalogTaxonomy:
 
         try:
             results = centroid_coll.query(**query_kwargs)
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return None  # No centroids match the filter
 
         if not results["ids"] or not results["ids"][0]:
@@ -2085,7 +2082,7 @@ class CatalogTaxonomy:
                 "taxonomy__centroids",
                 embedding_function=None,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return []
 
         if centroid_coll.count() == 0:
@@ -2114,7 +2111,7 @@ class CatalogTaxonomy:
                 query_embeddings=emb_list,
                 **base_kwargs,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return []
 
         by = "projection" if cross_collection else "centroid"
@@ -2238,19 +2235,19 @@ class CatalogTaxonomy:
         (``nx taxonomy project``) sets this to True by default so long-
         running projections are observable; test callers leave it False.
         """
-        import sys
-        import time
+        import sys  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+        import time  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
         def _emit(msg: str) -> None:
             if progress:
-                print(f"  {msg}", file=sys.stderr, flush=True)
+                print(f"  {msg}", file=sys.stderr, flush=True)  # noqa: T201 — opt-in (`progress=True`) CLI projection progress to stderr
 
         # 1. Fetch source embeddings
         try:
             src_coll = chroma_client.get_collection(
                 source_collection, embedding_function=None,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return {
                 "matched_topics": [],
                 "novel_chunks": [],
@@ -2297,7 +2294,7 @@ class CatalogTaxonomy:
         # 2. Fetch target centroids
         try:
             centroid_coll = self._create_centroid_collection(chroma_client)
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return {
                 "matched_topics": [],
                 "novel_chunks": list(src_ids),
@@ -2724,7 +2721,7 @@ class CatalogTaxonomy:
                     else:
                         old_labels.append(m.get("label", ""))
                         old_review_statuses.append("pending")
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             pass
 
         with self._lock:

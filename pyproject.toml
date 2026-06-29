@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "5.10.6"
+version = "6.0.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -194,6 +194,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=7.0.0",
+    "ruff>=0.15.18",
     "syrupy>=4.0",
     "twine>=6.2.0",
 ]
@@ -213,3 +214,24 @@ dev = [
 override-dependencies = [
     "av; sys_platform == 'never'",
 ]
+
+[tool.ruff]
+# nexus-ls88v (epic nexus-whh61 F7): enforce the structlog-only / no-print
+# discipline that was previously convention-only. The selected rules below are
+# each audited across src/ — every existing site is either fixed or carries a
+# justified per-line `# noqa: <code> — reason`, so a NEW violation fails CI.
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+# T20  flake8-print        — no print() in library code (CLAUDE.md hot rule;
+#                            library progress -> structlog, CLI -> click.echo).
+# BLE001 flake8-blind-except — `except Exception`/bare-except must be audited.
+# PLC0415 import-outside-top-level — lazy imports must be deliberate (circular-
+#                            dep / optional-dep / startup-cost), not accidental.
+select = ["T20", "BLE001", "PLC0415"]
+
+[tool.ruff.lint.per-file-ignores]
+# CLI command modules emit user-facing output; stdout via print()/click.echo is
+# the sanctioned output channel there, not a library no-print violation.
+"src/nexus/commands/**" = ["T201", "T203"]

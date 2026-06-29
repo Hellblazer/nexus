@@ -271,9 +271,9 @@ def _iter_managed_repo_roots() -> list[Path]:
     (``nx upgrade``) treats hook refresh as best-effort.
     """
     try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
-        from nexus.config import nexus_config_dir  # noqa: PLC0415
-        from nexus.repos import list_repos_dual  # noqa: PLC0415
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — command-local import (config)
+        from nexus.repos import list_repos_dual  # noqa: PLC0415 — command-local import (repos)
 
         cat = make_catalog_reader()
         if cat is None:

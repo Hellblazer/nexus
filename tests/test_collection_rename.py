@@ -25,6 +25,24 @@ import pytest
 from click.testing import CliRunner
 
 
+@pytest.fixture(autouse=True)
+def _pin_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the storage backend to SQLITE for the whole module.
+
+    RDR-164 P3 added a SERVICE branch to ``rename_collection_data_plane`` that
+    fans out to the Java service. The hard default is SERVICE (RDR-152), so
+    without this pin these local-path tests (T2Database + fake Chroma) would
+    route into the service branch. Service-mode coverage lives in
+    ``test_collection_rename_service_mode.py``.
+    """
+    from nexus.db.storage_mode import StorageBackend
+
+    monkeypatch.setattr(
+        "nexus.db.storage_mode.storage_backend_for",
+        lambda store: StorageBackend.SQLITE,
+    )
+
+
 @pytest.fixture
 def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CHROMA_API_KEY", "test")

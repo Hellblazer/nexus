@@ -25,141 +25,21 @@ _log = structlog.get_logger()
 
 
 def _db_path() -> "Path":  # noqa: F821 — lazy import
-    from nexus.commands._helpers import default_db_path
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     return default_db_path()
 
 
-def _check_deferred_migrations(conn: sqlite3.Connection) -> list[dict]:
-    """Probe for known deferred/gated migration conditions in the current DB.
-
-    GH-1061 E2 (bounded fix): the version-range filter in ``nx upgrade --dry-run``
-    can show ``pending = []`` even when a migration step will block the next daemon
-    start — because the step raised ``MigrationRetry`` (catalog absent) or will
-    raise ``MigrationError`` (high-volume orphans) rather than advancing the stored
-    version.
-
-    Probes the known conditions for the RDR-108 Phase 1c PK migrations, which
-    share the same defer/gate pattern on both ``document_aspects`` and
-    ``aspect_extraction_queue``:
-
-    1. Table still has the legacy ``(collection, source_path)`` PK AND the
-       catalog ``.catalog.db`` is absent → ``MigrationRetry`` on next start.
-    2. Table still has the legacy PK AND high-volume orphan rows (doc_id='')
-       exist → ``MigrationError`` on next start.
-
-    Returns a list of ``{"name": str, "reason": str, "remediation": str}`` dicts,
-    one entry per affected table.  An empty list means no known deferred/gated
-    work was detected.
-    """
-    import os
-
-    from nexus.db.migrations import _catalog_db_path_from_conn, _HIGH_VOLUME_ORPHAN_THRESHOLD
-
-    deferred: list[dict] = []
-
-    threshold = int(
-        os.environ.get(
-            "NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD",
-            str(_HIGH_VOLUME_ORPHAN_THRESHOLD),
-        )
-    )
-
-    try:
-        catalog_db_path = _catalog_db_path_from_conn(conn)
-    except Exception:
-        catalog_db_path = None
-
-    catalog_present = catalog_db_path is not None and catalog_db_path.exists()
-
-    # Both document_aspects and aspect_extraction_queue share the same RDR-108
-    # Phase 1c defer/gate pattern (_migrate_document_aspects_pk_via_apply_pending
-    # and _migrate_aspect_queue_pk_via_apply_pending in migrations.py).
-    tables = [
-        (
-            "document_aspects",
-            "RDR-108 Phase 1c: PK switch document_aspects to doc_id",
-        ),
-        (
-            "aspect_extraction_queue",
-            "RDR-108 Phase 1c: PK switch aspect_extraction_queue to doc_id",
-        ),
-    ]
-
-    for table_name, migration_name in tables:
-        # Skip if table does not exist (fresh install without aspects).
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (table_name,),
-        ).fetchone()
-        if not has_table:
-            continue
-
-        # Skip if already migrated to doc_id PK.
-        pk_cols = {
-            r[1]
-            for r in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-            if r[5] == 1  # pk flag
-        }
-        if pk_cols == {"doc_id"}:
-            continue
-
-        # Migration is still pending.  Check which gate would fire.
-        if not catalog_present:
-            deferred.append({
-                "name": migration_name,
-                "reason": (
-                    "Catalog database absent — migration raises MigrationRetry "
-                    "and will be retried on next daemon start once the catalog exists."
-                ),
-                "remediation": (
-                    "Run `nx catalog setup` to initialise the catalog, "
-                    "then re-run `nx upgrade`."
-                ),
-            })
-            continue
-
-        # Catalog present — check for high-volume orphans (doc_id='').
-        try:
-            rows = conn.execute(
-                """
-                SELECT collection, COUNT(*) AS n
-                FROM {} WHERE doc_id = ''
-                GROUP BY collection HAVING n > ?
-                ORDER BY n DESC
-                """.format(table_name),  # noqa: S608 — table_name is a literal constant
-                (threshold,),
-            ).fetchall()
-        except Exception:
-            rows = []
-
-        if rows:
-            detail = "; ".join(f"{coll} ({n} rows)" for coll, n in rows)
-            deferred.append({
-                "name": migration_name,
-                "reason": (
-                    f"High-volume unmapped orphan collection(s) detected: {detail}. "
-                    f"Migration will raise MigrationError on next daemon start."
-                ),
-                "remediation": (
-                    f"Option 1 — if collection was renamed, map it:\n"
-                    f"    nx catalog rename-collection <old> <new> --yes\n"
-                    f"  then re-run `nx upgrade`.\n"
-                    f"Option 2 — if collection is stale, drop orphans by raising the threshold:\n"
-                    f"    NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD=100000 nx upgrade"
-                ),
-            })
-
-    return deferred
-
-
 def _current_version() -> str:
-    try:
-        from importlib.metadata import version as _pkg_version
+    # RDR-170: the upgrade target is the canonical (registry-aware) schema
+    # version — max(package, registry_max) — NOT the raw package version. If
+    # this returned the frozen package version (5.10.6) while the registry
+    # carries an ahead-of-release step (5.10.7), apply_pending would RUN that
+    # step but stamp 5.10.6, leaving it perpetually "pending" to doctor and the
+    # next upgrade. expected_t2_schema_version() keeps the stamp == what ran.
+    from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — branch-local; avoids import cost on cold CLI start
 
-        return _pkg_version("conexus")
-    except Exception:
-        return "0.0.0"
+    return expected_t2_schema_version()
 
 
 @click.command("upgrade")
@@ -204,17 +84,17 @@ def _quiesce_daemon() -> None:
     never raises — the migration flock + busy_timeout still protect
     correctness if a straggler connection lingers.
     """
-    import json
-    import os
-    import subprocess
-    import time as _time
+    import json  # noqa: PLC0415 — stdlib import kept branch-local
+    import os  # noqa: PLC0415 — stdlib import kept branch-local
+    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
+    import time as _time  # noqa: PLC0415 — stdlib import kept branch-local
 
     try:
-        from nexus.commands.daemon import _resolve_nx_bin
-        from nexus.config import nexus_config_dir
-        from nexus.daemon.t2_daemon import t2_discovery_path
+        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.daemon.t2_daemon import t2_discovery_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-        from nexus.commands.daemon import _discovery_record_pid
+        from nexus.commands.daemon import _discovery_record_pid  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         disc = t2_discovery_path(nexus_config_dir())
         pid: int | None = None
@@ -244,7 +124,7 @@ def _quiesce_daemon() -> None:
                 except (ProcessLookupError, PermissionError):
                     break  # gone
                 _time.sleep(0.1)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort daemon quiesce; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_daemon_quiesce_failed", error=str(exc))
 
 
@@ -255,10 +135,10 @@ def _cycle_daemon_to_current() -> None:
     version-aware primitive the plugin/mcpb session-start hooks use. Never
     raises: a daemon nudge must not fail the upgrade.
     """
-    import subprocess
+    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
 
     try:
-        from nexus.commands.daemon import _resolve_nx_bin
+        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         subprocess.run(
             [*_resolve_nx_bin(), "daemon", "t2", "ensure-running", "--quiet"],
@@ -267,7 +147,7 @@ def _cycle_daemon_to_current() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort daemon cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_daemon_cycle_failed", error=str(exc))
 
 
@@ -281,16 +161,16 @@ def _cycle_t3_daemon_to_current() -> None:
     mode only; a no-op when no T3 daemon is running or in cloud mode.
     Never raises.
     """
-    import subprocess
+    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
 
     try:
-        from nexus.config import is_local_mode
-        from nexus.daemon.discovery import find_t3_daemon
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.daemon.discovery import find_t3_daemon  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         if not is_local_mode() or find_t3_daemon() is None:
             return  # nothing running to cycle (or cloud mode)
 
-        from nexus.commands.daemon import _resolve_nx_bin
+        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         nx = _resolve_nx_bin()
         for verb in ("stop", "start"):
@@ -301,7 +181,7 @@ def _cycle_t3_daemon_to_current() -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort T3 daemon cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_t3_daemon_cycle_failed", error=str(exc))
 
 
@@ -324,12 +204,12 @@ def _cycle_storage_service_to_current(
     seams for unit tests (avoids patching local imports deep in try blocks).
     Default values reproduce production behaviour exactly.
     """
-    import os
-    import subprocess
+    import os  # noqa: PLC0415 — stdlib import kept branch-local
+    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
 
     try:
-        from nexus.config import nexus_config_dir
-        from nexus.daemon.service_registry import ServiceRegistry
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         # Discover via the storage_service tier (matches what the supervisor
         # publishes and health._resolve_service_endpoint reads).
@@ -343,7 +223,7 @@ def _cycle_storage_service_to_current(
         if live is None:
             return  # nothing running to cycle
 
-        from nexus.commands.daemon import _resolve_nx_bin as _real_nx_bin
+        from nexus.commands.daemon import _resolve_nx_bin as _real_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         nx = _nx_bin_fn() if _nx_bin_fn is not None else _real_nx_bin()
         _run = _run_fn if _run_fn is not None else subprocess.run
         for verb in ("stop", "start"):
@@ -354,7 +234,7 @@ def _cycle_storage_service_to_current(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort storage-service cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_storage_service_cycle_failed", error=str(exc))
 
 
@@ -381,7 +261,7 @@ def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
 
 
 def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool = False) -> None:
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
     db_path = _db_path()
     current = _current_version()
@@ -430,14 +310,6 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
             last_seen = "0.0.0"
             last_seen_t = (0, 0, 0)
 
-        # Compute pending T2 migrations
-        pending_t2 = [
-            m
-            for m in MIGRATIONS
-            if _parse_version(m.introduced) > last_seen_t
-            and _parse_version(m.introduced) <= current_t
-        ]
-
         # Compute pending T3 steps (skip in auto mode or when --skip-t3)
         pending_t3 = []
         if not auto_mode and not skip_t3:
@@ -445,36 +317,80 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                 s
                 for s in T3_UPGRADES
                 if _parse_version(s.introduced) > last_seen_t
-                and _parse_version(s.introduced) <= current_t
             ]
 
         if dry_run:
-            if not pending_t2 and not pending_t3:
-                # GH-1061 E2: even when the version-range filter shows no pending
-                # migrations, there may be deferred or gated work that will block
-                # the next daemon start.  Probe for known conditions so the dry-run
-                # output is honest.
-                deferred = _check_deferred_migrations(conn)
-                if deferred:
-                    click.echo(
-                        f"Up to date (v{current}) by version gate, but "
-                        f"{len(deferred)} deferred/gated migration step(s) will "
-                        f"run on next daemon start:"
-                    )
-                    for item in deferred:
-                        click.echo(f"  [deferred] {item['name']}")
-                        click.echo(f"    Reason:      {item['reason']}")
-                        click.echo(f"    Remediation: {item['remediation']}")
-                    return
+            # RDR-142 P2.1: report T2 pending work from the read-only
+            # step-resolver, NOT a bare version-range filter. The resolver runs
+            # each eligible step's precondition (no DDL / no writes) and reports
+            # would-succeed / would-defer (MigrationRetry) / would-gate
+            # (MigrationError) WITH remediation — so --dry-run can no longer say
+            # "no pending" while a deferred/gated step would block the next start
+            # (the RDR-142 reporting-lie). This subsumes and replaces the GH-1061
+            # E2 `_check_deferred_migrations` stopgap (deleted), covering all 7
+            # defer/gate sites including the undrained-queue and drop_source_path
+            # conditions the stopgap missed.
+            from nexus.db.migrations import (  # noqa: PLC0415 — branch-local; avoids import cost on the non-dry-run path
+                StepOutcome,
+                resolve_blocking_steps,
+            )
+
+            steps = resolve_blocking_steps(conn, current, last_seen=last_seen)
+            if not steps and not pending_t3:
                 click.echo(f"Up to date (v{current}). No pending migrations.")
                 return
 
-            click.echo(f"Dry-run: pending migrations (last seen: v{last_seen}, current: v{current}):")
-            for m in pending_t2:
-                click.echo(f"  T2: [{m.introduced}] {m.name}")
-            for s in pending_t3:
-                click.echo(f"  T3: [{s.introduced}] {s.name} (heavy — skip with --skip-t3)")
+            # Two classes, framed accurately (RDR-142 P2.1 review):
+            #  - eligible: introduced > last_seen — WILL run on the next upgrade /
+            #    daemon start. A gate here genuinely blocks that run.
+            #  - supplementary: the version gate has already passed, so
+            #    apply_pending will NOT re-run it. A non-succeed verdict here is an
+            #    incomplete TABLE STATE with RUNTIME impact (code expects the new
+            #    schema), not a next-start crash — labelled distinctly so an
+            #    operator isn't told the daemon will crash when it won't.
+            eligible = [s for s in steps if s.eligible]
+            supplementary = [s for s in steps if not s.eligible]
+
+            def _emit(s) -> None:
+                if s.outcome == StepOutcome.WOULD_GATE and s.informational:
+                    tag = "[needs attention — apply_pending will attempt to resolve automatically]"
+                elif s.outcome == StepOutcome.WOULD_GATE:
+                    tag = "[BLOCKED — would gate on next start]" if s.eligible \
+                        else "[TABLE STATE INCOMPLETE — runtime queries will fail; apply_pending will NOT re-run (version gate passed)]"
+                elif s.outcome == StepOutcome.WOULD_DEFER:
+                    tag = "[deferred — retried on next start]" if s.eligible \
+                        else "[deferred — catalog absent; apply_pending will NOT re-run at this version]"
+                else:
+                    tag = ""
+                click.echo(f"  T2: [{s.introduced}] {s.name}  {tag}".rstrip())
+                if s.detail:
+                    click.echo(f"    Reason:      {s.detail}")
+                if s.remediation:
+                    click.echo(f"    Remediation: {s.remediation}")
+
+            if eligible or pending_t3:
+                click.echo(
+                    f"Dry-run: pending migrations (last seen: v{last_seen}, current: v{current}):"
+                )
+                for s in eligible:
+                    _emit(s)
+                for s in pending_t3:
+                    click.echo(f"  T3: [{s.introduced}] {s.name} (heavy — skip with --skip-t3)")
+
+            if supplementary:
+                click.echo(
+                    "Table-state checks (version gate already passed; apply_pending will "
+                    "not re-run these — they indicate incomplete migration state with runtime impact):"
+                )
+                for s in supplementary:
+                    _emit(s)
             return
+
+        # Eligible T2 steps for the post-apply report (lower-bound only, mirroring
+        # apply_pending). Computed BEFORE apply_pending stamps the version.
+        pending_t2 = [
+            m for m in MIGRATIONS if _parse_version(m.introduced) > last_seen_t
+        ]
 
         # Execute T2 migrations
         if force:
@@ -512,9 +428,9 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
         # advanced ``_nexus_version.cli_version`` to ``current``, the
         # next run computed ``pending_t3 = []`` and never re-tried.
         if not auto_mode and pending_t3:
-            from nexus.commands._helpers import default_db_path
-            from nexus.db import make_t3
-            from nexus.db.t2 import T2Database
+            from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS _nexus_t3_steps ("
@@ -550,7 +466,7 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                             click.echo(f"  T3: [{step.introduced}] {step.name}")
                             try:
                                 step.fn(t3_db, t2_db.taxonomy)
-                            except Exception as step_exc:
+                            except Exception as step_exc:  # noqa: BLE001 — per-step T3 upgrade failure logged + flagged, remaining steps continue
                                 any_failed = True
                                 _log.warning(
                                     "t3_upgrade_step_failed",
@@ -614,7 +530,7 @@ def _refresh_all_git_hooks() -> None:
     upgrade. Silent when no managed hooks exist anywhere.
     """
     try:
-        from nexus.commands.hooks import refresh_all_managed_hooks
+        from nexus.commands.hooks import refresh_all_managed_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         summary = refresh_all_managed_hooks(echo=False)
         if summary["refreshed"]:
@@ -628,7 +544,7 @@ def _refresh_all_git_hooks() -> None:
                     else "."
                 )
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — best-effort git-hook refresh; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_git_hook_refresh_failed", error=str(exc))
 
 
@@ -645,19 +561,19 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
     can run ``nx catalog migrate-repos --force`` once that verb lands;
     until then they delete the file manually after reading the log.
     """
-    from pathlib import Path
+    from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     reg_path = nexus_config_dir() / "repos.json"
     if not reg_path.exists():
         return  # idempotent — no-op when already absent
 
     try:
-        from nexus.catalog.factory import make_catalog_reader
-        from nexus.config import catalog_path
-        from nexus.repo_identity import _repo_identity
-        from nexus.repos import _read_repos_json, _repos_json_is_parseable
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.repos import _read_repos_json, _repos_json_is_parseable  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         # RDR-137 followup CRITICAL-4 (nexus-43qgm.4): refuse to delete
         # a malformed/truncated repos.json. _read_repos_json returns
@@ -723,7 +639,7 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
             f"\nRepos.json migration: catalog parity confirmed; "
             f"{reg_path} deleted."
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort repos.json migration; failure logged at warning
         _log.warning("repos_json_migration_failed", error=str(exc))
 
 
@@ -732,9 +648,9 @@ def _emit_name_vs_embed_dim_advisory() -> None:
     if any collections are mislabeled. Silent on PASS, error-tolerant
     (T3 may be unavailable on a freshly-migrated install)."""
     try:
-        from nexus.commands.catalog import _run_name_vs_embed_dim
+        from nexus.commands.catalog_cmds.doctor import _run_name_vs_embed_dim  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         report = _run_name_vs_embed_dim()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort doctor advisory; silent return when T3 unavailable
         return
     if report.get("error"):
         return

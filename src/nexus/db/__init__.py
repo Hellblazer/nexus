@@ -69,14 +69,14 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClien
         # RDR-155 P4a.2 (nexus-1k8s1): pgvector service serves T3 in both
         # modes. The local chroma-daemon leg (RDR-120) and the cloud
         # CloudClient leg are retired.
-        from nexus.db.http_vector_client import get_http_vector_client
+        from nexus.db.http_vector_client import get_http_vector_client  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client)
 
         return get_http_vector_client()
 
-    from nexus.config import load_config
+    from nexus.config import load_config  # noqa: PLC0415 — deferred to avoid circular import (config)
     # Runtime import of T3Database (was moved out of module-scope to
     # break the eager torch-import chain during CLI startup).
-    from nexus.db.t3 import T3Database
+    from nexus.db.t3 import T3Database  # noqa: PLC0415 — deferred to avoid circular import (db.t3)
 
     cfg = load_config()
     read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)

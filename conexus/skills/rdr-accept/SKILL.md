@@ -22,10 +22,13 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 
 1. **Verify gate result** — read `{id}-gate-latest` from T2. Block if outcome is not PASSED.
 2. **Update T2** (process authority) — set `status: "accepted"`, `accepted_date: "YYYY-MM-DD"`.
-3. **Update file** — change frontmatter `status: draft` to `status: accepted`, add `accepted_date`.
-4. **Update reviewed-by** — set to `self` if empty.
-5. **Regenerate README** — update `{rdr_dir}/README.md` index.
-6. **Stage files** — `git add` modified files.
+3. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):**
+   ```bash
+   nx rdr set-status {id} accepted
+   ```
+   This is the code-enforced flip. It rewrites the RDR file `status: draft -> accepted`, adds `accepted_date`, and updates the README index-row status cell in one tested action. Hand-editing frontmatter is the source of the RDR-165/166 ledger drift (T2 advanced, file left at `draft`); always use the command so T2 and the file cannot diverge.
+4. **Update reviewed-by** — set to `self` if empty (frontmatter edit; the CLI does not touch this field).
+5. **Stage files** — `git add` the RDR file and `{rdr_dir}/README.md`.
 7. **Planning handoff** (default: yes) — Auto-detect complexity:
    - Scan for any plan section (Implementation Plan, Approach, Steps, etc.)
    - Count step-like subheadings (Phase, Step, Stage, Part, or numbered ###)

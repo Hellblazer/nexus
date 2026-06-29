@@ -18,7 +18,7 @@ T3 has a collection that the catalog `collections` projection table doesn't know
 
 The catalog has a collection row, but T3 doesn't have a matching collection.
 
-**Cause**: a T3 collection was deleted (manual `nx collection delete`, or chromadb-side housekeeping) without going through `Catalog.supersede_collection`.
+**Cause**: a T3 collection was deleted (manual `nx collection delete`, or service-side / migration housekeeping) without going through `Catalog.supersede_collection`.
 
 **Action**: operator decision. If the documents that referenced this collection are still real, re-create the T3 collection by re-indexing the source files. If they're stale, either delete the catalog rows (`nx catalog delete <tumbler>`) or supersede the collection projection row to a known target via the manual Python snippet the doctor prints. There is no automated fix for this class because the right answer depends on whether the source data still exists.
 

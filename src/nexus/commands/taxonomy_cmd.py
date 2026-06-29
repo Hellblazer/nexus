@@ -25,7 +25,7 @@ def _T2Database(path):
     The reads do not contend on the WAL writer lock; the writes are
     infrequent operator commands, not the automated hot path.
     """
-    from nexus.db.t2 import T2Database
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
     return T2Database(path)  # epsilon-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
 
 def _has_raw_access(taxonomy: Any) -> bool:
@@ -45,35 +45,149 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
-def _reject_service_backed_handle(t3: Any) -> None:
-    """Fail loud when the T3 handle has no raw Chroma client.
+def _require_supported_taxonomy_backend(t3: Any, taxonomy: Any) -> None:
+    """Block only the unsupported split: service T3 + raw-SQLite taxonomy.
 
-    RDR-155 P4a.2 (nexus-1k8s1): taxonomy discovery reads embeddings through
-    the raw Chroma client, which retired with the Chroma serving paths —
-    ``make_t3()`` returns the service-backed handle in production now.
-    Taxonomy on the pgvector service is a tracked follow-on
-    (nexus-gmiaf.21+); until it lands this command refuses cleanly instead
-    of surfacing an AttributeError.
+    nexus-7ydks. Supported: both service-backed (6.0 default) or both raw
+    (legacy / ``NX_STORAGE_BACKEND=sqlite``). The split case has no raw Chroma
+    client for the legacy centroid path, so refuse cleanly.
     """
-    from nexus.db.http_vector_client import is_service_backed
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    if is_service_backed(t3):
+    if is_service_backed(t3) and _has_raw_access(taxonomy):
         raise click.ClickException(
-            "taxonomy discovery needs a raw Chroma client, which retired with "
-            "the Chroma serving paths (RDR-155 Phase 4a). Taxonomy on the "
-            "pgvector service is a tracked follow-on (nexus-gmiaf.21+)."
+            "taxonomy discovery is not supported with a service-backed T3 vector "
+            "store but a raw-SQLite taxonomy store (NX_STORAGE_BACKEND_TAXONOMY="
+            "sqlite). Use a uniform backend: either let both default to the "
+            "service, or set NX_STORAGE_BACKEND=sqlite for both."
         )
+
+
+def _enumerate_discoverable_collections(t3: Any, exclude: list[str]) -> list[str]:
+    """Return collection names with >=5 chunks, skipping excludes + taxonomy__.
+
+    Backend-uniform: raw T3 exposes ``_client.list_collections()`` (Chroma
+    Collection objects); service T3 exposes ``list_collections()`` (list of
+    dicts with ``name``/``count``). nexus-7ydks.
+    """
+    from fnmatch import fnmatch  # noqa: PLC0415 - branch-local; deferred to call time
+
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    names: list[tuple[str, int]] = []
+    if is_service_backed(t3):
+        for c in t3.list_collections():
+            names.append((c.get("name", ""), int(c.get("count", 0) or 0)))
+    else:
+        for c in t3._client.list_collections():
+            names.append((c.name, c.count()))
+    return [
+        name for name, count in names
+        if count >= 5
+        and name
+        and not name.startswith("taxonomy__")
+        and not any(fnmatch(name, pat) for pat in exclude)
+    ]
+
+
+def _fetch_service_vectors(
+    collection_name: str, t3: Any,
+) -> tuple[list[str], list[str], "np.ndarray"] | None:
+    """Fetch (doc_ids, texts, embeddings) for a collection via the nexus-service.
+
+    nexus-7ydks. Enumerates ids + documents through the service collection
+    stub's paginated ``get`` and pulls the stored embeddings server-side via
+    ``t3.get_embeddings`` (no re-embed). Returns ``None`` on a fatal fetch
+    problem (collection missing, or embeddings the service could not align to
+    the requested ids — which would silently corrupt clustering).
+    """
+    try:
+        n = t3.count(collection_name)
+    except Exception:  # noqa: BLE001 - best-effort count; failure logged via log.warning, returns None
+        _log.warning("taxonomy_service_count_failed", collection=collection_name)
+        return None
+    if n < 5:
+        return [], [], np.empty((0, 0), dtype=np.float32)
+
+    stub = t3.get_or_create_collection(collection_name)
+    ids: list[str] = []
+    texts: list[str] = []
+    offset = 0
+    page_size = 250  # service quota: Get limit 300
+    _milestone = max(n // 4, 1)
+    _next = _milestone
+    while offset < n:
+        if offset >= _next and _next < n:
+            _progress(f"    fetching {offset:,}/{n:,} chunks ({100 * offset // n}%)")
+            _next += _milestone
+        page = stub.get(include=["documents"], limit=page_size, offset=offset)
+        page_ids = page.get("ids") or []
+        page_docs = page.get("documents") or []
+        if not page_ids:
+            break
+        for i, pid in enumerate(page_ids):
+            doc = page_docs[i] if i < len(page_docs) else None
+            if doc is not None:
+                ids.append(pid)
+                texts.append(doc)
+        offset += len(page_ids)
+        if len(page_ids) < page_size:
+            break
+
+    _progress(f"    fetched {len(ids):,} chunks")
+    # Positional-alignment assumption (nexus-7ydks S2): get_embeddings returns
+    # rows in request order (documented contract, http_vector_client.py), so
+    # embeddings[i] pairs with ids[i]/texts[i]. The count-equality check below
+    # is the tripwire; if the service ever returned an id->vector MAP instead,
+    # this would need a by-id realign rather than the positional zip.
+    embeddings = t3.get_embeddings(collection_name, ids)
+    if embeddings is None or len(embeddings) != len(ids):
+        # get_embeddings drops ids the service cannot resolve (N < len(ids)),
+        # which would desync ids/texts/embeddings. Refuse rather than cluster
+        # misaligned rows (feedback_no_silent_fallbacks_for_correctness).
+        _log.warning(
+            "taxonomy_service_embedding_misalign",
+            collection=collection_name,
+            ids=len(ids),
+            embeddings=0 if embeddings is None else len(embeddings),
+        )
+        return None
+    return ids, texts, np.asarray(embeddings, dtype=np.float32)
+
+
+def _discover_via_service(
+    collection_name: str, taxonomy: Any, t3: Any, *, force: bool,
+) -> int:
+    """Service-backed discovery: fetch vectors from the service, persist through
+    the HttpTaxonomyStore drop-in (centroids via the service's
+    ``/v1/taxonomy/centroids`` HTTP route).
+
+    nexus-7ydks. The store's ``discover_topics`` / ``rebuild_taxonomy`` are
+    complete CatalogTaxonomy mirrors and persist through the Java service (the
+    single writer), so no daemon-routed split is needed here.
+    """
+    fetched = _fetch_service_vectors(collection_name, t3)
+    if fetched is None:
+        return 0
+    doc_ids, texts, embeddings = fetched
+    if len(doc_ids) < 5:
+        _log.info("too_few_docs", collection=collection_name, n=len(doc_ids))
+        return 0
+    _progress(f"    clustering {len(doc_ids):,} x {embeddings.shape[1]}d (service)...")
+    if force:
+        return taxonomy.rebuild_taxonomy(collection_name, doc_ids, embeddings, texts)
+    return taxonomy.discover_topics(collection_name, doc_ids, embeddings, texts)
 
 
 def _progress(msg: str) -> None:
     """Print a progress message and flush immediately (works in pipes/redirects)."""
-    import sys
+    import sys  # noqa: PLC0415 - branch-local; deferred to call time
 
     click.echo(msg)
     try:
         sys.stdout.buffer.flush()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - best-effort cleanup; non-fatal
+        _log.debug("taxonomy_stdout_flush_failed", error=str(exc))
 
 
 # ── Shared function (M5 — callable from CLI and index_repo_cmd) ──────────────
@@ -82,7 +196,7 @@ def _progress(msg: str) -> None:
 def discover_for_collection(
     collection_name: str,
     taxonomy: "CatalogTaxonomy",
-    chroma_client: Any,
+    t3: Any,
     *,
     force: bool = False,
 ) -> int:
@@ -102,9 +216,11 @@ def discover_for_collection(
     collection_name:
         ChromaDB collection to discover topics for.
     taxonomy:
-        :class:`CatalogTaxonomy` instance (owns T2 topic tables).
-    chroma_client:
-        Raw ``chromadb.ClientAPI`` (not ``T3Database``).
+        :class:`CatalogTaxonomy` (raw) or ``HttpTaxonomyStore`` (service).
+    t3:
+        The T3 handle (``T3Database`` raw, or ``HttpVectorClient`` service).
+        nexus-7ydks: service-backed handles route through
+        :func:`_discover_via_service`; raw handles use ``t3._client``.
     force:
         If True, delete existing topics for this collection before
         re-discovering (calls ``rebuild_taxonomy``).
@@ -114,11 +230,21 @@ def discover_for_collection(
     int
         Number of topics created.
     """
+    # nexus-7ydks: service-backed taxonomy store → fetch from the service and
+    # persist through the HttpTaxonomyStore drop-in (centroids via the service's
+    # /v1/taxonomy/centroids HTTP route).
+    if not _has_raw_access(taxonomy):
+        return _discover_via_service(collection_name, taxonomy, t3, force=force)
+
+    # Raw path (unchanged): daemon-routed persist (RDR-128/151) over a raw
+    # Chroma client. Accept either a ``T3Database`` handle (use ``._client``)
+    # or a raw chroma client passed directly (programmatic / test callers).
+    chroma_client = getattr(t3, "_client", t3)
     try:
         coll = chroma_client.get_collection(
             collection_name, embedding_function=None,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - collection-missing tolerated; logged via log.warning, returns 0
         _log.warning("collection_not_found", collection=collection_name)
         return 0
 
@@ -168,7 +294,7 @@ def discover_for_collection(
         if len(page_ids) < page_size:
             break
 
-    import time
+    import time  # noqa: PLC0415 - branch-local; deferred to call time
 
     _progress(f"    fetched {len(all_ids):,} chunks")
 
@@ -177,7 +303,7 @@ def discover_for_collection(
         _progress(f"    embedding: using T3 native ({len(all_embs[0])}d)")
         embeddings = np.array(all_embs, dtype=np.float32)
     else:
-        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         _progress(f"    embedding: re-encoding with MiniLM (384d)")
         ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
@@ -192,8 +318,8 @@ def discover_for_collection(
     # the daemon-returned topic_ids. ``taxonomy`` is used only for the
     # force-path READ of old state (read-only; no WAL writer contention) and
     # the static centroid helpers — no direct T2 write happens here.
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-    from nexus.mcp_infra import t2_index_write
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     centroid_coll = CatalogTaxonomy._create_centroid_collection(chroma_client)
     if force:
@@ -237,7 +363,7 @@ def discover_for_collection(
             )
             if pairs:
                 t2_index_write(lambda db: db.taxonomy.persist_cross_links(pairs))
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort cross-link discovery; logged via log.debug
             _log.debug("discover_cross_links_failed", exc_info=True)
 
     # Record doc count for rebalance tracking (routed).
@@ -279,8 +405,8 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             # Storage review I-1: every .conn access goes through the
             # domain-store lock. These are read-only queries but the lock
             # protects against a concurrent writer on the same connection.
-            with db.taxonomy._lock:
-                all_topics = db.taxonomy.conn.execute(
+            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
+                all_topics = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                     "SELECT collection, COUNT(*), SUM(doc_count), "
                     "SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END), "
                     "SUM(CASE WHEN review_status = 'accepted' THEN 1 ELSE 0 END) "
@@ -289,7 +415,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         else:
             # Service mode: derive per-collection aggregate from public API
             raw_topics = db.taxonomy.get_all_topics()
-            from collections import defaultdict
+            from collections import defaultdict  # noqa: PLC0415 - branch-local; deferred to call time
             _agg: dict[str, list[int, int, int, int]] = defaultdict(lambda: [0, 0, 0, 0])
             for t in raw_topics:
                 c = t.get("collection", "")
@@ -326,8 +452,8 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         ]
 
         if _has_raw_access(db.taxonomy):
-            with db.taxonomy._lock:
-                link_count = db.taxonomy.conn.execute(
+            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
+                link_count = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                     "SELECT COUNT(*) FROM topic_links"
                 ).fetchone()[0]
         else:
@@ -349,8 +475,8 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             click.echo("Taxonomy Status\n")
             for coll, n_topics, n_docs, n_pending, n_accepted in rows:
                 if _has_raw_access(db.taxonomy):
-                    with db.taxonomy._lock:
-                        meta = db.taxonomy.conn.execute(
+                    with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
+                        meta = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                             "SELECT last_discover_doc_count, last_discover_at "
                             "FROM taxonomy_meta WHERE collection = ?",
                             (coll,),
@@ -398,29 +524,29 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         rows: list[tuple[str, int, int, str | None]] = []
         try:
             if _has_raw_access(db.taxonomy):
-                with db.taxonomy._lock:
+                with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                     try:
-                        rows = db.taxonomy.conn.execute(
+                        rows = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                             "SELECT hook_name, is_batch, "
                             "       COALESCE(batch_doc_ids, '') "
                             "FROM hook_failures "
                             "WHERE occurred_at >= datetime('now', '-1 day')"
                         ).fetchall()
                         rows = [(r[0], 1, r[1], r[2]) for r in rows]
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - legacy-schema fallback for pre-4.14.1 batch columns
                         # Pre-4.14.1 schema: batch columns absent. Read with
                         # legacy shape and treat every row as scalar.
-                        legacy = db.taxonomy.conn.execute(
+                        legacy = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                             "SELECT hook_name FROM hook_failures "
                             "WHERE occurred_at >= datetime('now', '-1 day')"
                         ).fetchall()
                         rows = [(r[0], 1, 0, None) for r in legacy]
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort row read; degrades to empty list
             rows = []
 
         if rows:
-            import json as _json
-            from collections import Counter
+            import json as _json  # noqa: PLC0415 - branch-local; deferred to call time
+            from collections import Counter  # noqa: PLC0415 - branch-local; deferred to call time
 
             total_recent = sum(n for _, n, _, _ in rows)
             per_hook: Counter[str] = Counter()
@@ -457,7 +583,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
 @click.option("--depth", "-d", default=2, type=int, help="Tree depth", show_default=True)
 def list_cmd(collection: str, depth: int) -> None:
     """Show topic tree."""
-    from nexus.taxonomy import get_topic_tree
+    from nexus.taxonomy import get_topic_tree  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     depth = min(depth, 4)
     with _T2Database(_default_db_path()) as db:
@@ -465,8 +591,8 @@ def list_cmd(collection: str, depth: int) -> None:
         # Count docs with no topic assignment (noise / uncategorized).
         # Lock taken per storage review I-1 (SQLite only).
         if _has_raw_access(db.taxonomy):
-            with db.taxonomy._lock:
-                total_assigned = db.taxonomy.conn.execute(
+            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
+                total_assigned = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                     "SELECT COUNT(DISTINCT doc_id) FROM topic_assignments"
                     + (" WHERE topic_id IN (SELECT id FROM topics WHERE collection = ?)" if collection else ""),
                     (collection,) if collection else (),
@@ -511,7 +637,7 @@ def _print_tree(node: dict, indent: int = 0) -> None:
 @click.option("--limit", "-n", default=20, help="Max docs to show", show_default=True)
 def show_cmd(topic_id: int, limit: int) -> None:
     """Show documents assigned to a topic."""
-    from nexus.taxonomy import get_topic_docs
+    from nexus.taxonomy import get_topic_docs  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     with _T2Database(_default_db_path()) as db:
         docs = get_topic_docs(db, topic_id, limit=limit)
@@ -534,10 +660,10 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
     Use --collection for a single collection, or --all to discover
     topics for every T3 collection (respects local_exclude_collections).
     """
-    from fnmatch import fnmatch
+    from fnmatch import fnmatch  # noqa: PLC0415 - branch-local; deferred to call time
 
-    from nexus.config import is_local_mode, load_config
-    from nexus.db import make_t3
+    from nexus.config import is_local_mode, load_config  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     if not collection and not discover_all:
         click.echo("Specify --collection <name> or --all.")
@@ -549,16 +675,11 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         if is_local_mode() else []
     )
     t3 = make_t3()
-    _reject_service_backed_handle(t3)
 
     if discover_all:
-        colls = t3._client.list_collections()
-        targets = [
-            c.name for c in colls
-            if c.count() >= 5
-            and not any(fnmatch(c.name, pat) for pat in exclude)
-            and not c.name.startswith("taxonomy__")
-        ]
+        # Backend-support is checked per-collection inside the loop below
+        # (authoritative); enumeration itself needs no taxonomy handle.
+        targets = _enumerate_discoverable_collections(t3, exclude)
         if not targets:
             click.echo("No eligible collections found.")
             return
@@ -580,8 +701,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         for i, col_name in enumerate(targets, 1):
             if len(targets) > 1:
                 click.echo(f"[{i}/{len(targets)}] {col_name}")
+            _require_supported_taxonomy_backend(t3, db.taxonomy)
             count = discover_for_collection(
-                col_name, db.taxonomy, t3._client, force=force,
+                col_name, db.taxonomy, t3, force=force,
             )
             if count:
                 click.echo(f"  {col_name}: {count} topics")
@@ -597,7 +719,11 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
             else:
                 click.echo(f"  {col_name}: skipped")
 
-        # Cross-collection projection pass (RDR-075 SC-7)
+        # Cross-collection projection pass (RDR-075 SC-7). nexus-9pqoj:
+        # project_against handles both backends; pass the raw chroma client for
+        # a raw T3Database (has ._client) or the service handle itself for an
+        # HttpVectorClient (no ._client).
+        _proj_handle = getattr(t3, "_client", t3)
         if total_topics and len(targets) > 1:
             try:
                 proj_count = 0
@@ -605,8 +731,14 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                     others = [c for c in targets if c != col_name]
                     if others:
                         result = db.taxonomy.project_against(
-                            col_name, others, t3._client, threshold=0.85,
+                            col_name, others, _proj_handle, threshold=0.85,
                         )
+                        if result.get("incomplete_fetch"):
+                            click.echo(
+                                f"  Projection: skipped {col_name} (incomplete "
+                                "service embedding read; collection may be mid-index)"
+                            )
+                            continue
                         assignments = result.get("chunk_assignments", [])
                         if assignments:
                             _persist_assignments(
@@ -617,21 +749,21 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                     click.echo(f"  Projection: {proj_count} cross-collection assignments")
                     # Co-occurrence topic links (SC-5, SC-7)
                     # RDR-151 Phase 3: route via daemon.
-                    from nexus.mcp_infra import t2_index_write
+                    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
                     cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
                     if cooc:
                         click.echo(f"  Links:      {cooc} co-occurrence topic links")
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort projection; logged via log.warning
                 _log.warning("discover_projection_failed", exc_info=True)
 
         # Refresh L1 context cache after discovery
         if total_topics:
             try:
-                from pathlib import Path as _Path
-                from nexus.context import generate_context_l1
+                from pathlib import Path as _Path  # noqa: PLC0415 - branch-local; deferred to call time
+                from nexus.context import generate_context_l1  # noqa: PLC0415 - deferred to avoid circular import at module load
                 generate_context_l1(db.taxonomy, repo_path=_Path.cwd())
-            except Exception:
-                pass  # Non-fatal
+            except Exception as exc:  # noqa: BLE001 - non-fatal best-effort step
+                _log.debug("taxonomy_context_l1_generation_failed", error=str(exc))
 
     click.echo(f"\nTotal: {total_topics} topics, {total_labeled} labeled.")
 
@@ -642,7 +774,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
 @click.option("-k", default=None, type=int, hidden=True, help="Deprecated: cluster count is automatic")
 def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
     """Rebuild topic taxonomy from scratch (alias for discover --force)."""
-    from nexus.db import make_t3
+    from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     # Backward compat: old --project flag maps to --collection
     if project and not collection:
@@ -661,9 +793,9 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
 
     with _T2Database(_default_db_path()) as db:
         t3 = make_t3()
-        _reject_service_backed_handle(t3)
+        _require_supported_taxonomy_backend(t3, db.taxonomy)
         count = discover_for_collection(
-            collection, db.taxonomy, t3._client, force=True,
+            collection, db.taxonomy, t3, force=True,
         )
     click.echo(f"Rebuilt {count} topics for collection {collection!r}.")
 
@@ -674,7 +806,7 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
 def _resolve_doc_titles(doc_ids: list[str]) -> list[str]:
     """Resolve doc_ids to human-readable titles via catalog, fallback to raw ID."""
     try:
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         cat = make_catalog_reader()
         if cat is None:
@@ -687,7 +819,7 @@ def _resolve_doc_titles(doc_ids: list[str]) -> list[str]:
             else:
                 titles.append(doc_id)
         return titles
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort; degrades to input doc_ids
         return doc_ids
 
 
@@ -698,7 +830,7 @@ def _display_topic(
     taxonomy: "CatalogTaxonomy",
 ) -> None:
     """Display a single topic for review."""
-    import json
+    import json  # noqa: PLC0415 - branch-local; deferred to call time
 
     click.echo(f"\n{'─' * 60}")
     click.echo(f"  [{index}/{total}]  {topic['label']}  ({topic['doc_count']} docs)")
@@ -752,7 +884,7 @@ def review_cmd(collection: str, limit: int) -> None:
         click.echo("Actions: [a]ccept  [r]ename  [m]erge  [d]elete  [S]kip")
 
         # RDR-151 Phase 3 (nexus-uzay8): all T2 writes routed via daemon.
-        from nexus.mcp_infra import t2_index_write
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         for i, topic in enumerate(topics, 1):
             _display_topic(topic, i, len(topics), db.taxonomy)
@@ -811,7 +943,7 @@ def review_cmd(collection: str, limit: int) -> None:
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
     """Assign a document to a topic by label."""
-    from nexus.mcp_infra import t2_index_write
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
@@ -849,7 +981,7 @@ def rename_cmd(
     (the user typing a new label is an acknowledgement); ``--no-accept``
     lets you fix a typo without forcing the topic through review.
     """
-    from nexus.mcp_infra import t2_index_write
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
@@ -874,7 +1006,7 @@ def rename_cmd(
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
     """Merge source topic into target topic."""
-    from nexus.mcp_infra import t2_index_write
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
     with _T2Database(_default_db_path()) as db:
         source_id = db.taxonomy.resolve_label(source_label, collection=collection)
         if source_id is None:
@@ -904,11 +1036,11 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     daemon via t2_index_write.  Chroma centroid operations happen locally
     before and after the routed persist using the returned child IDs.
     """
-    import numpy as _np
-    from nexus.db import make_t3
-    from nexus.db.local_ef import LocalEmbeddingFunction
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-    from nexus.mcp_infra import t2_index_write
+    import numpy as _np  # noqa: PLC0415 - heavy dep deferred to call time
+    from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
@@ -928,13 +1060,32 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
 
         collection_name = topic["collection"]
         t3 = make_t3()
-        _reject_service_backed_handle(t3)
+
+        # nexus-9pqoj: service-backed split. The store's split_topic does the
+        # full fetch -> compute -> persist -> centroid round-trip via the service.
+        if not _has_raw_access(db.taxonomy):
+            # service-backed split_topic persists through the Java service (the
+            # single writer for HttpTaxonomyStore), not the SQLite WAL writer the
+            # boundary lint guards, so t2_index_write routing does not apply.
+            child_count = db.taxonomy.split_topic(topic_id, k, t3)  # epsilon-allow: service single-writer persist
+            click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
+            if child_count:
+                coll_scope = collection_name or collection
+                scope = f" -c {coll_scope}" if coll_scope else ""
+                click.echo(
+                    f"Action: {child_count} new sub-topics have n-gram labels. "
+                    f"Run `nx taxonomy label{scope}` to get human-readable labels."
+                )
+            return
+
+        # Raw path (unchanged): refuse the split-backend config, then inline.
+        _require_supported_taxonomy_backend(t3, db.taxonomy)
         chroma_client = t3._client
 
         # Fetch texts from T3 collection
         try:
             coll = chroma_client.get_collection(collection_name, embedding_function=None)
-        except Exception:
+        except Exception:  # noqa: BLE001 - collection-missing surfaced to user via click.echo, returns
             click.echo(f"Collection '{collection_name}' not found in T3.")
             return
 
@@ -981,8 +1132,8 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
             parent_centroid_id = f"{collection_name}:{topic_id}"
             try:
                 centroid_coll.delete(ids=[parent_centroid_id])
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort; non-fatal
+                _log.debug("taxonomy_centroid_delete_failed", error=str(exc))
             c_ids = [f"{collection_name}:{cid}" for cid in child_ids]
             c_embs = [spec["centroid"] for spec in child_specs]
             c_metas = [
@@ -1012,11 +1163,11 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
 def _try_load_catalog() -> Any:
     """Load the catalog if initialized, else return None."""
     try:
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         return make_catalog_reader()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - best-effort lookup; degrades to None
+        _log.debug("taxonomy_catalog_reader_unavailable", error=str(exc))
     return None
 
 
@@ -1036,7 +1187,7 @@ def compute_topic_links(
     When ``persist=True``, also writes to the ``topic_links`` T2 table
     for use by ``apply_topic_boost`` at search time.
     """
-    from collections import Counter, defaultdict
+    from collections import Counter, defaultdict  # noqa: PLC0415 - branch-local; deferred to call time
 
     # Build doc_id → (topic_label, topic_id) index from T2
     topics = taxonomy.get_topics()
@@ -1057,7 +1208,7 @@ def compute_topic_links(
 
     # Build prefix index: file_path → first matching doc_id (O(N) build, O(1) lookup)
     # Sorted doc_ids enable prefix matching via bisect
-    from bisect import bisect_left
+    from bisect import bisect_left  # noqa: PLC0415 - branch-local; deferred to call time
 
     sorted_doc_ids = sorted(doc_to_topic_label.keys())
 
@@ -1135,7 +1286,7 @@ def compute_topic_links(
             }
             for k, v in id_pair_counts.most_common()
         ]
-        from nexus.mcp_infra import t2_index_write
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
         t2_index_write(lambda db: db.taxonomy.upsert_topic_links(persist_data))
 
     return result
@@ -1168,9 +1319,9 @@ def links_cmd(collection: str, refresh: bool) -> None:
         # Display all rows in topic_links, joined with topic labels.
         # Lock taken per storage review I-1 (SQLite only).
         if _has_raw_access(db.taxonomy):
-            with db.taxonomy._lock:
+            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                 if collection:
-                    rows = db.taxonomy.conn.execute(
+                    rows = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                         "SELECT t1.label, t1.collection, t2.label, t2.collection, "
                         "       tl.link_count, tl.link_types "
                         "FROM topic_links tl "
@@ -1181,7 +1332,7 @@ def links_cmd(collection: str, refresh: bool) -> None:
                         (collection, collection),
                     ).fetchall()
                 else:
-                    rows = db.taxonomy.conn.execute(
+                    rows = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
                         "SELECT t1.label, t1.collection, t2.label, t2.collection, "
                         "       tl.link_count, tl.link_types "
                         "FROM topic_links tl "
@@ -1217,9 +1368,9 @@ def links_cmd(collection: str, refresh: bool) -> None:
         click.echo(f"Topic relationships ({len(rows)} pairs):\n")
         for from_label, from_coll, to_label, to_coll, count, types_json in rows:
             try:
-                import json as _json
+                import json as _json  # noqa: PLC0415 - branch-local; deferred to call time
                 types_str = ", ".join(_json.loads(types_json))
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort label parse; falls back to raw json string
                 types_str = types_json
             click.echo(
                 f"  [{from_coll}] {from_label} <-> [{to_coll}] {to_label}"
@@ -1232,7 +1383,7 @@ def links_cmd(collection: str, refresh: bool) -> None:
 
 def _claude_available() -> bool:
     """Check if claude CLI is on PATH."""
-    import shutil
+    import shutil  # noqa: PLC0415 - branch-local; deferred to call time
 
     return shutil.which("claude") is not None
 
@@ -1300,10 +1451,10 @@ async def _generate_labels_batch(
 
     results: list[str | None] = [None] * len(items)
     try:
-        from nexus.operators.dispatch import claude_dispatch
+        from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         payload = await claude_dispatch(prompt, _LABEL_SCHEMA, timeout=120.0)
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort payload parse; degrades to current results
         return results
 
     labels = payload.get("labels") if isinstance(payload, dict) else None
@@ -1344,9 +1495,9 @@ def relabel_topics(
         project_root: Repo root for glossary resolution. Defaults to
             ``Path.cwd()`` when unset.
     """
-    import asyncio
-    import json
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import asyncio  # noqa: PLC0415 - branch-local; deferred to call time
+    import json  # noqa: PLC0415 - branch-local; deferred to call time
+    from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415 - branch-local; deferred to call time
 
     if only_pending:
         topics = taxonomy.get_unreviewed_topics(collection=collection, limit=5000)
@@ -1373,12 +1524,12 @@ def relabel_topics(
     # Resolve glossary once per command invocation (RDR-085).
     glossary_text = ""
     try:
-        from nexus.glossary import format_for_prompt, load_glossary
+        from nexus.glossary import format_for_prompt, load_glossary  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         root = project_root or Path.cwd()
         glossary = load_glossary(root, collection=collection or None)
         glossary_text = format_for_prompt(glossary) if glossary else ""
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort glossary load; logged via log.debug
         _log.debug("glossary_load_failed", exc_info=True)
 
     # Split into batches
@@ -1411,7 +1562,7 @@ def relabel_topics(
         labels = asyncio.run(_generate_labels_batch(items, glossary_text=glossary_text))
         return [(w[0], lbl) for w, lbl in zip(batch, labels)]
 
-    from nexus.mcp_infra import t2_index_write
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_label_batch, b): b for b in batches}
@@ -1521,11 +1672,16 @@ def project_cmd(
       nx taxonomy project code__nexus --use-icf --persist
       nx taxonomy project --backfill --persist
     """
-    from nexus.corpus import default_projection_threshold
-    from nexus.db import make_t3
+    from nexus.corpus import default_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     db = _T2Database(_default_db_path())
     t3 = make_t3()
+    # nexus-9pqoj: refuse the split-backend config; project_against handles both
+    # backends, so pass the chroma client (raw T3Database) or the service handle
+    # (HttpVectorClient has no ._client).
+    _require_supported_taxonomy_backend(t3, db.taxonomy)
+    _proj_handle = getattr(t3, "_client", t3)
 
     # Resolve threshold: explicit flag wins; otherwise per-corpus default
     # (defaults applied at the per-source level inside _run_backfill).
@@ -1536,7 +1692,7 @@ def project_cmd(
     try:
         if backfill:
             _run_backfill(
-                db.taxonomy, t3._client,
+                db.taxonomy, _proj_handle,
                 threshold=threshold, top_k=top_k, persist=persist,
                 use_icf=use_icf,
             )
@@ -1580,11 +1736,21 @@ def project_cmd(
             db.taxonomy.compute_icf_map(use_cache=True) if use_icf else None
         )
         result = db.taxonomy.project_against(
-            source_collection, targets, t3._client,
+            source_collection, targets, _proj_handle,
             threshold=resolved_threshold, top_k=top_k,
             icf_map=icf_map,
             progress=True,
         )
+        # nexus-9pqoj S1: a service fetch that could not align embeddings to ids
+        # returns empty-with-flag; surface it loudly instead of looking like
+        # "no matches".
+        if result.get("incomplete_fetch"):
+            raise click.ClickException(
+                f"Could not read all source embeddings for {source_collection} "
+                "from the service (count mismatch). The collection may be mid-"
+                "index; retry once indexing settles, or re-index it."
+            )
+
         # Fall through: display logic uses `threshold` local — rebind
         # to the resolved value so messages reflect what was applied.
         threshold = resolved_threshold
@@ -1640,7 +1806,7 @@ def _persist_assignments(
     The assign_topic calls are batched as a single persist_assignments call
     so the daemon takes one write lock, not N individual locks.
     """
-    from nexus.mcp_infra import t2_index_write
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
     # Build the serializable assignment dicts for the daemon-routable
     # persist_assignments method (avoids N individual daemon RPCs).
     assignment_dicts = [
@@ -1681,7 +1847,7 @@ def _run_backfill(
     for each source collection (``default_projection_threshold``). An
     explicit *threshold* short-circuits that and applies uniformly.
     """
-    from nexus.corpus import default_projection_threshold
+    from nexus.corpus import default_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     collections = taxonomy.get_distinct_collections()
 
@@ -1715,6 +1881,12 @@ def _run_backfill(
                 icf_map=icf_map,
                 progress=True,
             )
+            if result.get("incomplete_fetch"):
+                click.echo(
+                    f"    Skipped: incomplete service embedding read for {src} "
+                    "(collection may be mid-index; retry later)"
+                )
+                continue
             matched = len(result["matched_topics"])
             novel = len(result["novel_chunks"])
             chunks = result["total_chunks"]
@@ -1727,7 +1899,7 @@ def _run_backfill(
             if persist and result.get("chunk_assignments"):
                 _persist_assignments(result["chunk_assignments"], src)
                 total_assigned += len(result["chunk_assignments"])
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - per-item skip surfaced to user via click.echo
             click.echo(f"    Skipped: {e}")
 
     click.echo(
@@ -1933,13 +2105,13 @@ def _resolve_prefixes(cli_override: str) -> list[str]:
     if cli_override:
         return [p.strip() for p in cli_override.split(",") if p.strip()]
     try:
-        from nexus.config import load_config
+        from nexus.config import load_config  # noqa: PLC0415 - deferred to avoid circular import at module load
         cfg = load_config()
         cfg_prefixes = (cfg.get("taxonomy") or {}).get("collection_prefixes")
         if isinstance(cfg_prefixes, list) and cfg_prefixes:
             return [str(p).strip() for p in cfg_prefixes if str(p).strip()]
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - best-effort prefix discovery; degrades to defaults
+        _log.debug("taxonomy_prefix_discovery_failed", error=str(exc))
     return list(_DEFAULT_PREFIXES)
 
 
@@ -1978,11 +2150,11 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
       1 — at least one Drift (or Missing with --strict)
       2 — scanner/T3 failure
     """
-    import json
-    import sys
+    import json  # noqa: PLC0415 - branch-local; deferred to call time
+    import sys  # noqa: PLC0415 - branch-local; deferred to call time
 
-    from nexus.db import make_t3
-    from nexus.doc.ref_scanner import (
+    from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.doc.ref_scanner import (  # noqa: PLC0415 - deferred to avoid circular import at module load
         VERDICT_DRIFT, VERDICT_MISSING, VERDICT_OK,
         scan_markdown, validate,
     )
@@ -1991,20 +2163,20 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
 
     try:
         t3 = make_t3()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - T3-unavailable surfaced to user via click.echo then clean exit
         click.echo(f"Error: T3 unavailable: {exc}", err=True)
         raise click.exceptions.Exit(2)
 
     try:
         all_refs = []
         for p in paths:
-            from pathlib import Path as _P
+            from pathlib import Path as _P  # noqa: PLC0415 - branch-local; deferred to call time
             try:
                 all_refs.extend(scan_markdown(_P(p), resolved_prefixes))
             except ValueError as exc:
                 click.echo(f"Error: {exc}", err=True)
                 raise click.exceptions.Exit(2)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - per-scanner failure surfaced to user via click.echo, continues
                 click.echo(f"Warning: scanner failed on {p}: {exc}", err=True)
 
         drifts = validate(all_refs, t3, tolerance=tolerance)
@@ -2014,8 +2186,8 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
         if callable(close):
             try:
                 close()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort cleanup; non-fatal
+                _log.debug("taxonomy_t3_close_failed", error=str(exc))
 
     # ── Render ──
     if fmt == "json":
@@ -2089,9 +2261,9 @@ def backfill_source_collection_cmd(apply_: bool) -> None:
     guarantees correctness. Projection rows are untouched; auto-matched
     rows stay NULL (ambiguous source).
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
-    from nexus.taxonomy_backfill import backfill_source_collection
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.taxonomy_backfill import backfill_source_collection  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     db_path = default_db_path()
     if not db_path.exists():

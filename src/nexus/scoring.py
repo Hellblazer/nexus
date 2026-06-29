@@ -134,7 +134,7 @@ def apply_hybrid_scoring(
                 chunk_count_by_doc_id = catalog.chunk_counts_for_docs(
                     list(code_doc_ids)
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort catalog lookup; failure logged, scoring proceeds without chunk counts
                 _log.warning(
                     "scoring_chunk_count_lookup_failed",
                     error=str(exc),
@@ -178,7 +178,7 @@ def quality_score(
     """
     if citation_count <= 0:
         return 0.0
-    import math
+    import math  # noqa: PLC0415 — branch-local; only reached when citation_count > 0
     citation_signal = min(1.0, math.log(citation_count + 1) / math.log(c_max + 1))
     age_signal = 0.5 ** (age_days / half_life) if half_life > 0 else 1.0
     return alpha * citation_signal + (1 - alpha) * age_signal
@@ -201,7 +201,7 @@ def apply_quality_boost(
     Only applies to knowledge__/docs__/rdr__ collections.  Results without
     ``bib_citation_count`` are untouched.
     """
-    from datetime import date
+    from datetime import date  # noqa: PLC0415 — branch-local helper import
 
     today = date.today()
     for r in results:
@@ -275,7 +275,7 @@ def apply_link_boost(
     # Catalog and HttpCatalogClient — no raw _db access.
     try:
         links_by_tumbler = catalog.links_from_batch(list(doc_ids))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort catalog lookup; failure logged, scoring proceeds without link boost
         _log.warning(
             "scoring_link_boost_lookup_failed",
             error=str(exc),
@@ -404,7 +404,7 @@ def rerank_results(
     n = top_k or len(results)
     documents = [r.content for r in results]
 
-    from nexus.config import is_local_mode  # noqa: PLC0415
+    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
     if is_local_mode():
         return _rerank_local(results, query, documents, n)
@@ -444,7 +444,7 @@ def _rerank_cloud(
             model=model,
             top_k=top_n,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort rerank; any failure logged and falls back to original order
         _log.warning("rerank failed, returning original order", error=str(exc))
         return results[:top_n]
     reranked: list[SearchResult] = []
@@ -465,9 +465,9 @@ def _rerank_local(
     download failures or missing optional deps fall back to the
     original order."""
     try:
-        from nexus.cross_encoder import get_local_cross_encoder  # noqa: PLC0415
+        from nexus.cross_encoder import get_local_cross_encoder  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
         scores = get_local_cross_encoder().score(query, documents)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort local rerank; model/dep failure logged, falls back to original order
         _log.warning(
             "local rerank failed, returning original order",
             error=str(exc),

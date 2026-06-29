@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-163 bead nexus-795gv — aspect-extraction-queue bounded backoff-retry ladder, P0.
+
+    Adds nexus.aspect_extraction_queue.next_retry_at (TIMESTAMPTZ, nullable) so the
+    claim path can schedule a retry into the future instead of terminal-failing a
+    transient error. NULL means "claimable now" (the default for freshly enqueued
+    rows); a future timestamp means "do not claim before this instant".
+
+    Sibling additive changeset — the aspects-001 baseline is NEVER edited. The column
+    is written ONLY by markRetry (P1, nexus-ztpt6); P0 lands the column + the
+    claim-query gate (AspectRepository.claimNext) + the reclaimStale invariant
+    (reclaimStale must leave next_retry_at unchanged). No default, no backfill: NULL
+    is the correct "ready" state for every existing row.
+
+    Grants: grants-nexus-svc.xml (runAlways=true, last in the master changelog) issues
+    schema-wide DML grants, so the new column inherits nexus_svc access automatically —
+    no grant changeset needed. RLS: the table already has tenant_isolation
+    ENABLE + FORCE (aspects-001-6); adding a column does not change the policy.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="aspects-002-1" author="nexus-795gv">
+        <comment>Add next_retry_at TIMESTAMPTZ (nullable) for the backoff-retry claim gate</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.aspect_extraction_queue ADD COLUMN next_retry_at TIMESTAMPTZ;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.aspect_extraction_queue DROP COLUMN IF EXISTS next_retry_at;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -8,15 +8,15 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 26 | Storage tiers, retrieval, operators, orchestration |
+| `nexus` | `nx-mcp` | 35 | Storage tiers, retrieval, operators, orchestration |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 | `devonthink` | `nx-mcp-devonthink` | ~17 (DT present) / 1 (DT absent) | DEVONthink agent surface: AI/content/bib/capture tools + the `dt_incorporate` composite (RDR-139 Layer A') |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
-**Substrate dependency**: since conexus 4.34.0 (RDR-120), storage tools route through the T2 daemon (and the T3 daemon in local mode). The Claude Code plugin's SessionStart hook auto-spawns `nx daemon t2 ensure-running`; for a daemon that survives reboots independent of Claude Code, run `nx daemon t2 install --autostart` once. See [Container Integration](container-integration.md) for the multi-process / multi-host model.
+**Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started](getting-started.md#first-time-setup-the-storage-backend) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model. (The standalone SQLite T2 daemon — `nx daemon t2 install --autostart` — remains an explicit opt-in for `NX_STORAGE_BACKEND=sqlite`.)
 
-## `nexus` — retrieval + storage (26 tools)
+## `nexus` — retrieval + storage (35 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -28,7 +28,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `query` | Document-level catalog-aware retrieval (scope by `author`, `content_type`, `subtree`, `follow_links`, `depth`). Link-aware + topic-aware ranking |
 | `store_put` | Write a document into a T3 collection. Fires post-store hooks: batch chain auto-assigns to nearest topic; document-grain chain enqueues aspect extraction on `knowledge__*` (RDR-089) |
 | `store_get` | Retrieve a document by id from a T3 collection |
-| `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the ChromaDB quota |
+| `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the per-request 300-record limit |
 | `store_list` | Paginate documents in a T3 collection |
 
 ### Memory (T2)
@@ -73,6 +73,8 @@ Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a sing
 | `operator_filter` | Narrow items by a natural-language criterion (RDR-088 §D.4). Returns `{items, rationale[{id, reason}]}` |
 | `operator_check` | Cross-item consistency probe (RDR-088 §D.2). Returns `{ok, evidence[{item_id, quote, role}]}` |
 | `operator_verify` | Single-claim verification against one evidence source (RDR-088 §D.2). Returns `{verified, reason, citations[]}` |
+| `operator_groupby` | Partition items by a natural-language key into `[{key_value, items}]` (RDR-093 §D.4). SQL fast-path over `document_aspects` when items carry catalog identity, else `claude -p` |
+| `operator_aggregate` | Reduce each `operator_groupby` group to a per-group summary (RDR-093 §D.4). Pairs with `operator_groupby` for the `filter → groupby → aggregate` pipeline |
 
 ### Orchestration (RDR-080)
 

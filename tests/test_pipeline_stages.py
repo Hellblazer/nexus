@@ -62,7 +62,7 @@ def _er(page_count: int = 3) -> ExtractionResult:
 
 def _fx(n: int = 3, result: ExtractionResult | None = None, text_fn=None):
     r = result or _er(n)
-    def extract(pdf_path, *, extractor="auto", on_page=None):
+    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
         for i in range(n):
             txt = text_fn(i) if text_fn else f"Page {i} content."
             if on_page:
@@ -127,13 +127,56 @@ def _run_with_col(db, col_get_return, fake_result, fake_chunks,
     return t3, mock_col
 
 
+def _run_service_mode(db, fake_result, fake_chunks, *, service=True, voyage=None,
+                      pdf_path="/a.pdf", content_hash="svc123", collection="docs__test"):
+    """nexus-9n1u3: drive pipeline_index_pdf with embed_fn=None under a patched
+    service-mode flag and Voyage-credential, mirroring _run_with_col."""
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    t3 = create_autospec(T3Database, instance=True)
+    t3.get_or_create_collection.return_value = mock_col
+    pc = fake_result.metadata["page_count"]
+    with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
+            patch("nexus.db.http_vector_client.is_vector_service_mode",
+                  return_value=service), \
+            patch("nexus.config.get_credential", return_value=voyage):
+        ME.return_value.extract.side_effect = _fx(pc, fake_result)
+        MC.return_value.chunk.return_value = fake_chunks
+        pipeline_index_pdf(Path(pdf_path), content_hash, collection, t3,
+                           db=db, embed_fn=None)
+    return t3, mock_col
+
+
+class TestServiceModeStreaming:
+    """nexus-9n1u3: PDF streaming pipeline must server-side-embed in service
+    mode instead of demanding a Voyage key (which broke ALL PDF ingestion)."""
+
+    def test_service_mode_no_voyage_completes_and_server_embeds(self, db) -> None:
+        t3, _ = _run_service_mode(
+            db, _er(2), _tc(("chunk a", 0, {}), ("chunk b", 1, {})))
+        # Did NOT raise; the uploader routed to the server-side-embed upsert.
+        t3.upsert_chunks_with_embeddings.assert_called()
+        # Forwarded embeddings are empty — the service embeds, client vectors
+        # are discarded (HttpVectorClient.upsert_chunks_with_embeddings).
+        ca = t3.upsert_chunks_with_embeddings.call_args
+        embs = ca.args[3] if len(ca.args) > 3 else ca.kwargs["embeddings"]
+        assert embs and all(e == [] for e in embs)
+
+    def test_non_service_no_voyage_still_raises(self, db) -> None:
+        # The legacy (non-service) no-Voyage path must keep failing loud.
+        with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
+            _run_service_mode(
+                db, _er(1), _tc(("chunk x", 0, {})),
+                service=False, voyage=None, content_hash="raw123")
+
+
 
 class TestExtractorLoop:
     def test_writes_pages_to_buffer(self, db: PipelineDB) -> None:
         result = _er(3)
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:
-            def f(pdf_path, *, extractor="auto", on_page=None):
+            def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
                 for i in range(3):
                     if on_page:
                         on_page(i, f"Page {i} text content.",
@@ -148,7 +191,7 @@ class TestExtractorLoop:
     def test_cancel_raises_pipeline_cancelled(self, db: PipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         cancel = threading.Event()
-        def f(pdf_path, *, extractor="auto", on_page=None):
+        def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
             for i in range(10):
                 if on_page:
                     on_page(i, f"Page {i}", {"page_number": i + 1, "text_length": 6})
@@ -288,13 +331,36 @@ class TestChunkerLoop:
             chunker_loop("h1", db, threading.Event(), embed_fn=tracking, extraction_done=done_event)
         assert calls == []
 
-    def test_embed_fn_none(self, db, done_event) -> None:
+    def test_embed_fn_none_writes_service_mode_sentinel(self, db, done_event) -> None:
+        # nexus-9n1u3: in SERVICE mode, embed_fn=None makes the embed stage
+        # write a non-NULL empty-blob sentinel so the chunk stays uploadable;
+        # the JVM embeds at upload time.
         _pop_pages(db, "h1", 2)
-        with patch(_P_CHK) as MC:
+        with patch(_P_CHK) as MC, patch(
+            "nexus.db.http_vector_client.is_vector_service_mode", return_value=True
+        ):
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {}))
+            chunker_loop("h1", db, threading.Event(), embed_fn=None, extraction_done=done_event)
+        out = db.read_ready_chunks("h1")
+        assert len(out) == 1 and out[0]["embedding"] == b""
+        # non-NULL sentinel -> the uploader will pick it up (was dropped when None)
+        assert len(db.read_uploadable_chunks("h1")) == 1
+
+    def test_embed_fn_none_non_service_does_not_write_sentinel(self, db, done_event) -> None:
+        # review Sig-1: the b"" sentinel is gated LOCALLY on is_vector_service_mode().
+        # A caller that bypasses the orchestrator and passes embed_fn=None in
+        # NON-service mode must NOT silently write an uploadable zero-vector
+        # chunk — it falls through to NULL (dropped by read_uploadable_chunks),
+        # surfacing the misuse instead of corrupting.
+        _pop_pages(db, "h1", 2)
+        with patch(_P_CHK) as MC, patch(
+            "nexus.db.http_vector_client.is_vector_service_mode", return_value=False
+        ):
             MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {}))
             chunker_loop("h1", db, threading.Event(), embed_fn=None, extraction_done=done_event)
         out = db.read_ready_chunks("h1")
         assert len(out) == 1 and out[0]["embedding"] is None
+        assert db.read_uploadable_chunks("h1") == []
 
     def test_incremental_chunking_before_extraction_done(self, db) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
@@ -536,6 +602,8 @@ class TestPipelineIndexPdf:
     def test_embed_fn_none_resolves_credentials(self, db, mock_t3) -> None:
         fr, fc = _er(1), _tc(("c0", 0, {"page_number": 1, "chunk_type": "text"}))
         with (patch(_P_EXT) as ME, patch(_P_CHK) as MC,
+              patch("nexus.db.http_vector_client.is_vector_service_mode",
+                    return_value=False),
               patch("nexus.config.get_credential", return_value="fake-key"),
               patch("nexus.config.load_config", return_value={}),
               patch("nexus.doc_indexer._embed_with_fallback") as me):
@@ -547,7 +615,10 @@ class TestPipelineIndexPdf:
         me.assert_called()
 
     def test_embed_fn_none_no_credentials_fails_fast(self, db, mock_t3) -> None:
-        with patch("nexus.config.get_credential", return_value=None):
+        # Legacy (non-service) path: no Voyage key must still fail loud.
+        with (patch("nexus.db.http_vector_client.is_vector_service_mode",
+                    return_value=False),
+              patch("nexus.config.get_credential", return_value=None)):
             with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
                 pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
 

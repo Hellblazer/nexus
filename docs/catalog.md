@@ -224,7 +224,7 @@ In `.nexus.yml`:
 ```yaml
 taxonomy:
   auto_label: true                       # Label with Claude haiku (default)
-  local_exclude_collections: ["code__*"] # Skip code in local mode (MiniLM clusters code poorly)
+  local_exclude_collections: ["code__*"] # Skip code in local mode (general-purpose local embeddings cluster code poorly)
 ```
 
 | Key | Default | Description |
@@ -234,19 +234,25 @@ taxonomy:
 
 ### Local vs cloud quality
 
-| Mode | Embedding model | Code quality | Document quality |
+| Mode | Embedding model (server-side) | Code quality | Document quality |
 |------|----------------|-------------|-----------------|
-| Local | MiniLM 384d (ONNX) | Poor (excluded by default) | Good (8 topics from 120 docs) |
+| Local | bge-768 (ONNX, via nexus-service) | Poor (excluded by default) | Good (8 topics from 120 docs) |
 | Cloud | Voyage 1024d | Excellent (124 topics from 5K chunks) | Excellent (88 topics, 78% assigned) |
 
 ### How it works
+
+> **Note (6.0):** Taxonomy *discovery*, *rebuild*, and per-document *assignment*
+> run on the nexus-service backend (the default since 6.0): embeddings are read
+> server-side and topics + centroids persist through the service (nexus-7ydks).
+> Still being ported (`nexus-7ydks`): `nx taxonomy split` / `project` and the
+> automatic cross-collection projection pass refuse cleanly on the service.
 
 After `nx index repo` (or `nx taxonomy discover --all`):
 
 1. **Fetch embeddings** from each T3 collection
 2. **Cluster** via HDBSCAN density-based clustering (`min_cluster_size=5`)
 3. **Label** each cluster with c-TF-IDF keywords, refined via Claude haiku
-4. **Store** topics in T2 and centroids in ChromaDB
+4. **Store** topics in T2 and centroids in a local ChromaDB collection (`taxonomy__centroids`, a centroid-only store independent of the retired T3 Chroma serving path)
 
 From then on, every `store_put` auto-assigns the new document to its nearest topic via centroid lookup, every search call boosts results sharing a topic cluster, and operator-curated labels survive rebuilds via centroid-matching merge (similarity > 0.8 transfers the old label).
 
@@ -320,9 +326,9 @@ Over time, JSONL files accumulate overwrites and tombstones. Two compaction mode
 
 ## Durability and remote sync
 
-**Local mode users** (ONNX embeddings, no cloud): the catalog is as durable as your disk. If that's fine, you're done.
+**Local-service users** (local nexus-service, bge-768): both T3 content (the service's Postgres) and the catalog live on your disk, so both are as durable as that disk. If that's fine, you're done.
 
-**Cloud mode users** (ChromaDB Cloud + Voyage AI): your T3 content lives in the cloud, but the catalog — the only record of what's indexed, how documents relate, and what their tumblers are — is local. If you lose the disk, the catalog is gone. T3 content survives but you'd have to `backfill` to reconstruct the registry, and all links would be lost.
+**Managed-cloud users** (a hosted nexus-service with pgvector + Voyage AI): your T3 content lives in the managed service's Postgres, but the catalog — the only record of what's indexed, how documents relate, and what their tumblers are — is still local. If you lose the disk, the catalog is gone. T3 content survives in the managed service, but you'd have to `backfill` to reconstruct the registry, and all links would be lost.
 
 **Fix this by adding a git remote:**
 

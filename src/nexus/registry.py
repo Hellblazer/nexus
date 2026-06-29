@@ -61,7 +61,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        import nexus.repo_identity as _ri  # noqa: PLC0415
+        import nexus.repo_identity as _ri  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
         return getattr(_ri, name)
     raise AttributeError(
         f"module 'nexus.registry' has no attribute {name!r}"
@@ -117,7 +117,7 @@ class RepoRegistry:
         # Direct import from the new home — avoids triggering this
         # module's __getattr__ DeprecationWarning on our own internal
         # use (the warning is for EXTERNAL imports from nexus.registry).
-        from nexus.repo_identity import _resolve_repo_collection as _rrc
+        from nexus.repo_identity import _resolve_repo_collection as _rrc  # noqa: PLC0415 — deliberate: direct import avoids this module's __getattr__ deprecation warning on internal use
         code_col = _rrc(repo, "code", cat=cat)
         docs_col = _rrc(repo, "docs", cat=cat)
         with self._lock:

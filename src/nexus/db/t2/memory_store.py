@@ -311,7 +311,7 @@ class MemoryStore:
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_memory_fts
+        from nexus.db.migrations import migrate_memory_fts  # noqa: PLC0415 — deferred to avoid circular import
 
         migrate_memory_fts(self.conn)
 
@@ -321,7 +321,7 @@ class MemoryStore:
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
         Delegates to module-level function in migrations.py (RDR-076).
         """
-        from nexus.db.migrations import migrate_access_tracking
+        from nexus.db.migrations import migrate_access_tracking  # noqa: PLC0415 — deferred to avoid circular import
 
         migrate_access_tracking(self.conn)
 

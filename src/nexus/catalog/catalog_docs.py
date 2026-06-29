@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Document / owner / collection lookup ops (nexus-mbm extraction 4/5).
+"""Document / collection lookup ops (nexus-mbm extraction 4/5).
 
 Read-only catalog queries: tumbler resolution, file-path / owner /
 content-type / corpus filters, collection registry lookups, and
-the BFS-like ``descendants`` walk. Writes (``register_owner``,
+the BFS-like ``descendants`` walk. The owner-table lookups
+(``owner_for_repo`` / ``owner_tumblers_by_name``) moved to
+``_OwnerOps`` (nexus-kgyoz); ``register_document`` reaches them via
+the facade. Writes (``register_owner``,
 ``register``, ``register_collection``, ``update``,
 ``delete_document``, alias/collection mutations) stay on
 ``Catalog`` — they touch the event-sourcing + JSONL append
@@ -89,37 +92,6 @@ class _DocumentOps:
     def __init__(self, catalog: "Catalog") -> None:
         self._cat = catalog
 
-    def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
-        cat = self._cat
-        row = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?", (repo_hash,)
-        ).fetchone()
-        return Tumbler.parse(row[0]) if row else None
-
-    def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
-        """Return tumblers of all owners with this name.
-
-        UNIQUE constraint is ``(name, owner_type)`` per nexus-7vuw, so
-        a single name can map to multiple owners across types (e.g.
-        a repo and a curator both named ``nexus``). Callers that need
-        a unique answer should disambiguate on the returned list
-        (typical CLI flow: error when ``len(...) > 1`` and surface
-        the candidates).
-
-        Returns ``[]`` if no owner has this name. Used by the
-        ``--owner`` CLI flags on ``nx catalog list`` (and friends)
-        to resolve operator-typed names to tumblers without leaking
-        the ``Tumbler.parse → int()`` ``ValueError`` (#537,
-        nexus-1lx7).
-        """
-        cat = self._cat
-        rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "ORDER BY tumbler_prefix",
-            (name,),
-        ).fetchall()
-        return [Tumbler.parse(r[0]) for r in rows]
-
     def resolve(self, tumbler: Tumbler, *, follow_alias: bool = True) -> CatalogEntry | None:
         """Return the document entry for ``tumbler``.
 
@@ -130,7 +102,7 @@ class _DocumentOps:
         graph itself).
         """
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         target = cat.resolve_alias(tumbler) if follow_alias else tumbler
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
@@ -185,7 +157,7 @@ class _DocumentOps:
         ``--re-extract`` re-sweeps.
         """
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         sql = (
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
@@ -380,7 +352,7 @@ class _DocumentOps:
         replaced was removed in Phase 5.
         """
         cat = self._cat
-        from nexus.repo_identity import _repo_identity  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
         _, repo_hash = _repo_identity(repo)
         owner = cat.owner_for_repo(repo_hash)
@@ -536,7 +508,7 @@ class _DocumentOps:
 
     def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.search(query, content_type=content_type)
         return [
             CatalogEntry(
@@ -559,7 +531,7 @@ class _DocumentOps:
 
     def by_file_path(self, owner: Tumbler, file_path: str) -> CatalogEntry | None:
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -596,7 +568,7 @@ class _DocumentOps:
         if not uri:
             return None
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -624,7 +596,7 @@ class _DocumentOps:
 
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -654,7 +626,7 @@ class _DocumentOps:
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
         """List all entries with the given content type (code, paper, rdr, knowledge)."""
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -676,7 +648,7 @@ class _DocumentOps:
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
         """List all entries with the given corpus tag."""
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -720,7 +692,7 @@ class _DocumentOps:
         HttpCatalogClient (which already supported offset).
         """
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         # alias_of at position 13 — required so verify_cmd's alias filter is non-vacuous.
         # Without alias_of in the SELECT, CatalogEntry.alias_of defaults to "" for every
         # row and the `not e.alias_of` guard in verify_cmd is vacuously True (nexus-xnz0o).
@@ -755,7 +727,7 @@ class _DocumentOps:
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         """Look up catalog entry by T3 doc_id stored in meta.doc_id."""
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
@@ -780,4 +752,67 @@ class _DocumentOps:
             source_mtime=row[12] or 0.0,
             source_uri=row[13] or "",
         )
+
+    def resolve_many(
+        self, doc_ids: list[str],
+    ) -> "dict[str, CatalogEntry]":
+        """Batch-resolve multiple doc_ids to CatalogEntry objects (nexus-7lm3q).
+
+        Executes a single ``SELECT ... WHERE json_extract(metadata,'$.doc_id')
+        IN (?)`` instead of N per-doc ``by_doc_id()`` calls. Returns a dict
+        keyed by doc_id; each value is the matching CatalogEntry. Doc_ids with
+        no matching document are absent from the result. Batched at 200 doc_ids
+        per query to stay safely below SQLite's variable limit while remaining
+        within the JsonExtract overhead tolerance.
+
+        Column-divergence note (nexus-7lm3q critic Sig-2): this local path keys
+        on ``json_extract(metadata,'$.doc_id')`` (matching the single-doc
+        ``by_doc_id`` at this layer), whereas the service path
+        (``CatalogRepository.resolveMany``) keys on the ``tumbler`` column. In
+        normal operation these are the same string (``metadata.doc_id`` is set
+        to the document's tumbler), so the two backends agree. They could
+        diverge only for a document whose ``tumbler`` differs from its stored
+        ``metadata.doc_id`` (a migration / re-registration / manual-repair edge
+        case) — a pre-existing asymmetry inherited from ``by_doc_id`` vs
+        ``/show?tumbler=X``, not introduced by the batch methods.
+        """
+        if not doc_ids:
+            return {}
+        cat = self._cat
+        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        result: dict[str, CatalogEntry] = {}
+        _BATCH = 200
+        for i in range(0, len(doc_ids), _BATCH):
+            batch = doc_ids[i : i + _BATCH]
+            placeholders = ", ".join(["?"] * len(batch))
+            rows = cat._db.execute(
+                f"SELECT json_extract(metadata, '$.doc_id'), "
+                f"tumbler, title, author, year, content_type, file_path, "
+                f"corpus, physical_collection, chunk_count, head_hash, "
+                f"indexed_at, metadata, source_mtime, source_uri "
+                f"FROM documents "
+                f"WHERE json_extract(metadata, '$.doc_id') IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                queried_doc_id = row[0]
+                if not queried_doc_id:
+                    continue
+                result[queried_doc_id] = CatalogEntry(
+                    tumbler=Tumbler.parse(row[1]),
+                    title=row[2],
+                    author=row[3],
+                    year=row[4],
+                    content_type=row[5],
+                    file_path=row[6],
+                    corpus=row[7],
+                    physical_collection=row[8],
+                    chunk_count=row[9],
+                    head_hash=row[10],
+                    indexed_at=row[11],
+                    meta=json.loads(row[12]) if row[12] else {},
+                    source_mtime=row[13] or 0.0,
+                    source_uri=row[14] or "",
+                )
+        return result
 

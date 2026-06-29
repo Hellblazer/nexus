@@ -583,9 +583,24 @@ class TestK11SkipNotCached:
         )
         mem_conn.close()
 
-    def test_after_skip_second_call_reattempts(self, tmp_path: Path) -> None:
+    def test_after_skip_second_call_reattempts(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """After a catalog-absent skip, a second apply_pending call must re-run migrations."""
         from nexus.db import migrations
+
+        # RDR-170: apply_pending is now lower-bound-only, so a "4.30.0" target no
+        # longer caps the run at je0b — it would also attempt migrate_drop_source_
+        # path_column (4.31.0), whose audit raises on this test's contrived state.
+        # Reproduce the old upper-bound scoping faithfully: slice the real
+        # registry to introduced <= 4.30.0 (keeps je0b, drops 4.31.0+).
+        from nexus.db.migrations import _parse_version as _pv
+
+        monkeypatch.setattr(
+            migrations,
+            "MIGRATIONS",
+            [m for m in migrations.MIGRATIONS if _pv(m.introduced) <= _pv("4.30.0")],
+        )
 
         mem_db = tmp_path / "memory.db"
         # Catalog must match the path derived by _catalog_db_path_from_conn:
@@ -631,9 +646,22 @@ class TestK11SkipNotCached:
 class TestCG2NoCatalog:
     """CG-2: apply_pending with absent catalog must be no-op AND retry-able."""
 
-    def test_apply_pending_no_catalog_does_not_raise(self, tmp_path: Path) -> None:
+    def test_apply_pending_no_catalog_does_not_raise(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """apply_pending must complete without exception when catalog DB is absent."""
         from nexus.db import migrations
+
+        # RDR-170: lower-bound-only runner — slice to <= 4.30.0 so a "4.30.0"
+        # target exercises the je0b defer path WITHOUT also attempting 4.31.0+
+        # (the old upper-bound scoping this je0b plumbing test was written for).
+        from nexus.db.migrations import _parse_version as _pv
+
+        monkeypatch.setattr(
+            migrations,
+            "MIGRATIONS",
+            [m for m in migrations.MIGRATIONS if _pv(m.introduced) <= _pv("4.30.0")],
+        )
 
         mem_db = tmp_path / "memory.db"
         mem_conn = _make_memory_db(mem_db)
@@ -645,9 +673,20 @@ class TestCG2NoCatalog:
         migrations.apply_pending(mem_conn, "4.30.0")
         mem_conn.close()
 
-    def test_apply_pending_no_catalog_leaves_path_not_cached(self, tmp_path: Path) -> None:
+    def test_apply_pending_no_catalog_leaves_path_not_cached(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """apply_pending with absent catalog must NOT add path to _upgrade_done."""
         from nexus.db import migrations
+
+        # RDR-170: slice to <= 4.30.0 (see sibling test).
+        from nexus.db.migrations import _parse_version as _pv
+
+        monkeypatch.setattr(
+            migrations,
+            "MIGRATIONS",
+            [m for m in migrations.MIGRATIONS if _pv(m.introduced) <= _pv("4.30.0")],
+        )
 
         mem_db = tmp_path / "memory.db"
         mem_conn = _make_memory_db(mem_db)

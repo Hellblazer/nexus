@@ -55,13 +55,14 @@ _BATCH_SIZE: int = 200
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 
 
 # ── HttpChashIndex ─────────────────────────────────────────────────────────────
 
 
-class HttpChashIndex:
+class HttpChashIndex(RawHandleGuardMixin):
     """ChashIndex drop-in that delegates to the RDR-152 Java HTTP service.
 
     Uses a keep-alive :class:`httpx.Client` connection pool. Reads
@@ -73,12 +74,11 @@ class HttpChashIndex:
     semantics (``ValueError`` for empty chash/collection).
 
     Thread safety: ``httpx.Client`` is thread-safe for concurrent requests.
-    The ``_lock`` attribute is present on ``ChashIndex`` (SQLite) for its
-    own reasons; ``HttpChashIndex`` does not need it but exposes the attribute
-    as ``None`` so any caller checking ``hasattr(store, '_lock')`` does not crash.
+    Like every service-backed store this has no raw SQLite ``.conn`` /
+    ``._lock``; both are provided by ``RawHandleGuardMixin`` and fail loud
+    with an actionable ``AttributeError`` (so ``hasattr`` /
+    ``has_raw_access`` cleanly return False — nexus-9613q.2).
     """
-
-    _lock = None  # public attribute compatibility
 
     def __init__(
         self,
@@ -95,8 +95,7 @@ class HttpChashIndex:
                       resolved from NX_SERVICE_TOKEN env var.
         """
         if base_url is None:
-            host, port, resolved_token = _resolve_config()
-            base_url = f"http://{host}:{port}"
+            base_url, resolved_token = _resolve_endpoint()
         else:
             resolved_token = _token or os.environ.get("NX_SERVICE_TOKEN", "")
             if not resolved_token:
@@ -280,6 +279,6 @@ def _raise_for_status(resp: httpx.Response, op: str) -> None:
     try:
         body = resp.json()
         msg = body.get("error", resp.text)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort response-body parse before raising RuntimeError
         msg = resp.text
     raise RuntimeError(f"HttpChashIndex.{op} failed (HTTP {resp.status_code}): {msg}")

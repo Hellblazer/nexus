@@ -176,6 +176,118 @@ class Telemetry:
             self.conn.commit()
             return cur.lastrowid
 
+    def record_tier_write(
+        self,
+        *,
+        session_id: str,
+        ts: str,
+        tool: str,
+        tier: str,
+        agent: str | None = None,
+        project: str | None = None,
+        target_title: str | None = None,
+    ) -> None:
+        """Append one row to ``tier_writes`` (tier-discipline audit).
+
+        nexus-pyzk7: the canonical store owns the INSERT so the MCP consumers
+        call ``db.telemetry.record_tier_write(...)`` instead of reaching for a
+        raw ``.conn`` (which a service-backed store does not have).
+        """
+        from nexus.db.migrations import migrate_tier_writes  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
+        with self._lock:
+            migrate_tier_writes(self.conn)
+            self.conn.execute(
+                "INSERT INTO tier_writes "
+                "(session_id, ts, tool, tier, agent, project, target_title) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, ts, tool, tier, agent, project, target_title),
+            )
+            self.conn.commit()
+
+    def record_nx_answer_run(
+        self,
+        *,
+        question: str,
+        plan_id: int | None,
+        matched_confidence: float | None,
+        step_count: int,
+        final_text: str,
+        cost_usd: float,
+        duration_ms: int,
+    ) -> None:
+        """Append one row to ``nx_answer_runs`` (RDR-080 run metrics).
+
+        nexus-pyzk7: consumer redaction (trace=False) is applied by the caller
+        before invoking this; the store just persists the given values.
+        """
+        from nexus.db.migrations import migrate_nx_answer_runs  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
+        with self._lock:
+            migrate_nx_answer_runs(self.conn)
+            self.conn.execute(
+                "INSERT INTO nx_answer_runs "
+                "(question, plan_id, matched_confidence, step_count, "
+                "final_text, cost_usd, duration_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (question, plan_id, matched_confidence, step_count,
+                 final_text, cost_usd, duration_ms),
+            )
+            self.conn.commit()
+
+    def record_hook_failure(
+        self,
+        *,
+        doc_id: str,
+        collection: str,
+        hook_name: str,
+        error: str,
+        chain: str,
+        batch_doc_ids: str | None = None,
+        is_batch: bool = False,
+        occurred_at: str | None = None,
+    ) -> None:
+        """Append one row to ``hook_failures`` (post-store hook failure audit).
+
+        nexus-9613q.3: the canonical store owns the INSERT so hook_registry
+        calls ``db.telemetry.record_hook_failure(...)`` instead of reaching a
+        raw ``.conn`` — which a service-backed store lacks, so every row was
+        silently dropped in service mode (the silent-loss class nexus-pyzk7
+        closed for tier_writes). Ensures the full RDR-095/RDR-089 column set
+        exists, then writes a single complete row (no per-caller column
+        fallback ladder — the migration guarantees the columns).
+        """
+        from nexus.db.migrations import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
+            migrate_hook_failures,
+            migrate_hook_failures_batch_columns,
+            migrate_hook_failures_chain_column,
+        )
+        with self._lock:
+            migrate_hook_failures(self.conn)
+            migrate_hook_failures_batch_columns(self.conn)
+            migrate_hook_failures_chain_column(self.conn)
+            cols = ["doc_id", "collection", "hook_name", "error",
+                    "batch_doc_ids", "is_batch", "chain"]
+            vals: list[Any] = [doc_id, collection, hook_name, error,
+                               batch_doc_ids, 1 if is_batch else 0, chain]
+            # Always stamp occurred_at in ISO-8601 (T separator). When the caller
+            # omits it, use isoformat() rather than letting the DDL DEFAULT
+            # CURRENT_TIMESTAMP fill a space-separated value — the age reaper
+            # (trim_hook_failures, nexus-7365x) compares occurred_at as TEXT
+            # against an isoformat() cutoff, and a space (0x20) sorts before
+            # 'T' (0x54), which would skew the cutoff-day boundary. Matches the
+            # search_telemetry convention (ts is always isoformat()).
+            cols.append("occurred_at")
+            vals.append(
+                occurred_at if occurred_at is not None
+                else datetime.now(UTC).isoformat()
+            )
+            placeholders = ", ".join(["?"] * len(vals))
+            self.conn.execute(
+                f"INSERT INTO hook_failures ({', '.join(cols)}) "
+                f"VALUES ({placeholders})",
+                vals,
+            )
+            self.conn.commit()
+
     def log_relevance_batch(
         self,
         rows: list[tuple[str, str, str, str, str]],
@@ -344,6 +456,31 @@ class Telemetry:
         with self._lock:
             cur = self.conn.execute(
                 "DELETE FROM search_telemetry WHERE ts < ?",
+                (cutoff,),
+            )
+            self.conn.commit()
+        return cur.rowcount
+
+    def trim_hook_failures(self, days: int = 30) -> int:
+        """Delete ``hook_failures`` rows older than *days* days (nexus-7365x).
+
+        Audit-table TTL parity with :meth:`trim_search_telemetry`: hook_failures
+        is a no-cascade audit table (RDR-164 P0) reaped by age. Filters on the
+        ``occurred_at`` timestamp. Default 30d, matching the search-telemetry
+        reaper. Safe on an empty or not-yet-migrated table. Returns rows deleted.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._lock:
+            # hook_failures is created by migration; tolerate its absence.
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_failures'"
+            ).fetchone()
+            if not exists:
+                return 0
+            cur = self.conn.execute(
+                "DELETE FROM hook_failures WHERE occurred_at < ?",
                 (cutoff,),
             )
             self.conn.commit()

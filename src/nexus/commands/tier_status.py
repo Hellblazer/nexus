@@ -146,6 +146,24 @@ def tier_status_cmd(
             "--session, --last, and --since are mutually exclusive"
         )
 
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 - deferred to avoid circular import at module load
+    if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+        # nexus-wyu1g: in service mode tier_writes are recorded in the
+        # service-backed telemetry store (Postgres), not local SQLite. Reading
+        # the local table would silently report 0 writes; say so honestly
+        # instead (and don't require a local T2 db). Full service-side read
+        # parity — a GET /v1/telemetry/tier_writes endpoint — is deferred to
+        # nexus-59wjj.
+        msg = (
+            "tier_writes are recorded in the service-backed telemetry store "
+            "(Postgres); local inspection is not available in service mode."
+        )
+        if json_out:
+            click.echo(_json.dumps({"service_backed": True, "message": msg}, indent=2))
+        else:
+            click.echo(msg)
+        return
+
     db_path = default_db_path()
     if not Path(db_path).exists():
         if json_out:

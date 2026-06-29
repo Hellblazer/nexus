@@ -57,9 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - name: Set up GraalVM 25.0.3
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
@@ -70,7 +70,7 @@ jobs:
         # applies the master changelog, generates into target/generated-sources/jooq).
         run: ./mvnw -q generate-sources
       - name: Upload generated jOOQ sources
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: jooq-sources
           path: service/target/generated-sources/jooq
@@ -87,6 +87,12 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # max-parallel: 2 — the two linux builds run in parallel (they schedule
+      # cleanly), and mac-arm64 (ordered last) only starts once a linux slot
+      # frees, so it no longer competes for a runner up front. The scarce macOS
+      # runner was getting starved-then-slammed when all three launched at once;
+      # deferring it keeps linux concurrency while giving mac an uncontended slot.
+      max-parallel: 2
       matrix:
         target:
           - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true }
@@ -99,12 +105,12 @@ jobs:
       ASSET: nexus-service-${{ matrix.target.arch }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Set up GraalVM 25.0.3
         # SHA-pinned (not @v1): this is a PUBLISH path that creates a GitHub
         # Release, so a floating tag is a supply-chain hole. bef4b0e == v1.
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
         with:
           # >= 25.0.2 REQUIRED: the bundled jOOQ / liquibase reachability metadata
           # use GraalVM's unified reachability-metadata schema (nexus-lp2qo).
@@ -112,40 +118,26 @@ jobs:
           distribution: 'graalvm'
           cache: 'maven'
 
-      - name: Cache bge-768 ONNX model
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # RDR-160: in local mode the native binary constructs Bge768Embedder,
         # which loads the STANDARD fp32 bge-base-en-v1.5 ONNX from ~/.cache/nexus
-        # (NOT MiniLM, NOT fastembed's fused optimized export) — the native smoke
-        # needs it. STABLE key (immutable upstream export): one cold download per
-        # arch, restored thereafter; bump -v only if the model source changes.
-        uses: actions/cache@v4
+        # — the native smoke needs it. Centralised in
+        # .github/actions/prime-bge-onnx (self-hosted release asset, no
+        # HuggingFace 429 dependency). Arch-qualified cache key: one cold
+        # download per arch, restored thereafter.
+        uses: ./.github/actions/prime-bge-onnx
         with:
-          path: ~/.cache/nexus/onnx_models/bge-base-en-v1.5
-          key: bge-onnx-standard-${{ runner.os }}-${{ matrix.target.arch }}-v1
-
-      - name: Prime bge-768 ONNX on cache miss
-        run: |
-          MODEL_DIR="$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx"
-          if [ ! -f "$MODEL_DIR/model.onnx" ]; then
-            echo "bge ONNX not in cache; downloading the standard fp32 export (~416MB)."
-            mkdir -p "$MODEL_DIR"
-            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx \
-              -o "$MODEL_DIR/model.onnx"
-            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json \
-              -o "$MODEL_DIR/tokenizer.json"
-            test -f "$MODEL_DIR/model.onnx" || { echo "bge model.onnx missing after download"; exit 1; }
-          else
-            echo "bge ONNX restored from cache."
-          fi
+          cache-key: bge-onnx-standard-${{ runner.os }}-${{ matrix.target.arch }}-v1
 
       - name: Resolve engine-service version
         id: ver
         # On a tag push, the published version is the tag minus the
         # 'engine-service-v' prefix. On workflow_dispatch (dev/smoke) there is no
-        # release version, so keep the pom's SNAPSHOT. The version must be stamped
-        # into the binary so its /version endpoint (VersionHandler reads
-        # pom.properties) does not report 1.0-SNAPSHOT under a real release tag —
-        # nx clients negotiate schema skew off /version (nexus-pebfx.4).
+        # release version. RDR-002: the version is stamped into a dedicated
+        # release_version field (see the release.properties stamp step below), NOT
+        # into the Maven app_version — app_version stays 1.0-SNAPSHOT (the dev
+        # coordinate). nx clients pin on release_version (RDR-002 ez5.4) and
+        # fail-closed when it is null (dev/unstamped build).
         run: |
           set -euo pipefail
           ref="${GITHUB_REF_NAME}"
@@ -158,15 +150,38 @@ jobs:
       - name: Download pre-generated jOOQ sources
         # From the jooq-codegen job — compiled by -Pprebuilt-jooq below. No Docker
         # needed to build, which is what lets mac-arm64 build here.
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
         with:
           name: jooq-sources
           path: service/target/generated-sources/jooq
 
-      - name: Stamp release version into the pom (tag push only)
+      - name: Stamp release_version into the binary (tag push only)
+        # RDR-002 (conexus PR #78): bake the release identity into a dedicated
+        # release_version field read by VersionHandler from
+        # META-INF/nexus/release.properties — NOT into the Maven app_version
+        # (do NOT versions:set the pom; app_version stays 1.0-SNAPSHOT, the dev
+        # coordinate). On workflow_dispatch the file stays blank in source, so
+        # VersionHandler reports release_version=null and the RDR-002 pin
+        # fail-closes — exactly the intended dev-build behaviour.
         if: steps.ver.outputs.version != ''
         working-directory: service
-        run: ./mvnw -q versions:set -DnewVersion="${{ steps.ver.outputs.version }}" -DgenerateBackupPoms=false
+        env:
+          # Via env (not direct ${{ }} interpolation into the script body): a git
+          # tag can legally contain shell metacharacters, so interpolating it into
+          # the command text is an injection vector (code-review H1). The runner
+          # sets this as an env value; the shell never re-parses it as code.
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          props="src/main/resources/META-INF/nexus/release.properties"
+          test -f "$props" || { echo "release.properties missing at $props"; exit 1; }
+          # Overwrite the release_version line in place (preserve the header).
+          tmp="$(mktemp)"
+          grep -v '^release_version=' "$props" > "$tmp"
+          printf 'release_version=%s\n' "$RELEASE_VERSION" >> "$tmp"
+          mv "$tmp" "$props"
+          echo "stamped release_version=$RELEASE_VERSION"
+          grep '^release_version=' "$props"
 
       - name: Build native image (-Pnative -Pprebuilt-jooq)
         working-directory: service
@@ -256,7 +271,7 @@ jobs:
         # bead exists to close — same reasoning as the SHA-pinned graalvm action
         # above. SHA backs v3.7.0.
         if: startsWith(github.ref, 'refs/tags/engine-service-v')
-        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409  # v3.7.0
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
       - name: Sign release asset (cosign keyless, release tag only)
         # nexus-1odsm: the native binary runs with DB credentials in the conexus
@@ -297,7 +312,7 @@ jobs:
           echo "cosign signatures verified for $ASSET (.cosign.bundle + .sigstore.json)"
 
       - name: Upload Actions artifact (always — dev smoke / non-tag path)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: ${{ env.ASSET }}
           path: dist/*
@@ -333,8 +348,9 @@ jobs:
             "STANDARD fp32 bge-base-en-v1.5 ONNX from the filesystem at runtime." \
             "Before building the runtime image, stage it (or run nx init --service):" \
             "  MODEL_DIR=~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx; mkdir -p \$MODEL_DIR" \
-            "  curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx -o \$MODEL_DIR/model.onnx" \
-            "  curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json -o \$MODEL_DIR/tokenizer.json" \
+            "  base=https://github.com/${GITHUB_REPOSITORY}/releases/download/ci-assets-bge-768-v1" \
+            "  curl -fL --retry 5 --retry-all-errors \$base/model.onnx -o \$MODEL_DIR/model.onnx" \
+            "  curl -fL --retry 5 --retry-all-errors \$base/tokenizer.json -o \$MODEL_DIR/tokenizer.json" \
             "" \
             "Provenance: each asset carries a sha256 AND a keyless cosign/Sigstore" \
             "signature in TWO bundle formats — <asset>.cosign.bundle (old JSON) and" \
@@ -405,7 +421,7 @@ jobs:
       PGVECTOR_VERSION: "v0.8.2"
       ASSET: nexus-pg-${{ matrix.target.arch }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Build PG + pgvector bundle and package .txz
         env:
@@ -447,7 +463,7 @@ jobs:
         # SHA-pinned (not @v3.7.0): same supply-chain reasoning as the native-binary
         # job above — the signing primitive must not float.
         if: startsWith(github.ref, 'refs/tags/engine-service-v')
-        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409  # v3.7.0
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
       - name: Sign PG bundle (cosign keyless, release tag only)
         if: startsWith(github.ref, 'refs/tags/engine-service-v')
@@ -468,7 +484,7 @@ jobs:
           echo "cosign signature verified for $ASSET.txz (.sigstore.json)"
 
       - name: Upload Actions artifact (always — dev smoke / non-tag path)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: ${{ env.ASSET }}
           path: dist/*

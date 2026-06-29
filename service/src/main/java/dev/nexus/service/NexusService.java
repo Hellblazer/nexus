@@ -146,6 +146,43 @@ public final class NexusService {
     }
 
     /**
+     * The address the HTTP server binds. Defaults to loopback ({@code 127.0.0.1});
+     * {@code NX_SERVICE_BIND} overrides it (e.g. {@code 0.0.0.0}) for container
+     * hosting where a peer must reach the service across a network namespace.
+     *
+     * <p><strong>Security:</strong> the service has no external TLS (forward proxy
+     * / supervisor terminates TLS in production). Binding beyond loopback exposes a
+     * token-authed but plaintext service, so a non-loopback bind is logged loudly
+     * and is intended only for trusted container networking.
+     */
+    static String resolveBindHost() {
+        return resolveBindHost(System.getenv("NX_SERVICE_BIND"));
+    }
+
+    /** Pure resolution (testable): {@code null}/blank → loopback; otherwise the
+     *  trimmed value, with a loud security warning for any non-loopback bind. */
+    static String resolveBindHost(String envValue) {
+        if (envValue == null || envValue.isBlank()) {
+            return "127.0.0.1";
+        }
+        String bind = envValue.trim();
+        // Normalize "localhost" → "127.0.0.1": InetSocketAddress resolves the name
+        // at bind time, and on IPv6-only-loopback /etc/hosts it would bind [::1]
+        // while the supervisor + Python clients connect to 127.0.0.1 → refused
+        // (code-review H-1). An explicit "::1" is left as-is (deliberate IPv6).
+        if (bind.equals("localhost")) {
+            return "127.0.0.1";
+        }
+        if (!bind.equals("127.0.0.1") && !bind.equals("::1")) {
+            log.warn("event=service_bind_non_loopback bind={} security=\"no external TLS; "
+                    + "token-authed plaintext (and unauthenticated /health, /version) "
+                    + "exposed beyond loopback — intended only for trusted container "
+                    + "networking\"", bind);
+        }
+        return bind;
+    }
+
+    /**
      * Full constructor — the production wiring (RDR-155 P4a.2, bead nexus-1k8s1).
      *
      * @param port              listen port; 0 for OS-assigned ephemeral (use in tests)
@@ -185,7 +222,7 @@ public final class NexusService {
         var catalogRepo   = new CatalogRepository(tenantScope);
 
         this.server = HttpServer.create(
-            new InetSocketAddress("127.0.0.1", port), /* backlog */ 10);
+            new InetSocketAddress(resolveBindHost(), port), /* backlog */ 10);
 
         // /health — unauthenticated
         server.createContext("/health", new HealthHandler(dataSource));

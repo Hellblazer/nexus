@@ -3,8 +3,23 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # Skip the full matrix for changes that cannot affect test outcomes
+    # (docs + changelogs). Conservative on purpose: NOT a blanket **/*.md —
+    # plugin-structure tests validate skill/agent markdown frontmatter, so
+    # only clearly-non-code prose paths are listed. A push touching any code,
+    # config, or manifest still runs CI in full.
+    paths-ignore:
+      - 'CHANGELOG.md'
+      - 'conexus/CHANGELOG.md'
+      - 'README.md'
+      - 'docs/**'
   pull_request:
     branches: [main, develop]
+    paths-ignore:
+      - 'CHANGELOG.md'
+      - 'conexus/CHANGELOG.md'
+      - 'README.md'
+      - 'docs/**'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,6 +28,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  lint:
+    # nexus-ls88v (epic nexus-whh61 F7): the structlog-only / no-print-in-library
+    # / audited-broad-except discipline was previously convention-only — 73
+    # BLE001 + 284 PLC0415 noqa were version-controlled but unenforced because no
+    # CI lint job existed. This job runs the committed [tool.ruff] ruleset so a
+    # NEW print()/blind-except/lazy-import that lacks a justified per-line noqa
+    # fails the PR. Ruff is pinned to the version the F7 audit was performed with
+    # so local `uv run ruff` (>=0.15.18) and CI agree on rule behaviour.
+    name: ruff lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Lint src/ with ruff
+        # uvx fetches the standalone ruff (no project build / heavy-dep sync).
+        # Pinned exact for determinism; the [tool.ruff] config in pyproject.toml
+        # is read automatically.
+        run: uvx ruff@0.15.18 check src/
+
   test:
     name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -28,9 +68,9 @@ jobs:
         python-version: ["3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: ${{ matrix.python-version }}
           # nexus-2ivn: setup-uv's bundled enable-cache only restored
@@ -38,12 +78,12 @@ jobs:
           # missing and torch (~847 MB) re-downloaded on every run.
           # Disable the bundled cache and target the directory setup-uv
           # actually uses (UV_CACHE_DIR = ${{ runner.temp }}/setup-uv-
-          # cache, not ~/.cache/uv) with an explicit actions/cache@v4
+          # cache, not ~/.cache/uv) with an explicit actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
           # step below.
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           # Key on uv.lock so a dep change rebuilds; restore-keys
@@ -55,7 +95,7 @@ jobs:
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Cache ChromaDB ONNX model
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ~/.cache/chroma
           # nexus-8g79.33: include uv.lock hash so a chromadb bump that
@@ -69,7 +109,7 @@ jobs:
             chromadb-onnx-${{ runner.os }}-
 
       - name: Cache HuggingFace models (docling, cross-encoder, MinerU)
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           # nexus-cxsbs: the docling PDF extractor downloads its layout +
           # TableFormer models from HuggingFace at test time; an unreliable
@@ -165,7 +205,13 @@ jobs:
       MANYLINUX_IMAGE: ${{ matrix.target.image }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          # Full history so dorny/paths-filter resolves the main...develop
+          # merge-base without --deepen, whose shallow-fetch loop races
+          # ("fatal: shallow file has changed since we read it") and flaked
+          # the linux CA-3 gate twice on a docs-only push (2026-06-28).
+          fetch-depth: 0
 
       # Path-gate the expensive PG-from-source build. The job ALWAYS runs (so the
       # required status check always reports), but the build/test/smoke steps run
@@ -176,7 +222,7 @@ jobs:
       # compromised to always emit ca3='false' would skip the PG build + tests
       # while the job still reports green — the exact vacuous gate the
       # always-run-job pattern exists to prevent. de90cc6 == v3.0.2.
-      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
         id: changes
         with:
           filters: |
@@ -198,7 +244,7 @@ jobs:
               - 'uv.lock'
               - 'pyproject.toml'
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         if: steps.changes.outputs.ca3 == 'true'
         with:
           python-version: "3.12"
@@ -206,7 +252,7 @@ jobs:
 
       - name: Cache uv wheel cache
         if: steps.changes.outputs.ca3 == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-${{ matrix.target.arch }}-3.12-${{ hashFiles('uv.lock') }}
@@ -289,7 +335,7 @@ jobs:
 
       - name: Upload bundle artifact (P3.1, consumed by P3.2/P3.4)
         if: steps.changes.outputs.ca3 == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: nexus-pg-${{ matrix.target.arch }}
           path: ${{ runner.temp }}/nexus-pg-${{ matrix.target.arch }}.txz
@@ -322,7 +368,9 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
       # Path-gate the expensive native PG build (same rationale as the linux CA-3
       # job): the job always runs so the required check reports, but the build/test
@@ -332,7 +380,7 @@ jobs:
       # compromised to always emit ca3='false' would skip the PG build + tests
       # while the job still reports green — the exact vacuous gate the
       # always-run-job pattern exists to prevent. de90cc6 == v3.0.2.
-      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
         id: changes
         with:
           filters: |
@@ -354,7 +402,7 @@ jobs:
               - 'uv.lock'
               - 'pyproject.toml'
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         if: steps.changes.outputs.ca3 == 'true'
         with:
           python-version: "3.12"
@@ -364,7 +412,7 @@ jobs:
         # Mirror the linux CA-3 jobs so a gated mac run reuses wheels instead of
         # re-downloading from scratch (code-review L1).
         if: steps.changes.outputs.ca3 == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-mac-arm64-3.12-${{ hashFiles('uv.lock') }}
@@ -425,7 +473,7 @@ jobs:
 
       - name: Upload bundle artifact (P3.1, consumed by P3.2/P3.4)
         if: steps.changes.outputs.ca3 == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: nexus-pg-mac-arm64
           path: ${{ runner.temp }}/nexus-pg-mac-arm64.txz
@@ -454,9 +502,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
-      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
         id: changes
         with:
           filters: |
@@ -491,3 +541,144 @@ jobs:
         # and lowers peak memory while preserving the gate's purpose. The RELEASE build
         # (engine-service-release.yml) keeps the default -O2 full optimization.
         run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob package
+
+  write-seam-gate:
+    # nexus-h29w1 — Behavioural cross-boundary write-seam CI gate (F1 closure).
+    #
+    # Audit finding F1: no single CI gate exercises BOTH halves of a write-seam
+    # diff. The Python suite (ci.yml) deselects integration tests; service-ci.yml
+    # fires only on service/** paths — so a Python-only change to
+    # http_vector_client.py:upsert_chunks cannot trigger the Java
+    # VectorHandler/PgVectorRepository tenant/dedup/quota suite.
+    #
+    # This job boots the real service JAR (pre-built shaded jar) against a
+    # throwaway pgvector/pgvector:pg17 Docker container and feeds >300-record,
+    # duplicate-chash, and NUL-bearing inputs through the REAL HttpVectorClient,
+    # asserting server-side enforcement: dedup collapse, ON CONFLICT idempotency,
+    # and NUL sanitization.  The new value is the Python-client -> real-server
+    # WIRE CROSSING — this does NOT duplicate existing in-JVM Java coverage
+    # (VectorHandlerEmbeddingModeTest, VectorIntegrationTest,
+    # PgVectorRepositoryContractTest).
+    #
+    # PATH GATE: the job ALWAYS runs (so the required status check always
+    # reports), but the expensive build/test steps run only when the write-seam
+    # surface changes (Python client OR Java handler).  A diff touching either
+    # half triggers this job, closing the gap where neither existing workflow
+    # fires.
+    #
+    # FAIL-NOT-SKIP ON MISSING JAR: NX_REQUIRE_SERVICE_JAR=1 is set so that
+    # a missing/stale JAR causes the conftest.py autouse fixture to FAIL (not
+    # skip) — the gate cannot pass vacuously on a missing JAR in CI.
+    # scripts/assert_write_seam_ran.py then enforces that the load-bearing
+    # dedup-collapse test actually ran and passed (no all-skip vacuous green).
+    #
+    # Part of epic nexus-whh61. Related: nexus-57dh4.
+    name: write-seam behavioural gate (nexus-h29w1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
+
+      # SHA-pinned (not @v4): this filter's `seam` output gates whether EVERY
+      # expensive step in a REQUIRED check runs. A floating tag compromised to
+      # always emit seam='false' would skip the JAR build + test while the job
+      # still reports green — the exact vacuous gate this gate exists to prevent.
+      # fbd0ab8 == v4.0.1 (same SHA used by the CA-3 jobs above).
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+        id: changes
+        with:
+          filters: |
+            seam:
+              - 'src/nexus/db/http_vector_client.py'
+              # C1 (nexus-h29w1 critic): VectorHandler lives in http/, not
+              # vectors/ — the old vectors/VectorHandler.java entry was a dead
+              # reference, so a diff to the real HTTP dispatch layer never fired
+              # the gate. AuthFilter does tenant extraction upstream of the
+              # write path, so it belongs in the seam too.
+              - 'service/src/main/java/dev/nexus/service/http/VectorHandler.java'
+              - 'service/src/main/java/dev/nexus/service/http/AuthFilter.java'
+              - 'service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java'
+              - 'tests/db/test_write_seam_gate_integration.py'
+              - 'scripts/assert_write_seam_ran.py'
+              - '.github/workflows/ci.yml'
+              # Dep bump can change the Python env or service contract without
+              # touching the above paths; gate on lockfile + manifest so such a
+              # change re-runs the gate (same rationale as CA-3 jobs above).
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'service/pom.xml'
+
+      - name: Set up Java 25 (GraalVM)
+        if: steps.changes.outputs.seam == 'true'
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+
+      - uses: astral-sh/setup-uv@v7
+        if: steps.changes.outputs.seam == 'true'
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        if: steps.changes.outputs.seam == 'true'
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-write-seam-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-write-seam-3.12-
+
+      - name: Cache ChromaDB ONNX model
+        if: steps.changes.outputs.seam == 'true'
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Install project + dev deps
+        if: steps.changes.outputs.seam == 'true'
+        run: uv sync --group dev
+
+      - name: Build service JAR (shaded, -DskipTests)
+        # Build the JAR that upsert_chunks posts to. Uses the standard Maven
+        # shaded package (NOT native) — we need the JVM jar, not a native binary,
+        # so the build is ~30s vs ~5m for native.
+        if: steps.changes.outputs.seam == 'true'
+        working-directory: service
+        run: ./mvnw -q package -DskipTests
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        # nexus-h29w1: the JAR boots its local ONNX embedder at startup
+        # (RDR-160 = bge-768). Without the model the service never finishes
+        # booting and never binds its port → the gate timed out ("port not
+        # reachable after 90s"). Centralised in .github/actions/prime-bge-onnx
+        # (self-hosted release asset, no HuggingFace 429 dependency).
+        if: steps.changes.outputs.seam == 'true'
+        uses: ./.github/actions/prime-bge-onnx
+
+      - name: Run write-seam gate (>300-record, dup-chash, ON CONFLICT, NUL-sanitize)
+        if: steps.changes.outputs.seam == 'true'
+        env:
+          # FAIL (not skip) on missing/stale JAR in CI — the conftest.py autouse
+          # _service_jar_freshness fixture checks CI=true (already set by GitHub
+          # Actions) and calls pytest.fail() instead of pytest.skip(). Setting
+          # NX_REQUIRE_SERVICE_JAR=1 is belt-and-suspenders for local scripted runs
+          # that set neither CI nor GITHUB_ACTIONS.
+          NX_REQUIRE_SERVICE_JAR: "1"
+          CI: "true"
+        run: |
+          set -euo pipefail
+          # -o addopts="" clears the repo default -m 'not integration' so the
+          # integration-marked test module is collected (same pattern as CA-3 jobs).
+          uv run pytest tests/db/test_write_seam_gate_integration.py \
+            -o addopts="" -m integration -q -rs --junit-xml=write-seam.xml
+          # Non-vacuity gate: asserts the dedup-collapse test actually ran+passed
+          # and no prereq-skip vacuously cleared the run.
+          uv run python scripts/assert_write_seam_ran.py write-seam.xml

@@ -76,11 +76,20 @@ class LiveServiceWiredModels:
 
     def wired_models(self) -> frozenset[str] | None:
         try:
-            from nexus.daemon.binary_lifecycle import fetch_service_version
-            from nexus.db.service_endpoint import resolve_service_config
+            from urllib.parse import urlsplit  # noqa: PLC0415 — branch-local; only on wired-model probe
 
-            host, port, _token = resolve_service_config()
-            handshake = fetch_service_version(host, port)
+            from nexus.daemon.binary_lifecycle import fetch_service_version  # noqa: PLC0415 — circular-dep avoidance; daemon pulls heavy deps
+            from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — branch-local probe helper
+
+            # Scheme-aware: a managed TLS endpoint (NX_SERVICE_URL=https://…:443)
+            # must reach the service over https; the old (host, port) path
+            # hard-coded http and broke the handshake before the data path ran
+            # (nexus-n3bwh). resolve_service_endpoint preserves the scheme.
+            base_url, _token = resolve_service_endpoint()
+            parsed = urlsplit(base_url)
+            handshake = fetch_service_version(
+                parsed.hostname, parsed.port, scheme=parsed.scheme
+            )
         except Exception as exc:  # noqa: BLE001 - probe must never raise upward
             _log.debug("pregate_live_wired_unreachable", error=str(exc))
             return None

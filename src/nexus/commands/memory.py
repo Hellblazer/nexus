@@ -254,7 +254,7 @@ def expire_cmd() -> None:
         count = db.memory.expire()
         try:
             db.telemetry.expire_relevance_log(days=90)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — best-effort relevance_log purge; safe default (memory expiry already landed), facade logged the structured error
             # The relevance_log purge is best-effort; the facade
             # logged a structured ``relevance_log_error`` event for
             # this. Without the daemon-side facade we lose that
@@ -270,15 +270,15 @@ def expire_cmd() -> None:
 @click.option("--remove", is_flag=True, default=False, help="Delete the entry from T2 after promoting.")
 def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None:
     """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
-    from nexus.corpus import t3_collection_name
+    from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import: heavy T3-resolution dep deferred to command invocation
 
     with t2_handle() as db:
         entry = db.memory.get(id=entry_id)
         if entry is None:
             raise click.ClickException(f"Entry {entry_id} not found in T2 memory.")
 
-        from nexus.config import is_local_mode
-        from nexus.db import make_t3
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deliberate function-local import: branch-local, only on promote path
+        from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-local import: heavy T3 dep deferred to command invocation
 
         if not is_local_mode():
             missing = [
@@ -288,7 +288,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             ]
             if missing:
                 raise click.ClickException(
-                    f"{', '.join(missing)} not set — run: nx config init"
+                    f"{', '.join(missing)} not set — run: nx config set <key> <value>"
                 )
 
         # nexus-hmxi: probe T3 so promote targets land in the same
@@ -304,7 +304,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             if callable(close):
                 try:
                     close()
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort probe-handle cleanup; close failure must not abort promote
                     pass
 
         # Translate TTL: T2 ttl=None (permanent) -> T3 ttl_days=0; T2 ttl=N -> T3 ttl_days=N
@@ -325,8 +325,8 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # document_chunks + documents.chunk_count for this promotion.
         # Without this, the promoted entry lands in T3 with no catalog
         # identity — same regression class as nexus-zq79 / nexus-lf8f.
-        import hashlib
-        from nexus.catalog.store_hook import catalog_store_hook
+        import hashlib  # noqa: PLC0415 — deliberate function-local import: only needed on promote path
+        from nexus.catalog.store_hook import catalog_store_hook  # noqa: PLC0415 — deliberate function-local import: catalog dep deferred, branch-local
         chunk_chroma_id = hashlib.sha256(entry["content"].encode()).hexdigest()[:32]
         catalog_doc_id = catalog_store_hook(
             title=entry["title"],
@@ -350,7 +350,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # symmetric-fire; this path was missed by the original commit.
         # nexus-8g79.1: thread catalog_doc_id through so the manifest
         # hook can populate document_chunks + chunk_count.
-        from nexus.hook_registry import HookRegistry, install_default_hooks
+        from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-local import: hook-registry dep deferred, branch-local
         hooks = HookRegistry()
         install_default_hooks(hooks)
         hooks.fire_store_chains(

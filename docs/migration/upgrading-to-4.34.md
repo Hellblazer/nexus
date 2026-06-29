@@ -1,5 +1,13 @@
 # Upgrading to conexus 4.34.x — RDR-120 storage substrate split
 
+> **Historical (pre-6.0).** This guide covers the 4.34.0 substrate split, when
+> local-mode T3 still ran as a `nx daemon t3` ChromaDB process. As of 6.0 that
+> T3 daemon is retired: T3 serves through the native nexus-service (Postgres 16
+> + pgvector). If you are upgrading to 6.0, ignore the `nx daemon t3` step below
+> and follow [Getting Started § Cloud mode](../getting-started.md#cloud-mode-optional)
+> + `nx init --service`, then run `nx guided-upgrade` (see the
+> [Migration Runbook](../migration-runbook.md)).
+
 **TL;DR — one new command after upgrading:**
 
 ```bash

@@ -18,7 +18,7 @@ SYSTEM_CREATORS = frozenset({"index_hook", "filepath_extractor", "auto-linker"})
 def _catalog_dir() -> Path:
     # Delegate to the canonical resolver so NEXUS_CONFIG_DIR and
     # NEXUS_CATALOG_PATH redirections land consistently.
-    from nexus.config import catalog_path
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid circular import
 
     return catalog_path()
 

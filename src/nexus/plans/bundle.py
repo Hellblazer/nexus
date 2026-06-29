@@ -611,7 +611,7 @@ def _terminal_schema(tool: str) -> dict[str, Any]:
         # definition so a role-enum or required-key change only lands
         # once. Local import avoids a module-load cycle between runner /
         # bundle / mcp.core.
-        from nexus.mcp.core import _CHECK_EVIDENCE_ITEM_SCHEMA
+        from nexus.mcp.core import _CHECK_EVIDENCE_ITEM_SCHEMA  # noqa: PLC0415 — deferred to avoid circular import (mcp.core)
         return {
             "type": "object",
             "required": ["ok", "evidence"],
@@ -739,7 +739,7 @@ async def dispatch_bundle(
     Returns the terminal step's output dict — the caller stamps it at the
     bundle's ``end_index`` slot in ``step_outputs``.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — deferred to avoid circular import (operators.dispatch)
 
     prompt, schema = compose_bundle_prompt(bundle)
     return await claude_dispatch(prompt, schema, timeout=timeout)

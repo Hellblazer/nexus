@@ -44,9 +44,11 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/write     replace manifest
  *   POST  /v1/catalog/manifest/append    append chunks
  *   GET   /v1/catalog/manifest/get       get manifest for doc_id
+ *   POST  /v1/catalog/manifest/get_many  batch-fetch manifests for multiple doc_ids (nexus-7lm3q)
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
+ *   POST  /v1/catalog/resolve_many       batch-resolve multiple doc_ids to entries (nexus-7lm3q)
  *   POST  /v1/catalog/owners/upsert      upsert owner
  *   GET   /v1/catalog/owners/list        list all owners
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
@@ -55,6 +57,7 @@ import java.util.*;
  *   GET   /v1/catalog/collections/get    get collection by name
  *   POST  /v1/catalog/collections/supersede supersede collection
  *   POST  /v1/catalog/collections/rename rename collection (cascade)
+ *   POST  /v1/catalog/collections/delete delete collection + cascade all in-PG lifecycle state (RDR-164 P2)
  *   GET   /v1/catalog/coverage            link coverage by content type (nexus-3cwnx)
  *   POST  /v1/catalog/import/owner       ETL import owner
  *   POST  /v1/catalog/import/document    ETL import document
@@ -80,6 +83,13 @@ public final class CatalogHandler implements HttpHandler {
             .setSerializationInclusion(JsonInclude.Include.ALWAYS);
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+
+    /**
+     * Upper bound on doc_ids accepted by the batch endpoints
+     * ({@code /manifest/get_many}, {@code /resolve_many}). Well under
+     * PostgreSQL's 32767-parameter Bind-message hard limit. nexus-7lm3q review.
+     */
+    private static final int MAX_BATCH_DOC_IDS = 1000;
 
     private final CatalogRepository repo;
 
@@ -122,6 +132,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/write"        -> handleManifestWrite(exchange, tenant, method);
                 case "/manifest/append"       -> handleManifestAppend(exchange, tenant, method);
                 case "/manifest/get"          -> handleManifestGet(exchange, tenant, method);
+                case "/manifest/get_many"     -> handleManifestGetMany(exchange, tenant, method);
                 case "/manifest/purge"        -> handleManifestPurge(exchange, tenant, method);
                 case "/manifest/chashes"      -> handleManifestChashes(exchange, tenant, method);
                 case "/manifest/docs_for_chashes" -> handleDocsForChashes(exchange, tenant, method);
@@ -144,6 +155,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/collections/get"       -> handleCollectionGet(exchange, tenant, method);
                 case "/collections/supersede" -> handleCollectionSupersede(exchange, tenant, method);
                 case "/collections/rename"    -> handleCollectionRename(exchange, tenant, method);
+                case "/collections/delete"    -> handleCollectionDelete(exchange, tenant, method);
                 case "/collections/for_tuple" -> handleCollectionForTuple(exchange, tenant, method);
                 case "/collections/health"    -> handleCollectionHealth(exchange, tenant, method);
 
@@ -168,6 +180,13 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Scoring hot-path batch endpoints (nexus-qnp5s) ───────────
                 case "/docs/chunk-counts"     -> handleDocChunkCounts(exchange, tenant, method);
                 case "/links/from-batch"      -> handleLinksFromBatch(exchange, tenant, method);
+
+                // ── Batch resolve endpoints (nexus-7lm3q) ────────────────────
+                case "/resolve_many"          -> handleResolveMany(exchange, tenant, method);
+
+                // ── Span / chash resolution (nexus-njrcn.4) ──────────────────
+                case "/resolve_span"          -> handleResolveSpan(exchange, tenant, method);
+                case "/resolve_chash"         -> handleResolveChash(exchange, tenant, method);
 
                 // ── Server-side tumbler assignment ────────────────────────────
                 case "/doc/register"          -> handleDocRegister(exchange, tenant, method);
@@ -340,8 +359,8 @@ public final class CatalogHandler implements HttpHandler {
     private void handleLink(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        repo.upsertLink(tenant, body);
-        HttpUtil.send(exchange, 200, "{\"ok\":true}");
+        boolean created = repo.upsertLink(tenant, body);
+        HttpUtil.send(exchange, 200, "{\"ok\":true,\"created\":" + created + "}");
     }
 
     /** POST /v1/catalog/unlink — delete link(s). */
@@ -374,6 +393,17 @@ public final class CatalogHandler implements HttpHandler {
         String tumbler   = queryParam(exchange, "tumbler");
         String direction = queryParam(exchange, "direction");
         String linkType  = queryParam(exchange, "link_type");
+        // RDR-168 njrcn.5: optional comma-separated link_types for a server-side IN filter
+        // (multi-type callers no longer fetch every edge and filter client-side). link_types
+        // takes precedence; falls back to the single link_type; null = no type filter.
+        String linkTypesRaw = queryParam(exchange, "link_types");
+        List<String> linkTypes = null;
+        if (linkTypesRaw != null && !linkTypesRaw.isBlank()) {
+            linkTypes = java.util.Arrays.stream(linkTypesRaw.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).toList();
+        } else if (linkType != null && !linkType.isBlank()) {
+            linkTypes = List.of(linkType);
+        }
         if (tumbler == null || tumbler.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"tumbler query param required\"}"); return;
         }
@@ -382,10 +412,10 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> linksFrom = List.of();
         List<Map<String, Object>> linksTo   = List.of();
         if ("out".equals(direction) || "both".equals(direction)) {
-            linksFrom = repo.linksFrom(tenant, tumbler, linkType);
+            linksFrom = repo.linksFrom(tenant, tumbler, linkTypes);
         }
         if ("in".equals(direction) || "both".equals(direction)) {
-            linksTo = repo.linksTo(tenant, tumbler, linkType);
+            linksTo = repo.linksTo(tenant, tumbler, linkTypes);
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("links_from", linksFrom, "links_to", linksTo)));
@@ -512,6 +542,123 @@ public final class CatalogHandler implements HttpHandler {
             : List.of();
         var docs = repo.docsForChashes(tenant, chashes);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("tumblers", docs)));
+    }
+
+    /**
+     * POST /v1/catalog/manifest/get_many (nexus-7lm3q)
+     *
+     * <p>Batch-fetch manifest rows for multiple doc_ids in a single round-trip,
+     * replacing the N per-doc {@code /manifest/get} loop issued by
+     * {@code _attach_doc_ids_from_catalog} in {@code search_engine.py}.
+     *
+     * <p>Request body:  {@code {"doc_ids": ["tumbler1", "tumbler2", ...]}}
+     * Response body:   {@code {"manifests": {"tumbler1": [rows...], "tumbler2": [rows...]}}}
+     *
+     * <p>Doc_ids with no manifest rows are absent from the response map.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleManifestGetMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("doc_ids");
+        List<String> docIds = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (docIds.isEmpty()) {
+            HttpUtil.send(exchange, 200, "{\"manifests\":{}}"); return;
+        }
+        // nexus-7lm3q review (CR High-2 / critic Sig-1): cap the IN-list well
+        // under PostgreSQL's 32767-parameter Bind limit. The sole production
+        // caller (search_engine fan-out) is bounded by the 300-result cap and
+        // the Python client batches at 500, but the endpoint must not trust the
+        // caller — admin tooling / future consumers could submit a larger list.
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var manifests = repo.getManifestMany(tenant, docIds);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("manifests", manifests)));
+    }
+
+    /**
+     * GET /v1/catalog/resolve_span?span_chash=<hex32>&collection=<name>  (nexus-njrcn.4)
+     *
+     * <p>Resolves a 32-char chunk chash within a specific collection to its text and
+     * metadata. The client parses the full span string client-side and sends only the
+     * truncated chash + collection so the server does a simple keyed lookup.
+     *
+     * <p>Response: {@code {"chunk_text": "...", "metadata": {...}, "chunk_hash": "..."}}
+     * or 404 on miss.
+     */
+    private void handleResolveSpan(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String spanChash = queryParam(exchange, "span_chash");
+        String collection = queryParam(exchange, "collection");
+        if (spanChash == null || spanChash.isBlank() || collection == null || collection.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"span_chash and collection query params required\"}"); return;
+        }
+        var result = repo.resolveSpan(tenant, collection, spanChash);
+        if (result == null) {
+            HttpUtil.send(exchange, 404, "{\"error\":\"chunk not found\"}"); return;
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
+    }
+
+    /**
+     * GET /v1/catalog/resolve_chash?chash=<hex32>[&prefer_collection=<name>]  (nexus-njrcn.4)
+     *
+     * <p>Globally resolves a 32-char chunk chash (across all dim tables) to its text,
+     * metadata, owning collection, and doc_id. Tie-breaks by prefer_collection (if
+     * provided) then newest created_at.
+     *
+     * <p>Response: {@code {"chash": "...", "chunk_hash": "...", "physical_collection": "...",
+     * "doc_id": "...", "chunk_text": "...", "metadata": {...}}} or 404 on miss.
+     */
+    private void handleResolveChash(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String chash = queryParam(exchange, "chash");
+        if (chash == null || chash.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"chash query param required\"}"); return;
+        }
+        String preferCollection = queryParam(exchange, "prefer_collection"); // may be null
+        var result = repo.resolveChash(tenant, chash, preferCollection);
+        if (result == null) {
+            HttpUtil.send(exchange, 404, "{\"error\":\"chunk not found\"}"); return;
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
+    }
+
+    /**
+     * POST /v1/catalog/resolve_many (nexus-7lm3q)
+     *
+     * <p>Batch-resolve multiple doc_ids to full document entries in a single
+     * round-trip, replacing the N per-doc {@code /show?tumbler=X} calls issued
+     * by {@code _attach_display_paths} in {@code search_engine.py}.
+     *
+     * <p>Request body:  {@code {"doc_ids": ["tumbler1", "tumbler2", ...]}}
+     * Response body:   {@code {"entries": {"tumbler1": {doc...}, "tumbler2": {doc...}}}}
+     *
+     * <p>Doc_ids with no matching document are absent from the response map.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleResolveMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("doc_ids");
+        List<String> docIds = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (docIds.isEmpty()) {
+            HttpUtil.send(exchange, 200, "{\"entries\":{}}"); return;
+        }
+        // nexus-7lm3q review (CR High-2 / critic Sig-1): see handleManifestGetMany —
+        // cap the IN-list under PostgreSQL's 32767-parameter Bind limit.
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var entries = repo.resolveMany(tenant, docIds);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("entries", entries)));
     }
 
     /**
@@ -643,8 +790,43 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
-        int updated = repo.renameCollection(tenant, oldName, newName);
-        HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
+        // nexus-hz785: a rename of an unregistered collection used to return 200 with all-zero
+        // counts (insert-select copies 0 rows, every child UPDATE touches 0) — a silent no-op on
+        // a typo. Fail loud with a legible 404 instead.
+        if (!repo.collectionExists(tenant, oldName)) {
+            HttpUtil.send(exchange, 404,
+                "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + oldName) + "}"); return;
+        }
+        // nexus-gaou3: if new_name is ALREADY a registered collection, renameCollection silently
+        // takes the RDR-162 cross-model COPY branch (repoints catalog_documents ONLY; chunks/
+        // taxonomy/aspects are NOT moved). That is correct ONLY for the deliberate cross-model
+        // migrate. A plain rename onto an existing collection is a collision: fail loud with 409
+        // unless the caller opts into the COPY branch via cross_model:true.
+        boolean crossModel = Boolean.TRUE.equals(body.get("cross_model"));
+        if (!crossModel && repo.collectionExists(tenant, newName)) {
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString("target collection already exists: " + newName
+                    + " (pass cross_model:true only for a deliberate cross-model repoint)") + "}"); return;
+        }
+        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
+    }
+
+    /**
+     * RDR-164 P2: atomically delete a collection and all its in-Postgres derived state.
+     * Returns per-table deleted-row counts so the client can preserve its CascadeCounts
+     * contract. {@code pipeline.db} and local-mode cascades remain client-side.
+     */
+    private void handleCollectionDelete(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        // Accept both "name" (canonical) and "collection" (client compat).
+        String name = body.get("name") instanceof String s ? s : (String) body.get("collection");
+        if (name == null || name.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"name (or collection) required\"}"); return;
+        }
+        Map<String, Integer> counts = repo.deleteCollection(tenant, name);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("deleted", counts)));
     }
 
     private void handleCollectionForTuple(HttpExchange exchange, String tenant, String method) throws IOException {

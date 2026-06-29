@@ -256,7 +256,7 @@ class TestUnlinkEventOrderingAfterCommit:
 
 class TestDoctorLinksSnapshotByName:
     def test_snapshot_table_excludes_named_columns(self, tmp_path):
-        from nexus.commands.catalog import _snapshot_table
+        from nexus.commands.catalog_cmds.doctor import _snapshot_table
 
         # Build a CatalogDB and seed one link.
         db = CatalogDB(tmp_path / ".catalog.db")

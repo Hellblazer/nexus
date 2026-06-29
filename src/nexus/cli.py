@@ -42,6 +42,7 @@ from nexus.commands.command_context import command_context
 from nexus.commands.console import console
 from nexus.commands.context_cmd import context
 from nexus.commands.config_cmd import config_group
+from nexus.commands.uninstall import uninstall_cmd
 from nexus.commands.daemon import daemon_group
 from nexus.commands.doc import doc
 from nexus.commands.doctor import doctor_cmd
@@ -52,6 +53,7 @@ from nexus.commands.hooks import hooks
 from nexus.commands.index import index
 from nexus.commands.init import init_cmd
 from nexus.commands.memory import memory
+from nexus.commands.guided_upgrade_cmd import guided_upgrade_cmd
 from nexus.commands.migrate_cmd import migrate_to_service_cmd
 from nexus.commands.migration_cmd import migration_cmd
 from nexus.commands.mineru import mineru_group
@@ -75,7 +77,7 @@ from nexus.commands.upgrade import upgrade
 @click.pass_context
 def main(ctx: click.Context, verbose: bool) -> None:
     """Nexus — self-hosted semantic search and knowledge management."""
-    from nexus.logging_setup import configure_logging
+    from nexus.logging_setup import configure_logging  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
@@ -88,7 +90,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
     # (CI / cron / MCP / scripted runs) and via NEXUS_NO_PROMPTS=1.
     # Hook is here, at the top-level Click group, so it fires once per
     # CLI invocation rather than per Catalog construction.
-    from nexus.commands._migration_prompt import maybe_emit_bootstrap_prompt
+    from nexus.commands._migration_prompt import maybe_emit_bootstrap_prompt  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     maybe_emit_bootstrap_prompt()
 
 
@@ -107,6 +109,7 @@ hook_group.hidden = True
 main.add_command(hook_group, name="hook")
 main.add_command(hooks)
 main.add_command(index)
+main.add_command(guided_upgrade_cmd, name="guided-upgrade")
 main.add_command(init_cmd, name="init")
 main.add_command(memory)
 main.add_command(migrate_to_service_cmd, name="migrate-to-service")
@@ -125,6 +128,7 @@ main.add_command(tenant, name="tenant")
 main.add_command(tier_status_cmd, name="tier-status")
 main.add_command(aspects_group, name="aspects")
 main.add_command(upgrade)
+main.add_command(uninstall_cmd, name="uninstall")
 
 
 if __name__ == "__main__":

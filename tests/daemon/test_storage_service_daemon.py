@@ -33,7 +33,6 @@ from nexus.daemon.storage_service_daemon import (
     StorageServiceStartError,
     StorageServiceSupervisor,
     _MAX_UNHEALTHY_HEARTBEATS,
-    _RESTART_WINDOW_HEARTBEATS,
     stop_storage_service,
     start_storage_service,
 )
@@ -146,6 +145,17 @@ def _make_supervisor(
 
 class TestStorageServiceSupervisorUnit:
     """Unit tests for the supervisor, mocking out real pg/jar spawning."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_service_token_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nexus-zr9rv: these tests assert the supervisor resolves
+        ``NX_SERVICE_TOKEN`` from the ``creds`` dict, but
+        ``_resolve_service_token`` takes the ENV var over creds. Several
+        ``tests/db/`` tests set ``os.environ["NX_SERVICE_TOKEN"]`` directly;
+        when one runs earlier in the same process the leaked env value wins
+        over the test's creds and the assertion fails. Clear the env so the
+        creds path is exercised deterministically regardless of ordering."""
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
 
     def test_publish_only_after_ready(
         self, config_dir: Path, clock: _FakeClock
@@ -440,8 +450,6 @@ class TestPGIndependentRecovery:
         sup._service_port = 19001
         sup._publish(19001)
 
-        original_restart_count = sup._restart_count
-
         import nexus.daemon.storage_service_daemon as ssd_mod
         with patch.object(sup, "_service_healthy", return_value=True), \
              patch.object(sup, "_pg_reachable", return_value=False), \
@@ -452,9 +460,11 @@ class TestPGIndependentRecovery:
         assert jar_running is True
         # PG is reported down
         assert pg_ok is False
-        # No respawn triggered — _restart_count must not change
-        assert sup._restart_count == original_restart_count, (
-            "PG-down must NOT trigger a jar respawn; _restart_count unchanged"
+        # PG-down with a HEALTHY jar must not advance the stuck-process counter
+        # (RDR-175: that counter is the only path to a falsey-running exit).
+        assert sup._consecutive_unhealthy_heartbeats == 0, (
+            "PG-down with a healthy jar must NOT advance the stuck-process "
+            "exit counter; (True, False) is in-place PG recovery, not an exit"
         )
 
     def test_ensure_pg_running_called_when_pg_down_but_jar_alive(
@@ -492,137 +502,6 @@ class TestPGIndependentRecovery:
 
         assert ensure_pg_called, "_ensure_pg_running must be called on PG-down"
 
-
-# ---------------------------------------------------------------------------
-# Windowed restart budget (SIGNIFICANT-2 fix)
-# ---------------------------------------------------------------------------
-
-
-class TestWindowedRestartBudget:
-    """_restart_count must reset after _RESTART_WINDOW_HEARTBEATS clean heartbeats
-    following a restart (SIGNIFICANT-2 fix — not lifetime-cumulative)."""
-
-    def test_restart_budget_resets_after_clean_window(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        """After a restart and then _RESTART_WINDOW_HEARTBEATS clean heartbeats,
-        _restart_count resets to 0 so isolated bursts don't permanently exhaust budget."""
-        sup = _make_supervisor(config_dir, clock)
-        fake_proc = _FakeProc(pid=43200)
-        sup._proc = fake_proc
-        sup._service_port = 19010
-        sup._publish(19010)
-
-        # Simulate one restart
-        sup._restart_count = 1
-        sup._clean_heartbeats_since_restart = 0
-
-        # Simulate clean heartbeats via _maybe_reset_restart_budget
-        for _ in range(_RESTART_WINDOW_HEARTBEATS - 1):
-            sup._maybe_reset_restart_budget()
-            assert sup._restart_count == 1, "budget must not reset mid-window"
-
-        # One more clean heartbeat crosses the threshold
-        sup._maybe_reset_restart_budget()
-        assert sup._restart_count == 0, (
-            f"After {_RESTART_WINDOW_HEARTBEATS} clean heartbeats, restart budget "
-            "must reset to 0 (windowed, not lifetime-cumulative)"
-        )
-        assert sup._clean_heartbeats_since_restart == 0
-
-    def test_restart_budget_not_reset_when_no_restarts(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        """_maybe_reset_restart_budget is a no-op when _restart_count == 0."""
-        sup = _make_supervisor(config_dir, clock)
-        assert sup._restart_count == 0
-        for _ in range(_RESTART_WINDOW_HEARTBEATS + 10):
-            sup._maybe_reset_restart_budget()
-        assert sup._restart_count == 0  # already 0, no change
-
-    def test_clean_window_reset_on_respawn(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        """_respawn() resets _clean_heartbeats_since_restart to 0, restarting the window."""
-        sup = _make_supervisor(config_dir, clock)
-        fake_proc = _FakeProc(pid=43201)
-        sup._proc = fake_proc
-        sup._service_port = 19011
-        sup._publish(19011)
-
-        # Accumulate some clean heartbeats
-        sup._restart_count = 1
-        sup._clean_heartbeats_since_restart = 50
-
-        new_proc = _FakeProc(pid=43202)
-        with patch.object(sup, "_spawn_service", return_value=(new_proc, 19011)), \
-             patch.object(sup, "_wait_for_service_ready"):
-            sup._proc = None
-            sup._respawn()
-
-        assert sup._clean_heartbeats_since_restart == 0, (
-            "_respawn() must reset the clean window so the budget window restarts"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Auto-restart tests
-# ---------------------------------------------------------------------------
-
-
-class TestStorageServiceAutoRestart:
-    """The supervisor must auto-restart the jar on death, publishing a strictly
-    higher generation each time."""
-
-    def test_restart_publishes_higher_generation(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        """After jar death and restart, the new record has gen > old gen."""
-        sup = _make_supervisor(config_dir, clock)
-        fake_proc = _FakeProc(pid=43001)
-        sup._proc = fake_proc
-        sup._service_port = 18090
-        sup._publish(18090)
-
-        registry = ServiceRegistry(
-            dir=config_dir, tier="storage_service", clock=clock
-        )
-        scope = str(os.getuid())
-        gen1 = registry.discover(scope).generation
-
-        # Simulate jar death + respawn
-        fake_proc.kill_proc()
-        new_proc = _FakeProc(pid=43002)
-
-        with patch.object(sup, "_spawn_service", return_value=(new_proc, 18090)):
-            with patch.object(sup, "_wait_for_service_ready"):
-                sup._proc = None
-                sup._respawn()
-
-        gen2 = registry.discover(scope).generation
-        assert gen2 > gen1, "restart must publish a strictly higher generation"
-
-    def test_loud_failure_on_respawn_exhaustion(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        """If respawn fails _MAX_RESTART_ATTEMPTS times, StorageServiceStartError is raised."""
-        from nexus.daemon.storage_service_daemon import _MAX_RESTART_ATTEMPTS
-        sup = _make_supervisor(config_dir, clock)
-        # Force the restart counter over the limit
-        sup._restart_count = _MAX_RESTART_ATTEMPTS
-
-        with pytest.raises(StorageServiceStartError, match="(?i)restart|attempt|failed"):
-            sup._respawn()
-
-    def test_loud_failure_on_spawn_error(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        """If _spawn_service raises, the error propagates as StorageServiceStartError."""
-        sup = _make_supervisor(config_dir, clock)
-
-        with patch.object(sup, "_spawn_service", side_effect=StorageServiceStartError("JAR not found")):
-            with pytest.raises(StorageServiceStartError):
-                sup._respawn()
 
 
 # ---------------------------------------------------------------------------
@@ -757,26 +636,27 @@ class TestEndToEndDiscovery:
 
 
 # ---------------------------------------------------------------------------
-# Stuck-JVM / unhealthy-respawn tests (SIG2 fix)
+# Stuck-JVM detection tests (SIG2 detection RETAINED; RDR-175 action = exit)
 # ---------------------------------------------------------------------------
 
 
-class TestStuckJvmRespawn:
-    """Jar alive but /health returning non-200 must trigger respawn after
-    _MAX_UNHEALTHY_HEARTBEATS consecutive failures (SIG2 fix).
+class TestStuckJvmDetection:
+    """Jar alive but /health returning non-200 must signal a falsey `running`
+    after _MAX_UNHEALTHY_HEARTBEATS consecutive failures so the supervise loop
+    EXITS non-zero (RDR-175) — the OS watchdog then restarts the whole process.
 
     A stuck-but-alive JVM (connection-pool exhaustion, GC pause, internal
-    deadlock) is the most common Java partial-failure mode. Treating it as
-    'jar alive, lease not re-stamped, no recovery' was the silent-degrade
-    gap. The fix: count consecutive unhealthy beats; on reaching the
-    threshold return (False, pg_ok) from heartbeat_once() so the run loop
-    calls _respawn().
+    deadlock) is the most common Java partial-failure mode, and the OS watchdog
+    cannot see it (the process never dies) without this detection signal.
+    RDR-175 retired the in-process respawn mechanism; the DETECTION is retained
+    but its action is now exit-for-OS-restart, not _respawn. Treating it as
+    'jar alive, lease not re-stamped, no recovery' was the silent-degrade gap.
     """
 
-    def test_single_unhealthy_beat_does_not_respawn(
+    def test_single_unhealthy_beat_does_not_signal_exit(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
-        """A single unhealthy heartbeat is below threshold — no respawn signal."""
+        """A single unhealthy heartbeat is below threshold — no exit signal."""
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=45001)
         sup._proc = fake_proc
@@ -793,10 +673,10 @@ class TestStuckJvmRespawn:
         assert jar_running is True
         assert sup._consecutive_unhealthy_heartbeats == 1
 
-    def test_threshold_minus_one_beats_no_respawn(
+    def test_threshold_minus_one_beats_no_exit(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
-        """_MAX_UNHEALTHY_HEARTBEATS - 1 consecutive failures do not signal respawn."""
+        """_MAX_UNHEALTHY_HEARTBEATS - 1 consecutive failures do not signal exit."""
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=45002)
         sup._proc = fake_proc
@@ -809,15 +689,15 @@ class TestStuckJvmRespawn:
              patch.object(ssd_mod, "_pid_is_alive", return_value=True):
             for i in range(_MAX_UNHEALTHY_HEARTBEATS - 1):
                 jar_running, _pg_ok = sup.heartbeat_once()
-                assert jar_running is True, f"should not signal respawn on beat {i+1}"
+                assert jar_running is True, f"should not signal exit on beat {i+1}"
 
         assert sup._consecutive_unhealthy_heartbeats == _MAX_UNHEALTHY_HEARTBEATS - 1
 
-    def test_at_threshold_returns_false_to_force_respawn(
+    def test_at_threshold_returns_false_to_force_exit(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
         """After _MAX_UNHEALTHY_HEARTBEATS consecutive failures, return (False, pg_ok)
-        so the run loop calls _respawn() — treating stuck JVM like a jar death.
+        so the run loop exits non-zero — treating stuck JVM like a jar death.
         """
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=45003)
@@ -833,12 +713,12 @@ class TestStuckJvmRespawn:
             for _ in range(_MAX_UNHEALTHY_HEARTBEATS - 1):
                 jar_running, _ = sup.heartbeat_once()
                 assert jar_running is True
-            # Nth beat: threshold crossed → respawn signal
+            # Nth beat: threshold crossed → exit signal
             jar_running, pg_ok = sup.heartbeat_once()
 
         assert jar_running is False, (
             f"After {_MAX_UNHEALTHY_HEARTBEATS} consecutive unhealthy beats, "
-            "heartbeat_once() must return (False, _) to signal a respawn"
+            "heartbeat_once() must return (False, _) to signal a supervisor exit"
         )
         assert pg_ok is True  # PG was healthy
         # Counter reset after signalling
@@ -848,7 +728,7 @@ class TestStuckJvmRespawn:
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
         """One healthy heartbeat resets the unhealthy counter to 0 so transient
-        GC pauses do not accumulate toward the respawn threshold.
+        GC pauses do not accumulate toward the exit threshold.
         """
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=45004)
@@ -878,66 +758,13 @@ class TestStuckJvmRespawn:
             "One healthy beat must reset _consecutive_unhealthy_heartbeats to 0"
         )
 
-    def test_unhealthy_respawn_counts_toward_restart_budget(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        """An unhealthy-triggered respawn (via run loop calling _respawn after
-        (False, _) from heartbeat_once) counts toward _restart_count, composing
-        correctly with the windowed restart budget.
-        """
-        sup = _make_supervisor(config_dir, clock)
-        fake_proc = _FakeProc(pid=45005)
-        sup._proc = fake_proc
-        sup._service_port = 20005
-        sup._publish(20005)
-
-        # Force the unhealthy threshold
-        import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=False), \
-             patch.object(sup, "_pg_reachable", return_value=True), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
-            for _ in range(_MAX_UNHEALTHY_HEARTBEATS - 1):
-                sup.heartbeat_once()
-            jar_running, _ = sup.heartbeat_once()
-
-        assert jar_running is False  # respawn signal
-
-        # Simulate the run loop calling _respawn(). The stuck JVM (fake_proc) is
-        # STILL set as sup._proc — heartbeat_once signalled respawn without
-        # clearing it. _respawn() must stop the old process before spawning the
-        # replacement, otherwise the stuck JVM is orphaned (round-3 HIGH-1/SIG-1).
-        assert sup._proc is fake_proc, "stuck JVM must still be the live _proc"
-        order: list[str] = []
-        new_proc = _FakeProc(pid=45006)
-
-        def _record_stop() -> None:
-            order.append("stop")
-            sup._proc = None
-
-        def _record_spawn() -> tuple[_FakeProc, int]:
-            order.append("spawn")
-            return new_proc, 20005
-
-        with patch.object(sup, "_stop_service", side_effect=_record_stop), \
-             patch.object(sup, "_spawn_service", side_effect=_record_spawn), \
-             patch.object(sup, "_wait_for_service_ready"):
-            sup._respawn()
-
-        assert order == ["stop", "spawn"], (
-            "_respawn() must stop the old (stuck) process BEFORE spawning the "
-            f"replacement, to avoid orphaning the JVM; got order={order}"
-        )
-        assert sup._restart_count == 1, (
-            "Unhealthy-triggered respawn must count toward _restart_count"
-        )
-
     def test_compound_failure_below_threshold_returns_jar_alive(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
         """When the jar is unhealthy AND PG is also down, below the stuck-JVM
         threshold heartbeat_once() reports the jar as still-alive (True) and PG
         down (False), so the run loop takes the PG-recovery branch rather than
-        respawning the jar prematurely (round-3 LOW-1).
+        exiting the supervisor prematurely (round-3 LOW-1).
         """
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=45007)
@@ -1228,14 +1055,17 @@ class TestNativeStartHasNoSchemaSkewGate:
 
 
 # ---------------------------------------------------------------------------
-# nexus-14k0m: simultaneous service+PG death must attempt PG recovery
+# RDR-175: minimal supervise loop — start + heartbeat + die-non-zero.
+# OS init (RDR-174 units) is the single process watchdog; no in-process respawn.
 # ---------------------------------------------------------------------------
 
 
 class _ScriptedSupervisor:
     """run-loop double for ``_supervise_until_stopped``: heartbeat_once pops
     scripted (service_running, pg_ok) tuples; every lifecycle call is recorded
-    in ``calls`` so ordering assertions are exact."""
+    in ``calls`` so ordering assertions are exact. Note: there is no ``_respawn``
+    on the double — RDR-175 retired it; if the loop ever called it this double
+    would raise AttributeError, which is the desired regression tripwire."""
 
     def __init__(
         self,
@@ -1243,12 +1073,10 @@ class _ScriptedSupervisor:
         stop_requested,
         *,
         ensure_pg_raises: Exception | None = None,
-        respawn_raises: Exception | None = None,
     ) -> None:
         self._beats = list(beats)
         self._stop = stop_requested
         self._ensure_pg_raises = ensure_pg_raises
-        self._respawn_raises = respawn_raises
         self.calls: list[str] = []
 
     def start(self) -> None:
@@ -1269,25 +1097,16 @@ class _ScriptedSupervisor:
         if self._ensure_pg_raises is not None:
             raise self._ensure_pg_raises
 
-    def _respawn(self) -> None:
-        self.calls.append("respawn")
-        if self._respawn_raises is not None:
-            raise self._respawn_raises
-
     def stop(self) -> None:
         self.calls.append("stop")
 
 
-class TestSimultaneousJarPgDeath:
-    """nexus-14k0m (P5 gate code-review HIGH): heartbeat (False, False)
-    previously hit only the ``not jar_running`` branch, whose _respawn()
-    never restarts PG — the new jar's /health can never pass, the restart
-    budget burns down, and the supervisor exits without ONE pg_ctl attempt.
-
-    The (False, False) beat models BOTH real routes into jar_running=False
-    (process exit, which hardcodes pg_ok=False; stuck-JVM threshold, which
-    carries a live PG probe) — at the run-loop seam they are
-    indistinguishable, so one scripted beat covers both (CRE M2)."""
+class TestMinimalSuperviseLoop:
+    """RDR-175: the supervise loop is start + heartbeat + die-non-zero. On any
+    falsey ``service_running`` beat (process death OR stuck-process threshold)
+    the supervisor EXITS non-zero so the OS watchdog restarts the whole
+    process — there is NO in-process respawn. The lone in-place recovery is the
+    ``(True, False)`` PG-only arm, which restarts PG without bouncing the JVM."""
 
     def _run(self, sup_factory):
         import threading
@@ -1300,48 +1119,62 @@ class TestSimultaneousJarPgDeath:
             code = ssd._supervise_until_stopped(sup, stop, lambda: None)
         return sup, code
 
-    def test_pg_restarted_before_jar_respawn(self) -> None:
+    def test_service_and_pg_down_exits_3_for_os_restart(self) -> None:
+        """(False, False): service dead — exit 3. The supervisor does NOT
+        attempt an in-process PG restart or respawn; the OS restart re-runs
+        start() (which brings PG back up via _ensure_pg_running)."""
         sup, code = self._run(
             lambda stop: _ScriptedSupervisor([(False, False)], stop)
         )
-        assert code == 0
-        assert "ensure_pg" in sup.calls, (
-            "simultaneous death must attempt PG recovery, not only respawn"
+        assert code == 3, "service-unrecoverable is the exit-3 OS-restart contract"
+        assert "ensure_pg" not in sup.calls, (
+            "service death must NOT trigger an in-process PG restart; the OS "
+            "restart re-runs start() which brings PG up"
         )
-        assert sup.calls.index("ensure_pg") < sup.calls.index("respawn"), (
-            "PG must be up BEFORE the jar respawn or /health can never pass"
+        assert sup.calls == ["start", "stop"], (
+            f"loop must be start -> exit -> stop, no respawn; got {sup.calls}"
         )
 
-    def test_pg_restart_failure_exits_4_without_burning_respawn(self) -> None:
+    def test_service_down_pg_up_exits_3(self) -> None:
+        """(False, True): stuck-process threshold (live PG probe) — exit 3, no
+        in-process respawn."""
+        sup, code = self._run(
+            lambda stop: _ScriptedSupervisor([(False, True)], stop)
+        )
+        assert code == 3, "service-unrecoverable is the exit-3 contract"
+        assert "ensure_pg" not in sup.calls
+
+    def test_pg_only_death_restarts_pg_without_exit(self) -> None:
+        """(True, False): JVM alive, PG down — restart PG in place, NO exit.
+        After the scripted beat the loop exits cleanly (code 0)."""
+        sup, code = self._run(
+            lambda stop: _ScriptedSupervisor([(True, False)], stop)
+        )
+        assert code == 0, "PG-only death must NOT exit the supervisor"
+        assert sup.calls.count("ensure_pg") == 1, (
+            "the (True, False) arm restarts PG directly without bouncing Java"
+        )
+
+    def test_pg_only_restart_failure_exits_4(self) -> None:
+        """(True, False) with an unrecoverable PG — exit 4."""
         sup, code = self._run(
             lambda stop: _ScriptedSupervisor(
-                [(False, False)], stop,
+                [(True, False)], stop,
                 ensure_pg_raises=StorageServiceStartError("pg_ctl failed"),
             )
         )
         assert code == 4, "PG-unrecoverable is the exit-4 contract"
         assert "ensure_pg" in sup.calls, "exit 4 must come FROM the PG attempt"
-        assert "respawn" not in sup.calls, (
-            "respawning the jar with PG down is futile budget burn"
-        )
 
-    def test_jar_only_death_does_not_touch_pg(self) -> None:
+    def test_healthy_beats_sleep_then_exit_on_stop(self) -> None:
+        """(True, True) beats keep the loop alive (no exit, no PG churn) until
+        stop is requested, then exit 0."""
         sup, code = self._run(
-            lambda stop: _ScriptedSupervisor([(False, True)], stop)
+            lambda stop: _ScriptedSupervisor([(True, True), (True, True)], stop)
         )
         assert code == 0
-        assert "respawn" in sup.calls
-        assert "ensure_pg" not in sup.calls, (
-            "jar-only death keeps the existing no-PG-churn behaviour"
-        )
-
-    def test_pg_only_death_unchanged(self) -> None:
-        sup, code = self._run(
-            lambda stop: _ScriptedSupervisor([(True, False)], stop)
-        )
-        assert code == 0
-        assert sup.calls.count("ensure_pg") == 1
-        assert "respawn" not in sup.calls
+        assert "ensure_pg" not in sup.calls
+        assert sup.calls == ["start", "stop"]
 
 
 # ---------------------------------------------------------------------------
@@ -1402,3 +1235,500 @@ class TestEnsureStorageSupervisor:
              patch.object(daemon_mod.subprocess, "Popen", return_value=MagicMock()):
             with pytest.raises(StorageServiceStartError):
                 daemon_mod.ensure_storage_supervisor(config_dir)
+
+    def test_dead_supervisor_pid_relinquishes_and_respawns(
+        self, config_dir: Path
+    ) -> None:
+        """RDR-175 heal-on-next-use: a hard-crashed supervisor (OOM-kill, no
+        relinquish) can leave a still-fresh (TTL-live) lease whose
+        ``supervisor_pid`` points at a dead process. The discover path must
+        detect the dead pid, relinquish the stale lease, and re-spawn — rather
+        than returning a dead endpoint for up to the lease TTL window."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.commands import daemon as daemon_mod
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        # A fresh, supervised lease (payload carries supervisor_pid). Patch
+        # _pid_is_alive False so the guard treats that supervisor as dead.
+        self._publish_fresh_lease(config_dir, port=18093)
+        scope = str(os.getuid())
+        assert ServiceRegistry(dir=config_dir, tier="storage_service").discover(scope) is not None
+
+        def _popen_publishes(*_a, **_k):
+            self._publish_fresh_lease(config_dir, port=18094)
+            return MagicMock()
+
+        with patch.object(ssd_mod, "_pid_is_alive", return_value=False), \
+             patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
+             patch.object(daemon_mod.subprocess, "Popen", side_effect=_popen_publishes) as popen:
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+
+        popen.assert_called_once()  # dead lease must trigger a re-spawn
+        assert rec is not None and rec.endpoint.get("port") == 18094
+
+    def test_absent_supervisor_pid_trusts_ttl_freshness(
+        self, config_dir: Path
+    ) -> None:
+        """A lease WITHOUT a supervisor_pid (legacy/non-supervised) must fall
+        through to the existing TTL-freshness short-circuit — no spurious
+        re-spawn — even when _pid_is_alive would report dead."""
+        import time as _time
+
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.commands import daemon as daemon_mod
+
+        # Publish a NON-supervised lease: payload {} → supervisor_pid absent.
+        sup = _make_supervisor(config_dir, lambda: _time.time(), supervised=False)
+        sup._proc = _FakeProc(pid=42778)
+        sup._service_port = 18095
+        sup._publish(18095)
+
+        with patch.object(ssd_mod, "_pid_is_alive", return_value=False), \
+             patch.object(daemon_mod.subprocess, "Popen") as popen:
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+
+        popen.assert_not_called()  # absent supervisor_pid → trust TTL, no re-spawn
+        assert rec is not None and rec.endpoint.get("port") == 18095
+
+
+# ---------------------------------------------------------------------------
+# nexus-lz3f2: lease-TTL margin + optional service heap bound
+# ---------------------------------------------------------------------------
+class TestLeaseTtlAndHeapBound:
+    """nexus-lz3f2: the storage-service supervisor was OOM-killed at the boot
+    memory peak (its lease then vanished silently). Two robustness fixes:
+    (B) a 15s lease TTL so a transient heartbeat stall never false-expires a
+    LIVE service's lease; (C) an optional -Xmx bound so memory-constrained hosts
+    don't trip the OOM killer."""
+
+    def test_lease_published_with_extended_ttl(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        sup = _make_supervisor(config_dir, clock, supervised=True)
+        sup._proc = _FakeProc(pid=49001)
+        sup._service_port = 18077
+        sup._publish(18077)
+
+        # discover() judges freshness from the RECORD's ttl, not this registry's
+        # ttl arg — so a default-ttl registry still reads the 15s stamped at publish.
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        rec = registry.discover(str(os.getuid()))
+        assert rec is not None
+        # The published lease carries the storage-service tier TTL (shared
+        # primitive), not the 3s substrate default.
+        from nexus.daemon.service_registry import ttl_for_tier
+
+        assert rec.ttl == ttl_for_tier("storage_service") == 15.0
+
+    def test_ttl_exceeds_worst_case_heartbeat_tick(self) -> None:
+        # The margin invariant (debugger RF-1 finding): a heartbeat tick can take
+        # up to _HEALTH_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL; the TTL must exceed
+        # that with room, or a single slow tick grazes the TTL.
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.daemon.service_registry import DEFAULT_HEARTBEAT_INTERVAL, ttl_for_tier
+
+        worst_tick = ssd_mod._HEALTH_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL
+        assert ttl_for_tier("storage_service") >= 3 * worst_tick
+
+    def test_spawn_service_applies_max_heap_when_set(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        monkeypatch.setenv("NX_SERVICE_MAX_HEAP", "1g")
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured["argv"] = argv
+            return _FakeProc(pid=49100)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18078)
+        sup._spawn_service()
+        # -Xmx must immediately follow the binary path (native-image consumes
+        # runtime options before app args).
+        assert captured["argv"][0] == str(sup._binary_path)
+        assert captured["argv"][1] == "-Xmx1g"
+
+    def test_spawn_service_rejects_malformed_max_heap(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        monkeypatch.setenv("NX_SERVICE_MAX_HEAP", "abc")
+        sup = _make_supervisor(config_dir, clock)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18088)
+        # A malformed heap value fails loud BEFORE spawning (no /health-timeout
+        # misdiagnosis); Popen is never reached.
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("Popen reached")))
+        with pytest.raises(StorageServiceStartError, match="NX_SERVICE_MAX_HEAP"):
+            sup._spawn_service()
+
+    def test_spawn_service_no_heap_flag_by_default(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        monkeypatch.delenv("NX_SERVICE_MAX_HEAP", raising=False)
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured["argv"] = argv
+            return _FakeProc(pid=49101)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+        sup._spawn_service()
+        # Production default: no -Xmx — the binary keeps native-image's default heap.
+        assert not any(a.startswith("-Xmx") for a in captured["argv"][1:])
+
+
+class TestPdeathsigOrphanPrevention:
+    """nexus-03bcg / f9y78 root cause: an OOM-killed supervisor left an
+    orphaned-but-serving JVM whose lease aged out — and a naive heal-on-next-use
+    would then double-spawn a JVM. RDR-149-aligned fix (no pid-file, no orphan
+    sweep): the JVM dies WITH its supervisor via PR_SET_PDEATHSIG, so a dead
+    supervisor leaves NO orphan to double-spawn against."""
+
+    def test_spawn_service_wires_pdeathsig_on_linux(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        monkeypatch.setattr(ssd_mod, "_LIBC", object())  # simulate Linux libc loaded
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured.update(kw)
+            return _FakeProc(pid=49201)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+        sup._spawn_service()
+        assert captured.get("preexec_fn") is ssd_mod._set_pdeathsig_preexec, (
+            "on Linux the JVM must be spawned with the PR_SET_PDEATHSIG preexec_fn"
+        )
+
+    def test_spawn_service_no_pdeathsig_off_linux(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        monkeypatch.setattr(ssd_mod, "_LIBC", None)  # non-Linux: no prctl
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured.update(kw)
+            return _FakeProc(pid=49202)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+        sup._spawn_service()
+        assert captured.get("preexec_fn") is None, (
+            "PR_SET_PDEATHSIG is Linux-only; preexec_fn must be None elsewhere"
+        )
+
+    def test_spawn_service_arms_parent_death_watchdog_env(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        """nexus-03bcg: the supervisor sets NX_SERVICE_PARENT_DEATH_EXIT=1 so the
+        Java-side parent-death watchdog activates — the portable (macOS-covering)
+        complement to the Linux-only PR_SET_PDEATHSIG."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured.update(kw)
+            return _FakeProc(pid=49203)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+        sup._spawn_service()
+        assert captured["env"].get("NX_SERVICE_PARENT_DEATH_EXIT") == "1"
+
+    @pytest.mark.skipif(
+        not __import__("sys").platform.startswith("linux"),
+        reason="PR_SET_PDEATHSIG is Linux-only",
+    )
+    def test_pdeathsig_orphan_dies_with_parent(self) -> None:
+        """Integration proof (Linux): a child spawned with the pdeathsig
+        preexec_fn is killed when its parent dies, leaving no orphan."""
+        import subprocess as _sp
+        import sys as _sys
+        import textwrap
+        import time as _t
+
+        from nexus.daemon.storage_service_daemon import _pid_is_alive
+
+        parent_src = textwrap.dedent(
+            """
+            import subprocess, sys
+            from nexus.daemon.storage_service_daemon import _set_pdeathsig_preexec
+            p = subprocess.Popen(["sleep", "30"], preexec_fn=_set_pdeathsig_preexec)
+            sys.stdout.write(str(p.pid) + "\\n")
+            sys.stdout.flush()
+            # parent exits here → the child must receive SIGKILL via PR_SET_PDEATHSIG
+            """
+        )
+        parent = _sp.Popen([_sys.executable, "-c", parent_src], stdout=_sp.PIPE, text=True)
+        child_pid = int(parent.stdout.readline().strip())
+        parent.wait(timeout=10)
+        # give the kernel a moment to deliver the parent-death signal
+        deadline = _t.monotonic() + 5.0
+        while _t.monotonic() < deadline and _pid_is_alive(child_pid):
+            _t.sleep(0.1)
+        assert not _pid_is_alive(child_pid), (
+            "the child must die with its parent (PR_SET_PDEATHSIG); orphan survived"
+        )
+
+
+# ---------------------------------------------------------------------------
+# RDR-174 P2.2 (nexus-exfns): boot-robustness — the supervisor self-manages PG.
+#
+# §4 finding: there is NO external postgresql.service to order the autostart
+# unit against. The supervisor STARTS its own nx-owned PG cluster as step 1 of
+# startup, with boot-safe binary discovery from the config dir — no
+# provisioning-time env (NEXUS_PG_BIN) required. These regression tests pin
+# that guarantee so the "After=postgresql.service / macOS readiness wrapper"
+# delta stays a verified no-op: the unit needs only After=network.target.
+# ---------------------------------------------------------------------------
+
+
+class TestSupervisorSelfManagesPgAtBoot:
+    """The autostart unit needs no external PG ordering because the supervisor
+    self-starts PG. Encodes the RDR-174 §4 verified-no-op finding."""
+
+    def test_start_locked_starts_pg_before_spawning_service(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """_start_locked must call _ensure_pg_running() BEFORE _spawn_service().
+
+        PG-before-engine ordering is owned by the supervisor itself, not by a
+        systemd After= dependency on an external postgresql.service.
+        """
+        sup = _make_supervisor(config_dir, clock)
+        order: list[str] = []
+
+        def _fake_ensure_pg() -> None:
+            order.append("ensure_pg")
+
+        def _fake_spawn() -> tuple[Any, int]:
+            order.append("spawn_service")
+            return _FakeProc(pid=44900), 18077
+
+        sup._ensure_pg_running = _fake_ensure_pg  # type: ignore[method-assign]
+        sup._spawn_service = _fake_spawn  # type: ignore[method-assign]
+        stub_supervisor = MagicMock()
+        stub_supervisor.record.generation = 1
+        sup._supervisor = stub_supervisor
+        with patch.object(sup, "_wait_for_service_ready"), \
+             patch.object(sup, "_publish"):
+            sup._start_locked()
+
+        assert order == ["ensure_pg", "spawn_service"], (
+            "the supervisor must start its own PG (step 1) before the engine, "
+            f"with no other ordering; got order={order}"
+        )
+
+    def test_ensure_pg_running_self_starts_cluster_without_provisioning_env(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With PG down and NEXUS_PG_BIN unset, _ensure_pg_running discovers
+        binaries and starts an nx-owned cluster itself.
+
+        This is the boot-safety guarantee: cold boot has no provisioning env,
+        and there is no external postgresql.service. The supervisor resolves
+        binaries (config-dir boot-safe) and runs _start_cluster against its own
+        PG_DATA/port — so the autostart unit requires no PG ordering seam.
+        """
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        import nexus.db.pg_provision as pgp
+
+        monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+        sup = _make_supervisor(config_dir, clock, pg_port=15439)
+        sup._creds["PG_DATA"] = str(config_dir / "postgres")
+
+        calls: dict[str, Any] = {}
+
+        def _fake_discover() -> Any:
+            calls["discover"] = True
+            return "FAKE_BINS"
+
+        def _fake_start_cluster(bins: Any, pgdata: Path, port: int) -> None:
+            calls["start_cluster"] = (bins, Path(pgdata), port)
+
+        monkeypatch.setattr(pgp, "discover_pg_binaries", _fake_discover)
+        monkeypatch.setattr(pgp, "_start_cluster", _fake_start_cluster)
+        # PG is down on entry, then accepting after the supervisor starts it.
+        accepting = iter([False, True])
+        monkeypatch.setattr(
+            ssd_mod, "_port_accepting", lambda host, port, **kw: next(accepting)
+        )
+
+        sup._ensure_pg_running()
+
+        assert calls.get("discover") is True, (
+            "supervisor must discover PG binaries itself (no external unit)"
+        )
+        assert "start_cluster" in calls, (
+            "supervisor must start its own PG cluster, not wait on postgresql.service"
+        )
+        bins, pgdata, port = calls["start_cluster"]
+        assert bins == "FAKE_BINS"
+        assert pgdata == config_dir / "postgres", "starts nx's own PG_DATA"
+        assert port == 15439, "starts nx's own provisioned port"
+
+
+# ---------------------------------------------------------------------------
+# RDR-175 Minimum Viable Validation: single supervisor, no double-spawn
+# ---------------------------------------------------------------------------
+class TestRdr175MvvSingleSupervisor:
+    """RDR-175 MVV (subsumes nexus-1brzs). The minimal design's regression
+    proof: after the in-process respawn mechanism is retired, exactly ONE
+    supervisor owns the lease — a second start attempt (e.g. an autostart unit
+    activating while a session supervisor already runs) discovers the live
+    lease and short-circuits without spawning a second service. The
+    no-double-spawn property rests on RDR-149 lease arbitration (idempotent
+    start under a live lease), NOT on in-process respawn. The decide-first
+    autostart ordering that prevents the coexistence in the first place is a
+    forward requirement on RDR-174 P2.4 (nexus-3pfj0), not in this RDR.
+
+    The (True, False) PG-only arm restarts PG in place WITHOUT bouncing the
+    JVM: the Java process identity is unchanged across a PG restart."""
+
+    def test_second_start_short_circuits_to_single_lease(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """A live lease (first supervisor / unit start) makes a second
+        supervisor.start() short-circuit: no second spawn, exactly one lease."""
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        scope = str(os.getuid())
+
+        # First supervisor publishes a live lease (models the unit / session
+        # supervisor already holding the lease).
+        first = _make_supervisor(config_dir, clock, supervised=True)
+        first._proc = _FakeProc(pid=46001)
+        first._service_port = 18101
+        first._publish(18101)
+
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        assert registry.discover(scope) is not None
+
+        # Second supervisor attempts start(). _spawn_service is a tripwire: if
+        # the short-circuit fails and it tries to spawn, the test fails loudly.
+        second = _make_supervisor(config_dir, clock, supervised=True)
+
+        def _must_not_spawn() -> tuple[Any, int]:
+            raise AssertionError(
+                "second start() must short-circuit on the live lease, never spawn "
+                "a second service (no double-spawn)"
+            )
+
+        with patch.object(second, "_spawn_service", side_effect=_must_not_spawn), \
+             patch.object(second, "_ensure_pg_running") as ensure_pg:
+            payload = second.start()
+
+        ensure_pg.assert_not_called()  # short-circuit precedes PG bring-up
+        # Exactly one lease, and it is the FIRST supervisor's endpoint.
+        rec = registry.discover(scope)
+        assert rec is not None
+        assert rec.endpoint.get("port") == 18101
+        assert payload["port"] == 18101, "second start must return the live endpoint"
+
+    def test_second_supervisor_under_live_lease_exits_nonzero(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """Coexistence through the FULL run loop (substantive-critic SIG-1): a
+        second supervisor started while another holds a live lease must NOT
+        double-spawn — start() short-circuits on the live lease, _proc stays
+        unset, and the loop exits non-zero (the OS, not an in-process respawn,
+        owns restart decisions). Under the OS unit this re-runs every RestartSec
+        until the foreign lease expires — a bounded crash-loop (RDR-175
+        §Consequences) that RDR-174 P2.4's decide-first ordering (nexus-3pfj0)
+        prevents by never starting a session supervisor under a unit. This PINS
+        the behavior so the requirement on nexus-3pfj0 stays visible."""
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        # First supervisor holds a live lease.
+        first = _make_supervisor(config_dir, clock, supervised=True)
+        first._proc = _FakeProc(pid=46021)
+        first._service_port = 18103
+        first._publish(18103)
+
+        # Second supervisor runs the real loop. _spawn_service is a tripwire:
+        # the short-circuit must keep it from ever spawning a second service.
+        second = _make_supervisor(config_dir, clock, supervised=True)
+
+        def _must_not_spawn() -> tuple[Any, int]:
+            raise AssertionError("coexisting supervisor must NOT spawn a second service")
+
+        stop = threading.Event()
+        with patch.object(second, "_spawn_service", side_effect=_must_not_spawn), \
+             patch.object(second, "_ensure_pg_running"), \
+             patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0):
+            code = ssd._supervise_until_stopped(second, stop, lambda: None)
+
+        assert code == 3, (
+            "a supervisor that finds the lease already held exits 3 (no "
+            "double-spawn); the OS unit then crash-loops until the foreign "
+            "lease expires — decide-first ordering on nexus-3pfj0 prevents the "
+            "coexistence; see RDR-175 §Consequences"
+        )
+
+    def test_pg_only_restart_keeps_same_java_pid(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """(True, False) PG-only death: the supervise loop restarts PG in place
+        and the Java process identity (sup._proc) is unchanged before and
+        after — the JVM is never bounced for a PG-only failure."""
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        sup = _make_supervisor(config_dir, clock, supervised=True)
+        fake_proc = _FakeProc(pid=46010)
+        sup._proc = fake_proc
+        sup._service_port = 18102
+        sup._publish(18102)
+
+        stop = threading.Event()
+        beats = iter([(True, False), (True, True)])
+
+        def _scripted_heartbeat() -> tuple[bool, bool]:
+            try:
+                return next(beats)
+            except StopIteration:
+                stop.set()
+                return True, True
+
+        ensure_pg_calls: list[int] = []
+
+        def _record_ensure_pg() -> None:
+            ensure_pg_calls.append(1)  # restart PG in place; do NOT touch _proc
+
+        pid_before = sup._proc.pid
+        with patch.object(sup, "start"), \
+             patch.object(sup, "heartbeat_once", side_effect=_scripted_heartbeat), \
+             patch.object(sup, "_ensure_pg_running", side_effect=_record_ensure_pg), \
+             patch.object(sup, "stop"), \
+             patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0):
+            code = ssd._supervise_until_stopped(sup, stop, lambda: None)
+
+        assert code == 0, "PG-only death must NOT exit the supervisor"
+        assert ensure_pg_calls == [1], "PG restarted in place exactly once"
+        assert sup._proc is fake_proc, "Java process must NOT be bounced for a PG-only restart"
+        assert sup._proc.pid == pid_before

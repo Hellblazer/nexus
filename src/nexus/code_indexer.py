@@ -12,6 +12,8 @@ language tables (_COMMENT_CHARS, DEFINITION_TYPES).
 from __future__ import annotations
 
 import hashlib as _hl
+
+from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
 from pathlib import Path
 
 import structlog
@@ -33,7 +35,7 @@ def _service_mode_stub() -> bool:
     Lazy import so the monkeypatchable source of truth stays
     ``nexus.db.http_vector_client.is_vector_service_mode``.
     """
-    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
 
     return is_vector_service_mode()
 
@@ -263,15 +265,15 @@ def _extract_context(
         return ("", "")
 
     try:
-        from tree_sitter_language_pack import get_parser  # lazy import
+        from tree_sitter_language_pack import get_parser  # lazy import  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         parser = get_parser(language)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         _log.warning("get_parser_failed", language=language, error=str(exc), exc_info=True)
         return ("", "")
 
     try:
         tree = parser.parse(source)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         _log.debug("tree_parse_failed", language=language, error=str(exc))
         return ("", "")
 
@@ -316,7 +318,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     Returns the post-filter chunk count (chunks upserted), or 0 if
     skipped (current) or failed.
     """
-    from nexus.chunker import chunk_file
+    from nexus.chunker import chunk_file  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     try:
         content = file_path.read_text(encoding="utf-8")
@@ -373,7 +375,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         if _ch == "\n":
             _line_offsets.append(_i + 1)
 
-    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415  — circular-dep avoidance (nexus.metadata_schema)
 
     # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
     # file. Empty string when no catalog handle exists. RDR-108 Phase 3
@@ -392,7 +394,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         # T3 record; the catalog manifest preserves position via
         # ``(doc_id, position)`` pointing at the shared chash.
         chunk_text_hash_full = _hl.sha256(chunk["text"].encode()).hexdigest()
-        chunk_chroma_id = chunk_text_hash_full[:32]
+        chunk_chroma_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
         class_ctx, method_ctx = _extract_context(
             source_bytes, language, chunk["line_start"] - 1, chunk["line_end"] - 1
         )

@@ -34,13 +34,13 @@ def _make_code_splitter(language: str, content: str, chunk_lines: int = _CHUNK_L
     Uses tree-sitter-language-pack to obtain the parser, passing it explicitly
     to CodeSplitter (which otherwise tries the deprecated tree_sitter_languages).
     """
-    import warnings
+    import warnings  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*validate_default.*")
-        from llama_index.core import Document  # type: ignore[import]
-        from llama_index.core.node_parser import CodeSplitter  # type: ignore[import]
-    from tree_sitter_language_pack import get_parser  # type: ignore[import]
+        from llama_index.core import Document  # type: ignore[import]  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from llama_index.core.node_parser import CodeSplitter  # type: ignore[import]  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from tree_sitter_language_pack import get_parser  # type: ignore[import]  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     # tree-sitter-language-pack uses "csharp" not "c_sharp".
     parser_name = "csharp" if language == "c_sharp" else language
@@ -290,7 +290,7 @@ def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list
                 # Post-process: split any AST node that exceeds the byte cap
                 # (e.g. a single function body longer than _CHUNK_MAX_BYTES).
                 return _enforce_byte_cap(result)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
             _log.debug("AST chunking failed, falling back to line chunks", file=str(file), exc_info=True)
 
     # Line-based fallback

@@ -225,6 +225,17 @@ class _FakeTelemetryHandler(BaseHTTPRequestHandler):
                 })
             self._send(200, {"ok": True})
 
+        elif pp == "/v1/telemetry/hook_failures/trim":
+            days = int(body.get("days", 30))
+            cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+            with _STORE_LOCK:
+                before = len(_hook_failures)
+                _hook_failures[:] = [
+                    r for r in _hook_failures if r["occurred_at"] >= cutoff
+                ]
+                deleted = before - len(_hook_failures)
+            self._send(200, {"deleted": deleted})
+
         elif pp == "/v1/telemetry/frecency/upsert":
             chunk_id = body.get("chunk_id", "")
             with _STORE_LOCK:
@@ -531,6 +542,26 @@ class TestTrimSearchTelemetry:
         client.log_search_batch(rows)
         deleted = client.trim_search_telemetry(days=365 * 3)
         assert deleted >= 1
+
+
+class TestTrimHookFailures:
+    def test_trim_days_validation(self, client):
+        with pytest.raises(ValueError, match="days must be >= 1"):
+            client.trim_hook_failures(days=0)
+
+    def test_trim_removes_old(self, client):
+        # Old row (2020) + recent row; trim with a 3-year window deletes only the old.
+        client.record_hook_failure(
+            doc_id="d-old", collection="code__nexus", hook_name="h_old",
+            error="boom", chain="single", occurred_at="2020-01-01T00:00:00+00:00",
+        )
+        client.record_hook_failure(
+            doc_id="d-new", collection="code__nexus", hook_name="h_new",
+            error="boom", chain="single",
+            occurred_at=datetime.now(UTC).isoformat(),
+        )
+        deleted = client.trim_hook_failures(days=365 * 3)
+        assert deleted == 1
 
 
 class TestRenameCollection:

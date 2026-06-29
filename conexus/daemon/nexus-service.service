@@ -1,0 +1,51 @@
+## systemd user unit for the nexus storage SERVICE (RDR-174 P2.1, nexus-y2yj6).
+## Installed by ``nx daemon service install --autostart``. The ``__NX_BIN__``
+## placeholder is substituted at install time with the resolved absolute path
+## to the ``nx`` executable.
+##
+## ``nx daemon service start --foreground`` runs the storage supervisor
+## (run_storage_supervisor) in the foreground — it owns the native engine-
+## service binary + the local Postgres cluster and blocks until SIGTERM, so
+## systemd's supervision is the canonical lifecycle owner.
+##
+## No PG boot-ordering seam (RDR-174 P2.2, nexus-exfns — VERIFIED NO-OP): the
+## supervisor starts its OWN nx-owned Postgres cluster as step 1 of startup
+## (storage_service_daemon._start_locked -> _ensure_pg_running ->
+## pg_provision._start_cluster), with boot-safe binary discovery from the
+## config dir (no provisioning-time env). There is NO external
+## postgresql.service to order against in any mode, so After=postgresql.service /
+## Wants=postgresql.service would be wrong. After=network.target below is
+## conventional defensive ordering for a port-binding daemon; the 127.0.0.1
+## loopback the supervisor binds is kernel-configured before userspace, so it
+## is belt-and-suspenders rather than a hard requirement. The supervisor's only
+## real boot prerequisites are the nx binary on PATH (__PATH_ENV__) and the
+## provisioned pg_credentials (absence crash-loops until `nx init`).
+
+[Unit]
+Description=Nexus storage service (engine-service binary + local Postgres; serves T2 + T3)
+After=network.target
+PartOf=default.target
+## Never-give-up parity with launchd (RDR-175 P1 Step 2, nexus-ckwhd). With the
+## in-process respawn layer retired (RDR-175), systemd is the single watchdog;
+## the default StartLimitIntervalSec=10s / StartLimitBurst=5 would let the unit
+## enter 'failed' after a restart burst (e.g. crash-looping before
+## `nx init` provisions pg_credentials), abandoning the service where
+## launchd's KeepAlive+ThrottleInterval=30 keeps retrying. 0 disables the rate
+## limiter so Restart=on-failure retries indefinitely.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=__NX_BIN__ daemon service start --foreground
+Restart=on-failure
+RestartSec=5s
+## SIGTERM-induced exits surface as code 143. Mark them as success so a
+## graceful ``nx daemon service stop`` (which sends SIGTERM) does not
+## immediately respawn through Restart=on-failure.
+SuccessExitStatus=143
+Environment=PATH=__PATH_ENV__
+StandardOutput=append:__LOG_DIR__/nexus-service.log
+StandardError=append:__LOG_DIR__/nexus-service.err
+
+[Install]
+WantedBy=default.target

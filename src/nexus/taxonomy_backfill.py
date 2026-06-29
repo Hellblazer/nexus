@@ -97,7 +97,7 @@ def backfill_source_collection(
     # Resolve (conn, optional lock) so the rest of the function is a
     # single path. Both branches fall through to the same logic under
     # the conditional ``_hold_lock`` context manager.
-    from contextlib import nullcontext
+    from contextlib import nullcontext  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     if hasattr(taxonomy_or_conn, "_lock") and hasattr(taxonomy_or_conn, "conn"):
         conn = taxonomy_or_conn.conn

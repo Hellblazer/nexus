@@ -93,46 +93,70 @@ If you don't intend to index math PDFs and want to skip the download, run with `
 nx index pdf --extractor docling some.pdf
 ```
 
-## First-time setup: the T2 daemon
+## First-time setup: the storage backend
 
-Since conexus 4.34.0 (RDR-120 storage substrate split), all
-user-facing CLI commands that touch persistent state — `nx memory`,
-`nx index`, `nx store`, `nx catalog`, the MCP server, and everything
-the Claude Code plugin does — route through the **T2 daemon**, a
-single arbitrating SQLite-writer process. This is the substrate
-fix that lets host CLI usage, multiple Claude Code sessions, Claude
-Cowork agents, and dev containers all share state without racing on
-the database file.
+In the default configuration every persistent tier — `nx memory`,
+`nx index`, `nx store`, `nx catalog`, the MCP server, and everything the
+Claude Code plugin does — is served by the native **nexus-service** over
+Postgres + pgvector. A single `nx init` provisions and starts it (see the next
+section), so there is **no** separate T2-daemon install step in the default
+flow.
 
-Register the daemon to start at login (one-time setup):
+> **Opt-in: the standalone SQLite T2 daemon.** Users who deliberately select a
+> SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`, or a per-store override) can
+> register the legacy single-writer SQLite daemon to start at login:
+>
+> ```bash
+> nx daemon t2 install --autostart
+> nx daemon t2 status                # confirm running
+> ```
+>
+> This writes a LaunchAgent (macOS, `~/Library/LaunchAgents/com.nexus.t2.plist`)
+> or systemd user-unit (Linux, `~/.config/systemd/user/nexus-t2.service`) with
+> `KeepAlive=true` / `Restart=on-failure`. Uninstall with
+> `nx daemon t2 uninstall --autostart`. This path is not needed for the default
+> service-backed install.
 
-```bash
-nx daemon t2 install --autostart
-nx daemon t2 status                # confirm running
-```
-
-This writes a LaunchAgent (macOS, `~/Library/LaunchAgents/com.nexus.t2.plist`)
-or systemd user-unit (Linux, `~/.config/systemd/user/nexus-t2.service`)
-with `KeepAlive=true` / `Restart=on-failure`, so the daemon survives
-crashes and reboots. Uninstall with `nx daemon t2 uninstall --autostart`.
-
-If you skip this step, the conexus plugin's SessionStart hook
-will auto-spawn the daemon on every session start anyway, so plugin
-users still get a working substrate. The autostart path is recommended
-if you also use `nx` directly from the shell.
-
-**Local-mode T3 only**: the T3 daemon wraps a local ChromaDB process.
-Register it the same way:
+**T3 (the permanent vector store)** is served by the native nexus-service over
+Postgres 17 + pgvector — in **both** local and cloud mode. Provision and start
+it with:
 
 ```bash
-nx daemon t3 install --autostart   # only when NX_LOCAL=1 / no cloud creds
+nx daemon service install-binary <engine-service-vX.Y.Z>   # acquire the cosign-verified native binary + relocatable PG+pgvector bundle
+nx init                                                    # provision Postgres, fetch the bge-768 ONNX, start the service, offer autostart
 ```
 
-Cloud-mode T3 talks directly to ChromaDB Cloud over HTTP and has no
-daemon — `nx daemon t3` is a no-op in that configuration.
+Pick `<engine-service-vX.Y.Z>` from the
+[engine-service releases](https://github.com/Hellblazer/nexus/releases) (the
+newest `engine-service-v*` tag). There is no `latest` resolution — the tag is
+explicit. You can instead export `NEXUS_SERVICE_TAG=engine-service-vX.Y.Z`, in
+which case `nx init` acquires the binary itself and the explicit
+`install-binary` step is optional.
 
-See [docs/container-integration.md](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) for the full daemon-model story
-including TCP / UDS / Cowork transport details.
+`nx init` provisions the local service backend by default (the older
+`nx init --service` flag still works but is deprecated). It offers to register
+the OS autostart unit so the service restarts at login/boot — the prompt
+defaults to yes; `--yes` accepts non-interactively, and `--no-autostart` starts
+a session supervisor only (no persistent unit). `nx init` is idempotent — safe
+to re-run. The service embeds with bge-768 (local) or, in the managed-cloud
+deployment, server-side via Voyage with the operator's key (clients supply only
+`NX_SERVICE_TOKEN`, never a Voyage key).
+
+> The legacy `nx daemon t3` (a managed ChromaDB subprocess) is retired as a
+> serving path — T3 no longer serves from ChromaDB. ChromaDB data from a
+> pre-6.0 install is read only as the migration *source* (see Upgrading below).
+
+See [docs/container-integration.md](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) for reaching the
+service from a container, and [docs/migration-runbook.md](https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md) for the
+migration details.
+
+### Using the hosted managed service (no local stack)
+
+Prefer not to run the service stack yourself? Point `nx` at the hosted Conexus
+managed service with an operator-provisioned URL + token — no local service, no
+migration. See [docs/managed-onboarding.md](https://github.com/Hellblazer/nexus/blob/main/docs/managed-onboarding.md)
+for the greenfield journey (`nx config set service_url/service_token` → probe →
+first store/search).
 
 ## Update
 
@@ -152,6 +176,27 @@ nx daemon t2 stop && nx daemon t2 start    # or: launchctl kickstart -k gui/<uid
 The schema-version handshake (RDR-120 P3b) fails loud on
 client/daemon version mismatch, so stale daemons fail closed rather
 than silently corrupting state.
+
+### Upgrading to 6.0 (migrating off ChromaDB)
+
+6.0 moves the permanent vector store (T3) from ChromaDB to the Postgres +
+pgvector service. Existing installs migrate with one command:
+
+```bash
+uv tool upgrade conexus       # get the 6.0 CLI
+nx guided-upgrade             # detect -> provision+verify the service -> migrate -> validate -> unlock
+```
+
+`nx guided-upgrade` detects your existing ChromaDB footprint, provisions and
+starts the service, version-pins it (its `/version` must report a
+`release_version` — present from engine-service v0.1.6+; the code floor is
+v0.1.8 but earlier binaries are below it / omit the field and fail closed),
+health-gates it, then migrates your collections into pgvector with validation
+and **copy-not-move** rollback safety — your ChromaDB store is left intact as
+the source. Voyage-capability and version pre-flights fail loud *before* any
+migration. It is idempotent (safe to re-run) but not a no-op after success: a
+re-run re-copies at full cost. On a validation block it leaves the migration
+state `migrated-failed` and offers a rollback command rather than auto-reverting.
 
 ## Use it (no API keys needed)
 
@@ -198,7 +243,7 @@ The catalog tracks every indexed document and the relationships between them. It
 
 The enhanced `query` MCP tool uses catalog metadata for scoped search — `query(question="...", author="Fagin")` searches only that author's collections in a single call.
 
-If you use cloud mode (ChromaDB Cloud), add a git remote so the catalog survives disk loss:
+If you use managed-cloud mode (a hosted nexus service), add a git remote so the local catalog survives disk loss:
 
 ```bash
 cd ~/.config/nexus/catalog && git remote add origin git@github.com:you/nexus-catalog.git
@@ -230,34 +275,22 @@ claude --plugin-dir ./nx
 
 ## Cloud mode (optional)
 
-Local mode uses bundled ONNX embeddings (384d MiniLM). Cloud mode upgrades to Voyage AI (1024d), cross-chunk context (CCE), and reranking.
+Local mode embeds with the on-device bge-768 ONNX model (768-dim) the service provisions; the bundled minilm-384 remains a zero-download fallback. The managed-cloud deployment embeds server-side with Voyage AI (1024d), cross-chunk context (CCE), and reranking.
 
-### 1. Create accounts
+In managed-cloud mode there is no local service and no local Postgres: `nx` talks HTTPS to a hosted nexus service that owns its cloud Postgres + pgvector and embeds with Voyage AI server-side. You do not create a ChromaDB Cloud account or supply a Voyage key yourself (the service owns it).
 
-| Service | Purpose | Free tier |
-|---------|---------|-----------|
-| [ChromaDB Cloud](https://trychroma.com) | Vector storage | Generous for individual use |
-| [Voyage AI](https://voyageai.com) | Embeddings | 200M tokens/month |
+### 1. Point nx at the managed service
 
-Both free tiers cover typical usage at no cost.
-
-### 2. Configure credentials
-
-Interactive wizard:
+Set the service endpoint and your bearer token in the environment:
 
 ```bash
-nx config init
+export NX_SERVICE_URL=https://api.conexus-nexus.com   # or your provider's URL
+export NX_SERVICE_TOKEN=<your-managed-service-token>
 ```
 
-Or set individually:
+`NX_SERVICE_URL` defaults to `https://api.conexus-nexus.com`, so a hosted user on the default deployment only needs `NX_SERVICE_TOKEN`. (These are read from the environment; persist them in your shell profile or your process manager.)
 
-```bash
-nx config set chroma_api_key sk-...
-nx config set chroma_database nexus
-nx config set voyage_api_key pa-...
-```
-
-### 3. Verify
+### 2. Verify
 
 ```bash
 nx doctor
@@ -265,7 +298,7 @@ nx doctor
 
 All items should show `✓`. Fix anything marked `✗` before proceeding.
 
-### 4. Index and search
+### 3. Index and search
 
 ```bash
 nx index repo .
@@ -281,10 +314,11 @@ Common flags: `-n 20` (result count), `--json`, `--files` (paths only), `-c` (sh
 
 ### Upgrade local embedding quality (optional)
 
-For better local-only embeddings (768d bge-base) without cloud:
+For the Python-side bge-768 embedder (used by non-service local indexing paths;
+the `nx init` service stack already embeds with bge-768 server-side):
 
 ```bash
-uv tool install conexus --with "conexus[local]" --force
+uv tool install --reinstall "conexus[local]"
 ```
 
 To force local mode even when cloud credentials exist: `NX_LOCAL=1`.
@@ -314,11 +348,9 @@ uv tool install conexus --force --python 3.13   # use "conexus[local]" here if y
 
 Note: `uv tool upgrade` reuses the existing environment's Python — it won't switch from 3.14 to 3.13 automatically. You must use `--force --python 3.13` to rebuild the environment. Because `--force` rebuilds from scratch it drops optional extras, so re-include `[local]` (i.e. install `"conexus[local]"`) if you use the bge-768 embedder.
 
-**`nx doctor` reports credentials not set** — Expected for local mode. Only needed if you want cloud embeddings — run `nx config init`.
+**`nx doctor` reports credentials not set** — Expected for local mode. Only needed for managed-cloud mode — export `NX_SERVICE_URL` + `NX_SERVICE_TOKEN` in the environment.
 
-**Provisioning failed during `nx config init`** — If your ChromaDB plan restricts automatic database creation, create the database manually in the [dashboard](https://trychroma.com) using your `chroma_database` value as the name.
-
-**`nx index repo .` fails with "credentials not set"** — In cloud mode, indexing requires T3 credentials. Run `nx config init` first, or use local mode (no credentials needed).
+**`nx index repo .` fails with a service-auth error** — In managed-cloud mode, indexing requires a reachable service and a valid `NX_SERVICE_TOKEN`. Export the token (`export NX_SERVICE_TOKEN=…`) and confirm the endpoint with `nx doctor`, or use local mode (run `nx daemon service start`, no token needed).
 
 **`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14. Fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed; re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
 
@@ -326,7 +358,7 @@ Note: `uv tool upgrade` reuses the existing environment's Python — it won't sw
 
 **`nx search` returns no results** — Run `nx doctor` to verify connectivity. If indexing was interrupted, re-run `nx index repo .` to resume.
 
-**`T2DaemonNotReachableError: No T2 daemon discovery resolved`** — Since 4.34.0 the CLI routes through the T2 daemon. Start it (one of):
+**`T2DaemonNotReachableError: No T2 daemon discovery resolved`** — Only on the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`); the default service backend does not use this daemon. Start it (one of):
 
 ```bash
 nx daemon t2 ensure-running              # one-shot spawn (idempotent)

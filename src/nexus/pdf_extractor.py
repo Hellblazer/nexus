@@ -39,6 +39,32 @@ except ImportError:
 # Inline script executed in a child Python process for memory isolation.
 # Uses os._exit to force-terminate without waiting for daemon threads / worker
 # pools that MinerU's pipeline may leave running.
+#
+# RDR-148 Gap 3 (macOS spawn-guard) — VERIFY-FIRST spike outcome, source-
+# verified 2026-06-24: the original diagnosis (in-process MinerU worker failing
+# on macOS under multiprocessing's `spawn` start method without an
+# `if __name__ == "__main__"` guard — exit 1 + "leaked semaphore") is MOOT for
+# the boundary it described. The worker is now a plain
+# ``subprocess.Popen([sys.executable, "-c", _MINERU_WORKER_SCRIPT, ...])`` — a
+# fresh interpreter, NOT a multiprocessing-spawn child, so the parent-__main__
+# re-import recursion that the guard protects against is categorically
+# inapplicable at the nexus->worker boundary. ``os._exit(0)`` further skips the
+# pool teardown that leaked the semaphore. Residual, distinct, and UNVERIFIED:
+# if MinerU's ``do_parse`` itself spawns multiprocessing children, the un-
+# guarded ``-c`` __main__ could re-trigger an analogous issue; reproducing that
+# needs model weights (CA-3/CA-4 deferred — do not run casually on a dev host).
+# Do NOT add a speculative multiprocessing guard here without that repro: it is
+# untested surface (feedback_no_preventive_scope_beyond_evidence). The
+# fresh-interpreter `-c` form is a load-bearing invariant — see the structural
+# guard in tests/test_mineru_spawn_logging.py.
+# RDR-148 Gap 5: distinct exit code for an in-process MemoryError so the parent
+# can classify a memory exhaustion (the RLIMIT_AS-ceiling-breach path added by
+# Gap 6) separately from a generic non-zero exit. A bare RLIMIT_AS breach exits
+# the worker via an in-process MemoryError (code path below), NOT the OS SIGKILL
+# (-9) path, so the -9-only mapping would miss it (gate finding). Sentinel is
+# substituted into the worker script template below.
+_MINERU_OOM_EXIT = 42
+
 _MINERU_WORKER_SCRIPT = '''
 import json, sys, os
 from pathlib import Path
@@ -46,20 +72,42 @@ from mineru.cli.common import do_parse
 
 pdf_path, result_dir, start, end_str = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 end = None if end_str == "none" else int(end_str)
-do_parse(
-    result_dir,
-    pdf_file_names=[Path(pdf_path).name],
-    pdf_bytes_list=[Path(pdf_path).read_bytes()],
-    p_lang_list=["en"],
-    formula_enable=True,
-    table_enable=True,  # Note: server path uses config (default False) — see RDR-046 RF-2
-    start_page_id=start,
-    end_page_id=end,
-)
+try:
+    do_parse(
+        result_dir,
+        pdf_file_names=[Path(pdf_path).name],
+        pdf_bytes_list=[Path(pdf_path).read_bytes()],
+        p_lang_list=["en"],
+        formula_enable=True,
+        table_enable=True,  # Note: server path uses config (default False) — see RDR-046 RF-2
+        start_page_id=start,
+        end_page_id=end,
+    )
+except MemoryError:
+    # RDR-148 Gap 5/6: a memory-ceiling breach (RLIMIT_AS) surfaces in-process as
+    # MemoryError, not OS SIGKILL. Exit with the sentinel so the parent maps it to
+    # MineruMemoryError. os._exit (not sys.exit) to skip pool/daemon-thread teardown.
+    os._exit(__MINERU_OOM_EXIT__)
 os._exit(0)
-'''
+'''.replace("__MINERU_OOM_EXIT__", str(_MINERU_OOM_EXIT))
 
 _log = structlog.get_logger(__name__)
+
+
+class MineruMemoryError(RuntimeError):
+    """A MinerU subprocess died from memory exhaustion (RDR-148 Gap 5).
+
+    Subclasses ``RuntimeError`` deliberately: the existing
+    ``except RuntimeError`` 1-page OOM-retry in ``_extract_with_mineru``
+    keeps catching it, while callers that want to special-case memory
+    exhaustion (per-page degrade-to-docling) can catch this narrower type.
+    Raised when a worker exits via SIGKILL (OS OOM-killer / jetsam), via the
+    ``_MINERU_OOM_EXIT`` sentinel (in-process ``MemoryError`` from an
+    ``RLIMIT_AS`` ceiling breach), or any non-zero exit once a memory ceiling
+    was applied (Gap 6). The third arm is gated on
+    ``PDFExtractor._mineru_ceiling_applied`` (default ``False`` until Gap 6
+    wires the ceiling), so it is inert today and never misfires.
+    """
 
 
 # nexus-2fyb code-review R1-I3: progress messages are interactive UX for
@@ -82,7 +130,7 @@ def _progress(msg: str) -> None:
     """
     _log.info("pdf_extractor_progress", message=msg.strip())
     if _os.environ.get("NEXUS_PDF_PROGRESS_QUIET") != "1":
-        print(msg, file=sys.stderr, flush=True)
+        print(msg, file=sys.stderr, flush=True)  # noqa: T201 — gated interactive stderr progress; structured event emitted above via _log.info
 
 
 # nexus-2fyb code-review R5-I2: chained exceptions from MinerU/httpx can
@@ -178,7 +226,7 @@ def _has_formulas_quick(pdf_path: Path) -> int:
     Returns the count. A threshold of >=5 indicates a formula-containing paper.
     """
     try:
-        import pymupdf
+        import pymupdf  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
         with pymupdf.open(pdf_path) as doc:
             count = 0
             for page in doc:
@@ -187,7 +235,7 @@ def _has_formulas_quick(pdf_path: Path) -> int:
                 if count >= 5:
                     return count  # early exit
             return count
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort page count; falls back to 0
         return 0
 
 
@@ -330,12 +378,23 @@ class PDFExtractor:
         self._mineru_server_checked: bool = False
         self._mineru_server_up: bool = False
         self._mineru_server_restarts: int = 0
+        # RDR-148 Gap 5/6: set True by Gap 6 when an RLIMIT_AS memory ceiling is
+        # applied to the worker, so the OOM classifier treats ANY non-zero exit
+        # as a ceiling breach (a breach may surface as a plain non-zero exit, not
+        # only SIGKILL / the sentinel). Default False until Gap 6 lands.
+        self._mineru_ceiling_applied: bool = False
+        # RDR-148 Gap 6: page count of the document currently being extracted,
+        # set at the top of _extract_with_mineru so the subprocess path scales
+        # the per-page timeout for the whole-doc (end is None) batch without
+        # re-opening the PDF. None for direct subprocess callers.
+        self._mineru_run_total_pages: int | None = None
 
     def extract(
         self,
         pdf_path: Path,
         *,
         extractor: str = "auto",
+        on_formula_oom: str = "fail",
         on_page: Callable[[int, str, dict], None] | None = None,
     ) -> ExtractionResult:
         """Extract text from *pdf_path*. Returns ExtractionResult.
@@ -346,6 +405,14 @@ class PDFExtractor:
         - ``"docling"`` — Docling with PyMuPDF normalized fallback.
         - ``"mineru"`` — MinerU directly (no fallback).
 
+        *on_formula_oom* (RDR-148 Gap 5) governs what happens when a *single*
+        page reproducibly OOM-kills MinerU's formula model (page-content-specific
+        exhaustion the 1-page-batch floor cannot mitigate):
+        - ``"fail"`` (default) — re-raise the formula-aware error; preserves the
+          no-silent-fallback-for-formulas guarantee.
+        - ``"docling"`` — degrade THAT page to docling (formula-stripped) and
+          continue, so one pathological page doesn't fail the whole document.
+
         *on_page* — optional streaming callback fired per extracted page (or
         per MinerU batch when ``mineru_page_batch > 1``):
         ``on_page(page_index, page_text, page_metadata)``.
@@ -355,6 +422,10 @@ class PDFExtractor:
         if extractor not in ("auto", "docling", "mineru"):
             raise ValueError(
                 f"extractor must be 'auto', 'docling', or 'mineru'; got {extractor!r}"
+            )
+        if on_formula_oom not in ("fail", "docling"):
+            raise ValueError(
+                f"on_formula_oom must be 'fail' or 'docling'; got {on_formula_oom!r}"
             )
 
         # nexus-2fyb code-review R1-I2: validate the path is readable before
@@ -370,14 +441,16 @@ class PDFExtractor:
             _progress(f"  Docling: extracting {pdf_path.name}…")
             try:
                 return self._extract_with_docling(pdf_path, on_page=on_page)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — fallback path; logged, falls back to PyMuPDF extractor
                 _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
                 _log.debug("docling_extraction_failed", error=str(exc), path=str(pdf_path))
                 return self._extract_normalized(pdf_path, on_page=on_page)
 
         if extractor == "mineru":
             _progress(f"  MinerU: extracting {pdf_path.name}…")
-            return self._extract_with_mineru(pdf_path, on_page=on_page)
+            return self._extract_with_mineru(
+                pdf_path, on_page=on_page, on_formula_oom=on_formula_oom,
+            )
 
         # extractor == "auto"
         # Step 1: Quick formula pre-screen via raw PDF text (~0.1s)
@@ -388,7 +461,7 @@ class PDFExtractor:
         _progress(f"  Docling: extracting {pdf_path.name}…")
         try:
             fast_result = self._extract_with_docling(pdf_path, enriched=False)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — fallback path; logged, falls back to PyMuPDF extractor
             _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
             _log.debug("docling_auto_pass_failed", error=str(exc), path=str(pdf_path))
             return self._extract_normalized(pdf_path, on_page=on_page)
@@ -419,7 +492,10 @@ class PDFExtractor:
         # into formula-stripped extraction with --extractor docling.
         _progress(f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}")
         try:
-            return self._extract_with_mineru(pdf_path, formula_count=formula_count, on_page=on_page)
+            return self._extract_with_mineru(
+                pdf_path, formula_count=formula_count, on_page=on_page,
+                on_formula_oom=on_formula_oom,
+            )
         except ImportError as exc:
             # do_parse is None — mineru is a default dep since nexus-2fyb so a
             # missing import means the conexus install itself is corrupt.
@@ -468,8 +544,8 @@ class PDFExtractor:
         attr = "_converter_enriched" if enriched else "_converter"
         converter = getattr(self, attr)
         if converter is None:
-            from docling.document_converter import DocumentConverter, PdfFormatOption
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
+            from docling.document_converter import DocumentConverter, PdfFormatOption  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+            from docling.datamodel.pipeline_options import PdfPipelineOptions  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
             opts = PdfPipelineOptions()
             opts.do_ocr = False                 # digital PDFs have embedded text
@@ -537,7 +613,7 @@ class PDFExtractor:
                     if callable(getattr(item, "export_to_html", None)):
                         try:
                             html = item.export_to_html(doc=doc)
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 — best-effort table export; logged, html falls back to empty
                             _log.debug("table_html_export_failed", page=page_no, error=str(exc))
                             html = ""
                     table_regions.append({"page": page_no, "html": html})
@@ -553,7 +629,7 @@ class PDFExtractor:
                     if callable(getattr(item, "export_to_html", None)):
                         try:
                             html = item.export_to_html(doc=doc)
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 — best-effort table export; logged, html falls back to empty
                             _log.debug("table_html_export_failed", page=page_no, error=str(exc))
                             html = ""
                     table_regions.append({"page": page_no, "html": html})
@@ -585,11 +661,58 @@ class PDFExtractor:
     # Page batch size is read from config via get_mineru_page_batch() (default 1).
     # Formula-dense PDFs OOM during MFR prediction at larger batch sizes.
 
+    def _extract_page_via_docling(self, pdf_path: Path, page: int) -> str:
+        """Formula-stripped docling extraction of a SINGLE page (0-based).
+
+        RDR-148 Gap 5 ``on_formula_oom="docling"`` support: when one page
+        reproducibly OOM-kills MinerU's formula model, extract just that page
+        with docling (slicing it into a one-page temp PDF) so the rest of the
+        document still gets formula-aware MinerU extraction. Returns the page's
+        markdown (formulas rendered as best docling can, i.e. stripped).
+        """
+        import tempfile  # noqa: PLC0415 — deferred import — branch-local
+        import pymupdf  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+
+        # Create the temp file FIRST so it is always bound for cleanup even if
+        # pymupdf slicing raises (an insert_pdf failure must propagate as itself,
+        # not as an UnboundLocalError on a never-assigned tmp name).
+        fd, tmp_name = tempfile.mkstemp(suffix=".pdf")
+        _os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            with pymupdf.open(pdf_path) as doc:
+                one = pymupdf.open()
+                try:
+                    one.insert_pdf(doc, from_page=page, to_page=page)
+                    one.save(tmp_name)
+                finally:
+                    one.close()
+            return self._extract_with_docling(tmp_path).text
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def _degrade_page_to_docling(
+        self, pdf_path: Path, page: int, total_pages: int, fname: str,
+    ) -> tuple[str, list[dict], list[dict]]:
+        """Degrade ONE page to docling after a formula-OOM, returning the
+        ``(md, content_list, pdf_info)`` triple in MinerU's shape (empty
+        structured lists, since docling does not emit MinerU content_list)."""
+        _log.warning(
+            "mineru_formula_oom_degrade_to_docling",
+            page=page + 1, path=str(pdf_path),
+        )
+        _progress(
+            f"  MinerU page {page + 1}/{total_pages} OOM (formula model) — "
+            f"degrading THIS page to docling (formula-stripped, {fname})"
+        )
+        return self._extract_page_via_docling(pdf_path, page), [], []
+
     def _extract_with_mineru(
         self,
         pdf_path: Path,
         *,
         formula_count: int = 0,
+        on_formula_oom: str = "fail",
         on_page: Callable[[int, str, dict], None] | None = None,
     ) -> ExtractionResult:
         """Extract text via MinerU (math-aware, optional dependency).
@@ -612,12 +735,14 @@ class PDFExtractor:
                 "nexus-2fyb. Reinstall conexus: `uv tool install --reinstall conexus`."
             )
 
-        import pymupdf  # lightweight — only used for page count
+        import pymupdf  # lightweight — only used for page count  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
         with pymupdf.open(pdf_path) as doc:
             total_pages = len(doc)
+        # Gap 6: expose to the subprocess path for whole-doc-batch timeout scaling.
+        self._mineru_run_total_pages = total_pages
 
-        from nexus.config import get_mineru_page_batch
+        from nexus.config import get_mineru_page_batch  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         batch_size = get_mineru_page_batch()
 
         batches: list[tuple[int, int | None]] = []
@@ -643,6 +768,81 @@ class PDFExtractor:
         # appends one entry covering the batch span.
         per_page_lengths: list[tuple[int, int]] = []
 
+        def _append_page(
+            page: int, md: str, content_list: list[dict], pdf_info: list[dict],
+        ) -> None:
+            # Single append point so the batch-success, 1-page-retry, and
+            # degrade-to-docling paths produce identical bookkeeping. For
+            # batch_size > 1 the success path passes the batch start as `page`;
+            # page-number metadata is only exact at batch_size == 1 (the
+            # default the streaming pipeline relies on).
+            if on_page is not None:
+                on_page(page, md, {"page_number": page + 1, "text_length": len(md)})
+            md_parts.append(md)
+            all_content_list.extend(content_list)
+            all_pdf_info.extend(pdf_info)
+            per_page_lengths.append((page, len(md)))
+
+        def _append_batch(s: int, md: str, content_list: list[dict],
+                          pdf_info: list[dict], batch_pages: int) -> None:
+            # batch_size>1 success: the batch md covers `batch_pages` pages and
+            # we distribute its length uniformly (the only resolution available
+            # without per-page md from MinerU). on_page/md_parts/content fire
+            # once for the batch; per_page_lengths is the distributed form.
+            if on_page is not None:
+                on_page(s, md, {"page_number": s + 1, "text_length": len(md)})
+            md_parts.append(md)
+            all_content_list.extend(content_list)
+            all_pdf_info.extend(pdf_info)
+            per_page = len(md) // batch_pages
+            remainder = len(md) % batch_pages
+            for offset in range(batch_pages):
+                extra = 1 if offset < remainder else 0
+                per_page_lengths.append((s + offset, per_page + extra))
+
+        def _extract_range(s: int, e: int | None) -> None:
+            # RDR-148 Gap 6 batch//2 ladder: extract pages [s, e) in one
+            # subprocess; on failure BISECT (full range -> halves -> ... -> one
+            # page) instead of dropping straight to 1-page, so a mid-size batch
+            # that fits memory is tried before the slowest per-page path. A
+            # single page that OOMs degrades-or-fails per on_formula_oom (Gap 5).
+            rng_end = e if e is not None else total_pages
+            span = rng_end - s
+            try:
+                md, content_list, pdf_info = self._mineru_run_isolated(pdf_path, s, e)
+            except RuntimeError as exc:
+                if span <= 1:
+                    # Single page already run and OOM'd (exc in hand) — do not
+                    # re-run. Gap 5: degrade THIS page to docling when opted in,
+                    # else propagate so the document fails cleanly (no silent
+                    # formula fallback). Single degrade site (Gap 6 lands once).
+                    if isinstance(exc, MineruMemoryError) and on_formula_oom == "docling":
+                        d_md, d_cl, d_pi = self._degrade_page_to_docling(
+                            pdf_path, s, total_pages, fname,
+                        )
+                        _append_page(s, d_md, d_cl, d_pi)
+                        return
+                    raise
+                mid = s + span // 2
+                _log.warning(
+                    "mineru_oom_retry", pages=f"{s + 1}–{rng_end}",
+                    path=str(pdf_path), original_batch=span, retry_split=mid,
+                )
+                _progress(
+                    f"  MinerU: pages {s + 1}–{rng_end} failed — bisecting "
+                    f"at {mid + 1} ({fname})"
+                )
+                _extract_range(s, mid)
+                _extract_range(mid, rng_end)
+                return
+            # Success. Normalize before measuring length so per_page_lengths is
+            # consistent with the stored normalized text.
+            md = _normalize_mineru_latex(md)
+            if span <= 1:
+                _append_page(s, md, content_list, pdf_info)
+            else:
+                _append_batch(s, md, content_list, pdf_info, span)
+
         fname = pdf_path.name
         for batch_idx, (start, end) in enumerate(batches):
             label = f"{start + 1}–{end}" if end is not None else f"{start + 1}–{total_pages}"
@@ -650,65 +850,7 @@ class PDFExtractor:
                 f"  MinerU: page {start + 1}/{total_pages} ({fname})",
             )
             _log.info("mineru_batch", pages=label, path=str(pdf_path))
-            try:
-                md, content_list, pdf_info = self._mineru_run_isolated(pdf_path, start, end)
-            except RuntimeError:
-                # OOM or subprocess failure — retry at 1-page granularity.
-                # This catches both subprocess OOM (exit code -9) and server-crash
-                # fallback failures. Single-page retries that also fail propagate
-                # immediately (span <= 1 → re-raise), so the document fails cleanly.
-                span = (end or total_pages) - start
-                if span <= 1:
-                    raise  # already single-page, no retry possible
-                _log.warning(
-                    "mineru_oom_retry",
-                    pages=label,
-                    path=str(pdf_path),
-                    original_batch=span,
-                )
-                for page in range(start, end or total_pages):
-                    _progress(
-                        f"  MinerU: page {page + 1}/{total_pages} (retry, {fname})",
-                    )
-                    md, content_list, pdf_info = self._mineru_run_isolated(
-                        pdf_path, page, page + 1,
-                    )
-                    # Normalize before measuring length so per_page_lengths
-                    # is consistent with the stored normalized text.
-                    md = _normalize_mineru_latex(md)
-                    if on_page is not None:
-                        on_page(page, md, {"page_number": page + 1, "text_length": len(md)})
-                    md_parts.append(md)
-                    all_content_list.extend(content_list)
-                    all_pdf_info.extend(pdf_info)
-                    per_page_lengths.append((page, len(md)))
-                continue
-            # Normalize before measuring length so per_page_lengths
-            # is consistent with the stored normalized text.
-            md = _normalize_mineru_latex(md)
-            if on_page is not None:
-                # Note: for batch_size > 1, fires once per batch with the batch's
-                # combined markdown and start page index. Page-number metadata is
-                # only accurate when batch_size=1 (the default). The streaming
-                # pipeline relies on this default for correct page attribution.
-                on_page(start, md, {"page_number": start + 1, "text_length": len(md)})
-            md_parts.append(md)
-            all_content_list.extend(content_list)
-            all_pdf_info.extend(pdf_info)
-            # For batch_size==1 (the default), end == start+1 and this is
-            # exact. For batch_size>1, the batch md covers `batch_pages`
-            # pages and we distribute it uniformly within the batch (the
-            # only resolution available without per-page md from MinerU).
-            batch_end = end if end is not None else total_pages
-            batch_pages = batch_end - start
-            if batch_pages == 1:
-                per_page_lengths.append((start, len(md)))
-            elif batch_pages > 1:
-                per_page = len(md) // batch_pages
-                remainder = len(md) % batch_pages
-                for offset in range(batch_pages):
-                    extra = 1 if offset < remainder else 0
-                    per_page_lengths.append((start + offset, per_page + extra))
+            _extract_range(start, end)
 
         if batches:
             _progress(f"  MinerU: {total_pages}/{total_pages} done ({fname})")
@@ -720,58 +862,105 @@ class PDFExtractor:
             formula_count_floor=formula_count,
         )
 
+    def _probe_mineru_health(self, base_url: str) -> tuple[bool, str]:
+        """Probe ``{base_url}/health`` once. Return ``(ok, reason)``.
+
+        ``reason`` is empty on success, else a short diagnostic
+        (``http_503`` / ``ConnectError: ...``) for the caller to surface
+        on the loud fallback decision. Per-probe failures are logged at
+        DEBUG — the single WARNING belongs to the final fallback in
+        :meth:`_mineru_server_available`, not to each probe.
+        """
+        url = f"{base_url}/health"
+        try:
+            resp = httpx.get(url, timeout=2)
+            if resp.status_code == 200:
+                return True, ""
+            _log.debug("mineru_health_probe_non_200", url=url,
+                       http_status=resp.status_code)
+            return False, f"http_{resp.status_code}"
+        except (httpx.ConnectError, httpx.TimeoutException,
+                httpx.RemoteProtocolError) as exc:
+            # RemoteProtocolError: a server dying mid-startup can accept the
+            # TCP connection but return a truncated/malformed response. The
+            # parse path (_mineru_run_isolated) already treats it as a
+            # crash-and-fall-back; the health probe must too, not crash.
+            _log.debug("mineru_health_probe_unreachable", url=url,
+                       error=f"{type(exc).__name__}: {exc}")
+            return False, f"{type(exc).__name__}: {exc}"
+
     def _mineru_server_available(self) -> bool:
         """Check if the MinerU API server is reachable.
 
         Result cached for the lifetime of this PDFExtractor instance —
         a False result is never retried. Create a new instance to re-check.
 
-        nexus-h1jk: when the configured URL is unreachable, emit a
-        structured warning + ``_progress`` line so the operator knows
-        the run is silently degrading to the in-process subprocess
-        path (where math-heavy / large PDFs OOM-kill the worker).
-        The auto-restart machinery writes the live port back to
-        ``~/.config/nexus/config.yml``, so a stale URL persists across
-        sessions when the server is later killed.
+        RDR-148 Gap 2 (rediscover-then-fail-loud): on a /health failure
+        the run must not silently degrade to the in-process subprocess
+        path (where math-heavy / large PDFs OOM-kill the worker). Before
+        degrading, perform exactly ONE rediscovery pass — re-resolve the
+        endpoint, which re-reads the live PID file when config is at the
+        default, so a server that restarted mid-run on a new port is
+        picked up. Only when rediscovery still finds no live server is the
+        subprocess path selected, and that decision is logged LOUD (a
+        single WARNING + ``_progress`` line naming the reason), never
+        silently (nexus-h1jk warn-on-fallback, made non-silent here).
+
+        Known limitation (by Gap 1 design, for vehin.5): "rediscover" means
+        re-resolve via ``get_mineru_server_url()``, whose pid-file read is
+        gated by the Gap 1 precedence — an EXPLICIT non-default operator URL
+        wins and the pid file is intentionally NOT consulted. So rediscovery
+        re-reads the pid file only on the default-config path; with an
+        explicit URL it is a transient-recovery re-probe of the same
+        endpoint. This is deliberate: honoring "operator intent wins" (Gap 1)
+        precludes a pid file silently redirecting an explicitly-pinned URL.
         """
         if self._mineru_server_checked:
             return self._mineru_server_up
 
-        from nexus.config import get_mineru_server_url
-        url = f"{get_mineru_server_url()}/health"
-        try:
-            resp = httpx.get(url, timeout=2)
-            self._mineru_server_up = resp.status_code == 200
-            if not self._mineru_server_up:
-                _log.warning(
-                    "mineru_server_unhealthy",
-                    url=url, http_status=resp.status_code,
-                )
-                _progress(
-                    f"  warn: MinerU server at {url} returned HTTP "
-                    f"{resp.status_code}; falling back to in-process subprocess. "
-                    f"Run `nx mineru start` to enable server mode."
-                )
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            self._mineru_server_up = False
-            _log.warning(
-                "mineru_server_unreachable",
-                url=url, error=f"{type(exc).__name__}: {exc}",
-            )
-            _progress(
-                f"  warn: MinerU server at {url} unreachable; falling back "
-                f"to in-process subprocess (slower, OOM-risk on large math PDFs). "
-                f"Run `nx mineru start` to enable server mode."
-            )
+        from nexus.config import get_mineru_server_url  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+        first_url = get_mineru_server_url()
+        ok, first_reason = self._probe_mineru_health(first_url)
+        if ok:
+            self._mineru_server_up = True
+            self._mineru_server_checked = True
+            return True
+
+        # Gap 2: exactly one rediscovery pass before degrading. Re-resolving
+        # re-reads the PID file (default-config path), so a mid-run restart
+        # to a new port is picked up; with an explicit operator URL this is
+        # a single transient-recovery re-probe of the same endpoint.
+        second_url = get_mineru_server_url()
+        ok, reason = self._probe_mineru_health(second_url)
+        if ok:
+            _log.info("mineru_server_rediscovered",
+                      url=second_url, prior_url=first_url)
+            self._mineru_server_up = True
+            self._mineru_server_checked = True
+            return True
+
+        # No live server after rediscovery — loud, reasoned fallback.
+        self._mineru_server_up = False
         self._mineru_server_checked = True
+        _log.warning(
+            "mineru_fallback_to_subprocess",
+            first_url=first_url, rediscovered_url=second_url,
+            reason=reason, first_reason=first_reason,
+        )
+        _progress(
+            f"  warn: MinerU server unreachable after rediscovery "
+            f"({reason}); falling back to in-process subprocess (slower, "
+            f"OOM-risk on large math PDFs). Run `nx mineru start` to enable "
+            f"server mode, or pass --extractor docling."
+        )
         return self._mineru_server_up
 
     def _mineru_run_via_server(
         self, pdf_path: Path, start: int, end: int | None,
     ) -> tuple[str, list[dict], list[dict]]:
         """Extract via MinerU HTTP server (POST /file_parse)."""
-        from nexus.config import get_mineru_server_url, get_mineru_table_enable
+        from nexus.config import get_mineru_server_url, get_mineru_table_enable  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         url = f"{get_mineru_server_url()}/file_parse"
         with pdf_path.open("rb") as f:
@@ -843,7 +1032,7 @@ class PDFExtractor:
         # because ``nx mineru start/stop`` owns the lifecycle; the
         # library only reads. Path is also available via
         # ``nexus._mineru_pid._pid_file_path``.
-        from nexus._mineru_pid import (
+        from nexus._mineru_pid import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
             _pid_file_path,
             is_process_alive,
             read_pid_file,
@@ -855,9 +1044,9 @@ class PDFExtractor:
             _pid_file_path().unlink(missing_ok=True)
 
         # Start a new server via the same logic as `nx mineru start`
-        import subprocess as _sp
-        import time as _time
-        from nexus.commands.mineru import (
+        import subprocess as _sp  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+        import time as _time  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+        from nexus.commands.mineru import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
             _HEALTH_POLL_INTERVAL,
             _find_free_port,
             _mineru_output_root,
@@ -878,15 +1067,30 @@ class PDFExtractor:
         # set, MinerU falls back to its default world-writable /tmp/mineru-
         # output instead of the per-user 0o700 directory.
         output_root = _mineru_output_root()
+        # RDR-148 Gap 4: this respawns the long-lived mineru-api server; like
+        # the `nx mineru start` path, route its output to a rotated child log
+        # so a crash-on-restart leaves evidence instead of dying silently
+        # into DEVNULL (nexus-ovbr7 silent-death class).
+        from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — branch-local; only on the restart path
+
+        # config_dir=None (global config dir): PDFExtractor is not
+        # config-dir-parameterized (__init__ takes no config_dir) and the
+        # mineru pid/env helpers all resolve the default dir, so None matches
+        # the rest of the subsystem (the daemon self._config_dir precedent
+        # does not apply here).
+        server_log = open_child_log_or_devnull("mineru_server")
         try:
             proc = _sp.Popen(
                 cmd, env=_server_env(output_root),
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                stdout=server_log, stderr=server_log,
                 start_new_session=True,
             )
         except (FileNotFoundError, PermissionError):
             _log.warning("mineru_restart_failed", reason="mineru-api not found")
             return False
+        finally:
+            if not isinstance(server_log, int):
+                server_log.close()
 
         # Poll health for up to 60s (models already cached in memory by OS)
         url = f"http://127.0.0.1:{port}/health"
@@ -911,8 +1115,8 @@ class PDFExtractor:
         # lookup in ``get_mineru_server_url`` discovers the live port
         # at every call. Persisting ephemeral ports drifted across
         # reboots.
-        import json as _json
-        from datetime import datetime, timezone
+        import json as _json  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+        from datetime import datetime, timezone  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
         pid_path = _pid_file_path()
         pid_path.parent.mkdir(parents=True, exist_ok=True)
         pid_path.write_text(_json.dumps({
@@ -944,7 +1148,7 @@ class PDFExtractor:
                     # Retry this page on the new server
                     try:
                         return self._mineru_run_via_server(pdf_path, start, end)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — best-effort server call; falls through to subprocess mode
                         pass  # fall through to subprocess
                 return self._mineru_run_subprocess(pdf_path, start, end)
             except httpx.HTTPStatusError as exc:
@@ -964,9 +1168,60 @@ class PDFExtractor:
         """
         result_dir = tempfile.mkdtemp()
         try:
-            import os as _os
-            import signal
+            import os as _os  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+            import signal  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
+            # RDR-148 Gap 6: optional RLIMIT_AS address-space ceiling on the
+            # worker. LINUX-GATED: macOS raises ValueError on
+            # setrlimit(RLIMIT_AS) and does not enforce it (verified spike,
+            # RDR-148 Spike Result 1) — an ungated preexec crashes darwin. When
+            # a ceiling IS applied, set _mineru_ceiling_applied so the Gap 5
+            # classifier treats any non-zero exit as OOM (a breach can surface
+            # as a plain non-zero exit, not only SIGKILL / the sentinel).
+            from nexus.config import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+                get_mineru_memory_ceiling_mb,
+                get_mineru_page_timeout_s,
+            )
+            ceiling_mb = get_mineru_memory_ceiling_mb()
+            preexec_fn = None
+            if ceiling_mb > 0 and sys.platform.startswith("linux"):
+                ceiling_bytes = ceiling_mb * 1024 * 1024
+
+                def _apply_rlimit() -> None:  # pragma: no cover — runs in the child after fork
+                    import resource  # noqa: PLC0415 — child-only, POSIX
+                    resource.setrlimit(
+                        resource.RLIMIT_AS, (ceiling_bytes, ceiling_bytes),
+                    )
+
+                preexec_fn = _apply_rlimit
+            elif ceiling_mb > 0:
+                # Operator configured a ceiling but it cannot be enforced here —
+                # surface it loudly (a silent no-op resource cap is a hazard).
+                _log.warning(
+                    "mineru_memory_ceiling_unenforced_on_platform",
+                    platform=sys.platform, ceiling_mb=ceiling_mb,
+                    consequence="RLIMIT_AS is Linux-only; relying on the OS OOM-killer",
+                )
+            # Reflect THIS call's ceiling state for the OOM classifier.
+            self._mineru_ceiling_applied = preexec_fn is not None
+
+            # RDR-148 Gap 6: per-page wall-clock budget replaces the old fixed
+            # batch-level 180s. For the whole-doc end==None batch the page count
+            # is supplied by the caller (total_pages, already opened upstream) so
+            # the budget scales without re-opening the PDF; explicit batches
+            # scale by their span. Falls back to 1 page (the old flat 180s, no
+            # regression) when total_pages is unknown (direct subprocess calls).
+            if end is not None:
+                pages = end - start
+            elif self._mineru_run_total_pages is not None:
+                pages = max(1, self._mineru_run_total_pages - start)
+            else:
+                pages = 1
+            timeout_s = get_mineru_page_timeout_s() * max(1, pages)
+
+            # Short-lived per-batch worker (Gap 4 carve-out): DEVNULL stdio is a
+            # judged choice — failure is returncode-detected by the caller
+            # (killpg + the Gap 5 OOM classification below).
             proc = subprocess.Popen(
                 [
                     sys.executable, "-c", _MINERU_WORKER_SCRIPT,
@@ -977,6 +1232,7 @@ class PDFExtractor:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,  # own process group
+                preexec_fn=preexec_fn,  # Linux-only RLIMIT_AS ceiling (or None)
             )
             # Use killpg(getpgid(pid)) rather than killpg(pid) directly —
             # with start_new_session=True the pgid equals pid at spawn time,
@@ -989,32 +1245,48 @@ class PDFExtractor:
                 # Delegated to nexus.util.process_group.safe_killpg so
                 # the mock-guard + error-swallow contract is consistent
                 # across every subprocess cleanup site in the codebase.
-                from nexus.util.process_group import safe_killpg
+                from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
                 safe_killpg(proc, signal.SIGKILL)
 
             try:
-                returncode = proc.wait(timeout=180)
+                returncode = proc.wait(timeout=timeout_s)
             except subprocess.TimeoutExpired:
                 _killpg_safe()
                 proc.wait()
                 raise RuntimeError(
-                    f"MinerU subprocess timed out after 180s "
+                    f"MinerU subprocess timed out after {timeout_s}s "
                     f"(pages {start}–{end}, path={pdf_path})"
                 )
             if returncode != 0:
                 # Clean up any orphaned children in the process group
                 _killpg_safe()
+                # RDR-148 Gap 5: 3-way OOM classification. A memory exhaustion
+                # surfaces three ways: (1) OS OOM-killer / macOS jetsam ->
+                # negative SIGKILL returncode; (2) an RLIMIT_AS breach caught
+                # in-process -> the _MINERU_OOM_EXIT sentinel; (3) once a memory
+                # ceiling is applied (Gap 6), any non-zero exit is treated as a
+                # breach. The SIGKILL-only mapping would miss (2) and (3) — the
+                # gate finding that motivated this classification.
+                is_oom = (
+                    returncode == -signal.SIGKILL
+                    or returncode == _MINERU_OOM_EXIT
+                    or self._mineru_ceiling_applied
+                )
                 _log.error(
                     "mineru_subprocess_failed",
                     returncode=returncode,
+                    classified_oom=is_oom,
                     pages=f"{start}–{end}",
                     path=str(pdf_path),
                 )
-                raise RuntimeError(
+                msg = (
                     f"MinerU subprocess exited with code {returncode} "
                     f"(pages {start}–{end}, path={pdf_path})"
                 )
+                if is_oom:
+                    raise MineruMemoryError(msg)
+                raise RuntimeError(msg)
             # Kill any lingering workers in the process group
             _killpg_safe()
 
@@ -1041,7 +1313,7 @@ class PDFExtractor:
             )
             return md, content_list, middle.get("pdf_info", [])
         finally:
-            import shutil
+            import shutil  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
             shutil.rmtree(result_dir, ignore_errors=True)
 
     @staticmethod
@@ -1195,7 +1467,7 @@ class PDFExtractor:
         on_page: Callable[[int, str, dict], None] | None = None,
     ) -> ExtractionResult:
         """Extract via raw PyMuPDF with whitespace normalization."""
-        import pymupdf  # lazy
+        import pymupdf  # lazy  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
         text_parts: list[str] = []
         page_boundaries: list[dict] = []

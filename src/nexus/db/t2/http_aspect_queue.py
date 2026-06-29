@@ -43,7 +43,8 @@ DEFAULT_TENANT: str = "default"
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 
 
 def _body_to_queue_row(body: dict[str, Any]) -> QueueRow:
@@ -57,7 +58,7 @@ def _body_to_queue_row(body: dict[str, Any]) -> QueueRow:
     )
 
 
-class HttpAspectQueue:
+class HttpAspectQueue(RawHandleGuardMixin):
     """AspectExtractionQueue drop-in that delegates to the RDR-152 Java HTTP service.
 
     The ``rename_lock`` parameter is accepted to match AspectExtractionQueue's
@@ -90,8 +91,7 @@ class HttpAspectQueue:
                     )
             self._base_url = base_url.rstrip("/")
         else:
-            host, port, token = _resolve_config()
-            self._base_url = f"http://{host}:{port}"
+            self._base_url, token = _resolve_endpoint()
             _token = token
 
         self._tenant = tenant
@@ -177,7 +177,14 @@ class HttpAspectQueue:
         if limit <= 0:
             return []
         r = self._post("/claim_batch", {"limit": limit})
-        rows = r.get("rows", [])
+        # nexus-575kd: the Java service sends a BARE JSON ARRAY here
+        # (AspectHandler.handleQueueClaimBatch -> writeValueAsString(rows)),
+        # unlike claim_next which is enveloped. Accept the array directly;
+        # tolerate a future {"rows":[...]} envelope defensively. The prior
+        # ``r.get("rows", [])`` raised AttributeError on the list every poll,
+        # so the service-mode worker claimed nothing and document_aspects never
+        # populated (all service-mode aspect extraction was dead).
+        rows = r if isinstance(r, list) else r.get("rows", [])
         return [_body_to_queue_row(row) for row in rows]
 
     def mark_done(
@@ -211,11 +218,18 @@ class HttpAspectQueue:
             "error": error[:2000],
         })
 
-    def mark_retry(self, collection: str, source_path: str) -> None:
-        """Reset the row to 'pending' and increment retry_count."""
+    def mark_retry(self, collection: str, source_path: str,
+                   interval_seconds: int = 0) -> None:
+        """Reset the row to 'pending', increment retry_count, and back it off.
+
+        ``interval_seconds`` is the worker-chosen backoff; the service stamps
+        ``next_retry_at = now() + interval_seconds`` server-side (RDR-163 P1,
+        nexus-ztpt6). Default 0 = ready immediately.
+        """
         self._post("/mark_retry", {
             "collection": collection,
             "source_path": source_path,
+            "interval_seconds": interval_seconds,
         })
 
     def reclaim_stale(self, timeout_seconds: int = 300) -> int:
@@ -242,6 +256,14 @@ class HttpAspectQueue:
         if limit is not None:
             params["limit"] = limit
         rows: list[dict] = self._get("/list_pending", params)
+        return [_body_to_queue_row(r) for r in rows]
+
+    def list_failed(self, collection: str | None = None) -> list[QueueRow]:
+        """Return terminal-failed rows, optionally scoped to one collection."""
+        params: dict[str, Any] = {}
+        if collection:
+            params["collection"] = collection
+        rows: list[dict] = self._get("/list_failed", params)
         return [_body_to_queue_row(r) for r in rows]
 
     def rename_collection(self, *, old: str, new: str) -> int:

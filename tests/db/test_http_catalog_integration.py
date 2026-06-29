@@ -642,21 +642,21 @@ class TestLinkAndTraversal:
         a, b, c = linked_docs
         lf = cat.links_from(a)
         assert len(lf) >= 1
-        to_tumblers = [lk["to_tumbler"] for lk in lf]
+        to_tumblers = [str(lk.to_tumbler) for lk in lf]
         assert str(b) in to_tumblers
 
     def test_links_to(self, cat, linked_docs) -> None:
         a, b, c = linked_docs
         lt = cat.links_to(b)
         assert len(lt) >= 1
-        from_tumblers = [lk["from_tumbler"] for lk in lt]
+        from_tumblers = [str(lk.from_tumbler) for lk in lt]
         assert str(a) in from_tumblers
 
     def test_link_query_filter_by_type(self, cat, linked_docs) -> None:
         a, b, c = linked_docs
         links = cat.link_query(link_type="cites", from_t=str(a))
         assert len(links) >= 1
-        assert all(lk["link_type"] == "cites" for lk in links)
+        assert all(lk.link_type == "cites" for lk in links)
 
     def test_graph_depth_1(self, cat, linked_docs) -> None:
         """graph() POST /traverse with depth=1 returns direct neighbors."""
@@ -684,7 +684,7 @@ class TestLinkAndTraversal:
     def test_link_if_absent_idempotent(self, cat, linked_docs) -> None:
         """link_if_absent on an existing edge must not raise."""
         a, b, c = linked_docs
-        cat.link_if_absent(a, b, "cites")
+        cat.link_if_absent(a, b, "cites", created_by="inttest")
 
     def test_unlink(self, cat) -> None:
         """Create, verify, then remove a link."""
@@ -692,12 +692,12 @@ class TestLinkAndTraversal:
                          source_uri="file:///unlink/x.md")
         y = cat.register("1.1", "UnlinkDoc-Y", content_type="paper",
                          source_uri="file:///unlink/y.md")
-        cat.link(x, y, "relates")
+        cat.link(x, y, "relates", created_by="inttest")
         before = cat.links_from(x)
-        assert any(lk["to_tumbler"] == str(y) for lk in before)
+        assert any(str(lk.to_tumbler) == str(y) for lk in before)
         cat.unlink(x, y, "relates")
         after = cat.links_from(x)
-        assert not any(lk["to_tumbler"] == str(y) for lk in after)
+        assert not any(str(lk.to_tumbler) == str(y) for lk in after)
 
 
 class TestManifest:
@@ -725,7 +725,7 @@ class TestManifest:
         t, expected = doc_with_manifest
         rows = cat.get_manifest(str(t))
         assert len(rows) == 3
-        chashes = [r["chash"] for r in rows]
+        chashes = [r.chash for r in rows]
         assert "chunk_hash_000000000000000000000" in chashes
         assert "chunk_hash_010000000000000000000" in chashes
         assert "chunk_hash_020000000000000000000" in chashes
@@ -742,7 +742,7 @@ class TestManifest:
             {"position": 3, "chash": "chunk_hash_030000000000000000000"},
         ])
         rows = cat.get_manifest(str(t))
-        chashes = [r["chash"] for r in rows]
+        chashes = [r.chash for r in rows]
         assert "chunk_hash_030000000000000000000" in chashes
 
     def test_docs_for_chashes_reverse_lookup(self, cat, doc_with_manifest) -> None:
@@ -784,7 +784,7 @@ class TestManifest:
             {"position": 1, "chash": "new_hash_01000000000000000000000"},
         ])
         rows = cat.get_manifest(str(t))
-        chashes = [r["chash"] for r in rows]
+        chashes = [r.chash for r in rows]
         assert "new_hash_00000000000000000000000" in chashes
         assert "new_hash_01000000000000000000000" in chashes
         assert "old_hash000000000000000000000000" not in chashes
@@ -991,7 +991,7 @@ class TestETLFidelity:
         })
         assert r is not None
         links = cat.links_from(a, link_type="etl-test")
-        assert any(lk["to_tumbler"] == str(b) for lk in links)
+        assert any(str(lk.to_tumbler) == str(b) for lk in links)
 
     def test_collections_round_trip(self, cat) -> None:
         """register_collection + list_collections + get_collection."""
@@ -1198,12 +1198,12 @@ class TestLinkQueryDirectionTumbler:
         a, b = link_query_docs
         links = cat.link_query(direction="out", tumbler=str(a))
         assert isinstance(links, list), f"Expected list, got {type(links)}"
-        from_tumblers = [lk["from_tumbler"] for lk in links]
+        from_tumblers = [str(lk.from_tumbler) for lk in links]
         assert str(a) in from_tumblers, (
             f"direction=out tumbler={a}: expected {a} in from_tumblers, got {from_tumblers}"
         )
         # Must not contain links where A is the to_tumbler
-        to_tumblers = [lk["to_tumbler"] for lk in links]
+        to_tumblers = [str(lk.to_tumbler) for lk in links]
         assert str(a) not in to_tumblers, (
             f"direction=out: A appeared as to_tumbler, expected only from_tumbler"
         )
@@ -1213,30 +1213,34 @@ class TestLinkQueryDirectionTumbler:
         a, b = link_query_docs
         links = cat.link_query(direction="in", tumbler=str(b))
         assert isinstance(links, list)
-        to_tumblers = [lk["to_tumbler"] for lk in links]
+        to_tumblers = [str(lk.to_tumbler) for lk in links]
         assert str(b) in to_tumblers, (
             f"direction=in tumbler={b}: expected {b} in to_tumblers, got {to_tumblers}"
         )
         # Must not contain links where B is the from_tumbler
-        from_tumblers = [lk["from_tumbler"] for lk in links]
+        from_tumblers = [str(lk.from_tumbler) for lk in links]
         assert str(b) not in from_tumblers, (
             f"direction=in: B appeared as from_tumbler"
         )
 
-    def test_link_query_results_are_dicts(self, cat, link_query_docs) -> None:
-        """Results from link_query must be plain dicts (service mode — no .to_dict() needed).
+    def test_link_query_results_are_typed_links(self, cat, link_query_docs) -> None:
+        """Results from link_query are typed CatalogLink, like local Catalog (RDR-168).
 
-        mcp/catalog.py line ~495 previously called l.to_dict() which fails when
-        HttpCatalogClient returns list[dict]. Now uses 'l if isinstance(l, dict) else l.to_dict()'.
+        Return-type parity: the client previously returned list[dict], which crashed
+        consumers doing attribute access (indexer rename-detection: lnk.to_tumbler). The
+        mcp/catalog.py dual-handle sites (`l if isinstance(l, dict) else l.to_dict()`)
+        keep working because CatalogLink.to_dict() exists.
         """
+        from nexus.catalog.catalog import CatalogLink  # noqa: PLC0415
+
         a, b = link_query_docs
         links = cat.link_query(direction="out", tumbler=str(a))
         for lk in links:
-            assert isinstance(lk, dict), f"Expected dict, got {type(lk)}: {lk}"
-            # These are the fields the mcp/catalog.py link_query result uses
-            assert "from_tumbler" in lk
-            assert "to_tumbler" in lk
-            assert "link_type" in lk
+            assert isinstance(lk, CatalogLink), f"Expected CatalogLink, got {type(lk)}: {lk}"
+            assert str(lk.from_tumbler)
+            assert str(lk.to_tumbler)
+            assert lk.link_type
+            assert isinstance(lk.to_dict(), dict)  # dual-handle (mcp/catalog.py) path stays valid
 
     def test_link_query_tumbler_both_direction(self, cat, link_query_docs) -> None:
         """link_query(direction='both', tumbler=A) returns all links touching A."""
@@ -1245,7 +1249,7 @@ class TestLinkQueryDirectionTumbler:
         assert len(links) >= 1
         touching_a = [
             lk for lk in links
-            if lk["from_tumbler"] == str(a) or lk["to_tumbler"] == str(a)
+            if str(lk.from_tumbler) == str(a) or str(lk.to_tumbler) == str(a)
         ]
         assert len(touching_a) >= 1
 
@@ -1417,4 +1421,161 @@ class TestResyncChunkCount:
         assert entry_after.chunk_count == 3, (
             f"resync_chunk_count_cache must correct chunk_count to 3 (true manifest count); "
             f"got {entry_after.chunk_count} — resync is still a no-op?"
+        )
+
+
+# ── RDR-168 P4 (nexus-pwclh): live service-mode index MVV ───────────────────────
+
+
+class TestServiceModeIndexMVV:
+    """LIVE service-mode ``nx index repo`` MVV (load-bearing deliverable #2).
+
+    Runs the REAL indexer against the live Java + Postgres catalog (NOT a mocked
+    HttpCatalogClient) and asserts the catalog populated end-to-end: Documents > 0 and a
+    non-empty manifest (catalog_document_chunks). This is the proof that the Phase 3
+    signature reconciliation actually restores service-mode catalog population (CA-4)
+    through the real wire. A mocked client cannot detect a second cause — manifest hook,
+    catalog_doc_id threading, or wire serialization — so the gate requires the live path.
+
+    Catalog routes to the service (NX_STORAGE_BACKEND_CATALOG=service, set by the
+    ``service`` fixture); T3 is a local EphemeralClient and embeddings are the bundled
+    local ONNX model, so the test needs no Voyage key and exercises only the catalog
+    wire path under test.
+    """
+
+    @pytest.fixture
+    def fixture_repo(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "mvv-repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "mod.py").write_text(
+            "def add(a, b):\n    return a + b\n\n\n"
+            "class Calc:\n    def run(self):\n        return add(1, 2)\n",
+            encoding="utf-8",
+        )
+        (repo / "README.md").write_text(
+            "# MVV Fixture\n\nA tiny repo for the RDR-168 service-mode index MVV.\n" * 3,
+            encoding="utf-8",
+        )
+        for args in (
+            ("init", "-b", "main"),
+            ("config", "user.email", "t@t.invalid"),
+            ("config", "user.name", "MVV Test"),
+            ("add", "."),
+            ("commit", "-m", "init"),
+        ):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+        return repo
+
+    def _run_service_mode_index_and_find_code_doc(
+        self, fixture_repo: Path, cat, service, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Run the real indexer in service mode against the live stack; return the code
+        CatalogEntry that THIS run registered.
+
+        Self-contained (no inter-test state) and attributed to this repo via its unique
+        owner (``owner_for_repo(repo_hash)`` only exists if this run registered it), so
+        the assertions cannot be satisfied by another test's residue on the module-scoped
+        Postgres instance.
+        """
+        import re  # noqa: PLC0415
+        import chromadb  # noqa: PLC0415 — integration-only heavy dep
+        from unittest.mock import MagicMock, patch  # noqa: PLC0415
+
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # noqa: PLC0415
+        from nexus.db.t3 import T3Database  # noqa: PLC0415
+        from nexus.indexer import index_repository  # noqa: PLC0415
+        from nexus.registry import RepoRegistry  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415
+
+        # Catalog → live service. The indexer's make_catalog_writer() builds its OWN
+        # HttpCatalogClient from env (resolve_service_config), so HOST/PORT/TOKEN must all
+        # be set — the `service` fixture sets PORT/TOKEN but not HOST (cf. TestReaderPaths).
+        base_url, token, _ = service
+        m = re.search(r":(\d+)$", base_url)
+        assert m, f"cannot parse port from {base_url}"
+        monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", m.group(1))
+        monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+        monkeypatch.setenv("NX_LOCAL", "1")  # T3 + embeddings local
+
+        local_t3 = T3Database(
+            _client=chromadb.EphemeralClient(),
+            _ef_override=DefaultEmbeddingFunction(),
+        )
+        registry = RepoRegistry(fixture_repo.parent / "repos.json")
+        registry.add(fixture_repo)
+
+        ef = DefaultEmbeddingFunction()
+        mock_voyage = MagicMock()
+
+        def fake_embed(texts, model, input_type="document"):  # noqa: ANN001, ANN202
+            r = MagicMock()
+            r.embeddings = ef(texts)
+            return r
+
+        def fake_cce(inputs, model, input_type="document"):  # noqa: ANN001, ANN202
+            r = MagicMock()
+            br = MagicMock()
+            br.embeddings = ef(inputs[0])
+            r.results = [br]
+            return r
+
+        mock_voyage.embed.side_effect = fake_embed
+        mock_voyage.contextualized_embed.side_effect = fake_cce
+
+        def fake_credential(key):  # noqa: ANN001, ANN202
+            # service endpoint must resolve from the NX_SERVICE_* env (the live fixture),
+            # NOT this stub — returning a non-URL here poisons base_url resolution. Only
+            # the embedding/API key is stubbed.
+            if key in ("service_url", "service_token"):
+                return None
+            return "test-key"
+
+        with patch("nexus.db.make_t3", return_value=local_t3), \
+             patch("nexus.config.get_credential", side_effect=fake_credential), \
+             patch("voyageai.Client", return_value=mock_voyage):
+            index_repository(fixture_repo, registry, force=True)
+
+        # Attribute to THIS run: the owner exists only because this index registered it.
+        _, repo_hash = _repo_identity(fixture_repo)
+        owner = cat.owner_for_repo(repo_hash)
+        assert owner is not None, (
+            "service-mode index did not register the fixture repo's OWNER — the catalog "
+            "hook never reached the service (Documents == 0)."
+        )
+        prefix = f"{owner}."
+        own_docs = [d for d in cat.all_documents() if str(d.tumbler).startswith(prefix)]
+        code_docs = [d for d in own_docs if d.content_type == "code"]
+        assert code_docs, (
+            "no code document registered under this repo's owner after service-mode "
+            f"index; this-run content_types: {sorted({d.content_type for d in own_docs})}"
+        )
+        return code_docs[0]
+
+    def test_service_mode_index_populates_catalog_and_manifest(
+        self, fixture_repo: Path, cat, service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: service-mode `nx index repo` populates DOCUMENTS and the MANIFEST.
+
+        Indexes ONCE against the live stack and asserts both, so this is the single
+        load-bearing proof that the full catalog-write path works through the real wire:
+        - Documents register (collection_for renders v1; the catalog hook fires in
+          service mode — the P3 signatures + init-gate fixes).
+        - The manifest (catalog_document_chunks) is non-empty (Chunks > 0) — the manifest
+          post-store hook reaches the service (the njrcn.6 _db-abort + chash-length +
+          ManifestRow return-type fixes).
+        """
+        code_doc = self._run_service_mode_index_and_find_code_doc(
+            fixture_repo, cat, service, monkeypatch
+        )
+        assert str(code_doc.tumbler)  # registered with a real tumbler
+
+        manifest = cat.get_manifest(code_doc.tumbler)
+        assert manifest, (
+            f"manifest empty for {code_doc.tumbler} — catalog_document_chunks not "
+            "populated (Chunks == 0): the manifest hook did not reach the service catalog."
+        )
+        assert all(len(row.chash) == 32 for row in manifest), (
+            "manifest chash must be the 32-char natural ID (catalog_document_chunks_chash_len_check)"
         )

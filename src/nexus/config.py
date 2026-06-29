@@ -112,6 +112,19 @@ class PDFConfig:
     mineru_server_url: str = "http://127.0.0.1:8010"
     mineru_table_enable: bool = False
     mineru_page_batch: int = 1
+    # RDR-148 Gap 6: hard RLIMIT_AS address-space ceiling (MB) applied to the
+    # MinerU worker. 0 = disabled (rely on the OS OOM-killer / jetsam). Opt-in
+    # because too low a value turns healthy pages into spurious OOMs. Enforced
+    # only on Linux — macOS does not honour RLIMIT_AS (see get_mineru helpers).
+    # NB: RLIMIT_AS caps VIRTUAL address space, not physical RSS; PyTorch/MinerU
+    # mmap model weights aggressively, so the address-space footprint can be 3-5x
+    # the resident size — set this generously (e.g. several GB) to avoid spurious
+    # OOMs on healthy pages.
+    mineru_memory_ceiling_mb: int = 0
+    # RDR-148 Gap 6: per-page wall-clock budget (seconds) for the worker,
+    # replacing the old fixed batch-level 180s. The effective subprocess timeout
+    # is this value times the number of pages in the range.
+    mineru_page_timeout_s: int = 180
 
 
 def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
@@ -126,6 +139,8 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
         mineru_server_url=pdf.get("mineru_server_url", "http://127.0.0.1:8010"),
         mineru_table_enable=bool(pdf.get("mineru_table_enable", False)),
         mineru_page_batch=max(1, int(pdf.get("mineru_page_batch", 1))),
+        mineru_memory_ceiling_mb=max(0, int(pdf.get("mineru_memory_ceiling_mb", 0))),
+        mineru_page_timeout_s=max(1, int(pdf.get("mineru_page_timeout_s", 180))),
     )
 
 
@@ -215,11 +230,11 @@ def _read_live_mineru_port() -> int | None:
     # reaching up into commands/. The CLI module re-exports under the
     # legacy private names.
     try:
-        from nexus._mineru_pid import (  # noqa: PLC0415
+        from nexus._mineru_pid import (  # noqa: PLC0415 — circular-dep avoidance (_mineru_pid)
             is_process_alive,
             read_pid_file,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort PID probe; any import/read failure degrades to None
         return None
     info = read_pid_file()
     if not info:
@@ -233,29 +248,51 @@ def _read_live_mineru_port() -> int | None:
     return port
 
 
-def get_mineru_server_url(repo_root: Path | None = None) -> str:
-    """Return the URL of the live MinerU server, falling back to the
-    configured default when no live server is found.
+_MINERU_DEFAULT_URL = "http://127.0.0.1:8010"
 
-    Resolution order:
-    1. Live PID file (``~/.config/nexus/mineru.pid``) — the canonical
-       source of truth when a server is running. Validated via
-       ``_is_process_alive``.
-    2. Configured ``pdf.mineru_server_url`` — the static fallback for
-       installs where the operator manages the server out-of-band
-       (e.g. a launchctl service on a fixed port).
+
+def get_mineru_server_url(repo_root: Path | None = None) -> str:
+    """Return the URL of the MinerU server to talk to.
+
+    Resolution order (RDR-148 Gap 1 — explicit operator intent wins):
+    1. An explicit, non-default ``pdf.mineru_server_url`` — when the
+       operator has set the config to anything other than the built-in
+       default ``http://127.0.0.1:8010``, that intent wins outright.
+       This covers out-of-band server management (e.g. a launchctl
+       service or a remote host on a fixed URL); a live local pid file
+       must not silently hijack it.
+    2. Live PID file (``~/.config/nexus/mineru.pid``) — the canonical
+       source of truth when ``nx mineru start`` brought a server up on
+       an ephemeral port and the config was left at the default.
+       Validated via ``_is_process_alive``.
     3. Built-in default ``http://127.0.0.1:8010``.
+
+    Documented heuristic limitation: the ``!=`` default check cannot
+    distinguish "operator deliberately fixed local :8010" from "config
+    never changed", so an operator who pins :8010 is still overridden by
+    a live pid file. Both target 127.0.0.1, so this is harmless; a
+    ``mineru_prefer_config`` flag can be added later if a concrete need
+    arises.
     """
+    configured = get_pdf_config(repo_root).mineru_server_url
+    if configured != _MINERU_DEFAULT_URL:
+        return configured
     live = _read_live_mineru_port()
     if live is not None:
         return f"http://127.0.0.1:{live}"
-    return get_pdf_config(repo_root).mineru_server_url
+    return configured
 
 def get_mineru_table_enable(repo_root: Path | None = None) -> bool:
     return get_pdf_config(repo_root).mineru_table_enable
 
 def get_mineru_page_batch(repo_root: Path | None = None) -> int:
     return get_pdf_config(repo_root).mineru_page_batch
+
+def get_mineru_memory_ceiling_mb(repo_root: Path | None = None) -> int:
+    return get_pdf_config(repo_root).mineru_memory_ceiling_mb
+
+def get_mineru_page_timeout_s(repo_root: Path | None = None) -> int:
+    return get_pdf_config(repo_root).mineru_page_timeout_s
 
 
 def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:
@@ -325,6 +362,13 @@ CREDENTIALS: dict[str, str] = {
     "chroma_database":   "CHROMA_DATABASE",
     "voyage_api_key":    "VOYAGE_API_KEY",
     "migrated":          "NX_MIGRATED",
+    # RDR-166 managed onboarding (nexus-v3p0x): the operator-provisioned managed
+    # endpoint + bearer. `nx config set service_url/service_token` persists them
+    # to config.yml; the service resolvers consume them via get_credential, so
+    # the env var still wins and config.yml is the durable fallback — the single
+    # consume point the conexus issuance contract targets.
+    "service_url":       "NX_SERVICE_URL",
+    "service_token":     "NX_SERVICE_TOKEN",
 }
 
 
@@ -496,7 +540,7 @@ def storage_mode() -> str:
     if not normalized or normalized == "daemon":
         return "daemon"
     if normalized == "direct":
-        import warnings
+        import warnings  # noqa: PLC0415 — branch-local; only on decommissioned-mode path
 
         warnings.warn(
             "NX_STORAGE_MODE=direct is decommissioned (RDR-120 P6). "
@@ -518,17 +562,26 @@ def storage_mode() -> str:
 def is_local_mode() -> bool:
     """Return True if nexus should use the local T3 backend.
 
-    Decision logic:
+    Decision logic (precedence, highest first):
       - ``NX_LOCAL=1`` → True  (explicit opt-in)
       - ``NX_LOCAL=0`` → False (explicit opt-out)
-      - Otherwise: True when **either** CHROMA_API_KEY or VOYAGE_API_KEY is absent
+      - ``service_url`` present (``NX_SERVICE_URL`` env or config.yml) → False —
+        a managed 6.0 user serves every tier from a remote service and is NOT
+        local (nexus-3k43p: the legacy heuristic below mis-detected a greenfield
+        managed user — service_url set, no chroma/voyage key — as local). This
+        mirrors ``_resolve_init_mode``'s precedence (NX_LOCAL wins over
+        service_url, which wins over the legacy heuristic).
+      - Otherwise (legacy, pre-6.0): True when **either** CHROMA_API_KEY or
+        VOYAGE_API_KEY is absent.
     """
     nx_local = os.environ.get("NX_LOCAL", "").strip()
     if nx_local == "1":
         return True
     if nx_local == "0":
         return False
-    # Auto-detect: local mode when either cloud credential is missing
+    if (get_credential("service_url") or "").strip():
+        return False
+    # Auto-detect (legacy): local mode when either cloud credential is missing
     chroma_key = get_credential("chroma_api_key")
     voyage_key = get_credential("voyage_api_key")
     return not (chroma_key and voyage_key)
@@ -777,6 +830,52 @@ def set_credential(name: str, value: str) -> None:
             except OSError:
                 pass  # intentional: cleanup after re-raise
             raise
+
+
+def unset_credential(name: str) -> bool:
+    """Remove credential *name* from ``~/.config/nexus/config.yml``.
+
+    The teardown counterpart of :func:`set_credential` (RDR-165 nexus-a11ge —
+    the managed-config clear in ``nx uninstall``). Returns ``True`` when the key
+    was present and removed, ``False`` when it was already absent (idempotent —
+    a teardown must not error on an already-clean config). Raises ``ValueError``
+    for an unknown credential name, mirroring :func:`set_credential`.
+
+    NOTE: this clears only the persisted ``config.yml`` value. An environment
+    variable (e.g. ``NX_SERVICE_TOKEN``) overrides config.yml in
+    :func:`get_credential` and CANNOT be unset from the parent shell here — the
+    caller is responsible for warning the user to unset the export.
+    """
+    if name not in CREDENTIALS:
+        known = ", ".join(sorted(CREDENTIALS))
+        raise ValueError(f"Unknown credential '{name}'. Known: {known}")
+    path = _global_config_path()
+    if not path.exists():
+        return False
+    with _config_lock:
+        data: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
+        creds = data.get("credentials")
+        if not isinstance(creds, dict) or name not in creds:
+            return False
+        del creds[name]
+        if not creds:
+            data.pop("credentials", None)
+        content = yaml.dump(data, default_flow_style=False)
+        # Atomic write: unique temp file → os.replace() (0o600), mirroring
+        # set_credential so a torn write never leaves a half-cleared config.
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
+        try:
+            with os.fdopen(tmp_fd, "w") as fh:
+                fh.write(content)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass  # intentional: cleanup after re-raise
+            raise
+    return True
 
 
 def load_config(repo_root: Path | None = None) -> dict[str, Any]:

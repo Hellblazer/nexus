@@ -457,6 +457,12 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # explicitly via the ``voyage_key_present`` argument, never the ambient
     # cloud_mode fixture (the classifier is a pure deployment-mode function).
     "test_detection.py",
+    # RDR-166 nexus-hxry2 vector-ETL: voyage tokens are collection-NAME segments
+    # driving same-model passthrough vs cross-model routing (_is_same_model_
+    # passthrough / _migrate_one). The ETL never embeds — the server does — so
+    # these tests are deployment-mode-agnostic; they pin behavior via explicit
+    # target_name / collection names, never the ambient cloud_mode fixture.
+    "test_vector_etl.py",
     # RDR-159 P1d pre-gate + P1c quiesce: voyage tokens are collection-NAME /
     # wired-model-set fixtures driving the support gate and the count-mismatch
     # attribution message; mode is pinned explicitly via the injected
@@ -464,6 +470,17 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # cloud_mode fixture.
     "test_pregate.py",
     "test_quiesce.py",
+    # RDR-169 G5 bridge address-field tests: voyage tokens appear only as
+    # collection-NAME fixtures (knowledge__test__voyage-context-3__v1) in fully
+    # mocked HttpVectorClient / _ServiceCollectionStub unit tests. The server
+    # embeds, not these tests — they assert additive /v1 response shape and the
+    # include_source_uri opt-in, never cloud-mode embedding behavior.
+    "test_bridge_address_fields.py",
+    # nexus-8o9pm voyage-capability gate: voyage tokens are collection-NAME
+    # fixtures (footprint detection) and embedding_models inside a FAKE /version
+    # response body; the gate is a pure data/HTTP predicate that never embeds, so
+    # there is no ambient cloud_mode behavior to assert.
+    "test_guided_upgrade_voyage_capability.py",
     # RDR-001 managed-endpoint probe: voyage tokens appear only as
     # embedding_models inside a FAKE /version response body (injected
     # http_get) — the managed service's reported models, not cloud-mode
@@ -612,6 +629,14 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # are extracted. The engine is fully mocked; no embedder runs and no
     # mode-dependent path executes ("string-literal-as-name" class).
     "tests/migration/test_driver.py::test_two_leg_composes_collections_and_dims",
+    #
+    # nexus-gilf2: the cross-model remap-target test asserts the driver derives
+    # voyage target NAMES (voyage-code-3 / voyage-context-3) in cloud mode. Mode
+    # is pinned explicitly by patching ``voyage_key_available`` (via the
+    # ``voyage_key=True`` engine patch), not the ambient cloud_mode fixture —
+    # the target resolver is a pure deployment-mode function, same rationale as
+    # the ``test_detection.py`` file exclusion ("string-literal-as-name" class).
+    "tests/migration/test_driver.py::test_cross_model_target_is_voyage_in_cloud_mode",
     #
     # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
     # fallback. Voyage tokens appear only as realistic collection-NAME /

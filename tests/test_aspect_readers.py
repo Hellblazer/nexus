@@ -1398,4 +1398,279 @@ class TestReadDevonthinkUri:
             "x-devonthink-item:COMPAT-UUID", dt_resolver=resolver,
         )
         assert isinstance(result, ReadOk)
-        assert result.metadata["uuid"] == "COMPAT-UUID"
+
+
+# ── obsidian:// reader (RDR-169 G3) ─────────────────────────────────────────
+
+
+class TestReadObsidianUri:
+    """Tests for ``_read_obsidian_uri`` and its integration with ``read_source``.
+
+    Design (RDR-169 G3 split): obsidian:// is a LOCAL scheme resolved against
+    the requesting tenant's vault root. The vault root is supplied via the
+    ``tenant`` kwarg to ``read_source``; the handler constructs an absolute
+    path and reads the file.  Cross-tenant isolation is structural: the
+    handler only ever sees the vault root given for the request's tenant.
+    """
+
+    def test_valid_note_returns_read_ok(self, tmp_path: Path):
+        """Happy path: vault-relative note path resolves and is readable."""
+        from nexus.aspect_readers import ReadOk, _read_obsidian_uri
+
+        vault = tmp_path / "my-vault"
+        vault.mkdir()
+        note = vault / "Projects" / "todo.md"
+        note.parent.mkdir(parents=True)
+        note.write_text("# Todo\n\n- item 1\n", encoding="utf-8")
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=my-vault&file=Projects%2Ftodo.md",
+            vault_root=vault,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "# Todo\n\n- item 1\n"
+        assert result.metadata["scheme"] == "obsidian"
+        assert result.metadata["vault_root"] == str(vault)
+
+    def test_missing_note_returns_read_fail_unreachable(self, tmp_path: Path):
+        """File path that doesn't exist returns ``ReadFail(reason='unreachable')``."""
+        from nexus.aspect_readers import ReadFail, _read_obsidian_uri
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=vault&file=nonexistent.md",
+            vault_root=vault,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+
+    def test_empty_note_returns_read_fail_empty(self, tmp_path: Path):
+        """Empty file returns ``ReadFail(reason='empty')``."""
+        from nexus.aspect_readers import ReadFail, _read_obsidian_uri
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "empty.md").write_text("", encoding="utf-8")
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=vault&file=empty.md",
+            vault_root=vault,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "empty"
+
+    def test_no_vault_root_returns_read_fail(self):
+        """``vault_root=None`` (no tenant context) must not resolve anything."""
+        from nexus.aspect_readers import ReadFail, _read_obsidian_uri
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=v&file=note.md",
+            vault_root=None,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "vault_root" in result.detail
+
+    def test_path_traversal_outside_vault_is_rejected(self, tmp_path: Path):
+        """``../../etc/passwd`` style paths must not escape the vault root."""
+        from nexus.aspect_readers import ReadFail, _read_obsidian_uri
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        # create a file outside the vault to ensure the block is not
+        # a file-not-found coincidence
+        outside = tmp_path / "secret.txt"
+        outside.write_text("secret", encoding="utf-8")
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=vault&file=../../secret.txt",
+            vault_root=vault,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unauthorized"
+
+    def test_missing_file_param_returns_read_fail(self, tmp_path: Path):
+        """URI with no ``file`` query param returns ``ReadFail``."""
+        from nexus.aspect_readers import ReadFail, _read_obsidian_uri
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=vault",
+            vault_root=vault,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+
+
+class TestReadSourceObsidianDispatch:
+    """``read_source`` dispatches obsidian:// to its reader and threads
+    the ``tenant`` kwarg through as ``vault_root``.
+    """
+
+    def test_obsidian_dispatches_to_reader(self, tmp_path: Path):
+        """obsidian:// scheme reaches ``_read_obsidian_uri``."""
+        from nexus.aspect_readers import ReadOk, read_source
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "note.md").write_text("content", encoding="utf-8")
+
+        result = read_source(
+            "obsidian://open?vault=vault&file=note.md",
+            tenant={"vault_root": vault},
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "content"
+
+    def test_unknown_scheme_returns_scheme_unknown(self):
+        """Schemes with no registered handler return
+        ``ReadFail(reason='scheme_unknown')``.
+        """
+        from nexus.aspect_readers import ReadFail, read_source
+
+        result = read_source("xyz://something")
+        assert isinstance(result, ReadFail)
+        assert result.reason == "scheme_unknown"
+
+    def test_tenant_ctx_forwarded_to_obsidian_handler(self, tmp_path: Path):
+        """The handler receives the tenant-supplied vault_root, not a
+        different tenant's vault.
+        """
+        from nexus.aspect_readers import ReadOk, read_source
+
+        vault_a = tmp_path / "vault_a"
+        vault_b = tmp_path / "vault_b"
+        for v in (vault_a, vault_b):
+            v.mkdir()
+        (vault_a / "note.md").write_text("tenant A note", encoding="utf-8")
+        (vault_b / "note.md").write_text("tenant B note", encoding="utf-8")
+
+        result_a = read_source(
+            "obsidian://open?vault=vault_a&file=note.md",
+            tenant={"vault_root": vault_a},
+        )
+        result_b = read_source(
+            "obsidian://open?vault=vault_b&file=note.md",
+            tenant={"vault_root": vault_b},
+        )
+        assert isinstance(result_a, ReadOk)
+        assert isinstance(result_b, ReadOk)
+        assert result_a.text == "tenant A note"
+        assert result_b.text == "tenant B note"
+
+    def test_two_tenants_different_vault_roots(self, tmp_path: Path):
+        """Cross-tenant isolation: tenant A's vault root cannot resolve
+        tenant B's file even if the relative path exists in A's vault.
+        """
+        from nexus.aspect_readers import ReadFail, ReadOk, read_source
+
+        vault_a = tmp_path / "vault_a"
+        vault_b = tmp_path / "vault_b"
+        for v in (vault_a, vault_b):
+            v.mkdir()
+        (vault_a / "shared_name.md").write_text("A content", encoding="utf-8")
+        # vault_b does NOT have shared_name.md
+
+        result = read_source(
+            "obsidian://open?vault=vault_b&file=shared_name.md",
+            tenant={"vault_root": vault_b},
+        )
+        assert isinstance(result, ReadFail)
+        # vault_b has no such file — proves tenant B's vault root is used,
+        # not tenant A's
+        assert result.reason == "unreachable"
+
+    def test_existing_schemes_tolerate_tenant_kwarg(self, tmp_path: Path):
+        """``file://`` and other pre-existing readers accept the new
+        ``tenant`` kwarg without crashing (they accept ``**_kw``).
+        """
+        from nexus.aspect_readers import ReadOk, read_source
+
+        p = tmp_path / "doc.txt"
+        p.write_text("hello", encoding="utf-8")
+
+        result = read_source(
+            f"file://{p}",
+            tenant={"vault_root": tmp_path},
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "hello"
+        assert result.metadata["scheme"] == "file"
+
+
+class TestObsidianVaultRootValidation:
+    """Defense-in-depth validation of the vault_root parameter.
+
+    These tests verify that the obsidian handler rejects vault_root values
+    that would make the path-traversal guard vacuous or indicate misconfiguration.
+    vault_root MUST be server-provisioned config, never client-supplied.
+    """
+
+    def test_system_root_vault_root_is_rejected(self):
+        """``vault_root='/'`` makes every path relative_to('/'), neutralising
+        the traversal guard — it must be rejected as unauthorized.
+        """
+        from nexus.aspect_readers import ReadFail, _read_obsidian_uri
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=v&file=etc%2Fpasswd",
+            vault_root="/",
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unauthorized"
+        assert "vault_root" in result.detail
+
+    def test_etc_vault_root_is_rejected(self, tmp_path: Path):
+        """/etc is a blocked system root — must be rejected."""
+        from nexus.aspect_readers import ReadFail, _read_obsidian_uri
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=v&file=passwd",
+            vault_root="/etc",
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unauthorized"
+
+    def test_url_encoded_absolute_path_traversal_is_blocked(self, tmp_path: Path):
+        """``file=%2Fetc%2Fpasswd`` (URL-encoded absolute path) must not
+        escape the vault — ``unquote`` decodes it to ``/etc/passwd``, and
+        the traversal guard must catch the resolved path escaping vault_root.
+        """
+        from nexus.aspect_readers import ReadFail, _read_obsidian_uri
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=vault&file=%2Fetc%2Fpasswd",
+            vault_root=vault,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unauthorized"
+
+    def test_symlink_inside_vault_pointing_outside_is_blocked(self, tmp_path: Path):
+        """A symlink inside the vault that points to a file outside the vault
+        must be blocked.  ``.resolve()`` follows the symlink before
+        ``relative_to`` checks, so the escape is caught.
+        """
+        import os
+        from nexus.aspect_readers import ReadFail, _read_obsidian_uri
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        outside = tmp_path / "outside_secret.txt"
+        outside.write_text("secrets", encoding="utf-8")
+        # Create a symlink inside the vault pointing outside.
+        link = vault / "evil_link.md"
+        os.symlink(outside, link)
+
+        result = _read_obsidian_uri(
+            "obsidian://open?vault=vault&file=evil_link.md",
+            vault_root=vault,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unauthorized"

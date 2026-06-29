@@ -75,7 +75,7 @@ def extract_salient_sentences(
     if not sentences:
         return []
     if cross_encoder is None:
-        from nexus.cross_encoder import get_local_cross_encoder  # noqa: PLC0415
+        from nexus.cross_encoder import get_local_cross_encoder  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
         cross_encoder = get_local_cross_encoder()
 
     max_scores = [float("-inf")] * len(sentences)

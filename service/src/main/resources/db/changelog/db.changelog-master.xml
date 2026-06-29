@@ -35,6 +35,8 @@
 
     <!-- Store 6: aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15) -->
     <include file="db/changelog/aspects-001-baseline.xml"/>
+    <!-- RDR-163 nexus-795gv: aspect_extraction_queue.next_retry_at backoff-retry gate. -->
+    <include file="db/changelog/aspects-002-next-retry-at.xml"/>
 
     <!-- Store 7: chash_index (bead nexus-gmiaf.16) — content-addressed routing table, no FTS -->
     <include file="db/changelog/chash-001-baseline.xml"/>
@@ -65,6 +67,27 @@
          catalog_collections(tenant_id, name). Includes backfill-stubs changeset.
          Must come after vectors-001, chash-001, taxonomy-001, and catalog-001. -->
     <include file="db/changelog/fk-002-collection-registry.xml"/>
+
+    <!-- RDR-156 P0.3 (bead nexus-70r3c.3): gap-window stub-register reconcile +
+         VALIDATE CONSTRAINT for the five fk-002 NOT VALID collection FKs
+         (chunks_384/768/1024, chash_index, topic_assignments). World-block lifted
+         2026-06-21 (RDR-153 migrate-all total_failed==0). Separate changelog so
+         VALIDATE stays off the P0.2 critical path and runs only after the reconcile.
+         Must come after fk-002-collection-registry. -->
+    <include file="db/changelog/fk-002-validate.xml"/>
+
+    <!-- Collection-registry FKs, second wave (bead nexus-dcqml, RDR-164 P1a):
+         NOT VALID ON DELETE RESTRICT FKs from document_aspects, aspect_extraction_queue,
+         topics, taxonomy_meta, and document_highlights to catalog_collections(tenant_id, name),
+         plus a stub-register backfill. VALIDATE is deferred to P1b (world-blocked).
+         Must come after aspects-001, taxonomy-001, and catalog-001. -->
+    <include file="db/changelog/fk-003-collection-registry-extra.xml"/>
+
+    <!-- RDR-164 P1b (bead nexus-p9aw6): gap-window stub-register reconcile +
+         VALIDATE CONSTRAINT for the five fk-003 NOT VALID collection FKs.
+         Separate changelog so VALIDATE stays off the P2->P5 critical path and
+         runs only after the reconcile. Must come after fk-003-collection-registry-extra. -->
+    <include file="db/changelog/fk-003-validate.xml"/>
 
     <!-- Catalog hygiene (bead nexus-70r3c.2, RDR-156 P0.2):
          temporal typing for catalog_collections.created_at/superseded_at (TEXT→timestamptz NULL),
@@ -151,6 +174,11 @@
          Must come after those tables exist (aspects-001, taxonomy-001) and
          before grants-nexus-svc. -->
     <include file="db/changelog/updated-at-001-triggers.xml"/>
+
+    <!-- nexus-wk3s9: (tenant_id, collection) indexes for the RDR-164 rename
+         audit re-home. After the tables exist (telemetry-001, aspects-001),
+         before grants. -->
+    <include file="db/changelog/perf-001-rename-collection-indexes.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

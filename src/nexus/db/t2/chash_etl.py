@@ -130,7 +130,7 @@ def migrate_chash_rows(
                     batch_size=len(payload),
                     batch_imported=batch_imported,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — per-batch best-effort: tally + log, continue remaining batches
                 errors += len(payload)
                 _log.error(
                     "chash_etl_batch_error",

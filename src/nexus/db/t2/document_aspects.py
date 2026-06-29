@@ -169,8 +169,8 @@ def _resolve_doc_id(record: AspectRecord) -> str:
     # primitives for FTS5 sanitisation), but the *behaviour* is no
     # longer reaching into Catalog internals.
     try:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
             cat = Catalog(cat_path, cat_path / ".catalog.db")
@@ -179,7 +179,7 @@ def _resolve_doc_id(record: AspectRecord) -> str:
             )
             if resolved:
                 return resolved
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort identity probe; falls back to source_uri/legacy key
         pass
     if record.source_uri:
         return record.source_uri
@@ -427,7 +427,7 @@ class DocumentAspects:
         # supply one so post-drop reads can recover source_path via the
         # canonical URI shape.
         if not record.source_uri and record.collection and record.source_path:
-            from nexus.aspect_readers import uri_for  # noqa: PLC0415
+            from nexus.aspect_readers import uri_for  # noqa: PLC0415  — circular-dep avoidance (nexus.aspect_readers)
             derived_uri = uri_for(record.collection, record.source_path)
             if derived_uri:
                 record = replace(record, source_uri=derived_uri)
@@ -566,7 +566,7 @@ class DocumentAspects:
             )
             params: tuple = (collection, source_path)
         else:
-            from nexus.aspect_readers import uri_for  # noqa: PLC0415
+            from nexus.aspect_readers import uri_for  # noqa: PLC0415  — circular-dep avoidance (nexus.aspect_readers)
             uri = uri_for(collection, source_path)
             if not uri:
                 return None
@@ -673,7 +673,7 @@ class DocumentAspects:
             )
             params: tuple = (collection, source_path)
         else:
-            from nexus.aspect_readers import uri_for  # noqa: PLC0415
+            from nexus.aspect_readers import uri_for  # noqa: PLC0415  — circular-dep avoidance (nexus.aspect_readers)
             uri = uri_for(collection, source_path)
             if not uri:
                 return 0
@@ -697,13 +697,25 @@ class DocumentAspects:
         appears in the catalog ``documents`` table (RDR-108 nexus-urj4).
 
         Aspects are extracted asynchronously after a document is
-        registered. When the document is later deleted (via
-        ``cat.delete_document``, source-file removal, etc.) the
-        corresponding aspect rows are NOT cascaded today (the catalog
-        and T2 live in separate SQLite files; cross-DB FK CASCADE is
-        not supported by SQLite). This method is the periodic-sweep
-        cleanup for the orphans that accumulate between extraction
-        and deletion lifecycle events.
+        registered. Whether a document delete reaches its aspect rows
+        depends on the storage backend (RDR-164 P4):
+
+          * Service mode (single Postgres): ``fk-001`` adds a real
+            ``(tenant_id, doc_id) -> catalog_documents`` FK with
+            ``ON DELETE CASCADE``, so a HARD delete of the parent
+            ``catalog_documents`` row (the path a collection delete
+            takes) removes the aspect rows in the same transaction.
+            BUT the per-document ``cat.delete_document`` API is a SOFT
+            tombstone (``UPDATE deleted_at``), and ``ON DELETE CASCADE``
+            does not fire on an UPDATE — so aspects for soft-deleted
+            (not yet hard-purged) documents still accumulate.
+          * Local mode (catalog and T2 in separate SQLite files):
+            there is no cross-DB FK at all, so no document delete
+            cascades to aspects.
+
+        Either way this method is the periodic-sweep cleanup (and
+        defense-in-depth) for the orphans that accumulate between
+        extraction and deletion lifecycle events.
 
         Behavior:
           - Aspects whose ``source_uri`` is empty are NOT classified

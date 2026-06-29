@@ -17,6 +17,8 @@ After all three stages complete, the orchestrator runs post-passes to:
 from __future__ import annotations
 
 import hashlib
+
+from nexus.chunk_identity import chunk_id as _chunk_id
 import json
 import struct
 import threading
@@ -59,6 +61,7 @@ def extractor_loop(
     db: PipelineDB,
     cancel: threading.Event,
     extractor: str = "auto",
+    on_formula_oom: str = "fail",
     extraction_done: threading.Event | None = None,
 ) -> ExtractionResult:
     """Extract pages to PipelineDB buffer via the on_page streaming callback.
@@ -89,7 +92,7 @@ def extractor_loop(
     ext = PDFExtractor()
     try:
         try:
-            result = ext.extract(pdf_path, extractor=extractor, on_page=on_page)
+            result = ext.extract(pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page)
         except PipelineCancelled:
             return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
 
@@ -152,7 +155,7 @@ def _build_chunk_metadata(
     carries it at the document level. Parameter retained so existing call
     sites do not need to drop the kwarg simultaneously.
     """
-    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415  — circular-dep avoidance (nexus.metadata_schema)
 
     # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
     # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id.
@@ -192,6 +195,8 @@ def _embed_and_write_batch(
     if not chunks_to_embed:
         return 0, target_model
 
+    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
+
     chunk_texts = [c.text for c in chunks_to_embed]
     embeddings: list[list[float]] = []
     actual_model = target_model
@@ -209,14 +214,31 @@ def _embed_and_write_batch(
     write_count = len(embeddings) if embed_fn is not None else len(chunks_to_embed)
     for i in range(write_count):
         chunk = chunks_to_embed[i]
-        emb_bytes = None
+        emb_bytes: bytes | None
         if i < len(embeddings):
             emb_bytes = struct.pack(f"{len(embeddings[i])}f", *embeddings[i])
+        elif embed_fn is None and is_vector_service_mode():
+            # nexus-9n1u3: service mode — the JVM embeds server-side at upload.
+            # Write a non-NULL empty-blob sentinel (not None) so
+            # ``read_uploadable_chunks`` (``embedding IS NOT NULL``) still picks
+            # the chunk up; the uploader struct.unpacks ``b""`` to ``[]`` and
+            # ``HttpVectorClient.upsert_chunks_with_embeddings`` discards the
+            # empty vector and embeds from the chunk text. Mirrors the batch
+            # path (doc_indexer server-side-embed branch). The service-mode
+            # check is LOCAL (not inferred from embed_fn=None) so a caller that
+            # bypasses the orchestrator and passes embed_fn=None outside service
+            # mode does NOT silently write zero-vector chunks — it falls through
+            # to emb_bytes=None, which read_uploadable_chunks drops, surfacing
+            # the misuse instead of corrupting (review nexus-9n1u3 Sig-1).
+            emb_bytes = b""
+        else:
+            emb_bytes = None
         # RDR-108 D1 / nexus-kmb6: streaming PDF chunk natural ID is
         # chunk_text_hash[:32] (matches code/prose/doc indexer write
         # paths). Identical chunk text in the same collection collapses
         # to one T3 record; the catalog manifest preserves position.
-        chunk_id = hashlib.sha256(chunk.text.encode()).hexdigest()[:32]
+        # nexus-4pvho: single source of truth in nexus.chunk_identity.
+        chunk_id = _chunk_id(chunk.text)
         meta = _build_chunk_metadata(
             chunk,
             content_hash=content_hash,
@@ -450,7 +472,7 @@ def uploader_loop(
                 # batch chains fire from every storage event; the per-doc
                 # loop covers single-shape consumers on CLI ingest.
                 if hooks is None:
-                    from nexus.hook_registry import HookRegistry, install_default_hooks
+                    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 - deferred to avoid circular import at module load
                     hooks = HookRegistry()
                     install_default_hooks(hooks)
                 hooks.fire_batch(
@@ -511,9 +533,9 @@ def _catalog_pdf_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-        from nexus.config import catalog_path
+        from nexus.catalog import Catalog  # noqa: PLC0415 - deferred to avoid circular import at module load
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
+        from nexus.config import catalog_path  # noqa: PLC0415 - deferred to avoid circular import at module load
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
@@ -536,7 +558,7 @@ def _catalog_pdf_hook(
         # the file without depending on the cwd of the reading process.
         # Portability across machines is now the catalog's source-mtime
         # + content_hash story — both already populated.
-        from datetime import UTC, datetime
+        from datetime import UTC, datetime  # noqa: PLC0415 - branch-local; deferred to call time
         file_path_str = str(pdf_path.resolve())
         existing = reader.by_file_path(owner, file_path_str)
 
@@ -568,7 +590,7 @@ def _catalog_pdf_hook(
                 file_path=file_path_str,
                 source_mtime=source_mtime,
             )
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort catalog PDF hook; logged via log.debug, cleanup in finally
         _log.debug("catalog_pdf_hook_failed", exc_info=True)
     finally:
         if writer is not None:
@@ -586,6 +608,7 @@ def pipeline_index_pdf(
     db: PipelineDB | None = None,
     embed_fn: EmbedFn | None = None,
     extractor: str = "auto",
+    on_formula_oom: str = "fail",
     corpus: str = "",
     target_model: str = "voyage-context-3",
     git_meta: dict | None = None,
@@ -612,7 +635,7 @@ def pipeline_index_pdf(
 
     Returns total chunks indexed.
     """
-    from nexus.pipeline_buffer import PIPELINE_DB_PATH
+    from nexus.pipeline_buffer import PIPELINE_DB_PATH  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     if db is None:
         db = PipelineDB(PIPELINE_DB_PATH)
@@ -624,7 +647,7 @@ def pipeline_index_pdf(
     # _build_chunk_metadata can stamp every chunk without re-detecting
     # (nexus-2my fix #3).
     if git_meta is None:
-        from nexus.indexer_utils import detect_git_metadata
+        from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 - deferred to avoid circular import at module load
         git_meta = detect_git_metadata(pdf_path)
 
     # RDR-102 Phase A: pre-flight catalog registration for the streaming
@@ -635,7 +658,7 @@ def pipeline_index_pdf(
     # via Catalog.register's by_file_path early-return; returns "" when
     # the catalog is absent (no-catalog ingest contract preserved).
     if not doc_id:
-        from nexus.doc_indexer import _register_or_lookup_doc_id
+        from nexus.doc_indexer import _register_or_lookup_doc_id  # noqa: PLC0415 - deferred to avoid circular import at module load
         doc_id = _register_or_lookup_doc_id(
             pdf_path, corpus,
             content_type="paper",
@@ -650,7 +673,7 @@ def pipeline_index_pdf(
         try:
             col = t3.get_or_create_collection(collection)
             col.delete(where={"content_hash": content_hash})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - best-effort orphan cleanup; logged via log.warning
             _log.warning(
                 "force_t3_orphan_cleanup_failed",
                 content_hash=content_hash,
@@ -666,15 +689,28 @@ def pipeline_index_pdf(
 
     # Resolve embed_fn from credentials when not provided (matches batch path).
     if embed_fn is None:
-        from nexus.config import get_credential, load_config
-        voyage_key = get_credential("voyage_api_key")
-        if voyage_key:
-            from nexus.doc_indexer import _embed_with_fallback
-            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-            embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
+        if is_vector_service_mode():
+            # nexus-9n1u3 / RDR-152 Seam B: leave embed_fn=None — the service
+            # embeds server-side at upload time. The embed stage writes a
+            # non-NULL empty-blob sentinel and the uploader routes through
+            # HttpVectorClient.upsert_chunks_with_embeddings (JVM embeds).
+            # Mirrors the batch path (doc_indexer._index_pdf_document).
+            pass
         else:
-            db.mark_failed(content_hash, error="voyage_api_key not configured")
-            raise RuntimeError("voyage_api_key not configured — cannot embed for streaming pipeline")
+            from nexus.config import get_credential, load_config  # noqa: PLC0415 - deferred to avoid circular import at module load
+            voyage_key = get_credential("voyage_api_key")
+            if voyage_key:
+                from nexus.doc_indexer import _embed_with_fallback  # noqa: PLC0415 - deferred to avoid circular import at module load
+                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
+            else:
+                db.mark_failed(content_hash, error="voyage_api_key not configured")
+                raise RuntimeError(
+                    "voyage_api_key not configured — cannot embed for streaming "
+                    "pipeline (set a Voyage key, or use service mode for "
+                    "server-side embedding)"
+                )
 
     cancel = threading.Event()
     extraction_done = threading.Event()
@@ -683,8 +719,9 @@ def pipeline_index_pdf(
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         extract_future = pool.submit(
-            extractor_loop, pdf_path, content_hash, db, cancel, extractor,
-            extraction_done,
+            extractor_loop, pdf_path, content_hash, db, cancel,
+            extractor=extractor, on_formula_oom=on_formula_oom,
+            extraction_done=extraction_done,
         )
         chunk_future = pool.submit(
             chunker_loop, content_hash, db, cancel, embed_fn,
@@ -693,7 +730,7 @@ def pipeline_index_pdf(
             git_meta=git_meta, doc_id=doc_id,
         )
         if hooks is None:
-            from nexus.hook_registry import HookRegistry, install_default_hooks
+            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 - deferred to avoid circular import at module load
             hooks = HookRegistry()
             install_default_hooks(hooks)
         upload_future = pool.submit(
@@ -796,7 +833,7 @@ def pipeline_index_pdf(
         if not year_raw:
             creation_date = extraction_result.metadata.get("pdf_creation_date", "")
             if creation_date:
-                import re as _re
+                import re as _re  # noqa: PLC0415 - branch-local; deferred to call time
                 m = _re.search(r"(\d{4})", str(creation_date))
                 if m:
                     year_raw = int(m.group(1))
@@ -815,8 +852,8 @@ def pipeline_index_pdf(
     # reads source_path itself per the P0.1 content-sourcing contract.
     # nexus-tdgc: _catalog_pdf_hook ran above so the catalog entry now
     # exists; resolve the doc_id and forward it to the document chain.
-    from nexus.catalog.factory import make_catalog_reader
-    from nexus.doc_indexer import _lookup_existing_doc_id
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.doc_indexer import _lookup_existing_doc_id  # noqa: PLC0415 - deferred to avoid circular import at module load
     _cat = make_catalog_reader()
     hooks.fire_document(
         str(pdf_path), collection, "",
@@ -890,7 +927,7 @@ def _enrich_metadata_from_extraction(
 
         t3.update_chunks(collection, all_ids, updated_metas)
         return True
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - best-effort metadata enrichment; logged via log.warning, returns False
         _log.warning("metadata_enrichment_failed", content_hash=content_hash, error=str(exc))
         return False
 
@@ -924,7 +961,7 @@ def _update_chunk_metadata(
             if len(batch.get("ids", [])) < 300:
                 break
             offset += 300
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - best-effort chunk-metadata query; logged via log.warning, returns False
         _log.warning("chunk_metadata_query_failed", content_hash=content_hash, error=str(exc))
         return False
 
@@ -938,7 +975,7 @@ def _update_chunk_metadata(
     if ids_to_update:
         try:
             t3.update_chunks(collection, ids_to_update, updated_metas)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - best-effort chunk-metadata update; logged via log.warning, returns False
             _log.warning("chunk_metadata_update_failed", count=len(ids_to_update), error=str(exc))
             return False
     return True
@@ -957,7 +994,7 @@ def _prune_stale_chunks(
     registered the file, the chunk lookup keys on ``doc_id``. Empty or
     missing entries fall back to the legacy ``source_path`` lookup.
     """
-    from nexus.doc_indexer import _identity_where  # noqa: PLC0415
+    from nexus.doc_indexer import _identity_where  # noqa: PLC0415  — circular-dep avoidance (nexus.doc_indexer)
     stale_ids: list[str] = []
     offset = 0
     where_filter = _identity_where(pdf_path, corpus)
@@ -980,7 +1017,7 @@ def _prune_stale_chunks(
             if len(batch_ids) < 300:
                 break
             offset += 300
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - best-effort stale-prune query; logged via log.warning, returns False
         _log.warning("stale_prune_query_failed", pdf_path=pdf_path, error=str(exc))
         return False
 
@@ -996,7 +1033,7 @@ def _prune_stale_chunks(
             _chroma_with_retry(col.delete, ids=batch)
         _log.info("stale_chunks_pruned", count=len(stale_ids), pdf_path=pdf_path)
         return True
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - best-effort stale-prune delete; logged via log.warning, returns False
         _log.warning(
             "stale_prune_delete_failed",
             pdf_path=pdf_path,

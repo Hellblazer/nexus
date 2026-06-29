@@ -45,6 +45,7 @@ from nexus.migration.detection import (
     classify_collections,
     classify_model_support,
     cross_model_remappable,
+    render_cost_confirmation,
     render_dry_run_preview,
     voyage_key_available,
     wired_models,
@@ -451,9 +452,43 @@ class TestDryRunPreview:
         assert len(cross) == 1
         assert cross[0].model == "minilm-l6-v2-384"
         assert cross[0].chunk_count == 7
+        # nexus-gilf2: cloud mode (voyage key) → the prose source targets
+        # voyage-context-3, and the preview names that ACTUAL target (not a
+        # hard-coded bge-768) so the operator sees what the migrate will produce.
+        assert cross[0].target_model == "voyage-context-3"
         text = render_dry_run_preview(preview)
-        assert "cross-model re-embed" in text
+        assert "minilm-l6-v2-384 -> voyage-context-3 cross-model re-embed" in text
+        assert "bge-768" not in text
         assert "BLOCKED" not in text
+
+    def test_cross_model_preview_local_mode_targets_bge_768(self) -> None:
+        # nexus-gilf2: local mode (no voyage key) → bge-768 target, named honestly.
+        local = _FakeChromaClient({ONNX_384: 7})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=False
+        )
+        preview = build_dry_run_preview(report)
+        cross = [g for g in preview.groups if g.cross_model]
+        assert len(cross) == 1
+        assert cross[0].target_model == "bge-base-en-v15-768"
+        text = render_dry_run_preview(preview)
+        assert "minilm-l6-v2-384 -> bge-base-en-v15-768 cross-model re-embed" in text
+
+    def test_cross_model_preview_cloud_splits_code_and_prose_targets(self) -> None:
+        # nexus-gilf2: a single source model (minilm-384) spanning code + prose
+        # splits into TWO target buckets in cloud mode — voyage-code-3 for code,
+        # voyage-context-3 for prose — each named in the preview.
+        code_src = "code__acme__minilm-l6-v2-384__v1"
+        local = _FakeChromaClient({ONNX_384: 7, code_src: 3})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        preview = build_dry_run_preview(report)
+        targets = {g.target_model for g in preview.groups if g.cross_model}
+        assert targets == {"voyage-context-3", "voyage-code-3"}
+        text = render_dry_run_preview(preview)
+        assert "minilm-l6-v2-384 -> voyage-code-3 cross-model re-embed" in text
+        assert "minilm-l6-v2-384 -> voyage-context-3 cross-model re-embed" in text
 
     def test_all_blocked_render_has_no_dangling_migrate_section(self) -> None:
         # Every collection GENUINELY blocked (voyage, no key) → the "Would
@@ -477,6 +512,147 @@ class TestDryRunPreview:
         assert "[local]" in text
         assert "[cloud]" in text
         assert "rough estimate" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Voyage re-embed COST estimate (nexus-cewad / RDR-166 Gap 4) — billed only for a
+# cross-model→voyage RE-EMBED. Same-model voyage migrations use vector passthrough
+# (nexus-hxry2: stored vectors copied, not re-embedded) → free. ONNX/bge local
+# re-embeds are free.
+# ---------------------------------------------------------------------------
+class TestVoyageCostEstimate:
+    def test_onnx_only_is_free(self) -> None:
+        # bge-768 local re-embed runs on the local ONNX runtime — no Voyage bill.
+        local = _FakeChromaClient({BGE_768: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=False
+        )
+        preview = build_dry_run_preview(report)
+        assert preview.billed_voyage_tokens == 0
+        assert preview.est_voyage_cost_usd == 0.0
+
+    def test_same_model_voyage_is_free_via_passthrough(self) -> None:
+        # A collection ALREADY on a voyage model migrates SAME-model: the stored
+        # vectors are copied verbatim (vector passthrough, nexus-hxry2), not
+        # re-embedded → no Voyage bill.
+        cloud = _FakeChromaClient({VOYAGE_CTX_1024: 500})
+        report = classify_collections(
+            local_client=None, cloud_client=cloud, voyage_key_present=True
+        )
+        preview = build_dry_run_preview(report)
+        assert preview.billed_voyage_tokens == 0
+        assert preview.est_voyage_cost_usd == 0.0
+        # …but tracked as passthrough volume so the $0 can be caveated.
+        assert preview.passthrough_voyage_tokens == 500 * 512
+        text = render_dry_run_preview(preview)
+        assert "Voyage passthrough (free)" in text
+        assert "missing its stored vector" in text
+
+    def test_cross_model_to_voyage_is_billed_and_scales(self) -> None:
+        # minilm-384 in cloud mode → voyage-context-3 re-embed → BILLED.
+        local = _FakeChromaClient({ONNX_384: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        preview = build_dry_run_preview(report)
+        # 1000 chunks x 512 tokens/chunk, all voyage-targeted.
+        assert preview.billed_voyage_tokens == 1000 * 512
+        # 512_000 tokens x $0.12 / 1_000_000 = $0.06144 (exact constant rate).
+        assert preview.est_voyage_cost_usd == pytest.approx(512_000 / 1_000_000 * 0.12)
+
+    def test_only_voyage_targeted_tokens_are_billed_in_mixed_footprint(self) -> None:
+        # bge byte-for-byte (free) + minilm→voyage (billed): only the latter bills.
+        local = _FakeChromaClient({BGE_768: 9999, ONNX_384: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        preview = build_dry_run_preview(report)
+        assert preview.billed_voyage_tokens == 1000 * 512  # bge excluded
+        assert preview.est_voyage_cost_usd == pytest.approx(512_000 / 1_000_000 * 0.12)
+
+    def test_dry_run_render_surfaces_voyage_cost(self) -> None:
+        # The --dry-run pre-flight (render_dry_run_preview) must show the billed
+        # cost, not only the live-run confirm path (code-review H1).
+        local = _FakeChromaClient({ONNX_384: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        text = render_dry_run_preview(build_dry_run_preview(report))
+        assert "Voyage re-embed cost" in text
+        assert "512,000" in text
+
+    def test_dry_run_render_omits_cost_when_free(self) -> None:
+        local = _FakeChromaClient({BGE_768: 10})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=False
+        )
+        text = render_dry_run_preview(build_dry_run_preview(report))
+        assert "Voyage re-embed cost" not in text
+
+    def test_render_cost_confirmation_none_when_free(self) -> None:
+        local = _FakeChromaClient({BGE_768: 10})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=False
+        )
+        assert render_cost_confirmation(build_dry_run_preview(report)) is None
+
+    def test_render_cost_confirmation_surfaces_cost_and_rerun_footgun(self) -> None:
+        local = _FakeChromaClient({ONNX_384: 1000})
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        text = render_cost_confirmation(build_dry_run_preview(report))
+        assert text is not None
+        assert "$" in text
+        assert "512,000" in text or "512000" in text  # the billed token volume
+        # the re-run-at-full-cost foot-gun (nexus-1sx01) must be stated.
+        assert "re-run" in text.lower() or "again" in text.lower()
+        assert "operator" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Cross-model remap TARGET derivation (nexus-gilf2): mode-aware, content-type-aware
+# ---------------------------------------------------------------------------
+class TestCrossModelTargetModel:
+    """The cross-model remap target must be a model the live deployment WIRES.
+
+    nexus-gilf2: a flat bge-768 target blocks the mixed migrant (ran local,
+    migrates onto a voyage-mode service) — the service has no bge-768 embedder
+    in cloud mode and the pebfx.2 guard 422s the upsert. The target is
+    derived from the deployment mode and the source's content_type.
+    """
+
+    def test_local_mode_targets_bge_768_regardless_of_content_type(self) -> None:
+        from nexus.migration.detection import cross_model_target_model
+
+        for src in (ONNX_384, "code__acme__minilm-l6-v2-384__v1"):
+            assert (
+                cross_model_target_model(src, voyage_key_present=False)
+                == "bge-base-en-v15-768"
+            )
+
+    def test_cloud_mode_prose_targets_voyage_context_3(self) -> None:
+        from nexus.migration.detection import cross_model_target_model
+
+        for src in (
+            "knowledge__acme__minilm-l6-v2-384__v1",
+            "docs__acme__minilm-l6-v2-384__v1",
+            "rdr__acme__minilm-l6-v2-384__v1",
+        ):
+            assert (
+                cross_model_target_model(src, voyage_key_present=True)
+                == "voyage-context-3"
+            )
+
+    def test_cloud_mode_code_targets_voyage_code_3(self) -> None:
+        from nexus.migration.detection import cross_model_target_model
+
+        assert (
+            cross_model_target_model(
+                "code__acme__minilm-l6-v2-384__v1", voyage_key_present=True
+            )
+            == "voyage-code-3"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +807,12 @@ class TestMigrateToServiceRun:
             factory, "make_catalog_client_for_migration", lambda **k: object()
         )
         monkeypatch.setattr(driver, "run_guided_upgrade", _fake_run_guided_upgrade)
+        # Isolate the cost-guardrail pre-flight from the real local Chroma store:
+        # these tests exercise result rendering, not the cost gate (covered in
+        # test_migrate_cost_guardrail). A no-data classify → zero billed cost →
+        # no prompt, so --yes below is belt-and-suspenders.
+        monkeypatch.setattr(migrate_cmd, "open_read_legs", lambda p: (None, None))
+        monkeypatch.setattr(migrate_cmd, "_close_quietly", lambda c: None)
         if token is None:
             monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
         else:
@@ -642,7 +824,9 @@ class TestMigrateToServiceRun:
         cat.write_text("")
         cli = CliRunner().invoke(
             migrate_cmd.migrate_to_service_cmd,
-            ["--db", str(db), "--catalog-db", str(cat)],
+            # --yes: these exercise post-confirm result rendering, not the cost
+            # gate (which has dedicated coverage in test_migrate_cost_guardrail).
+            ["--db", str(db), "--catalog-db", str(cat), "--yes"],
         )
         return cli, captured
 

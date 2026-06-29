@@ -87,12 +87,13 @@ def marker_path() -> Path:
 def uv_receipt_present() -> bool:
     """True iff conexus was installed via ``uv tool`` (receipt present).
 
-    Inline re-implementation of ``src/nexus/commands/init.py:52-68``
-    (``_uv_receipt_path``). Intentionally NOT imported from nexus.commands.init
-    (the bare hook interpreter cannot import the conexus package) and NOT
-    extracted to a shared nexus/ helper (the two consumers run in different
-    interpreters: the package vs this bare hook). If the detection logic in
-    init.py changes, update this copy too.
+    Self-contained uv-receipt check. This used to mirror
+    ``init.py:_uv_receipt_path``, but that helper was removed in RDR-174 P1.3
+    (the embedder-picker extra-add path it served is gone); this is now the sole
+    instance. Intentionally NOT imported from nexus.commands.init (the bare hook
+    interpreter cannot import the conexus package) and NOT extracted to a shared
+    nexus/ helper (the two consumers run in different interpreters: the package
+    vs this bare hook).
 
     Absence of the receipt means a dev/editable tree (or no uv): SKIP, so we
     never clobber a developer checkout. All edge cases fail-safe to False.

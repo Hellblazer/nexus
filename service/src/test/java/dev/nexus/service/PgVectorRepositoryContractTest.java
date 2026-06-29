@@ -223,6 +223,56 @@ class PgVectorRepositoryContractTest {
         assertThat(superuserCount(384,  col)).as("nothing in chunks_384").isEqualTo(0L);
     }
 
+    // ---------------------------------------------------------------------------
+    // Contract: same-model vector PASSTHROUGH (nexus-hxry2) — supplied vectors are
+    // stored verbatim, the embedder is NOT invoked, and a dim mismatch fails loud.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void upsertChunksWithVectors_storesSuppliedVectorsVerbatim_skipsEmbedder() throws Exception {
+        String col = COL_CTX_1024;
+        String chash = "ptvc1024c10000000000000000000000";
+        // A distinctive vector the FakeEmbedder would never produce (its default
+        // is [1,0,...]); proves the stored vector is the SUPPLIED one, not embedded.
+        float[] supplied = new float[1024];
+        supplied[0] = 0.25f;
+        supplied[1] = 0.75f;
+
+        repo1024.upsertChunksWithVectors(TENANT_A, col,
+            List.of(chash), List.of("passthrough text"),
+            List.of(supplied), List.of(Map.of("kind", "pt")));
+
+        assertThat(superuserCount(1024, col)).as("row landed in chunks_1024").isEqualTo(1L);
+        String stored = superuserChunkEmbedding(1024, col, chash);
+        assertThat(stored)
+            .as("the SUPPLIED vector is stored verbatim, not the embedder's [1,0,...] default")
+            .startsWith("[0.25,0.75,");
+    }
+
+    @Test
+    void upsertChunksWithVectors_dimMismatch_failsLoud() {
+        String col = COL_CTX_1024;  // dispatches to chunks_1024
+        float[] wrongDim = new float[768];  // a 768-dim vector for a 1024 collection
+        wrongDim[0] = 1.0f;
+        // The contamination guard: a supplied vector whose dim disagrees with the
+        // target table is rejected before any SQL — never silently stored or embedded.
+        assertThatThrownBy(() -> repo1024.upsertChunksWithVectors(TENANT_A, col,
+            List.of("ptbaddim10240000000000000000000000"), List.of("bad dim text"),
+            List.of(wrongDim), List.of(Map.of())))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void upsertChunksWithVectors_lengthMismatch_failsLoud() {
+        String col = COL_CTX_1024;
+        float[] one = new float[1024];
+        // Two ids, one embedding → fail loud (never misalign vectors to ids).
+        assertThatThrownBy(() -> repo1024.upsertChunksWithVectors(TENANT_A, col,
+            List.of("ptlen1id1000000000000000000000000", "ptlen1id2000000000000000000000000"),
+            List.of("t1", "t2"), List.of(one), List.of(Map.of(), Map.of())))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
     @Test
     void upsert_voyage3_landsInChunks1024Only() throws Exception {
         String col = "knowledge__v3disp__voyage-3__v1";
@@ -493,6 +543,136 @@ class PgVectorRepositoryContractTest {
         assertThat(rows).extracting(r -> r.get("id"))
             .as("multi-key where must AND all predicates: exactly the one row matching both")
             .containsExactly("andc1000000000000000000000000000");
+    }
+
+    // Contract 4b: operator-form where-filters on the bridge (nexus-05bfd).
+    // seedSearchFixture: snear{kind=a} d0.0, smid{kind=b} d0.2, sfar{kind=a} d1.0.
+
+    @Test
+    void search_whereNe_excludesMatching_distanceOrdered() {
+        String col = "code__searchne__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("kind", Map.of("$ne", "b")));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("{kind:{$ne:b}} drops the one kind=b row, keeps both kind=a, distance-ordered")
+            .containsExactly("snear000000000000000000000000000", "sfar0000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereEqOperatorForm_matchesPlainEquality() {
+        String col = "code__searcheq__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("kind", Map.of("$eq", "a")));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("{kind:{$eq:a}} is identical to plain {kind:a}")
+            .containsExactly("snear000000000000000000000000000", "sfar0000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereIn_matchesAnyListed() {
+        String col = "code__searchin__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        assertThat(repo1024.search(TENANT_A, "search query", List.of(col), 10,
+                Map.of("kind", Map.of("$in", List.of("b")))))
+            .as("{kind:{$in:[b]}} returns exactly the kind=b row")
+            .extracting(r -> r.get("id"))
+            .containsExactly("smid0000000000000000000000000000");
+
+        assertThat(repo1024.search(TENANT_A, "search query", List.of(col), 10,
+                Map.of("kind", Map.of("$in", List.of("a", "b")))))
+            .as("{kind:{$in:[a,b]}} returns all three, distance-ordered")
+            .extracting(r -> r.get("id"))
+            .containsExactly("snear000000000000000000000000000", "smid0000000000000000000000000000", "sfar0000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereNin_excludesListed() {
+        String col = "code__searchnin__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("kind", Map.of("$nin", List.of("b"))));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("{kind:{$nin:[b]}} excludes kind=b, keeps both kind=a")
+            .containsExactly("snear000000000000000000000000000", "sfar0000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereNe_keepsRowsMissingTheKey() {
+        // Chroma "field != value" intent: a row that carries no `section_type` at all
+        // must be KEPT when filtering section_type != references (IS DISTINCT FROM, not !=).
+        String col = "code__searchnemiss__voyage-code-3__v1";
+        embedder1024.register("search query", 1.0f, 0.0f);
+        embedder1024.register("has key", 1.0f, 0.0f);
+        embedder1024.register("no key", 0.8f, 0.6f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("haskey00000000000000000000000000", "nokey000000000000000000000000000"),
+            List.of("has key", "no key"),
+            List.of(Map.of("section_type", "references"), Map.of("other", "x")));
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("section_type", Map.of("$ne", "references")));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("$ne keeps the row whose section_type is ABSENT, drops the explicit references row")
+            .containsExactly("nokey000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereUnsupportedOperator_failsLoud() {
+        String col = "code__searchbadop__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        assertThatThrownBy(() -> repo1024.search(TENANT_A, "search query", List.of(col), 10,
+                Map.of("kind", Map.of("$regex", "a.*"))))
+            .as("an unsupported operator must fail loud (400), not silently match nothing")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("$regex");
+    }
+
+    @Test
+    void search_whereCompoundOperator_failsLoud() {
+        String col = "code__searchcompound__voyage-code-3__v1";
+        seedSearchFixture(col);
+
+        assertThatThrownBy(() -> repo1024.search(TENANT_A, "search query", List.of(col), 10,
+                Map.of("$or", List.of(Map.of("kind", "a"), Map.of("kind", "b")))))
+            .as("compound $or is not supported and must fail loud, not bind as a literal column")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("$or");
+    }
+
+    @Test
+    void getWhere_operatorForm_filtersExactly() {
+        // The same translator backs getWhere (store-get with where) — exercise the
+        // second call site so its bind ordering is covered too.
+        String col = "code__getwherene__voyage-code-3__v1";
+        embedder1024.register("gw a", 1.0f, 0.0f);
+        embedder1024.register("gw b", 0.8f, 0.6f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("gwa10000000000000000000000000000", "gwb10000000000000000000000000000"),
+            List.of("gw a", "gw b"),
+            List.of(Map.of("kind", "a"), Map.of("kind", "b")));
+
+        @SuppressWarnings("unchecked")
+        List<String> ids = (List<String>) repo1024.getWhere(
+            TENANT_A, col, Map.of("kind", Map.of("$ne", "b")), 100, 0).get("ids");
+
+        assertThat(ids)
+            .as("getWhere {kind:{$ne:b}} returns only the kind=a chunk")
+            .containsExactly("gwa10000000000000000000000000000");
     }
 
     @Test
@@ -926,6 +1106,21 @@ class PgVectorRepositoryContractTest {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
                  "SELECT metadata::text FROM nexus.chunks_" + dim
+                 + " WHERE collection = ? AND chash = ?")) {
+            ps.setString(1, collection);
+            ps.setString(2, chash);
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).as("row %s/%s must exist in chunks_%d", collection, chash, dim).isTrue();
+                return rs.getString(1);
+            }
+        }
+    }
+
+    /** Superuser fetch of one chunk's embedding as pgvector text (bypasses RLS). */
+    private String superuserChunkEmbedding(int dim, String collection, String chash) throws SQLException {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "SELECT embedding::text FROM nexus.chunks_" + dim
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, collection);
             ps.setString(2, chash);

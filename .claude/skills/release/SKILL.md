@@ -9,6 +9,21 @@ Follow every step in order. Do not skip or reorder. Authority: CLAUDE.md § Rele
 
 ## Steps
 
+### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
+
+The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release PINS one engine tag — `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, Step 3) plus the `REQUIRED_RELEASE_VERSION` floor (`src/nexus/migration/guided_upgrade.py`). Before cutting the PyPI release, verify the pinned engine is cloud-current — do NOT ship on a stale, un-cloud-validated engine:
+
+```bash
+git tag -l "engine-service-v*" | sort -V | tail -1          # last engine tag
+git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant drift?
+```
+
+1. Confirm the pinned engine tag is (a) cloud-DEPLOYED and (b) cloud-GATED (recall + hybrid parity, xr7.8.9-style) — read the authoritative bead + conexus bus, **not memory** (cross-repo gate state goes stale fast: 2026-06-26 a `luxe6` condition had been cleared a week earlier than memory implied).
+2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — have conexus deploy + re-gate it (passive bus: surface an explicit "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Hal), THEN bump `PINNED_SERVICE_TAG` here. The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary.
+3. The engine cut itself: full `service/` suite green on the tagged commit (confirm the `service/` tree equals a green-`service-ci` commit — the Java CI is advisory and does not block auto-merge, so verify), then the **human** pushes `engine-service-vX.Y.Z`.
+
+This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.
+
 ### 1. Run unit + integration suite
 
 ```bash
@@ -47,6 +62,8 @@ CI enforces parity. Missing any one of these fails the marketplace-version-match
 - `sn/.claude-plugin/plugin.json`: `version`
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
+
+**Engine-service pin (conditional 8th target — nexus-3rq00).** The Python/Java boundary rides one more hand-edited constant that sits OUTSIDE the seven-manifest parity gate: `PINNED_SERVICE_TAG` in `src/nexus/daemon/binary_install.py`, the `engine-service-vX.Y.Z` release this build auto-installs. It is NOT bumped every release — only when the compatible engine-service version advances. When this release ships a new engine, bump `PINNED_SERVICE_TAG` in lock-step. Two invariants the `TestEnginePinParity` test enforces: (1) `PINNED_SERVICE_TAG`'s numeric version must be `>= REQUIRED_RELEASE_VERSION` (`src/nexus/migration/guided_upgrade.py`) — never ship a client that auto-installs an engine it then refuses as too old; (2) at the 6.0 release boundary the pin must be non-None (it is intentionally `None` pre-6.0). A release that bumps pyproject to 6.x without setting a real pin trips CI.
 
 Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 

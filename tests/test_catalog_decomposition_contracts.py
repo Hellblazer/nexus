@@ -452,3 +452,131 @@ def test_bulk_unlink_legacy_shadow_emit_fires_after_commit(
             "broken (events.jsonl could claim deletions SQLite has "
             f"not yet committed). call order: {call_log}"
         )
+
+
+# ── _OwnerOps extraction (nexus-kgyoz) ───────────────────────────────────────
+
+
+def test_owner_ops_composed_and_back_referenced(tmp_path: Path) -> None:
+    """``self._owners`` MUST be a ``_OwnerOps`` composed onto the
+    Catalog with a back-reference to the same instance, mirroring the
+    ``_links`` / ``_docs`` / ``_sync`` composition contract.
+    """
+    Catalog.init(tmp_path)
+    cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+    from nexus.catalog.catalog_owners import _OwnerOps
+
+    assert isinstance(cat._owners, _OwnerOps)
+    assert cat._owners._cat is cat
+
+
+def test_owner_facade_delegates_round_trip(tmp_path: Path) -> None:
+    """The facade owner methods delegate to ``_OwnerOps`` without
+    behaviour change: register → list_owners → get_owner_by_prefix →
+    set_owner_head_hash → owners_with_roots all round-trip the same
+    record through the delegating wrappers.
+    """
+    Catalog.init(tmp_path)
+    cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+    owner = cat.register_owner(
+        name="o", owner_type="repo", repo_hash="h",
+        repo_root="/tmp/o-root",
+    )
+    listed = cat.list_owners()
+    assert any(r["tumbler_prefix"] == str(owner) for r in listed)
+    rec = cat.get_owner_by_prefix(str(owner))
+    assert rec is not None and rec["name"] == "o"
+    assert cat.list_owners_by_type("repo")[0]["repo_hash"] == "h"
+    assert cat.set_owner_head_hash(owner, "deadbeef") == 1
+    assert cat.get_owner_by_prefix(str(owner))["head_hash"] == "deadbeef"
+    assert cat.owners_with_roots()[str(owner)] == "/tmp/o-root"
+
+
+def test_owner_facade_delegates_ensure_and_curator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ensure_owner_for_repo`` and ``curator_owner_tumbler_by_name``
+    are the owner entry points the indexer and CLI use. Pin their
+    delegation through ``_OwnerOps`` so a future consolidation back
+    into the facade (or a different extraction) trips the contract
+    suite, not only the functional tests. ``_repo_identity_with_main``
+    is mocked so the test needs no real git tree.
+    """
+    Catalog.init(tmp_path)
+    cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+
+    monkeypatch.setattr(
+        "nexus.repo_identity._repo_identity_with_main",
+        lambda repo: ("repo-name", "repo-hash", tmp_path),
+    )
+    owner = cat.ensure_owner_for_repo(tmp_path)
+    assert isinstance(owner, Tumbler)
+    # Idempotent: a second call returns the same tumbler (no re-register).
+    assert str(cat.ensure_owner_for_repo(tmp_path)) == str(owner)
+
+    # No curator owner registered → None.
+    assert cat.curator_owner_tumbler_by_name("nonexistent") is None
+    curator = cat.register_owner(name="cur", owner_type="curator")
+    assert str(cat.curator_owner_tumbler_by_name("cur")) == str(curator)
+
+
+def test_cat_mod_propagates_make_event_patch_to_owner_ops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``catalog_owners.py`` references ``_make_event`` /
+    ``_OwnerRegisteredPayload`` via ``_cat_mod``. A test that patches
+    ``nexus.catalog.catalog._make_event`` must see the patched factory
+    fire from ``_OwnerOps.register_owner`` — silent-refactor protection
+    against a future ``from nexus.catalog.catalog import _make_event``
+    that would bind at load time and defeat the patch.
+    """
+    Catalog.init(tmp_path)
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+    cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+
+    import nexus.catalog.catalog as cat_mod
+
+    real_make_event = cat_mod._make_event
+    calls: list[int] = []
+
+    def spy_make_event(payload, *, v):  # noqa: ANN001, ANN202
+        calls.append(v)
+        return real_make_event(payload, v=v)
+
+    monkeypatch.setattr("nexus.catalog.catalog._make_event", spy_make_event)
+    cat.register_owner(name="o", owner_type="repo", repo_hash="h")
+    assert calls, (
+        "_cat_mod indirection failed to propagate the patched "
+        "_make_event — _OwnerOps still bound the original factory"
+    )
+
+
+def test_owner_lookups_relocated_to_owner_ops(tmp_path: Path) -> None:
+    """``owner_for_repo`` / ``owner_tumblers_by_name`` MUST live on
+    ``_OwnerOps`` and NOT on ``_DocumentOps`` (nexus-kgyoz deferred
+    clean-up). The facade delegates to ``_owners``; behaviour
+    round-trips. Trips the suite if a future change re-homes these
+    owner-table queries back onto ``_DocumentOps``.
+    """
+    from nexus.catalog.catalog_docs import _DocumentOps
+    from nexus.catalog.catalog_owners import _OwnerOps
+
+    assert hasattr(_OwnerOps, "owner_for_repo")
+    assert hasattr(_OwnerOps, "owner_tumblers_by_name")
+    assert not hasattr(_DocumentOps, "owner_for_repo")
+    assert not hasattr(_DocumentOps, "owner_tumblers_by_name")
+
+    Catalog.init(tmp_path)
+    cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+    owner = cat.register_owner(
+        name="r", owner_type="repo", repo_hash="abc123", repo_root="/tmp/r-root",
+    )
+    # The facade round-trips through _OwnerOps end-to-end (delegation +
+    # SQL). With the methods gone from _DocumentOps (asserted above), a
+    # passing round-trip proves the facade reaches _OwnerOps.
+    # owner_for_repo round-trips the just-registered repo owner.
+    assert str(cat.owner_for_repo("abc123")) == str(owner)
+    assert cat.owner_for_repo("no-such-hash") is None
+    # owner_tumblers_by_name finds it by name.
+    assert str(cat.owner_tumblers_by_name("r")[0]) == str(owner)
+    assert cat.owner_tumblers_by_name("nobody") == []

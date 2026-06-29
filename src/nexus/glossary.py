@@ -40,10 +40,10 @@ def load_glossary(
     yml = project_root / ".nexus.yml"
     if yml.exists():
         try:
-            import yaml  # pyyaml is already a nexus dep
+            import yaml  # pyyaml is already a nexus dep  # noqa: PLC0415 — branch-local: only needed when .nexus.yml exists
 
             data = yaml.safe_load(yml.read_text()) or {}
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort YAML parse; malformed config degrades to empty glossary
             data = {}
         if isinstance(data, dict):
             section = data.get("taxonomy")

@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import sqlite3
 from typing import Any, Callable
 
 import structlog
@@ -107,7 +106,7 @@ class HookRegistry:
         for hook in self._single:
             try:
                 hook(doc_id, collection, content)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
                     "post_store_hook_failed",
@@ -183,7 +182,7 @@ class HookRegistry:
                     )
                 else:
                     hook(doc_ids, collection, contents, embeddings, metadatas)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
                     "post_store_batch_hook_failed",
@@ -250,7 +249,7 @@ class HookRegistry:
                     hook(source_path, collection, content, doc_id=doc_id)
                 else:
                     hook(source_path, collection, content)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
                     "post_document_hook_failed",
@@ -330,7 +329,7 @@ def install_default_hooks(registry: HookRegistry) -> None:
     Idempotent: re-registering the same callable on the same registry
     is a no-op (duplicate-registration detection by identity).
     """
-    from nexus.mcp_infra import (
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
         chash_dual_write_batch_hook,
         manifest_write_batch_hook,
         taxonomy_assign_batch_hook,
@@ -344,12 +343,68 @@ def install_default_hooks(registry: HookRegistry) -> None:
         if hook not in registry._batch:
             registry.register_batch(hook)
 
-    from nexus.aspect_worker import aspect_extraction_enqueue_hook
+    from nexus.aspect_worker import aspect_extraction_enqueue_hook  # noqa: PLC0415 — deferred to avoid circular import
     if aspect_extraction_enqueue_hook not in registry._document:
         registry.register_document(aspect_extraction_enqueue_hook)
 
 
 # ── Failure-record helpers (moved from mcp_infra) ────────────────────────────
+
+
+#: nexus-9613q.3: warn-once guard so a failed hook_failures persist (e.g. a
+#: service 5xx) is VISIBLE rather than silently swallowed at DEBUG. Keyed on
+#: ``(chain, hook_name)`` — NOT ``chain`` alone — so a transient failure of one
+#: hook does not permanently silence every other hook of the same chain for the
+#: process lifetime (nexus-9613q review M1).
+_hook_failure_drop_warned: set[tuple[str, str]] = set()
+
+
+def _persist_hook_failure(
+    *,
+    doc_id: str,
+    collection: str,
+    hook_name: str,
+    error: str,
+    chain: str,
+    batch_doc_ids: str | None = None,
+    is_batch: bool = False,
+) -> None:
+    """Persist one ``hook_failures`` row via the telemetry STORE.
+
+    nexus-9613q.3: routes through ``db.telemetry.record_hook_failure(...)`` so
+    the write works on both the SQLite and service backends. The prior code
+    reached ``t2.taxonomy.conn`` directly, which a service-backed store lacks,
+    silently dropping every row in service mode (the silent-loss class
+    nexus-pyzk7 closed for tier_writes). Best-effort: recording an
+    already-failing hook must never mask the original hook exception, but a
+    persist failure is now WARNED ONCE per chain instead of swallowed at DEBUG.
+    The store owns the column-set migration, so there is no per-caller
+    INSERT fallback ladder anymore.
+    """
+    from nexus.mcp_infra import t2_ctx  # noqa: PLC0415 — deferred to avoid circular import
+
+    try:
+        with t2_ctx() as t2:
+            t2.telemetry.record_hook_failure(
+                doc_id=doc_id,
+                collection=collection,
+                hook_name=hook_name,
+                error=error[:2000],
+                chain=chain,
+                batch_doc_ids=batch_doc_ids,
+                is_batch=is_batch,
+            )
+    except Exception:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
+        key = (chain, hook_name)
+        if key not in _hook_failure_drop_warned:
+            _hook_failure_drop_warned.add(key)
+            _log.warning(
+                "hook_failure_persist_dropped",
+                chain=chain,
+                hook=hook_name,
+                collection=collection,
+                exc_info=True,
+            )
 
 
 def _record_hook_failure(
@@ -359,45 +414,11 @@ def _record_hook_failure(
     hook_name: str,
     error: str,
 ) -> None:
-    """Persist a single-doc post-store hook failure to T2 ``hook_failures``.
-
-    Writes ``chain='single'`` (RDR-089 4.14.2 schema) when the column is
-    present, falling back to a chain-less insert on pre-4.14.2 DBs.
-    Secondary best-effort path: if the T2 write itself fails, swallow
-    the second failure (the primary warning already reached structlog)
-    rather than mask the original hook exception.
-    """
-    from nexus.mcp_infra import t2_ctx
-
-    truncated = error[:2000]
-    try:
-        with t2_ctx() as t2:
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                try:
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error, chain) "
-                        "VALUES (?, ?, ?, ?, 'single')",
-                        (doc_id, collection, hook_name, truncated),
-                    )
-                except sqlite3.OperationalError as exc:
-                    msg = str(exc)
-                    if "no column named" not in msg and "no such column" not in msg:
-                        raise
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",
-                        (doc_id, collection, hook_name, truncated),
-                    )
-                conn.commit()
-    except Exception:
-        _log.debug(
-            "hook_failure_persist_failed",
-            hook=hook_name,
-            collection=collection,
-            exc_info=True,
-        )
+    """Persist a single-doc post-store hook failure (``chain='single'``)."""
+    _persist_hook_failure(
+        doc_id=doc_id, collection=collection, hook_name=hook_name,
+        error=error, chain="single",
+    )
 
 
 def _record_batch_hook_failure(
@@ -415,55 +436,12 @@ def _record_batch_hook_failure(
     render something meaningful (RDR-095 schema migration adds the two
     new columns in 4.14.1).
 
-    Falls back to scalar-only insert if the new columns don't exist
-    yet (mixed-version operator scenario).
     """
-    from nexus.mcp_infra import t2_ctx
-
-    representative = doc_ids[0] if doc_ids else ""
-    payload = json.dumps(doc_ids)
-    truncated = error[:2000]
-    try:
-        with t2_ctx() as t2:
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                try:
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error, "
-                        " batch_doc_ids, is_batch, chain) "
-                        "VALUES (?, ?, ?, ?, ?, 1, 'batch')",
-                        (representative, collection, hook_name, truncated, payload),
-                    )
-                except sqlite3.OperationalError as exc:
-                    msg = str(exc)
-                    if "no column named" not in msg and "no such column" not in msg:
-                        raise
-                    try:
-                        conn.execute(
-                            "INSERT INTO hook_failures "
-                            "(doc_id, collection, hook_name, error, "
-                            " batch_doc_ids, is_batch) VALUES (?, ?, ?, ?, ?, 1)",
-                            (representative, collection, hook_name, truncated, payload),
-                        )
-                    except sqlite3.OperationalError as exc2:
-                        msg2 = str(exc2)
-                        if "no column named" not in msg2 and "no such column" not in msg2:
-                            raise
-                        conn.execute(
-                            "INSERT INTO hook_failures "
-                            "(doc_id, collection, hook_name, error) "
-                            "VALUES (?, ?, ?, ?)",
-                            (representative, collection, hook_name, truncated),
-                        )
-                conn.commit()
-    except Exception:
-        _log.debug(
-            "batch_hook_failure_persist_failed",
-            hook=hook_name,
-            collection=collection,
-            exc_info=True,
-        )
+    _persist_hook_failure(
+        doc_id=doc_ids[0] if doc_ids else "",
+        collection=collection, hook_name=hook_name, error=error,
+        chain="batch", batch_doc_ids=json.dumps(doc_ids), is_batch=True,
+    )
 
 
 def _record_document_hook_failure(
@@ -479,39 +457,8 @@ def _record_document_hook_failure(
     carries 'subject of failure' regardless of chain shape) and sets
     ``chain='document'`` so readers can render the row appropriately.
 
-    Two-tier fallback (vs. three-tier in :func:`_record_batch_hook_failure`)
-    is correct: the document chain is new in 4.14.2, so there is no
-    intermediate 4.14.1-shape schema to handle.
     """
-    from nexus.mcp_infra import t2_ctx
-
-    truncated = error[:2000]
-    try:
-        with t2_ctx() as t2:
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                try:
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error, chain) "
-                        "VALUES (?, ?, ?, ?, 'document')",
-                        (source_path, collection, hook_name, truncated),
-                    )
-                except sqlite3.OperationalError as exc:
-                    msg = str(exc)
-                    if "no column named" not in msg and "no such column" not in msg:
-                        raise
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error) "
-                        "VALUES (?, ?, ?, ?)",
-                        (source_path, collection, hook_name, truncated),
-                    )
-                conn.commit()
-    except Exception:
-        _log.debug(
-            "document_hook_failure_persist_failed",
-            hook=hook_name,
-            collection=collection,
-            exc_info=True,
-        )
+    _persist_hook_failure(
+        doc_id=source_path, collection=collection, hook_name=hook_name,
+        error=error, chain="document",
+    )

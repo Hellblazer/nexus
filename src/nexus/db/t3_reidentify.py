@@ -267,7 +267,7 @@ def reidentify_collection(
                 # 33+ metadata keys; the prior narrow-strip path produced
                 # NumMetadataKeys quota errors on the upsert. The canonical
                 # funnel brings these chunks back under the per-row quota.
-                from nexus.db.t3 import _normalize_for_write
+                from nexus.db.t3 import _normalize_for_write  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
                 new_meta = _normalize_for_write(meta, collection_name)
                 ids_to_upsert.append(new_id)
                 docs_to_upsert.append(doc)

@@ -22,7 +22,7 @@ import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
 
-from nexus.commands.catalog import (
+from nexus.commands.catalog_cmds.doctor import (
     _MICRO_CHUNK_BYTES,
     _percentile,
     doctor_cmd,

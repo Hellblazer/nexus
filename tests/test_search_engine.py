@@ -303,6 +303,96 @@ class TestThresholdOverride:
         )
         assert {r.id for r in results} == {"a"}
 
+
+class _ConcurrentFakeT3:
+    """T3 stand-in that records concurrency and lets per-collection latency be
+    tuned so completion order can be forced to differ from input order.
+
+    ``delays`` maps a collection name to the seconds its ``search`` sleeps.
+    ``raises`` is a set of collections that raise ``VectorServiceError``.
+    """
+
+    def __init__(self, results_by_col, delays=None, raises=None):
+        import threading
+        self._results = results_by_col
+        self._delays = delays or {}
+        self._raises = raises or set()
+        self._voyage_client = "fake-voyage"
+        self._lock = threading.Lock()
+        self._inflight = 0
+        self.max_inflight = 0
+
+    def search(self, query, collection_names, n_results=10, where=None):
+        import time
+        from nexus.db.http_vector_client import VectorServiceError
+        name = collection_names[0]
+        with self._lock:
+            self._inflight += 1
+            self.max_inflight = max(self.max_inflight, self._inflight)
+        try:
+            time.sleep(self._delays.get(name, 0.0))
+            if name in self._raises:
+                raise VectorServiceError(f"{name} unservable")
+            return self._results.get(name, [])
+        finally:
+            with self._lock:
+                self._inflight -= 1
+
+
+class TestParallelFanOut:
+    """nexus-o51et: the per-collection fan-out runs concurrently but the merge
+    is deterministic in ``collections`` order regardless of completion order,
+    and a single unservable collection does not sink the whole search.
+    """
+
+    def test_result_order_independent_of_completion_order(self):
+        # Earlier collections sleep longer, so they complete LAST. If the merge
+        # depended on completion order the per-collection blocks would be
+        # reversed; assert they follow input order instead.
+        cols = ["knowledge__a", "knowledge__b", "knowledge__c"]
+        t3 = _ConcurrentFakeT3(
+            {
+                "knowledge__a": [{"id": "a", "content": "x", "distance": 0.10}],
+                "knowledge__b": [{"id": "b", "content": "x", "distance": 0.10}],
+                "knowledge__c": [{"id": "c", "content": "x", "distance": 0.10}],
+            },
+            delays={"knowledge__a": 0.06, "knowledge__b": 0.03, "knowledge__c": 0.0},
+            raises=set(),
+        )
+        results = search_cross_corpus(
+            "test", cols, 10, t3, threshold_override=float("inf"),
+            cluster_by=None,
+        )
+        assert [r.collection for r in results] == cols
+        assert [r.id for r in results] == ["a", "b", "c"]
+
+    def test_fan_out_runs_concurrently(self):
+        cols = [f"knowledge__c{i}" for i in range(5)]
+        t3 = _ConcurrentFakeT3(
+            {c: [{"id": c, "content": "x", "distance": 0.10}] for c in cols},
+            delays={c: 0.05 for c in cols},
+        )
+        search_cross_corpus(
+            "test", cols, 10, t3, threshold_override=float("inf"),
+            cluster_by=None,
+        )
+        assert t3.max_inflight > 1  # genuinely parallel, not serialized
+
+    def test_one_failed_collection_does_not_sink_search(self):
+        cols = ["knowledge__ok", "knowledge__bad", "knowledge__ok2"]
+        t3 = _ConcurrentFakeT3(
+            {
+                "knowledge__ok": [{"id": "ok", "content": "x", "distance": 0.10}],
+                "knowledge__ok2": [{"id": "ok2", "content": "x", "distance": 0.10}],
+            },
+            raises={"knowledge__bad"},
+        )
+        results = search_cross_corpus(
+            "test", cols, 10, t3, threshold_override=float("inf"),
+            cluster_by=None,
+        )
+        assert {r.id for r in results} == {"ok", "ok2"}
+
     def test_override_applies_uniformly_across_collections(self):
         """One override replaces the per-corpus threshold for every collection."""
         t3 = _ThresholdFakeT3({
@@ -626,41 +716,59 @@ class TestAttachDisplayPaths:
     def test_attaches_catalog_resolved_path(self):
         """WITH TEETH: the resolved file_path lands on the metadata
         dict under ``_display_path``. A regression that drops the
-        write or routes through the wrong key fails this test."""
-        catalog = MagicMock()
-        catalog.by_doc_id.return_value = SimpleNamespace(
-            file_path="/abs/from/catalog.py",
-        )
+        write or routes through the wrong key fails this test.
+
+        Updated for nexus-7lm3q batch path: catalogs now expose resolve_many()
+        which is called instead of by_doc_id(). The OldCatalog helper class
+        (without resolve_many) tests the legacy fallback path."""
+        class _Catalog:
+            """Catalog that exposes resolve_many (the new batch path)."""
+            def resolve_many(self, doc_ids):
+                return {
+                    did: SimpleNamespace(file_path="/abs/from/catalog.py")
+                    for did in doc_ids
+                }
+
         r = self._result(doc_id="ART-deadbeef", source_path="src/legacy.py")
-        _attach_display_paths([r], catalog=catalog)
-        catalog.by_doc_id.assert_called_once_with("ART-deadbeef")
+        _attach_display_paths([r], catalog=_Catalog())
         assert r.metadata["_display_path"] == "/abs/from/catalog.py"
         # source_path stays untouched: the prune verb owns its removal.
         assert r.metadata["source_path"] == "src/legacy.py"
 
     def test_doc_id_with_no_catalog_entry_leaves_field_unset(self):
-        catalog = MagicMock()
-        catalog.by_doc_id.return_value = None
+        class _Catalog:
+            def resolve_many(self, doc_ids):
+                return {}  # no entries found
+
         r = self._result(doc_id="ART-orphan", source_path="src/legacy.py")
-        _attach_display_paths([r], catalog=catalog)
+        _attach_display_paths([r], catalog=_Catalog())
         assert "_display_path" not in r.metadata
 
     def test_repeated_doc_id_only_hits_catalog_once(self):
         """Multi-chunk results sharing the same doc_id share one
         catalog lookup. Pre-fix code that loops per result without a
         cache hits the catalog N times (slow on large result sets).
-        """
-        catalog = MagicMock()
-        catalog.by_doc_id.return_value = SimpleNamespace(
-            file_path="/abs/foo.py",
-        )
+
+        Updated for nexus-7lm3q: resolve_many is called ONCE for all
+        distinct doc_ids, even when the same doc_id repeats across results."""
+        call_count = 0
+
+        class _Catalog:
+            def resolve_many(self, doc_ids):
+                nonlocal call_count
+                call_count += 1
+                return {
+                    did: SimpleNamespace(file_path="/abs/foo.py")
+                    for did in doc_ids
+                }
+
         results = [
             self._result(doc_id="ART-shared"),
             self._result(doc_id="ART-shared"),
             self._result(doc_id="ART-shared"),
         ]
-        _attach_display_paths(results, catalog=catalog)
-        assert catalog.by_doc_id.call_count == 1
+        _attach_display_paths(results, catalog=_Catalog())
+        assert call_count == 1
         for r in results:
             assert r.metadata["_display_path"] == "/abs/foo.py"
 
@@ -731,14 +839,34 @@ class TestAttachDocIdsFromCatalog:
 
     def test_preserves_existing_doc_id_legacy_fallback(self):
         """Pre-Phase-3 chunks may still carry doc_id in metadata; the
-        helper must NOT overwrite the legacy field, only fill the gap."""
+        helper must NOT overwrite the legacy field, only fill the gap.
+
+        nexus-7lm3q critic Sig-3: this previously used ``MagicMock()``, whose
+        auto-created ``get_manifests`` made ``manifest_cache.update(mock)`` a
+        silent no-op — so the batch path ran but chunk_count/chunk_index were
+        never exercised. Use a concrete catalog so the batch path is genuinely
+        driven and the gap-fill is asserted (LEGACY-doc preserved, chunk_count
+        filled in from the manifest)."""
         from nexus.search_engine import _attach_doc_ids_from_catalog
         chash = "b" * 64
-        catalog = MagicMock()
-        catalog.docs_for_chashes.return_value = {chash: ["MANIFEST-doc"]}
+
+        class _Catalog:
+            """Batch-capable catalog (has get_manifests)."""
+            def docs_for_chashes(self, chashes):
+                # The chunk already carries doc_id, so this fallback resolution
+                # is not used; return a different doc to prove it's ignored.
+                return {chash: ["MANIFEST-doc"]}
+            def get_manifests(self, doc_ids):
+                # Keyed on the LEGACY doc_id (the preserved one), not MANIFEST-doc.
+                return {did: [{"chash": chash, "position": 0}] for did in doc_ids}
+
         r = self._result(chunk_text_hash=chash, doc_id="LEGACY-doc")
-        _attach_doc_ids_from_catalog([r], catalog=catalog)
+        _attach_doc_ids_from_catalog([r], catalog=_Catalog())
+        # Legacy doc_id preserved (not overwritten by MANIFEST-doc) ...
         assert r.metadata["doc_id"] == "LEGACY-doc"
+        # ... and the gap (chunk_count/chunk_index) IS filled via the batch.
+        assert r.metadata["chunk_count"] == 1
+        assert r.metadata["chunk_index"] == 0
 
     def test_chash_with_no_manifest_entry_leaves_field_unset(self):
         from nexus.search_engine import _attach_doc_ids_from_catalog
@@ -908,3 +1036,224 @@ class TestPerCollectionErrorIsolation:
             and entry["collection"] == "knowledge__seam"
             for entry in logs
         )
+
+
+# ── nexus-7lm3q: batch manifest/resolve, backward-compat fallback ────────────
+
+
+class TestAttachDocIdsBatchManifest:
+    """nexus-7lm3q: _attach_doc_ids_from_catalog uses get_manifests() batch
+    when available, falls back to per-doc get_manifest() loop when the
+    catalog predates the new method."""
+
+    def _result(self, *, chunk_text_hash: str = "", doc_id: str = "") -> SearchResult:
+        meta: dict = {}
+        if chunk_text_hash:
+            meta["chunk_text_hash"] = chunk_text_hash
+        if doc_id:
+            meta["doc_id"] = doc_id
+        return SearchResult(
+            id=f"r-{chunk_text_hash[:8] or doc_id or 'x'}",
+            content="x", distance=0.1, collection="docs__c", metadata=meta,
+        )
+
+    def test_batch_path_uses_get_manifests_when_available(self):
+        """WITH TEETH: catalog with get_manifests() gets ONE batch call,
+        NOT N per-doc get_manifest() calls. Reverting the batch path
+        regresses to N calls and this test fails."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+
+        chash_a = "a" * 64
+        chash_b = "b" * 64
+        catalog = MagicMock()
+        catalog.docs_for_chashes.return_value = {
+            chash_a: ["doc-A"],
+            chash_b: ["doc-B"],
+        }
+        # Return one chunk row per doc (position=0, chash matches)
+        catalog.get_manifests.return_value = {
+            "doc-A": [{"chash": chash_a, "position": 0}],
+            "doc-B": [{"chash": chash_b, "position": 0}],
+        }
+        r_a = self._result(chunk_text_hash=chash_a)
+        r_b = self._result(chunk_text_hash=chash_b)
+        _attach_doc_ids_from_catalog([r_a, r_b], catalog=catalog)
+
+        # Exactly one batch call, zero per-doc calls.
+        catalog.get_manifests.assert_called_once()
+        catalog.get_manifest.assert_not_called()
+
+        assert r_a.metadata["chunk_count"] == 1
+        assert r_b.metadata["chunk_count"] == 1
+        assert r_a.metadata["chunk_index"] == 0
+        assert r_b.metadata["chunk_index"] == 0
+
+    def test_fallback_to_per_doc_when_get_manifests_absent(self):
+        """Catalog without get_manifests() must fall through to the existing
+        per-doc loop. Both old and new backends pass."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+
+        chash = "c" * 64
+
+        class OldCatalog:
+            """Simulates a pre-batch catalog - no get_manifests attribute."""
+            def docs_for_chashes(self, chashes):
+                return {chash: ["doc-C"]}
+            def get_manifest(self, doc_id):
+                return [{"chash": chash, "position": 0}]
+
+        r = self._result(chunk_text_hash=chash)
+        _attach_doc_ids_from_catalog([r], catalog=OldCatalog())
+
+        assert r.metadata["doc_id"] == "doc-C"
+        assert r.metadata["chunk_count"] == 1
+        assert r.metadata["chunk_index"] == 0
+
+    def test_batch_failure_does_not_poison_search(self):
+        """get_manifests() raising must degrade gracefully (no chunk_count/
+        chunk_index stamped) without aborting the search."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+
+        chash = "d" * 64
+        catalog = MagicMock()
+        catalog.docs_for_chashes.return_value = {chash: ["doc-D"]}
+        catalog.get_manifests.side_effect = RuntimeError("service dead")
+        r = self._result(chunk_text_hash=chash)
+        _attach_doc_ids_from_catalog([r], catalog=catalog)
+
+        # doc_id should still be injected; chunk_count/chunk_index absent.
+        assert r.metadata["doc_id"] == "doc-D"
+        assert "chunk_count" not in r.metadata
+        assert "chunk_index" not in r.metadata
+
+    def test_legacy_chunk_count_not_overwritten_by_batch(self):
+        """Legacy pre-Phase-3 chunks that already carry chunk_count must
+        not have it overwritten by the batch manifest path."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+
+        chash = "e" * 64
+        catalog = MagicMock()
+        catalog.docs_for_chashes.return_value = {chash: ["doc-E"]}
+        catalog.get_manifests.return_value = {
+            "doc-E": [{"chash": chash, "position": 0}],
+        }
+        r = self._result(chunk_text_hash=chash)
+        r.metadata["chunk_count"] = 99  # legacy field already set
+        _attach_doc_ids_from_catalog([r], catalog=catalog)
+
+        assert r.metadata["chunk_count"] == 99  # must be preserved
+
+    def test_partial_batch_response_handled(self):
+        """nexus-7lm3q critic obs: a manifest batch that returns only SOME of
+        the requested doc_ids stamps chunk_count for the present ones and
+        leaves the absent ones unstamped (no crash, no cross-contamination)."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+
+        chash_a = "a" * 64
+        chash_b = "b" * 64
+        catalog = MagicMock()
+        catalog.docs_for_chashes.return_value = {
+            chash_a: ["doc-A"],
+            chash_b: ["doc-B"],
+        }
+        # Only doc-A comes back; doc-B absent from the batch response.
+        catalog.get_manifests.return_value = {
+            "doc-A": [{"chash": chash_a, "position": 0}],
+        }
+        r_a = self._result(chunk_text_hash=chash_a)
+        r_b = self._result(chunk_text_hash=chash_b)
+        _attach_doc_ids_from_catalog([r_a, r_b], catalog=catalog)
+
+        assert r_a.metadata["chunk_count"] == 1
+        assert r_a.metadata["chunk_index"] == 0
+        # doc-B still gets its doc_id resolved, but no manifest-derived fields.
+        assert r_b.metadata["doc_id"] == "doc-B"
+        assert "chunk_count" not in r_b.metadata
+        assert "chunk_index" not in r_b.metadata
+
+
+class TestAttachDisplayPathsBatch:
+    """nexus-7lm3q: _attach_display_paths uses resolve_many() batch
+    when available, falls back to per-doc by_doc_id() loop when absent."""
+
+    def _result(self, doc_id: str) -> SearchResult:
+        return SearchResult(
+            id=f"r-{doc_id}", content="x", distance=0.1,
+            collection="code__c", metadata={"doc_id": doc_id},
+        )
+
+    def test_batch_path_uses_resolve_many_when_available(self):
+        """WITH TEETH: catalog with resolve_many() gets ONE call, no
+        by_doc_id() calls. Reverting regresses to N calls."""
+        from nexus.search_engine import _attach_display_paths
+
+        catalog = MagicMock()
+        catalog.resolve_many.return_value = {
+            "doc-1": SimpleNamespace(file_path="/a/b/one.py"),
+            "doc-2": SimpleNamespace(file_path="/a/b/two.py"),
+        }
+        r1 = self._result("doc-1")
+        r2 = self._result("doc-2")
+        _attach_display_paths([r1, r2], catalog=catalog)
+
+        catalog.resolve_many.assert_called_once()
+        catalog.by_doc_id.assert_not_called()
+
+        assert r1.metadata["_display_path"] == "/a/b/one.py"
+        assert r2.metadata["_display_path"] == "/a/b/two.py"
+
+    def test_fallback_to_by_doc_id_when_resolve_many_absent(self):
+        """Catalog without resolve_many() must use per-doc by_doc_id()."""
+        from nexus.search_engine import _attach_display_paths
+
+        class OldCatalog:
+            def by_doc_id(self, doc_id):
+                return SimpleNamespace(file_path=f"/path/{doc_id}.py")
+
+        r = self._result("old-doc")
+        _attach_display_paths([r], catalog=OldCatalog())
+
+        assert r.metadata["_display_path"] == "/path/old-doc.py"
+
+    def test_batch_failure_does_not_poison_search(self):
+        """resolve_many() raising must degrade gracefully."""
+        from nexus.search_engine import _attach_display_paths
+
+        catalog = MagicMock()
+        catalog.resolve_many.side_effect = RuntimeError("service dead")
+        r = self._result("doc-X")
+        _attach_display_paths([r], catalog=catalog)
+
+        assert "_display_path" not in r.metadata
+
+    def test_partial_batch_response_handled(self):
+        """resolve_many() may return fewer entries than requested
+        (missing doc_ids). Results with no entry remain unpopulated."""
+        from nexus.search_engine import _attach_display_paths
+
+        catalog = MagicMock()
+        catalog.resolve_many.return_value = {
+            "doc-found": SimpleNamespace(file_path="/found.py"),
+            # doc-missing intentionally absent
+        }
+        r_found = self._result("doc-found")
+        r_missing = self._result("doc-missing")
+        _attach_display_paths([r_found, r_missing], catalog=catalog)
+
+        assert r_found.metadata["_display_path"] == "/found.py"
+        assert "_display_path" not in r_missing.metadata
+
+    def test_multi_chunk_results_all_populated(self):
+        """Multiple results with the same doc_id all get the display path."""
+        from nexus.search_engine import _attach_display_paths
+
+        catalog = MagicMock()
+        catalog.resolve_many.return_value = {
+            "shared-doc": SimpleNamespace(file_path="/shared.py"),
+        }
+        results = [self._result("shared-doc") for _ in range(3)]
+        _attach_display_paths(results, catalog=catalog)
+
+        catalog.resolve_many.assert_called_once()
+        for r in results:
+            assert r.metadata["_display_path"] == "/shared.py"

@@ -93,7 +93,7 @@ def _apply_chroma_http_timeout(client: object) -> None:
             write=CHROMA_HTTP_WRITE_TIMEOUT_S,
             pool=CHROMA_HTTP_POOL_TIMEOUT_S,
         )
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001 — defensive timeout-override catch; logged at warning
         _log.warning("chroma_http_timeout_override_failed", error=str(exc))
 
 
@@ -327,7 +327,7 @@ class T3Database:
 
         # ── Local mode: injected client over a local-EF dispatch ──────────
         if local_mode:
-            from pathlib import Path
+            from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
             p = Path(local_path)
             p.mkdir(parents=True, exist_ok=True)
             self._client = _client
@@ -339,7 +339,7 @@ class T3Database:
         # used (the eager top-level import was multi-second cold-start
         # cost on every CLI invocation through the indirect import chain).
         if voyage_api_key:
-            import voyageai  # noqa: PLC0415
+            import voyageai  # noqa: PLC0415 — optional/heavy dependency deferred (voyageai)
             self._voyage_client = voyageai.Client(
                 api_key=voyage_api_key,
                 timeout=read_timeout_seconds,
@@ -398,7 +398,7 @@ class T3Database:
     def _build_embedding_fn(self, collection_name: str):
         """Construct (uncached) the EF for *collection_name*. Bidirectional
         name-aware dispatch — see :meth:`_embedding_fn` docstring."""
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — command-local import (db.local_ef)
 
         parsed_token = embedding_model_for_collection_name(collection_name)
         is_local_token = parsed_token in LOCAL_EMBEDDING_MODELS
@@ -555,7 +555,7 @@ class T3Database:
                 if _doc_bytes(doc) > max_bytes:
                     source = metadatas[i].get("source_path", "<unknown>") if i < len(metadatas) else "<unknown>"
                     if fail_on_oversized:
-                        from nexus.errors import PutOversizedError
+                        from nexus.errors import PutOversizedError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
                         raise PutOversizedError(
                             doc_id=ids[i],
@@ -706,7 +706,7 @@ class T3Database:
         legacy collections opt out via an explicit ``strict=False``
         keyword argument.
         """
-        from nexus.corpus import (
+        from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
             is_conformant_collection_name, validate_collection_name,
         )
         validate_collection_name(name)
@@ -732,14 +732,14 @@ class T3Database:
         if _bypass_canonical_schema(name):
             metadata: dict = {"hnsw:space": "cosine"}
             if self._local_mode:
-                from nexus.config import load_config
+                from nexus.config import load_config  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
                 cfg = load_config()
                 metadata["hnsw:search_ef"] = cfg.get("search", {}).get("hnsw_ef", 256)
             kwargs: dict = {"embedding_function": None, "metadata": metadata}
         else:
             kwargs = {"embedding_function": self._embedding_fn(name)}
             if self._local_mode:
-                from nexus.config import load_config
+                from nexus.config import load_config  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
                 cfg = load_config()
                 hnsw_ef = cfg.get("search", {}).get("hnsw_ef", 256)
                 kwargs["metadata"] = {"hnsw:search_ef": hnsw_ef}
@@ -778,7 +778,7 @@ class T3Database:
         cluster geometry). Reorder explicitly, exactly like the service
         path's ``PgVectorRepository.getEmbeddings``.
         """
-        import numpy as np
+        import numpy as np  # noqa: PLC0415 — heavy/optional dep deferred
 
         col = _chroma_with_retry(
             self._client_for(collection_name).get_collection, collection_name,
@@ -835,7 +835,7 @@ class T3Database:
         string is the legacy / no-catalog path; ``normalize`` Step 4c
         drops the field on the way to T3.
         """
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         # MCP-stored docs are single-chunk: chunk_text == content, so the
         # natural ID (chunk_text_hash[:32], per RDR-108 D1 / nexus-kmb6)
@@ -1179,7 +1179,7 @@ class T3Database:
 
         Returns the total number of deleted documents.
         """
-        from nexus.metadata_schema import is_expired  # noqa: PLC0415
+        from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         # ChromaDB only supports numeric $lt/$gt, so pre-filter by
         # ttl_days > 0 (eliminates permanent entries) then check
@@ -1260,7 +1260,7 @@ class T3Database:
         Queries the single ChromaDB client and parallelizes count queries
         up to 8 concurrent requests.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415 — stdlib import kept branch-local
 
         try:
             raw = self._client.list_collections()
@@ -1281,7 +1281,7 @@ class T3Database:
             for future in as_completed(futures):
                 try:
                     result.append(future.result())
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — per-collection count failure in thread pool; logged, other collections counted
                     name = futures[future]
                     _log.warning("list_collections_count_failed", collection=name, error=str(exc))
         return sorted(result, key=lambda r: r["name"])
@@ -1306,7 +1306,7 @@ class T3Database:
         exposes this primitive as ``nx collection rename``. Caller
         guarantees ``new`` does not collide (we raise here if it does).
         """
-        from nexus.corpus import validate_collection_name
+        from nexus.corpus import validate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         validate_collection_name(new)
         client = self._client_for(old)
         if self.collection_exists(new):
@@ -1803,14 +1803,14 @@ def apply_hnsw_ef(db: "T3Database") -> int:
     path — pgvector tunes HNSW server-side via ``SET LOCAL
     hnsw.iterative_scan``; RDR-155 P4a.2, nexus-1k8s1).
     """
-    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — circular-dep avoidance (db.http_vector_client)
 
     if is_service_backed(db):
         return 0
     if not db._local_mode:
         return 0
 
-    from nexus.config import load_config
+    from nexus.config import load_config  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     cfg = load_config()
     hnsw_ef: int = cfg.get("search", {}).get("hnsw_ef", 256)
 

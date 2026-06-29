@@ -12,6 +12,7 @@ import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -113,6 +114,12 @@ class AspectRepositoryTest {
                 su.createStatement().execute(
                     "GRANT USAGE ON SEQUENCE nexus." + table + "_id_seq TO " + SVC_ROLE);
             }
+            // RDR-164 P1a: aspect/highlight/queue writes now ensure-register their collection
+            // (catalog_collections stub) to satisfy the new fk-003 collection FKs, so the
+            // service role needs INSERT on catalog_collections (production grants this via
+            // GRANT ... ON ALL TABLES IN SCHEMA nexus; the test role is scoped explicitly).
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
 
@@ -545,8 +552,8 @@ class AspectRepositoryTest {
 
         repo.markFailed(TENANT_A, "failretry-coll", "fr.pdf", "extractor crashed");
         // After failed, isDrained excludes failed — still counts as not-done
-        // Now retry: resets to pending
-        repo.markRetry(TENANT_A, "failretry-coll", "fr.pdf");
+        // Now retry with interval 0 (immediately ready): resets to pending
+        repo.markRetry(TENANT_A, "failretry-coll", "fr.pdf", 0L);
         int cnt = repo.pendingCount(TENANT_A);
         assertThat(cnt).isGreaterThanOrEqualTo(1);
     }
@@ -660,8 +667,51 @@ class AspectRepositoryTest {
         importBody.put("retry_count", 1);
         repo.importQueueRow(TENANT_A, importBody);
 
-        // pending_count confirms row is still there
-        assertThat(repo.pendingCount(TENANT_A)).isGreaterThanOrEqualTo(1);
+        // GREATEST(existing, EXCLUDED) must keep retry_count=3, NOT overwrite to 1.
+        // Read the value back (a plain EXCLUDED.retry_count overwrite would yield 1 and
+        // pass a >= 1 assertion — this exact-value check is the non-vacuous guard).
+        Map<String, Object> row = repo.listPending(TENANT_A, 1000).stream()
+            .filter(r -> "gr.pdf".equals(r.get("source_path")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("imported queue row gr.pdf not found in listPending"));
+        assertThat(((Number) row.get("retry_count")).intValue())
+            .as("GREATEST(retry_count) must preserve the higher existing value (3), not the stale import (1)")
+            .isEqualTo(3);
+    }
+
+    @Test @Order(39)
+    void importQueueRow_least_enqueuedAt_keepsEarliest() {
+        // LEAST(existing.enqueued_at, EXCLUDED.enqueued_at): a later re-import must NOT
+        // push enqueued_at forward. A plain EXCLUDED.enqueued_at overwrite would replace
+        // the earlier value and pass any "row exists" assertion — so read the value back.
+        String tenant = "etl-least-tenant-" + System.nanoTime();
+        String path   = "least.pdf";
+        String early  = "2025-01-01T00:00:00.000000Z";
+        String later  = "2026-06-01T00:00:00.000000Z";
+
+        var seed = new java.util.LinkedHashMap<String, Object>();
+        seed.put("collection",  "least-coll");
+        seed.put("source_path", path);
+        seed.put("status",      "pending");
+        seed.put("retry_count", 0);
+        seed.put("enqueued_at", early);
+        repo.importQueueRow(tenant, seed);
+
+        seed.put("enqueued_at", later);   // stale (later) re-import
+        repo.importQueueRow(tenant, seed);
+
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT enqueued_at FROM nexus.aspect_extraction_queue "
+                + "WHERE tenant_id = '" + tenant + "' AND source_path = '" + path + "'");
+            assertThat(rs.next()).as("queue row must exist").isTrue();
+            var enqueuedAt = rs.getObject("enqueued_at", java.time.OffsetDateTime.class).toInstant();
+            assertThat(enqueuedAt)
+                .as("LEAST(enqueued_at) must keep the EARLIER 2025 timestamp, not the later 2026 re-import")
+                .isEqualTo(java.time.OffsetDateTime.parse(early).toInstant());
+        } catch (Exception e) {
+            throw new AssertionError("failed to read back enqueued_at", e);
+        }
     }
 
     @Test @Order(39)
@@ -690,6 +740,242 @@ class AspectRepositoryTest {
         List<Map<String, Object>> batch = repo.claimBatch(TENANT_A, 3);
         assertThat(batch).as("claimBatch must return at most 3 rows").hasSizeLessThanOrEqualTo(3);
         assertThat(batch).as("claimBatch must return at least 1 row").isNotEmpty();
+    }
+
+    // ── next_retry_at backoff gate (RDR-163 P0, nexus-795gv) ────────────────────
+
+    @Test @Order(41)
+    void claimNext_skipsRowWithFutureNextRetryAt() throws Exception {
+        // Isolated tenant so claimNext sees ONLY this row.
+        String tenant = "nra-future-tenant-" + System.nanoTime();
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "nra-coll");
+        body.put("source_path", "future.pdf");
+        repo.enqueue(tenant, body);
+
+        // Back the row off one hour into the future (server clock).
+        setNextRetryAt(tenant, "future.pdf",
+            OffsetDateTime.now(ZoneOffset.UTC).plusHours(1));
+
+        Optional<Map<String, Object>> claimed = repo.claimNext(tenant);
+        assertThat(claimed)
+            .as("a row whose next_retry_at is in the future must NOT be claimed")
+            .isEmpty();
+    }
+
+    @Test @Order(42)
+    void claimNext_claimsRowWhenNextRetryAtNullOrElapsed() throws Exception {
+        String tenant = "nra-ready-tenant-" + System.nanoTime();
+
+        // Row 1: next_retry_at elapsed (5 min in the past) -> claimable.
+        var past = new java.util.LinkedHashMap<String, Object>();
+        past.put("collection",  "nra-coll");
+        past.put("source_path", "past.pdf");
+        repo.enqueue(tenant, past);
+        setNextRetryAt(tenant, "past.pdf",
+            OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5));
+
+        // Row 2: next_retry_at left NULL (the enqueue default) -> claimable.
+        var nul = new java.util.LinkedHashMap<String, Object>();
+        nul.put("collection",  "nra-coll");
+        nul.put("source_path", "null.pdf");
+        repo.enqueue(tenant, nul);
+
+        // Both branches of the gate (IS NULL OR <= now()) must admit a claim.
+        List<Map<String, Object>> claimed = repo.claimBatch(tenant, 10);
+        List<Object> paths = claimed.stream().map(r -> r.get("source_path")).toList();
+        assertThat(paths)
+            .as("both an elapsed-next_retry_at row and a NULL-next_retry_at row must be claimable")
+            .containsExactlyInAnyOrder("past.pdf", "null.pdf");
+    }
+
+    @Test @Order(43)
+    void reclaimStale_leavesNextRetryAtUnchanged_andRowImmediatelyClaimable() throws Exception {
+        String tenant = "nra-reclaim-tenant-" + System.nanoTime();
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "nra-coll");
+        body.put("source_path", "reclaim.pdf");
+        repo.enqueue(tenant, body);
+
+        // Stamp a known PAST next_retry_at so the row is claimable, then claim it
+        // (-> in_progress). claimNext must not touch next_retry_at. Truncate to
+        // microseconds: PG TIMESTAMPTZ has microsecond precision, so a nanosecond
+        // Java value would round on store and break the exact round-trip equality
+        // below (passes or fails depending on the random sub-microsecond digits).
+        OffsetDateTime backoff = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10)
+            .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        setNextRetryAt(tenant, "reclaim.pdf", backoff);
+        assertThat(repo.claimNext(tenant))
+            .as("setup: a past-next_retry_at row must claim into in_progress")
+            .isPresent();
+
+        // Worker dies -> reclaimStale resets in_progress -> pending. It must NOT
+        // write next_retry_at: clearing it would bypass the backoff cap, bumping
+        // it would punish a crash (RDR-163 §Consequences, AspectRepository invariant).
+        int reclaimed = repo.reclaimStale(tenant, 0);
+        assertThat(reclaimed).as("reclaimStale must reclaim the stale row").isGreaterThanOrEqualTo(1);
+
+        OffsetDateTime after = readNextRetryAt(tenant, "reclaim.pdf");
+        assertThat(after).as("reclaimStale must leave next_retry_at populated").isNotNull();
+        assertThat(after.toInstant())
+            .as("reclaimStale must leave next_retry_at UNCHANGED (no cap-bypass, no crash-punish)")
+            .isEqualTo(backoff.toInstant());
+
+        // Because next_retry_at is in the past, the reclaimed row is claimable now.
+        assertThat(repo.claimNext(tenant))
+            .as("a reclaimed row whose next_retry_at is in the past must be immediately claimable")
+            .isPresent();
+    }
+
+    @Test @Order(44)
+    void reclaimStale_leavesNullNextRetryAtNull_andRowClaimable() throws Exception {
+        // Complement to Order(43): the common pre-P1 state is next_retry_at NULL.
+        // reclaimStale must not invent a value (which would back off a crash-victim).
+        String tenant = "nra-reclaim-null-tenant-" + System.nanoTime();
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "nra-coll");
+        body.put("source_path", "reclaim-null.pdf");
+        repo.enqueue(tenant, body);                 // next_retry_at left NULL (default)
+
+        assertThat(repo.claimNext(tenant))
+            .as("setup: NULL-next_retry_at row claims into in_progress").isPresent();
+
+        int reclaimed = repo.reclaimStale(tenant, 0);
+        assertThat(reclaimed).as("reclaimStale must reclaim the stale row").isGreaterThanOrEqualTo(1);
+
+        assertThat(readNextRetryAt(tenant, "reclaim-null.pdf"))
+            .as("reclaimStale must leave a NULL next_retry_at NULL (no spurious backoff stamp)")
+            .isNull();
+        assertThat(repo.claimNext(tenant))
+            .as("a reclaimed NULL-next_retry_at row is immediately claimable").isPresent();
+    }
+
+    @Test @Order(46)
+    void markRetry_stampsNextRetryAtServerSide_andBacksOffClaim() throws Exception {
+        String tenant = "markretry-tenant-" + System.nanoTime();
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "mr-coll");
+        body.put("source_path", "mr.pdf");
+        repo.enqueue(tenant, body);
+        repo.claimNext(tenant);                       // -> in_progress
+
+        long interval = 600;                          // 10 minutes
+        OffsetDateTime before = OffsetDateTime.now(ZoneOffset.UTC);
+        repo.markRetry(tenant, "mr-coll", "mr.pdf", interval);
+        OffsetDateTime after = OffsetDateTime.now(ZoneOffset.UTC);
+
+        // next_retry_at is stamped now()+interval on the SERVER clock. In testcontainers
+        // the DB shares the host clock, so [before, after] bound the server now() tightly;
+        // a 30s pad absorbs any residual skew without making the assertion vacuous.
+        OffsetDateTime nra = readNextRetryAt(tenant, "mr.pdf");
+        assertThat(nra).as("markRetry must stamp next_retry_at").isNotNull();
+        assertThat(nra.toInstant())
+            .as("next_retry_at must be now()+interval, server-stamped")
+            .isBetween(before.plusSeconds(interval).minusSeconds(30).toInstant(),
+                       after.plusSeconds(interval).plusSeconds(30).toInstant());
+
+        // retry_count incremented to 1 (row is pending; listPending is ungated so it shows).
+        Map<String, Object> row = repo.listPending(tenant, 100).stream()
+            .filter(r -> "mr.pdf".equals(r.get("source_path")))
+            .findFirst().orElseThrow(() -> new AssertionError("retried row not in listPending"));
+        assertThat(((Number) row.get("retry_count")).intValue())
+            .as("markRetry must increment retry_count").isEqualTo(1);
+
+        // The backoff is live: the row is NOT claimable until next_retry_at elapses.
+        assertThat(repo.claimNext(tenant))
+            .as("a just-retried row backed off into the future must not be claimable")
+            .isEmpty();
+    }
+
+    @Test @Order(47)
+    void reEnqueue_clearsStaleBackoff_rowImmediatelyClaimable() throws Exception {
+        // RDR-163 P1 (nexus-ztpt6) H-1: a re-enqueue resets retry_count to 0, so
+        // it must also clear next_retry_at — otherwise a row backed off by a prior
+        // mark_retry stays silently held until the old backoff elapses.
+        String tenant = "reenqueue-backoff-tenant-" + System.nanoTime();
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "rb-coll");
+        body.put("source_path", "rb.pdf");
+        repo.enqueue(tenant, body);
+
+        // Back the row off far into the future (simulating a prior mark_retry).
+        setNextRetryAt(tenant, "rb.pdf", OffsetDateTime.now(ZoneOffset.UTC).plusHours(2));
+        assertThat(repo.claimNext(tenant))
+            .as("precondition: a backed-off row is not claimable").isEmpty();
+
+        // Re-enqueue at the same key: must clear the backoff and be claimable now.
+        repo.enqueue(tenant, body);
+        assertThat(readNextRetryAt(tenant, "rb.pdf"))
+            .as("re-enqueue must clear stale next_retry_at").isNull();
+        assertThat(repo.claimNext(tenant))
+            .as("re-enqueued row must be immediately claimable").isPresent();
+    }
+
+    @Test @Order(48)
+    void listFailed_returnsOnlyFailedRows_collectionScoped() {
+        // Isolated tenant so listFailed sees only this test's rows. doc_id omitted
+        // (NULL) to avoid the catalog_documents FK; doc_id round-trip is covered by
+        // the SQLite/HTTP list_failed tests and is structurally identical to the
+        // already-tested listPending map.
+        String tenant = "list-failed-tenant-" + System.nanoTime();
+        for (String[] cs : new String[][]{
+                {"lf-a", "a1.pdf"}, {"lf-a", "a2.pdf"}, {"lf-b", "b1.pdf"}}) {
+            var body = new java.util.LinkedHashMap<String, Object>();
+            body.put("collection", cs[0]);
+            body.put("source_path", cs[1]);
+            repo.enqueue(tenant, body);
+            repo.markFailed(tenant, cs[0], cs[1], "boom");
+        }
+        var pending = new java.util.LinkedHashMap<String, Object>();
+        pending.put("collection", "lf-a");
+        pending.put("source_path", "ok.pdf");
+        repo.enqueue(tenant, pending);   // stays pending
+
+        // All failed (pending excluded), FIFO by enqueued_at.
+        var all = repo.listFailed(tenant, null);
+        assertThat(all.stream().map(r -> r.get("source_path")).toList())
+            .as("listFailed returns only failed rows, FIFO")
+            .containsExactly("a1.pdf", "a2.pdf", "b1.pdf");
+
+        // Collection-scoped.
+        var scoped = repo.listFailed(tenant, "lf-a");
+        assertThat(scoped.stream().map(r -> r.get("source_path")).toList())
+            .as("listFailed honors the collection filter")
+            .containsExactly("a1.pdf", "a2.pdf");
+        assertThat(scoped).allSatisfy(r ->
+            assertThat(r.get("collection")).isEqualTo("lf-a"));
+    }
+
+    /** Set next_retry_at on a specific row via a superuser connection (bypasses RLS). */
+    private void setNextRetryAt(String tenant, String sourcePath, OffsetDateTime ts)
+            throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            try (var ps = su.prepareStatement(
+                    "UPDATE nexus.aspect_extraction_queue SET next_retry_at = ? "
+                    + "WHERE tenant_id = ? AND source_path = ?")) {
+                ps.setObject(1, ts);
+                ps.setString(2, tenant);
+                ps.setString(3, sourcePath);
+                int n = ps.executeUpdate();
+                assertThat(n).as("setNextRetryAt must update exactly one row").isEqualTo(1);
+            }
+        }
+    }
+
+    /** Read next_retry_at for a specific row via a superuser connection (bypasses RLS). */
+    private OffsetDateTime readNextRetryAt(String tenant, String sourcePath) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            try (var ps = su.prepareStatement(
+                    "SELECT next_retry_at FROM nexus.aspect_extraction_queue "
+                    + "WHERE tenant_id = ? AND source_path = ?")) {
+                ps.setString(1, tenant);
+                ps.setString(2, sourcePath);
+                ResultSet rs = ps.executeQuery();
+                assertThat(rs.next()).as("row must exist for readNextRetryAt").isTrue();
+                return rs.getObject("next_retry_at", OffsetDateTime.class);
+            }
+        }
     }
 
     // ── CONCURRENCY: claim_next distinctness ────────────────────────────────────

@@ -52,10 +52,11 @@ DEFAULT_TENANT: str = "default"
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 
 
-class HttpTelemetryStore:
+class HttpTelemetryStore(RawHandleGuardMixin):
     """Telemetry drop-in that delegates to the RDR-152 Java HTTP service.
 
     Uses a keep-alive :class:`httpx.Client` connection pool. Reads
@@ -85,8 +86,7 @@ class HttpTelemetryStore:
                     )
             self._base_url = base_url.rstrip("/")
         else:
-            host, port, token = _resolve_config()
-            self._base_url = f"http://{host}:{port}"
+            self._base_url, token = _resolve_endpoint()
             _token = token
 
         self._tenant = tenant
@@ -130,6 +130,86 @@ class HttpTelemetryStore:
         }
         resp = self._post("/v1/telemetry/relevance/log", payload)
         return int(resp.get("id", 0))
+
+    def record_tier_write(
+        self,
+        *,
+        session_id: str,
+        ts: str,
+        tool: str,
+        tier: str,
+        agent: str | None = None,
+        project: str | None = None,
+        target_title: str | None = None,
+    ) -> None:
+        """Record a tier-write event. Calls ``POST /v1/telemetry/tier_writes/record``.
+
+        nexus-pyzk7: the service-side table + endpoint already exist; this routes
+        the MCP consumer there instead of a raw SQLite conn the service has not.
+        """
+        self._post("/v1/telemetry/tier_writes/record", {
+            "session_id":   session_id,
+            "ts":           ts,
+            "tool":         tool,
+            "tier":         tier,
+            "agent":        agent,
+            "project":      project,
+            "target_title": target_title,
+        })
+
+    def record_nx_answer_run(
+        self,
+        *,
+        question: str,
+        plan_id: int | None,
+        matched_confidence: float | None,
+        step_count: int,
+        final_text: str,
+        cost_usd: float,
+        duration_ms: int,
+    ) -> None:
+        """Record an nx_answer run. Calls ``POST /v1/telemetry/nx_answer_runs/record``."""
+        self._post("/v1/telemetry/nx_answer_runs/record", {
+            "question":           question,
+            "plan_id":            plan_id,
+            "matched_confidence": matched_confidence,
+            "step_count":         step_count,
+            "final_text":         final_text,
+            "cost_usd":           cost_usd,
+            "duration_ms":        duration_ms,
+        })
+
+    def record_hook_failure(
+        self,
+        *,
+        doc_id: str,
+        collection: str,
+        hook_name: str,
+        error: str,
+        chain: str,
+        batch_doc_ids: str | None = None,
+        is_batch: bool = False,
+        occurred_at: str | None = None,
+    ) -> None:
+        """Record a hook failure. Calls ``POST /v1/telemetry/hook_failures/record``.
+
+        nexus-9613q.3: the service-side table + endpoint already exist; this
+        routes the hook_registry consumer there instead of a raw SQLite conn
+        the service-backed store has not (every row was silently dropped).
+        """
+        payload: dict[str, Any] = {
+            "doc_id":      doc_id,
+            "collection":  collection,
+            "hook_name":   hook_name,
+            "error":       error,
+            "chain":       chain,
+            "is_batch":    is_batch,
+        }
+        if batch_doc_ids is not None:
+            payload["batch_doc_ids"] = batch_doc_ids
+        if occurred_at is not None:
+            payload["occurred_at"] = occurred_at
+        self._post("/v1/telemetry/hook_failures/record", payload)
 
     def log_relevance_batch(
         self,
@@ -225,6 +305,16 @@ class HttpTelemetryStore:
         if days < 1:
             raise ValueError(f"days must be >= 1; got {days}")
         resp = self._post("/v1/telemetry/search/trim", {"days": days})
+        return int(resp.get("deleted", 0))
+
+    def trim_hook_failures(self, days: int = 30) -> int:
+        """Delete ``hook_failures`` rows older than *days* days (nexus-7365x).
+
+        Calls ``POST /v1/telemetry/hook_failures/trim``.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        resp = self._post("/v1/telemetry/hook_failures/trim", {"days": days})
         return int(resp.get("deleted", 0))
 
     def rename_collection(self, *, old: str, new: str) -> dict[str, int]:
@@ -432,7 +522,7 @@ class HttpTelemetryStore:
             return
         try:
             detail = resp.json().get("error", resp.text)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort detail extraction; falls back to raw response text on any parse failure
             detail = resp.text
         raise httpx.HTTPStatusError(
             f"HttpTelemetryStore.{op} failed: HTTP {resp.status_code}: {detail}",

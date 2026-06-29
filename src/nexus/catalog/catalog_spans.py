@@ -141,7 +141,7 @@ def fallback_chash_scan(
 
     try:
         all_cols = [c.name for c in t3.list_collections()]
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback scan; T3 list failure is logged and degrades to no-match, must not crash caller
         _log.debug("chash_fallback_list_collections_failed", exc_info=True)
         return None
 
@@ -157,7 +157,7 @@ def fallback_chash_scan(
     def _probe(coll: str) -> dict | None:
         try:
             return resolve_span_in_t3(span, coll, t3)
-        except Exception:
+        except Exception:  # noqa: BLE001 — per-collection probe in parallel scan; a single collection failure must not abort the fan-out, treat as miss
             return None
 
     deadline = time.monotonic() + _CHASH_FALLBACK_DEADLINE_S
@@ -215,7 +215,7 @@ def fallback_chash_scan(
                         include=[],
                     )
                     doc_id = hit["ids"][0] if hit["ids"] else ""
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort doc_id recovery on a confirmed hit; failure degrades to empty doc_id, the span text is still returned
                     doc_id = ""
                 return build_ref(
                     coll=coll, doc_id=doc_id, span_result=span_res,
@@ -300,7 +300,7 @@ def resolve_chash_globally(
         try:
             live = {c.name for c in t3.list_collections()}
             list_failed = False
-        except Exception:
+        except Exception:  # noqa: BLE001 — transient T3 list failure must not purge the chash index (nexus-8g79.3); logged at WARNING, self-heal skipped this pass
             _log.warning(
                 "chash_index_selfheal_skipped_list_collections_failed",
                 chash_prefix=hex_chash[:16],
@@ -328,7 +328,7 @@ def resolve_chash_globally(
                     chash_index.delete_stale(
                         chash=hex_chash, collection=row["collection"],
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort stale-row cleanup; delete failure is logged at WARNING and self-heal continues, must not abort resolution
                     _log.warning(
                         "chash_index_selfheal_delete_failed",
                         chash_prefix=hex_chash[:16],
@@ -343,7 +343,7 @@ def resolve_chash_globally(
         for row in sorted(survivors, key=_sort_key):
             try:
                 span_res = resolve_span_in_t3(span, row["collection"], t3)
-            except Exception:
+            except Exception:  # noqa: BLE001 — per-candidate resolution failure falls through to the next survivor / T3 fallback, must not abort the loop
                 span_res = None
             if span_res is None:
                 continue
@@ -397,13 +397,13 @@ def resolve_span_text_for_entry(
     # Content-hash span: look up by chunk_text_hash in T3
     if span.startswith("chash:") and entry.physical_collection:
         try:
-            from nexus.db import make_t3
+            from nexus.db import make_t3  # noqa: PLC0415 — function-local to avoid a circular import (nexus.db imports catalog)
             t3 = make_t3()
             result = resolve_span_in_t3(
                 span, entry.physical_collection, t3._client,
             )
             return result["chunk_text"] if result else None
-        except Exception:
+        except Exception:  # noqa: BLE001 — span resolution is best-effort; failure is logged at WARNING and degrades to None, must not crash caller
             _log.warning(
                 "resolve_span_text_failed",
                 span=span,
@@ -421,7 +421,7 @@ def resolve_span_text_for_entry(
                 encoding="utf-8",
             ).splitlines()
             return "\n".join(lines[start - 1:end])
-        except Exception:
+        except Exception:  # noqa: BLE001 — line-range read is best-effort (missing/unreadable file); degrades to None rather than crashing the resolver
             return None
 
     # Chunk:char span: read from T3
@@ -431,7 +431,7 @@ def resolve_span_text_for_entry(
             int(m.group(1)), int(m.group(2)), int(m.group(3)),
         )
         try:
-            from nexus.db import make_t3
+            from nexus.db import make_t3  # noqa: PLC0415 — function-local to avoid a circular import (nexus.db imports catalog)
             t3 = make_t3()
             col = t3.get_or_create_collection(entry.physical_collection)
             doc_id = entry.meta.get("doc_id") or str(entry.tumbler)
@@ -482,7 +482,7 @@ def resolve_span_text_for_entry(
             if docs:
                 text = docs[0]
                 return text[char_start:char_end]
-        except Exception:
+        except Exception:  # noqa: BLE001 — chunk:char resolution is best-effort over T3/manifest; degrades to None rather than crashing the resolver
             return None
 
     return None

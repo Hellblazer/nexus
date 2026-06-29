@@ -103,7 +103,7 @@ def _rebuild_heartbeat(label: str, summary_builder=None):
             if summary_builder is not None:
                 try:
                     line = summary_builder(elapsed)
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort summary render; a builder bug must not mask the real work, falls back to plain message
                     # Never let a summary-rendering bug mask the real
                     # work — fall back to the plain message.
                     line = f"  Catalog: {label} done ({elapsed:.1f}s)"
@@ -124,7 +124,7 @@ def _count_lines(path: Path) -> int:
     try:
         with path.open("rb") as f:
             return sum(1 for _ in f)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort line count for heartbeat; any read error degrades to 0 (see docstring)
         return 0
 
 
@@ -315,7 +315,7 @@ _log = structlog.get_logger()
 
 def _default_registry_path() -> Path:
     """Return the default path to the repo registry JSON file."""
-    from nexus.config import nexus_config_dir
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance; config imports catalog helpers
 
     return nexus_config_dir() / "repos.json"
 
@@ -585,7 +585,7 @@ class Catalog:
         # means a future change to the projector's constructor (e.g.
         # taking a Phase-5 schema version flag) only has to be
         # threaded once.
-        from nexus.catalog.projector import Projector as _Projector
+        from nexus.catalog.projector import Projector as _Projector  # noqa: PLC0415 — circular-dep avoidance; projector imports catalog
         self._projector = _Projector(self._db)
         self.degraded: bool = False
         # RDR-101 Phase 3 follow-up B (nexus-o6aa.9.7): set when
@@ -630,10 +630,11 @@ class Catalog:
         # bootstrap. _read_consistency_marker / _ensure_consistent both
         # delegate through self._sync, so the composition has to be in
         # place when those calls fire.
-        from nexus.catalog.catalog_links import _LinkOps
-        from nexus.catalog.catalog_docs import _DocumentOps
-        from nexus.catalog.catalog_sync import _SyncOps
-        from nexus.catalog.catalog_writes import _WriteOps
+        from nexus.catalog.catalog_links import _LinkOps  # noqa: PLC0415 — circular-dep avoidance; _Ops facades import catalog
+        from nexus.catalog.catalog_docs import _DocumentOps  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.catalog.catalog_sync import _SyncOps  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.catalog.catalog_writes import _WriteOps  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.catalog.catalog_owners import _OwnerOps  # noqa: PLC0415 — circular-dep avoidance
         self._links = _LinkOps(self)
         self._docs = _DocumentOps(self)
         self._sync = _SyncOps(self)
@@ -641,6 +642,9 @@ class Catalog:
         # (update, delete, rename, supersede, alias) live in
         # catalog_writes._WriteOps.
         self._writes = _WriteOps(self)
+        # nexus-kgyoz: owner registration + owner-table queries live in
+        # catalog_owners._OwnerOps.
+        self._owners = _OwnerOps(self)
 
         self._last_consistency_mtime: float = self._read_consistency_marker()
 
@@ -717,7 +721,7 @@ class Catalog:
                 )
                 try:
                     self._write_to_event_log(event)
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort backfill event write; failure logged, backfill continues
                     _log.warning(
                         "catalog_backfill_event_write_failed",
                         collection_name=name,
@@ -847,7 +851,7 @@ class Catalog:
                 ).fetchone()[0]
                 if live_count > 0 and total_lines / live_count >= ratio:
                     return True
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort compaction check; failure surfaced at WARNING, returns False (see comment)
             # nexus-8g79.5: pre-fix the bare ``except: pass`` silently
             # disabled JSONL compaction whenever an exception fired
             # (transient read error, permissions hiccup). The next call
@@ -953,7 +957,7 @@ class Catalog:
             return
         try:
             self._write_to_event_log(event)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort shadow emit; failure logged, primary write path unaffected
             event_type = getattr(event, "type", "?")
             _log.warning(
                 "shadow_emit_failed",
@@ -968,133 +972,22 @@ class Catalog:
     def register_owner(
         self, name: str, owner_type: str, *, repo_hash: str = "", description: str = "", repo_root: str = ""
     ) -> Tumbler:
-        # nexus-zbne (part of nexus-b34f): owner_type="repo" without a
-        # repo_hash is the pathway that produced 83 orphan owners in the
-        # live catalog — callers skipped ``owner_for_repo(repo_hash)`` and
-        # fell straight through to register_owner(), accumulating one
-        # alias per (repo_root, indexing-run) pair. Refuse the call so the
-        # invariant is enforced at the API boundary: every repo owner
-        # must be keyed by a stable hash that ``owner_for_repo`` can find.
-        if owner_type == "repo" and not repo_hash.strip():
-            raise ValueError(
-                "register_owner(owner_type='repo') requires a non-empty repo_hash. "
-                "Use Catalog.owner_for_repo(repo_hash) to look up an existing owner "
-                "before falling through to register_owner()."
-            )
-        if repo_root and not Path(repo_root).is_absolute():
-            raise ValueError(f"repo_root must be an absolute path: {repo_root!r}")
-        # RDR-137 followup CRITICAL-5 (nexus-43qgm.5): threading lock
-        # (within-process) wraps the flock (cross-process) so the
-        # check-then-register critical section is atomic against BOTH
-        # sibling threads and sibling processes. Lock order is always
-        # threading-then-flock to avoid deadlock.
-        with self._owner_register_lock:
-            dir_fd = self._acquire_lock()
-            try:
-                # RDR-137 followup CRITICAL-5: re-check inside both
-                # locks. ensure_owner_for_repo's owner_for_repo() runs
-                # OUTSIDE this critical section; a concurrent caller may
-                # have registered the same repo_hash in the meantime.
-                # The projector's INSERT OR REPLACE would silently
-                # replace the first owner's row (deleting its tumbler)
-                # rather than raise IntegrityError, so the re-check —
-                # not the UNIQUE-index error path — is what guarantees
-                # a single stable owner per repo_hash. Curator owners
-                # (no repo_hash) are intentionally exempt: name
-                # collisions across owner_types are allowed.
-                if owner_type == "repo" and repo_hash.strip():
-                    existing = self._docs.owner_for_repo(repo_hash)
-                    if existing is not None:
-                        return existing
-                # Compute next owner number. Under event-sourced mode the
-                # events.jsonl is canonical and SQLite is its projection,
-                # which means SQLite is consistent with all committed
-                # events even after a crash that lost the JSONL append
-                # (events.jsonl is written FIRST, SQLite committed second,
-                # JSONL appended last). Reading the high-water-mark from
-                # JSONL would re-allocate a colliding tumbler in that
-                # crash window. Under legacy mode JSONL is canonical, so
-                # read from JSONL.
-                if self._event_sourced_enabled:
-                    row = self._db.execute(
-                        "SELECT COALESCE(MAX(CAST(SUBSTR(tumbler_prefix, "
-                        "INSTR(tumbler_prefix, '.') + 1) AS INTEGER)), 0) "
-                        "FROM owners WHERE tumbler_prefix LIKE '1.%'"
-                    ).fetchone()
-                    next_num = (row[0] or 0) + 1
-                else:
-                    owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-                    next_num = max(
-                        (Tumbler.parse(k).owner for k in owners), default=0
-                    ) + 1
-                prefix = f"1.{next_num}"
-                rec = OwnerRecord(
-                    owner=prefix,
-                    name=name,
-                    owner_type=owner_type,
-                    repo_hash=repo_hash,
-                    description=description,
-                    repo_root=repo_root,
-                )
-                event = _make_event(
-                    _OwnerRegisteredPayload(
-                        owner_id=prefix,
-                        name=name,
-                        owner_type=owner_type,
-                        repo_root=repo_root,
-                        repo_hash=repo_hash,
-                        description=description,
-                    ),
-                    v=0,
-                )
-                if self._event_sourced_enabled:
-                    # Event-sourced path: events.jsonl first, projector
-                    # writes SQLite, legacy JSONL last for back-compat.
-                    self._write_to_event_log(event)
-                    self._projector.apply(event)
-                    self._db.commit()
-                    self._append_jsonl(self._owners_path, rec.__dict__)
-                else:
-                    self._append_jsonl(self._owners_path, rec.__dict__)
-                    # RDR-137 followup CRITICAL-1: COALESCE-preserve head_hash
-                    # so the legacy non-event-sourced re-register path doesn't
-                    # wipe the column (set_owner_head_hash writes are epsilon-
-                    # allowed and live only in SQLite + the JSONL replay layer).
-                    self._db.execute(
-                        "INSERT OR REPLACE INTO owners "
-                        "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash) "
-                        "VALUES (?, ?, ?, ?, ?, ?, "
-                        "COALESCE((SELECT head_hash FROM owners WHERE name = ? AND owner_type = ?), ''))",
-                        (prefix, name, owner_type, repo_hash, description, repo_root, name, owner_type),
-                    )
-                    self._db.commit()
-                    self._emit_shadow_event(event)
-                return Tumbler.parse(prefix)
-            finally:
-                self._release_lock(dir_fd)
+        """Delegates to ``_OwnerOps.register_owner`` (nexus-kgyoz)."""
+        return self._owners.register_owner(
+            name, owner_type, repo_hash=repo_hash, description=description, repo_root=repo_root,
+        )
 
     def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
-        """Delegates to ``_DocumentOps.owner_for_repo`` (nexus-mbm)."""
-        return self._docs.owner_for_repo(repo_hash)
+        """Delegates to ``_OwnerOps.owner_for_repo`` (nexus-kgyoz)."""
+        return self._owners.owner_for_repo(repo_hash)
 
     def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
-        """Delegates to ``_DocumentOps.owner_tumblers_by_name`` (nexus-mbm)."""
-        return self._docs.owner_tumblers_by_name(name)
+        """Delegates to ``_OwnerOps.owner_tumblers_by_name`` (nexus-kgyoz)."""
+        return self._owners.owner_tumblers_by_name(name)
 
     def curator_owner_tumbler_by_name(self, name: str) -> "Tumbler | None":
-        """Return the tumbler of the *curator*-type owner with this name, or None.
-
-        The ``(name, owner_type)`` UNIQUE constraint guarantees at most one
-        curator owner per name.  Returns ``None`` when no curator owner exists.
-
-        nexus-qnp5s: mirrors the same method on HttpCatalogClient so all
-        callers can use a uniform public-API call instead of raw ``_db.execute``.
-        """
-        row = self._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? AND owner_type = 'curator'",
-            (name,),
-        ).fetchone()
-        return Tumbler.parse(row[0]) if row else None
+        """Delegates to ``_OwnerOps.curator_owner_tumbler_by_name`` (nexus-kgyoz)."""
+        return self._owners.curator_owner_tumbler_by_name(name)
 
     def stats(self) -> dict:
         """Return catalog statistics: doc_count, link_count, owner_count, collection_count.
@@ -1206,38 +1099,12 @@ class Catalog:
         ``repo_name`` defaults to the basename returned by
         :func:`nexus.registry._repo_identity`; ``description`` defaults
         to ``"Git repository: {repo_name}"``.
-        """
-        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
 
-        # nexus-zr2ie (RDR-137 gate critique 2026-05-28): use the
-        # 3-tuple variant so ``repo_root`` is the canonical main-repo
-        # path even when *repo* is a worktree. Pre-fix this wrote
-        # ``str(repo)`` and contaminated the catalog on first-run-
-        # from-worktree indexing; after worktree deletion the stored
-        # path was broken for every relative-path document.
-        derived_name, repo_hash, main_repo = _repo_identity_with_main(repo)
-        existing = self.owner_for_repo(repo_hash)
-        if existing is not None:
-            return existing
-        try:
-            return self.register_owner(
-                name=repo_name or derived_name,
-                owner_type="repo",
-                repo_hash=repo_hash,
-                repo_root=str(main_repo),
-                description=description or f"Git repository: {repo_name or derived_name}",
-            )
-        except sqlite3.IntegrityError:
-            # RDR-137 followup CRITICAL-5 (nexus-43qgm.5): partial
-            # UNIQUE on owners.repo_hash trips when two concurrent
-            # ensure_owner_for_repo calls both miss the lookup and
-            # both attempt to register. The losing thread re-lookups
-            # to return the winner's tumbler. Without the catch, the
-            # second thread would crash on the duplicate-key error.
-            existing = self.owner_for_repo(repo_hash)
-            if existing is not None:
-                return existing
-            raise
+        Delegates to ``_OwnerOps.ensure_owner_for_repo`` (nexus-kgyoz).
+        """
+        return self._owners.ensure_owner_for_repo(
+            repo, repo_name=repo_name, description=description,
+        )
 
     def set_owner_head_hash(
         self, owner: "Tumbler | str", head_hash: str,
@@ -1264,56 +1131,10 @@ class Catalog:
         pure derived signal (one query on the source git tree); no
         replay-equality concerns. See ``§A8-exempt content writes`` at
         the top of :mod:`nexus.db.t2.catalog`.
-        """
-        owner_str = str(owner)
-        cur = self._db.execute(  # epsilon-allow: derived staleness signal — not an event; the JSONL append below is for rebuild-survival (RDR-137 P3.8 + nexus-43qgm.1), not replay-equality
-            "UPDATE owners SET head_hash = ? WHERE tumbler_prefix = ?",
-            (head_hash, owner_str),
-        )
-        self._db.commit()
-        if cur.rowcount > 0:
-            # Append a snapshot OwnerRecord to JSONL so rebuild
-            # preserves the value (the catalog's rebuild path replays
-            # owners.jsonl as last-wins; without this append the most
-            # recent head_hash would be lost on the next rebuild).
-            #
-            # CRITICAL: preserve next_seq from the most-recent existing
-            # OwnerRecord. next_seq is JSONL-only state (not in the
-            # SQLite owners table); ``register`` reads owners.jsonl
-            # last-wins to compute the next document number. If this
-            # snapshot defaults next_seq=1 (the dataclass default), the
-            # next register() will allocate tumblers starting from 1
-            # and reuse already-allocated document slots — REGRESSION
-            # uncovered by test_tumblers_stable_across_delete_compact_reindex
-            # in the RDR-137 follow-up CI run.
-            row = self._db.execute(
-                "SELECT name, owner_type, repo_hash, description, repo_root, head_hash "
-                "FROM owners WHERE tumbler_prefix = ?",
-                (owner_str,),
-            ).fetchone()
-            if row is not None:
-                from nexus.catalog.tumbler import OwnerRecord, read_owners  # noqa: PLC0415
 
-                # Read current JSONL state to recover next_seq.
-                if self._owners_path.exists():
-                    existing = read_owners(self._owners_path).get(owner_str)
-                    preserved_next_seq = (
-                        existing.next_seq if existing else 1
-                    )
-                else:
-                    preserved_next_seq = 1
-                rec = OwnerRecord(
-                    owner=owner_str,
-                    name=row[0],
-                    owner_type=row[1],
-                    repo_hash=row[2] or "",
-                    description=row[3] or "",
-                    repo_root=row[4] or "",
-                    next_seq=preserved_next_seq,
-                    head_hash=row[5] or "",
-                )
-                self._append_jsonl(self._owners_path, rec.__dict__)
-        return cur.rowcount
+        Delegates to ``_OwnerOps.set_owner_head_hash`` (nexus-kgyoz).
+        """
+        return self._owners.set_owner_head_hash(owner, head_hash)
 
     # ── Documents ──────────────────────────────────────────────────────────
 
@@ -1383,7 +1204,7 @@ class Catalog:
         # Realpath both sides so symlinked roots (notably macOS's
         # /private/var ↔ /var) and ``..`` segments don't trigger
         # false positives. realpath() tolerates non-existent paths.
-        from urllib.parse import unquote
+        from urllib.parse import unquote  # noqa: PLC0415 — branch-local; only on file:// URI normalization path
 
         file_abs = unquote(parsed.path)
         real_file = os.path.realpath(file_abs)
@@ -1610,8 +1431,8 @@ class Catalog:
         canonical and the projector writes SQLite; in legacy mode SQLite
         is written directly and the event is shadow-emitted.
         """
-        from datetime import UTC, datetime  # noqa: PLC0415
-        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+        from datetime import UTC, datetime  # noqa: PLC0415  — stdlib deferred to call site (datetime)
+        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
 
         if not name:
             raise ValueError("register_collection: name must be non-empty")
@@ -1707,7 +1528,7 @@ class Catalog:
         forbid catalog writes outside the projector module. Cascade
         callers stay clean by routing through this verb.
         """
-        from nexus.catalog.events import CollectionDeletedPayload  # noqa: PLC0415
+        from nexus.catalog.events import CollectionDeletedPayload  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.events)
 
         dir_fd = self._acquire_lock()
         try:
@@ -1748,53 +1569,12 @@ class Catalog:
         return [c for c in self.list_collections() if c.get("owner_id") == owner_id]
 
     def get_owner_by_prefix(self, tumbler_prefix: str) -> dict | None:
-        """Return full owner dict for the given tumbler_prefix, or None.
-
-        nexus-qnp5s: mirrors HttpCatalogClient.get_owner_by_prefix() so
-        repos.py head_hash lookup can use a uniform call on both backends.
-        """
-        row = self._db.execute(
-            "SELECT tumbler_prefix, name, owner_type, repo_hash, "
-            "description, repo_root, head_hash "
-            "FROM owners WHERE tumbler_prefix = ?",
-            (tumbler_prefix,),
-        ).fetchone()
-        if not row:
-            return None
-        return {
-            "tumbler_prefix": row[0],
-            "name": row[1],
-            "owner_type": row[2],
-            "repo_hash": row[3],
-            "description": row[4],
-            "repo_root": row[5],
-            "head_hash": row[6],
-        }
+        """Delegates to ``_OwnerOps.get_owner_by_prefix`` (nexus-kgyoz)."""
+        return self._owners.get_owner_by_prefix(tumbler_prefix)
 
     def list_owners_by_type(self, owner_type: str) -> list[dict]:
-        """Return all owners with the given owner_type as a list of dicts.
-
-        nexus-qnp5s: mirrors HttpCatalogClient.list_owners_by_type() so
-        repos.py repo-root iteration can use a uniform call on both backends.
-        """
-        rows = self._db.execute(
-            "SELECT tumbler_prefix, name, owner_type, repo_hash, "
-            "description, repo_root, head_hash "
-            "FROM owners WHERE owner_type = ?",
-            (owner_type,),
-        ).fetchall()
-        return [
-            {
-                "tumbler_prefix": r[0],
-                "name": r[1],
-                "owner_type": r[2],
-                "repo_hash": r[3],
-                "description": r[4],
-                "repo_root": r[5],
-                "head_hash": r[6],
-            }
-            for r in rows
-        ]
+        """Delegates to ``_OwnerOps.list_owners_by_type`` (nexus-kgyoz)."""
+        return self._owners.list_owners_by_type(owner_type)
 
     def chunk_counts_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
         """Return {tumbler: chunk_count} for the given doc_ids.
@@ -1918,7 +1698,7 @@ class Catalog:
         Thin delegate to :func:`nexus.catalog.catalog_spans.resolve_span_in_t3`
         (nexus-mbm). See that function for the full contract.
         """
-        from nexus.catalog import catalog_spans
+        from nexus.catalog import catalog_spans  # noqa: PLC0415 — circular-dep avoidance; catalog_spans imports catalog
         return catalog_spans.resolve_span_in_t3(span, physical_collection, t3)
 
     def resolve_chash(
@@ -1935,7 +1715,7 @@ class Catalog:
         :func:`nexus.catalog.catalog_spans.resolve_chash_globally`
         (nexus-mbm). See that function for the full contract.
         """
-        from nexus.catalog import catalog_spans
+        from nexus.catalog import catalog_spans  # noqa: PLC0415 — circular-dep avoidance; catalog_spans imports catalog
         return catalog_spans.resolve_chash_globally(
             chash, t3, chash_index, prefer_collection=prefer_collection,
         )
@@ -1987,6 +1767,15 @@ class Catalog:
         """Return ordered manifest rows for ``doc_id`` (nexus-572g K6)."""
         return self._writes.get_manifest(doc_id)
 
+    def get_manifests(self, doc_ids: list[str]) -> "dict[str, list[_ManifestRow]]":
+        """Batch-fetch manifest rows for multiple doc_ids (nexus-7lm3q).
+
+        Returns a dict keyed by doc_id; each value is the ordered list of
+        ManifestRow objects. Doc_ids with no rows are absent from the result.
+        Delegates to ``_CatalogWrites.get_manifests``.
+        """
+        return self._writes.get_manifests(doc_ids)
+
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
         """Return the ordered list of chashes for ``doc_id`` (RDR-108
         Phase 4b / nexus-kosc). Convenience wrapper over ``get_manifest``
@@ -2024,7 +1813,7 @@ class Catalog:
         ).fetchone()
         if row is None:
             return None
-        from nexus.catalog.tumbler import Tumbler as _T  # noqa: PLC0415
+        from nexus.catalog.tumbler import Tumbler as _T  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.tumbler)
         return self._docs.resolve(_T.parse(row[0]))
 
     def by_source_uri(self, uri: str) -> "CatalogEntry | None":
@@ -2062,6 +1851,15 @@ class Catalog:
         """Delegates to ``_DocumentOps.by_doc_id`` (nexus-mbm)."""
         return self._docs.by_doc_id(doc_id)
 
+    def resolve_many(self, doc_ids: list[str]) -> "dict[str, CatalogEntry]":
+        """Batch-resolve multiple doc_ids to CatalogEntry objects (nexus-7lm3q).
+
+        Returns a dict keyed by doc_id; each value is the matching
+        CatalogEntry. Doc_ids with no matching document are absent from
+        the result. Delegates to ``_DocumentOps.resolve_many``.
+        """
+        return self._docs.resolve_many(doc_ids)
+
     def lookup_doc_id_by_collection_and_path(
         self, collection: str, source_path: str,
     ) -> str:
@@ -2087,7 +1885,7 @@ class Catalog:
                 "LIMIT 1",
                 (collection, source_path, source_path),
             ).fetchone()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort source-path lookup; any query error degrades to empty string
             return ""
         if not row:
             return ""
@@ -2120,7 +1918,7 @@ class Catalog:
     # would propagate (c) but breaks ``Catalog._MAX_GRAPH_NODES``
     # class-level reads (returns the property descriptor instead of
     # an int). The class-attribute alias is the simpler contract.
-    from nexus.catalog import catalog_links as _links_mod
+    from nexus.catalog import catalog_links as _links_mod  # noqa: PLC0415 — circular-dep avoidance; class-attribute alias (see comment)
     _MAX_GRAPH_DEPTH = _links_mod._MAX_GRAPH_DEPTH
     _MAX_GRAPH_NODES = _links_mod._MAX_GRAPH_NODES
     del _links_mod
@@ -2241,7 +2039,7 @@ class Catalog:
         entry = self.resolve(tumbler)
         if entry is None:
             return None
-        from nexus.catalog import catalog_spans
+        from nexus.catalog import catalog_spans  # noqa: PLC0415 — circular-dep avoidance; catalog_spans imports catalog
         # nexus-hjd6: pass self so the chunk:char branch can use the
         # document_chunks manifest (RDR-108 Phase 3 removed the
         # chunk_index/doc_id metadata that the legacy where-filter
@@ -2309,28 +2107,8 @@ class Catalog:
     # ══════════════════════════════════════════════════════════════════════════
 
     def list_owners(self) -> list[dict]:
-        """Return all owners for this catalog.
-
-        Backs commands/catalog.py owners_cmd.  Mirrors HttpCatalogClient.list_owners()
-        (nexus-xnz0o).  Returns list of dicts with keys: tumbler_prefix, name,
-        owner_type, repo_hash, description, repo_root, head_hash.
-        """
-        rows = self._db.execute(
-            "SELECT tumbler_prefix, name, owner_type, repo_hash, "
-            "description, repo_root, head_hash FROM owners"
-        ).fetchall()
-        return [
-            {
-                "tumbler_prefix": r[0],
-                "name": r[1],
-                "owner_type": r[2],
-                "repo_hash": r[3],
-                "description": r[4],
-                "repo_root": r[5] or "",
-                "head_hash": r[6],
-            }
-            for r in rows
-        ]
+        """Delegates to ``_OwnerOps.list_owners`` (nexus-kgyoz)."""
+        return self._owners.list_owners()
 
     def distinct_doc_collections(self) -> list[str]:
         """Return distinct non-empty physical_collection values from documents.
@@ -2345,15 +2123,8 @@ class Catalog:
         return [r[0] for r in rows]
 
     def owners_with_roots(self) -> dict[str, str]:
-        """Return {tumbler_prefix: repo_root} for owners with non-empty repo_root.
-
-        Backs commands/catalog.py prune_stale_cmd.
-        Mirrors HttpCatalogClient.owners_with_roots() (nexus-xnz0o).
-        """
-        rows = self._db.execute(
-            "SELECT tumbler_prefix, repo_root FROM owners WHERE repo_root != ''"
-        ).fetchall()
-        return {r[0]: r[1] for r in rows}
+        """Delegates to ``_OwnerOps.owners_with_roots`` (nexus-kgyoz)."""
+        return self._owners.owners_with_roots()
 
     def orphaned_docs(self) -> list[dict]:
         """Return documents with no incoming and no outgoing links.

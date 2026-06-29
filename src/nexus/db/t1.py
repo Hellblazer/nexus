@@ -227,12 +227,12 @@ class T1Database:
             self._session_id = self._resolve_session_id(session_id)
             return
 
-        from nexus.session import _nexus_config_dir_at_import
+        from nexus.session import _nexus_config_dir_at_import  # noqa: PLC0415 — circular-dep avoidance (nexus.session imports from db)
 
         config_dir = _nexus_config_dir_at_import()
         resolved_session = resolve_active_session_id(session_id)
         if resolved_session:
-            from nexus.daemon.t1_lease import discover_t1_lease
+            from nexus.daemon.t1_lease import discover_t1_lease  # noqa: PLC0415 — circular-dep avoidance (daemon package imports from db)
 
             addr = discover_t1_lease(resolved_session, config_dir=config_dir)
             if addr is not None:
@@ -251,8 +251,8 @@ class T1Database:
         # it identically). Ancestor-pid-targeted + TTL-bounded, so no
         # cross-session mis-bind. ``resolved_session`` being non-empty does NOT
         # mean this path is unreachable: a non-empty-but-unleased id falls here.
-        from nexus.daemon.t1_lease import discover_t1_by_claude_ancestor
-        from nexus.session import find_immediate_claude_pid
+        from nexus.daemon.t1_lease import discover_t1_by_claude_ancestor  # noqa: PLC0415 — circular-dep avoidance (daemon package imports from db)
+        from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — circular-dep avoidance (nexus.session imports from db)
 
         addr = discover_t1_by_claude_ancestor(
             find_immediate_claude_pid(), config_dir=config_dir
@@ -278,7 +278,7 @@ class T1Database:
         )
 
     def __init__(self, session_id: str | None = None, client=None) -> None:
-        import chromadb
+        import chromadb  # noqa: PLC0415 — optional/heavy dep deferred (chromadb)
 
         self._dead: bool = False
 
@@ -323,9 +323,10 @@ class T1Database:
             session_id=self._session_id,
         )
         raise T1ServerNotFoundError(
-            "T1 connection lost. Construct a new T1Database to "
-            "re-resolve via the four-branch hybrid-discovery gate "
-            "(env -> addr file -> isolation -> raise)."
+            "T1 connection lost. Use /clear or restart the MCP server "
+            "to re-resolve the T1 endpoint via the four-branch discovery gate "
+            "(env -> lease -> isolation -> raise). "
+            "In-place reconnect is unsupported by design (RDR-105 P4 nexus-jnx7)."
         )
 
     @property
@@ -373,7 +374,7 @@ class T1Database:
         chroma metadata; ``nx tier-status`` slices by agent via the
         ``tier_writes`` T2 mirror.
         """
-        import os as _os
+        import os as _os  # noqa: PLC0415 — deliberate function-local import (branch-local env read)
         doc_id = str(uuid4())
         if persist:
             flush_project = flush_project or "scratch_sessions"
@@ -423,7 +424,7 @@ class T1Database:
             exact = self._exec(
                 lambda: self._col.get(ids=[id], include=["metadatas"])
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch of undocumented chromadb get() failures; fall back to the prefix scan
             exact = {"ids": []}
         if exact["ids"]:
             owned = (
@@ -440,7 +441,7 @@ class T1Database:
         # the common one; the ambiguous case surfaces a candidate list.
         try:
             session_ids = [e["id"] for e in self.list_entries()]
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch of undocumented chromadb enumeration failures; resolution falls back to not-found
             return None, []
         candidates = [sid for sid in session_ids if sid.startswith(id)]
         if len(candidates) == 1:
@@ -491,7 +492,7 @@ class T1Database:
         }
         try:
             self._exec(lambda: self._col.update(ids=[resolved], metadatas=[updated_meta]))
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort access-count telemetry must not crash the caller; surfaced via log.warning
             _log.warning("t1_access_count_update_failed", id=resolved)
         return self._to_row(result["ids"][0], result["documents"][0], updated_meta)
 
@@ -556,7 +557,7 @@ class T1Database:
                     lambda ids=ids_to_update, metas=metas_to_update:
                     self._col.update(ids=ids, metadatas=metas)
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort batch access-count telemetry must not crash the caller; surfaced via log.warning
                 _log.warning(
                     "t1_access_count_batch_update_failed",
                     count=len(ids_to_update),
@@ -662,7 +663,7 @@ class T1Database:
         retrieval plus Jaccard for precision matches the pattern already
         used by ``find_overlapping_memories`` (memory_store.py).
         """
-        from nexus.types import PromotionReport
+        from nexus.types import PromotionReport  # noqa: PLC0415 — circular-dep avoidance (nexus.types imports from db)
 
         # Fetch without incrementing access_count (promote is a write-path, not a read)
         result = self._exec(lambda: self._col.get(ids=[id], include=["documents", "metadatas"]))
@@ -785,10 +786,10 @@ def get_t1_database(
     ``promote``, ``delete``, ``clear``, ``resolve_prefix_candidates``, and
     the ``session_id`` property.  All methods are available on both paths.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-local import (factory-time backend selection)
 
     if storage_backend_for("t1") == StorageBackend.SERVICE:
-        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — rare/branch-local import (SERVICE backend path only)
 
         return HttpScratchStore()  # type: ignore[return-value]
 

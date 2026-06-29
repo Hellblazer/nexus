@@ -86,6 +86,18 @@ def _make_completed(stdout: str, stderr: str = "", returncode: int = 0):
     return completed
 
 
+#: Paper-shaped input content so per-document shape routing (nexus-kmbys)
+#: classifies it as a scholarly paper (Abstract + References headings +
+#: "we propose" + citation marker = 4 signals) and keeps the scholarly
+#: extractor. Tests that exercise the scholarly path feed this so they are
+#: not silently re-routed to general-prose-v1.
+_PAPER_SHAPED_CONTENT = (
+    "Abstract\n\n"
+    "We propose a sharded consensus protocol. References\n"
+    "[1] Foo et al. (2020).\n"
+)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_sleep(monkeypatch):
     """Make exponential backoff instant in tests."""
@@ -269,7 +281,7 @@ class TestSuccessfulExtraction:
             subprocess, "run", lambda *a, **kw: _make_completed(_ok_stdout()),
         )
         record = extract_aspects(
-            content="x",
+            content=_PAPER_SHAPED_CONTENT,
             source_path="/p1.pdf",
             collection="knowledge__delos",
         )
@@ -452,6 +464,78 @@ class TestContentSourcing:
         assert isinstance(result, ExtractFail)
         assert result.reason == "unreachable"
         assert "FileNotFoundError" in result.detail
+
+
+class TestReadIndexedText:
+    """nexus-vwns1: read_indexed_text returns the SAME reassembled T3
+    chunk text the extractor consumes, so --validate-sample verifies
+    against the extracted prose rather than raw (PDF-binary) file bytes."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_get_t3(self, monkeypatch):
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.get_t3", lambda: MagicMock(),
+        )
+
+    def test_returns_reassembled_chunk_text_on_read_ok(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import read_indexed_text
+        from nexus.aspect_readers import ReadOk
+
+        captured: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            captured.append(uri)
+            return ReadOk(text="OCR PROSE\x00 from chunks", metadata={})
+
+        monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
+        text = read_indexed_text(
+            collection="knowledge__delos",
+            source_path="/scanned/paper.pdf",
+        )
+        # Null bytes stripped; same identity-URI shape the extractor builds.
+        assert text == "OCR PROSE from chunks"
+        assert captured == ["chroma://knowledge__delos//scanned/paper.pdf"]
+
+    def test_lookup_path_overrides_source_path_in_uri(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import read_indexed_text
+        from nexus.aspect_readers import ReadOk
+
+        captured: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            captured.append(uri)
+            return ReadOk(text="x", metadata={})
+
+        monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
+        read_indexed_text(
+            collection="knowledge__delos",
+            source_path="relative/p.pdf",
+            lookup_path="/abs/p.pdf",
+        )
+        assert captured == ["chroma://knowledge__delos//abs/p.pdf"]
+
+    def test_returns_none_on_read_fail(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import read_indexed_text
+        from nexus.aspect_readers import ReadFail
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.read_source",
+            lambda uri, t3=None, **_kw: ReadFail(reason="empty", detail="no chunks"),
+        )
+        assert read_indexed_text(
+            collection="knowledge__delos", source_path="ghost",
+        ) is None
+
+    def test_returns_none_when_t3_unavailable(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import read_indexed_text
+
+        def _boom():
+            raise RuntimeError("no daemon")
+
+        monkeypatch.setattr("nexus.aspect_extractor.get_t3", _boom)
+        assert read_indexed_text(
+            collection="knowledge__delos", source_path="x",
+        ) is None
 
 
 # ── URI dispatch + chroma integration (RDR-096 P1.2) ────────────────────────
@@ -722,7 +806,8 @@ class TestRetry:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         record = extract_aspects(
-            content="x", source_path="/p1.pdf", collection="knowledge__delos",
+            content=_PAPER_SHAPED_CONTENT, source_path="/p1.pdf",
+            collection="knowledge__delos",
         )
 
         assert len(calls) == 1  # exactly one — no retry
@@ -1160,21 +1245,326 @@ class TestBatchExtraction:
         ])
         assert "\x00" not in captured_prompt[0]
 
-    def test_batch_mixed_extractor_configs_raises(self) -> None:
-        """A batch must come from a single ExtractorConfig. Mixed
-        configs are a caller bug; raise rather than dispatch
-        silently."""
+    def test_batch_partitions_mixed_paper_and_prose(self, monkeypatch) -> None:
+        """nexus-kmbys: a knowledge__ batch containing both a paper and a
+        prose doc partitions into TWO subprocess calls — scholarly-paper-v1
+        on the paper, general-prose-v1 on the prose — preserving input order
+        and stamping the correct extractor_name per row."""
         from nexus.aspect_extractor import extract_aspects_batch
 
-        # Only one config exists today (knowledge__*); construct a
-        # synthetic mixed batch by patching the registry briefly.
-        # This test pins the contract; with one config in the
-        # registry the only achievable mismatch is via two configs
-        # that share no prefix. Skip when only one config is
-        # registered.
-        from nexus.aspect_extractor import _REGISTRY
-        if len(_REGISTRY) < 2:
-            pytest.skip(
-                "only one ExtractorConfig registered; mixed-config "
-                "test is vacuous"
+        headers_seen: list[str] = []
+
+        def fake_run(args, **kwargs):
+            prompt = kwargs.get("input", "")
+            is_prose = "NOT scholarly papers" in prompt
+            headers_seen.append("prose" if is_prose else "paper")
+            # Echo back whichever source_paths the prompt carried.
+            papers = []
+            for sp in ("/paper.pdf", "/note.md"):
+                if f"source_path: {sp}" in prompt:
+                    papers.append({
+                        "source_path": sp,
+                        "problem_formulation": f"PF {sp}",
+                        "proposed_method": f"PM {sp}",
+                        "experimental_datasets": [],
+                        "experimental_baselines": [],
+                        "experimental_results": "R",
+                        "extras": {},
+                        "confidence": 0.9,
+                    })
+            # Prose header instructs a "documents" array; scholarly "papers".
+            key = "documents" if is_prose else "papers"
+            return _make_completed(_wrap_inner(json.dumps({key: papers})))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        records = extract_aspects_batch([
+            ("knowledge__delos", "/paper.pdf", _PAPER_SHAPED_CONTENT),
+            ("knowledge__delos", "/note.md", "A short design note about caching. No paper structure here."),
+        ])
+
+        # Two partitions -> two subprocess calls (one per shape).
+        assert sorted(headers_seen) == ["paper", "prose"]
+        assert len(records) == 2
+        # Order preserved by original input index.
+        assert records[0].source_path == "/paper.pdf"
+        assert records[0].extractor_name == "scholarly-paper-v1"
+        assert records[1].source_path == "/note.md"
+        assert records[1].extractor_name == "general-prose-v1"
+
+    def test_batch_homogeneous_prose_is_single_call(self, monkeypatch) -> None:
+        """nexus-kmbys: an all-prose batch still runs exactly one call."""
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        calls: list[int] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(1)
+            prompt = kwargs.get("input", "")
+            papers = [
+                {
+                    "source_path": sp,
+                    "problem_formulation": "PF",
+                    "proposed_method": "PM",
+                    "experimental_datasets": [],
+                    "experimental_baselines": [],
+                    "experimental_results": "",
+                    "extras": {},
+                    "confidence": 0.7,
+                }
+                for sp in ("/a.md", "/b.md")
+                if f"source_path: {sp}" in prompt
+            ]
+            return _make_completed(_wrap_inner(json.dumps({"papers": papers})))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        records = extract_aspects_batch([
+            ("knowledge__delos", "/a.md", "Just a note about onboarding."),
+            ("knowledge__delos", "/b.md", "Another general essay on workflow."),
+        ])
+        assert len(calls) == 1
+        assert all(r.extractor_name == "general-prose-v1" for r in records)
+
+    def test_batch_rdr_uses_parser_fn_not_subprocess(self, monkeypatch) -> None:
+        """nexus-kmbys review (Critical): a deterministic parser_fn config
+        (rdr-frontmatter-v1) in the batch path must run the parser inline,
+        NEVER the LLM subprocess with a scholarly-prompt fallback."""
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        def boom(*a, **kw):
+            raise AssertionError("subprocess must not run for a parser_fn config")
+
+        monkeypatch.setattr(subprocess, "run", boom)
+        rdr_content = (
+            "---\n"
+            "id: RDR-999\nstatus: accepted\ntype: decision\n"
+            "---\n\n"
+            "## Problem Statement\n\nThe problem.\n\n"
+            "## Proposed Solution\n\nThe solution.\n"
+        )
+        records = extract_aspects_batch([
+            ("rdr__nexus", "docs/rdr/rdr-999.md", rdr_content),
+        ])
+        assert len(records) == 1
+        assert records[0].extractor_name == "rdr-frontmatter-v1"
+        assert records[0].problem_formulation  # parser populated it
+
+
+class TestDocumentShapeClassifier:
+    """nexus-kmbys: deterministic paper-vs-prose routing for knowledge__."""
+
+    _PAPER = (
+        "# Title\n\nAbstract\n\nWe propose a new index. In this paper we show "
+        "gains.\n\n## References\n\n[1] Foo et al. (2020). Bar.\n"
+    )
+    _PROSE = (
+        "# Design Note: Caching\n\nThis note sketches how we might cache plan "
+        "matches. It is a working document, not a published result.\n"
+    )
+
+    def test_paper_shaped_classifies_as_paper(self):
+        from nexus.aspect_extractor import _classify_document_shape
+        assert _classify_document_shape(self._PAPER) == "paper"
+
+    def test_prose_classifies_as_prose(self):
+        from nexus.aspect_extractor import _classify_document_shape
+        assert _classify_document_shape(self._PROSE) == "prose"
+
+    def test_single_incidental_signal_stays_prose(self):
+        """One citation marker alone (below the 2-signal threshold) must NOT
+        promote a design note to the paper extractor."""
+        from nexus.aspect_extractor import _classify_document_shape
+        text = "A note that happens to reference [1] once, nothing else paper-like."
+        assert _classify_document_shape(text) == "prose"
+
+    def test_empty_content_is_prose(self):
+        from nexus.aspect_extractor import _classify_document_shape
+        assert _classify_document_shape("") == "prose"
+
+    def test_technical_note_with_list_and_year_stays_prose(self):
+        """Review finding: a design note using numbered list markers, a
+        parenthetical year, and generic first-person ('our approach') must
+        NOT be promoted to the paper extractor — those are not paper signals
+        (false-positive prose->paper is the hallucination being fixed)."""
+        from nexus.aspect_extractor import _classify_document_shape
+        text = (
+            "# Caching design\n\n"
+            "Our approach ranks options:\n"
+            "[1] LRU\n[2] LFU (2024 revision)\n\n"
+            "We picked LRU for simplicity.\n"
+        )
+        assert _classify_document_shape(text) == "prose"
+
+    def test_rdr172_fullstack_workload_doc_a_classifies_as_paper(self):
+        """RDR-172 P2.2 (nexus-jr84c): pin that the --fullstack harness's
+        paper-shaped workload doc (a) actually routes to scholarly-paper-v1.
+
+        The harness asserts ``document_aspects > 0`` after storing this doc;
+        the assertion is only the intended *paper-shaped* non-vacuous signal
+        if this string still classifies as a paper. The classifier threshold
+        is 2 and this string scores exactly 2 ("we propose"/"in this paper" +
+        "et al."), so a tightening of _PAPER_SHAPE_SIGNALS/_THRESHOLD would
+        silently downgrade the workload to prose — this test fails loudly
+        instead. KEEP IN SYNC with rehearse_fullstack.sh doc (a)."""
+        from nexus.aspect_extractor import (
+            _SCHOLARLY_PAPER_CONFIG,
+            _classify_document_shape,
+            _resolve_config_for_document,
+            select_config,
+        )
+
+        doc_a = (
+            "We propose a widget-assembly index. In this paper we present a "
+            "method for mechanical-part retrieval, evaluated against the prior "
+            "approach of Gear et al. (2021). fsmark12345 widget paper fragment."
+        )
+        assert _classify_document_shape(doc_a) == "paper"
+        routed = _resolve_config_for_document(
+            "knowledge__knowledge", doc_a, select_config("knowledge__knowledge"),
+        )
+        assert routed is _SCHOLARLY_PAPER_CONFIG
+
+    def test_resolver_only_substitutes_for_scholarly(self):
+        """rdr-frontmatter (and any non-scholarly base) is never re-routed."""
+        from nexus.aspect_extractor import (
+            _GENERAL_PROSE_CONFIG,
+            _SCHOLARLY_PAPER_CONFIG,
+            _resolve_config_for_document,
+            _REGISTRY,
+        )
+        rdr_cfg = _REGISTRY["rdr__"]
+        # rdr base stays rdr even for prose-shaped content.
+        assert _resolve_config_for_document("rdr__x", "prose blob", rdr_cfg) is rdr_cfg
+        # scholarly base -> prose content routes to general-prose.
+        out = _resolve_config_for_document("knowledge__x", self._PROSE, _SCHOLARLY_PAPER_CONFIG)
+        assert out is _GENERAL_PROSE_CONFIG
+        # scholarly base -> paper content stays scholarly.
+        out2 = _resolve_config_for_document("knowledge__x", self._PAPER, _SCHOLARLY_PAPER_CONFIG)
+        assert out2 is _SCHOLARLY_PAPER_CONFIG
+
+    def test_single_doc_prose_routes_and_stamps_general_prose(self, monkeypatch):
+        """End-to-end single-doc: prose content in knowledge__ produces a row
+        stamped general-prose-v1 (nexus-kmbys)."""
+        import subprocess as _sp
+        from nexus.aspect_extractor import extract_aspects
+
+        def fake_run(args, **kwargs):
+            prompt = kwargs.get("input", "")
+            assert "NOT a" in prompt and "scholarly paper" in prompt, (
+                "prose doc must use the general-prose prompt"
             )
+            return _make_completed(_wrap_inner(json.dumps({
+                "problem_formulation": "What caching strategy to use",
+                "proposed_method": "Cache plan matches by intent hash",
+                "experimental_datasets": [],
+                "experimental_baselines": [],
+                "experimental_results": "",
+                "extras": {},
+                "confidence": 0.7,
+            })))
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        rec = extract_aspects(
+            content=self._PROSE, source_path="/note.md",
+            collection="knowledge__delos",
+        )
+        assert rec is not None
+        assert rec.extractor_name == "general-prose-v1"
+        assert rec.experimental_datasets == []
+        assert rec.experimental_baselines == []
+
+
+class TestGap3KnowledgeNoteRouting:
+    """RDR-145 Phase 1 (P1.1, nexus-3g0l4): regression test pinning the
+    shipped nexus-kmbys shape-aware routing for the ``knowledge__knowledge``
+    collection — the exact locus of the aspect-orphan bug (nexus-pfzgb).
+
+    MCP-stored notes (``store_put`` with no explicit collection) land in
+    ``knowledge__knowledge``. Before nexus-kmbys these prose notes routed to
+    ``scholarly-paper-v1``, whose prompt invites the model to invent
+    datasets/baselines/venue — the fabrication this fix removed. These tests
+    are the machine-checkable form of "non-fabricated": a representative note
+    must route to ``general-prose-v1`` (NOT ``scholarly-paper-v1``) and the
+    resulting aspect must carry empty experimental fields.
+
+    Note: ``general-prose-v1`` enforces non-fabrication via *routing* (its
+    prose prompt declares datasets/baselines ALWAYS ``[]``), not by stripping
+    values in ``_build_record`` — so the discriminating, non-vacuous assertion
+    is the routing decision plus the prose prompt being the one invoked.
+    """
+
+    #: A representative MCP-stored knowledge note: prose, no paper structure.
+    _NOTE = (
+        "# Session note: plan-match thresholds\n\n"
+        "We settled on a 0.40 confidence floor for the plan-match gate. "
+        "This is a working note captured during a session, not a published "
+        "result. It records a decision, nothing more.\n"
+    )
+
+    def test_knowledge_note_routes_to_general_prose(self):
+        """``knowledge__knowledge`` prose note resolves to general-prose-v1,
+        never scholarly-paper-v1 (the fabricating extractor)."""
+        from nexus.aspect_extractor import (
+            _GENERAL_PROSE_CONFIG,
+            _SCHOLARLY_PAPER_CONFIG,
+            _resolve_config_for_document,
+            select_config,
+        )
+
+        base = select_config("knowledge__knowledge")
+        assert base is _SCHOLARLY_PAPER_CONFIG  # prefix selection unchanged
+        chosen = _resolve_config_for_document(
+            "knowledge__knowledge", self._NOTE, base,
+        )
+        assert chosen is _GENERAL_PROSE_CONFIG
+        assert chosen is not _SCHOLARLY_PAPER_CONFIG
+
+    def test_general_prose_config_does_not_require_experimental_fields(self):
+        """Schema contract: general-prose-v1 requires ONLY the two prose
+        fields, so a prose note never spuriously null-fields for missing
+        datasets/baselines/results."""
+        from nexus.aspect_extractor import _GENERAL_PROSE_CONFIG
+
+        assert _GENERAL_PROSE_CONFIG.required_fields == (
+            "problem_formulation",
+            "proposed_method",
+        )
+        assert "experimental_datasets" not in _GENERAL_PROSE_CONFIG.required_fields
+        assert "experimental_baselines" not in _GENERAL_PROSE_CONFIG.required_fields
+        assert "experimental_results" not in _GENERAL_PROSE_CONFIG.required_fields
+
+    def test_knowledge_note_aspect_has_empty_experimental_fields(self, monkeypatch):
+        """End-to-end: a ``knowledge__knowledge`` note runs through the
+        general-prose prompt and the row carries empty experimental fields.
+
+        Non-vacuity: the fixture ASSERTS the prose prompt was invoked (the
+        prompt that instructs datasets/baselines ``[]``) before returning the
+        prose-contract payload — so the empty fields are tied to the routing
+        under test, not merely echoed."""
+        import subprocess as _sp
+        from nexus.aspect_extractor import extract_aspects
+
+        def fake_run(args, **kwargs):
+            prompt = kwargs.get("input", "")
+            assert "NOT a" in prompt and "scholarly paper" in prompt, (
+                "knowledge__knowledge prose note must use the general-prose prompt"
+            )
+            return _make_completed(_wrap_inner(json.dumps({
+                "problem_formulation": "What confidence floor for plan-match",
+                "proposed_method": "Use a 0.40 floor",
+                "experimental_datasets": [],
+                "experimental_baselines": [],
+                "experimental_results": "",
+                "extras": {},
+                "confidence": 0.6,
+            })))
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        rec = extract_aspects(
+            content=self._NOTE, source_path="my-note",
+            collection="knowledge__knowledge",
+        )
+        assert rec is not None
+        assert rec.extractor_name == "general-prose-v1"
+        assert rec.experimental_datasets == []
+        assert rec.experimental_baselines == []
+        assert rec.experimental_results in ("", None)

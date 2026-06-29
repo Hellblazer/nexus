@@ -1,38 +1,61 @@
 # Migration-Window Operations Runbook (SQLite/Chroma to Postgres)
 
 Operational narrative for the operator running the next T2 + T3 migration
-onto the PG16 + pgvector + nexus-service stack (RDR-152/153/155). The flag
+onto the PG17 + pgvector + nexus-service stack (RDR-152/153/155). The flag
 reference lives in [`docs/cli-reference.md` § nx storage](cli-reference.md#nx-storage);
 this document is the order of operations, the failure playbook, and how to
 read the artifacts. Precedent: the 2026-06-10 production run (115,716
 chunks, ~10:46 to 15:05 PT, zero lost, est. $4-6 Voyage; permanent record:
 T2 `nexus_rdr/155-production-migration-complete`).
 
-## 0. The guided path: `nx migrate-to-service`
+## 0. The guided path: `nx guided-upgrade`
 
-> **Status (RDR-159 P4).** The guided command exists and runs the full flow.
-> The two-release deprecation-window cadence is documented in the next section.
-> Sections 1-7 below remain the authoritative manual order of operations; the
-> guided command sequences exactly those same primitives. The consumer-facing
-> entry is the conexus `/upgrade` slash-command — a thin veneer over this same
-> `nx migrate-to-service` that owns no migration logic.
+> **Status (RDR-002 / RDR-159 P4).** `nx guided-upgrade` is the validated
+> one-command path and the recommended entry point. The two-release
+> deprecation-window cadence is documented in the next section. Sections 1-7
+> below remain the authoritative manual order of operations; `guided-upgrade`
+> sequences exactly those same primitives.
 
-`nx migrate-to-service` wraps and sequences everything in sections 2-6 into one
-survivable command: detect the Chroma footprint, set the cross-process
-migration sentinel (reads degraded-LOUD, never bare-empty), quiesce background
-indexing, pre-gate per-collection model support, run T2 `migrate all` then T3
-vectors for every detected leg, validate (taxonomy + counts + manifest
-orphans), and unlock on a clean verdict. On a validation block it leaves the
-migrated copy in place (sentinel `migrated-failed`) and OFFERS — never
-auto-invokes — `nx storage migrate vectors --rollback` (§6); the Chroma source
-is untouched. Preview first with `nx migrate-to-service --dry-run`. Flag
-reference: [`cli-reference.md` § nx migrate-to-service](cli-reference.md#nx-migrate-to-service).
+`nx guided-upgrade` (RDR-002) is a thin orchestrator over reused pieces: it
+**pre-flight detects** the pre-RDR-160 Chroma footprint (a fresh user with
+nothing to migrate no-ops here, *without* provisioning), **provisions and
+verifies** the service stack (health-gate + version-pin; a not-ready or
+wrong-version service hard-fails with a remedy and NEVER migrates), runs the
+**voyage-capability gate** (refuses to migrate voyage-model collections onto a
+bge-only service, since re-embedding voyage text into bge changes recall),
+self-loads the freshly-provisioned `NX_SERVICE_TOKEN`, then **hands off to
+`nx migrate-to-service`** against the verified URL, and finishes with an
+advisory `nx doctor`. Preview the footprint first; re-running is safe (every
+step is idempotent) but is NOT a no-op after a successful migration —
+copy-not-move leaves the Chroma source intact, so a re-run re-detects and
+re-copies it.
+
+`nx migrate-to-service` (RDR-159; cross-model mode added in RDR-162) is the
+lower-level primitive that `guided-upgrade` sequences; run it directly when the service is already stood
+up and verified. It wraps everything in sections 2-6 into one survivable
+command: detect the Chroma footprint, set the cross-process migration sentinel
+(reads degraded-LOUD, never bare-empty), quiesce background indexing, pre-gate
+per-collection model support, run T2 `migrate all` then T3 vectors for every
+detected leg, validate (taxonomy + counts + manifest orphans), and unlock on a
+clean verdict. On a validation block it leaves the migrated copy in place
+(sentinel `migrated-failed`) and OFFERS — never auto-invokes —
+`nx storage migrate vectors --rollback` (§6); the Chroma source is untouched.
+Preview first with `nx migrate-to-service --dry-run`. The consumer-facing
+conexus `/upgrade` slash-command is a thin veneer over this same
+`migrate-to-service` that owns no migration logic. Flag references:
+[`cli-reference.md` § nx guided-upgrade](cli-reference.md#nx-guided-upgrade)
+and [§ nx migrate-to-service](cli-reference.md#nx-migrate-to-service).
 
 ## 0.1 The two-release deprecation window (release cadence)
 
 ChromaDB is retired across **two** releases, never one. The ordering is an
 invariant, not a preference: the release that *deletes* the Chroma read path
 can only ship *after* a release that gives users a way off Chroma.
+
+Release N (migration-capable) is **conexus 6.0.0** — the major bump that retires
+Chroma *serving* (RDR-155) while keeping the Chroma read path as the migration
+source. Release N+1 (the Chroma deletion, RDR-155 P4b) is a later release that
+must follow 6.0.0, never collapse into it.
 
 | | **Release N** (migration-capable) | **Release N+1** (Chroma deletion) |
 |---|---|---|
@@ -167,8 +190,10 @@ Check, in order:
 - No stale-binary warning (running binary differs from the installed
   provenance sidecar). Install the intended binary first via
   `nx daemon service install-binary <engine-service-vX.Y.Z>` (RDR-161: the
-  native binary is the sole launch artifact; the legacy `java -jar` path and
-  its schema-skew gate are expunged).
+  cosign-verified native binary is the production launch artifact). For local
+  dev/test on a host without a native binary, set `NEXUS_SERVICE_JAR` to a
+  built `nexus-service-*.jar` — an explicit, never-auto-discovered opt-in that
+  launches the JVM and is logged as UNVERIFIED (RDR-161 amendment, 2026-06-20).
 
 The T2 ladder commands read the service endpoint from the environment
 (`NX_SERVICE_PORT` + `NX_SERVICE_TOKEN` are required; the per-store

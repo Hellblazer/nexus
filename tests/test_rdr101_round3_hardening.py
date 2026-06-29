@@ -86,7 +86,7 @@ class TestDoctorReportSchema:
     def test_replay_equality_report_includes_event_source(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
-        from nexus.commands.catalog import _run_replay_equality
+        from nexus.commands.catalog_cmds.doctor import _run_replay_equality
 
         # PR ζ flipped default to ES; legacy-path assertion.
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")

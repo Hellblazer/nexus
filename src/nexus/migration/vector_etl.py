@@ -20,10 +20,21 @@ half-migration):
 VECTOR-IDENTITY DECISION (a) (recorded on bead nexus-unp61, 2026-06-10):
 chunk TEXT transfers byte-verbatim and the chash (chunk natural ID,
 ``sha256(text)[:32]``) is preserved verbatim; the pgvector side re-embeds
-server-side. NO source embedding vectors cross the ETL —
-``iter_collection_chunks`` deliberately omits them (RDR-109
-cross-model-contamination guard). Recall equivalence with identical
-embedders was established by the Phase 3 dual-run harness.
+server-side. By default NO source embedding vectors cross the ETL —
+``iter_collection_chunks`` omits them (RDR-109 cross-model-contamination
+guard). Recall equivalence with identical embedders was established by the
+Phase 3 dual-run harness.
+
+SAME-MODEL PASSTHROUGH EXCEPTION (nexus-hxry2): when a collection migrates
+SAME-model into a WIRED model (:data:`_PASSTHROUGH_MODELS` — bge / voyage;
+see :func:`_is_same_model_passthrough`), the stored vectors ARE fetched
+(``include_embeddings=True``) and forwarded so the service stores them
+verbatim, skipping a needless re-embed (a billed Voyage call for a managed
+user, a wasted ONNX recompute for a local user). The contamination guard
+still holds: passthrough fires only when the source model equals the
+target's wired model, and the service rejects any vector whose dimension
+disagrees with the dispatched table. A batch with any missing source vector
+falls back to the server-side re-embed (logged), never a null vector.
 
 COPY-NOT-MOVE: the Chroma source is opened read-only by convention and is
 never modified — not by migration, not by rollback. The source is also the
@@ -114,6 +125,44 @@ _MODEL_DIMS: dict[str, int] = {
 
 #: The per-dim physical tables shipped by vectors-001-baseline.xml.
 _KNOWN_DIMS: frozenset[int] = frozenset(_MODEL_DIMS.values())
+
+#: Voyage models — the same-model re-embeds that BILL the operator key. Used by
+#: the cost guardrail (detection.py) to estimate the cross-model→voyage charge.
+_VOYAGE_MODELS: frozenset[str] = frozenset(
+    {"voyage-code-3", "voyage-context-3", "voyage-3"}
+)
+
+#: Models eligible for same-model PASSTHROUGH (nexus-hxry2): the service can embed
+#: QUERIES against them post-migration, so copying stored doc vectors leaves a
+#: queryable collection. bge-768 is wired in every mode; voyage models are wired
+#: when the key is present (and only reach the same-model path when classified
+#: supported-voyage upstream). minilm / unknown models are deliberately ABSENT:
+#: the service wires no embedder for them, so they MUST be cross-model remapped
+#: (orchestrator-owned) — passthrough would leave an unqueryable collection.
+_PASSTHROUGH_MODELS: frozenset[str] = frozenset({"bge-base-en-v15-768"}) | _VOYAGE_MODELS
+
+
+def _is_same_model_passthrough(name: str, target: str) -> bool:
+    """True when this collection migrates SAME-model into a WIRED model.
+
+    Two conditions: (1) target == source (no model change), and (2) the model is
+    in :data:`_PASSTHROUGH_MODELS` — one the service can embed queries against, so
+    the migrated collection stays queryable. The collection name encodes the model
+    (``…__bge-base-en-v15-768__v1``), so a same-name migration into a wired model
+    means the stored vectors were produced by exactly the model the target is
+    searched against — safe to copy verbatim (guarded further by the server-side
+    per-vector dimension check).
+
+    Applies to BOTH deployments: a managed/voyage user avoids the billed Voyage
+    re-embed; a LOCAL user avoids a full ONNX (bge-768) recompute of vectors that
+    already exist — same logical waste, copied instead of recomputed (nexus-hxry2).
+    Cross-model migrations and unsupported-model collections (minilm, which must be
+    remapped) return False and re-embed, as required.
+    """
+    if name != target:
+        return False
+    segments = name.split("__")
+    return len(segments) == 4 and segments[2] in _PASSTHROUGH_MODELS
 
 
 @dataclass(frozen=True)
@@ -207,11 +256,17 @@ def cross_model_target_name(source: str, target_model: str) -> str:
 
 
 def _iter_id_pages(
-    read_client: Any, collection: str, page: int
+    read_client: Any, collection: str, page: int, *, include_embeddings: bool = False
 ) -> Iterator[list[dict[str, Any]]]:
-    """Group the chunk stream into read-page-aligned batches."""
+    """Group the chunk stream into read-page-aligned batches.
+
+    ``include_embeddings`` flows to :func:`iter_collection_chunks` so the
+    same-model passthrough (nexus-hxry2) carries each chunk's stored vector.
+    """
     batch: list[dict[str, Any]] = []
-    for chunk in iter_collection_chunks(read_client, collection, page_size=page):
+    for chunk in iter_collection_chunks(
+        read_client, collection, page_size=page, include_embeddings=include_embeddings
+    ):
         batch.append(chunk)
         if len(batch) == page:
             yield batch
@@ -242,7 +297,7 @@ def _migrate_one(
         # Unreadable counts as data (conservative: stays red).
         try:
             nc_count = int(read_client.get_collection(name).count())
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort count probe; degrades to -1 sentinel
             nc_count = -1
         if nc_count == 0:
             _log.info(
@@ -275,20 +330,91 @@ def _migrate_one(
             target_collection=target if is_cross_model else None,
         )
 
+    # Same-model migration → PASSTHROUGH: fetch the stored vectors and send them
+    # so the service stores them verbatim, skipping the re-embed (nexus-hxry2) —
+    # avoids a billed Voyage re-embed for a managed user AND a wasted local ONNX
+    # recompute for a local user. Any chunk missing a stored vector falls back to
+    # a server-side re-embed for that batch (correctness over cost — never store a
+    # null vector).
+    passthrough = _is_same_model_passthrough(name, target)
+    # nexus-bfdri: the model the collection name DECLARES (segment 3 of the
+    # conformant <ct>__<owner>__<embedding_model>__v<n> shape). Passthrough only
+    # copies a stored vector verbatim when each chunk's recorded provenance
+    # (metadata["embedding_model"], written by make_chunk_metadata at index time)
+    # MATCHES this declared model — the name segment alone is not proof the
+    # vectors came from the embedder the target is searched against.
+    # nexus-bfdri: the model the conformant name DECLARES (segment 3 of
+    # <ct>__<owner>__<embedding_model>__v<n>; passthrough already asserts 4
+    # segments). ``None`` only on the non-passthrough path (helper unused there).
+    declared_model = name.split("__")[2] if passthrough else None
+
+    def _provenance_ok(c: dict) -> bool:
+        """MISMATCH-ONLY provenance check (nexus-bfdri).
+
+        Re-embed ONLY when a chunk's recorded ``embedding_model`` is PRESENT and
+        DISAGREES with the declared model — that is the detectable mislabel the
+        bead targets (vectors from a different embedder than the name claims).
+
+        ABSENT/blank provenance is TRUSTED (passed through), NOT re-embedded:
+        ``code_indexer`` did not stamp ``embedding_model`` until the
+        ``make_chunk_metadata`` factory landed (2026-04-26), but conformant
+        ``code__*__voyage-code-3__v1`` names existed from 2026-02-22 — so
+        pre-factory chunks have a conformant name and no provenance, yet their
+        vectors DID come from the named embedder (just unstamped). Forcing those
+        to re-embed would silently revert the nexus-hxry2 passthrough
+        optimization (a billed Voyage re-embed / wasted local ONNX) with no
+        correctness gain. Absent ≠ mislabel; only present-and-wrong is evidence.
+        """
+        if declared_model is None:
+            return False  # defensive: meaningless without a declared target
+        prov = (c.get("metadata") or {}).get("embedding_model")
+        if not prov:  # absent/blank -> unverifiable but benign -> trust
+            return True
+        return prov == declared_model
+
     source_count = 0
     written = 0
     try:
-        for batch in _iter_id_pages(read_client, name, page):
+        for batch in _iter_id_pages(read_client, name, page, include_embeddings=passthrough):
             source_count += len(batch)
             # Read from the SOURCE (*name*); upsert into the TARGET (model-remapped
-            # for cross-model). Server re-embeds the stored text with the target's
-            # model — chash (sha256(text)[:32]) is identical, so re-runs stay
-            # idempotent on (tenant, target, chash).
+            # for cross-model). For the re-embed path the server embeds the stored
+            # text with the target's model; for passthrough it stores the supplied
+            # vectors verbatim. chash (sha256(text)[:32]) is identical either way,
+            # so re-runs stay idempotent on (tenant, target, chash).
+            embeddings = None
+            if passthrough:
+                if all(
+                    c.get("embedding") is not None and _provenance_ok(c)
+                    for c in batch
+                ):
+                    embeddings = [c["embedding"] for c in batch]
+                else:
+                    # Fallback: a batch with any missing source vector OR any chunk
+                    # whose recorded provenance does not match the declared model
+                    # re-embeds server-side (never copy a null or mis-provenanced
+                    # vector) — and that re-embed bills. Logged so a mixed
+                    # passthrough/re-embed run is auditable (the dry-run cost caveat
+                    # warns this is possible).
+                    missing = sum(1 for c in batch if c.get("embedding") is None)
+                    mis_provenance = sum(
+                        1 for c in batch
+                        if c.get("embedding") is not None and not _provenance_ok(c)
+                    )
+                    _log.warning(
+                        "vector_etl_passthrough_fallback_reembed",
+                        collection=name,
+                        target=target,
+                        batch_size=len(batch),
+                        missing_vectors=missing,
+                        provenance_mismatch=mis_provenance,
+                    )
             vector_client.upsert_chunks(
                 target,
                 [c["id"] for c in batch],
                 [c["document"] for c in batch],
                 [c["metadata"] for c in batch],
+                embeddings=embeddings,
             )
             written += len(batch)
     except Exception as exc:  # noqa: BLE001 — report and continue with the next collection
@@ -557,6 +683,7 @@ def verify_counts(
 def verify_taxonomy_consistency(
     t2_db_path: str | Path,
     vector_client: Any,
+    target_names: dict[str, str] | None = None,
 ) -> list[str]:
     """T2 consistency check (bead clause (d)): every
     ``topic_assignments.source_collection`` value must resolve to a
@@ -568,7 +695,14 @@ def verify_taxonomy_consistency(
     Reads the SQLite T2 read-only; the pgvector side is consulted through
     the service (``list_collections``), so the check runs with no direct
     Postgres access.
+
+    ``target_names`` (RDR-162 P2): a cross-model source collection's chunks
+    migrated into a model-remapped target (minilm-384 -> bge-768), so the SOURCE
+    SQLite still names ``S`` while the migrated pgvector collection is its target
+    ``target_names[S]``. Each referenced source name is resolved THROUGH this map
+    before the membership check, so a cross-model source is not a false orphan.
     """
+    tmap = target_names or {}
     uri = f"file:{Path(t2_db_path)}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)  # epsilon-allow: RDR-155 P5 taxonomy-consistency check — read-only T2 source read (mode=ro URI), mirrors the db/t2 ETL readers; never a T2 writer
     try:
@@ -578,7 +712,9 @@ def verify_taxonomy_consistency(
         ).fetchall()
     finally:
         conn.close()
-    referenced = {r[0] for r in rows}
+    # Resolve each source name through the cross-model remap before comparison:
+    # a source whose bge-768 target is migrated is NOT an orphan.
+    referenced = {tmap.get(r[0], r[0]) for r in rows}
     migrated = {c.get("name") for c in vector_client.list_collections()}
     if referenced and not migrated:
         # list_collections() swallows service errors and returns [] — an

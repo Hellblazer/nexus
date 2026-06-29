@@ -76,7 +76,7 @@ def _discover_lease() -> tuple[str | None, str | None]:
     module-local name because the catalog client and the discovery tests
     import ``_discover_lease`` from here.
     """
-    from nexus.db.service_endpoint import discover_lease
+    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred to avoid circular import
 
     return discover_lease()
 
@@ -84,8 +84,14 @@ def _discover_lease() -> tuple[str | None, str | None]:
 def _resolve_endpoint() -> tuple[str, str]:
     """Return ``(base_url, token)`` per the resolution order above."""
     global _lease_cache
-    env_url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/") or None
-    env_token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+    # env FIRST, then the persisted config.yml credential (RDR-166 nexus-v3p0x:
+    # a greenfield managed user who ran `nx config set service_url/service_token`
+    # must reach a resolvable endpoint with no env exported). get_credential
+    # encodes env>config.yml precedence, so an exported env var still wins.
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    env_url = (get_credential("service_url") or "").strip().rstrip("/") or None
+    env_token = (get_credential("service_token") or "").strip() or None
     url, token = env_url, env_token
     if url is None or token is None:
         with _endpoint_lock:
@@ -99,13 +105,15 @@ def _resolve_endpoint() -> tuple[str, str]:
             lease_url, lease_token = _lease_cache or (None, None)
         url = url or lease_url
         token = token or lease_token
+        # "credential" = env-or-config.yml (get_credential precedence); the
+        # source here is "configured" vs "lease", not specifically env.
         if env_url is not None and token is lease_token and token is not None:
             _log.debug(
-                "vector_endpoint_mixed_source", url_source="env", token_source="lease"
+                "vector_endpoint_mixed_source", url_source="credential", token_source="lease"
             )
         elif env_token is not None and url is lease_url and url is not None:
             _log.debug(
-                "vector_endpoint_mixed_source", url_source="lease", token_source="env"
+                "vector_endpoint_mixed_source", url_source="lease", token_source="credential"
             )
     if url is None or token is None:
         raise RuntimeError(
@@ -113,7 +121,8 @@ def _resolve_endpoint() -> tuple[str, str]:
             "routes through the nexus-service HTTP API (RDR-155 Phase 4a — "
             "the direct Chroma serving paths are retired). Either start the "
             "supervisor with 'nx daemon service start' (publishes the "
-            "endpoint lease this client auto-discovers), or export "
+            "endpoint lease this client auto-discovers), set the managed "
+            "endpoint with 'nx config set service_url/service_token', or export "
             "NX_SERVICE_URL / NX_SERVICE_TOKEN explicitly."
         )
     return url, token
@@ -138,7 +147,7 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
       (tenant, collection, chash) ON CONFLICT; deletes; reads), so a
       single retry after a mid-flight reset is safe.
     """
-    import urllib.error
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code == 401
@@ -160,7 +169,7 @@ def _request_once(
     classifies them; the public ``_post``/``_get`` wrap HTTP errors into
     :class:`VectorServiceError`.
     """
-    import urllib.request
+    import urllib.request  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     base_url, token = _resolve_endpoint()
     headers = {
@@ -189,7 +198,7 @@ def _request(
     (nexus-pebfx.1), not "give up". A second failure surfaces normally —
     no retry loops.
     """
-    import urllib.error
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     try:
         return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
@@ -232,7 +241,12 @@ def _managed_remedy() -> str | None:
     — callers that classify transient failures by raw type should catch
     ``VectorServiceError`` for the managed path. Local callers are unaffected.
     """
-    base = os.environ.get("NX_SERVICE_URL", "").strip()
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    # env FIRST, then config.yml — so a config.yml-only greenfield user gets the
+    # actionable managed remedy on a 401/connection error, not a bare error
+    # (RDR-166 nexus-v3p0x).
+    base = (get_credential("service_url") or "").strip()
     if not base:
         return None
     return (
@@ -253,7 +267,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
     Per dual-review S2 the raise is deliberately NOT global — a slow search
     should still fail fast.
     """
-    import urllib.error
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     try:
         return _request("POST", path, tenant=tenant, timeout=timeout, body=body)
@@ -261,7 +275,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         body_bytes = e.read()
         try:
             err = json.loads(body_bytes)
-        except Exception:
+        except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"POST {path} → HTTP {e.code}: {err.get('error', err)}"
         remedy = _managed_remedy() if e.code in (401, 403) else None
@@ -280,7 +294,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
 
 def _get(path: str, *, tenant: str = "default") -> Any:
     """GET from the service endpoint, return parsed response body."""
-    import urllib.error
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     try:
         return _request("GET", path, tenant=tenant, timeout=30, body=None)
@@ -288,7 +302,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         body_bytes = e.read()
         try:
             err = json.loads(body_bytes)
-        except Exception:
+        except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"GET {path} → HTTP {e.code}: {err.get('error', err)}"
         remedy = _managed_remedy() if e.code in (401, 403) else None
@@ -346,6 +360,8 @@ class _ServiceCollectionStub:
         include: list[str] | None = None,
         limit: int = 10,
         offset: int = 0,
+        *,
+        include_source_uri: bool = False,
     ) -> dict:
         """Query chunks from the service. Returns Chroma-style result dict.
 
@@ -364,6 +380,8 @@ class _ServiceCollectionStub:
                     "limit": limit,
                     "offset": offset,
                 }
+                if include_source_uri:
+                    body["include_source_uri"] = True
                 result = _post("/v1/vectors/store-get", body, tenant=self._tenant)
             else:
                 # Where-filter lookup (incremental-sync staleness check)
@@ -376,13 +394,21 @@ class _ServiceCollectionStub:
                     body["where"] = where
                 if include:
                     body["include"] = include
+                if include_source_uri:
+                    body["include_source_uri"] = True
                 result = _post("/v1/vectors/get", body, tenant=self._tenant)
-            # Normalise to Chroma shape: {ids, documents, metadatas}
-            return {
+            # Normalise to Chroma shape: {ids, documents, metadatas}.
+            # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
+            # source_uris present only when include_source_uri=True was forwarded.
+            out: dict[str, Any] = {
                 "ids":       result.get("ids", []),
                 "documents": result.get("documents", []),
                 "metadatas": result.get("metadatas", []),
             }
+            for key in ("chashes", "source_uris", "spans"):
+                if key in result:
+                    out[key] = result[key]
+            return out
         except VectorServiceError as exc:
             _log.warning(
                 "service_collection_get_failed",
@@ -470,11 +496,24 @@ class HttpVectorClient:
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
     ) -> None:
-        """Embed + quota-check + write via the Java service.
+        """Embed + write via the Java service.
+
+        Dedup + conflict-merge are SERVER-ENFORCED (nexus-57dh4): the service's
+        ``PgVectorRepository.upsertChunksInternal`` does first-wins in-batch dedup
+        and ``ON CONFLICT (tenant_id, collection, chash) DO UPDATE``. There is no
+        client-side quota check or 300-record cap on this path — the whole id set
+        is sent in one POST. (The old "quota-check" framing was a ChromaDB-Cloud
+        leftover; Postgres has no such limit.)
 
         CHUNKING STAYS PYTHON — this method is called with pre-chunked text.
-        Embeddings are computed server-side; any ``embeddings`` argument is
-        ignored (Seam B contract).
+        Embeddings are computed server-side by default (Seam B). The ONE
+        exception is the same-model migration PASSTHROUGH (nexus-hxry2): when
+        ``embeddings`` is supplied, the vectors are sent and stored verbatim and
+        the server skips the (billed) re-embed — used only when the source
+        collection's model equals the target's wired model, so the vectors are
+        already correct. Every non-migration caller leaves ``embeddings`` None.
+        (Note: :meth:`upsert_chunks_with_embeddings` deliberately still DISCARDS
+        its vectors — indexers re-embed server-side as the single authority.)
 
         ``skip_existing`` (or env ``NX_UPSERT_SKIP_EXISTING=1``): pre-filter
         ids through :meth:`existing_ids` and embed/upsert only the chunks
@@ -507,12 +546,21 @@ class HttpVectorClient:
                 ids = [ids[i] for i in keep]
                 documents = [documents[i] for i in keep]
                 metadatas = [metas[i] for i in keep]
+                if embeddings is not None:
+                    embeddings = [embeddings[i] for i in keep]
         body: dict[str, Any] = {
             "collection": collection,
             "ids": ids,
             "documents": documents,
             "metadatas": metadatas or [{}] * len(ids),
         }
+        # Same-model vector PASSTHROUGH (nexus-hxry2): when the caller supplies
+        # precomputed vectors (source model == target wired model), send them so
+        # the service stores them verbatim and skips the billed re-embed. Absent →
+        # the default Seam B server-side embed. This is the ONE path where
+        # ``embeddings`` is honoured; every other caller leaves it None.
+        if embeddings is not None:
+            body["embeddings"] = embeddings
         _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
         _log.debug(
             "http_vector_upsert_chunks",
@@ -581,11 +629,11 @@ class HttpVectorClient:
         ``fail_on_oversized=True``; the server is responsible for rejecting
         oversized content on the HTTP path.
         """
-        from nexus.corpus import (  # noqa: PLC0415
+        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
             embedding_model_for_collection_name,
             index_model_for_collection,
         )
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         doc_id = content_hash[:32]
@@ -650,6 +698,7 @@ class HttpVectorClient:
         cluster_by: str = "",
         threshold: float | None = None,
         structured: bool = False,
+        include_source_uri: bool = False,
     ) -> list[dict] | dict:
         """Semantic search via the Java service.
 
@@ -661,6 +710,10 @@ class HttpVectorClient:
         Returns the same list-of-dicts shape as ``T3Database.search()``
         when ``structured=False``, or a ``{ids, tumblers, distances, collections}``
         dict when ``structured=True``.
+
+        When ``include_source_uri=True``, gates a catalog JOIN server-side to
+        populate ``source_uri`` on each row (RDR-169 G5, bead nexus-jkv85).
+        Default False — omits the field so default callers pay zero JOIN cost.
         """
         body: dict[str, Any] = {
             "query": query,
@@ -669,6 +722,8 @@ class HttpVectorClient:
         }
         if where:
             body["where"] = where
+        if include_source_uri:
+            body["include_source_uri"] = True
 
         results = _post("/v1/vectors/search", body, tenant=self._tenant)
         # results is a list of {id, content, distance, collection, ...}
@@ -930,7 +985,7 @@ class HttpVectorClient:
 
     def count(self, collection: str) -> int:
         """Number of chunks in *collection* visible to this tenant."""
-        from urllib.parse import quote  # noqa: PLC0415
+        from urllib.parse import quote  # noqa: PLC0415 — stdlib deferred to call site (urllib.parse)
 
         result = _get(
             "/v1/vectors/count?collection=" + quote(collection),
@@ -983,12 +1038,18 @@ class HttpVectorClient:
         ``/v1/vectors/update-metadata`` endpoint so the frecency_score lands
         in the service's Chroma (the one search reads) — not daemon-Chroma.
 
-        Batches at MAX_RECORDS_PER_WRITE (300) to match the service's quota
-        validator and to mirror :meth:`T3Database.update_chunks` parity.
+        Sends in request-sized batches of 300 ids. NOTE (nexus-57dh4): this is a
+        pragmatic HTTP request-size chunk, NOT a backend quota — the pgvector
+        service has no 300-record limit (300 was a ChromaDB-Cloud free-tier quota,
+        inapplicable to Postgres). Dedup + conflict-merge are server-enforced in
+        ``PgVectorRepository.upsertChunksInternal`` (first-wins in-batch dedup +
+        ``ON CONFLICT DO UPDATE``); clients need not pre-dedup or quota-check.
+        The constant is reused only to keep a sane per-request size.
         """
         if not ids:
             return
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        # Request-size chunk only (see docstring) — not a backend quota.
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         for start in range(0, len(ids), size):
             batch_ids  = ids[start : start + size]
@@ -1018,7 +1079,7 @@ class HttpVectorClient:
         creating a zombie collection (contrast with
         :meth:`get_or_create_collection`).
         """
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+        from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415 — optional dependency deferred (chromadb.errors)
         try:
             cols = self.list_collections()
             if not any(c.get("name") == name for c in cols):
@@ -1057,7 +1118,7 @@ class HttpVectorClient:
         already treats as a per-collection shape-mismatch failure —
         identical to the Chroma path's semantics.
         """
-        import numpy as np
+        import numpy as np  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
         result = _post(
             "/v1/vectors/get-embeddings",
@@ -1080,7 +1141,7 @@ class HttpVectorClient:
         returns no ids). Param name ``collection_name`` matches the oracle
         (nexus-7zuzz).
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
 
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         ids: list[str] = []
@@ -1133,7 +1194,7 @@ class HttpVectorClient:
         concurrent delete already removed some — in which case the prune-stale
         caller's ``deleted != len(ids)`` WARN correctly fires.
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
 
         ids = self.ids_for_source(collection_name, source_path)
         if not ids:
@@ -1150,14 +1211,6 @@ class HttpVectorClient:
             )
             deleted += int(result.get("deleted", 0))
         return deleted
-
-    # ── Utility ──────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def chunk_id(text: str) -> str:
-        """Compute the canonical chunk natural ID: sha256(text)[:32]."""
-        return hashlib.sha256(text.encode()).hexdigest()[:32]
-
 
 # ── Module-level routing helper ───────────────────────────────────────────────
 

@@ -87,13 +87,29 @@ class TestIterCollectionChunks:
         assert list(iter_collection_chunks(client, "knowledge__etl_empty_test")) == []
 
     def test_embeddings_deliberately_not_fetched(self, client) -> None:
-        """The read leg transfers TEXT, not vectors — the pgvector side
-        re-embeds server-side (RDR-109 cross-model-contamination guard;
+        """The read leg transfers TEXT, not vectors, BY DEFAULT — the pgvector
+        side re-embeds server-side (RDR-109 cross-model-contamination guard;
         decision recorded in the module docstring and on nexus-unp61)."""
         self._seed(client, "knowledge__etl_noemb_test", 2)
         rows = list(iter_collection_chunks(client, "knowledge__etl_noemb_test"))
         assert rows and all("embedding" not in r for r in rows)
         assert all(set(r) == {"id", "document", "metadata"} for r in rows)
+
+    def test_include_embeddings_opt_in_fetches_vectors(self, client) -> None:
+        """nexus-hxry2: the same-model passthrough opts into fetching the stored
+        vectors — each chunk additionally carries ``embedding`` (the verbatim
+        source vector) so the migration can copy it instead of re-embedding."""
+        self._seed(client, "knowledge__etl_emb_test", 3)
+        rows = list(
+            iter_collection_chunks(
+                client, "knowledge__etl_emb_test", include_embeddings=True
+            )
+        )
+        assert len(rows) == 3
+        assert all(set(r) == {"id", "document", "metadata", "embedding"} for r in rows)
+        by_id = {r["id"]: r for r in rows}
+        # the verbatim seeded vector round-trips (seed: [float(i), 1.0, 0.0])
+        assert by_id["id-0002"]["embedding"] == [2.0, 1.0, 0.0]
 
     def test_page_size_over_quota_fails_loud(self, client) -> None:
         """chroma_quotas still governs this leg — the ONE reason it

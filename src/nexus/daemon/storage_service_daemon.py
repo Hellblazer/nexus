@@ -12,9 +12,11 @@ logic lives in the shared primitive, not here. This module:
 2. Starts the native nexus-service binary (RDR-157 native-image; acquired via
    ``nx daemon service install-binary``) with the environment variables read
    from ``pg_credentials``, a free ``NX_SERVICE_PORT``, and process-group
-   isolation (``start_new_session=True`` / ``os.killpg`` on stop). The native
-   binary is the SOLE launch artifact — RDR-161 expunged the legacy JVM
-   launch path.
+   isolation (``start_new_session=True`` / ``os.killpg`` on stop). The
+   cosign-verified native binary is the production launch artifact (RDR-161).
+   ``NEXUS_SERVICE_JAR`` is an EXPLICIT dev/test opt-in that launches a JVM
+   (``java -jar``) instead — never auto-discovered, never a silent fallback,
+   and logged loudly as UNVERIFIED (amends RDR-161).
 3. Waits for ``GET /health`` to return HTTP 200 (richer than bare-TCP: the
    HealthHandler returns ``{"status":"ok","db":"up"}`` or ``{"status":"error",
    "db":"down"}`` with a 503 status).
@@ -32,12 +34,15 @@ logic lives in the shared primitive, not here. This module:
    When the service is alive but ``/health`` returns non-200 for
    ``_MAX_UNHEALTHY_HEARTBEATS`` consecutive beats (stuck process: connection-pool
    exhaustion, internal deadlock), ``heartbeat_once()`` returns ``(False, pg_ok)``
-   to force a respawn — treating a stuck process identically to a process death.
+   so the run loop exits non-zero — treating a stuck process identically to a
+   process death and letting the OS watchdog restart the whole supervisor.
 6. ``mark_shutting_down()`` BEFORE ``os.killpg`` (RDR-151 P1.3 ordering).
-7. Auto-restarts on service death with a strictly higher generation (the primitive
-   handles generation/fencing). ``_restart_count`` is windowed: reset to 0
-   after ``_RESTART_WINDOW_HEARTBEATS`` clean heartbeats so transient clusters
-   of failures don't permanently exhaust the budget.
+7. RDR-175: OS init (launchd/systemd, RDR-174) is the single process watchdog.
+   On service death OR the stuck-process threshold, the supervisor EXITS non-zero
+   (3=service-unrecoverable, 4=PG-unrecoverable) and the OS restarts the whole
+   process — there is no in-process respawn mechanism. PG-only death (service
+   still alive) is the lone in-place recovery: the run loop restarts PG without
+   bouncing the JVM.
 8. LOUD failure when the service stays unreachable: ``StorageServiceStartError``
    (structured log + exception, no silent fall-through).
 
@@ -51,8 +56,11 @@ No direct-mode fallback — a service/PG outage is always fatal for callers.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import errno
 import os
+import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -68,6 +76,7 @@ from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     ServiceRegistry,
     ServiceSupervisor,
+    ttl_for_tier,
 )
 
 _log = structlog.get_logger(__name__)
@@ -85,6 +94,68 @@ _REGISTRY_TIER: str = "storage_service"
 #: The host the Java service binds to (loopback-only, no cross-host federation).
 _SERVICE_HOST: str = "127.0.0.1"
 
+#: PR_SET_PDEATHSIG (linux/prctl.h): deliver a signal to THIS process when its
+#: parent dies. nexus-03bcg / f9y78: the supervisor spawns the JVM as a child;
+#: arming pdeathsig makes the JVM die WITH its supervisor, so an OOM-killed
+#: supervisor leaves NO orphaned-but-serving JVM. That removes the double-JVM
+#: hazard at heal-on-next-use WITHOUT a pid-keyed addr file or orphan sweep
+#: (both banned by the RDR-149 lifecycle gate — liveness stays lease-TTL).
+_PR_SET_PDEATHSIG: int = 1
+
+#: libc handle for the prctl(2) call, loaded ONCE at import (not in preexec_fn —
+#: only the pre-loaded function pointer is async-signal-safe to call post-fork).
+#: ``CDLL(None)`` resolves already-loaded symbols (works on glibc AND musl);
+#: ``None`` on non-Linux platforms, where PR_SET_PDEATHSIG does not exist.
+#: The pid of the process that imported this module — the supervisor, for the
+#: ``nx daemon service start --foreground`` process. Used by the pdeathsig race
+#: guard (below) to detect fork-vs-parent-death reparenting in a way that is
+#: subreaper-agnostic (``getppid()==1`` misses systemd/container subreapers,
+#: which reparent to themselves, not init).
+_SUPERVISOR_PID: int = os.getpid()
+
+_LIBC: ctypes.CDLL | None
+if sys.platform.startswith("linux"):
+    try:
+        _LIBC = ctypes.CDLL(None, use_errno=True)
+        _LIBC.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong]
+        _LIBC.prctl.restype = ctypes.c_int
+    except (OSError, AttributeError):  # pragma: no cover — libc/prctl must exist on Linux, but never crash import
+        _LIBC = None
+else:
+    _LIBC = None
+
+
+def _set_pdeathsig_preexec() -> None:
+    """``preexec_fn`` for the JVM child: arm PR_SET_PDEATHSIG so the JVM dies
+    when its supervisor (parent) dies — no orphaned service, no double-JVM on
+    heal-on-next-use (nexus-03bcg, RDR-149-aligned).
+
+    Runs in the child after ``fork()``, before ``exec()``. Async-signal-safe:
+    only the import-time-loaded ``_LIBC.prctl``, ``os.getppid``, ``os.write``,
+    and ``os._exit`` (NO structlog / allocation post-fork). No-op off Linux.
+
+    Two robustness details:
+    - A failed prctl (seccomp/SELinux/ancient kernel) is surfaced via an
+      async-signal-safe ``os.write`` to fd 2 — otherwise the orphan hazard would
+      silently reinstate with no diagnostic.
+    - Closes the fork-vs-parent-death race: if the supervisor died before prctl
+      ran, the signal was missed; ``getppid() != _SUPERVISOR_PID`` (the supervisor
+      that forked us) means we were reparented, so exit rather than orphan. This
+      is subreaper-agnostic (unlike a ``getppid()==1`` check).
+
+    NOTE (macOS / non-Linux): PR_SET_PDEATHSIG has no equivalent, so the
+    orphaned-JVM hazard persists on the inline/no-autostart path there; under
+    launchd the supervisor is restarted but a prior OOM orphan is NOT killed (it
+    lingers as a port-less, lease-less zombie until reboot). The Linux container
+    OOM scenario — the one this targets — is fully covered.
+    """
+    if _LIBC is None:  # non-Linux: PR_SET_PDEATHSIG unavailable
+        return
+    if _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL) != 0:
+        os.write(2, b"nexus: prctl(PR_SET_PDEATHSIG) failed; JVM will not die with supervisor\n")
+    if os.getppid() != _SUPERVISOR_PID:  # reparented → supervisor already dead → don't orphan
+        os._exit(0)
+
 #: Path suffix of the spawn lock file inside config_dir.
 _SPAWN_LOCK_FILE: str = "storage_service_spawn.lock"
 
@@ -97,26 +168,28 @@ _READY_POLL_INTERVAL: float = 0.5
 #: After SIGTERM, wait this long before escalating to SIGKILL.
 _GRACEFUL_STOP_TIMEOUT: float = 5.0
 
-#: Max auto-restart attempts in a window before giving up.
-_MAX_RESTART_ATTEMPTS: int = 3
-
-#: Delay between restart attempts.
-_RESTART_BACKOFF: float = 2.0
-
 #: Short HTTP timeout for /health probes.
 _HEALTH_TIMEOUT: float = 2.0
 
-#: Number of clean heartbeats after a restart before the restart budget resets.
-#: Prevents lifetime-cumulative exhaustion from transient failure clusters.
-#: At DEFAULT_HEARTBEAT_INTERVAL=1s, 300 heartbeats ≈ 5 minutes.
-_RESTART_WINDOW_HEARTBEATS: int = 300
+#: The storage-service lease TTL is a SUBSTRATE parameter — it lives in the shared
+#: primitive (``service_registry.TIER_TTLS["storage_service"]``, resolved via
+#: ``ttl_for_tier``), NOT here, per RDR-149 (no tier-specific lifecycle code
+#: outside the substrate). nexus-lz3f2: the storage-service heartbeat tick can
+#: take up to ``_HEALTH_TIMEOUT`` (2s) + ``DEFAULT_HEARTBEAT_INTERVAL`` (1s) ≈ 3s,
+#: grazing the 3s default; the 15s tier override gives ~15 missed-beats of margin.
+#: TRADE-OFF (nexus-om64x): this also widens the post-restart stale-endpoint
+#: window — the old lease lingers until TTL — from 3s to 15s; the client re-spawn
+#: backstop nexus-03bcg is what closes that window for a dead supervisor.
 
 #: Consecutive heartbeats where the process is alive but /health returns
-#: non-200 before triggering a forced respawn. Handles stuck-but-alive states
-#: (connection-pool exhaustion, GC pause, internal deadlock) that are the
-#: most common partial-failure mode. 3 beats at 1s interval = a 3s
-#: grace window before respawn — large enough to absorb transient GC pauses,
-#: small enough to recover quickly from real deadlocks.
+#: non-200 before the supervisor exits non-zero for an OS restart. Handles
+#: stuck-but-alive states (connection-pool exhaustion, GC pause, internal
+#: deadlock) that are the most common partial-failure mode — and which the OS
+#: watchdog (RDR-175) cannot catch on its own, since it only sees process
+#: death. 3 beats at 1s interval = a 3s grace window before exit — large
+#: enough to absorb transient GC pauses, small enough to recover quickly from
+#: real deadlocks. RDR-175 retired the in-process respawn mechanism; this
+#: DETECTION is retained but its action is now exit-for-OS-restart, not respawn.
 _MAX_UNHEALTHY_HEARTBEATS: int = 3
 
 
@@ -183,7 +256,7 @@ def _find_service_binary(config_dir: Path) -> Path | None:
             "to use the installed binary."
         )
 
-    from nexus.daemon.binary_lifecycle import well_known_binary_path
+    from nexus.daemon.binary_lifecycle import well_known_binary_path  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
     well_known = well_known_binary_path(config_dir)
     if well_known.is_file():
         return _require_executable(well_known, "nexus-service")
@@ -201,6 +274,84 @@ def _require_executable(p: Path, label: str) -> Path:
             f"{label} at {p} is not executable. Make it runnable: chmod +x {p}"
         )
     return p
+
+
+def _find_service_jar() -> Path | None:
+    """Resolve an EXPLICIT, opt-in service JAR, or None.
+
+    Dev/test escape hatch amending RDR-161 (which made the cosign-signed native
+    binary the sole launch artifact). The JAR is **never auto-discovered and
+    never a silent fallback** — it launches ONLY when ``NEXUS_SERVICE_JAR`` is
+    set, preserving RDR-161's "never silently mask a missing native binary"
+    supply-chain intent. The JAR is NOT signature-verified; the caller logs
+    that loudly. Set-but-missing fails loud (an operator who named a JAR that
+    does not exist made a mistake worth surfacing).
+    """
+    override = os.environ.get("NEXUS_SERVICE_JAR", "").strip()
+    if not override:
+        return None
+    p = Path(override)
+    if p.is_file():
+        return p
+    raise StorageServiceStartError(
+        f"NEXUS_SERVICE_JAR is set to {override!r} but the file does not exist. "
+        "Point it at a built nexus-service-*.jar, or unset it to use the "
+        "installed native binary."
+    )
+
+
+def _resolve_java_executable() -> str:
+    """Return the ``java`` launcher for the JAR path, or fail loud with a remedy.
+
+    Honours ``JAVA_HOME`` (``$JAVA_HOME/bin/java``) then falls back to ``java``
+    on ``PATH``. A JAR launch with no JVM available must fail with an actionable
+    message, not a bare ``FileNotFoundError`` from ``Popen``.
+    """
+    java_home = os.environ.get("JAVA_HOME", "").strip()
+    if java_home:
+        cand = Path(java_home) / "bin" / "java"
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    found = shutil.which("java")
+    if found:
+        return found
+    raise StorageServiceStartError(
+        "NEXUS_SERVICE_JAR launch requires a Java runtime, but no 'java' was "
+        "found on PATH or via JAVA_HOME. Install a JDK (>= 21), or unset "
+        "NEXUS_SERVICE_JAR to use the native binary."
+    )
+
+
+def _resolve_launch_artifact(config_dir: Path) -> tuple[Path, str]:
+    """Resolve the service launch artifact and its kind.
+
+    Returns ``(path, kind)`` where kind is ``"jar"`` (explicit ``NEXUS_SERVICE_JAR``
+    opt-in, dev/test, UNVERIFIED) or ``"native"`` (the RDR-161 cosign-verified
+    binary, the production default). The JAR is checked first ONLY because it is
+    an explicit override; with it unset the native binary is the sole path.
+    """
+    jar = _find_service_jar()
+    if jar is not None:
+        _log.warning(
+            "storage_service_jar_launch",
+            jar=str(jar),
+            verified=False,
+            note="launching the UNVERIFIED dev/test JAR via NEXUS_SERVICE_JAR, "
+                 "not the cosign-signed native binary (RDR-161). For production "
+                 "use the installed native binary.",
+        )
+        return jar, "jar"
+    binary = _find_service_binary(config_dir)
+    if binary is None:
+        raise StorageServiceStartError(
+            "No nexus-service launch artifact found. Acquire the signed native "
+            "binary:\n"
+            "  nx daemon service install-binary <engine-service tag>\n"
+            "or point NEXUS_SERVICE_BIN at a built native binary. For local "
+            "dev/test you may instead set NEXUS_SERVICE_JAR to a built "
+            "nexus-service-*.jar (unverified; requires a JVM)."
+        )
+    return binary, "native"
 
 
 # ── Port helpers ───────────────────────────────────────────────────────────────
@@ -255,9 +406,9 @@ def _pid_is_alive(pid: int) -> bool:
 def _daemon_version() -> str:
     """Return the conexus package version for the lease."""
     try:
-        from importlib.metadata import version
+        from importlib.metadata import version  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         return version("conexus")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort version probe; falls back to 0.0.0
         return "0.0.0"
 
 
@@ -277,12 +428,11 @@ class StorageServiceSupervisor:
     - PG-only death (service still alive): ``_ensure_pg_running()`` called
       directly from the run loop without a full service respawn.
     - ``mark_shutting_down()`` BEFORE ``os.killpg`` (RDR-151 P1.3).
-    - Auto-restart on service death: respawn + republish (higher generation).
-    - ``_restart_count`` is windowed (reset after _RESTART_WINDOW_HEARTBEATS
-      clean heartbeats) so transient failure clusters don't permanently
-      exhaust the budget.
+    - Service death or stuck-process threshold: the supervisor EXITS non-zero
+      (RDR-175) and the OS watchdog (RDR-174 launchd/systemd units) restarts the
+      whole process. No in-process respawn mechanism.
     - NX_SERVICE_TOKEN included in the lease endpoint so clients can
-      re-read the token after an auto-restart.
+      re-read the token after an OS restart.
     - LOUD failure: cannot bring up the service -> ``StorageServiceStartError``.
 
     Postgres ownership: the supervisor starts PG on demand and restarts it
@@ -302,20 +452,31 @@ class StorageServiceSupervisor:
         service_port: int,
         creds: dict[str, str],
         binary_path: Path,
+        launch_kind: str = "native",
         lease_clock: Callable[[], float] = time.time,
         supervised: bool = False,
     ) -> None:
-        # RDR-161: the native binary is the SOLE launch artifact — the
-        # legacy JVM launch path is expunged. A missing binary is fatal here.
+        # RDR-161: the cosign-verified native binary is the production launch
+        # artifact. ``launch_kind="jar"`` is the explicit dev/test opt-in
+        # (NEXUS_SERVICE_JAR), launched via the JVM — never an auto-fallback.
         if binary_path is None:
             raise StorageServiceStartError(
-                "StorageServiceSupervisor needs a native binary to launch; "
-                "none was provided. Acquire one via "
-                "'nx daemon service install-binary <tag>'."
+                "StorageServiceSupervisor needs a launch artifact; none was "
+                "provided. Acquire the native binary via "
+                "'nx daemon service install-binary <tag>', or set "
+                "NEXUS_SERVICE_JAR for a local dev/test JVM launch."
+            )
+        if launch_kind not in ("native", "jar"):
+            raise StorageServiceStartError(
+                f"launch_kind must be 'native' or 'jar', got {launch_kind!r}."
             )
         self._config_dir = config_dir
         self._binary_path = binary_path
-        self._svc_log_name = "storage_service_native"
+        self._launch_kind = launch_kind
+        self._svc_log_name = (
+            "storage_service_jar" if launch_kind == "jar"
+            else "storage_service_native"
+        )
         self._pg_port = pg_port
         self._service_port = service_port
         self._creds = creds
@@ -325,12 +486,10 @@ class StorageServiceSupervisor:
         self._proc: subprocess.Popen[bytes] | None = None
         self._registry: ServiceRegistry | None = None
         self._supervisor: ServiceSupervisor | None = None
-        self._restart_count: int = 0
-        # Windowed restart budget: counts clean heartbeats since the last restart.
-        self._clean_heartbeats_since_restart: int = 0
         # Consecutive unhealthy heartbeats counter: process alive but /health
         # non-200. When this reaches _MAX_UNHEALTHY_HEARTBEATS the run loop
-        # treats the stuck process like a process death and triggers _respawn().
+        # treats the stuck process like a process death and exits non-zero so
+        # the OS watchdog (RDR-175) restarts the whole supervisor.
         self._consecutive_unhealthy_heartbeats: int = 0
         # Persistent root bearer token (gmiaf.32.5). Read from pg_credentials
         # (or the env override); NOT derived from DB passwords. Stable across
@@ -403,6 +562,13 @@ class StorageServiceSupervisor:
         # dual-review finding M-2).
         # Use the stable token so clients don't get 401 after a restart.
         env["NX_SERVICE_TOKEN"] = self._service_token
+        # nexus-03bcg: arm the Java-side parent-death watchdog so the JVM exits if
+        # THIS supervisor dies — the portable (Linux + macOS) orphan-prevention
+        # complement to the Linux-only PR_SET_PDEATHSIG preexec below. Only the
+        # supervisor-spawned JVM gets this (standalone binary runs do not), so a
+        # dead supervisor never leaves an orphaned-but-serving service. NX_SERVICE_BIND
+        # (container bind override, default loopback) passes through via env inheritance.
+        env["NX_SERVICE_PARENT_DEATH_EXIT"] = "1"
 
         # nexus-pebfx.2: the service only reads NX_VOYAGE_API_KEY; without it the
         # service embeds local ONNX (RDR-160: bge-768) and refuses every
@@ -411,7 +577,7 @@ class StorageServiceSupervisor:
         # credentials) so `nx daemon service start` works without manual env
         # plumbing. An explicit NX_VOYAGE_API_KEY in the caller's env wins.
         if not env.get("NX_VOYAGE_API_KEY"):
-            from nexus.config import get_credential
+            from nexus.config import get_credential  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             voyage_key = get_credential("voyage_api_key")
             if voyage_key:
                 env["NX_VOYAGE_API_KEY"] = voyage_key
@@ -424,13 +590,43 @@ class StorageServiceSupervisor:
                     hint="set VOYAGE_API_KEY or `nx config set voyage_api_key <key>`",
                 )
 
-        argv = [str(self._binary_path)]
+        # Launch artifact: native binary (argv[0] = binary) or, when explicitly
+        # opted in via NEXUS_SERVICE_JAR, the JVM (argv = java -jar <jar>). The
+        # -Xmx option below is accepted by both GraalVM native-image and the JVM.
+        if self._launch_kind == "jar":
+            java_exe = _resolve_java_executable()
+            argv = [java_exe]
+        else:
+            argv = [str(self._binary_path)]
+        # nexus-lz3f2: optional max-heap bound for memory-constrained hosts
+        # (e.g. the migration-rehearsal container, where an unbounded native-image
+        # heap peak during bge-768 ONNX load + PG + the Python supervisor tripped
+        # the cgroup OOM killer — which SIGKILLed the *supervisor*, not the JVM,
+        # silently vanishing the lease). GraalVM native-image consumes -Xmx as a
+        # runtime option before the app sees argv. Unset by default → no change to
+        # production serving; set NX_SERVICE_MAX_HEAP (e.g. "1g") to bound it.
+        max_heap = os.environ.get("NX_SERVICE_MAX_HEAP", "").strip()
+        if max_heap:
+            # Validate before injection: a malformed -Xmx makes the native binary
+            # exit immediately, and the supervisor would then blame a /health
+            # timeout (pointing at the log, not the env var). Fail loud + actionable.
+            if not re.fullmatch(r"\d+[kKmMgG]", max_heap):
+                raise StorageServiceStartError(
+                    f"NX_SERVICE_MAX_HEAP={max_heap!r} is not a valid JVM heap size "
+                    "(expected e.g. '512m', '1g', '2048k')."
+                )
+            argv.append(f"-Xmx{max_heap}")
+        # JVM launch: the runnable artifact follows as `-jar <jar>` (after any
+        # -Xmx, which the JVM requires before -jar). Native: argv[0] is already
+        # the binary.
+        if self._launch_kind == "jar":
+            argv += ["-jar", str(self._binary_path)]
         artifact = str(self._binary_path)
         # nexus-ovbr7: route both streams to one file so interleaved output keeps
         # its order; O_APPEND means a respawn never truncates the previous
         # process's final (crash) output. The native binary writes to
         # storage_service_native.log.
-        from nexus.logging_setup import open_child_log_or_devnull
+        from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         svc_log = open_child_log_or_devnull(self._svc_log_name, self._config_dir)
         try:
@@ -440,6 +636,9 @@ class StorageServiceSupervisor:
                 stdout=svc_log,
                 stderr=svc_log,
                 start_new_session=True,
+                # nexus-03bcg: die with the supervisor (Linux PR_SET_PDEATHSIG) so
+                # an OOM-killed supervisor leaves no orphaned JVM. None off Linux.
+                preexec_fn=_set_pdeathsig_preexec if _LIBC is not None else None,
             )
         finally:
             # The child holds its own duplicated fd; the parent's handle is
@@ -451,6 +650,8 @@ class StorageServiceSupervisor:
             pid=proc.pid,
             port=port,
             artifact=artifact,
+            launch_kind=self._launch_kind,
+            verified=self._launch_kind == "native",
             service_log=getattr(svc_log, "name", "DEVNULL"),
         )
         return proc, port
@@ -462,11 +663,11 @@ class StorageServiceSupervisor:
             return False
         url = f"http://{_SERVICE_HOST}:{_port}/health"
         try:
-            import urllib.request
+            import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=_HEALTH_TIMEOUT) as resp:
                 return resp.status == 200
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort reachability probe; returns False on any error
             return False
 
     def _pg_reachable(self) -> bool:
@@ -507,7 +708,7 @@ class StorageServiceSupervisor:
             pid=proc.pid,
         )
         with contextlib.suppress(Exception):
-            from nexus.util.process_group import safe_killpg
+            from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             safe_killpg(proc.pid, signal.SIGTERM)
             kill_deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
             while time.monotonic() < kill_deadline and _pid_is_alive(proc.pid):
@@ -538,6 +739,7 @@ class StorageServiceSupervisor:
             dir=self._config_dir,
             tier=_REGISTRY_TIER,
             clock=self._lease_clock,
+            ttl=ttl_for_tier(_REGISTRY_TIER),
         )
         self._supervisor = ServiceSupervisor(
             self._registry,
@@ -562,7 +764,7 @@ class StorageServiceSupervisor:
         """
         if self._proc is None:
             return
-        from nexus.util.process_group import safe_killpg
+        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         pid = self._proc.pid
         if _pid_is_alive(pid):
@@ -574,61 +776,12 @@ class StorageServiceSupervisor:
                 safe_killpg(pid, signal.SIGKILL)
         self._proc = None
 
-    def _respawn(self) -> None:
-        """Spawn and re-publish after a process death or stuck-process respawn.
-
-        SIGNIFICANT-2 fix: ``_restart_count`` is windowed — reset to 0 after
-        ``_RESTART_WINDOW_HEARTBEATS`` clean heartbeats following a restart.
-
-        ROUND-3 fix: stop the old process group BEFORE spawning the replacement.
-        On the natural process-death path the process is already gone, so
-        ``_stop_service()`` is a guarded no-op (it checks ``_pid_is_alive``). On
-        the stuck-process path (``heartbeat_once`` signals respawn while the
-        process is still physically alive) this is load-bearing: without it the
-        old process is orphaned, keeps its Postgres connections open, and
-        accumulates one leak per respawn cycle. Stopping first also covers the
-        budget-exhausted raise path so we never leave a stuck process behind
-        when giving up.
-        """
-        self._stop_service()
-        self._restart_count += 1
-        self._clean_heartbeats_since_restart = 0  # reset the clean window
-        if self._restart_count > _MAX_RESTART_ATTEMPTS:
-            raise StorageServiceStartError(
-                f"Storage service auto-restart failed {self._restart_count} times "
-                f"in the current restart window (max={_MAX_RESTART_ATTEMPTS}). "
-                "Giving up. Check service logs and Postgres status."
-            )
-        _log.warning(
-            "storage_service_restarting",
-            attempt=self._restart_count,
-            max_attempts=_MAX_RESTART_ATTEMPTS,
-        )
-        time.sleep(_RESTART_BACKOFF)
-        proc, port = self._spawn_service()
-        self._proc = proc
-        self._wait_for_service_ready(proc, port)
-        # Republish — ServiceRegistry.publish() under the election flock bumps
-        # the generation monotonically, providing the higher-generation fencing
-        # the RDR-149 conformance battery requires.
-        self._publish(port)
-
-    def _maybe_reset_restart_budget(self) -> None:
-        """After a clean heartbeat following a restart, advance the window counter.
-
-        If the window threshold is reached, reset _restart_count to 0 so
-        isolated bursts of failures don't permanently exhaust the budget.
-        """
-        if self._restart_count > 0:
-            self._clean_heartbeats_since_restart += 1
-            if self._clean_heartbeats_since_restart >= _RESTART_WINDOW_HEARTBEATS:
-                _log.info(
-                    "storage_service_restart_budget_reset",
-                    previous_count=self._restart_count,
-                    window=_RESTART_WINDOW_HEARTBEATS,
-                )
-                self._restart_count = 0
-                self._clean_heartbeats_since_restart = 0
+    # RDR-175: the in-process respawn mechanism (``_respawn`` + the windowed
+    # restart budget ``_maybe_reset_restart_budget``) was retired. OS init
+    # (RDR-174 launchd/systemd units) is now the single process watchdog: on
+    # service death or the stuck-process threshold the supervise loop exits
+    # non-zero and the OS restarts the whole process. The ``(True, False)``
+    # PG-only arm restarts PG in place (see ``_supervise_until_stopped``).
 
     # -- Public lifecycle API -----------------------------------------------
 
@@ -639,7 +792,7 @@ class StorageServiceSupervisor:
         Idempotent: a live lease short-circuits without a duplicate spawn.
         Raises :class:`StorageServiceStartError` on failure (LOUD).
         """
-        import fcntl
+        import fcntl  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         self._config_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._config_dir / _SPAWN_LOCK_FILE
@@ -737,7 +890,7 @@ class StorageServiceSupervisor:
 
         _log.info("storage_service_starting_pg", port=self._pg_port)
         try:
-            from nexus.db.pg_provision import discover_pg_binaries, _start_cluster
+            from nexus.db.pg_provision import discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             pg_data_str = self._creds.get("PG_DATA", "")
             if not pg_data_str:
                 raise StorageServiceStartError(
@@ -766,17 +919,21 @@ class StorageServiceSupervisor:
         """Re-stamp the lease iff service is alive AND healthy AND PG reachable.
 
         Returns (service_running, pg_ok) so the run loop can handle PG-only
-        failure without triggering a service respawn:
+        failure without exiting the supervisor:
 
         - (False, _)    — process exited OR stuck-process threshold crossed;
-                          caller should call _respawn(). When the process is
-                          physically alive but /health has returned non-200 for
-                          _MAX_UNHEALTHY_HEARTBEATS consecutive beats, this
-                          method returns (False, pg_ok) to force a respawn —
-                          a stuck-but-alive process (connection-pool exhaustion,
-                          internal deadlock) is treated like a process death.
-        - (True, False) — process alive and healthy, PG down; caller should call
-                          _ensure_pg_running() directly.
+                          the run loop EXITS non-zero so the OS watchdog
+                          (RDR-175) restarts the whole supervisor. When the
+                          process is physically alive but /health has returned
+                          non-200 for _MAX_UNHEALTHY_HEARTBEATS consecutive
+                          beats, this method returns (False, pg_ok) to force
+                          that exit — a stuck-but-alive process (connection-pool
+                          exhaustion, internal deadlock) is treated like a
+                          process death (the OS watchdog cannot see it
+                          otherwise, since the process never dies).
+        - (True, False) — process alive and healthy, PG down; the run loop calls
+                          _ensure_pg_running() directly (PG restart in place,
+                          no supervisor exit, JVM untouched).
         - (True, True)  — everything healthy; lease re-stamped. NOTE: the
                           (True, True) path is the ONLY path that re-stamps
                           the lease. The (True, False) path does NOT re-stamp
@@ -799,7 +956,7 @@ class StorageServiceSupervisor:
                 returncode=rc,
                 service_log=str(self._config_dir / "logs" / f"{self._svc_log_name}.log"),
             )
-            return False, False  # process exited; signal the run loop to respawn
+            return False, False  # process exited; signal the run loop to exit
 
         service_alive = _pid_is_alive(self._proc.pid)
         service_ok = self._service_healthy()
@@ -821,11 +978,12 @@ class StorageServiceSupervisor:
                 threshold=_MAX_UNHEALTHY_HEARTBEATS,
             )
             if self._consecutive_unhealthy_heartbeats >= _MAX_UNHEALTHY_HEARTBEATS:
-                # Stuck process: treat like a death so the run loop calls _respawn().
+                # Stuck process: treat like a death so the run loop exits
+                # non-zero and the OS watchdog restarts the whole supervisor.
                 _log.warning(
-                    "storage_service_stuck_respawn",
+                    "storage_service_stuck_exit",
                     consecutive_unhealthy=self._consecutive_unhealthy_heartbeats,
-                    msg="Stuck process threshold reached; signalling respawn",
+                    msg="Stuck process threshold reached; signalling supervisor exit",
                 )
                 self._consecutive_unhealthy_heartbeats = 0
                 return False, pg_ok
@@ -851,7 +1009,6 @@ class StorageServiceSupervisor:
                 "storage_service_lease_fenced",
                 scope=self._scope,
             )
-        self._maybe_reset_restart_budget()
         return True, True
 
     def stop(self) -> None:
@@ -879,7 +1036,7 @@ class StorageServiceSupervisor:
 
 def _load_credentials(config_dir: Path) -> dict[str, str]:
     """Read pg_credentials; raise StorageServiceStartError if absent."""
-    from nexus.db.pg_provision import CREDENTIALS_FILENAME
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
     creds_path = config_dir / CREDENTIALS_FILENAME
     if not creds_path.exists():
         raise StorageServiceStartError(
@@ -892,28 +1049,13 @@ def _load_credentials(config_dir: Path) -> dict[str, str]:
     # one here so the supervisor starts cleanly on upgrade rather than hard-failing in
     # _resolve_service_token. Idempotent (no-op if already present).
     if not creds.get("NX_SERVICE_TOKEN"):
-        import secrets
-        from nexus.db.pg_provision import _persist_service_token
+        import secrets  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        from nexus.db.pg_provision import _persist_service_token  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         _persist_service_token(creds_path, secrets.token_hex(32))
         creds = _read_pg_credentials(creds_path)
     return creds
 
 
-def _require_service_binary(config_dir: Path) -> Path:
-    """Resolve the native service binary or fail loud (RDR-161 native-only).
-
-    There is no legacy JVM fallback: a missing binary means the service was
-    never acquired. Direct the operator at the install verb.
-    """
-    binary_path = _find_service_binary(config_dir)
-    if binary_path is None:
-        raise StorageServiceStartError(
-            "No nexus-service native binary found. Acquire one:\n"
-            "  nx daemon service install-binary <engine-service tag>\n"
-            "  (installs to the well-known location under the config dir),\n"
-            "or point NEXUS_SERVICE_BIN at a built native binary."
-        )
-    return binary_path
 
 
 def start_storage_service(
@@ -929,7 +1071,7 @@ def start_storage_service(
     Raises :class:`StorageServiceStartError` loudly on any failure.
     """
     if config_dir is None:
-        from nexus.config import nexus_config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         config_dir = nexus_config_dir()
 
     creds = _load_credentials(config_dir)
@@ -941,11 +1083,12 @@ def start_storage_service(
         )
     pg_port = int(pg_port_str)
 
-    binary_path = _require_service_binary(config_dir)
+    binary_path, launch_kind = _resolve_launch_artifact(config_dir)
 
     sup = StorageServiceSupervisor(
         config_dir=config_dir,
         binary_path=binary_path,
+        launch_kind=launch_kind,
         pg_port=pg_port,
         service_port=0,  # allocated inside start()
         creds=creds,
@@ -964,23 +1107,26 @@ def run_storage_supervisor(
     it gracefully shuts down.
 
     PG-only failure: when heartbeat_once() returns (True, False), the run loop
-    calls _ensure_pg_running() directly — a PG restart without a service respawn.
+    calls _ensure_pg_running() directly — a PG restart in place without bouncing
+    the JVM (the lone in-process recovery retained under the OS-watchdog model).
 
-    Simultaneous service+PG death (False, False): PG is restarted FIRST, then the
-    service respawns (nexus-14k0m) — a respawn against a dead PG can never pass
-    /health and would burn the restart budget with no PG attempt. If PG is
-    unrecoverable the supervisor exits 4 without consuming respawn budget.
-
-    Service failure or stuck process: when heartbeat_once() returns (False, _),
-    auto-restart up to _MAX_RESTART_ATTEMPTS times in the current window.
-    The (False, _) signal is raised both when the service process exits AND when
-    it is alive but /health has returned non-200 for _MAX_UNHEALTHY_HEARTBEATS
-    consecutive beats (stuck process). On exhaustion, returns non-zero so the
-    process supervisor (launchd / systemd) can restart the *supervisor process*.
-    Returns the intended process exit code.
+    Service failure or stuck process (RDR-175): when heartbeat_once() returns
+    (False, _), the supervisor EXITS non-zero so the OS process watchdog
+    (launchd / systemd, RDR-174) restarts the whole supervisor — there is no
+    in-process respawn. The (False, _) signal is raised both when the service
+    process exits AND when it is alive but /health has returned non-200 for
+    _MAX_UNHEALTHY_HEARTBEATS consecutive beats (stuck process). Exit codes:
+    3 = service-unrecoverable, 4 = PG-unrecoverable. NOTE (RDR-175): exit 4 is
+    emitted ONLY from the (True, False) PG-only arm (PG dies while the service
+    is alive). A simultaneous service+PG death exits 3, and if PG is then
+    permanently unrecoverable the OS-restart's start() raises
+    StorageServiceStartError → the crash backstop re-raises → process exits 1.
+    Under StartLimitIntervalSec=0 / KeepAlive all of 1/3/4 trigger an OS
+    restart, so this narrowing affects log-based triage only, not recovery.
+    Returns the exit code.
     """
     if config_dir is None:
-        from nexus.config import nexus_config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         config_dir = nexus_config_dir()
 
     # nexus-ovbr7: route structlog to <config_dir>/logs/storage_service.log
@@ -988,7 +1134,7 @@ def run_storage_supervisor(
     # stderr, so without this file sink every lifecycle event below —
     # including the restart-exhausted and crash paths — was invisible and
     # four supervisor deaths went undiagnosed.
-    from nexus.logging_setup import configure_logging, flush_logging
+    from nexus.logging_setup import configure_logging, flush_logging  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     configure_logging("storage_service", config_dir=config_dir)
 
@@ -1010,12 +1156,13 @@ def run_storage_supervisor(
         )
     pg_port = int(pg_port_str)
 
-    binary_path = _require_service_binary(config_dir)
+    binary_path, launch_kind = _resolve_launch_artifact(config_dir)
 
     _log.info(
         "storage_service_supervisor_started",
         pid=os.getpid(),
         artifact=str(binary_path),
+        launch_kind=launch_kind,
         pg_port=pg_port,
         config_dir=str(config_dir),
     )
@@ -1023,6 +1170,7 @@ def run_storage_supervisor(
     sup = StorageServiceSupervisor(
         config_dir=config_dir,
         binary_path=binary_path,
+        launch_kind=launch_kind,
         pg_port=pg_port,
         service_port=0,
         creds=creds,
@@ -1045,7 +1193,15 @@ def _supervise_until_stopped(
     flush_logging: Callable[[], None],
 ) -> int:
     """The supervise loop body of ``run_storage_supervisor`` (split out so
-    the crash backstop wraps start() and the loop uniformly)."""
+    the crash backstop wraps start() and the loop uniformly).
+
+    RDR-175: OS init is the single process watchdog. The loop is start →
+    heartbeat → die-non-zero. On service death OR the stuck-process threshold
+    (``service_running`` falsey) the supervisor exits 3 and the OS restarts the
+    whole process (which re-runs ``start()`` — including a fresh PG bring-up),
+    instead of an in-process respawn. The lone in-place recovery is the
+    ``(True, False)`` PG-only arm: PG is restarted directly while the alive JVM
+    keeps running (the OS supervises the supervisor process, not PG)."""
     sup.start()
 
     exit_code = 0
@@ -1053,56 +1209,27 @@ def _supervise_until_stopped(
         service_running, pg_ok = sup.heartbeat_once()
 
         if not service_running:
-            # Service exited (or stuck-process threshold hit) — auto-restart.
-            if not pg_ok:
-                # nexus-14k0m: simultaneous service+PG death. _respawn() never
-                # starts PG, and the `elif not pg_ok` branch below only fires
-                # while the service is ALIVE — so without this, the respawned
-                # service's /health could never pass and the restart budget
-                # burned down with zero pg_ctl attempts. Restart PG FIRST;
-                # if PG is unrecoverable, respawning the service is futile —
-                # exit 4 (the PG-unrecoverable contract) with budget intact.
-                # Covers BOTH routes into service_running=False (process exit
-                # hardcodes pg_ok=False; stuck-process carries a live probe) —
-                # _ensure_pg_running() re-probes, so a hardcoded False with
-                # PG actually up is a cheap no-op, never a false exit 4.
-                # Loop invariant: heartbeat_once() returned (False, False)
-                # with _proc/_supervisor still set (stop() only runs after
-                # the loop) — do not call sup.stop() mid-loop.
-                _log.warning(
-                    "storage_service_and_pg_died",
-                    msg="service process and PG both down; restarting PG before respawn",
-                )
-                try:
-                    sup._ensure_pg_running()
-                    _log.info("storage_service_pg_restarted_before_respawn")
-                except StorageServiceStartError as exc:
-                    _log.error(
-                        "storage_service_and_pg_restart_failed",
-                        error=str(exc),
-                        msg="Could not restart PG; supervisor exiting",
-                    )
-                    exit_code = 4
-                    break
+            # Service process exited OR the stuck-process detection threshold
+            # was breached (wedged-but-alive JVM). Under the OS-watchdog model
+            # (RDR-175) the supervisor no longer respawns in-process: it exits
+            # non-zero so the OS init unit (launchd/systemd) restarts the whole
+            # supervisor, which re-runs start() — including a fresh
+            # _ensure_pg_running(). A both-down (False, False) beat is covered
+            # by the same exit: the OS restart brings PG back up via start().
+            # 3 = service-unrecoverable.
             _log.warning(
                 "storage_service_exited",
-                msg="service child gone; attempting restart",
+                msg="service child gone or wedged; exiting non-zero for OS restart",
+                pg_ok=pg_ok,
             )
-            try:
-                sup._respawn()
-                _log.info("storage_service_restarted_successfully")
-            except StorageServiceStartError as exc:
-                _log.error(
-                    "storage_service_restart_exhausted",
-                    error=str(exc),
-                    msg="Max restart attempts reached; supervisor exiting",
-                )
-                exit_code = 3
-                break
+            exit_code = 3
+            break
 
-        elif not pg_ok:
+        if not pg_ok:
             # PG died independently while the service is still alive — restart
-            # PG directly without triggering a service respawn.
+            # PG directly without bouncing the JVM (PRESERVED under the OS
+            # watchdog: the OS supervises the supervisor process, not PG).
+            # 4 = PG-unrecoverable.
             _log.warning(
                 "storage_service_pg_died_independently",
                 msg="PG unreachable while service alive; attempting PG restart",
@@ -1149,7 +1276,7 @@ def stop_storage_service(*, config_dir: Path | None = None) -> int | None:
     None for stale ones), a non-None return is the freshness proxy.
     """
     if config_dir is None:
-        from nexus.config import nexus_config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         config_dir = nexus_config_dir()
 
     registry = ServiceRegistry(dir=config_dir, tier=_REGISTRY_TIER)
@@ -1185,7 +1312,7 @@ def stop_storage_service(*, config_dir: Path | None = None) -> int | None:
 
     # No live supervisor: signal the service process group directly.
     if isinstance(pid_to_signal, int) and pid_to_signal > 0:
-        from nexus.util.process_group import safe_killpg
+        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         safe_killpg(pid_to_signal, signal.SIGTERM)
         # Clean up the lease record.
         with contextlib.suppress(Exception):

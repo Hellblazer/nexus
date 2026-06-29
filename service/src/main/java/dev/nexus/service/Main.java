@@ -141,10 +141,58 @@ public final class Main {
         var pgVectorRepo = new PgVectorRepository(new TenantScope(ds), docEmbedRouter,
                                                   qryEmbedRouter);
 
+        // Pooler-mode backstop (nexus-bhzuv): if a PgBouncer is interposed
+        // (NX_PGBOUNCER_ADMIN_URL set), refuse to bind unless it reports
+        // pool_mode=transaction. SET LOCAL tenant GUCs leak across borrows under
+        // session-mode pooling → cross-tenant read. No-op on the direct-PG path.
+        // Runs BEFORE service.start(), mirroring the schema-migration fail-fast ordering.
+        try {
+            dev.nexus.service.db.PoolerModeCheck.verifyAtStartup();
+        } catch (dev.nexus.service.db.PoolerModeCheck.PoolerModeException e) {
+            ds.close();
+            log.error("event=pooler_mode_check_failed error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+        }
+
         var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo);
         service.start();
 
         log.info("event=service_ready port={}", service.getPort());
+
+        // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
+        // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving
+        // JVM (the orphan would keep /health green while its lease ages out, and a
+        // heal-on-next-use re-spawn would then double-spawn a 2nd JVM). Opt-in via
+        // NX_SERVICE_PARENT_DEATH_EXIT=1 (set by the supervisor when it spawns us)
+        // so standalone/test runs with no supervisor are unaffected. This is the
+        // portable (Linux + macOS) complement to the Linux-only PR_SET_PDEATHSIG
+        // the supervisor also arms on the child.
+        if ("1".equals(System.getenv("NX_SERVICE_PARENT_DEATH_EXIT"))) {
+            ProcessHandle.current().parent().ifPresentOrElse(parent -> {
+                Thread watchdog = new Thread(() -> {
+                    try {
+                        parent.onExit().get();   // completes when the supervisor exits
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    } catch (Exception e) {       // onExit unsupported for this handle (RuntimeException)
+                        log.warn("event=parent_death_watchdog_error error=\"{}\"", e.toString());
+                        return;
+                    }
+                    log.warn("event=supervisor_exited action=self_exit "
+                            + "reason=orphan_prevention parent_pid={}", parent.pid());
+                    // halt, not exit: orphan-prevention is a hard kill, not a graceful
+                    // shutdown. System.exit would run the shutdown hook → HikariCP
+                    // ds.close() can stall ~30s on a dead PG (the OOM path took the
+                    // supervisor AND likely PG). On Linux PR_SET_PDEATHSIG SIGKILLs us
+                    // first anyway; halt makes the macOS path equally prompt (CRE M-1).
+                    Runtime.getRuntime().halt(143);
+                }, "parent-death-watchdog");
+                watchdog.setDaemon(true);
+                watchdog.start();
+                log.info("event=parent_death_watchdog_armed parent_pid={}", parent.pid());
+            }, () -> log.warn("event=parent_death_watchdog_skipped reason=no_parent_handle"));
+        }
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");

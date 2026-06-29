@@ -58,19 +58,19 @@ def t2_handle() -> Iterator[Any]:
     Note: ``nx plan`` commands open T2 directly (epsilon-allow) and
     do NOT go through this helper — they must tolerate offline mode.
     """
-    import click
+    import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
     # RDR-152 nexus-fjwxh: in SERVICE mode the Java service (PG) is the write
     # arbiter, so the SQLite single-writer T2 daemon is not in the picture —
     # route directly to a service-backed T2Database (its ``.memory`` is an
     # HttpMemoryStore with the same interface as ``T2Client.memory``). The
     # daemon-client path below is the SQLite-mode arbiter only.
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-local import: circular-dep avoidance, db package imports commands surfaces
 
     if storage_backend_for("memory") == StorageBackend.SERVICE:
-        import httpx
+        import httpx  # noqa: PLC0415 — deliberate function-local import: branch-local, only on SERVICE path
 
-        from nexus.db.t2 import T2Database
+        from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import: branch-local, only on SERVICE path
 
         # Service mode routes T2Database to the HTTP service (PG arbiter), not a
         # raw SQLite writer, so the RDR-128 single-writer concern does not apply.
@@ -105,7 +105,7 @@ def t2_handle() -> Iterator[Any]:
             db.close()
         return
 
-    from nexus.daemon.t2_client import (
+    from nexus.daemon.t2_client import (  # noqa: PLC0415 — deliberate function-local import: circular-dep avoidance + SQLite-mode-only path
         T2ClientError,
         T2DaemonNotReachableError,
         T2SchemaVersionMismatchError,

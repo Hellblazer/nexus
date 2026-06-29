@@ -188,9 +188,19 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
     :func:`embedding_model_for_collection_name`; this function is for
     WRITE-side decisions only.
     """
-    from nexus.config import is_local_mode  # noqa: PLC0415
+    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
     if is_local_mode():
-        from nexus.db.local_ef import local_model_token  # noqa: PLC0415
+        # nexus-xq8f9: in service-vector mode (the 6.0 default) the nexus-service
+        # embeds server-side with bge-768 (RDR-160), independent of whether the
+        # CLIENT has the [local]/fastembed extra. Naming the collection from the
+        # client's local-EF tier (which falls back to minilm-384 when fastembed
+        # is absent) makes the service refuse the write (HTTP 422, model
+        # mismatch). Follow the service's embedder token instead.
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (db.http_vector_client)
+        if is_vector_service_mode():
+            from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL  # noqa: PLC0415 — circular-dep avoidance (db.local_ef)
+            return _MODEL_TOKENS[_TIER1_MODEL]  # bge-base-en-v15-768
+        from nexus.db.local_ef import local_model_token  # noqa: PLC0415 — circular-dep avoidance (db.local_ef)
         return local_model_token()
     return canonical_embedding_model(content_type)
 
@@ -331,7 +341,7 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
                 for c in t3.list_collections()  # type: ignore[attr-defined]
                 if c["name"].startswith(f"{user_arg}__")
             ]
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort collection-listing probe; empty match list on any backend failure
             matches = []
         if len(matches) == 1:
             return matches[0]
@@ -419,7 +429,7 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
                 and t3.collection_exists(legacy_two_segment)  # type: ignore[attr-defined]
             ):
                 return legacy_two_segment
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort collection_exists probe; falls through to auto-promoted shape on any backend failure
         # collection_exists probe is best-effort. On failure (cloud
         # quota error, transient network) fall through to the
         # auto-promoted shape; legacy reads still work via T3's

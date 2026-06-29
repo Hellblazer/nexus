@@ -13,6 +13,8 @@ doc_indexer._embed_with_fallback for CCE-aware embedding.
 from __future__ import annotations
 
 import hashlib as _hl
+
+from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
 from pathlib import Path
 
 import structlog
@@ -34,10 +36,10 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     Returns the post-filter chunk count (chunks upserted), or 0 if
     skipped (current) or failed.
     """
-    from nexus.chunker import _line_chunk
-    from nexus.doc_indexer import _embed_with_fallback
-    from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter
-    from nexus.pdf_chunker import _extract_headings
+    from nexus.chunker import _line_chunk  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+    from nexus.doc_indexer import _embed_with_fallback  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+    from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+    from nexus.pdf_chunker import _extract_headings  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
 
     try:
         content = file_path.read_text(encoding="utf-8")
@@ -84,7 +86,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             _log.debug("skipped file with no chunks", path=str(file_path))
             return 0
 
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
         # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
         # file. Empty string when no catalog handle exists; ``normalize``
@@ -98,7 +100,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
             # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
             chunk_text_hash_full = _hl.sha256(chunk.text.encode()).hexdigest()
-            chunk_chroma_id = chunk_text_hash_full[:32]
+            chunk_chroma_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
             # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
             # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
             # catalog manifest is authoritative.
@@ -141,7 +143,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         # chunk can carry section_type / section_title (matches PDF and
         # markdown paths so prose-fallback chunks aren't second-class
         # citizens for section-scoped retrieval).
-        from bisect import bisect_right
+        from bisect import bisect_right  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
         _line_offsets = [0]
         for _i, _ch in enumerate(content):
             if _ch == "\n":
@@ -149,7 +151,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         _headings = _extract_headings(content)
         _heading_offsets = [h[0] for h in _headings]
 
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
         # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
         # file. Empty string when no catalog handle exists.
@@ -162,7 +164,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
             # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
             chunk_text_hash_full = _hl.sha256(text.encode()).hexdigest()
-            chunk_chroma_id = chunk_text_hash_full[:32]
+            chunk_chroma_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
             chunk_start_char = _line_offsets[ls - 1] if 0 < ls <= len(_line_offsets) else 0
             chunk_end_char = (
                 _line_offsets[le] if le < len(_line_offsets) else len(content)
@@ -222,7 +224,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             embeddings = ctx.embed_fn(embed_texts)
             actual_model = ctx.embedding_model
         else:
-            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
 
             if is_vector_service_mode():
                 # RDR-152 Seam B stub (nexus-fsquc): the service embeds

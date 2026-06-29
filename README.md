@@ -13,9 +13,13 @@
 
 **Start here**: [**How I actually use Nexus**](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) — the conceptual overview and the shape of the substrate. Then [**Installing Nexus**](https://tensegrity.blog/2026/04/26/installing-nexus/) — a ten-minute hands-on walkthrough from `uv tool install` through your first search.
 
+## Prerequisites
+
+Python 3.12+, [`uv`](https://docs.astral.sh/uv/), `git`. For hybrid search, [`ripgrep`](https://github.com/BurntSushi/ripgrep). For the Claude Code plugin, [Node.js](https://nodejs.org/) (the bundled `sequential-thinking` and `context7` servers spawn via `npx`).
+
 ## Install for Claude
 
-Three surfaces share one host substrate. Pick the one that matches how you use Claude.
+Three surfaces share one host substrate: the `nx` CLI (the `conexus` package). Claude Desktop's `.mcpb` bundles it and resolves it on first launch; the Claude Code plugin and Cowork use a **separately-installed** CLI (`uv tool install conexus`). Pick the one that matches how you use Claude.
 
 ### Claude Desktop chat
 
@@ -24,11 +28,14 @@ Download `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/
 ### Claude Code (terminal)
 
 ```bash
-/plugin marketplace add Hellblazer/nexus
-/plugin install conexus@nexus-plugins
+uv tool install conexus                  # 1. the nx CLI (the plugin's MCP servers ARE this package)
+/plugin marketplace add Hellblazer/nexus # 2. add the marketplace
+/plugin install conexus@nexus-plugins    # 3. install the plugin
 ```
 
-The plugin ships 13 specialized agents, 43 skills (RDR lifecycle, plan-centric retrieval, dev workflows), and 36 MCP tools split across two focused servers. Session hooks load project context at startup.
+The plugin's MCP servers (`nx-mcp`, `nx-mcp-catalog`) are console-scripts from the `conexus` package, so **the `nx` CLI must be installed too**: `/plugin install` alone leaves the servers unable to launch. Install the CLI first (step 1; see [CLI quick-start](#cli-quick-start) to then provision the storage backend).
+
+The plugin ships 13 specialized agents, 45 skills (RDR lifecycle, plan-centric retrieval, dev workflows), and 50 MCP tools split across two focused servers. Session hooks load project context at startup.
 
 ### Claude Cowork
 
@@ -42,20 +49,22 @@ For the full deployment story across all three surfaces (install, daemon lifecyc
 - **Semantic search** — index your code, docs, RDRs, and PDFs once; search by meaning afterward. Tree-sitter AST chunking across 23 languages, CCE prose chunking, PDF auto-routing.
 - **Typed document catalog** — Xanadu-inspired addressing with typed links (`cites`, `implements`, `supersedes`). Walk from a design doc to the code that implements it.
 - **RDR: Research-Design-Review** — write a spec before you code. Captures the problem, research, alternatives, and chosen approach. The corpus is searchable, so prior decisions surface during new design work.
-- **Local-first** — default install runs entirely on your machine with ONNX MiniLM + local ChromaDB. Voyage AI + ChromaDB Cloud are opt-in for higher-quality embeddings.
+- **Local-first** — runs entirely on your machine: an on-device bge-768 ONNX embedder over a bundled Postgres 17 + pgvector service that `nx init` provisions for you. Voyage AI (server-side embeddings) is opt-in for the managed-cloud deployment.
 
 ## CLI quick-start
 
 ```bash
-uv tool install conexus                  # install the nx CLI (built-in ONNX MiniLM embedder)
-nx init                                  # guided: choose your local embedder (384 vs bge-768)
-nx daemon t2 install --autostart         # register the T2 daemon (one-time)
-nx doctor                                # verify installation
-nx index repo .                          # index your repo + discover topics
-nx search "how does retry work"          # semantic search, fully local
+uv tool install conexus                                   # install the nx CLI
+nx daemon service install-binary <engine-service-vX.Y.Z>  # acquire the signed native service binary + PG bundle
+nx init                                                    # provision Postgres+pgvector + bge-768, start the service, offer autostart
+nx doctor                                                 # verify the stack
+nx index repo .                                            # index your repo + discover topics
+nx search "how does retry work"                            # semantic search, fully local
 ```
 
-`nx init` presents the embedder choice (recommended bge-768, ~140 MB one-time download, for materially better local search, vs the bundled 384-dim MiniLM), adds the `[local]` extra for you when you pick bge-768, and migrates any pre-existing 384-dim collections safely. To request the higher-quality embedder directly at install time instead: `uv tool install "conexus[local]"`.
+`nx init` provisions the bundled Postgres 17 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, starts the persistent service, and offers to register the OS autostart unit so it restarts at login/boot (prompt defaults to yes; `--yes` accepts non-interactively, `--no-autostart` starts a session supervisor only). There is **no** separate `nx daemon t2 install` step — T2 (notes/plans) is served by the same service in the default config. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically (see [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full flow). (The older `nx init --service` flag still works but is deprecated — plain `nx init` is the path now.) **First run only:** this downloads a few hundred MB (the signed ~134 MB service binary, the relocatable Postgres bundle, and the ~140 MB bge-768 model) and takes a few minutes; subsequent starts are fast.
+
+> **Upgrading from a pre-6.0 install?** 6.0 moves the permanent vector store from ChromaDB to the Postgres + pgvector service. After `uv tool upgrade conexus`, run **`nx guided-upgrade`** — one command detects your existing store, provisions and version-pins the service, and migrates your data with validation and copy-not-move rollback safety. Your ChromaDB data is left intact as the migration source.
 
 The `nx` CLI provides direct access to all storage tiers, indexing, search, the catalog, and taxonomy. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for a walkthrough, [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) for every command and flag.
 
@@ -74,6 +83,8 @@ When you update the **Claude Code plugin** (`/plugin update`), upgrade the CLI t
 | If you want to... | Read |
 |---|---|
 | Understand the architecture | [Storage Tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md), [Architecture](https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md) |
+| Install, upgrade, or uninstall the agent | [Agent Lifecycle & Operations](https://github.com/Hellblazer/nexus/blob/main/docs/operations/agent-lifecycle.md) |
+| Use the hosted managed service | [Managed Onboarding](https://github.com/Hellblazer/nexus/blob/main/docs/managed-onboarding.md) |
 | Write an RDR | [RDR: Research-Design-Review](https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md) |
 | Index a repo or PDFs | [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) |
 | Configure or tune | [Configuration](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md) |
@@ -82,10 +93,6 @@ When you update the **Claude Code plugin** (`/plugin update`), upgrade the CLI t
 | Read the conceptual story | [How I actually use Nexus](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) |
 | Walk through a fresh install | [Installing Nexus](https://tensegrity.blog/2026/04/26/installing-nexus/) |
 | Browse the full series | [Tensegrity blog](https://tensegrity.blog/) |
-
-## Prerequisites
-
-Python 3.12+, [`uv`](https://docs.astral.sh/uv/), `git`. For hybrid search, [`ripgrep`](https://github.com/BurntSushi/ripgrep). For the Claude Code plugin, [Node.js](https://nodejs.org/) (the bundled `sequential-thinking` and `context7` servers spawn via `npx`).
 
 ## License
 

@@ -87,7 +87,7 @@ TAG_NAMESPACE_PREFIX = "engine-service-v"
 #: service (RF-161-2). ``None`` until the first real ``engine-service-v*``
 #: release exists; while it is ``None``, ``nx init --service`` cannot
 #: auto-install and instructs the user to pass an explicit tag.
-PINNED_SERVICE_TAG: str | None = None
+PINNED_SERVICE_TAG: str | None = "engine-service-v0.1.11"
 
 #: Env override for the service tag (operator / CI). Takes precedence over the
 #: build-time pin. Still an explicit tag — no "latest" semantics.
@@ -194,9 +194,9 @@ class _SigstoreChecker:
         self, *, asset_bytes: bytes, bundle_bytes: bytes, identity_regexp: str, issuer: str
     ) -> None:
         try:
-            from sigstore.models import Bundle
-            from sigstore.verify import Verifier
-            from sigstore.verify.policy import AllOf, AnyOf, OIDCIssuer, OIDCIssuerV2
+            from sigstore.models import Bundle  # noqa: PLC0415 — heavy/optional dep deferred
+            from sigstore.verify import Verifier  # noqa: PLC0415 — heavy/optional dep deferred
+            from sigstore.verify.policy import AllOf, AnyOf, OIDCIssuer, OIDCIssuerV2  # noqa: PLC0415 — heavy/optional dep deferred
         except ImportError as exc:  # actionable, never a bare ModuleNotFoundError
             raise BinaryVerificationError(
                 "signature verification requires the 'sigstore' package "
@@ -237,8 +237,8 @@ class _RegexpIdentityPolicy:
         self._pattern = pattern
 
     def verify(self, cert) -> None:  # noqa: ANN001 — cryptography x509 cert
-        from cryptography import x509
-        from sigstore.errors import VerificationError
+        from cryptography import x509  # noqa: PLC0415 — heavy/optional dep deferred
+        from sigstore.errors import VerificationError  # noqa: PLC0415 — heavy/optional dep deferred
 
         try:
             san = cert.extensions.get_extension_for_class(

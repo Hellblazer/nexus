@@ -72,7 +72,7 @@ class StageTimers:
             raise ValueError(
                 f"unknown stage {name!r}; valid: {_STAGE_NAMES}"
             )
-        from nexus.retry import get_retry_stats
+        from nexus.retry import get_retry_stats  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         pre = get_retry_stats()["total_seconds"]
         t0 = time.monotonic()

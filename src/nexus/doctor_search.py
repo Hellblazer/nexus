@@ -76,13 +76,13 @@ def _default_rdr_dir() -> Path:
 
 
 def _corpus_runner(name: str, all_collections: list[str]) -> list[str]:
-    from nexus.corpus import resolve_corpus
+    from nexus.corpus import resolve_corpus  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe
 
     return resolve_corpus(name, all_collections)
 
 
 def _rdr_runner(name: str) -> str:
-    from nexus.doc.resolvers import RdrResolver
+    from nexus.doc.resolvers import RdrResolver  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe
 
     return RdrResolver(_default_rdr_dir()).resolve(name, field=None, filters={})
 
@@ -92,7 +92,7 @@ def _span_runner(name: str) -> bool:
 
 
 def _load_canaries():
-    from nexus.name_canaries import NAME_CANARIES
+    from nexus.name_canaries import NAME_CANARIES  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe
 
     return NAME_CANARIES
 
@@ -101,7 +101,7 @@ def _load_canaries():
 
 
 def _make_t3():
-    from nexus.db import make_t3
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe
 
     return make_t3()
 
@@ -133,7 +133,7 @@ def run_name_resolution_probe(
     Injected runners make the probe testable without live catalog / T3 /
     RDR filesystem state. Defaults wire to the real production surfaces.
     """
-    from nexus.doc.resolvers import ResolutionError
+    from nexus.doc.resolvers import ResolutionError  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe
 
     cols = all_collections if all_collections is not None else []
     out: list[ProbeResult] = []
@@ -156,7 +156,7 @@ def run_name_resolution_probe(
                 else:
                     outcome = "error"
                     error = f"unknown surface literal: {surface!r}"
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
                 outcome = "error"
                 error = f"{type(exc).__name__}: {exc}"
             out.append(
@@ -175,13 +175,13 @@ def run_name_resolution_probe(
 
 
 def _default_search_fn(*args, **kwargs):
-    from nexus.search_engine import search_cross_corpus
+    from nexus.search_engine import search_cross_corpus  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe
 
     return search_cross_corpus(*args, **kwargs)
 
 
 def _default_model_for(col: str) -> str:
-    from nexus.corpus import voyage_model_for_collection
+    from nexus.corpus import voyage_model_for_collection  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe
 
     return voyage_model_for_collection(col)
 
@@ -213,7 +213,7 @@ def run_retrieval_quality_probe(
             (≤400 ms per A-2 measurement).
         n_results: small probe depth.
     """
-    from nexus.search_engine import SearchDiagnostics  # noqa: F401
+    from nexus.search_engine import SearchDiagnostics  # noqa: F401,PLC0415 — deferred import; presence-probe only needed in this diagnostic
 
     if metadata_fn is None:
         def metadata_fn(col: str) -> dict[str, Any]:
@@ -227,7 +227,7 @@ def run_retrieval_quality_probe(
             expected = model_for(col)
             meta = metadata_fn(col) or {}
             actual = str(meta.get("embedding_model") or "")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
             out.append(
                 ProbeResult(
                     name=col,
@@ -258,7 +258,7 @@ def run_retrieval_quality_probe(
                 query, [col], n_results, t3,
                 diagnostics_out=diag_list,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
             out.append(
                 ProbeResult(
                     name=col,
@@ -414,7 +414,7 @@ def run_check_search(*, json_out: bool) -> None:
     retrieval_results: list[ProbeResult] = []
     try:
         collections = _list_collections()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
         retrieval_results.append(
             ProbeResult(
                 name="<enumerate>",
@@ -427,7 +427,7 @@ def run_check_search(*, json_out: bool) -> None:
         if collections:
             try:
                 t3 = _make_t3()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
                 retrieval_results.append(
                     ProbeResult(
                         name="<t3_client>",

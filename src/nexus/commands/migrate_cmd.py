@@ -35,11 +35,40 @@ from nexus.migration.detection import (
     build_dry_run_preview,
     classify_collections,
     open_read_legs,
+    render_cost_confirmation,
     render_dry_run_preview,
     voyage_key_available,
 )
 
 _log = structlog.get_logger(__name__)
+
+
+def _confirm_voyage_cost(
+    preview: Any,
+    *,
+    assume_yes: bool,
+    confirm: Any = None,
+) -> bool:
+    """Estimate-and-confirm gate for a billed Voyage re-embed (nexus-cewad).
+
+    Returns ``True`` when the caller may proceed with the billed migration,
+    ``False`` when the operator declined. A migration that bills nothing
+    proceeds silently; ``assume_yes`` proceeds without prompting (the scripted
+    / CI path). Otherwise the cost + re-run foot-gun is shown and an interactive
+    confirmation gates the call. ``confirm`` is injectable for tests; production
+    uses :func:`click.confirm` (which aborts on a non-interactive stream, so a
+    billed run without ``--yes`` never proceeds unattended).
+    """
+    warning = render_cost_confirmation(preview)
+    if warning is None:
+        return True  # nothing billed — no prompt
+    if assume_yes:
+        click.echo(warning)
+        click.echo("Proceeding (--yes): the operator's Voyage key will be billed.")
+        return True
+    click.echo(warning)
+    _confirm = confirm if confirm is not None else click.confirm
+    return bool(_confirm("Proceed with the billed re-embed?"))
 
 
 @click.command(name="migrate-to-service")
@@ -77,12 +106,22 @@ _log = structlog.get_logger(__name__)
     default=None,
     help="Override the nexus-service base URL (default: the supervisor lease).",
 )
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    default=False,
+    help="Skip the Voyage re-embed cost confirmation (scripted / non-interactive "
+    "runs). The operator's Voyage key is billed without a prompt.",
+)
 def migrate_to_service_cmd(
     dry_run: bool,
     local_path: str | None,
     db_path: str | None,
     catalog_db_path: str | None,
     service_url: str | None,
+    assume_yes: bool,
 ) -> None:
     """Guided Chroma-to-service upgrade migration (RDR-159).
 
@@ -92,7 +131,9 @@ def migrate_to_service_cmd(
     if dry_run:
         _run_dry_run(local_path)
         return
-    _run_migration(local_path, db_path, catalog_db_path, service_url)
+    _run_migration(
+        local_path, db_path, catalog_db_path, service_url, assume_yes=assume_yes
+    )
 
 
 def _run_dry_run(local_path: str | None) -> None:
@@ -120,6 +161,8 @@ def _run_migration(
     db_path: str | None,
     catalog_db_path: str | None,
     service_url: str | None,
+    *,
+    assume_yes: bool = False,
 ) -> None:
     """Drive the full guided migration through the nexus engine.
 
@@ -128,8 +171,8 @@ def _run_migration(
     sentinel ``migrated-failed`` (reads stay degraded-LOUD) and exits non-zero;
     rollback is offered, never auto-invoked (RF-5, copy-not-move).
     """
-    from nexus.migration.driver import run_guided_upgrade
-    from nexus.migration.orchestrator import EtlSources
+    from nexus.migration.driver import run_guided_upgrade  # noqa: PLC0415 — heavy migration dep deferred to subcommand scope
+    from nexus.migration.orchestrator import EtlSources  # noqa: PLC0415 — heavy migration dep deferred to subcommand scope
 
     # Process-level for this one-shot CLI invocation; HttpVectorClient +
     # make_catalog_client_for_migration below resolve the endpoint from it.
@@ -150,7 +193,7 @@ def _run_migration(
     # Pre-flight the service endpoint so an unresolvable service is a clean
     # early error BEFORE the (potentially long) detect+ETL, mirroring
     # `storage migrate vectors`.
-    from nexus.db.http_vector_client import HttpVectorClient, _resolve_endpoint
+    from nexus.db.http_vector_client import HttpVectorClient, _resolve_endpoint  # noqa: PLC0415 — deferred import; http_vector_client only needed in this branch
 
     try:
         _resolve_endpoint()
@@ -165,7 +208,26 @@ def _run_migration(
             "Set it to the bearer token configured in the nexus-service."
         )
 
-    from nexus.catalog.factory import make_catalog_client_for_migration
+    # COST GUARDRAIL (nexus-cewad) — a cross-model→voyage re-embed is billed to
+    # the operator's Voyage key. Estimate it from a read-only classify pass and
+    # gate the billed run behind an explicit confirmation. A migration that
+    # bills nothing (byte-for-byte copy / local ONNX re-embed) proceeds silently.
+    local_read, cloud_read = open_read_legs(local_path)
+    try:
+        cost_preview = build_dry_run_preview(
+            classify_collections(
+                local_client=local_read,
+                cloud_client=cloud_read,
+                voyage_key_present=voyage_key_available(),
+            )
+        )
+    finally:
+        for client in (local_read, cloud_read):
+            _close_quietly(client)
+    if not _confirm_voyage_cost(cost_preview, assume_yes=assume_yes):
+        raise click.Abort()
+
+    from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred import; catalog factory only needed in this branch
 
     vector_client = HttpVectorClient()
     try:
@@ -277,7 +339,7 @@ def _resolve_db_path(explicit: str | None) -> Path:
     env_path = os.environ.get("NX_DB_PATH", "")
     if env_path:
         return Path(env_path)
-    from nexus.config import default_db_path  # noqa: PLC0415
+    from nexus.config import default_db_path  # noqa: PLC0415 — command-local import (config)
 
     return default_db_path()
 
@@ -290,7 +352,7 @@ def _resolve_catalog_db_path(explicit: str | None) -> Path:
     env_path = os.environ.get("NX_CATALOG_DB_PATH", "")
     if env_path:
         return Path(env_path)
-    from nexus.config import nexus_config_dir  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — command-local import (config)
 
     return nexus_config_dir() / "catalog" / ".catalog.db"
 

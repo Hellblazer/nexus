@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-wk3s9 — (tenant_id, collection) indexes on relevance_log + document_highlights.
+
+    The RDR-164 P3 server-side renameCollection coherent re-home re-points the
+    collection audit column on every per-collection store:
+        UPDATE nexus.<table> SET collection = :new WHERE tenant_id = :t AND collection = :old
+    relevance_log and document_highlights carry a `collection` column but had no
+    index on it (their existing indexes cover timestamp/query/chunk_id/session_id
+    and source_uri/ingested_at respectively), so the re-home UPDATE planned a Seq
+    Scan that grows with table size. Surfaced by the RDR-164 cascade EXPLAIN probe
+    on the engine-service-v0.1.7 cloud test-deploy (2026-06-22) — low impact
+    (rename is rare) but a cheap, durable fix.
+
+    topic_assignments has the same gap on its `source_collection` column: both the
+    rename re-home (UPDATE ... SET source_collection=:new WHERE source_collection=
+    :old, CatalogRepository.java:1320) and the deleteCollection cascade (DELETE ...
+    WHERE source_collection=:name, :1194) filter on it, but its only covering index
+    is idx_ta_tenant_by_source (tenant_id, assigned_by, source_collection) — with
+    assigned_by in the middle it cannot prefix-scan (tenant_id, source_collection),
+    so both paths Seq Scan. (Found by the stacked-review coverage audit, not the
+    probe — the probe only exercised relevance_log/document_highlights.) The other
+    rename/delete-touched tables already have a usable (tenant_id, collection[, ...])
+    leading index or PK and need no change.
+
+    IF NOT EXISTS keeps this idempotent / re-runnable against any environment that
+    may already carry a hand-added equivalent index.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="perf-001-1" author="nexus-wk3s9">
+        <comment>Index relevance_log (tenant_id, collection) for the rename audit re-home</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE INDEX IF NOT EXISTS idx_relevance_log_collection
+    ON nexus.relevance_log (tenant_id, collection);
+        </sql>
+        <rollback>
+DROP INDEX IF EXISTS nexus.idx_relevance_log_collection;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="perf-001-2" author="nexus-wk3s9">
+        <comment>Index document_highlights (tenant_id, collection) for the rename audit re-home</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE INDEX IF NOT EXISTS idx_doc_highlights_collection
+    ON nexus.document_highlights (tenant_id, collection);
+        </sql>
+        <rollback>
+DROP INDEX IF EXISTS nexus.idx_doc_highlights_collection;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="perf-001-3" author="nexus-wk3s9">
+        <comment>Index topic_assignments (tenant_id, source_collection) for the rename re-home + delete cascade</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE INDEX IF NOT EXISTS idx_topic_assignments_source_collection
+    ON nexus.topic_assignments (tenant_id, source_collection);
+        </sql>
+        <rollback>
+DROP INDEX IF EXISTS nexus.idx_topic_assignments_source_collection;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

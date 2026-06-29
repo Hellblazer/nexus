@@ -58,6 +58,12 @@ _T2_PLIST_NAME = "com.nexus.t2.plist"
 _T2_SERVICE_NAME = "nexus-t2.service"
 _T2_LAUNCHD_LABEL = "com.nexus.t2"
 
+# RDR-174 P2.1 (nexus-y2yj6): the storage SERVICE tier (engine-service binary +
+# local Postgres; serves T2 + T3). Mirrors the T2/T3 autostart-unit identity.
+_SERVICE_PLIST_NAME = "com.nexus.service.plist"
+_SERVICE_SERVICE_NAME = "nexus-service.service"
+_SERVICE_LAUNCHD_LABEL = "com.nexus.service"
+
 
 def _autostart_platform() -> str:
     """Indirection point so tests can stub the platform."""
@@ -84,7 +90,7 @@ def _autostart_log_dir() -> Path:
 
 
 def _read_template(name: str) -> str:
-    from importlib.resources import as_file, files
+    from importlib.resources import as_file, files  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     resource = files("nexus") / "_resources" / "daemon" / name
     with as_file(resource) as resolved:
@@ -156,6 +162,14 @@ def _autostart_filename_t2() -> str:
     return _T2_PLIST_NAME if _autostart_platform() == "darwin" else _T2_SERVICE_NAME
 
 
+def _autostart_filename_service() -> str:
+    return (
+        _SERVICE_PLIST_NAME
+        if _autostart_platform() == "darwin"
+        else _SERVICE_SERVICE_NAME
+    )
+
+
 def _autostart_unit_installed() -> Path | None:
     """Return the unit-file Path if the T2 autostart unit is installed, else None.
 
@@ -190,7 +204,7 @@ def _t2_supervisor_spawn(unit_path: Path) -> bool:
     returns False. The caller logs a warning and falls back to
     subprocess.Popen.
     """
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     try:
         platform = _autostart_platform()
@@ -230,7 +244,7 @@ def _t2_supervisor_spawn(unit_path: Path) -> bool:
                 timeout=_SUPERVISOR_CMD_TIMEOUT,
             )
             return res.returncode == 0
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — supervisor spawn boundary; failure logged via log.warning, caller degrades
         _log.warning(
             "t2_supervisor_spawn_exception",
             exc=str(exc),
@@ -311,11 +325,11 @@ def t3_start_cmd(
     long-running foreground process and can react to crashes via
     ``KeepAlive.Crashed`` / ``Restart=on-failure``.
     """
-    import subprocess
+    import subprocess  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    from nexus.config import _default_local_path, is_local_mode
-    from nexus.daemon.discovery import find_t3_daemon
-    from nexus.daemon.t3_daemon import (
+    from nexus.config import _default_local_path, is_local_mode  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.discovery import find_t3_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.t3_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         T3CloudModeError,
         T3StartError,
         run_t3_supervisor,
@@ -356,7 +370,7 @@ def t3_start_cmd(
         ]
         # nexus-ovbr7: crash-channel capture (see the storage-service spawn
         # for the rationale).
-        from nexus.logging_setup import open_child_log_or_devnull
+        from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
         spawn_log = open_child_log_or_devnull("t3_daemon.crash", config_dir)
         try:
@@ -400,7 +414,7 @@ def t3_start_cmd(
 )
 def t3_stop_cmd(config_dir_str: str | None) -> None:
     """Stop the running T3 daemon (graceful SIGTERM → SIGKILL escalation)."""
-    from nexus.daemon.t3_daemon import stop_t3_daemon
+    from nexus.daemon.t3_daemon import stop_t3_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     pid = stop_t3_daemon(config_dir=config_dir)
@@ -426,7 +440,7 @@ def t3_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     RDR-120 bead nexus-41unl acceptance: reports PID + bound address.
     Exits non-zero when no discovery file exists.
     """
-    from nexus.daemon.t3_daemon import t3_discovery_path
+    from nexus.daemon.t3_daemon import t3_discovery_path  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     disc = t3_discovery_path(config_dir)
@@ -648,8 +662,8 @@ def t2_start_cmd(config_dir_str: str | None, db_path_str: str | None) -> None:
     A genuine lifecycle error (bind failed, etc.) still raises
     ``T2DaemonError`` and exits 2.
     """
-    from nexus.commands._helpers import default_db_path
-    from nexus.daemon.t2_daemon import T2DaemonError, run_t2_daemon
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.t2_daemon import T2DaemonError, run_t2_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     db_path = Path(db_path_str) if db_path_str else default_db_path()
@@ -699,9 +713,9 @@ def t2_stop_cmd(config_dir_str: str | None) -> None:
     (rendered as code 143 to launchd / systemd; both supervisor
     templates list 143 as a non-failure exit).
     """
-    import json as _json
+    import json as _json  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    from nexus.daemon.t2_daemon import t2_discovery_path
+    from nexus.daemon.t2_daemon import t2_discovery_path  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     disc = t2_discovery_path(config_dir)
@@ -746,8 +760,8 @@ def t2_stop_cmd(config_dir_str: str | None) -> None:
 )
 def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     """Print the T2 daemon discovery JSON (PID + UDS path + TCP address)."""
-    import json as _json
-    from nexus.daemon.t2_daemon import t2_discovery_path
+    import json as _json  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.t2_daemon import t2_discovery_path  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     disc = t2_discovery_path(config_dir)
@@ -771,7 +785,7 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # record that is freshness (a daemon whose heartbeat loop wedged reads
     # as down even though its pid is alive); for a legacy payload it is
     # pid-liveness. ``find_t2_daemon`` applies the right rule per format.
-    from nexus.daemon.discovery import find_t2_daemon
+    from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     alive = find_t2_daemon(config_dir) is not None
 
@@ -871,8 +885,8 @@ def _acquire_election_lock(db_path: Path, timeout: float) -> int | None:
     distinct lock file. Auto-releases on holder death (the OS drops the fd's
     lock), so a holder that crashes mid-spawn never deadlocks the waiters.
     """
-    import errno
-    import fcntl
+    import errno  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    import fcntl  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     path = _election_lock_path_for_db(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -895,7 +909,7 @@ def _acquire_election_lock(db_path: Path, timeout: float) -> int | None:
 def _release_election_lock(fd: int | None) -> None:
     if fd is None:
         return
-    import fcntl
+    import fcntl  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1001,7 +1015,7 @@ def _predecessor_alive(pid: int) -> bool:
     than waiting on (or aborting for) a stranger. Used by ``ensure-running``
     to poll the predecessor's exit (RDR-129 A2).
     """
-    from nexus.daemon.t2_daemon import _is_t2_daemon_process, _pid_is_alive
+    from nexus.daemon.t2_daemon import _is_t2_daemon_process, _pid_is_alive  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     return _pid_is_alive(pid) and _is_t2_daemon_process(pid)
 
@@ -1022,7 +1036,7 @@ def _t2_db_write_lock_acquirable(db_path: Path, timeout_ms: int) -> bool:
     Bounded by construction: ``busy_timeout`` caps the ``BEGIN IMMEDIATE``
     wait, so this never hangs. Non-lock ``OperationalError``\\s propagate.
     """
-    import sqlite3
+    import sqlite3  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     if not db_path.exists():
         return True
@@ -1070,7 +1084,7 @@ def _t2_ensure_running_inner(
     command ``t2_ensure_running_cmd`` is a thin wrapper that maps the
     enum to CLI exit codes.
     """
-    import time as _time
+    import time as _time  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
 
@@ -1084,7 +1098,7 @@ def _t2_ensure_running_inner(
         a live daemon, with the pid (lifted from the lease endpoint) used
         for the SIGTERM in the version-skew cycle below.
         """
-        from nexus.daemon.discovery import find_t2_daemon
+        from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
         payload = find_t2_daemon(config_dir)
         if payload is None:
@@ -1101,8 +1115,8 @@ def _t2_ensure_running_inner(
         return _running_daemon() is not None
 
     def _installed_version() -> str:
-        from importlib.metadata import PackageNotFoundError
-        from importlib.metadata import version as _pkg_version
+        from importlib.metadata import PackageNotFoundError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
         try:
             return _pkg_version("conexus")
@@ -1295,7 +1309,7 @@ def _t2_ensure_running_inner(
                 click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
             # nexus-ovbr7: crash-channel capture (see the storage-service
             # spawn for the rationale).
-            from nexus.logging_setup import open_child_log_or_devnull
+            from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
             spawn_log = open_child_log_or_devnull("t2_daemon.crash", config_dir)
             try:
@@ -1430,7 +1444,7 @@ def t2_install_cmd(autostart: bool, force: bool) -> None:
     if not autostart:  # pragma: no cover
         raise click.UsageError("--autostart is required")
 
-    from nexus.daemon import installer
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     try:
         result = installer.install_autostart(force=force)
@@ -1471,7 +1485,7 @@ def t2_uninstall_cmd(autostart: bool) -> None:
     if not autostart:  # pragma: no cover
         raise click.UsageError("--autostart is required")
 
-    from nexus.daemon import installer
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     result = installer.uninstall_autostart()
     if result.status is installer.UninstallStatus.NOT_INSTALLED:
@@ -1492,33 +1506,161 @@ def service_group() -> None:
     """Storage-service daemon: managed native service binary + local Postgres."""
 
 
+@service_group.command("install")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help=(
+        "Install OS autostart entry (launchd on macOS, systemd user unit on "
+        "Linux) so the storage service starts at login / boot."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite an existing plist/unit file even when its content "
+    "differs from the freshly rendered template.",
+)
+def service_install_cmd(autostart: bool, force: bool) -> None:
+    """Install the storage-service autostart entry for the current user.
+
+    RDR-174 P2.1 (nexus-y2yj6): the service that serves every tier (engine
+    binary + local Postgres) previously had no reboot-persistence. Thin wrapper
+    over :func:`nexus.daemon.installer.install_autostart` with ``tier="service"``
+    (mirrors ``nx daemon t2 install`` — same structured-result translation).
+    The installed unit execs ``nx daemon service start --foreground``.
+    """
+    if not autostart:  # pragma: no cover — click enforces required=True
+        raise click.UsageError("--autostart is required")
+
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    try:
+        result = installer.install_autostart(tier="service", force=force)
+    except installer.SymlinkRefusedError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except installer.ContentDiffersError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except installer.ActivationError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if result.status is installer.InstallStatus.ALREADY_PRESENT:
+        click.echo(result.detail)
+        return
+
+    click.echo(f"Wrote {result.dest}")
+    for warning in result.warnings:
+        click.echo(f"Warning: {warning}", err=True)
+    if result.activated_cmd is not None:
+        click.echo(f"Activated via: {' '.join(result.activated_cmd)}")
+
+
+@service_group.command("uninstall")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help="Remove the OS autostart entry installed by ``install --autostart``.",
+)
+def service_uninstall_cmd(autostart: bool) -> None:
+    """Remove the storage-service autostart entry for the current user.
+
+    RDR-174 P2.1: completes the install/uninstall pair so the unit a user
+    installs can be cleanly removed via ``nx`` (not stranded). Thin wrapper over
+    :func:`nexus.daemon.installer.uninstall_autostart` with ``tier="service"``;
+    mirrors ``nx daemon t2 uninstall``.
+    """
+    if not autostart:  # pragma: no cover — click enforces required=True
+        raise click.UsageError("--autostart is required")
+
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    result = installer.uninstall_autostart(tier="service")
+    if result.status is installer.UninstallStatus.NOT_INSTALLED:
+        click.echo(f"Autostart not installed (nothing at {result.dest}).")
+        return
+    for warning in result.warnings:
+        click.echo(f"Warning: {warning}", err=True)
+    click.echo(f"Removed {result.dest}")
+
+
 def ensure_storage_supervisor(config_dir: Path):
     """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
 
-    Returns the live :class:`LeaseRecord`. If a fresh lease already exists this
+    Returns the live :class:`LeaseRecord`. If a FRESH lease already exists this
     is a no-op (idempotent — re-running ``nx init --service`` / ``nx daemon
     service start`` is safe). Otherwise it detached-spawns the ``--foreground``
     supervisor (``start_new_session=True``) and waits up to 60s for it to publish
     a lease.
 
-    This is the SINGLE persistent-start path (nexus-qke1e): both ``nx init
-    --service`` and ``nx daemon service start`` route through it, so neither
-    leaves a transient unsupervised lease that ages out by TTL because nothing
-    heartbeats it. The bug it closes: ``start_storage_service`` (the old init
-    path) published a lease without a heartbeating supervisor, so the service
-    looked 'serving' at init time but the lease aged out before the next client
-    (e.g. ``nx migrate-to-service``) could discover it.
+    Liveness is TTL-FRESHNESS, not process-aliveness: the short-circuit returns
+    any lease whose heartbeat is within the ServiceRegistry TTL (a supervisor
+    that crashed within the last TTL window still passes the freshness check and
+    its lease expires shortly after). It also does not distinguish a supervised
+    lease (``payload.supervisor_pid`` set) from a legacy transient one. In the
+    current code paths this is sound because BOTH ``nx init --service`` and ``nx
+    daemon service start`` route through here and the old transient
+    ``start_storage_service`` init path is retired — so a fresh lease is a
+    supervised one. A caller needing process-level liveness should poll the
+    service ``/health`` endpoint directly (or ``nx service probe``).
+
+    This is the SINGLE persistent-start path (nexus-qke1e): routing both surfaces
+    through it means neither leaves a transient unsupervised lease that ages out
+    by TTL because nothing heartbeats it. The bug it closes: ``start_storage_service``
+    (the old init path) published a lease without a heartbeating supervisor, so
+    the service looked 'serving' at init time but the lease aged out before the
+    next client (e.g. ``nx migrate-to-service``) could discover it.
 
     Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
     """
-    from nexus.daemon.service_registry import ServiceRegistry
-    from nexus.daemon.storage_service_daemon import StorageServiceStartError
+    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    StorageServiceStartError = _ssd.StorageServiceStartError
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = str(os.getuid())
     existing = registry.discover(scope)
     if existing is not None:
-        return existing
+        # RDR-175 heal-on-next-use hardening: a fresh (TTL-live) lease whose
+        # ``supervisor_pid`` points at a DEAD process is a hard-crashed
+        # supervisor (OOM-kill / SIGKILL with no relinquish). Without the OS
+        # watchdog (no-autostart mode) nothing restarts it, and the lease would
+        # otherwise be returned as a live endpoint for up to the TTL window.
+        # Relinquish it and fall through to re-spawn. Reuses the exact guard from
+        # ``stop_storage_service`` — an ABSENT ``supervisor_pid`` (legacy /
+        # non-supervised lease) is left to the existing TTL-freshness
+        # short-circuit, never re-spawned spuriously. (RDR-149-gate-safe: this is
+        # in the storage-specific caller, not service_registry.discover.)
+        supervisor_pid = existing.payload.get("supervisor_pid")
+        if (
+            isinstance(supervisor_pid, int)
+            and supervisor_pid > 0
+            and not _ssd._pid_is_alive(supervisor_pid)
+        ):
+            _log.warning(
+                "storage_service_dead_lease_reclaim",
+                supervisor_pid=supervisor_pid,
+                msg="fresh lease held by a dead supervisor; relinquishing + re-spawning",
+            )
+            try:
+                registry.relinquish(existing)
+            except Exception as exc:  # noqa: BLE001 — best-effort reclaim; generation fencing still protects ownership
+                # Don't fail the spawn: the new supervisor's publish bumps the
+                # generation (fencing prevents double-ownership) and the 60s
+                # discover-wait resolves once it lands. But log it — a silent
+                # reclaim failure leaves no evidence for an operator.
+                _log.warning(
+                    "storage_service_dead_lease_relinquish_failed",
+                    supervisor_pid=supervisor_pid,
+                    error=str(exc),
+                )
+        else:
+            return existing
 
     argv = [
         *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
@@ -1528,12 +1670,13 @@ def ensure_storage_supervisor(config_dir: Path):
     # BEFORE run_storage_supervisor's configure_logging runs (import error, bad
     # argv) and interpreter-fatal tracebacks are captured. Post-configure, the
     # daemon drops its stderr handler (non-tty), so this file stays quiet healthy.
-    from nexus.logging_setup import open_child_log_or_devnull
+    from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
     try:
         subprocess.Popen(
             argv,
+            stdin=subprocess.DEVNULL,  # detached daemon: never inherit a TTY stdin (avoids read-block / dangling fd)
             stdout=spawn_log,
             stderr=spawn_log,
             start_new_session=True,
@@ -1598,12 +1741,10 @@ def service_start_cmd(
     A service/PG outage is always fatal — there is no direct-mode
     fallback (per RDR-152 §Approach).
     """
-    from nexus.daemon.storage_service_daemon import (
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         StorageServiceStartError,
         run_storage_supervisor,
-        start_storage_service,
     )
-    from nexus.daemon.service_registry import ServiceRegistry
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
 
@@ -1624,7 +1765,7 @@ def service_start_cmd(
 
     ep = existing.endpoint
     if announce_stdout:
-        import json as _json
+        import json as _json  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         click.echo(_json.dumps({
             "host": ep.get("host"),
             "port": ep.get("port"),
@@ -1668,9 +1809,9 @@ def service_install_binary_cmd(
     nothing is installed unless BOTH gates pass. One verified seam covers the
     binary and the PG bundle (RDR-161).
     """
-    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    from nexus.daemon.binary_install import (
+    from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         BinaryVerificationError,
         asset_name,
         install_binary,
@@ -1749,7 +1890,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     may serve other clients) — nexus-pebfx.5 makes that visible instead of
     surprising: the command says so and offers --with-pg.
     """
-    from nexus.daemon.storage_service_daemon import (
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         _port_accepting,
         _read_pg_credentials,
         stop_storage_service,
@@ -1798,9 +1939,9 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
             err=True,
         )
         sys.exit(2)
-    import subprocess
+    import subprocess  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    from nexus.db.pg_provision import discover_pg_binaries
+    from nexus.db.pg_provision import discover_pg_binaries  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     try:
         bins = discover_pg_binaries()
@@ -1808,7 +1949,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
             [str(bins.pg_ctl), "-D", pg_data, "-m", "fast", "stop"],
             check=True, capture_output=True, text=True, timeout=30,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch around PG stop; surfaced via click.echo + exit(2)
         click.echo(f"--with-pg: failed to stop Postgres: {exc}", err=True)
         sys.exit(2)
     click.echo(f"Postgres stopped (port {port_str}).")
@@ -1816,15 +1957,15 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
 
 def _probe_health(host: str, port: int, timeout: float = 3.0) -> str:
     """GET /health → "ok" | "db-down" | "unreachable" (nexus-pebfx.5)."""
-    import urllib.request
+    import urllib.request  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     try:
         with urllib.request.urlopen(
             f"http://{host}:{port}/health", timeout=timeout,
         ) as resp:
             return "ok" if resp.status == 200 else f"http-{resp.status}"
-    except Exception as exc:
-        import urllib.error
+    except Exception as exc:  # noqa: BLE001 — boundary catch of urllib/transport errors; mapped to db-down status
+        import urllib.error  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
         if isinstance(exc, urllib.error.HTTPError) and exc.code == 503:
             return "db-down"
@@ -1842,7 +1983,7 @@ def _probe_pg(creds_path: Path) -> dict:
     if not creds_path.exists():
         out["pg"] = "not provisioned (run: nx init --service)"
         return out
-    from nexus.daemon.storage_service_daemon import (
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         _port_accepting,
         _read_pg_credentials,
     )
@@ -1864,9 +2005,9 @@ def _probe_pg(creds_path: Path) -> dict:
 
 def _pgvector_version(creds: dict) -> str | None:
     """Installed pgvector extension version via psql (admin creds)."""
-    import subprocess
+    import subprocess  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    from nexus.daemon.binary_lifecycle import _db_name_from_creds, _psql_bin
+    from nexus.daemon.binary_lifecycle import _db_name_from_creds, _psql_bin  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     psql = _psql_bin()
     if psql is None:
@@ -1879,7 +2020,7 @@ def _pgvector_version(creds: dict) -> str | None:
     )
     if not user:
         return None
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     env = dict(_os.environ)
     env["PGPASSWORD"] = password
@@ -1907,8 +2048,8 @@ def _nx_major_gap_note(installed_by: str) -> str | None:
     ``installed_by`` is the sidecar's ``"conexus X.Y.Z"`` stamp. Returns
     ``None`` when versions are unparseable or majors match.
     """
-    import re as _re
-    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+    import re as _re  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     m = _re.match(r"conexus (\d+)\.", installed_by or "")
     if not m:
@@ -1940,9 +2081,9 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
 
     Exits non-zero when no live lease is found.
     """
-    import json as _json
-    from nexus.daemon.service_registry import ServiceRegistry
-    import os as _os
+    import json as _json  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
@@ -1971,7 +2112,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # it configured" — supervisor, native service (/health + /version), PG cluster,
     # embedding mode, pgvector version, and the paths an operator would
     # otherwise assemble from ps aux + psql + curl + the addr file by hand.
-    import os as _os
+    import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     data["supervisor_pid"] = record.payload.get("supervisor_pid")
     data["addr_file"] = str(config_dir / f"storage_service_addr.{_os.getuid()}")
@@ -1996,7 +2137,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # nexus-pebfx.4 version handshake: report the RUNNING service's app +
     # schema versions, and warn when they drift from the binary installed at
     # the well-known location (a stale service that needs a restart).
-    from nexus.daemon.binary_lifecycle import (
+    from nexus.daemon.binary_lifecycle import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         fetch_service_version,
         read_installed_provenance,
     )
@@ -2012,6 +2153,10 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     stale_warning: str | None = None
     if svc_version is not None:
         data["service_app_version"] = svc_version.get("app_version")
+        # RDR-002: release_version is the release identity (app_version is now the
+        # frozen dev coordinate 1.0-SNAPSHOT and can no longer be compared against
+        # the installed binary's tag-derived version).
+        data["service_release_version"] = svc_version.get("release_version")
         data["embedding_mode"] = svc_version.get("embedding_mode", "unknown")
         if svc_version.get("embedding_models"):
             # Kept as a list: --json consumers get the same array shape the
@@ -2020,14 +2165,20 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         data["schema_latest_id"] = svc_version.get("schema_latest_id")
         data["schema_changeset_count"] = svc_version.get("schema_changeset_count")
         installed = read_installed_provenance(config_dir)
+        # RDR-002: compare the installed binary's tag-derived version against the
+        # running service's release_version (both are the e.g. "0.1.6" release
+        # semver), NOT app_version (permanently "1.0-SNAPSHOT" by contract, which
+        # would false-positive stale on every call). A dev/unstamped service
+        # reports release_version=null → no comparison → no spurious warning.
+        svc_release = svc_version.get("release_version")
         if (
             installed is not None
             and installed.get("version")
-            and svc_version.get("app_version")
-            and installed["version"] != svc_version["app_version"]
+            and svc_release
+            and installed["version"] != svc_release
         ):
             stale_warning = (
-                f"running service is app_version={svc_version['app_version']} "
+                f"running service is release_version={svc_release} "
                 f"but the installed binary is {installed['version']} — restart to "
                 "pick it up: nx daemon service stop && nx daemon service start"
             )

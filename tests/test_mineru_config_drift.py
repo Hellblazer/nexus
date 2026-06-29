@@ -43,7 +43,7 @@ def test_live_port_returns_none_when_pid_dead(tmp_path: Path, monkeypatch) -> No
     # value that we then patch _is_process_alive to claim is dead.
     pid_path.write_text(json.dumps({"pid": 999999, "port": 49353}))
     with patch(
-        "nexus.commands.mineru._is_process_alive", return_value=False,
+        "nexus._mineru_pid.is_process_alive", return_value=False,
     ):
         from nexus.config import _read_live_mineru_port
         assert _read_live_mineru_port() is None
@@ -65,9 +65,37 @@ def test_live_port_returns_none_when_malformed_json(tmp_path: Path, monkeypatch)
 # ── get_mineru_server_url ────────────────────────────────────────────
 
 
-def test_url_prefers_live_pid_file_over_config(tmp_path: Path, monkeypatch) -> None:
+def test_url_explicit_nondefault_config_wins_over_live_pid(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """RDR-148 Gap 1: an explicit, non-default operator override wins
+    over a live local pid file. The operator manages the server
+    out-of-band (remote host / fixed URL); a live pid must not hijack
+    that intent (CA-2 precedence inversion fix)."""
     monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
-    # Config says dead port; PID file says live port — PID wins.
+    # PID file says a live local server is up...
+    pid_path = tmp_path / "mineru.pid"
+    pid_path.write_text(json.dumps({
+        "pid": os.getpid(),
+        "port": 49353,
+    }))
+    # ...but the operator explicitly pointed config elsewhere.
+    with patch(
+        "nexus.config.get_pdf_config",
+        return_value=type("X", (), {
+            "mineru_server_url": "http://mineru.internal:9999",
+        })(),
+    ):
+        from nexus.config import get_mineru_server_url
+        assert get_mineru_server_url() == "http://mineru.internal:9999"
+
+
+def test_url_prefers_live_pid_when_config_is_default(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """When config is left at the built-in default, a live pid file
+    (ephemeral port from ``nx mineru start``) wins."""
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
     pid_path = tmp_path / "mineru.pid"
     pid_path.write_text(json.dumps({
         "pid": os.getpid(),
@@ -76,7 +104,7 @@ def test_url_prefers_live_pid_file_over_config(tmp_path: Path, monkeypatch) -> N
     with patch(
         "nexus.config.get_pdf_config",
         return_value=type("X", (), {
-            "mineru_server_url": "http://127.0.0.1:9999",
+            "mineru_server_url": "http://127.0.0.1:8010",
         })(),
     ):
         from nexus.config import get_mineru_server_url
@@ -101,7 +129,7 @@ def test_url_falls_back_to_config_when_pid_stale(tmp_path: Path, monkeypatch) ->
     pid_path = tmp_path / "mineru.pid"
     pid_path.write_text(json.dumps({"pid": 999999, "port": 49353}))
     with patch(
-        "nexus.commands.mineru._is_process_alive", return_value=False,
+        "nexus._mineru_pid.is_process_alive", return_value=False,
     ), patch(
         "nexus.config.get_pdf_config",
         return_value=type("X", (), {

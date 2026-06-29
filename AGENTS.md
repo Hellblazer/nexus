@@ -108,7 +108,21 @@ Six rules borrowed from the global `marketplace-pinned-source-playbook`:
 5. **Releaser is human. AI prepares; human cuts.** AI can draft the release PR, bump manifests, write the CHANGELOG entry. The human runs `gh pr merge` + `git tag` + `git push origin vX.Y.Z`.
 6. **Parity tests stay strict.** Any drift between `pyproject.toml` version and the four other manifests (plus `source.ref` in marketplace.json) fails CI. No `# noqa` escape hatches.
 
+### Engine-service release (a SECOND lifecycle — decoupled from the PyPI release)
+
+The Java **engine-service** binary is a separate release artifact with its own cadence. Conflating it with the PyPI/marketplace release is how the cloud engine silently drifts behind develop (2026-06-26: 22 `service/` commits / 4 days un-deployed, un-cloud-tested).
+
+- **Artifact + trigger:** an `engine-service-vX.Y.Z` git tag fires `engine-service-release.yml`, which builds + cosign-signs the 4 native binaries. It publishes **nothing to PyPI** and is **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** (the workflow header says so explicitly). So the engine can be refreshed in the cloud at any time, independent of the unreleasable-develop state.
+- **Version is tag-stamped — there is NO manifest to bump.** `release.properties` `release_version` is blank in source and stamped at native-build time from the tag (the Maven `pom.xml` stays `1.0-SNAPSHOT`, the dev coordinate). The cut is purely: full engine suite green on the tagged commit → human pushes `engine-service-vX.Y.Z`.
+- **Cut from develop tip; don't let it drift.** Cloud-relevant engine work (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints) lands on develop continuously. Cut + deploy + cloud-gate the engine on its own cadence. Rule of thumb: if `git log <last-engine-tag>..HEAD -- service/` is non-trivial AND cloud-relevant, cut a fresh engine **before** relying on cloud test results or pinning it into a PyPI release.
+- **Prep (AI) vs cut (human).** AI preps: confirm the `service/` tree at the target commit equals a green-`service-ci` commit (the Java CI is advisory — it does not block auto-merge — so verify the full `./mvnw test` + native build actually passed on that exact tree). The human pushes the tag.
+- **Deploy + cloud-gate is conexus-side (passive bus).** After the tag publishes + signs, conexus deploys the signed binary and re-runs the cloud gate (recall + hybrid parity, xr7.8.9-style). Surface an explicit "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Hal — never frame the cross-instance deploy as autonomous.
+- **A new engine bumps these downstream references:** `tests/e2e/migration-rehearsal/run.sh` `COLD_TAG` default; the PyPI release's pinned engine tag (the parity test); and the `REQUIRED_RELEASE_VERSION` floor in `src/nexus/migration/guided_upgrade.py` ONLY if the PyPI release hard-requires the new engine's features (the floor is a minimum, not "latest").
+
 ### Cutting a release (version bump + tag-push to PyPI)
+
+**Engine-freshness gate (step 0 — BEFORE the numbered steps).** The PyPI release pins an `engine-service` tag (`REQUIRED_RELEASE_VERSION` floor + the parity test). Before cutting, confirm the pinned engine tag is (a) cloud-deployed + cloud-gated and (b) reasonably current with develop's engine tip. If `git log <pinned-engine-tag>..HEAD -- service/` shows cloud-relevant drift, cut + deploy + cloud-gate a fresh `engine-service` tag FIRST (see "Engine-service release" above), then pin it. Shipping the PyPI release on a stale, un-cloud-validated engine is exactly the gap this gate closes.
+
 
 1. **Run unit + integration suite.** `uv run pytest` and `uv run pytest -m integration`. Both must pass — integration is excluded from CI and is your last line of defense.
 2. **Audit docs against changes since last tag.** `git log --oneline v<prev>..HEAD` then check `docs/cli-reference.md`, `docs/architecture.md`, `README.md` for user-visible drift.

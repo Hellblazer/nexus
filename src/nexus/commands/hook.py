@@ -34,14 +34,14 @@ def _read_stdin_session_id(stream: IO[str]) -> str | None:
         if stream.isatty():
             return None
         raw = stream.read()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — hook stdin read must not crash session-start; logged at debug
         _log.debug("session_start_stdin_read_failed", error=str(exc))
         return None
     if not raw:
         return None
     try:
         data = json.loads(raw)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — hook stdin parse must not crash session-start; logged at debug
         _log.debug("session_start_stdin_parse_failed", error=str(exc))
         return None
     if not isinstance(data, dict):
@@ -156,7 +156,7 @@ def session_end_detach_cmd() -> None:
     # and nothing can observe us anyway.
     try:
         hooks.session_end()
-    except Exception:
+    except Exception:  # noqa: BLE001 — hook teardown best-effort before os._exit; nothing to recover
         pass
     os._exit(0)
 
@@ -185,9 +185,9 @@ def routing_stats_cmd(log_path: str | None, as_json: bool) -> None:
     false positives (high escape rate), inert matchers (zero fires), or
     overly broad blocks (high block rate).
     """
-    import pathlib as _pathlib
+    import pathlib as _pathlib  # noqa: PLC0415 — stdlib pathlib deferred to subcommand scope
 
-    from nexus.routing_stats import aggregate, default_log_path, stats_to_json
+    from nexus.routing_stats import aggregate, default_log_path, stats_to_json  # noqa: PLC0415 — deferred import; routing_stats only needed in this subcommand
 
     path = _pathlib.Path(log_path) if log_path else default_log_path()
     stats = aggregate(path)

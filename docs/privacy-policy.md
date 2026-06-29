@@ -1,6 +1,6 @@
 # Privacy Policy — Conexus
 
-_Effective: 2026-05-24_
+_Effective: 2026-06-20_
 
 Conexus is a self-hosted MCP server and Claude Code / Claude Desktop extension that indexes content on your machine and provides semantic search and persistent memory across Claude conversations. This policy describes what data Conexus handles, where it goes, and what is never collected.
 
@@ -8,9 +8,10 @@ Conexus is a self-hosted MCP server and Claude Code / Claude Desktop extension t
 
 All persistent data lives on the host machine running Conexus:
 
-- **Indexed content** — text from files you ask Conexus to index (`nx index repo`, `nx index pdf`), plus structured metadata (file paths, chunk identifiers, taxonomy assignments). Stored in:
-  - `~/.local/share/nexus/chroma/` (local mode — embeddings + chunk text)
-  - ChromaDB Cloud (cloud mode — only if you provide credentials)
+- **Indexed content** — text from files you ask Conexus to index (`nx index repo`, `nx index pdf`), plus structured metadata (file paths, chunk identifiers, taxonomy assignments). As of 6.0 the T3 vector store is the native nexus-service (Postgres 17 + pgvector). Stored in:
+  - the local nexus-service's Postgres cluster on disk (local mode — embeddings + chunk text, embedded server-side with bge-768)
+  - a managed nexus-service's Postgres (managed-cloud mode — only if you point Conexus at a hosted service)
+  - `~/.local/share/nexus/chroma/` (legacy ChromaDB store, read only as the migration source for `nx guided-upgrade`)
 - **Memory entries** — anything you (or an agent) writes via `nx memory put` or the `memory_put` MCP tool. Stored in `~/.config/nexus/memory.db` (SQLite, FTS5).
 - **Catalog** — document registry and typed-link graph. Stored in `~/.config/nexus/catalog/` (JSONL + SQLite cache).
 - **Session scratch** — ephemeral working notes shared across agents within a session. In-memory ChromaDB; wiped at session end.
@@ -20,11 +21,11 @@ All persistent data lives on the host machine running Conexus:
 ## 2. What Conexus sends to third parties
 
 **Local mode** (default — no credentials configured):
-Nothing leaves the machine. Embeddings are computed locally via ONNX MiniLM. All search runs against on-disk ChromaDB.
+Nothing leaves the machine. Embeddings are computed locally by the on-machine nexus-service (bge-768 ONNX), and search runs against the local on-disk Postgres + pgvector store.
 
-**Cloud mode** (you opt in by providing API keys):
-- **Voyage AI** — chunk text is sent to Voyage's embedding API for indexing and to embed query strings at search time. See https://www.voyageai.com/privacy.
-- **ChromaDB Cloud** — embeddings + chunk text are stored in your ChromaDB Cloud tenant for retrieval. See https://www.trychroma.com/privacy.
+**Managed-cloud mode** (you opt in by pointing Conexus at a hosted nexus-service):
+- **The managed nexus-service** — chunk text + embeddings are stored in the managed service's Postgres for retrieval, under that service operator's policy. Your data leaves your machine for whoever hosts the service.
+- **Voyage AI** — in managed-cloud mode the service embeds chunk text and query strings with Voyage's API server-side. See https://www.voyageai.com/privacy.
 - **Semantic Scholar** (only when you run `nx enrich bib`) — bibliographic metadata lookups for PDFs you ask Conexus to enrich. See https://www.semanticscholar.org/about/privacy.
 - **Anthropic Claude** (only when an MCP operator tool fires) — chunks passed to `claude -p` subprocesses run by `operator_*` / `nx_answer` / `nx_tidy` are sent to Anthropic's API per Anthropic's standard data policy.
 
@@ -40,7 +41,7 @@ You control which (if any) of the above are reachable by deciding whether to set
 ## 4. Data retention
 
 - Local-mode data persists on disk until you delete it. There is no automatic purge of T2 memory (`nx memory delete`), T3 collections (`nx store delete`), or the catalog (`nx catalog gc`).
-- Cloud-mode data persists in your ChromaDB Cloud tenant under your account's retention policy.
+- Managed-cloud data persists in the hosted nexus-service's Postgres under that service operator's retention policy.
 - T1 session scratch is wiped automatically when the host process exits.
 
 ## 5. Data export and deletion

@@ -55,6 +55,19 @@ pytestmark = pytest.mark.usefixtures("cloud_mode")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
+def _service_reachable() -> bool:
+    # nexus-o06g4: the spawned nx-mcp inherits cloud_mode env (is_local_mode
+    # False) so its scratch/memory round-trip routes to the nexus-service.
+    # Skip the live round-trip when no service endpoint resolves, instead of
+    # false-failing with an AssertionError on an unreachable backend.
+    try:
+        from nexus.db.service_endpoint import resolve_service_config
+        resolve_service_config()
+        return True
+    except Exception:
+        return False
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
@@ -86,13 +99,36 @@ def t2_path():
         yield Path(f.name)
 
 
+def _clear_ephemeral_collections(client) -> None:
+    """Delete every collection in the shared in-process Ephemeral backend.
+
+    nexus-st976: ``chromadb.EphemeralClient()`` instances share ONE
+    in-memory backend within a process, so collections created by another
+    test file's T3 fixture survive into this "fresh" client. ``store_put``
+    resolves ``collection="knowledge"`` via ``t3_collection_name``, which
+    probes ``list_collections()`` for a unique ``knowledge__*`` match and
+    returns it verbatim — so a single leaked ``knowledge__<owner>__...``
+    collection silently re-targets the write/read away from the expected
+    ``knowledge__knowledge`` name. Clearing on entry (and teardown) makes
+    the fixture order-independent.
+    """
+    for c in client.list_collections():
+        name = getattr(c, "name", c)
+        try:
+            client.delete_collection(name)
+        except Exception:  # noqa: BLE001 — best-effort cleanup of leaked shared-backend state
+            pass
+
+
 @pytest.fixture()
 def t3():
     client = chromadb.EphemeralClient()
+    _clear_ephemeral_collections(client)
     ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
-    return db
+    yield db
+    _clear_ephemeral_collections(client)
 
 
 @pytest.fixture(autouse=True)
@@ -852,6 +888,12 @@ def test_t1_session_isolation():
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _service_reachable(),
+    reason="nexus-o06g4: live MCP round-trip in cloud_mode needs a reachable "
+    "nexus-service (start with 'nx daemon service start' or export "
+    "NX_SERVICE_URL/NX_SERVICE_TOKEN)",
+)
 async def test_mcp_server_round_trip():
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client

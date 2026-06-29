@@ -355,6 +355,35 @@ class TestManagedServiceProbeCheck:
         from nexus.health import _check_managed_service_probe
         assert _check_managed_service_probe() == []
 
+    def test_config_yml_service_url_does_probe(self, monkeypatch):
+        # nexus-v3p0x: a greenfield user who set the endpoint via `nx config set
+        # service_url` (NO shell export) must still get the doctor probe — the
+        # guard resolves via get_credential (env, then config.yml), not bare env.
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        from nexus.config import set_credential
+        set_credential("service_url", "https://api.conexus-nexus.com")
+        from nexus.db import managed_endpoint as me
+
+        seen = {}
+
+        caps = me.ManagedCapabilities(
+            base_url="https://api.conexus-nexus.com", app_version="1.0",
+            release_version="0.1.8",
+            embedding_mode="voyage", embedding_models=[],
+            schema_latest_id=None, schema_changeset_count=None,
+        )
+
+        def _capture(**kw):
+            seen["base_url"] = kw.get("base_url")
+            return caps
+
+        monkeypatch.setattr(me, "probe_managed_service", _capture)
+        from nexus.health import _check_managed_service_probe
+        res = _check_managed_service_probe()
+        # It probed (non-empty result) against the config.yml endpoint, not [].
+        assert res != []
+        assert seen["base_url"] == "https://api.conexus-nexus.com"
+
     def test_probes_explicit_url_never_the_public_default(self, monkeypatch):
         # SAFETY INVARIANT: the probe receives the EXPLICIT NX_SERVICE_URL, never
         # base_url=None (which would default to https://api.conexus-nexus.com).
@@ -364,6 +393,7 @@ class TestManagedServiceProbeCheck:
         seen = {}
         caps = me.ManagedCapabilities(
             base_url="https://staging.example.com", app_version="1.0",
+            release_version="0.1.8",
             embedding_mode="voyage", embedding_models=[],
             schema_latest_id=None, schema_changeset_count=None,
         )
@@ -382,6 +412,7 @@ class TestManagedServiceProbeCheck:
 
         caps = me.ManagedCapabilities(
             base_url="https://api.conexus-nexus.com", app_version="1.0-SNAPSHOT",
+            release_version="0.1.8",
             embedding_mode="voyage", embedding_models=[],
             schema_latest_id="vectors-002", schema_changeset_count=64,
         )

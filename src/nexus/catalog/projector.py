@@ -397,7 +397,7 @@ class Projector:
         # live regex.
         payload_legacy = getattr(payload, "legacy_grandfathered", None)
         if payload_legacy is None:
-            from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+            from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
             legacy = 0 if is_conformant_collection_name(payload.coll_id) else 1
         else:
             legacy = 1 if payload_legacy else 0

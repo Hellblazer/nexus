@@ -403,17 +403,38 @@ class TestHttpAspectQueue:
         assert store.claim_next() is None
 
     def test_claim_batch_returns_list(self):
+        # nexus-575kd: the Java service's /queue/claim_batch sends a BARE JSON
+        # ARRAY (AspectHandler.handleQueueClaimBatch -> writeValueAsString(rows)),
+        # NOT a {"rows":[...]} envelope. The prior version of this test mocked
+        # the envelope — i.e. the client's wrong assumption — so it stayed green
+        # while the real service-mode worker claimed nothing (claim_batch raised
+        # on every poll -> document_aspects=0). Mock what the service ACTUALLY
+        # sends so this pins the real contract.
         rows = [
             {"collection": "c", "source_path": f"doc{i}.pdf",
              "content_hash": "", "content": "", "retry_count": 0, "doc_id": ""}
             for i in range(3)
         ]
         store = self._queue({
-            "/v1/aspects/queue/claim_batch": {"rows": rows}
+            "/v1/aspects/queue/claim_batch": rows  # bare array, as the service sends
         })
         result = store.claim_batch(5)
         assert len(result) == 3
         assert all(isinstance(r, QueueRow) for r in result)
+        assert [r.source_path for r in result] == ["doc0.pdf", "doc1.pdf", "doc2.pdf"]
+
+    def test_claim_batch_tolerates_rows_envelope(self):
+        # Defensive: if a future engine ever wraps as {"rows":[...]} (matching
+        # claim_next's envelope), the client must still parse it. Locks the
+        # isinstance fallback branch.
+        rows = [{"collection": "c", "source_path": "d.pdf",
+                 "content_hash": "", "content": "", "retry_count": 0, "doc_id": ""}]
+        store = self._queue({
+            "/v1/aspects/queue/claim_batch": {"rows": rows}
+        })
+        result = store.claim_batch(5)
+        assert len(result) == 1
+        assert result[0].source_path == "d.pdf"
 
     def test_claim_batch_zero_limit_returns_empty(self):
         store = self._queue({})
@@ -434,6 +455,25 @@ class TestHttpAspectQueue:
     def test_mark_retry(self):
         store = self._queue({"/v1/aspects/queue/mark_retry": {"ok": True}})
         store.mark_retry("c", "doc.pdf")
+
+    def test_mark_retry_posts_interval_seconds(self):
+        # RDR-163 P1 (nexus-ztpt6): the worker-chosen backoff must reach the
+        # service so it can stamp next_retry_at = now()+interval server-side.
+        captured = {}
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"ok": True})
+
+        store = HttpAspectQueue(base_url="http://test", _token="tok")
+        store._client = httpx.Client(
+            base_url="http://test", headers=store._headers,
+            transport=httpx.MockTransport(handle_request),
+        )
+        store.mark_retry("c", "doc.pdf", interval_seconds=120)
+        assert captured["body"]["interval_seconds"] == 120
+        assert captured["body"]["collection"] == "c"
+        assert captured["body"]["source_path"] == "doc.pdf"
 
     def test_reclaim_stale_returns_count(self):
         store = self._queue({"/v1/aspects/queue/reclaim_stale": {"reclaimed": 3}})
@@ -460,6 +500,34 @@ class TestHttpAspectQueue:
         result = store.list_pending()
         assert len(result) == 1
         assert isinstance(result[0], QueueRow)
+
+    def test_list_failed_returns_rows_and_preserves_doc_id(self):
+        rows = [
+            {"collection": "c", "source_path": "f.pdf",
+             "content_hash": "h", "content": "x", "retry_count": 6, "doc_id": "1.2"}
+        ]
+        store = self._queue({"/v1/aspects/queue/list_failed": rows})
+        result = store.list_failed()
+        assert len(result) == 1
+        assert isinstance(result[0], QueueRow)
+        assert result[0].doc_id == "1.2"
+        assert result[0].retry_count == 6
+
+    def test_list_failed_forwards_collection_param(self):
+        # nexus-2c51v: --collection scope must reach the service as a query param.
+        captured = {}
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json=[])
+
+        store = HttpAspectQueue(base_url="http://test", _token="tok")
+        store._client = httpx.Client(
+            base_url="http://test", headers=store._headers,
+            transport=httpx.MockTransport(handle_request),
+        )
+        store.list_failed(collection="knowledge__x")
+        assert captured["params"].get("collection") == "knowledge__x"
 
     def test_list_pending_with_limit(self):
         rows = [

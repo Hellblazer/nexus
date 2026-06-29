@@ -55,7 +55,7 @@ def _default_registry(
     cfg: dict = {}
     try:
         cfg = load_config(project_root)
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
         cfg = {}
     rdr_paths = (cfg.get("indexing") or {}).get("rdr_paths") or ["docs/rdr"]
     rdr_dir = project_root / rdr_paths[0]
@@ -106,7 +106,7 @@ def render_cmd(
     db: T2Database | None = None
     try:
         db = T2Database(default_db_path())  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
         db = None
 
     # RDR-086 Phase 4.3: chash resolver for footnote expansion. Only
@@ -116,7 +116,7 @@ def render_cmd(
     if expand_citations:
         try:
             phase4_trio = _phase4_catalog_t3_chash()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — boundary catch; logged and re-raised
             click.echo(f"--expand-citations cannot open resolver: {exc}", err=True)
             raise click.exceptions.Exit(2)
 
@@ -158,7 +158,7 @@ def render_cmd(
         if phase4_trio is not None:
             try:
                 phase4_trio[2].close()
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
                 pass
 
     click.echo(f"rendered {total_resolved} tokens across {len(paths)} file(s)")
@@ -199,7 +199,7 @@ def _append_chash_footnotes(
         seen.add(c.chash)
         try:
             ref = cat.resolve_chash(c.chash, t3, chash_index)
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
             ref = None
         short = c.chash[:8]
         if ref is None:
@@ -231,7 +231,7 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
     db: T2Database | None = None
     try:
         db = T2Database(default_db_path())  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
         db = None
 
     total_misses = 0
@@ -302,7 +302,7 @@ def check_grounding_cmd(
     is resolved via ``Catalog.resolve_chash``; any miss triggers a
     non-zero exit plus a file:line error report.
     """
-    import json
+    import json  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     # RDR-086 Phase 4.1: open Catalog + T3 + ChashIndex only when actually
     # resolving. This keeps the default path fast and free of T2/T3 deps
@@ -311,7 +311,7 @@ def check_grounding_cmd(
     if fail_ungrounded:
         try:
             cat, t3, chash_index = _phase4_catalog_t3_chash()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — boundary catch; logged and re-raised
             click.echo(
                 f"--fail-ungrounded cannot resolve: {exc}", err=True,
             )
@@ -332,7 +332,7 @@ def check_grounding_cmd(
                         continue
                     try:
                         ref = cat.resolve_chash(c.chash, t3, chash_index)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                         ref = None
                     if ref is None:
                         unresolved_here.append((c.lineno, c.chash))
@@ -365,7 +365,7 @@ def check_grounding_cmd(
         if chash_index is not None:
             try:
                 chash_index.close()
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
                 pass
 
     if output_format == "json":
@@ -422,14 +422,14 @@ def check_extensions_cmd(
     Docs whose best-projecting chunk scores below ``--threshold`` are
     flagged as author-extension candidates.
     """
-    import json
+    import json  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     results = []
     any_candidate = False
 
     try:
         cat, t3, chash_index = _phase4_catalog_t3_chash()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; logged and re-raised
         click.echo(f"cannot open chash resolver: {exc}", err=True)
         raise click.exceptions.Exit(2)
 
@@ -458,7 +458,7 @@ def check_extensions_cmd(
                         continue
                     try:
                         ref = cat.resolve_chash(c.chash, t3, chash_index)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                         ref = None
                     if ref is not None and ref.get("doc_id"):
                         resolved_doc_ids.append(ref["doc_id"])
@@ -491,7 +491,7 @@ def check_extensions_cmd(
     finally:
         try:
             chash_index.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
             pass
 
     if output_format == "json":
@@ -518,7 +518,7 @@ def check_extensions_cmd(
 def sqlite_errors() -> tuple[type[BaseException], ...]:
     """Broad exception tuple for T2 open failures — sqlite3.DatabaseError
     plus anything else the facade may raise."""
-    import sqlite3
+    import sqlite3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     return (sqlite3.Error, OSError)
 
@@ -546,9 +546,9 @@ def _phase4_catalog_t3_chash() -> tuple[Any, Any, Any]:
     T3 comes from ``nexus.db.make_t3``. ChashIndex opens the same T2
     path used by every other T2 store.
     """
-    from nexus.catalog.factory import make_catalog_reader
-    from nexus.db import make_t3
-    from nexus.db.t2.chash_index import ChashIndex
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     db_path = default_db_path()
     cat: Any = make_catalog_reader()
@@ -566,9 +566,9 @@ def _phase4_t2_taxonomy():
     leaked the five-connection T2Database for the command's lifetime
     (review #3).
     """
-    from contextlib import contextmanager
+    from contextlib import contextmanager  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    from nexus.db.t2 import T2Database
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     @contextmanager
     def _taxonomy_ctx():
@@ -593,7 +593,7 @@ def _phase5_search(*, query: str, corpus: str, limit: int) -> dict:
     returns the Phase 3 envelope (``ids``, ``distances``, ``collections``,
     ``chunk_text_hash``, ``tumblers``) — exactly what ``cite`` needs.
     """
-    from nexus.mcp.core import search as _mcp_search
+    from nexus.mcp.core import search as _mcp_search  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     result = _mcp_search(
         query=query, corpus=corpus, limit=limit, structured=True,
@@ -610,7 +610,7 @@ def _chash_index_is_empty(chash_index) -> bool:
     """
     try:
         return chash_index.is_empty()
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch of undocumented errors; degrades to safe fallback return
         return False
 
 
@@ -657,11 +657,11 @@ def cite_cmd(
       * 2 — usage errors: empty chash_index (fresh install), empty
         collection, or unknown collection
     """
-    import json as _json
+    import json as _json  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     try:
         cat, t3, chash_index = _phase4_catalog_t3_chash()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — boundary catch; logged and re-raised
         click.echo(f"cannot open resolver: {exc}", err=True)
         raise click.exceptions.Exit(2)
 
@@ -696,7 +696,7 @@ def cite_cmd(
 
         try:
             ref = cat.resolve_chash(top_hash, t3, chash_index)
-        except Exception:
+        except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
             ref = None
         excerpt = ""
         if ref is not None:
@@ -723,7 +723,7 @@ def cite_cmd(
                 c = collections[0] if collections else collection
                 try:
                     r = cat.resolve_chash(h, t3, chash_index) if h else None
-                except Exception:
+                except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                     r = None
                 exc = (str(r.get("chunk_text", "")).strip()[:200]
                        if r is not None else "")
@@ -762,5 +762,5 @@ def cite_cmd(
     finally:
         try:
             chash_index.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
             pass

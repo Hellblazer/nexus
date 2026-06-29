@@ -97,6 +97,64 @@ class TestConfirmedUninstall:
         stop_cmds = [c.args[0] for c in mock_run.call_args_list]
         assert ["/opt/conexus/bin/nx", "daemon", "t2", "stop"] in stop_cmds
 
+    def _install_service_unit(self) -> None:
+        with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stderr = ""
+            mock_run.return_value.stdout = ""
+            installer.install_autostart(tier="service")
+
+    def test_removes_service_autostart_unit_too(self, _env: Path) -> None:
+        """Follow-up bug: uninstall_daemon stops the engine-service + PG stack but
+        previously removed ONLY the T2 unit, leaving the SERVICE autostart unit on
+        disk — the OS watchdog would then restart the service it just stopped. A
+        full uninstall must remove BOTH units."""
+        self._install_service_unit()
+        service_unit = _env / "units" / "com.nexus.service.plist"
+        t2_unit = _env / "units" / "com.nexus.t2.plist"
+        assert service_unit.exists() and t2_unit.exists()
+
+        with patch.object(installer.subprocess, "run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stderr = ""
+            mock_run.return_value.stdout = ""
+            report = installer.uninstall_daemon(confirm=True)
+
+        assert not service_unit.exists(), (
+            "uninstall_daemon must remove the SERVICE autostart unit, else the OS "
+            "watchdog restarts the service the same uninstall just stopped"
+        )
+        assert not t2_unit.exists(), "the T2 unit must still be removed too"
+        assert report.service_unit_status is installer.UninstallStatus.REMOVED
+
+    def test_dry_run_mentions_service_unit(self, _env: Path) -> None:
+        self._install_service_unit()
+        report = installer.uninstall_daemon(confirm=False)
+        assert "com.nexus.service.plist" in report.message, (
+            "the dry-run plan must disclose the service unit it will remove"
+        )
+
+    def test_stops_engine_service_stack_with_pg(self, _env: Path) -> None:
+        # RDR-165 eu4u4: uninstall_daemon must tear down the engine-service/PG
+        # stack, not only `nx daemon t2 stop` (the installer.py:241 gap). Assert
+        # the exact `service stop --with-pg` argv is issued AND reported.
+        with patch.object(installer.subprocess, "run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stderr = ""
+            mock_run.return_value.stdout = ""
+            report = installer.uninstall_daemon(confirm=True)
+
+        stop_cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert ["/opt/conexus/bin/nx", "daemon", "service", "stop", "--with-pg"] in stop_cmds
+        assert report.service_stopped is True
+
+    def test_dry_run_plan_mentions_service_stack(self, _env: Path) -> None:
+        report = installer.uninstall_daemon(confirm=False)
+        assert report.confirmed is False
+        # Tight: the plan must name the engine-service/PG stop explicitly, not
+        # merely contain the substring "service" (which appears in unit paths).
+        assert "service stop --with-pg" in report.message
+
     def test_remove_data_wipes_config_dir(self, _env: Path) -> None:
         config_dir = _env / "cfg"
         assert config_dir.exists()
