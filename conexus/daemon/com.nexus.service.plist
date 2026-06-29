@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the nexus storage SERVICE (RDR-174 P2.1, nexus-y2yj6).
+  Installed by ``nx daemon service install --autostart``. The ``__NX_BIN__``
+  placeholder is substituted at install time with the resolved absolute path
+  to the ``nx`` executable.
+
+  ``nx daemon service start --foreground`` runs the storage supervisor
+  (run_storage_supervisor) in the foreground — it owns the native engine-
+  service binary + the local Postgres cluster and blocks until SIGTERM, so
+  launchd's supervision is the canonical lifecycle owner.
+
+  RDR-174 P2.2 will add the Postgres boot-ordering delta (a readiness wrapper
+  before the supervisor launches, since launchd has no After= equivalent).
+  This template is intentionally the plain unit; keep the seam below.
+
+  StandardOutPath / StandardErrorPath are the launchd-captured supervisor
+  stream (interpreter/boot crash diagnostics). The bounded primary log is
+  ``~/.config/nexus/logs/`` written by the supervisor itself.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nexus.service</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NX_BIN__</string>
+        <string>daemon</string>
+        <string>service</string>
+        <string>start</string>
+        <string>--foreground</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!--
+      always-keep-alive: the storage service must persist regardless of exit
+      reason (a clean SIGTERM sets exit code 0; KeepAlive=<true/> is the
+      canonical macOS pattern for a daemon that must come back). ExitTimeOut
+      bounds a stuck graceful shutdown so launchd does not loop too hard.
+
+      ThrottleInterval (RDR-174 P2.1 review SIG-1): the supervisor fails loud
+      (non-zero exit) until provisioning completes (no pg_credentials / no
+      engine binary yet — the normal state right after this unit is installed
+      but before ``nx init --service``). Without throttling, KeepAlive=<true/>
+      would respawn it in a tight loop. 30s mirrors the Linux RestartSec spirit
+      at a safer interval; P2.2's PG-readiness wrapper removes the crash entirely.
+    -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/nexus-service.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/nexus-service.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH_ENV__</string>
+    </dict>
+</dict>
+</plist>

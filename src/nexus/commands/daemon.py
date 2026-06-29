@@ -58,6 +58,12 @@ _T2_PLIST_NAME = "com.nexus.t2.plist"
 _T2_SERVICE_NAME = "nexus-t2.service"
 _T2_LAUNCHD_LABEL = "com.nexus.t2"
 
+# RDR-174 P2.1 (nexus-y2yj6): the storage SERVICE tier (engine-service binary +
+# local Postgres; serves T2 + T3). Mirrors the T2/T3 autostart-unit identity.
+_SERVICE_PLIST_NAME = "com.nexus.service.plist"
+_SERVICE_SERVICE_NAME = "nexus-service.service"
+_SERVICE_LAUNCHD_LABEL = "com.nexus.service"
+
 
 def _autostart_platform() -> str:
     """Indirection point so tests can stub the platform."""
@@ -154,6 +160,14 @@ def _autostart_filename_t3() -> str:
 
 def _autostart_filename_t2() -> str:
     return _T2_PLIST_NAME if _autostart_platform() == "darwin" else _T2_SERVICE_NAME
+
+
+def _autostart_filename_service() -> str:
+    return (
+        _SERVICE_PLIST_NAME
+        if _autostart_platform() == "darwin"
+        else _SERVICE_SERVICE_NAME
+    )
 
 
 def _autostart_unit_installed() -> Path | None:
@@ -1490,6 +1504,89 @@ def t2_uninstall_cmd(autostart: bool) -> None:
 @daemon_group.group("service")
 def service_group() -> None:
     """Storage-service daemon: managed native service binary + local Postgres."""
+
+
+@service_group.command("install")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help=(
+        "Install OS autostart entry (launchd on macOS, systemd user unit on "
+        "Linux) so the storage service starts at login / boot."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite an existing plist/unit file even when its content "
+    "differs from the freshly rendered template.",
+)
+def service_install_cmd(autostart: bool, force: bool) -> None:
+    """Install the storage-service autostart entry for the current user.
+
+    RDR-174 P2.1 (nexus-y2yj6): the service that serves every tier (engine
+    binary + local Postgres) previously had no reboot-persistence. Thin wrapper
+    over :func:`nexus.daemon.installer.install_autostart` with ``tier="service"``
+    (mirrors ``nx daemon t2 install`` — same structured-result translation).
+    The installed unit execs ``nx daemon service start --foreground``.
+    """
+    if not autostart:  # pragma: no cover — click enforces required=True
+        raise click.UsageError("--autostart is required")
+
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    try:
+        result = installer.install_autostart(tier="service", force=force)
+    except installer.SymlinkRefusedError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except installer.ContentDiffersError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except installer.ActivationError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if result.status is installer.InstallStatus.ALREADY_PRESENT:
+        click.echo(result.detail)
+        return
+
+    click.echo(f"Wrote {result.dest}")
+    for warning in result.warnings:
+        click.echo(f"Warning: {warning}", err=True)
+    if result.activated_cmd is not None:
+        click.echo(f"Activated via: {' '.join(result.activated_cmd)}")
+
+
+@service_group.command("uninstall")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help="Remove the OS autostart entry installed by ``install --autostart``.",
+)
+def service_uninstall_cmd(autostart: bool) -> None:
+    """Remove the storage-service autostart entry for the current user.
+
+    RDR-174 P2.1: completes the install/uninstall pair so the unit a user
+    installs can be cleanly removed via ``nx`` (not stranded). Thin wrapper over
+    :func:`nexus.daemon.installer.uninstall_autostart` with ``tier="service"``;
+    mirrors ``nx daemon t2 uninstall``.
+    """
+    if not autostart:  # pragma: no cover — click enforces required=True
+        raise click.UsageError("--autostart is required")
+
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    result = installer.uninstall_autostart(tier="service")
+    if result.status is installer.UninstallStatus.NOT_INSTALLED:
+        click.echo(f"Autostart not installed (nothing at {result.dest}).")
+        return
+    for warning in result.warnings:
+        click.echo(f"Warning: {warning}", err=True)
+    click.echo(f"Removed {result.dest}")
 
 
 def ensure_storage_supervisor(config_dir: Path):

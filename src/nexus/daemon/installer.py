@@ -115,6 +115,40 @@ def _render_for_t2() -> tuple[Path, str]:
     return install_dir / template_name, rendered
 
 
+def _render_for_service() -> tuple[Path, str]:
+    """Resolve the destination path and rendered unit body for the storage
+    SERVICE tier (RDR-174 P2.1) — mirrors :func:`_render_for_t2`, swapping the
+    template filename. The unit execs ``nx daemon service start --foreground``.
+    """
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    install_dir = _daemon._autostart_install_dir()
+    install_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = _daemon._autostart_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    template_name = _daemon._autostart_filename_service()
+    nx_bin = _daemon._resolve_nx_bin()
+    rendered = _daemon._render_template(
+        template_name,
+        nx_bin=nx_bin,
+        log_dir=str(log_dir),
+        path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    )
+    return install_dir / template_name, rendered
+
+
+def _render_for(tier: str) -> tuple[Path, str]:
+    """Dispatch the per-tier render. ``install_autostart`` is tier-generic; the
+    render path is the only tier-specific seam on the INSTALL side (activation
+    is dest-based and tier-agnostic)."""
+    if tier == "t2":
+        return _render_for_t2()
+    if tier == "service":
+        return _render_for_service()
+    raise ValueError(f"unknown autostart tier {tier!r}")
+
+
 def _activate_cmd(dest: Path) -> list[str]:
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -124,17 +158,42 @@ def _activate_cmd(dest: Path) -> list[str]:
     return ["systemctl", "--user", "enable", "--now", dest.name]
 
 
-def _deactivate_cmd(dest: Path) -> list[str]:
+def _deactivate_cmd(dest: Path, *, tier: str = "t2") -> list[str]:
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     if _daemon._autostart_platform() == "darwin":
         uid = os.getuid()
-        return ["launchctl", "bootout", f"gui/{uid}/{_daemon._T2_LAUNCHD_LABEL}"]
+        # The launchd bootout target is the unit LABEL, which is tier-specific
+        # (the Linux disable path is dest.name and tier-agnostic). RDR-174 P2.1:
+        # a hardcoded T2 label here would no-op or boot out the wrong unit for
+        # the service tier.
+        label = (
+            _daemon._SERVICE_LAUNCHD_LABEL
+            if tier == "service"
+            else _daemon._T2_LAUNCHD_LABEL
+        )
+        return ["launchctl", "bootout", f"gui/{uid}/{label}"]
     return ["systemctl", "--user", "disable", "--now", dest.name]
 
 
-def install_autostart(*, force: bool = False) -> InstallResult:
-    """Install the T2 daemon OS autostart unit for the current user.
+def _autostart_filename_for(tier: str) -> str:
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if tier == "t2":
+        return _daemon._autostart_filename_t2()
+    if tier == "service":
+        return _daemon._autostart_filename_service()
+    raise ValueError(f"unknown autostart tier {tier!r}")
+
+
+def install_autostart(*, tier: str = "t2", force: bool = False) -> InstallResult:
+    """Install a daemon OS autostart unit for the current user.
+
+    ``tier`` selects which unit is rendered: ``"t2"`` (default — the historical
+    callers ``mcp._first_run`` / ``daemon_uninstall`` / the t2 CLI rely on this
+    default) or ``"service"`` (RDR-174 P2.1 — the storage service that serves
+    every tier). The activation path is tier-agnostic (dest-based); only the
+    rendered unit differs.
 
     The OS unit is the source of truth. If the destination already holds
     the freshly-rendered content, returns ``ALREADY_PRESENT`` without
@@ -152,7 +211,7 @@ def install_autostart(*, force: bool = False) -> InstallResult:
     Under ``force`` an activation failure is downgraded to a warning on
     the returned :class:`InstallResult` rather than raised.
     """
-    dest, rendered = _render_for_t2()
+    dest, rendered = _render_for(tier)
 
     if dest.is_symlink():
         raise SymlinkRefusedError(
@@ -189,7 +248,7 @@ def install_autostart(*, force: bool = False) -> InstallResult:
         msg = f"{cmd[0]} not found on PATH; file installed but not activated ({exc})."
         if not force:
             raise ActivationError(msg) from exc
-        _log.warning("t2_install_activation_not_found", dest=str(dest), error=str(exc))
+        _log.warning(f"{tier}_install_activation_not_found", dest=str(dest), error=str(exc))
         return InstallResult(
             status=InstallStatus.NEWLY_INSTALLED, dest=dest, detail=msg, warnings=(msg,)
         )
@@ -198,7 +257,7 @@ def install_autostart(*, force: bool = False) -> InstallResult:
         msg = f"{' '.join(cmd)} exited {result.returncode}: {detail}"
         if not force:
             raise ActivationError(msg)
-        _log.warning("t2_install_activation_failed", dest=str(dest), returncode=result.returncode)
+        _log.warning(f"{tier}_install_activation_failed", dest=str(dest), returncode=result.returncode)
         warnings = (msg,)
         return InstallResult(
             status=InstallStatus.NEWLY_INSTALLED, dest=dest, detail=msg, warnings=warnings
@@ -398,24 +457,25 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     )
 
 
-def uninstall_autostart() -> UninstallResult:
-    """Remove the T2 daemon OS autostart unit for the current user.
+def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
+    """Remove a daemon OS autostart unit for the current user.
 
-    A non-zero / missing ``launchctl bootout`` / ``systemctl disable``
-    is downgraded to a warning and the file is removed anyway (mirrors
-    the original CLI: the unit file is the durable artifact). Returns
+    ``tier`` selects the unit: ``"t2"`` (default — ``daemon_uninstall`` and the
+    t2 CLI rely on it) or ``"service"`` (RDR-174 P2.1). A non-zero / missing
+    ``launchctl bootout`` / ``systemctl disable`` is downgraded to a warning and
+    the file is removed anyway (the unit file is the durable artifact). Returns
     ``NOT_INSTALLED`` when nothing is present.
     """
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     install_dir = _daemon._autostart_install_dir()
-    dest = install_dir / _daemon._autostart_filename_t2()
+    dest = install_dir / _autostart_filename_for(tier)
 
     if not dest.exists():
         return UninstallResult(status=UninstallStatus.NOT_INSTALLED, dest=dest)
 
     warnings: list[str] = []
-    cmd = _deactivate_cmd(dest)
+    cmd = _deactivate_cmd(dest, tier=tier)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
