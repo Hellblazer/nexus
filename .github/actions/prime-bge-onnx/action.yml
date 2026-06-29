@@ -1,0 +1,68 @@
+name: Prime bge-768 ONNX
+description: >-
+  Provision the standard fp32 bge-base-en-v1.5 ONNX model into
+  ~/.cache/nexus for CI (RDR-160 local-mode embedder). Restores from the
+  Actions cache; on a miss, downloads from a SELF-HOSTED GitHub release
+  asset (no HuggingFace dependency) with retry/backoff and sha256
+  verification. Centralises the logic that previously lived inline in
+  ci.yml / service-ci.yml / engine-service-release.yml, where an
+  un-retried anonymous HuggingFace download (HTTP 429) was the recurring
+  CI flake — acute on release PRs to main, which structurally cannot
+  restore caches primed on develop.
+
+inputs:
+  cache-key:
+    description: >-
+      actions/cache key. Use an arch-qualified key for multi-arch matrix
+      jobs so each runner architecture caches independently.
+    required: false
+    default: bge-onnx-standard-${{ runner.os }}-v1
+  asset-tag:
+    description: GitHub release tag that hosts model.onnx + tokenizer.json.
+    required: false
+    default: ci-assets-bge-768-v1
+
+runs:
+  using: composite
+  steps:
+    - name: Restore bge-768 ONNX cache
+      id: cache
+      # STABLE key — the model is an immutable upstream export, so it
+      # downloads ONCE on a cold cache and restores thereafter; bump the
+      # -v suffix in the key only if the model SOURCE changes.
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+      with:
+        path: ~/.cache/nexus/onnx_models/bge-base-en-v1.5
+        key: ${{ inputs.cache-key }}
+
+    - name: Download bge-768 ONNX on cache miss (self-hosted asset)
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ASSET_TAG: ${{ inputs.asset-tag }}
+        GH_TOKEN: ${{ github.token }}
+        MODEL_SHA256: 9bc579acdba21c253c62a9bf866891355a63ffa3442b52c8a37d75b2ccb91848
+        TOKENIZER_SHA256: d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66
+      run: |
+        set -euo pipefail
+        MODEL_DIR="$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx"
+        mkdir -p "$MODEL_DIR"
+        base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${ASSET_TAG}"
+        echo "bge ONNX cache miss; fetching from self-hosted release ${ASSET_TAG} (no HuggingFace dependency)."
+
+        fetch() {
+          # curl --retry with backoff handles transient 429/5xx; the
+          # GitHub asset origin is not rate-limited like anonymous HF,
+          # so this is belt-and-suspenders. The token is harmless on a
+          # public repo and authorises a private one.
+          curl -fL --retry 5 --retry-delay 8 --retry-all-errors \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -o "$1" "${base}/$2"
+        }
+
+        fetch "$MODEL_DIR/model.onnx" model.onnx
+        fetch "$MODEL_DIR/tokenizer.json" tokenizer.json
+
+        echo "${MODEL_SHA256}  $MODEL_DIR/model.onnx" | shasum -a 256 -c -
+        echo "${TOKENIZER_SHA256}  $MODEL_DIR/tokenizer.json" | shasum -a 256 -c -
+        echo "bge ONNX provisioned + verified from self-hosted asset."

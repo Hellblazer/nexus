@@ -118,31 +118,16 @@ jobs:
           distribution: 'graalvm'
           cache: 'maven'
 
-      - name: Cache bge-768 ONNX model
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # RDR-160: in local mode the native binary constructs Bge768Embedder,
         # which loads the STANDARD fp32 bge-base-en-v1.5 ONNX from ~/.cache/nexus
-        # (NOT MiniLM, NOT fastembed's fused optimized export) — the native smoke
-        # needs it. STABLE key (immutable upstream export): one cold download per
-        # arch, restored thereafter; bump -v only if the model source changes.
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        # — the native smoke needs it. Centralised in
+        # .github/actions/prime-bge-onnx (self-hosted release asset, no
+        # HuggingFace 429 dependency). Arch-qualified cache key: one cold
+        # download per arch, restored thereafter.
+        uses: ./.github/actions/prime-bge-onnx
         with:
-          path: ~/.cache/nexus/onnx_models/bge-base-en-v1.5
-          key: bge-onnx-standard-${{ runner.os }}-${{ matrix.target.arch }}-v1
-
-      - name: Prime bge-768 ONNX on cache miss
-        run: |
-          MODEL_DIR="$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx"
-          if [ ! -f "$MODEL_DIR/model.onnx" ]; then
-            echo "bge ONNX not in cache; downloading the standard fp32 export (~416MB)."
-            mkdir -p "$MODEL_DIR"
-            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx \
-              -o "$MODEL_DIR/model.onnx"
-            curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json \
-              -o "$MODEL_DIR/tokenizer.json"
-            test -f "$MODEL_DIR/model.onnx" || { echo "bge model.onnx missing after download"; exit 1; }
-          else
-            echo "bge ONNX restored from cache."
-          fi
+          cache-key: bge-onnx-standard-${{ runner.os }}-${{ matrix.target.arch }}-v1
 
       - name: Resolve engine-service version
         id: ver
@@ -363,8 +348,9 @@ jobs:
             "STANDARD fp32 bge-base-en-v1.5 ONNX from the filesystem at runtime." \
             "Before building the runtime image, stage it (or run nx init --service):" \
             "  MODEL_DIR=~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx; mkdir -p \$MODEL_DIR" \
-            "  curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx -o \$MODEL_DIR/model.onnx" \
-            "  curl -fsSL https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json -o \$MODEL_DIR/tokenizer.json" \
+            "  base=https://github.com/${GITHUB_REPOSITORY}/releases/download/ci-assets-bge-768-v1" \
+            "  curl -fL --retry 5 --retry-all-errors \$base/model.onnx -o \$MODEL_DIR/model.onnx" \
+            "  curl -fL --retry 5 --retry-all-errors \$base/tokenizer.json -o \$MODEL_DIR/tokenizer.json" \
             "" \
             "Provenance: each asset carries a sha256 AND a keyless cosign/Sigstore" \
             "signature in TWO bundle formats — <asset>.cosign.bundle (old JSON) and" \
