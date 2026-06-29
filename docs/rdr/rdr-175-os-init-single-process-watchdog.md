@@ -9,8 +9,9 @@ reviewed-by: self
 created: 2026-06-28
 accepted_date: 2026-06-28
 closed_date: 2026-06-28
-close_reason: implemented
+close_reason: partial
 post_mortem: docs/rdr/post-mortem/175-os-init-single-process-watchdog.md
+deferred_to: nexus-3pfj0  # Step 3A decide-first ordering — RDR-174 P2.4
 related_issues: [nexus-1brzs]
 related_rdrs: [RDR-149, RDR-152, RDR-161, RDR-174]
 supersedes: []
@@ -231,21 +232,20 @@ PG; the Java service stays alive through a PG-only restart, unchanged from today
   `ensure_storage_supervisor` session detach. Exactly one supervisor in either
   branch.
 
-  > **VOID 2026-06-28 (premise error — Gap 3 was bad reasoning).** Gap 3
-  > asserted that the "gate-locked P2.4 ordering" in `nx init` prompts for
-  > autostart *after* `provision_and_start_service`, creating a two-supervisor
-  > situation whose ordering needs reworking. Implementation-time verification
-  > found P2.4 was **never implemented**: `init.py:523-530` is a placeholder
-  > comment, not code — `nx init` has no autostart prompt and never installs a
-  > unit (it unconditionally session-detaches via `ensure_storage_supervisor`).
-  > The standalone `nx daemon service install --autostart` command exists but
-  > `init` does not call it. So there is no extant ordering to rework and no
-  > two-supervisor situation in current code: Gap 3 described a problem that does
-  > not exist, and "decide-autostart-first" would fix a non-problem. The actual
-  > double-spawn root cause (Gap 2) was the `--foreground` → `_respawn` chain,
-  > removed in Step 1. This sub-item is dropped, not deferred — there is nothing
-  > to do. The heal-on-next-use hardening (the bullet above) and Steps 1 + 2 are
-  > unaffected and shipped.
+  > **HANDED TO RDR-174 P2.4 / `nexus-3pfj0` 2026-06-28.** This decide-first
+  > ordering is a real requirement, but it cannot be implemented inside RDR-175:
+  > the `nx init` autostart prompt it must order is *not yet built*
+  > (`init.py:523-530` is the placeholder invariant comment; P2.4 is the open,
+  > planned bead `nexus-3pfj0` under the RDR-174 epic). RDR-175 ships the
+  > respawn-retirement (Steps 1, 2, 3B). The decide-first ordering is a
+  > forward-looking contract that **`nexus-3pfj0` must honour when it builds the
+  > prompt**: decide autostart first; if yes, install the unit as the SOLE
+  > starter (do NOT also session-start via `ensure_storage_supervisor`); if no,
+  > session-detach. Exactly one supervisor in either branch. If P2.4 instead
+  > prompts *after* the unconditional session start (the ordering the §4 invariant
+  > comment sketches), it creates the coexistence crash-loop documented in
+  > §Consequences. The requirement is recorded on `nexus-3pfj0`, not as a separate
+  > RDR-175 bead, so it lands with the code that needs it.
 
 ### Technical Design
 
@@ -331,6 +331,19 @@ leaves the hazard. Hal chose heal-on-next-use.
   `start()` surfaces as exit 1 (crash backstop re-raise), not 4. Under
   `StartLimitIntervalSec=0` / launchd `KeepAlive` all of 1/3/4 restart, so this
   affects log-based triage only, not recovery.
+- (−) Coexistence crash-loop (substantive-critic SIG-1) — the failure mode that
+  the decide-first ordering requirement on `nexus-3pfj0` (RDR-174 P2.4) exists to
+  prevent. If a session supervisor (started by `nx init`'s
+  `provision_and_start_service`) is holding the lease and the autostart unit is
+  THEN installed/activated, the unit's supervisor `start()` short-circuits on the
+  live lease (`_proc` stays unset), the first `heartbeat_once()` returns falsey,
+  and the unit exits 3 → the OS restarts it every `RestartSec=5s` until the
+  session lease expires. No double-spawn (the regression this RDR targets is
+  gone), but the unit crash-loops within that login session. This is reachable
+  once P2.4 (`nexus-3pfj0`) builds the prompt UNLESS it installs decide-first.
+  Behavior pinned by
+  `TestRdr175MvvSingleSupervisor.test_second_supervisor_under_live_lease_exits_nonzero`.
+  Bounded: resolves on session end / reboot (only the unit starts, lease free).
 
 ### Risks and Mitigations
 
@@ -339,10 +352,13 @@ leaves the hazard. Hal chose heal-on-next-use.
   path (Critical Assumption 4); under autostart this is moot (instant OS restart).
 - **Risk**: systemd enters `failed` after a restart burst. **Mitigation**:
   `StartLimitIntervalSec=0`.
-- **Risk**: (was) Reworking the gate-locked P2.4 ordering regresses the autostart
-  prompt invariant. **VOID** — see the §Approach VOID note: RDR-174 P2.4 (the
-  autostart prompt) was never implemented, so there is no ordering to rework and
-  no invariant to regress.
+- **Risk**: RDR-174 P2.4 (`nexus-3pfj0`) builds the `nx init` autostart prompt
+  with naive prompt-after-provision ordering, creating the two-supervisor
+  coexistence crash-loop (§Consequences). **Mitigation**: the decide-first
+  ordering requirement is recorded on `nexus-3pfj0` — install autostart as the
+  sole starter, never under a running session supervisor. RDR-175 ships the
+  respawn retirement that makes this a crash-loop rather than a double-spawn;
+  closing it fully is P2.4's responsibility.
 
 ### Failure Modes
 
@@ -388,12 +404,15 @@ via the rendered-unit test that BOTH `StartLimitIntervalSec=0` and the existing
 `SuccessExitStatus=143` are present (the edit must not drop the graceful-stop
 directive).
 
-#### Step 3: Heal-on-next-use hardening (decide-autostart-first dropped as void)
+#### Step 3: Heal-on-next-use hardening (decide-first ordering handed to nexus-3pfj0)
 Add the dead-lease liveness check to `ensure_storage_supervisor`'s discover path
-(SHIPPED). The decide-autostart-first init ordering rework (Gap 3) is **VOID** —
-see the VOID note in §Approach: RDR-174 P2.4 (the autostart-in-init prompt it
-would reorder) was never implemented, so Gap 3 described a non-existent
-two-supervisor situation. Dropped, not deferred — nothing to do.
+(SHIPPED). The decide-autostart-first init ordering (Gap 3) is a real requirement
+that cannot be built inside RDR-175 because the `nx init` autostart prompt it
+orders is not yet implemented (RDR-174 P2.4 = the open bead `nexus-3pfj0`). The
+requirement is recorded ON `nexus-3pfj0` (see the §Approach note): when P2.4
+builds the prompt, it must install decide-first, never starting a session
+supervisor under a unit — otherwise the coexistence crash-loop in §Consequences
+is reachable.
 
 ### Phase 2: Operational Activation
 
@@ -503,7 +522,10 @@ escape hatch removal (~103 lines) is deliberately excluded to keep focus.
 - 2026-06-28 — draft created from the RDR-174 P2.3 supervisor-minimization
   analysis (brainstorming-gate approved; heal-on-next-use contract chosen by Hal).
 - 2026-06-28 — gate PASSED (0 crit, 3 sig addressed); accepted.
-- 2026-06-28 — Phase 1 implemented + stacked review + phase-gate + test-validator;
-  CLOSED (close_reason: implemented). Material divergence: Gap 3 / Step 3A dropped
-  as VOID (premise error — RDR-174 P2.4 was never implemented, so there is no
-  two-supervisor ordering to rework). See post-mortem.
+- 2026-06-28 — Steps 1, 2, 3B implemented + stacked review + phase-gate +
+  test-validator; CLOSED **partial**. Step 3A (decide-autostart-first ordering,
+  Gap 3) is a real forward requirement handed to RDR-174 P2.4 (`nexus-3pfj0`),
+  not buildable in RDR-175 (the prompt it orders is not yet built). NOTE: this
+  was briefly mis-closed as `implemented` with Gap 3 marked "void" (a close-time
+  premise error — P2.4 treated as abandoned rather than planned); caught by Hal
+  and corrected same day. See post-mortem.

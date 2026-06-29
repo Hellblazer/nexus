@@ -23,29 +23,36 @@ OS restarts the whole process.
 | Phase-review-gate cross-walk | nexus-8spnp | PASS (manual; parser can't read bullet-contract §Approach) |
 | Test-validator: RDR-149 orthogonality | nexus-bz744 | PASS — conformance + lifecycle gate UNCHANGED, 636 affected-suite passed |
 
-## Divergence: Gap 3 dropped as void (premise error)
+## Divergence: Step 3A (Gap 3) handed to RDR-174 P2.4 / nexus-3pfj0
 
-The single material divergence. RDR-175 §Approach Step 3 originally had two parts:
-3A (decide-autostart-first init ordering, addressing Gap 3) and 3B
-(heal-on-next-use). Only 3B shipped.
+The single material divergence. RDR-175 §Approach Step 3 had two parts: 3A
+(decide-autostart-first init ordering, addressing Gap 3) and 3B
+(heal-on-next-use). Only 3B shipped inside RDR-175. 3A is a real requirement
+that cannot be built here because the `nx init` autostart prompt it orders does
+not yet exist — it is RDR-174 P2.4, the open planned bead `nexus-3pfj0`. The
+decide-first requirement is therefore recorded ON `nexus-3pfj0` (install
+decide-first; never start a session supervisor under a unit), to land with the
+code that needs it.
 
-Gap 3 asserted: "the gate-locked P2.4 ordering creates the two-supervisor
-situation," citing `init.py:523-530` as a prompt-then-start path needing
-reordering. **Implementation-time verification found this was bad reasoning:**
-those lines are a placeholder comment, not code. RDR-174 P2.4 (an autostart
-prompt in `nx init`) was never implemented; `nx init` has no autostart prompt
-and never installs a unit (it unconditionally session-detaches via
-`ensure_storage_supervisor`). The standalone `nx daemon service install
---autostart` command exists but `init` does not call it.
+### Close-time error (caught by Hal, corrected same day)
 
-Consequence: there is no extant ordering to rework and no two-supervisor
-situation in current code. "Decide-autostart-first" would fix a non-problem.
-The actual double-spawn root cause (Gap 2) was the `--foreground` → `_respawn`
-chain, removed in Step 1. Gap 3 was therefore dropped as **void** (a premise
-error), not deferred — the RDR §Approach/§Step 3/§Risks/§Consequences were
-re-marked VOID, and a transient follow-up bead (nexus-shkww) plus a
-"coexistence crash-loop" consequence that had been written up around the false
-premise were deleted as artifacts of the same bad reasoning.
+This divergence was, for several hours during close, mis-recorded as a **void
+premise error** — the claim being that Gap 3 was "bad reasoning" because P2.4
+"was never implemented." That conclusion was wrong, and the disconfirming
+evidence (`nexus-3pfj0`, the open planned P2.4 bead) was visible in the
+rdr-close preamble's Active Beads list the whole time. "Not yet implemented" was
+conflated with "abandoned." On that bad basis a tracking bead (`nexus-shkww`)
+was deleted, the RDR §Approach/§Step 3/§Risks/§Consequences were re-marked VOID,
+and the real coexistence-crash-loop consequence was struck. Hal caught it by
+asking what `nexus-3pfj0` was and why it had not been surfaced during the
+determination. All of it was reverted: Gap 3 restored as a real forward
+requirement, the requirement re-homed onto `nexus-3pfj0`, the coexistence
+consequence restored and kept pinned by a regression test.
+
+The root failure: an irreversible-ish determination (delete a bead, rewrite +
+close an RDR) was made on an incomplete premise without the one `bd` lookup
+(the RDR-174 epic's open beads) that would have flipped it — the exact
+silent-premise class the RDR discipline exists to prevent.
 
 ## Minor divergence: exit-code narrowing (substantive-critic SIG-3)
 
@@ -58,15 +65,22 @@ not recovery. Documented in the `run_storage_supervisor` docstring and RDR
 
 ## Lessons
 
-- **Verify architectural premises against the actual code before implementing —
-  including premises locked into an accepted RDR.** Gap 3 cited a line range as
-  if it were behavior; it was a comment. The finalization gate did not catch
-  this because the cited code was not re-read at gate time. A premise that names
-  a `file:line` is worth opening that file before building on it.
-- **A premise error is "void," not "deferred."** When the problem an item
-  addresses does not exist, drop the item and delete the tracking artifacts —
-  do not file a follow-up bead that institutionalizes a phantom.
-- **The stacked reviewers caught different real things.** code-review-expert
-  surfaced a silent-suppress loudness gap (relinquish failure). substantive-critic
-  surfaced the exit-4 narrowing and pressure-tested the Gap 3 deferral hard
-  enough to expose it as a premise error rather than legitimate deferral.
+- **"Not yet implemented" is not "abandoned" — check the plan, not just the code.**
+  The close-time error came from verifying that the `nx init` autostart prompt
+  was absent from the *code* (true) and leaping to "the requirement is void"
+  (false). One `bd` lookup of the RDR-174 epic's open beads would have surfaced
+  `nexus-3pfj0` (the planned P2.4 prompt) and shown Gap 3 was a real
+  forward-coordination requirement, not bad reasoning. When an item references
+  another RDR's phase, read that RDR's bead graph before declaring it void.
+- **An irreversible determination needs a complete premise first.** Deleting a
+  bead and rewriting + closing an RDR are hard to walk back. Those actions were
+  taken on an incomplete premise with the disconfirming evidence in plain view
+  (the rdr-close preamble listed `nexus-3pfj0`). Surface the contradicting
+  artifact *during* the determination, not after the close.
+- **A user agreeing ("moot, bad reasoning") is not premise verification.** The
+  void framing was amplified by a quick agreement; the agreement was based on the
+  same incomplete premise. Agreement does not substitute for the `bd`/code check.
+- **The stacked reviewers caught real things.** code-review-expert surfaced a
+  silent-suppress loudness gap (relinquish failure). substantive-critic surfaced
+  the exit-4 narrowing AND the coexistence crash-loop (SIG-1) — which was correct
+  and was wrongly struck during the void error, then restored.
