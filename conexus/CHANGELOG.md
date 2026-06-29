@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.0.0] - 2026-06-29
+
+Plugin version aligned with conexus 6.0.0 (the migration-capable release:
+ChromaDB to Postgres 17 + pgvector behind the native nexus-service, with
+`nx guided-upgrade` as the one-command migration path).
+
 ### Changed
 
 - **StopFailure hook no longer files issues for transient API failures.** The
