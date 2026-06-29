@@ -46,10 +46,10 @@
       ThrottleInterval (RDR-174 P2.1 review SIG-1): the supervisor fails loud
       (non-zero exit) until provisioning completes (no pg_credentials / no
       engine binary yet — the normal state right after this unit is installed
-      but before ``nx init --service``). Without throttling, KeepAlive=<true/>
+      but before ``nx init``). Without throttling, KeepAlive=<true/>
       would respawn it in a tight loop. 30s mirrors the Linux RestartSec spirit
       at a safer interval. (The pre-provisioning crash is inherent to installing
-      the unit before ``nx init --service``; the supervisor owns PG startup, so
+      the unit before ``nx init``; the supervisor owns PG startup, so
       no readiness wrapper applies — ThrottleInterval is the bound that matters.)
     -->
     <key>KeepAlive</key>

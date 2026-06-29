@@ -19,7 +19,7 @@
 ## loopback the supervisor binds is kernel-configured before userspace, so it
 ## is belt-and-suspenders rather than a hard requirement. The supervisor's only
 ## real boot prerequisites are the nx binary on PATH (__PATH_ENV__) and the
-## provisioned pg_credentials (absence crash-loops until `nx init --service`).
+## provisioned pg_credentials (absence crash-loops until `nx init`).
 
 [Unit]
 Description=Nexus storage service (engine-service binary + local Postgres; serves T2 + T3)
@@ -29,7 +29,7 @@ PartOf=default.target
 ## in-process respawn layer retired (RDR-175), systemd is the single watchdog;
 ## the default StartLimitIntervalSec=10s / StartLimitBurst=5 would let the unit
 ## enter 'failed' after a restart burst (e.g. crash-looping before
-## `nx init --service` provisions pg_credentials), abandoning the service where
+## `nx init` provisions pg_credentials), abandoning the service where
 ## launchd's KeepAlive+ThrottleInterval=30 keeps retrying. 0 disables the rate
 ## limiter so Restart=on-failure retries indefinitely.
 StartLimitIntervalSec=0

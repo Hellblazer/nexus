@@ -1550,12 +1550,14 @@ T3 (the permanent vector store) serves through the native nexus-service over
 Postgres + pgvector in **both** local and cloud mode (`nx daemon service`); the
 legacy `nx daemon t3` ChromaDB daemon is a retired serving path.
 
-When the conexus plugin is installed, the plugin's
-SessionStart hook auto-spawns the T2 daemon via
-`nx daemon t2 ensure-running` on every Claude Code session start,
-so first-session-after-install works without any manual incantation.
-For long-lived background daemons that survive across reboots
-independent of Claude Code, use `install --autostart` as above.
+On the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`), the conexus
+plugin's SessionStart hook auto-spawns the SQLite T2 daemon via
+`nx daemon t2 ensure-running` on every Claude Code session start (a silent
+no-op in the default service config, where T2 is served by the nexus-service).
+For a SQLite T2 daemon that survives reboots independent of Claude Code, use
+`nx daemon t2 install --autostart`. In the default service config the service's
+own autostart unit (`nx daemon service install --autostart`, or accepting the
+`nx init` prompt) covers reboot-persistence for every tier.
 
 ### nx daemon t2 start
 
@@ -1768,9 +1770,13 @@ Register the storage service to start at login/boot — writes a launchd
 LaunchAgent (macOS, `~/Library/LaunchAgents/com.nexus.service.plist`) or a
 systemd user unit (Linux, `~/.config/systemd/user/nexus-service.service`) that
 execs `nx daemon service start --foreground`. The OS init system is the single
-process watchdog (RDR-175): the unit restarts the service on any non-zero exit
-(`StartLimitIntervalSec=0` / launchd `KeepAlive` give never-give-up parity), and
-the in-process respawn layer is retired. `nx init` runs this for you when you
+process watchdog (RDR-175), and the in-process respawn layer is retired. The
+systemd unit restarts on a non-zero exit (`Restart=on-failure` +
+`SuccessExitStatus=143` excludes a graceful SIGTERM stop; `StartLimitIntervalSec=0`
+removes the give-up threshold). The launchd plist uses `KeepAlive=true`, which
+restarts on any exit (including a clean `nx daemon service stop`) — stop it via
+`nx daemon service uninstall --autostart` (or `launchctl bootout`) when you want
+it to stay down. `nx init` runs this for you when you
 accept the autostart prompt (decide-first — the unit is the sole starter, no
 session supervisor underneath it). `--force` overwrites an existing unit whose
 content differs. Remove with `nx daemon service uninstall --autostart`.
