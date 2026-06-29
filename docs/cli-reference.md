@@ -1704,7 +1704,7 @@ Reverse of `install --autostart`: deactivate via
 
 > **Legacy / retired serving path (6.0).** T3 no longer serves from ChromaDB.
 > The permanent vector store now serves through the native nexus-service over
-> Postgres + pgvector — see `nx daemon service` below and `nx init --service`.
+> Postgres + pgvector — see `nx daemon service` below and `nx init`.
 > `nx daemon t3` (the managed `chroma run` subprocess) remains only for reading a
 > pre-6.0 ChromaDB store as the **migration source** (`nx guided-upgrade`).
 
@@ -1720,7 +1720,7 @@ spawns the native binary (resolving `NX_VOYAGE_API_KEY` through the credential
 chain), waits for `/health`, and publishes the endpoint lease that clients
 auto-discover. The native binary is the sole launch artifact (RDR-161: the
 `java -jar` path is expunged); acquire it with `install-binary` (below) or
-`nx init --service`, which places and verifies it.
+`nx init`, which places and verifies it.
 
 `status` is the single is-the-stack-healthy surface: the lease (host, port,
 service pid, generation), supervisor pid, addr-file path, live `/health` probe,
@@ -1757,6 +1757,29 @@ fast`).
 | `--json` | (`status`) Raw JSON output. |
 | `--with-pg` | (`stop`) Also stop the nx-managed Postgres cluster. |
 
+### nx daemon service install --autostart
+
+```
+nx daemon service install --autostart
+nx daemon service install --autostart --force
+```
+
+Register the storage service to start at login/boot — writes a launchd
+LaunchAgent (macOS, `~/Library/LaunchAgents/com.nexus.service.plist`) or a
+systemd user unit (Linux, `~/.config/systemd/user/nexus-service.service`) that
+execs `nx daemon service start --foreground`. The OS init system is the single
+process watchdog (RDR-175): the unit restarts the service on any non-zero exit
+(`StartLimitIntervalSec=0` / launchd `KeepAlive` give never-give-up parity), and
+the in-process respawn layer is retired. `nx init` runs this for you when you
+accept the autostart prompt (decide-first — the unit is the sole starter, no
+session supervisor underneath it). `--force` overwrites an existing unit whose
+content differs. Remove with `nx daemon service uninstall --autostart`.
+
+| Flag | Description |
+|------|-------------|
+| `--autostart` | Required. Install the OS autostart unit. |
+| `--force` | Overwrite an existing unit file even when its content differs. |
+
 ### nx daemon service install-binary
 
 ```
@@ -1768,7 +1791,7 @@ Download, verify, and install the signed native nexus-service binary (and,
 by default, the relocatable PostgreSQL bundle) from a GitHub release to the
 well-known location (`~/.config/nexus/service/`) with a provenance sidecar
 (version, tag, sha256, install metadata). Supervisor discovery and
-`nx init --service` use this location.
+`nx init` use this location.
 
 TAG is an EXPLICIT `engine-service-v*` release tag (e.g.
 `engine-service-v0.1.3`); there is no "latest" resolution. Each per-platform
@@ -1979,7 +2002,7 @@ provisioning + migration.
 
 Sequence: **pre-flight detect** (if there is no ChromaDB footprint to migrate it
 no-ops without provisioning) → **provision + serve** the local service (the full
-`nx init --service` path: Postgres + bge-768 ONNX + the native binary) — or, with
+`nx init` path: Postgres + bge-768 ONNX + the native binary) — or, with
 `--service-url`, gate an already-running service → **version-pin** (`/version`
 `/version` must report a `release_version` — present from engine-service
 v0.1.6+, code floor v0.1.8; older/below-floor binaries fail closed) → **bounded

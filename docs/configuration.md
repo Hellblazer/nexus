@@ -180,7 +180,7 @@ operator-facing matrix of transport choices per platform.
 
 ## Storage Service (Postgres) Prerequisites
 
-> **Local installs: skip this section.** `nx init --service` provisions the
+> **Local installs: skip this section.** `nx init` provisions the
 > bundled relocatable Postgres + pgvector cluster, creates the roles, and enables
 > the extensions for you — no DBA, no manual `CREATE EXTENSION`. The prerequisites
 > below apply only when you bring your **own** Postgres (an operator pointing the
@@ -308,7 +308,7 @@ If no marker file is found and no command is configured, the test check is skipp
 |---|---|
 | `~/.config/nexus/config.yml` | Global config and credentials |
 | `~/.local/share/nexus/chroma/` | Legacy ChromaDB store — migration source only as of 6.0 (`nx guided-upgrade`); not live T3 data |
-| `~/.config/nexus/postgres/` | The nx-provisioned Postgres cluster the service serves T3 from (local `nx init --service`) |
+| `~/.config/nexus/postgres/` | The nx-provisioned Postgres cluster the service serves T3 from (local `nx init`) |
 | `~/.config/nexus/memory.db` | T2 SQLite database |
 | `~/.config/nexus/catalog/.catalog.db` | Catalog: canonical repo→collection registration, documents, and links (`nx index repo` writes here). Replaced `repos.json` as the source of truth in 5.4.0 (RDR-137); a one-shot migration on `nx upgrade` folds any legacy `repos.json` into the catalog and removes it. |
 | `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |

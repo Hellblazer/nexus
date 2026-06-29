@@ -18,7 +18,7 @@ Start with [Getting Started](getting-started.md) for installation. Then explore 
 
 6.0 retires ChromaDB T3 serving for the native nexus-service (Postgres 17 + pgvector). Existing users migrate with one command, `nx guided-upgrade`.
 
-- [Getting Started § Cloud mode](getting-started.md#cloud-mode-optional) and `nx init --service` — stand up the service stack
+- [Getting Started § Cloud mode](getting-started.md#cloud-mode-optional) and `nx init` — stand up the service stack
 - [Migration Runbook](migration-runbook.md) — the operational order of operations, quiescence, rollback, and the two-release deprecation window
 
 ## Workflow

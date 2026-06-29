@@ -93,33 +93,29 @@ If you don't intend to index math PDFs and want to skip the download, run with `
 nx index pdf --extractor docling some.pdf
 ```
 
-## First-time setup: the T2 daemon
+## First-time setup: the storage backend
 
-Since conexus 4.34.0 (RDR-120 storage substrate split), all
-user-facing CLI commands that touch persistent state — `nx memory`,
-`nx index`, `nx store`, `nx catalog`, the MCP server, and everything
-the Claude Code plugin does — route through the **T2 daemon**, a
-single arbitrating SQLite-writer process. This is the substrate
-fix that lets host CLI usage, multiple Claude Code sessions, Claude
-Cowork agents, and dev containers all share state without racing on
-the database file.
+In the default configuration every persistent tier — `nx memory`,
+`nx index`, `nx store`, `nx catalog`, the MCP server, and everything the
+Claude Code plugin does — is served by the native **nexus-service** over
+Postgres + pgvector. A single `nx init` provisions and starts it (see the next
+section), so there is **no** separate T2-daemon install step in the default
+flow.
 
-Register the daemon to start at login (one-time setup):
-
-```bash
-nx daemon t2 install --autostart
-nx daemon t2 status                # confirm running
-```
-
-This writes a LaunchAgent (macOS, `~/Library/LaunchAgents/com.nexus.t2.plist`)
-or systemd user-unit (Linux, `~/.config/systemd/user/nexus-t2.service`)
-with `KeepAlive=true` / `Restart=on-failure`, so the daemon survives
-crashes and reboots. Uninstall with `nx daemon t2 uninstall --autostart`.
-
-If you skip this step, the conexus plugin's SessionStart hook
-will auto-spawn the daemon on every session start anyway, so plugin
-users still get a working substrate. The autostart path is recommended
-if you also use `nx` directly from the shell.
+> **Opt-in: the standalone SQLite T2 daemon.** Users who deliberately select a
+> SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`, or a per-store override) can
+> register the legacy single-writer SQLite daemon to start at login:
+>
+> ```bash
+> nx daemon t2 install --autostart
+> nx daemon t2 status                # confirm running
+> ```
+>
+> This writes a LaunchAgent (macOS, `~/Library/LaunchAgents/com.nexus.t2.plist`)
+> or systemd user-unit (Linux, `~/.config/systemd/user/nexus-t2.service`) with
+> `KeepAlive=true` / `Restart=on-failure`. Uninstall with
+> `nx daemon t2 uninstall --autostart`. This path is not needed for the default
+> service-backed install.
 
 **T3 (the permanent vector store)** is served by the native nexus-service over
 Postgres 17 + pgvector — in **both** local and cloud mode. Provision and start
@@ -127,19 +123,24 @@ it with:
 
 ```bash
 nx daemon service install-binary <engine-service-vX.Y.Z>   # acquire the cosign-verified native binary + relocatable PG+pgvector bundle
-nx init --service                                          # provision Postgres, fetch the bge-768 ONNX, start the service supervisor
+nx init                                                    # provision Postgres, fetch the bge-768 ONNX, start the service, offer autostart
 ```
 
 Pick `<engine-service-vX.Y.Z>` from the
 [engine-service releases](https://github.com/Hellblazer/nexus/releases) (the
 newest `engine-service-v*` tag). There is no `latest` resolution — the tag is
 explicit. You can instead export `NEXUS_SERVICE_TAG=engine-service-vX.Y.Z`, in
-which case `nx init --service` acquires the binary itself and the explicit
+which case `nx init` acquires the binary itself and the explicit
 `install-binary` step is optional.
 
-`nx init --service` is idempotent — safe to re-run. The service embeds with
-bge-768 (local) or, in the managed-cloud deployment, server-side via Voyage with
-the operator's key (clients supply only `NX_SERVICE_TOKEN`, never a Voyage key).
+`nx init` provisions the local service backend by default (the older
+`nx init --service` flag still works but is deprecated). It offers to register
+the OS autostart unit so the service restarts at login/boot — the prompt
+defaults to yes; `--yes` accepts non-interactively, and `--no-autostart` starts
+a session supervisor only (no persistent unit). `nx init` is idempotent — safe
+to re-run. The service embeds with bge-768 (local) or, in the managed-cloud
+deployment, server-side via Voyage with the operator's key (clients supply only
+`NX_SERVICE_TOKEN`, never a Voyage key).
 
 > The legacy `nx daemon t3` (a managed ChromaDB subprocess) is retired as a
 > serving path — T3 no longer serves from ChromaDB. ChromaDB data from a
@@ -314,7 +315,7 @@ Common flags: `-n 20` (result count), `--json`, `--files` (paths only), `-c` (sh
 ### Upgrade local embedding quality (optional)
 
 For the Python-side bge-768 embedder (used by non-service local indexing paths;
-the `nx init --service` stack already embeds with bge-768 server-side):
+the `nx init` service stack already embeds with bge-768 server-side):
 
 ```bash
 uv tool install --reinstall "conexus[local]"
@@ -357,7 +358,7 @@ Note: `uv tool upgrade` reuses the existing environment's Python — it won't sw
 
 **`nx search` returns no results** — Run `nx doctor` to verify connectivity. If indexing was interrupted, re-run `nx index repo .` to resume.
 
-**`T2DaemonNotReachableError: No T2 daemon discovery resolved`** — Since 4.34.0 the CLI routes through the T2 daemon. Start it (one of):
+**`T2DaemonNotReachableError: No T2 daemon discovery resolved`** — Only on the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`); the default service backend does not use this daemon. Start it (one of):
 
 ```bash
 nx daemon t2 ensure-running              # one-shot spawn (idempotent)

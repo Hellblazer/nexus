@@ -12,7 +12,7 @@ exclusively through that service stack in both local and cloud mode.
 ## State model
 
 ```
-  uninstalled ──nx init --service──▶ installed ──provision PG+pgvector──▶ provisioned
+  uninstalled ──────nx init──────▶ installed ──provision PG+pgvector──▶ provisioned
        ▲                                                                        │
        │                                                                (supervisor start)
        │                                                                        ▼
@@ -39,7 +39,7 @@ discovery, version-skew) is the shared service-registry primitive
 
 | Stage | CLI / surface | Authority |
 |-------|---------------|-----------|
-| Install | `nx init --service`, `nx daemon service install-binary <tag>` | RDR-157 (distribution), RDR-161 (native-only), RDR-144 (`nx init` embedder onboarding) |
+| Install | `nx init` (collapsed flow), `nx daemon service install-binary <tag>`, `nx daemon service install --autostart` | RDR-157 (distribution), RDR-161 (native-only), RDR-174 (collapsed init + autostart), RDR-175 (OS-init watchdog) |
 | Provision | bundled PG17 + pgvector, Liquibase migrate, bge-768 ONNX fetch | RDR-155 (pgvector substrate), RDR-160 (bge-768 embedder) |
 | Run | T2 daemon + T3 `nexus-service`; lease lifecycle | RDR-149 (daemon lifecycle), RDR-152 (endpoint discovery) |
 | Upgrade | `nx upgrade` (migrations), `nx guided-upgrade` (Chroma→service) | RDR-159 (guided upgrade), RDR-162 (cross-model) |
@@ -51,17 +51,20 @@ Greenfield local first-run (no prior install):
 
 ```bash
 nx daemon service install-binary engine-service-vX.Y.Z   # fetch the cosign-verified native binary + relocatable PG+pgvector bundle
-nx init --service                                         # provision Postgres, fetch the bge-768 ONNX, start the supervisor
+nx init                                                   # provision Postgres, fetch the bge-768 ONNX, start the service, offer autostart
 nx doctor                                                 # verify: dependencies, service /health, embedding mode
 ```
 
 Pick `engine-service-vX.Y.Z` from the
 [engine-service releases](https://github.com/Hellblazer/nexus/releases) (newest
-`engine-service-v*` tag, an explicit pin, no `latest`). `nx init --service` is
-idempotent (safe to re-run). It embeds with bge-768 locally; in the managed-cloud
-deployment, embeddings run server-side via Voyage with `NX_VOYAGE_API_KEY`
-plumbed from the nexus credential chain. See
-[getting-started.md](../getting-started.md#first-time-setup-the-t2-daemon) for the
+`engine-service-v*` tag, an explicit pin, no `latest`). `nx init` provisions the
+local service backend by default (the deprecated `nx init --service` flag still
+works) and offers to register the OS autostart unit (RDR-174 decide-first;
+`--yes` accepts, `--no-autostart` declines). It is idempotent (safe to re-run).
+It embeds with bge-768 locally; in the managed-cloud deployment, embeddings run
+server-side via Voyage with `NX_VOYAGE_API_KEY` plumbed from the nexus credential
+chain. See
+[getting-started.md](../getting-started.md#first-time-setup-the-storage-backend) for the
 full walkthrough and [container-integration.md](../container-integration.md) for
 reaching the service from a container.
 
