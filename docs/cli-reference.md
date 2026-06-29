@@ -1217,8 +1217,9 @@ Guided first-run setup for the local embedder (RDR-144). Distinct from
 provisions the on-device embedding model for local mode.
 
 ```
-nx init                       # interactive: prompt for the embedder
-nx init --yes                 # accept the recommended bge-768, no prompt
+nx init                       # local: provision + interactively offer autostart (default yes)
+nx init --yes                 # accept service-autostart registration, no prompt
+nx init --no-autostart        # provision + start a session supervisor only; register no unit
 nx init --embedder minilm-384 # pick a specific embedder, no prompt
 nx init --service             # provision the Postgres+pgvector service backend + start it
 ```
@@ -1226,8 +1227,16 @@ nx init --service             # provision the Postgres+pgvector service backend 
 | Flag | Description |
 |------|-------------|
 | `--embedder [bge-768\|minilm-384]` | Select the embedder non-interactively (skips the prompt) |
-| `--yes` / `-y` | Accept the recommended default (bge-768) without prompting |
+| `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` polls its lease rather than also starting a session supervisor (decide-first, RDR-175 Gap 3). |
+| `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
 | `--service` | Provision the local Postgres + pgvector cluster the RDR-152 service backend uses, lock the embedder to bge-768, acquire + verify the native service binary, fetch the bge-768 ONNX, and start the persistent service supervisor. Idempotent. This is the path that stands up T3 serving for a local install. (Also auto-runs when `NX_STORAGE_BACKEND=service` is set.) Acquire the binary + PG bundle first with `nx daemon service install-binary <engine-service-vX.Y.Z>`. |
+
+**Service autostart (RDR-174 P2.4, decide-first):** in local mode `nx init`
+decides autostart *before* starting any supervisor. Interactive runs prompt
+(default yes); `--yes` accepts, `--no-autostart` declines. A non-interactive run
+with neither flag declines — a system unit is **never** written without explicit
+consent. On yes the OS unit becomes the single process watchdog; on no (or a
+headless host where the unit can't activate) a session supervisor starts instead.
 
 **Local mode** presents the two on-device embedders and records the choice in
 `~/.config/nexus/config.yml` under `local.embed_model`:

@@ -198,6 +198,164 @@ class TestServiceProvisioningFlag:
         assert called == [], "NX_STORAGE_BACKEND must not steer dispatch; MANAGED stays no-op"
 
 
+class _FakeLeaseEP:
+    """Minimal lease stand-in carrying the attrs init's autostart reporter reads."""
+    endpoint = {"host": "127.0.0.1", "port": 18080, "pid": 1234}
+    generation = 1
+
+
+class TestAutostartPrompt:
+    """RDR-174 P2.4 (nexus-3pfj0): nx init OFFERS to register the service
+    autostart unit, with DECIDE-FIRST ordering (RDR-175 Gap 3) — never start a
+    session supervisor under a unit.
+
+    Decide-first contract verified per branch:
+    - autostart=yes → install the unit as the SOLE starter (install_autostart
+      called) + poll the lease; _start_service_step (session detach) NOT called.
+    - autostart=no  → provision_and_start_service (session); install_autostart
+      NOT called.
+    - consent gate: no system unit written without an explicit yes / --yes.
+    """
+
+    def _local(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+
+    def _seams(self, monkeypatch: pytest.MonkeyPatch):
+        """Patch the decide-first seams; return a calls recorder."""
+        calls: dict[str, int] = {"stack": 0, "install": 0, "poll": 0, "session": 0}
+
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_service_stack",
+            lambda embedder=None: calls.__setitem__("stack", calls["stack"] + 1) or True,
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._poll_service_lease",
+            lambda config_dir, **kw: calls.__setitem__("poll", calls["poll"] + 1) or _FakeLeaseEP(),
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._start_service_step",
+            lambda: calls.__setitem__("session", calls["session"] + 1) or _FakeLeaseEP(),
+        )
+
+        def _fake_install(*, tier: str, force: bool = False):  # noqa: ARG001
+            calls["install"] += 1
+
+        monkeypatch.setattr("nexus.daemon.installer.install_autostart", _fake_install)
+        return calls
+
+    def test_yes_flag_installs_decide_first(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--yes → install the unit as the sole starter; NEVER session-start."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert calls["install"] == 1, "autostart unit must be installed on --yes"
+        assert calls["poll"] == 1, "must poll the lease the unit's supervisor publishes"
+        assert calls["session"] == 0, (
+            "DECIDE-FIRST: must NOT start a session supervisor under the unit"
+        )
+
+    def test_no_autostart_flag_session_only(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--no-autostart → session supervisor only; no unit written."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        served: list[str | None] = []
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: served.append(embedder) or _FAKE_LEASE,
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--no-autostart"])
+
+        assert result.exit_code == 0, result.output
+        assert served == [None], "no-autostart must take the session provision path"
+        assert calls["install"] == 0, "no system unit may be written on --no-autostart"
+
+    def test_interactive_prompt_default_yes_installs(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Interactive TTY, default-yes prompt → installs decide-first."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        monkeypatch.setattr("nexus.commands.init._stdin_is_interactive", lambda: True)
+        monkeypatch.setattr("nexus.commands.init.click.confirm", lambda *a, **k: True)
+
+        result = CliRunner().invoke(init_cmd, [])
+
+        assert result.exit_code == 0, result.output
+        assert calls["install"] == 1 and calls["session"] == 0
+
+    def test_interactive_prompt_no_declines(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit 'n' at the prompt → no unit, session supervisor still up."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        monkeypatch.setattr("nexus.commands.init._stdin_is_interactive", lambda: True)
+        monkeypatch.setattr("nexus.commands.init.click.confirm", lambda *a, **k: False)
+        served: list[str | None] = []
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: served.append(embedder) or _FAKE_LEASE,
+        )
+
+        result = CliRunner().invoke(init_cmd, [])
+
+        assert result.exit_code == 0, result.output
+        assert calls["install"] == 0, "declining must not write a unit"
+        assert served == [None], "decline → session provision path"
+
+    def test_non_interactive_no_flag_consent_gate(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-interactive (no TTY) + no flag → NO unit (consent gate); session
+        supervisor still starts; a notice is printed."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        monkeypatch.setattr("nexus.commands.init._stdin_is_interactive", lambda: False)
+        served: list[str | None] = []
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: served.append(embedder) or _FAKE_LEASE,
+        )
+
+        result = CliRunner().invoke(init_cmd, [])
+
+        assert result.exit_code == 0, result.output
+        assert calls["install"] == 0, "no silent unit write under non-interactive init"
+        assert served == [None]
+
+    def test_activation_error_falls_back_to_session(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """install_autostart ActivationError (headless/no session bus) → warn and
+        fall back to a session supervisor so init still leaves a serving backend.
+        Safe: ActivationError means nothing was started, so no coexistence."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        from nexus.daemon import installer
+
+        def _boom(*, tier: str, force: bool = False):  # noqa: ARG001
+            calls["install"] += 1
+            raise installer.ActivationError("no session bus")
+
+        monkeypatch.setattr("nexus.daemon.installer.install_autostart", _boom)
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert calls["install"] == 1, "install was attempted"
+        assert calls["session"] == 1, "ActivationError falls back to a session supervisor"
+        assert calls["poll"] == 0, "no lease poll when activation failed"
+
+
 def _wrap(fn):
     """Wrap a bare callable in a trivial Click command so CliRunner can drive
     its ``click.echo`` / ``click.confirm`` I/O."""
@@ -646,12 +804,13 @@ class TestLocalDispatchP13:
         assert result.exit_code == 0, result.output
         assert "no local service was started" in result.output.lower()
 
-    def test_yes_flag_emits_noop_notice(
+    def test_yes_flag_inert_in_managed_mode(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``--yes`` is retained for compatibility but is a no-op; passing it
-        emits an explicit notice rather than silently changing semantics. The
-        notice prints before dispatch, so a probe-OK managed run still shows it."""
+        """RDR-174 P2.4: ``--yes`` now accepts service-autostart registration,
+        but that only applies in LOCAL mode. In MANAGED mode there is no local
+        supervisor to persist, so ``--yes`` has no autostart effect, registers no
+        unit, and (correctly) no longer prints the old 'no-op' notice."""
         monkeypatch.setenv("NX_LOCAL", "0")  # managed → no local provisioning
         monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
@@ -659,9 +818,15 @@ class TestLocalDispatchP13:
             "nexus.db.managed_endpoint.probe_managed_service",
             lambda **kw: _fake_caps(),
         )
+        installed: list[str] = []
+        monkeypatch.setattr(
+            "nexus.daemon.installer.install_autostart",
+            lambda **kw: installed.append("called"),
+        )
         result = CliRunner().invoke(init_cmd, ["--yes"])
         assert result.exit_code == 0, result.output
-        assert "no-op" in result.output.lower()
+        assert installed == [], "managed --yes must not register an autostart unit"
+        assert "no-op" not in result.output.lower(), "obsolete no-op notice removed"
 
     def test_guided_upgrade_default_serve_still_calls_provision(
         self, monkeypatch: pytest.MonkeyPatch

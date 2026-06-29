@@ -221,6 +221,127 @@ def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import
     return lease
 
 
+# ── P2.4: autostart decision + decide-first start (RDR-174 / RDR-175 Gap 3) ───
+
+
+def _stdin_is_interactive() -> bool:
+    """True when stdin is a TTY (so a prompt can be shown). Factored for tests."""
+    import sys  # noqa: PLC0415 — trivially cheap; kept local so the seam is patchable
+
+    try:
+        return sys.stdin.isatty()
+    except (ValueError, OSError):  # detached / closed stdin
+        return False
+
+
+def _decide_autostart(assume_yes: bool, no_autostart: bool) -> bool:
+    """Decide whether to register the service autostart unit — BEFORE any
+    supervisor starts (RDR-175 Gap 3 decide-first).
+
+    Precedence: an explicit ``--no-autostart`` always wins (explicit decline).
+    ``--yes`` accepts non-interactively. Otherwise prompt only when interactive
+    (default yes). CONSENT GATE: a non-interactive run with no flag declines —
+    a system unit is NEVER written without an explicit yes / ``--yes``.
+    """
+    if no_autostart:
+        return False
+    if assume_yes:
+        return True
+    if not _stdin_is_interactive():
+        click.echo(
+            "[non-interactive: skipping service autostart registration — "
+            "re-run with --yes to register it, or `nx daemon service install "
+            "--autostart` later]",
+            err=True,
+        )
+        return False
+    return click.confirm(
+        "Register the storage service to start automatically at login/boot?",
+        default=True,
+    )
+
+
+def _poll_service_lease(config_dir: Path, *, timeout: float = 60.0):  # noqa: ANN201 — returns LeaseRecord | None (avoid import cycle)
+    """Poll the storage-service registry for a fresh lease, up to ``timeout``s.
+
+    The autostart unit's supervisor (``nx daemon service start --foreground``)
+    publishes the lease once /health is green; ``nx init`` polls for it rather
+    than starting a second supervisor (decide-first; no parallel arbiter —
+    RDR-149 owns arbitration).
+    """
+    import time  # noqa: PLC0415 — deferred local import
+
+    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred local import — CLI startup cost
+    import os  # noqa: PLC0415 — deferred local import
+
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    scope = str(os.getuid())
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rec = registry.discover(scope)
+        if rec is not None:
+            return rec
+        time.sleep(0.5)
+    return None
+
+
+def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — returns LeaseRecord | None
+    """Decide-first autostart path: provision, install the unit as the SOLE
+    starter, then poll the lease it publishes. Never starts a session supervisor
+    underneath the unit (RDR-175 Gap 3). Self-reporting (prints its own outcome).
+
+    On ``ActivationError`` (headless / no session bus — `install_autostart`
+    cannot activate the unit) nothing was started, so falling back to a session
+    supervisor is coexistence-safe and leaves the user with a serving backend.
+    """
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred local import — CLI startup cost
+
+    if not provision_service_stack(embedder):
+        # Cloud-internal (e.g. --service with NX_LOCAL=0): PG provisioned, no
+        # local service to start. Mirror the plain-path cloud message.
+        click.echo(
+            "\nPostgres is provisioned, but no local service was started: this "
+            "host resolves to cloud/remote serving (is_local_mode is false). Set "
+            "NX_LOCAL=1 to force a local service, or configure a managed endpoint "
+            "with `nx config init`."
+        )
+        return None
+
+    config_dir = _config.nexus_config_dir()
+    click.echo("\nRegistering the storage service autostart unit …")
+    try:
+        installer.install_autostart(tier="service")
+    except installer.ActivationError as exc:
+        click.echo(
+            f"\nCould not activate the autostart unit ({exc}); starting the "
+            "service for this session instead. Re-run `nx daemon service install "
+            "--autostart` once a login session bus is available to persist it.",
+            err=True,
+        )
+        return _start_service_step()
+
+    lease = _poll_service_lease(config_dir)
+    if lease is None:
+        click.echo(
+            "\nAutostart unit installed, but the service has not published a "
+            "lease yet — the OS will keep retrying. Check `nx daemon service "
+            "status` and <config_dir>/logs/storage_service.log.",
+            err=True,
+        )
+        return None
+
+    ep = lease.endpoint
+    click.echo(
+        f"  Service running on {ep.get('host')}:{ep.get('port')} "
+        f"(generation {lease.generation}) via the autostart unit."
+    )
+    click.echo(
+        "  nx init complete — the service backend is serving and will restart "
+        "at login/boot."
+    )
+    return lease
+
+
 # ── P5 (A) Postgres provisioning ──────────────────────────────────────────────
 
 
@@ -333,11 +454,31 @@ def provision_and_start_service(embedder: str | None = None):  # noqa: ANN201
     embedder/model fetch, so the service crashed on a missing bge ONNX. Raises
     :class:`StorageServiceStartError` when no native binary is available.
     """
+    if not provision_service_stack(embedder):
+        return None
+    return _start_service_step()
+
+
+def provision_service_stack(embedder: str | None = None) -> bool:
+    """Provision the local service stack WITHOUT starting a supervisor.
+
+    Runs the provision steps shared by every local-serving path: Postgres, the
+    bge-768 service embedder (RDR-160), and the native binary (RDR-161). Returns
+    ``True`` when the host is local-serving (caller should start a supervisor —
+    either a session detach or an autostart unit), ``False`` in cloud-internal
+    mode (Postgres provisioned, embeddings run server-side, nothing to start).
+
+    Split out for RDR-174 P2.4 / RDR-175 Gap 3 decide-first ordering: ``nx init``
+    provisions first, decides autostart, THEN chooses the single starter — so a
+    session supervisor is never started underneath a unit.
+
+    Raises :class:`StorageServiceStartError` when no native binary is available.
+    """
     from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     _provision_postgres_step()
     if not _config.is_local_mode():
-        return None
+        return False
     # Local service backend (RDR-160): the Java service embeds every collection
     # with bge-768. Lock the embedder + provision the standard ONNX it reads.
     _provision_service_embedder_step(embedder)
@@ -350,7 +491,7 @@ def provision_and_start_service(embedder: str | None = None):  # noqa: ANN201
             "— install one (`nx daemon service install-binary` or configure the "
             "engine-service tag), then retry"
         )
-    return _start_service_step()
+    return True
 
 
 def _resolve_init_mode() -> str:
@@ -464,7 +605,15 @@ def _managed_onboarding(ctx: click.Context) -> None:
     "-y",
     "assume_yes",
     is_flag=True,
-    help="Accepted for compatibility; provisioning is non-interactive (no-op).",
+    help="Accept the service-autostart registration non-interactively (local mode).",
+)
+@click.option(
+    "--no-autostart",
+    "no_autostart",
+    is_flag=True,
+    default=False,
+    help="Do not register the service autostart unit; start a session "
+    "supervisor only (local mode). Takes precedence over --yes.",
 )
 @click.option(
     "--service",
@@ -482,6 +631,7 @@ def init_cmd(
     ctx: click.Context,
     embedder: str | None,
     assume_yes: bool,
+    no_autostart: bool,
     provision_service: bool,
 ) -> None:
     """Guided first-run setup — one command that provisions the right backend.
@@ -499,16 +649,10 @@ def init_cmd(
     ``--service`` is still accepted (it forces local provisioning) and is slated
     for a deprecation notice in P3.1.
     """
-    if assume_yes:
-        # RDR-174 P1.3: the interactive embedder picker is gone, so there is no
-        # prompt left to auto-accept. The flag is retained for CLI/script
-        # compatibility (formal deprecation tracked with --service in P3.1) but
-        # is now a no-op — say so rather than silently change its semantics.
-        click.echo(
-            "[--yes/-y is a no-op since the embedder picker was removed; "
-            "provisioning is non-interactive]",
-            err=True,
-        )
+    # RDR-174 P2.4: ``--yes`` now accepts the service-autostart registration
+    # non-interactively (the embedder picker that previously made it a no-op was
+    # removed in P1.3). ``--no-autostart`` declines. The decision is made
+    # decide-first in the local block below (RDR-175 Gap 3).
 
     # RDR-174 P1.3 dispatch. PRIMARY oracle is the gate-locked mode helper
     # (_resolve_init_mode — service_url-based, NOT is_local_mode which is
@@ -520,13 +664,12 @@ def init_cmd(
     # forces local provisioning even with cloud keys (migration/rehearsal). An
     # explicit ``--service`` forces local provisioning regardless of mode.
     #
-    # ⚠ CROSS-PHASE INVARIANT (P2 autostart): BOTH no-provision exits below — the
+    # ⚠ CROSS-PHASE INVARIANT (autostart): BOTH no-provision exits below — the
     # managed arm and the cloud arm (mode=="local" yet is_local_mode() False) —
-    # AND the lease-is-None diagnostic in the local block must remain reachable
-    # WITHOUT ever starting a local service. P2 inserts the autostart prompt
-    # after a SUCCESSFUL provision_and_start_service (non-None lease) only; it
-    # must NOT fire on these remote/cloud paths. Do not collapse this guard to
-    # `_resolve_init_mode()`-only — that would route cloud-Voyage users into
+    # must remain reachable WITHOUT ever starting a local service or registering
+    # an autostart unit. The autostart decision (P2.4) fires ONLY inside the
+    # LOCAL block below, after a successful provision. Do not collapse this guard
+    # to `_resolve_init_mode()`-only — that would route cloud-Voyage users into
     # provisioning.
     mode = _resolve_init_mode()
     if not provision_service and (mode == "managed" or not _config.is_local_mode()):
@@ -547,12 +690,21 @@ def init_cmd(
             click.echo("Manage cloud credentials with `nx config init`.")
         return
 
-    # LOCAL (or explicit ``--service``): plain ``nx init`` now provisions and
-    # starts the local service stack. provision_and_start_service forces bge-768
-    # (RDR-160) and is the SAME body ``nx init --service`` and
-    # guided_upgrade._default_serve invoke — signature/behaviour unchanged.
+    # LOCAL (or explicit ``--service``): provision the stack, then DECIDE-FIRST
+    # (RDR-174 P2.4 / RDR-175 Gap 3) — decide autostart BEFORE starting any
+    # supervisor, so a session supervisor is never started underneath a unit.
+    #   autostart=yes → install the unit as the SOLE starter + poll its lease.
+    #   autostart=no  → provision_and_start_service (session detach), as before
+    #                   (the SAME body guided_upgrade invokes — unchanged).
     from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    autostart = _decide_autostart(assume_yes, no_autostart)
     try:
+        if autostart:
+            # Self-reporting; handles cloud-internal, activation-error fallback,
+            # lease-timeout, and success messaging internally.
+            _provision_and_autostart_service(embedder)
+            return
         lease = provision_and_start_service(embedder)
     except StorageServiceStartError:
         # No native binary available and none acquirable. PG is provisioned and
@@ -567,10 +719,9 @@ def init_cmd(
         )
         raise SystemExit(1)
     if lease is None:
-        # provision_and_start_service resolved cloud-internal (is_local_mode
-        # False — e.g. an explicit ``--service`` with NX_LOCAL=0): Postgres was
-        # provisioned but no local service started. Say so rather than exit
-        # silently (CRE LOW-2).
+        # Cloud-internal (is_local_mode False — e.g. ``--service`` with
+        # NX_LOCAL=0): Postgres was provisioned but no local service started.
+        # Say so rather than exit silently (CRE LOW-2).
         click.echo(
             "\nPostgres is provisioned, but no local service was started: this "
             "host resolves to cloud/remote serving (is_local_mode is false). Set "
