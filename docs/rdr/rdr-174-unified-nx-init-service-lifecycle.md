@@ -153,6 +153,17 @@ Target end state: `uv tool install conexus && nx init && nx index`.
      a bespoke lock/election outside `service_registry`. (`nexus-1brzs`)
    Tests: boot-robustness (supervisor self-starts PG regardless of env); prompt
    honored; skip honored; no double-supervisor (exactly one lease after install).
+
+   > **SUPERSEDED 2026-06-28 by RDR-175 (Phase 1 Step 3).** The
+   > supervisor-handoff and autostart-ordering text in this item (the original
+   > P2.3/P2.4 scope) is superseded by RDR-175 "OS-Init as the Single Process
+   > Watchdog". RDR-175 retires the in-process respawn mechanism (the verified
+   > double-spawn root cause) and reworks the autostart dispatch to
+   > decide-autostart-first + heal-on-next-use. The PG-boot-ordering no-op
+   > finding above (`nexus-exfns`) is unaffected and still stands. This RDR keeps
+   > `status: accepted`; only this in-body breadcrumb is added so the gate-locked
+   > §4 handoff text is not left silently stale. See
+   > `docs/rdr/rdr-175-os-init-single-process-watchdog.md`.
 5. **`--service` deprecation notice** (still functional). Test: notice emitted,
    behavior unchanged.
 6. **Remove the T2-daemon step** from `nx init` and the README; confirm default
