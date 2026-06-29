@@ -2,14 +2,17 @@
 title: "Unified nx init and Service-Supervisor Lifecycle: Collapse the Install to One Command and Close the Reboot-Persistence Gap"
 id: RDR-174
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-28
 accepted_date: 2026-06-28
+closed_date: 2026-06-29
+close_reason: implemented
+post_mortem: docs/rdr/post-mortem/174-unified-nx-init-service-lifecycle.md
 related_issues: []
-related_rdrs: [RDR-144, RDR-152, RDR-155, RDR-157, RDR-158, RDR-160, RDR-161, RDR-165, RDR-166]
+related_rdrs: [RDR-144, RDR-152, RDR-155, RDR-157, RDR-158, RDR-160, RDR-161, RDR-165, RDR-166, RDR-175]
 supersedes: []
 related_tests: [tests/test_init_cmd.py, tests/test_daemon_cmd.py]
 ---
@@ -290,3 +293,15 @@ Open Question 2 (sequence T2-daemon *deletion* vs RDR-158 P4 — RDR-174 only
 demotes) and Open Question 3 (autostart ownership — RF-3 answers it: a direct
 launchd/systemd unit via installer.py, same as t2/t3). New risk to carry: remove
 the `_auto_service` side-channel when unifying.
+
+## Revision History
+
+- 2026-06-28 — drafted; gate PASSED (0 critical, 3 significant folded); accepted.
+- 2026-06-28 — §4 re-scoped: PG-boot-ordering verified a NO-OP (supervisor
+  self-manages PG); supersession breadcrumb added pointing §4 P2.3/P2.4 at RDR-175.
+- 2026-06-29 — all 7 §Approach items implemented (epic nexus-423yt, 18/18);
+  per-phase stacked reviews + P-GATE PASSED; CLOSED (close_reason: implemented).
+  Divergences (all documented, none silent): §4 re-scoped twice (PG-ordering
+  no-op; supervisor-handoff/respawn-retirement superseded by RDR-175, decide-first
+  ordering shipped in P2.4); P3.2 T2-demotion delivered as a regression assertion
+  (init never registered a T2 unit). See post-mortem.
