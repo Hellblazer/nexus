@@ -25,11 +25,13 @@ The storage-service supervisor (`src/nexus/daemon/storage_service_daemon.py`,
 1322 lines) carries an in-process restart/respawn layer — `_respawn`, a windowed
 restart budget (`_MAX_RESTART_ATTEMPTS=3`, `_RESTART_WINDOW_HEARTBEATS=300`,
 `_RESTART_BACKOFF`), and stuck-process detection (`_MAX_UNHEALTHY_HEARTBEATS`).
-That layer was built in RDR-152 Phase 5 as a "v1 reliability requirement" when
-the only way to run the service was a bare detached subprocess with **no OS
-supervisor above it**. RDR-174 introduces launchd/systemd autostart units — an
-OS-level process watchdog — making the in-process layer duplicated work and the
-root cause of a verified double-spawn hazard.
+The restart *mechanism* in that layer (`_respawn` + the windowed budget) was
+built in RDR-152 Phase 5 as a "v1 reliability requirement" when the only way to
+run the service was a bare detached subprocess with **no OS supervisor above
+it**. RDR-174 introduces launchd/systemd autostart units — an OS-level process
+watchdog — making the in-process restart mechanism duplicated work and the root
+cause of a verified double-spawn hazard. (The stuck-process *detection* is
+retained — see §Approach — since the OS watchdog only sees process death.)
 
 Now that the Java storage service is singular and local-install-only, the
 right model is: **OS init is the single process watchdog**; the supervisor
@@ -39,12 +41,14 @@ becomes a thin start-publish-heartbeat-die process.
 
 #### Gap 1: Two restart layers do the same job
 
-The in-process respawn layer and the RDR-174 OS-init units (launchd
-`KeepAlive`+`ThrottleInterval`, systemd `Restart=on-failure`) both restart a
-dead service. The OS layer is strictly more capable (never-give-up vs the
-in-process "3 attempts then permanently abandon"). The duplication is ~145 lines
-of production code plus ~400 lines of tests, and it diverges in semantics (the
-in-process budget can give up while the OS layer would keep trying).
+The in-process restart mechanism (`_respawn` + budget) and the RDR-174 OS-init
+units (launchd `KeepAlive`+`ThrottleInterval`, systemd `Restart=on-failure`) both
+restart a dead service. The OS layer is strictly more capable (never-give-up vs
+the in-process "3 attempts then permanently abandon"). The duplication is ~115
+lines of production code plus ~185 lines of tests (the stuck-process *detection*
+test class is rewritten, not deleted, since detection is retained), and it
+diverges in semantics (the in-process budget can give up while the OS layer would
+keep trying).
 
 #### Gap 2: The in-process respawn is the root cause of the double-spawn hazard
 
@@ -181,14 +185,26 @@ loop:     running, pg_ok = heartbeat_once()
           else:                        sleep(DEFAULT_HEARTBEAT_INTERVAL)
 ```
 
-Delete the in-process respawn layer: `_respawn`, `_maybe_reset_restart_budget`,
-constants `_MAX_RESTART_ATTEMPTS` / `_RESTART_BACKOFF` / `_RESTART_WINDOW_HEARTBEATS`
-/ `_MAX_UNHEALTHY_HEARTBEATS`, the restart-budget state, the stuck-process
-detection block in `heartbeat_once`, and the respawn branch of
-`_supervise_until_stopped`. Keep `_ensure_pg_running`, lease publish/heartbeat,
-`_wait_for_service_ready`, loud-fail-on-no-binary, the `stop()` triad, and the
-`(True, False)` PG-restart arm (valid under an OS watchdog — the OS supervises
-the supervisor process, not PG).
+Delete the in-process restart **mechanism**: `_respawn`,
+`_maybe_reset_restart_budget`, constants `_MAX_RESTART_ATTEMPTS` /
+`_RESTART_BACKOFF` / `_RESTART_WINDOW_HEARTBEATS`, the restart-budget state
+(`_restart_count`, `_clean_heartbeats_since_restart`), and the respawn branch of
+`_supervise_until_stopped`.
+
+**Retain the stuck-process DETECTION** (`_MAX_UNHEALTHY_HEARTBEATS` +
+`_consecutive_unhealthy_heartbeats`, `heartbeat_once:949-970`). This is a health
+*signal*, not a restart *action*: a wedged-but-alive Java process (HTTP 503,
+connection-pool exhaustion, deadlock) stays process-alive, so the OS watchdog —
+which only sees process death — would never catch it without this signal. The
+change is in the *action*: on threshold breach `heartbeat_once` returns a falsey
+`running` signal and the minimal loop **exits non-zero** so the OS restarts the
+whole supervisor (vs. the current in-process Java-only respawn). Transient
+non-200s below the threshold are still tolerated (lease not re-stamped; no exit).
+
+Keep `_ensure_pg_running`, lease publish/heartbeat, `_wait_for_service_ready`,
+loud-fail-on-no-binary, the `stop()` triad, and the `(True, False)` PG-restart
+arm (valid under an OS watchdog — the OS supervises the supervisor process, not
+PG; the Java service stays alive through a PG-only restart, unchanged from today).
 
 **Contracts:**
 
@@ -202,7 +218,10 @@ the supervisor process, not PG).
   path must detect a stale-but-fresh lease left by a hard crash (OOM-kill, no
   relinquish) and re-spawn, rather than returning a dead endpoint for up to the
   TTL window (`ensure_storage_supervisor:1601` currently trusts TTL-freshness,
-  not process-liveness).
+  not process-liveness). Reuse the exact guard from `stop_storage_service:1293` —
+  `isinstance(supervisor_pid, int) and supervisor_pid > 0 and _pid_is_alive(...)`
+  — so an absent `supervisor_pid` (a non-supervised/legacy lease) falls through to
+  current TTL-freshness behavior rather than re-spawning spuriously.
 - **Autostart ordering rework (Gap 3)** → decide autostart first; never start a
   session supervisor under a unit. If autostart=yes → install the unit (sole
   starter) → poll the lease for readiness. If autostart=no →
@@ -276,11 +295,17 @@ leaves the hazard. Hal chose heal-on-next-use.
 
 ### Consequences
 
-- (+) ~145 prod + ~400 test lines removed; one restart layer; double-spawn class gone.
+- (+) ~115 prod + ~185 test lines removed; one restart layer; double-spawn class gone.
 - (+) Never-give-up restart (better than 3-attempts-then-abandon).
-- (−) A PG-only hiccup now bounces the healthy Java service too (acceptable for a
-  minimal single-process watchdog on a local nx-owned cluster; PG death is rare).
+- (−) A stuck-but-alive Java process (HTTP 503 past the unhealthy threshold:
+  connection-pool exhaustion, deadlock, sustained GC) that previously triggered a
+  Java-only in-process respawn (sub-5s) now triggers a full supervisor exit →
+  OS-restart cycle (PG `_ensure_pg_running` no-op + Java spawn + `_wait_for_service_ready`
+  up to 60s). Accepted: stuck-process events are rare and the full cycle is still
+  bounded; transient non-200s below the threshold are still tolerated (no exit).
 - (−) No-autostart mode loses continuous self-heal; gains heal-on-next-use.
+- (=) PG-only failure is UNCHANGED — the `(True, False)` arm restarts PG directly
+  without bouncing the alive Java service.
 
 ### Risks and Mitigations
 
@@ -309,6 +334,10 @@ leaves the hazard. Hal chose heal-on-next-use.
   (research pass 1) — primitive exists, hardening is ~5 lines, no spike needed.
 - [ ] RDR gated + accepted (this RDR) — supersedes the RDR-174 §4 P2.3/P2.4
   gate-locked text for the supervisor handoff.
+- [ ] On acceptance, add a supersession breadcrumb to RDR-174 §Approach §4 (the
+  accepted RDR keeps its status; the note records that the P2.3/P2.4
+  supervisor-handoff/ordering text is superseded by RDR-175 Phase 1 Step 3) so
+  RDR-174's gate-locked text is not left silently stale.
 
 ### Minimum Viable Validation
 
@@ -319,14 +348,19 @@ design and subsumes the original `nexus-1brzs` single-lease test.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: Reduce the supervise loop + delete the respawn layer (TDD)
-Rewrite `_supervise_until_stopped` to start+heartbeat+die; delete `_respawn`,
-budget/stuck-process machinery; update `heartbeat_once`. Remove the 4 obsolete
-test classes, add the minimal-loop tests.
+#### Step 1: Reduce the supervise loop + delete the restart mechanism (TDD)
+Rewrite `_supervise_until_stopped` to start+heartbeat+die-non-zero; delete
+`_respawn`, `_maybe_reset_restart_budget`, the restart-budget constants/state.
+RETAIN the stuck-process detection in `heartbeat_once` but wire its threshold
+breach to the falsey-`running` return (→ loop exit), not to `_respawn`. Delete the
+restart-budget/auto-restart test classes; REWRITE the stuck-process test class to
+assert exit-non-zero (not in-process respawn); add the minimal-loop tests.
 
 #### Step 2: systemd never-give-up parity
 Add `StartLimitIntervalSec=0` to `conexus/daemon/nexus-service.service`; assert
-via the rendered-unit test.
+via the rendered-unit test that BOTH `StartLimitIntervalSec=0` and the existing
+`SuccessExitStatus=143` are present (the edit must not drop the graceful-stop
+directive).
 
 #### Step 3: Decide-autostart-first ordering (Gap 3) + heal-on-next-use hardening
 Rework the init P2.4 dispatch; add the dead-lease liveness check to
@@ -356,10 +390,16 @@ None.
   exactly one lease, one `nexus-service` (the MVV; no double-spawn).
 - **Scenario**: No-autostart, supervisor hard-crashes (no relinquish) — **Verify**:
   next `nx` command re-spawns (dead-lease detected, not a dead endpoint returned).
-- **Scenario**: PG-only death under the minimal loop — **Verify**: `(True,False)`
-  arm restarts PG without bouncing… or bounces the whole supervisor (settle the
-  chosen semantics; assert it deterministically).
-- **Scenario**: Rendered systemd unit — **Verify**: `StartLimitIntervalSec=0` present.
+- **Scenario**: PG-only death under the minimal loop — **Verify**: the
+  `(True,False)` arm calls `_ensure_pg_running()` directly WITHOUT supervisor exit;
+  the Java service stays alive through the PG restart; exactly one `nexus-service`
+  process before and after (semantics locked in §Approach, not re-decided here).
+- **Scenario**: Stuck-but-alive Java (HTTP 503 ≥ `_MAX_UNHEALTHY_HEARTBEATS`) —
+  **Verify**: supervisor exits non-zero (no in-process respawn); below-threshold
+  503s do NOT exit.
+- **Scenario**: Rendered systemd unit — **Verify**: BOTH `StartLimitIntervalSec=0`
+  AND the existing `SuccessExitStatus=143` present (the edit must not drop the
+  graceful-SIGTERM-stop directive).
 
 ## Validation
 
