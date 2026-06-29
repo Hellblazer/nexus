@@ -35,31 +35,66 @@ cd service && ./mvnw -q test
 
 The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge — so verify it actually passed on this tree rather than assuming.
 
-### 3. Validate the candidate with the 5x5 migration-rehearsal (REQUIRED)
+### 3. PRE-TAG gate: `--guided` ONLY (the only leg that builds the candidate)
 
-The isolated container rehearsal exercises the three cloud-relevant journeys end to end. It is the gate that catches what unit tests miss (it found `nexus-pi3s3` + `nexus-qeoxf` on 2026-06-26). Fully isolated — provisions its own PG in-box, installs the wheel in-container, never touches `~/.config/nexus` or prod.
+> **Ordering, load-bearing (corrected 2026-06-29).** Of the three rehearsal
+> legs, **only `--guided` builds the candidate binary locally** (a GraalVM
+> `-Ob` native build of the current `service/` tree, `rm -f
+> service/target/nexus-service` then rebuild). `--cold` and the `--with-cloud`
+> cloud leg **ACQUIRE the *published* binary** — so before the tag exists they
+> can only acquire the **previous** release and would validate the **old**
+> engine as a "gate" for the new one. That is incoherent; do NOT run them
+> pre-tag. The `--cold`/`--with-cloud` validation of the actual release artifact
+> happens **post-publish** (Step 5), once the workflow has built + published it.
 
 ```bash
-tests/e2e/migration-rehearsal/run.sh --cold        # green → local  (published-artifact bare-box install)
-tests/e2e/migration-rehearsal/run.sh --guided      # local → local  (nx guided-upgrade, develop HEAD)
-tests/e2e/migration-rehearsal/run.sh --with-cloud  # cloud → cloud  (Voyage leg; needs .env voyage key)
+tests/e2e/migration-rehearsal/run.sh --guided      # local -Ob native build → nx guided-upgrade MVV
 ```
 
-Each must end `SOUP-TO-NUTS REHEARSAL PASSED`. Notes:
-- `--cold` and `--guided` force a fresh native build; `--with-cloud` accepts `--no-build` to reuse artifacts.
-- The cloud leg bills Voyage (embeddings only — token cost, no prod data store touched).
-- **Do NOT use `release-sandbox.sh`** — it swaps the uv tool venv and can break the live install. The container rehearsal is the safe, isolated one.
+Must end `GUIDED-UPGRADE MVV PASSED`. This proves the candidate `service/` tree
+compiles + serves under GraalVM native-image (the `-Ob` build has the **same**
+reachability requirements as the full release build, so it catches a broken
+native build before the tag burns a release-workflow run). It is a *proxy* for
+the published binary — the canonical 4 binaries are built by the workflow in
+Step 4; the published artifact itself is validated in Step 5.
 
-### 4. Human pushes the tag
+Notes:
+- The host JVM suite (`cd service && ./mvnw -q test`, Step 2) validates the Java
+  on the JVM; `--guided` adds the native-image build + serve.
+- **Do NOT use `release-sandbox.sh`** — it swaps the uv tool venv and can break
+  the live install. The container rehearsal is the safe, isolated one.
+
+### 4. Push the tag (human, or AI when explicitly authorized)
+
+Releaser is **human** by default (AI preps + validates); the human pushes the
+tag, OR the AI pushes it when the human explicitly authorizes that cut.
 
 ```bash
-git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>
+git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit> must be on origin
 git push origin engine-service-vX.Y.Z
 ```
 
-Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 4 native binaries (linux/mac × arm64/amd64) and publishes the GitHub release. Publishes nothing to PyPI.
+Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 4 native binaries (linux/mac × arm64/amd64) and publishes the GitHub release. Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs ~30 min).
 
-### 5. Relay deploy + cloud-gate to conexus (passive bus)
+### 5. POST-PUBLISH validation: `--cold` + `--with-cloud` against the new tag (REQUIRED)
+
+Now the candidate is published, validate the **actual release artifact** by
+acquiring it — this is the gate that catches what unit tests miss (it found
+`nexus-pi3s3` + `nexus-qeoxf` on 2026-06-26). Fully isolated (own PG in-box,
+wheel installed in-container, never touches `~/.config/nexus` or prod).
+
+```bash
+export NEXUS_SERVICE_TAG=engine-service-vX.Y.Z      # point the cold-acquire at the JUST-published candidate
+tests/e2e/migration-rehearsal/run.sh --cold         # bare box → install-binary <new tag> → init → guided-upgrade
+tests/e2e/migration-rehearsal/run.sh --with-cloud   # cloud → cloud (Voyage leg; needs .env voyage key; bills Voyage embeddings only)
+```
+
+Each must end `... MVV PASSED` / `SOUP-TO-NUTS REHEARSAL PASSED`. `--cold`
+rebuilds the wheel and cold-acquires the published binary + PG bundle (it does
+**not** build a native binary). If either fails, the published tag is bad — fix
+and cut a new patch tag (a published tag is immutable; do not re-point it).
+
+### 6. Relay deploy + cloud-gate to conexus (passive bus)
 
 Deploy and cloud-validation are **conexus-side operations** — the bus is passive, so surface an explicit relay to Hal; never frame the cross-instance deploy as autonomous:
 
@@ -67,12 +102,12 @@ Deploy and cloud-validation are **conexus-side operations** — the bus is passi
 
 For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
 
-### 6. After conexus confirms deployed + cloud-gated green, bump downstream refs
+### 7. After conexus confirms deployed + cloud-gated green, bump downstream refs
 
 - `tests/e2e/migration-rehearsal/run.sh` `COLD_TAG` default → the new published tag (or override via `NEXUS_SERVICE_TAG`).
 - When the **next PyPI release** pins this engine: `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`) and — ONLY if the release hard-requires the new engine's features — `REQUIRED_RELEASE_VERSION` (`src/nexus/migration/guided_upgrade.py`; the floor is a minimum, not "latest"). These are the `release` skill's job, not this one.
 
-### 7. Record state (T2)
+### 8. Record state (T2)
 
 ```
 nx memory put -p nexus -t deployed-engine-version "engine-service-vX.Y.Z @ <commit>; cloud-gated <date>; gate result <...>"
