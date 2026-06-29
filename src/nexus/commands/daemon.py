@@ -1618,8 +1618,6 @@ def ensure_storage_supervisor(config_dir: Path):
 
     Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
     """
-    import contextlib  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
     from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     StorageServiceStartError = _ssd.StorageServiceStartError
@@ -1649,8 +1647,18 @@ def ensure_storage_supervisor(config_dir: Path):
                 supervisor_pid=supervisor_pid,
                 msg="fresh lease held by a dead supervisor; relinquishing + re-spawning",
             )
-            with contextlib.suppress(Exception):
+            try:
                 registry.relinquish(existing)
+            except Exception as exc:  # noqa: BLE001 — best-effort reclaim; generation fencing still protects ownership
+                # Don't fail the spawn: the new supervisor's publish bumps the
+                # generation (fencing prevents double-ownership) and the 60s
+                # discover-wait resolves once it lands. But log it — a silent
+                # reclaim failure leaves no evidence for an operator.
+                _log.warning(
+                    "storage_service_dead_lease_relinquish_failed",
+                    supervisor_pid=supervisor_pid,
+                    error=str(exc),
+                )
         else:
             return existing
 
