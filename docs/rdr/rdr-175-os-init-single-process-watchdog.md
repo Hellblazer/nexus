@@ -2,12 +2,12 @@
 title: "OS-Init as the Single Process Watchdog: Retire the In-Process Storage-Supervisor Respawn Layer"
 id: RDR-175
 type: Technical Debt
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-28
-accepted_date:
+accepted_date: 2026-06-28
 related_issues: [nexus-1brzs]
 related_rdrs: [RDR-149, RDR-152, RDR-161, RDR-174]
 supersedes: []
