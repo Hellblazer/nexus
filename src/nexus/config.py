@@ -562,17 +562,26 @@ def storage_mode() -> str:
 def is_local_mode() -> bool:
     """Return True if nexus should use the local T3 backend.
 
-    Decision logic:
+    Decision logic (precedence, highest first):
       - ``NX_LOCAL=1`` → True  (explicit opt-in)
       - ``NX_LOCAL=0`` → False (explicit opt-out)
-      - Otherwise: True when **either** CHROMA_API_KEY or VOYAGE_API_KEY is absent
+      - ``service_url`` present (``NX_SERVICE_URL`` env or config.yml) → False —
+        a managed 6.0 user serves every tier from a remote service and is NOT
+        local (nexus-3k43p: the legacy heuristic below mis-detected a greenfield
+        managed user — service_url set, no chroma/voyage key — as local). This
+        mirrors ``_resolve_init_mode``'s precedence (NX_LOCAL wins over
+        service_url, which wins over the legacy heuristic).
+      - Otherwise (legacy, pre-6.0): True when **either** CHROMA_API_KEY or
+        VOYAGE_API_KEY is absent.
     """
     nx_local = os.environ.get("NX_LOCAL", "").strip()
     if nx_local == "1":
         return True
     if nx_local == "0":
         return False
-    # Auto-detect: local mode when either cloud credential is missing
+    if (get_credential("service_url") or "").strip():
+        return False
+    # Auto-detect (legacy): local mode when either cloud credential is missing
     chroma_key = get_credential("chroma_api_key")
     voyage_key = get_credential("voyage_api_key")
     return not (chroma_key and voyage_key)
