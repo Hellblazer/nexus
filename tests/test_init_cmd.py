@@ -331,6 +331,67 @@ class TestAutostartPrompt:
         assert result.exit_code == 0, result.output
         assert calls["install"] == 0, "no silent unit write under non-interactive init"
         assert served == [None]
+        assert "non-interactive" in result.output.lower(), (
+            "the consent-gate decline must print an actionable notice"
+        )
+
+    def test_no_autostart_precedence_over_yes(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--no-autostart wins when both flags are passed (explicit decline)."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        served: list[str | None] = []
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: served.append(embedder) or _FAKE_LEASE,
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes", "--no-autostart"])
+
+        assert result.exit_code == 0, result.output
+        assert calls["install"] == 0, "--no-autostart must win over --yes"
+        assert served == [None]
+
+    def test_lease_timeout_exits_nonzero(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unit installed but no lease in the window → exit 1 (NOT confirmed
+        serving), parity with the no-binary path. No session fallback (that would
+        risk coexistence with the unit's eventual supervisor)."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        monkeypatch.setattr(
+            "nexus.commands.init._poll_service_lease", lambda config_dir, **kw: None
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 1, result.output
+        assert calls["install"] == 1
+        assert calls["session"] == 0, "lease-timeout must NOT session-fall-back"
+        assert "not confirmed serving" in result.output.lower()
+
+    def test_install_conflict_exits_nonzero_no_fallback(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-activation install conflict (ContentDiffersError) fails loud
+        with a remedy and does NOT silently session-fall-back."""
+        self._local(monkeypatch)
+        calls = self._seams(monkeypatch)
+        from nexus.daemon import installer
+
+        def _conflict(*, tier: str, force: bool = False):  # noqa: ARG001
+            calls["install"] += 1
+            raise installer.ContentDiffersError("unit exists with different content")
+
+        monkeypatch.setattr("nexus.daemon.installer.install_autostart", _conflict)
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 1, result.output
+        assert calls["session"] == 0, "install conflict must not session-fall-back"
+        assert "--force" in result.output, "must point at the --force remedy"
 
     def test_activation_error_falls_back_to_session(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch

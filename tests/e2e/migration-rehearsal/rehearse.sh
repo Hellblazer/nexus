@@ -53,8 +53,11 @@ fi
 # JVM), silently vanishing the lease and failing the migrate intermittently. The
 # supervisor inherits this env and passes -Xmx to the native binary.
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
+# --no-autostart (RDR-174 P2.4): the rehearsal wants a SESSION supervisor, not a
+# persistent OS unit in the container. Pre-P2.4 `--yes` was a no-op; it now means
+# "install the autostart unit", so be explicit about the session-only intent.
 note "nx init --service — provisioning PG16 + pgvector + nexus DB (bge-768 service embedder, RDR-160; NX_SERVICE_MAX_HEAP=$NX_SERVICE_MAX_HEAP)…"
-if nx init --service --embedder bge-768 --yes 2>&1 | sed 's/^/       /'; then
+if nx init --service --embedder bge-768 --no-autostart 2>&1 | sed 's/^/       /'; then
   ok "nx init --service (provision)"
 else
   bad "nx init --service failed"; say "ABORT (provision failed)"; exit 1

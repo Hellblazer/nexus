@@ -1227,7 +1227,7 @@ nx init --service             # provision the Postgres+pgvector service backend 
 | Flag | Description |
 |------|-------------|
 | `--embedder [bge-768\|minilm-384]` | Select the embedder non-interactively (skips the prompt) |
-| `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` polls its lease rather than also starting a session supervisor (decide-first, RDR-175 Gap 3). |
+| `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` waits for it to come up rather than also starting a session supervisor. |
 | `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
 | `--service` | Provision the local Postgres + pgvector cluster the RDR-152 service backend uses, lock the embedder to bge-768, acquire + verify the native service binary, fetch the bge-768 ONNX, and start the persistent service supervisor. Idempotent. This is the path that stands up T3 serving for a local install. (Also auto-runs when `NX_STORAGE_BACKEND=service` is set.) Acquire the binary + PG bundle first with `nx daemon service install-binary <engine-service-vX.Y.Z>`. |
 

@@ -24,8 +24,10 @@ test -x "$SVC_NATIVE_DIR/nexus-service" && ok "native service binary present" ||
 mkdir -p "$SVC_WELL_KNOWN_DIR" && cp "$SVC_NATIVE_DIR"/* "$SVC_WELL_KNOWN_DIR/" && chmod +x "$SVC_WELL_KNOWN_DIR/nexus-service" \
   && ok "native binary positioned" || bad "could not position native binary"
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
+# --no-autostart (RDR-174 P2.4): session supervisor only, no persistent OS unit
+# in the container (pre-P2.4 `--yes` was a no-op; it now installs the unit).
 note "nx init --service (provision PG16+pgvector+bge-768)…"
-if nx init --service --embedder bge-768 --yes 2>&1 | sed 's/^/       /'; then ok "nx init --service"; else bad "nx init --service failed"; say "ABORT"; exit 1; fi
+if nx init --service --embedder bge-768 --no-autostart 2>&1 | sed 's/^/       /'; then ok "nx init --service"; else bad "nx init --service failed"; say "ABORT"; exit 1; fi
 export NX_STORAGE_BACKEND=service
 # shellcheck disable=SC1091
 set -a; . /home/nexus/.config/nexus/pg_credentials; set +a

@@ -441,8 +441,12 @@ case "$MODE" in
 
         # ── The one command: fresh-install -> serving, zero manual steps. ──
         echo
+        # --no-autostart (RDR-174 P2.4): the sandbox proves the SESSION-start
+        # path (and its idempotent live-lease short-circuit below); it does not
+        # want a persistent OS unit. Explicit since pre-P2.4 plain `nx init
+        # --service` always session-started.
         echo "  ── nx init --service (the one-command collapse) ──"
-        if ! nx init --service 2>&1 | sed 's/^/    /'; then
+        if ! nx init --service --no-autostart 2>&1 | sed 's/^/    /'; then
             _die "nx init --service did not reach serving (see remedy above)"
         fi
         trap _svc_teardown EXIT
@@ -467,7 +471,7 @@ case "$MODE" in
         #    return the SAME endpoint, not spawn a second service. ──
         echo
         echo "  ── nx init --service AGAIN (idempotent re-run) ──"
-        if ! nx init --service 2>&1 | sed 's/^/    /'; then
+        if ! nx init --service --no-autostart 2>&1 | sed 's/^/    /'; then
             _die "re-run of nx init --service failed (not idempotent)"
         fi
         PORT2=$(_svc_field port); PID2=$(_svc_field pid)

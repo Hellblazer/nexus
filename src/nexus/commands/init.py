@@ -272,10 +272,9 @@ def _poll_service_lease(config_dir: Path, *, timeout: float = 60.0):  # noqa: AN
     import time  # noqa: PLC0415 — deferred local import
 
     from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred local import — CLI startup cost
-    import os  # noqa: PLC0415 — deferred local import
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    scope = str(os.getuid())
+    scope = str(os.getuid())  # POSIX-only; service mode is Linux/macOS
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         rec = registry.discover(scope)
@@ -312,6 +311,9 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
     try:
         installer.install_autostart(tier="service")
     except installer.ActivationError as exc:
+        # Headless / no session bus: the unit could not be ACTIVATED, so nothing
+        # was started — falling back to a session supervisor is coexistence-safe
+        # and leaves the user with a serving backend.
         click.echo(
             f"\nCould not activate the autostart unit ({exc}); starting the "
             "service for this session instead. Re-run `nx daemon service install "
@@ -319,16 +321,31 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
             err=True,
         )
         return _start_service_step()
+    except installer.InstallerError as exc:
+        # SymlinkRefusedError / ContentDiffersError: a real install conflict (e.g.
+        # a pre-existing unit with different content). Do NOT session-fall-back
+        # (the user must resolve the conflict); fail loud + actionable.
+        click.echo(
+            f"\nCould not install the autostart unit ({exc}). Re-run "
+            "`nx daemon service install --autostart --force` to overwrite, or "
+            "`nx init --no-autostart` to start a session supervisor instead.",
+            err=True,
+        )
+        raise SystemExit(1)
 
     lease = _poll_service_lease(config_dir)
     if lease is None:
+        # Unit installed but the service never published a lease in the window —
+        # NOT confirmed serving. Exit non-zero (parity with the no-binary path)
+        # so automation chaining `nx init && …` does not proceed against an
+        # unavailable backend. The OS unit will keep retrying independently.
         click.echo(
-            "\nAutostart unit installed, but the service has not published a "
-            "lease yet — the OS will keep retrying. Check `nx daemon service "
-            "status` and <config_dir>/logs/storage_service.log.",
+            "\nAutostart unit installed, but the service did not become ready in "
+            "time — NOT confirmed serving. The OS will keep retrying; check "
+            "`nx daemon service status` and <config_dir>/logs/storage_service.log.",
             err=True,
         )
-        return None
+        raise SystemExit(1)
 
     ep = lease.endpoint
     click.echo(
