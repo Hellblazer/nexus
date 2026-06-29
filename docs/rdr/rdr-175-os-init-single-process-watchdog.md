@@ -133,6 +133,22 @@ is file:line-cited in the T2 analysis note.
 - **Verified** — The RDR-149 conformance battery's storage_service rows are
   satisfied by the shared registry primitive, not by `_respawn` — so the cut is
   RDR-149-orthogonal.
+- **Verified (research pass 1, 2026-06-28)** — The dead-lease liveness primitive
+  for heal-on-next-use ALREADY EXISTS. `_publish:684` stamps
+  `payload={"supervisor_pid": os.getpid()}` on every supervised lease, and
+  `stop_storage_service:1288-1309` already reads `record.payload["supervisor_pid"]`
+  and gates on `_pid_is_alive`. The heal-on-next-use hardening is therefore ~5
+  lines in `ensure_storage_supervisor` reusing that exact pattern (after
+  `discover()` returns a fresh lease, if `supervisor_pid` is dead →
+  `registry.relinquish` + fall through to spawn). It lives in the storage-specific
+  caller, NOT in the shared `service_registry.discover`, so it is RDR-149-gate-safe.
+  storage_service TTL is 15s (`service_registry.TIER_TTLS`), so the un-hardened
+  gap is already bounded at ≤15s; the check makes heal instant. Residual:
+  pid-reuse could read a recycled pid as "alive," but pid is only a liveness HINT
+  layered on TTL-freshness + the uuid `owner_token` identity (RDR-149 chose
+  owner_token over pid precisely for reuse immunity), so the worst case is a
+  ≤15s heal delay (fall back to TTL), never a correctness error. A non-supervised
+  lease (no `supervisor_pid`) falls back to current TTL-freshness behavior.
 
 ### Critical Assumptions
 
@@ -145,9 +161,12 @@ is file:line-cited in the T2 analysis note.
 - [ ] **Deleting `_respawn` does not regress the RDR-149 conformance battery** —
   **Status**: Verified — **Method**: Source Search (conformance rows map to the
   shared registry primitive).
-- [ ] **The heal-on-next-use no-autostart contract needs a dead-lease liveness
-  check** — **Status**: Unverified — **Method**: Spike (the TTL-window gap below
-  must be closed or explicitly bounded before implementation).
+- [x] **The heal-on-next-use no-autostart contract needs a dead-lease liveness
+  check** — **Status**: Verified (research pass 1) — **Method**: Source Search.
+  The primitive exists (`_publish:684` stamps `supervisor_pid`;
+  `stop_storage_service:1288-1309` already gates on `_pid_is_alive`). Hardening is
+  ~5 lines in `ensure_storage_supervisor`, RDR-149-gate-safe; the un-hardened gap
+  is bounded at the 15s storage_service TTL. No spike required.
 
 ## Proposed Solution
 
@@ -286,7 +305,8 @@ leaves the hazard. Hal chose heal-on-next-use.
 
 ### Prerequisites
 
-- [ ] Critical Assumption 4 (dead-lease liveness) settled by spike.
+- [x] Critical Assumption 4 (dead-lease liveness) settled by source search
+  (research pass 1) — primitive exists, hardening is ~5 lines, no spike needed.
 - [ ] RDR gated + accepted (this RDR) — supersedes the RDR-174 §4 P2.3/P2.4
   gate-locked text for the supervisor handoff.
 
@@ -364,9 +384,10 @@ principle and RDR-174's OS-init watchdog direction.
 
 ### Assumption Verification
 
-Three of four Critical Assumptions are Verified by source search. The fourth
-(dead-lease liveness for heal-on-next-use) is Unverified and must be settled by
-spike before Phase 1 Step 3.
+All four Critical Assumptions are Verified by source search (research pass 1
+settled the dead-lease-liveness assumption: the `supervisor_pid` + `_pid_is_alive`
+primitive already exists in `_publish` and `stop_storage_service`; the hardening
+is ~5 lines in `ensure_storage_supervisor`, RDR-149-gate-safe, no spike needed).
 
 #### API Verification
 
