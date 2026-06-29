@@ -159,6 +159,36 @@ public final class Main {
 
         log.info("event=service_ready port={}", service.getPort());
 
+        // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
+        // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving
+        // JVM (the orphan would keep /health green while its lease ages out, and a
+        // heal-on-next-use re-spawn would then double-spawn a 2nd JVM). Opt-in via
+        // NX_SERVICE_PARENT_DEATH_EXIT=1 (set by the supervisor when it spawns us)
+        // so standalone/test runs with no supervisor are unaffected. This is the
+        // portable (Linux + macOS) complement to the Linux-only PR_SET_PDEATHSIG
+        // the supervisor also arms on the child.
+        if ("1".equals(System.getenv("NX_SERVICE_PARENT_DEATH_EXIT"))) {
+            ProcessHandle.current().parent().ifPresentOrElse(parent -> {
+                Thread watchdog = new Thread(() -> {
+                    try {
+                        parent.onExit().get();   // completes when the supervisor exits
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    } catch (Exception e) {       // onExit unsupported for this handle
+                        log.warn("event=parent_death_watchdog_error error=\"{}\"", e.toString());
+                        return;
+                    }
+                    log.warn("event=supervisor_exited action=self_exit "
+                            + "reason=orphan_prevention parent_pid={}", parent.pid());
+                    System.exit(143);             // runs the shutdown hook → clean ds/service close
+                }, "parent-death-watchdog");
+                watchdog.setDaemon(true);
+                watchdog.start();
+                log.info("event=parent_death_watchdog_armed parent_pid={}", parent.pid());
+            }, () -> log.warn("event=parent_death_watchdog_skipped reason=no_parent_handle"));
+        }
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");
             service.stop();

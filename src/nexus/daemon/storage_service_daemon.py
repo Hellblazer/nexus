@@ -562,6 +562,13 @@ class StorageServiceSupervisor:
         # dual-review finding M-2).
         # Use the stable token so clients don't get 401 after a restart.
         env["NX_SERVICE_TOKEN"] = self._service_token
+        # nexus-03bcg: arm the Java-side parent-death watchdog so the JVM exits if
+        # THIS supervisor dies — the portable (Linux + macOS) orphan-prevention
+        # complement to the Linux-only PR_SET_PDEATHSIG preexec below. Only the
+        # supervisor-spawned JVM gets this (standalone binary runs do not), so a
+        # dead supervisor never leaves an orphaned-but-serving service. NX_SERVICE_BIND
+        # (container bind override, default loopback) passes through via env inheritance.
+        env["NX_SERVICE_PARENT_DEATH_EXIT"] = "1"
 
         # nexus-pebfx.2: the service only reads NX_VOYAGE_API_KEY; without it the
         # service embeds local ONNX (RDR-160: bge-768) and refuses every

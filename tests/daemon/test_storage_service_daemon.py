@@ -1437,6 +1437,26 @@ class TestPdeathsigOrphanPrevention:
             "PR_SET_PDEATHSIG is Linux-only; preexec_fn must be None elsewhere"
         )
 
+    def test_spawn_service_arms_parent_death_watchdog_env(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        """nexus-03bcg: the supervisor sets NX_SERVICE_PARENT_DEATH_EXIT=1 so the
+        Java-side parent-death watchdog activates — the portable (macOS-covering)
+        complement to the Linux-only PR_SET_PDEATHSIG."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured.update(kw)
+            return _FakeProc(pid=49203)
+
+        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+        sup._spawn_service()
+        assert captured["env"].get("NX_SERVICE_PARENT_DEATH_EXIT") == "1"
+
     @pytest.mark.skipif(
         not __import__("sys").platform.startswith("linux"),
         reason="PR_SET_PDEATHSIG is Linux-only",
