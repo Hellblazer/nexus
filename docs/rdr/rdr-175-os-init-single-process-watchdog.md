@@ -228,22 +228,21 @@ PG; the Java service stays alive through a PG-only restart, unchanged from today
   `ensure_storage_supervisor` session detach. Exactly one supervisor in either
   branch.
 
-  > **DEFERRED 2026-06-28 (implementation-time premise check).** Gap 3 assumed
-  > `nx init` already prompts for autostart and installs a unit (RDR-174 P2.4)
-  > whose ordering needs reworking. Implementation-time verification found P2.4
-  > was **never landed**: `init.py:523-530` is a placeholder comment only; `nx
-  > init` has no autostart prompt and never installs a unit (it unconditionally
-  > session-detaches via `ensure_storage_supervisor`). The standalone `nx daemon
-  > service install --autostart` command exists but `init` does not call it.
-  > There is therefore no extant ordering to rework, and the "two-supervisor
-  > situation" cannot occur in current code (init never starts a unit). The
+  > **VOID 2026-06-28 (premise error — Gap 3 was bad reasoning).** Gap 3
+  > asserted that the "gate-locked P2.4 ordering" in `nx init` prompts for
+  > autostart *after* `provision_and_start_service`, creating a two-supervisor
+  > situation whose ordering needs reworking. Implementation-time verification
+  > found P2.4 was **never implemented**: `init.py:523-530` is a placeholder
+  > comment, not code — `nx init` has no autostart prompt and never installs a
+  > unit (it unconditionally session-detaches via `ensure_storage_supervisor`).
+  > The standalone `nx daemon service install --autostart` command exists but
+  > `init` does not call it. So there is no extant ordering to rework and no
+  > two-supervisor situation in current code: Gap 3 described a problem that does
+  > not exist, and "decide-autostart-first" would fix a non-problem. The actual
   > double-spawn root cause (Gap 2) was the `--foreground` → `_respawn` chain,
-  > already removed in Step 1. Building a decide-first autostart prompt in `init`
-  > from scratch is net-new feature scope (effectively implementing RDR-174 P2.4)
-  > and is preventive hardening for a path that does not yet exist. Deferred to a
-  > follow-up bead, to be implemented together with the autostart-in-init prompt
-  > if/when that lands. The heal-on-next-use hardening (the bullet above) and
-  > Steps 1 + 2 are unaffected and shipped.
+  > removed in Step 1. This sub-item is dropped, not deferred — there is nothing
+  > to do. The heal-on-next-use hardening (the bullet above) and Steps 1 + 2 are
+  > unaffected and shipped.
 
 ### Technical Design
 
@@ -329,18 +328,6 @@ leaves the hazard. Hal chose heal-on-next-use.
   `start()` surfaces as exit 1 (crash backstop re-raise), not 4. Under
   `StartLimitIntervalSec=0` / launchd `KeepAlive` all of 1/3/4 restart, so this
   affects log-based triage only, not recovery.
-- (−) Coexistence crash-loop (substantive-critic SIG-1), tied to the deferred
-  Step 3A: if a session supervisor (from `nx init`) is already holding the lease
-  and a user THEN runs `nx daemon service install --autostart`, the unit's
-  supervisor `start()` short-circuits on the live lease (`_proc` stays unset),
-  the first `heartbeat_once()` returns falsey, and the unit exits 3 → the OS
-  restarts it every `RestartSec=5s` until the session lease expires. No
-  double-spawn occurs (the regression this RDR targets is gone), but the unit
-  crash-loops within that login session. This coexistence is exactly what the
-  deferred decide-autostart-first ordering (Step 3A, `nexus-shkww`) prevents by
-  never letting a session supervisor and a unit run at once. Behavior is pinned
-  by `TestRdr175MvvSingleSupervisor.test_second_supervisor_under_live_lease_exits_nonzero`.
-  Bounded: resolves on session end / reboot (only the unit starts, lease free).
 
 ### Risks and Mitigations
 
@@ -349,9 +336,10 @@ leaves the hazard. Hal chose heal-on-next-use.
   path (Critical Assumption 4); under autostart this is moot (instant OS restart).
 - **Risk**: systemd enters `failed` after a restart burst. **Mitigation**:
   `StartLimitIntervalSec=0`.
-- **Risk**: Reworking the gate-locked P2.4 ordering regresses the autostart prompt
-  invariant. **Mitigation**: the decide-first flow preserves "prompt for autostart"
-  semantics; only the start ordering moves. Stacked review at the phase boundary.
+- **Risk**: (was) Reworking the gate-locked P2.4 ordering regresses the autostart
+  prompt invariant. **VOID** — see the §Approach VOID note: RDR-174 P2.4 (the
+  autostart prompt) was never implemented, so there is no ordering to rework and
+  no invariant to regress.
 
 ### Failure Modes
 
@@ -397,12 +385,12 @@ via the rendered-unit test that BOTH `StartLimitIntervalSec=0` and the existing
 `SuccessExitStatus=143` are present (the edit must not drop the graceful-stop
 directive).
 
-#### Step 3: Decide-autostart-first ordering (Gap 3) + heal-on-next-use hardening
+#### Step 3: Heal-on-next-use hardening (decide-autostart-first dropped as void)
 Add the dead-lease liveness check to `ensure_storage_supervisor`'s discover path
-(SHIPPED). The decide-autostart-first init ordering rework is **DEFERRED** to a
-follow-up bead — see the DEFERRED note in §Approach: RDR-174 P2.4 (the
-autostart-in-init prompt this would reorder) was never implemented, so there is
-no extant ordering to rework and no two-supervisor path in current code.
+(SHIPPED). The decide-autostart-first init ordering rework (Gap 3) is **VOID** —
+see the VOID note in §Approach: RDR-174 P2.4 (the autostart-in-init prompt it
+would reorder) was never implemented, so Gap 3 described a non-existent
+two-supervisor situation. Dropped, not deferred — nothing to do.
 
 ### Phase 2: Operational Activation
 

@@ -159,10 +159,9 @@ Target end state: `uv tool install conexus && nx init && nx index`.
    > P2.3/P2.4 scope) is superseded by RDR-175 "OS-Init as the Single Process
    > Watchdog". RDR-175 Phase 1 retires the in-process respawn mechanism (the
    > verified double-spawn root cause) and adds heal-on-next-use hardening for
-   > the no-autostart path. The decide-autostart-first init ordering rework is
-   > DEFERRED to follow-up bead `nexus-shkww` (RDR-174 P2.4, the autostart
-   > prompt in `nx init` it would reorder, was never implemented). The
-   > PG-boot-ordering no-op
+   > the no-autostart path. (RDR-174 P2.4 — an autostart prompt in `nx init` —
+   > was never implemented; it remains a placeholder comment below, not shipped
+   > behavior.) The PG-boot-ordering no-op
    > finding above (`nexus-exfns`) is unaffected and still stands. This RDR keeps
    > `status: accepted`; only this in-body breadcrumb is added so the gate-locked
    > §4 handoff text is not left silently stale. See

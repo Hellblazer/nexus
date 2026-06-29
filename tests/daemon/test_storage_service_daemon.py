@@ -1497,8 +1497,7 @@ class TestRdr175MvvSingleSupervisor:
     activating while a session supervisor already runs) discovers the live
     lease and short-circuits without spawning a second service. The
     no-double-spawn property rests on RDR-149 lease arbitration (idempotent
-    start under a live lease), NOT on in-process respawn or on the deferred
-    decide-autostart-first init ordering (nexus-shkww).
+    start under a live lease), NOT on in-process respawn.
 
     The (True, False) PG-only arm restarts PG in place WITHOUT bouncing the
     JVM: the Java process identity is unchanged across a PG restart."""
@@ -1546,14 +1545,12 @@ class TestRdr175MvvSingleSupervisor:
     def test_second_supervisor_under_live_lease_exits_nonzero(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
-        """Coexistence (substantive-critic SIG-1, deferred-Step-3A territory): a
-        second supervisor's FULL run loop, started while another supervisor holds
-        a live lease, must NOT double-spawn — start() short-circuits, _proc stays
-        unset, and the loop exits non-zero (3). Under the OS unit this re-runs
-        every RestartSec until the foreign lease expires (a bounded crash-loop,
-        documented in RDR-175 §Consequences). The decide-autostart-first ordering
-        (nexus-shkww) is what prevents the coexistence in the first place. This
-        test PINS the current behavior so the gap is tested, not hidden."""
+        """No-double-spawn through the FULL run loop: a second supervisor started
+        while another holds a live lease must NOT spawn a second service —
+        start() short-circuits on the live lease, _proc stays unset, and the
+        loop exits non-zero (the OS, not an in-process respawn, owns restart
+        decisions). Complements test_second_start_short_circuits_to_single_lease
+        by exercising _supervise_until_stopped, not just start()."""
         import threading
 
         from nexus.daemon import storage_service_daemon as ssd
@@ -1578,9 +1575,8 @@ class TestRdr175MvvSingleSupervisor:
             code = ssd._supervise_until_stopped(second, stop, lambda: None)
 
         assert code == 3, (
-            "a supervisor that finds the lease already held exits 3 (no "
-            "double-spawn); the OS unit then crash-loops until the foreign "
-            "lease expires — see RDR-175 §Consequences / nexus-shkww"
+            "a supervisor that finds the lease already held exits non-zero "
+            "without double-spawning; the OS owns the restart decision"
         )
 
     def test_pg_only_restart_keeps_same_java_pid(
