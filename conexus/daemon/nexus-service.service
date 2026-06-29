@@ -25,6 +25,14 @@
 Description=Nexus storage service (engine-service binary + local Postgres; serves T2 + T3)
 After=network.target
 PartOf=default.target
+## Never-give-up parity with launchd (RDR-175 P1 Step 2, nexus-ckwhd). With the
+## in-process respawn layer retired (RDR-175), systemd is the single watchdog;
+## the default StartLimitIntervalSec=10s / StartLimitBurst=5 would let the unit
+## enter 'failed' after a restart burst (e.g. crash-looping before
+## `nx init --service` provisions pg_credentials), abandoning the service where
+## launchd's KeepAlive+ThrottleInterval=30 keeps retrying. 0 disables the rate
+## limiter so Restart=on-failure retries indefinitely.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

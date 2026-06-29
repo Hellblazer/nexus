@@ -105,6 +105,31 @@ class TestRenderForService:
             f"unit must not order against external postgresql.service; got {offenders}"
         )
 
+    def test_service_unit_never_gives_up_and_keeps_graceful_stop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RDR-175 P1 Step 2 (Gap 4): with the in-process respawn retired, OS
+        init is the single watchdog. The systemd unit must never enter 'failed'
+        after a restart burst (default StartLimitIntervalSec=10s/Burst=5 gives
+        up where launchd KeepAlive+ThrottleInterval=30 does not), so
+        StartLimitIntervalSec=0 (never-give-up parity). The edit must NOT drop
+        the existing SuccessExitStatus=143 graceful-SIGTERM-stop directive."""
+        _set_platform(monkeypatch, "linux")
+        _stub_paths(tmp_path, monkeypatch)
+        _dest, body = installer._render_for_service()
+        active = [
+            ln.strip() for ln in body.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        assert "StartLimitIntervalSec=0" in active, (
+            "systemd unit must set StartLimitIntervalSec=0 for never-give-up "
+            f"parity with launchd; active directives: {active}"
+        )
+        assert "SuccessExitStatus=143" in active, (
+            "the StartLimitIntervalSec edit must not drop the graceful-stop "
+            f"SuccessExitStatus=143 directive; active directives: {active}"
+        )
+
 
 class TestServicePlistThrottle:
     def test_plist_has_throttle_interval(
