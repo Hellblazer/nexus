@@ -474,6 +474,49 @@ class TestAutostartPrompt:
         assert calls["poll"] == 0, "no lease poll when activation failed"
 
 
+class TestT2DaemonDemotion:
+    """RDR-174 P3.2 (§Approach 6): in the default all-SERVICE config no T2 store
+    resolves to SQLite, so ``nx init`` must NOT register the SQLite T2 autostart
+    unit. The ``nx daemon t2 install`` command stays available as an explicit
+    opt-in (full deletion is RDR-158 P4, two-release window — NOT here).
+
+    init.py contains no T2-registration call today; these tests PIN that
+    invariant against regression rather than driving a production change."""
+
+    def test_default_init_writes_no_t2_autostart_unit(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: _FAKE_LEASE,
+        )
+        tiers: list[str] = []
+        monkeypatch.setattr(
+            "nexus.daemon.installer.install_autostart",
+            lambda *, tier, force=False: tiers.append(tier),
+        )
+
+        result = CliRunner().invoke(init_cmd, [])
+
+        assert result.exit_code == 0, result.output
+        assert "t2" not in tiers, (
+            "nx init must NOT register the SQLite T2 autostart unit "
+            f"(default config is all-SERVICE); installed tiers: {tiers}"
+        )
+
+    def test_t2_install_command_remains_optin(self) -> None:
+        """Guard against accidental deletion: `nx daemon t2 install` stays
+        registered (the demote-now / delete-at-RDR-158-P4 contract)."""
+        from nexus.commands.daemon import t2_group
+
+        assert "install" in t2_group.commands, (
+            "nx daemon t2 install must remain an explicit opt-in — deletion is "
+            "RDR-158 P4 (two-release window), not RDR-174 P3.2"
+        )
+
+
 def _wrap(fn):
     """Wrap a bare callable in a trivial Click command so CliRunner can drive
     its ``click.echo`` / ``click.confirm`` I/O."""
