@@ -28,7 +28,11 @@ final class ServiceBindHostTest {
     @Test
     void explicitLoopbackIsHonoured() {
         assertThat(NexusService.resolveBindHost("127.0.0.1")).isEqualTo("127.0.0.1");
-        assertThat(NexusService.resolveBindHost("localhost")).isEqualTo("localhost");
+        // "localhost" is normalized to 127.0.0.1 (avoids an IPv6-only bind mismatch
+        // with 127.0.0.1 clients — code-review H-1).
+        assertThat(NexusService.resolveBindHost("localhost")).isEqualTo("127.0.0.1");
+        // explicit IPv6 loopback is honoured as-is (deliberate), no security warn.
+        assertThat(NexusService.resolveBindHost("::1")).isEqualTo("::1");
     }
 
     @Test

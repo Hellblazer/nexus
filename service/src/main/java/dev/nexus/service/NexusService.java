@@ -166,10 +166,18 @@ public final class NexusService {
             return "127.0.0.1";
         }
         String bind = envValue.trim();
-        if (!bind.equals("127.0.0.1") && !bind.equals("localhost") && !bind.equals("::1")) {
+        // Normalize "localhost" → "127.0.0.1": InetSocketAddress resolves the name
+        // at bind time, and on IPv6-only-loopback /etc/hosts it would bind [::1]
+        // while the supervisor + Python clients connect to 127.0.0.1 → refused
+        // (code-review H-1). An explicit "::1" is left as-is (deliberate IPv6).
+        if (bind.equals("localhost")) {
+            return "127.0.0.1";
+        }
+        if (!bind.equals("127.0.0.1") && !bind.equals("::1")) {
             log.warn("event=service_bind_non_loopback bind={} security=\"no external TLS; "
-                    + "token-authed plaintext exposed beyond loopback — intended only for "
-                    + "trusted container networking\"", bind);
+                    + "token-authed plaintext (and unauthenticated /health, /version) "
+                    + "exposed beyond loopback — intended only for trusted container "
+                    + "networking\"", bind);
         }
         return bind;
     }

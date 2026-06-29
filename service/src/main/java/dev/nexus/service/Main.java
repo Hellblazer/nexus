@@ -175,13 +175,18 @@ public final class Main {
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         return;
-                    } catch (Exception e) {       // onExit unsupported for this handle
+                    } catch (Exception e) {       // onExit unsupported for this handle (RuntimeException)
                         log.warn("event=parent_death_watchdog_error error=\"{}\"", e.toString());
                         return;
                     }
                     log.warn("event=supervisor_exited action=self_exit "
                             + "reason=orphan_prevention parent_pid={}", parent.pid());
-                    System.exit(143);             // runs the shutdown hook → clean ds/service close
+                    // halt, not exit: orphan-prevention is a hard kill, not a graceful
+                    // shutdown. System.exit would run the shutdown hook → HikariCP
+                    // ds.close() can stall ~30s on a dead PG (the OOM path took the
+                    // supervisor AND likely PG). On Linux PR_SET_PDEATHSIG SIGKILLs us
+                    // first anyway; halt makes the macOS path equally prompt (CRE M-1).
+                    Runtime.getRuntime().halt(143);
                 }, "parent-death-watchdog");
                 watchdog.setDaemon(true);
                 watchdog.start();

@@ -1765,6 +1765,21 @@ combined peak (service binary + bge-768 ONNX + Postgres + supervisor) can trip
 the OS OOM-killer at first start; capping the heap reduces that risk. Default is
 unset (no cap).
 
+**Container reachability (`NX_SERVICE_BIND`, since engine-service v0.1.11).** The
+service binds `127.0.0.1` (loopback) by default. Set `NX_SERVICE_BIND=0.0.0.0`
+to bind all interfaces so a dev/CI container can reach a host-run service across
+its network namespace. **Security:** the service has **no TLS** — a non-loopback
+bind exposes a token-authed *plaintext* service (and unauthenticated `/health` /
+`/version`) on the LAN; use it only on trusted/host-private container networks,
+and never on an untrusted network. **Necessary but not sufficient:** the bind
+makes the service *reachable*, but a container still cannot *discover* it — the
+published lease host stays loopback by design (it is the host-side connect
+address), and the service port is OS-allocated. A container must therefore set
+`NX_SERVICE_HOST` / `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN` explicitly (it cannot
+read the host's lease file). A fixed/known-port mechanism for the full container
+flow is tracked in `nexus-ddvjy`. (This does **not** apply to Claude Cowork,
+which uses SDK transport to a host-resident MCP server per RDR-126.)
+
 ### nx daemon service install --autostart
 
 ```
