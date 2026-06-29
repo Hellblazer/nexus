@@ -1512,3 +1512,100 @@ class TestLeaseTtlAndHeapBound:
         sup._spawn_service()
         # Production default: no -Xmx — the binary keeps native-image's default heap.
         assert not any(a.startswith("-Xmx") for a in captured["argv"][1:])
+
+
+# ---------------------------------------------------------------------------
+# RDR-174 P2.2 (nexus-exfns): boot-robustness — the supervisor self-manages PG.
+#
+# §4 finding: there is NO external postgresql.service to order the autostart
+# unit against. The supervisor STARTS its own nx-owned PG cluster as step 1 of
+# startup, with boot-safe binary discovery from the config dir — no
+# provisioning-time env (NEXUS_PG_BIN) required. These regression tests pin
+# that guarantee so the "After=postgresql.service / macOS readiness wrapper"
+# delta stays a verified no-op: the unit needs only After=network.target.
+# ---------------------------------------------------------------------------
+
+
+class TestSupervisorSelfManagesPgAtBoot:
+    """The autostart unit needs no external PG ordering because the supervisor
+    self-starts PG. Encodes the RDR-174 §4 verified-no-op finding."""
+
+    def test_start_locked_starts_pg_before_spawning_service(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """_start_locked must call _ensure_pg_running() BEFORE _spawn_service().
+
+        PG-before-engine ordering is owned by the supervisor itself, not by a
+        systemd After= dependency on an external postgresql.service.
+        """
+        sup = _make_supervisor(config_dir, clock)
+        order: list[str] = []
+
+        def _fake_ensure_pg() -> None:
+            order.append("ensure_pg")
+
+        def _fake_spawn() -> tuple[Any, int]:
+            order.append("spawn_service")
+            return _FakeProc(pid=44900), 18077
+
+        sup._ensure_pg_running = _fake_ensure_pg  # type: ignore[method-assign]
+        sup._spawn_service = _fake_spawn  # type: ignore[method-assign]
+        stub_supervisor = MagicMock()
+        stub_supervisor.record.generation = 1
+        sup._supervisor = stub_supervisor
+        with patch.object(sup, "_wait_for_service_ready"), \
+             patch.object(sup, "_publish"):
+            sup._start_locked()
+
+        assert order == ["ensure_pg", "spawn_service"], (
+            "the supervisor must start its own PG (step 1) before the engine, "
+            f"with no other ordering; got order={order}"
+        )
+
+    def test_ensure_pg_running_self_starts_cluster_without_provisioning_env(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With PG down and NEXUS_PG_BIN unset, _ensure_pg_running discovers
+        binaries and starts an nx-owned cluster itself.
+
+        This is the boot-safety guarantee: cold boot has no provisioning env,
+        and there is no external postgresql.service. The supervisor resolves
+        binaries (config-dir boot-safe) and runs _start_cluster against its own
+        PG_DATA/port — so the autostart unit requires no PG ordering seam.
+        """
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        import nexus.db.pg_provision as pgp
+
+        monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+        sup = _make_supervisor(config_dir, clock, pg_port=15439)
+        sup._creds["PG_DATA"] = str(config_dir / "postgres")
+
+        calls: dict[str, Any] = {}
+
+        def _fake_discover() -> Any:
+            calls["discover"] = True
+            return "FAKE_BINS"
+
+        def _fake_start_cluster(bins: Any, pgdata: Path, port: int) -> None:
+            calls["start_cluster"] = (bins, Path(pgdata), port)
+
+        monkeypatch.setattr(pgp, "discover_pg_binaries", _fake_discover)
+        monkeypatch.setattr(pgp, "_start_cluster", _fake_start_cluster)
+        # PG is down on entry, then accepting after the supervisor starts it.
+        accepting = iter([False, True])
+        monkeypatch.setattr(
+            ssd_mod, "_port_accepting", lambda host, port, **kw: next(accepting)
+        )
+
+        sup._ensure_pg_running()
+
+        assert calls.get("discover") is True, (
+            "supervisor must discover PG binaries itself (no external unit)"
+        )
+        assert "start_cluster" in calls, (
+            "supervisor must start its own PG cluster, not wait on postgresql.service"
+        )
+        bins, pgdata, port = calls["start_cluster"]
+        assert bins == "FAKE_BINS"
+        assert pgdata == config_dir / "postgres", "starts nx's own PG_DATA"
+        assert port == 15439, "starts nx's own provisioned port"

@@ -86,6 +86,25 @@ class TestRenderForService:
         # ExecStart placeholder substituted (bare token survives in the comment).
         assert "ExecStart=__NX_BIN__" not in body
 
+    def test_service_unit_ships_no_postgresql_ordering(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RDR-174 P2.2 (nexus-exfns): the supervisor self-starts its own
+        nx-owned PG, so the unit must NOT order against an external
+        postgresql.service. Assert no ACTIVE directive references it (the prose
+        comment explaining why is allowed to mention the string)."""
+        _set_platform(monkeypatch, "linux")
+        _stub_paths(tmp_path, monkeypatch)
+        _dest, body = installer._render_for_service()
+        active = [
+            ln for ln in body.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        offenders = [ln for ln in active if "postgresql.service" in ln]
+        assert not offenders, (
+            f"unit must not order against external postgresql.service; got {offenders}"
+        )
+
 
 class TestServicePlistThrottle:
     def test_plist_has_throttle_interval(

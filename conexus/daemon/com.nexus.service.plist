@@ -11,9 +11,13 @@
   service binary + the local Postgres cluster and blocks until SIGTERM, so
   launchd's supervision is the canonical lifecycle owner.
 
-  RDR-174 P2.2 will add the Postgres boot-ordering delta (a readiness wrapper
-  before the supervisor launches, since launchd has no After= equivalent).
-  This template is intentionally the plain unit; keep the seam below.
+  No PG readiness wrapper (RDR-174 P2.2, nexus-exfns — VERIFIED NO-OP): the
+  supervisor starts its OWN nx-owned Postgres cluster as step 1 of startup
+  (storage_service_daemon._start_locked -> _ensure_pg_running ->
+  pg_provision._start_cluster), with boot-safe binary discovery from the config
+  dir. launchd having no After= equivalent does not matter — there is no
+  external Postgres to wait for; a wrapper would poll a PG nothing else starts.
+  RunAtLoad launches the supervisor directly and it brings up its own PG.
 
   StandardOutPath / StandardErrorPath are the launchd-captured supervisor
   stream (interpreter/boot crash diagnostics). The bounded primary log is
@@ -44,7 +48,9 @@
       engine binary yet — the normal state right after this unit is installed
       but before ``nx init --service``). Without throttling, KeepAlive=<true/>
       would respawn it in a tight loop. 30s mirrors the Linux RestartSec spirit
-      at a safer interval; P2.2's PG-readiness wrapper removes the crash entirely.
+      at a safer interval. (The pre-provisioning crash is inherent to installing
+      the unit before ``nx init --service``; the supervisor owns PG startup, so
+      no readiness wrapper applies — ThrottleInterval is the bound that matters.)
     -->
     <key>KeepAlive</key>
     <true/>
