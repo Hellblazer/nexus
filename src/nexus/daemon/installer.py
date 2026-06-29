@@ -288,6 +288,12 @@ class DaemonUninstallReport:
     #: (`nx daemon service stop --with-pg`). Best-effort, like ``daemon_stopped``.
     #: Defaulted so the MCP daemon_uninstall dry-run path needn't set it.
     service_stopped: bool = False
+    #: Status/dest of the SERVICE-tier autostart unit removal. uninstall_daemon
+    #: stops the engine-service + PG stack, so it must also remove the SERVICE
+    #: autostart unit (else the OS watchdog restarts the just-stopped service).
+    #: ``unit_status``/``unit_dest`` remain the T2 unit for back-compat.
+    service_unit_status: UninstallStatus = UninstallStatus.NOT_INSTALLED
+    service_unit_dest: Path | None = None
 
 
 def _stop_daemon_best_effort() -> tuple[bool, str | None]:
@@ -350,13 +356,16 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
     from nexus.mcp._first_run import _first_run_marker_path  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
-    unit_dest = _daemon._autostart_install_dir() / _daemon._autostart_filename_t2()
+    install_dir = _daemon._autostart_install_dir()
+    unit_dest = install_dir / _daemon._autostart_filename_t2()
+    service_unit_dest = install_dir / _daemon._autostart_filename_service()
     data_dir = nexus_config_dir()
     marker = _first_run_marker_path()
 
     if not confirm:
         parts = [
-            f"the autostart unit at {unit_dest}",
+            f"the service autostart unit at {service_unit_dest}",
+            f"the T2 autostart unit at {unit_dest}",
             "stop the engine-service + Postgres stack (service stop --with-pg)",
             "stop the running T2 daemon",
         ]
@@ -371,6 +380,10 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
                 UninstallStatus.REMOVED if unit_dest.exists() else UninstallStatus.NOT_INSTALLED
             ),
             unit_dest=unit_dest,
+            service_unit_status=(
+                UninstallStatus.REMOVED if service_unit_dest.exists() else UninstallStatus.NOT_INSTALLED
+            ),
+            service_unit_dest=service_unit_dest,
             marker_removed=False,
             data_removed=False,
             data_dir=data_dir,
@@ -384,7 +397,13 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
 
     warnings: list[str] = []
 
-    # 1. Remove the OS autostart unit.
+    # 1. Remove BOTH OS autostart units. The SERVICE unit is the one that
+    #    actually restarts the stack (it is the OS watchdog), so removing it is
+    #    load-bearing — leaving it would re-start the service stopped in step 2.
+    #    The legacy T2 unit is removed too. Both are best-effort (NOT_INSTALLED
+    #    is graceful).
+    service_unit_result = uninstall_autostart(tier="service")
+    warnings.extend(service_unit_result.warnings)
     unit_result = uninstall_autostart()
     warnings.extend(unit_result.warnings)
 
@@ -436,7 +455,10 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             except OSError as exc:
                 warnings.append(f"could not remove data dir {data_dir}: {exc}")
 
-    summary = [f"autostart unit: {unit_result.status.value}"]
+    summary = [
+        f"service autostart unit: {service_unit_result.status.value}",
+        f"T2 autostart unit: {unit_result.status.value}",
+    ]
     summary.append("service stack stopped" if service_stopped else "service stop not confirmed")
     summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
     if marker_removed:
@@ -447,6 +469,8 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         confirmed=True,
         unit_status=unit_result.status,
         unit_dest=unit_result.dest,
+        service_unit_status=service_unit_result.status,
+        service_unit_dest=service_unit_result.dest,
         marker_removed=marker_removed,
         data_removed=data_removed,
         data_dir=data_dir,
