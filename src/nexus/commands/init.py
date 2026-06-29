@@ -26,8 +26,13 @@ from nexus.db.local_ef import _TIER1_MODEL
 
 _log = structlog.get_logger(__name__)
 
-#: Config key the choice is persisted under. Read by the EF selection path
-#: in P3 (consumer wiring deferred — P2 only records the choice).
+#: Config key the active local embedder is persisted under. A real, live seam:
+#: ``config.local_embed_model_choice()`` reads it and feeds the doctor advisory
+#: (health.py), the MCP first-run advisory, and ``local_ef`` model selection.
+#: ``_provision_service_embedder_step`` stamps it at provisioning time so those
+#: consumers agree with what the service actually runs — bge-768 is the only
+#: valid value in the service-stack topology (RDR-160); the RDR-144 multi-choice
+#: picker that once varied it was removed in RDR-174 P1.3.
 _EMBED_MODEL_KEY = "local.embed_model"
 
 
@@ -514,6 +519,15 @@ def init_cmd(
     # would be a regression vs the pre-P1.3 cloud early-return). NX_LOCAL=1 still
     # forces local provisioning even with cloud keys (migration/rehearsal). An
     # explicit ``--service`` forces local provisioning regardless of mode.
+    #
+    # ⚠ CROSS-PHASE INVARIANT (P2 autostart): BOTH no-provision exits below — the
+    # managed arm and the cloud arm (mode=="local" yet is_local_mode() False) —
+    # AND the lease-is-None diagnostic in the local block must remain reachable
+    # WITHOUT ever starting a local service. P2 inserts the autostart prompt
+    # after a SUCCESSFUL provision_and_start_service (non-None lease) only; it
+    # must NOT fire on these remote/cloud paths. Do not collapse this guard to
+    # `_resolve_init_mode()`-only — that would route cloud-Voyage users into
+    # provisioning.
     mode = _resolve_init_mode()
     if not provision_service and (mode == "managed" or not _config.is_local_mode()):
         # Data plane served remotely — nothing local to provision. The old
