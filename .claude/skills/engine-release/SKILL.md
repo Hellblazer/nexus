@@ -55,7 +55,7 @@ Must end `GUIDED-UPGRADE MVV PASSED`. This proves the candidate `service/` tree
 compiles + serves under GraalVM native-image (the `-Ob` build has the **same**
 reachability requirements as the full release build, so it catches a broken
 native build before the tag burns a release-workflow run). It is a *proxy* for
-the published binary — the canonical 4 binaries are built by the workflow in
+the published binary — the canonical native binaries are built by the workflow in
 Step 4; the published artifact itself is validated in Step 5.
 
 Notes:
@@ -74,7 +74,7 @@ git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit>
 git push origin engine-service-vX.Y.Z
 ```
 
-Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 4 native binaries (linux/mac × arm64/amd64) and publishes the GitHub release. Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs ~30 min).
+Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`) plus their PG bundles, and publishes the GitHub release. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs ~30 min).
 
 ### 5. POST-PUBLISH validation: `--cold` + `--with-cloud` against the new tag (REQUIRED)
 
