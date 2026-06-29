@@ -323,6 +323,24 @@ leaves the hazard. Hal chose heal-on-next-use.
 - (−) No-autostart mode loses continuous self-heal; gains heal-on-next-use.
 - (=) PG-only failure is UNCHANGED — the `(True, False)` arm restarts PG directly
   without bouncing the alive Java service.
+- (−) Exit-code narrowing (substantive-critic SIG-3): exit 4 (PG-unrecoverable)
+  is now emitted ONLY from the `(True, False)` PG-only arm. A simultaneous
+  service+PG death exits 3, and a permanently-broken PG on the OS-restart's
+  `start()` surfaces as exit 1 (crash backstop re-raise), not 4. Under
+  `StartLimitIntervalSec=0` / launchd `KeepAlive` all of 1/3/4 restart, so this
+  affects log-based triage only, not recovery.
+- (−) Coexistence crash-loop (substantive-critic SIG-1), tied to the deferred
+  Step 3A: if a session supervisor (from `nx init`) is already holding the lease
+  and a user THEN runs `nx daemon service install --autostart`, the unit's
+  supervisor `start()` short-circuits on the live lease (`_proc` stays unset),
+  the first `heartbeat_once()` returns falsey, and the unit exits 3 → the OS
+  restarts it every `RestartSec=5s` until the session lease expires. No
+  double-spawn occurs (the regression this RDR targets is gone), but the unit
+  crash-loops within that login session. This coexistence is exactly what the
+  deferred decide-autostart-first ordering (Step 3A, `nexus-shkww`) prevents by
+  never letting a session supervisor and a unit run at once. Behavior is pinned
+  by `TestRdr175MvvSingleSupervisor.test_second_supervisor_under_live_lease_exits_nonzero`.
+  Bounded: resolves on session end / reboot (only the unit starts, lease free).
 
 ### Risks and Mitigations
 

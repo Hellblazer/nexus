@@ -1543,6 +1543,46 @@ class TestRdr175MvvSingleSupervisor:
         assert rec.endpoint.get("port") == 18101
         assert payload["port"] == 18101, "second start must return the live endpoint"
 
+    def test_second_supervisor_under_live_lease_exits_nonzero(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """Coexistence (substantive-critic SIG-1, deferred-Step-3A territory): a
+        second supervisor's FULL run loop, started while another supervisor holds
+        a live lease, must NOT double-spawn — start() short-circuits, _proc stays
+        unset, and the loop exits non-zero (3). Under the OS unit this re-runs
+        every RestartSec until the foreign lease expires (a bounded crash-loop,
+        documented in RDR-175 §Consequences). The decide-autostart-first ordering
+        (nexus-shkww) is what prevents the coexistence in the first place. This
+        test PINS the current behavior so the gap is tested, not hidden."""
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        # First supervisor holds a live lease.
+        first = _make_supervisor(config_dir, clock, supervised=True)
+        first._proc = _FakeProc(pid=46021)
+        first._service_port = 18103
+        first._publish(18103)
+
+        # Second supervisor runs the real loop. _spawn_service is a tripwire:
+        # the short-circuit must keep it from ever spawning a second service.
+        second = _make_supervisor(config_dir, clock, supervised=True)
+
+        def _must_not_spawn() -> tuple[Any, int]:
+            raise AssertionError("coexisting supervisor must NOT spawn a second service")
+
+        stop = threading.Event()
+        with patch.object(second, "_spawn_service", side_effect=_must_not_spawn), \
+             patch.object(second, "_ensure_pg_running"), \
+             patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0):
+            code = ssd._supervise_until_stopped(second, stop, lambda: None)
+
+        assert code == 3, (
+            "a supervisor that finds the lease already held exits 3 (no "
+            "double-spawn); the OS unit then crash-loops until the foreign "
+            "lease expires — see RDR-175 §Consequences / nexus-shkww"
+        )
+
     def test_pg_only_restart_keeps_same_java_pid(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:

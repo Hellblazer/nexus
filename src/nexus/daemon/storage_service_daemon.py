@@ -1043,7 +1043,14 @@ def run_storage_supervisor(
     in-process respawn. The (False, _) signal is raised both when the service
     process exits AND when it is alive but /health has returned non-200 for
     _MAX_UNHEALTHY_HEARTBEATS consecutive beats (stuck process). Exit codes:
-    3 = service-unrecoverable, 4 = PG-unrecoverable. Returns the exit code.
+    3 = service-unrecoverable, 4 = PG-unrecoverable. NOTE (RDR-175): exit 4 is
+    emitted ONLY from the (True, False) PG-only arm (PG dies while the service
+    is alive). A simultaneous service+PG death exits 3, and if PG is then
+    permanently unrecoverable the OS-restart's start() raises
+    StorageServiceStartError → the crash backstop re-raises → process exits 1.
+    Under StartLimitIntervalSec=0 / KeepAlive all of 1/3/4 trigger an OS
+    restart, so this narrowing affects log-based triage only, not recovery.
+    Returns the exit code.
     """
     if config_dir is None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
