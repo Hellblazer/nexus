@@ -122,21 +122,37 @@ Target end state: `uv tool install conexus && nx init && nx index`.
    reaches provisioning (mock the heavy steps).
 4. **Service-supervisor autostart**: new `nx daemon service install --autostart`
    on the RDR-149 installer substrate; `nx init` prompts (default yes) / `--yes` /
-   `--no-autostart`. Two service-specific deltas the t2/t3 templates do NOT cover
-   (gate-locked, critic SIG-2 / SIG-3):
-   - **PG boot-ordering**: the supervisor connects to the local Postgres, so the
-     Linux unit needs `After=postgresql.service` (and `Wants=`); macOS launchd has
-     no ordering, so the unit must exec a thin wrapper that polls PG readiness
-     before launching the supervisor (avoids `Restart`/`KeepAlive` thrash on cold
-     boot). t2/t3 only declare `After=network.target` — diverge here.
-   - **Supervisor handoff (no double-spawn)**: the autostart unit owns the
-     lifecycle. When `nx init` installs the unit, it does NOT also leave its own
-     detached `ensure_storage_supervisor` subprocess racing the unit's
-     `RunAtLoad`/`--now` start. Model (a): on install, let the unit be the single
-     starter and have `nx init` poll for the lease to appear; do not spawn a
-     second supervisor. Define the single-writer/lease cleanup if both ever race.
-   Tests: unit written with PG ordering; prompt honored; skip honored; no
-   double-supervisor (one lease after install).
+   `--no-autostart`. Two service-specific deltas, **re-scoped 2026-06-28 after
+   implementation-time verification** (decision `nexus-423yt.1`; evidence T2
+   `nexus/rdr-174-p2-section4-finding`). The original gate text (critic SIG-2 /
+   SIG-3) assumed an external Postgres to order against; the codebase shows the
+   supervisor self-manages an nx-owned PG cluster, so both deltas are lighter than
+   the gate text:
+   - **PG boot-ordering — VERIFIED NO-OP.** The supervisor STARTS its own
+     nx-owned PG cluster as step 1 of startup (`storage_service_daemon.py`
+     `_start_locked` → `_ensure_pg_running` → `_start_cluster`), with boot-safe
+     binary discovery from the config dir (`pg_provision.discover_pg_binaries`, no
+     provisioning-time env required). There is NO external `postgresql.service`
+     cluster in any mode (host-binaries mode still starts nx's own PG_DATA/port).
+     `After=postgresql.service` would order against a unit that does not manage
+     nx's cluster, and `Wants=` fails on hosts without distro PG; a macOS PG
+     readiness wrapper would poll a PG nothing external starts. Both wrong. The
+     only real boot need is `After=network.target` (already present in
+     `nexus-service.service`). Honest implementation: a template comment recording
+     that the supervisor owns its PG lifecycle, plus a boot-robustness regression
+     test asserting the supervisor self-starts PG regardless of env. (`nexus-exfns`)
+   - **Supervisor handoff (no double-spawn) — lean on the existing lease.**
+     `ensure_storage_supervisor` is already lease-gated via `service_registry`
+     (RDR-149 TTL/election; P2.1 critic OBS-2): once the autostart unit's
+     `RunAtLoad`/`--now` start publishes a lease, a later `ensure_storage_supervisor`
+     discovers it and exits, so there is no double-spawn today. Scope is therefore
+     a verify-existing-arbitration integration test (exactly ONE lease after
+     install-with-autostart) plus a `nx init` handoff-poll branch (poll for the
+     lease after install instead of spawning a second supervisor). Do NOT add a
+     parallel arbiter — the RDR-149 lifecycle gate (`test_lifecycle_gate.py`) bans
+     a bespoke lock/election outside `service_registry`. (`nexus-1brzs`)
+   Tests: boot-robustness (supervisor self-starts PG regardless of env); prompt
+   honored; skip honored; no double-supervisor (exactly one lease after install).
 5. **`--service` deprecation notice** (still functional). Test: notice emitted,
    behavior unchanged.
 6. **Remove the T2-daemon step** from `nx init` and the README; confirm default
