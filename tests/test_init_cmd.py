@@ -171,6 +171,63 @@ class TestServiceProvisioningFlag:
         assert result.exit_code == 0, result.output
         assert called == [None], "LOCAL plain init must provision via the unified path"
 
+    def test_service_flag_emits_deprecation_notice(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RDR-174 P3.1 (§Approach 5): ``--service`` still runs the local
+        provision path (now the default) but prints a deprecation notice."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: _FAKE_LEASE,
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--service"])
+
+        assert result.exit_code == 0, result.output
+        out = result.output.lower()
+        assert "--service" in result.output and "deprecat" in out, (
+            "--service must print a deprecation notice naming the flag"
+        )
+
+    def test_plain_init_no_deprecation_notice(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The deprecation notice fires ONLY for the explicit flag, not plain init."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: _FAKE_LEASE,
+        )
+
+        result = CliRunner().invoke(init_cmd, [])
+
+        assert result.exit_code == 0, result.output
+        assert "deprecat" not in result.output.lower()
+
+    def test_service_flag_same_provision_path_as_plain(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Behavior UNCHANGED: ``--service`` drives the SAME local provision path
+        as plain ``nx init`` (both call provision_and_start_service identically)."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        seen: list[str | None] = []
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: seen.append(embedder) or _FAKE_LEASE,
+        )
+
+        CliRunner().invoke(init_cmd, [])
+        CliRunner().invoke(init_cmd, ["--service"])
+
+        assert seen == [None, None], (
+            "--service and plain init must both call provision_and_start_service "
+            "with the same args (behavior unchanged, only a notice added)"
+        )
+
     def test_nx_storage_backend_no_effect_on_dispatch(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

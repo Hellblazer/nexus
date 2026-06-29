@@ -638,8 +638,9 @@ def _managed_onboarding(ctx: click.Context) -> None:
     is_flag=True,
     default=False,
     help=(
-        "Provision the local Postgres cluster for the RDR-152 Java service backend. "
-        "Creates nexus_admin and nexus_svc roles and writes credentials to "
+        "[DEPRECATED — plain `nx init` now does this by default] Provision the "
+        "local Postgres cluster for the RDR-152 Java service backend. Creates "
+        "nexus_admin and nexus_svc roles and writes credentials to "
         "~/.config/nexus/pg_credentials. Idempotent: safe to re-run."
     ),
 )
@@ -670,6 +671,18 @@ def init_cmd(
     # non-interactively (the embedder picker that previously made it a no-op was
     # removed in P1.3). ``--no-autostart`` declines. The decision is made
     # decide-first in the local block below (RDR-175 Gap 3).
+
+    # RDR-174 P3.1 (§Approach 5): ``--service`` is deprecated — plain ``nx init``
+    # now drives the same local provision path. The flag stays wired (back-compat
+    # for docs, muscle memory, and direct callers) but emits a notice. Fired here,
+    # before dispatch, so it surfaces on every path the flag forces into.
+    if provision_service:
+        click.echo(
+            "Note: `nx init --service` is deprecated — plain `nx init` now "
+            "provisions the local service backend by default. The flag still "
+            "works but will be removed in a future release.",
+            err=True,
+        )
 
     # RDR-174 P1.3 dispatch. PRIMARY oracle is the gate-locked mode helper
     # (_resolve_init_mode — service_url-based, NOT is_local_mode which is

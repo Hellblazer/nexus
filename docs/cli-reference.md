@@ -1221,7 +1221,7 @@ nx init                       # local: provision + interactively offer autostart
 nx init --yes                 # accept service-autostart registration, no prompt
 nx init --no-autostart        # provision + start a session supervisor only; register no unit
 nx init --embedder minilm-384 # pick a specific embedder, no prompt
-nx init --service             # provision the Postgres+pgvector service backend + start it
+nx init --service             # DEPRECATED — plain `nx init` now does this by default
 ```
 
 | Flag | Description |
@@ -1229,7 +1229,7 @@ nx init --service             # provision the Postgres+pgvector service backend 
 | `--embedder [bge-768\|minilm-384]` | Select the embedder non-interactively (skips the prompt) |
 | `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` waits for it to come up rather than also starting a session supervisor. |
 | `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
-| `--service` | Provision the local Postgres + pgvector cluster the RDR-152 service backend uses, lock the embedder to bge-768, acquire + verify the native service binary, fetch the bge-768 ONNX, and start the persistent service supervisor. Idempotent. This is the path that stands up T3 serving for a local install. (Also auto-runs when `NX_STORAGE_BACKEND=service` is set.) Acquire the binary + PG bundle first with `nx daemon service install-binary <engine-service-vX.Y.Z>`. |
+| `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, locks the embedder to bge-768, acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. Acquire the binary + PG bundle first with `nx daemon service install-binary <engine-service-vX.Y.Z>`. |
 
 **Service autostart (RDR-174 P2.4, decide-first):** in local mode `nx init`
 decides autostart *before* starting any supervisor. Interactive runs prompt
