@@ -1485,3 +1485,104 @@ class TestSupervisorSelfManagesPgAtBoot:
         assert bins == "FAKE_BINS"
         assert pgdata == config_dir / "postgres", "starts nx's own PG_DATA"
         assert port == 15439, "starts nx's own provisioned port"
+
+
+# ---------------------------------------------------------------------------
+# RDR-175 Minimum Viable Validation: single supervisor, no double-spawn
+# ---------------------------------------------------------------------------
+class TestRdr175MvvSingleSupervisor:
+    """RDR-175 MVV (subsumes nexus-1brzs). The minimal design's regression
+    proof: after the in-process respawn mechanism is retired, exactly ONE
+    supervisor owns the lease — a second start attempt (e.g. an autostart unit
+    activating while a session supervisor already runs) discovers the live
+    lease and short-circuits without spawning a second service. The
+    no-double-spawn property rests on RDR-149 lease arbitration (idempotent
+    start under a live lease), NOT on in-process respawn or on the deferred
+    decide-autostart-first init ordering (nexus-shkww).
+
+    The (True, False) PG-only arm restarts PG in place WITHOUT bouncing the
+    JVM: the Java process identity is unchanged across a PG restart."""
+
+    def test_second_start_short_circuits_to_single_lease(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """A live lease (first supervisor / unit start) makes a second
+        supervisor.start() short-circuit: no second spawn, exactly one lease."""
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        scope = str(os.getuid())
+
+        # First supervisor publishes a live lease (models the unit / session
+        # supervisor already holding the lease).
+        first = _make_supervisor(config_dir, clock, supervised=True)
+        first._proc = _FakeProc(pid=46001)
+        first._service_port = 18101
+        first._publish(18101)
+
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        assert registry.discover(scope) is not None
+
+        # Second supervisor attempts start(). _spawn_service is a tripwire: if
+        # the short-circuit fails and it tries to spawn, the test fails loudly.
+        second = _make_supervisor(config_dir, clock, supervised=True)
+
+        def _must_not_spawn() -> tuple[Any, int]:
+            raise AssertionError(
+                "second start() must short-circuit on the live lease, never spawn "
+                "a second service (no double-spawn)"
+            )
+
+        with patch.object(second, "_spawn_service", side_effect=_must_not_spawn), \
+             patch.object(second, "_ensure_pg_running") as ensure_pg:
+            payload = second.start()
+
+        ensure_pg.assert_not_called()  # short-circuit precedes PG bring-up
+        # Exactly one lease, and it is the FIRST supervisor's endpoint.
+        rec = registry.discover(scope)
+        assert rec is not None
+        assert rec.endpoint.get("port") == 18101
+        assert payload["port"] == 18101, "second start must return the live endpoint"
+
+    def test_pg_only_restart_keeps_same_java_pid(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """(True, False) PG-only death: the supervise loop restarts PG in place
+        and the Java process identity (sup._proc) is unchanged before and
+        after — the JVM is never bounced for a PG-only failure."""
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        sup = _make_supervisor(config_dir, clock, supervised=True)
+        fake_proc = _FakeProc(pid=46010)
+        sup._proc = fake_proc
+        sup._service_port = 18102
+        sup._publish(18102)
+
+        stop = threading.Event()
+        beats = iter([(True, False), (True, True)])
+
+        def _scripted_heartbeat() -> tuple[bool, bool]:
+            try:
+                return next(beats)
+            except StopIteration:
+                stop.set()
+                return True, True
+
+        ensure_pg_calls: list[int] = []
+
+        def _record_ensure_pg() -> None:
+            ensure_pg_calls.append(1)  # restart PG in place; do NOT touch _proc
+
+        pid_before = sup._proc.pid
+        with patch.object(sup, "start"), \
+             patch.object(sup, "heartbeat_once", side_effect=_scripted_heartbeat), \
+             patch.object(sup, "_ensure_pg_running", side_effect=_record_ensure_pg), \
+             patch.object(sup, "stop"), \
+             patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0):
+            code = ssd._supervise_until_stopped(sup, stop, lambda: None)
+
+        assert code == 0, "PG-only death must NOT exit the supervisor"
+        assert ensure_pg_calls == [1], "PG restarted in place exactly once"
+        assert sup._proc is fake_proc, "Java process must NOT be bounced for a PG-only restart"
+        assert sup._proc.pid == pid_before
