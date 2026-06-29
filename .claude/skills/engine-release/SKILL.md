@@ -76,7 +76,7 @@ git push origin engine-service-vX.Y.Z
 
 Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`) plus their PG bundles, and publishes the GitHub release. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs ~30 min).
 
-### 5. POST-PUBLISH validation: `--cold` + `--with-cloud` against the new tag (REQUIRED)
+### 5. POST-PUBLISH validation: `--cold` against the new tag (REQUIRED)
 
 Now the candidate is published, validate the **actual release artifact** by
 acquiring it — this is the gate that catches what unit tests miss (it found
@@ -86,21 +86,26 @@ wheel installed in-container, never touches `~/.config/nexus` or prod).
 ```bash
 export NEXUS_SERVICE_TAG=engine-service-vX.Y.Z      # point the cold-acquire at the JUST-published candidate
 tests/e2e/migration-rehearsal/run.sh --cold         # bare box → install-binary <new tag> → init → guided-upgrade
-tests/e2e/migration-rehearsal/run.sh --with-cloud   # cloud → cloud (Voyage leg; needs .env voyage key; bills Voyage embeddings only)
 ```
 
-Each must end `... MVV PASSED` / `SOUP-TO-NUTS REHEARSAL PASSED`. `--cold`
-rebuilds the wheel and cold-acquires the published binary + PG bundle (it does
-**not** build a native binary). If either fails, the published tag is bad — fix
-and cut a new patch tag (a published tag is immutable; do not re-point it).
+Must end `... MVV PASSED`. `--cold` rebuilds the wheel and cold-acquires the
+published binary + PG bundle (it does **not** build a native binary). If it
+fails, the published tag is bad — fix and cut a new patch tag (a published tag
+is immutable; do not re-point it).
 
-### 6. Relay deploy + cloud-gate to conexus (passive bus)
+> **`--with-cloud` does NOT belong here.** It is NOT a local/acquire leg — it
+> exercises the **conexus-DEPLOYED** cloud service, so it can only run AFTER the
+> engine is deployed to `api.conexus-nexus.com` (Step 6). Running it pre-deploy
+> tests the *previously*-deployed cloud engine, not the candidate. It is part of
+> the post-deploy cloud-gate, below.
+
+### 6. Relay deploy + post-deploy cloud validation to conexus (passive bus)
 
 Deploy and cloud-validation are **conexus-side operations** — the bus is passive, so surface an explicit relay to Hal; never frame the cross-instance deploy as autonomous:
 
-> relay: deploy `engine-service-vX.Y.Z` to the cloud + re-run the cloud gate (recall + hybrid parity, xr7.8.9-style).
+> relay: deploy `engine-service-vX.Y.Z` to `api.conexus-nexus.com` + re-run the cloud gate (recall + hybrid parity, xr7.8.9-style).
 
-For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
+The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → cloud Voyage journey) requires the candidate to be **deployed on conexus** first — it runs as part of this cloud-gate, once the deploy lands, not in Step 5. For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
 
 ### 7. After conexus confirms deployed + cloud-gated green, bump downstream refs
 
