@@ -49,7 +49,10 @@ _VERIFY_TABLES: dict[tuple[str, str], str] = {
     ("telemetry", "hook_failures"): "nexus.hook_failures",
     ("telemetry", "nx_answer_runs"): "nexus.nx_answer_runs",
     ("chash", "chash_index"): "nexus.chash_index",
+    ("catalog", "owners"): "nexus.catalog_owners",
     ("catalog", "documents"): "nexus.catalog_documents",
+    ("catalog", "collections"): "nexus.catalog_collections",
+    ("catalog", "document_chunks"): "nexus.catalog_document_chunks",
     ("catalog", "links"): "nexus.catalog_links",
 }
 
