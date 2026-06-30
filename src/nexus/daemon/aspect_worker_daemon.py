@@ -80,6 +80,14 @@ def _default_worker_factory() -> Any:
     return AspectExtractionWorker()
 
 
+def _default_aspect_queue(tenant: str) -> Any:
+    """Build the tenant-scoped service queue handle for the reclaim loop (RF-5).
+    Deferred import; the service endpoint resolves via the standard chain."""
+    from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 - deferred; service-mode only
+
+    return HttpAspectQueue(tenant=tenant)
+
+
 class AspectWorkerDaemon:
     """A per-tenant leased host for the aspect-extraction worker loop.
 
@@ -97,6 +105,9 @@ class AspectWorkerDaemon:
         worker_factory: WorkerFactory = _default_worker_factory,
         clock: Callable[[], float] = time.time,
         heartbeat_interval: float = _HEARTBEAT_INTERVAL,
+        stale_timeout_seconds: int = 60,
+        reclaim_interval: float | None = None,
+        queue_factory: Callable[[], Any] | None = None,
     ) -> None:
         if not tenant:
             raise ValueError("aspect-worker daemon requires a non-empty tenant (per-tenant scope)")
@@ -119,9 +130,22 @@ class AspectWorkerDaemon:
             clock=clock,
             ttl=ttl_for_tier(TIER),
         )
+        # RDR-173 P3 (RF-5): the daemon owns reclaim_stale. A stranded
+        # in_progress row is reset to pending on this interval so a worker death
+        # self-heals; the stale window passed to the service matches the worker's.
+        self._stale_timeout = stale_timeout_seconds
+        self._reclaim_interval = (
+            float(reclaim_interval) if reclaim_interval is not None else float(stale_timeout_seconds)
+        )
+        self._queue_factory = (
+            queue_factory if queue_factory is not None
+            else (lambda: _default_aspect_queue(self._tenant))
+        )
         self._supervisor: ServiceSupervisor | None = None
         self._worker: Any = None
         self._hb_thread: threading.Thread | None = None
+        self._reclaim_queue: Any = None
+        self._reclaim_thread: threading.Thread | None = None
         self._stop = threading.Event()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
@@ -146,7 +170,37 @@ class AspectWorkerDaemon:
             daemon=True,
         )
         self._hb_thread.start()
+        # RDR-173 P3 (RF-5): the reclaim owner. Built here (not in __init__) so a
+        # failed queue construction surfaces at start, alongside the lease.
+        self._reclaim_queue = self._queue_factory()
+        self._reclaim_thread = threading.Thread(
+            target=self._reclaim_loop,
+            name=f"aspect-worker-reclaim-{self._tenant}",
+            daemon=True,
+        )
+        self._reclaim_thread.start()
         _log.info("aspect_worker_daemon.started", tenant=self._tenant, pid=os.getpid())
+
+    def _reclaim_loop(self) -> None:
+        """Periodically reset stranded ``in_progress`` rows to ``pending`` so a
+        worker death self-heals (RF-5). Per-tenant: the service applies the
+        tenant GUC. A transient failure is logged and the loop continues."""
+        while not self._stop.wait(self._reclaim_interval):
+            queue = self._reclaim_queue
+            if queue is None:
+                continue
+            try:
+                n = queue.reclaim_stale(self._stale_timeout)
+                if n:
+                    _log.info(
+                        "aspect_worker_daemon.reclaimed_stale",
+                        tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
+                    )
+            except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
+                _log.warning(
+                    "aspect_worker_daemon.reclaim_failed",
+                    tenant=self._tenant, error=str(exc),
+                )
 
     def heartbeat_once(self) -> None:
         """Run a single heartbeat tick (test seam + the loop body)."""
@@ -195,6 +249,17 @@ class AspectWorkerDaemon:
                 # lingering reassert is not mistaken for a leak (code-review M1).
                 _log.warning("aspect_worker_daemon.heartbeat_thread_join_timeout", tenant=self._tenant)
             self._hb_thread = None
+        if self._reclaim_thread is not None:
+            self._reclaim_thread.join(timeout=2.0)
+            if self._reclaim_thread.is_alive():
+                _log.warning("aspect_worker_daemon.reclaim_thread_join_timeout", tenant=self._tenant)
+            self._reclaim_thread = None
+        if self._reclaim_queue is not None:
+            try:
+                self._reclaim_queue.close()
+            except Exception as exc:  # noqa: BLE001 - queue close is best-effort during teardown
+                _log.warning("aspect_worker_daemon.reclaim_queue_close_failed", tenant=self._tenant, error=str(exc))
+            self._reclaim_queue = None
         if self._worker is not None:
             try:
                 self._worker.stop(timeout=timeout)

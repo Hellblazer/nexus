@@ -52,13 +52,25 @@ class _FakeWorker:
         self.stopped += 1
 
 
+class _NoopQueue:
+    """No-op reclaim queue so lifecycle tests don't build a real HttpAspectQueue
+    (which needs a live service). Reclaim behavior itself is covered in
+    tests/daemon/test_aspect_worker_reclaim.py."""
+
+    def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        return 0
+
+    def close(self) -> None:
+        ...
+
+
 def _registry(config_dir: Path) -> ServiceRegistry:
     return ServiceRegistry(dir=config_dir, tier=_ASPECT_TIER, ttl=ttl_for_tier(_ASPECT_TIER))
 
 
 def test_start_publishes_per_tenant_lease(tmp_path: Path) -> None:
     worker = _FakeWorker()
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
     d.start()
     try:
         rec = _registry(tmp_path).discover("tenant-A")
@@ -70,7 +82,7 @@ def test_start_publishes_per_tenant_lease(tmp_path: Path) -> None:
 
 
 def test_lease_is_tenant_scoped(tmp_path: Path) -> None:
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
     d.start()
     try:
         reg = _registry(tmp_path)
@@ -82,7 +94,7 @@ def test_lease_is_tenant_scoped(tmp_path: Path) -> None:
 
 def test_stop_relinquishes_lease_and_stops_worker(tmp_path: Path) -> None:
     worker = _FakeWorker()
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
     d.start()
     d.stop()
     assert _registry(tmp_path).discover("tenant-A") is None
@@ -93,8 +105,8 @@ def test_second_instance_same_tenant_converges_to_one_owner(tmp_path: Path) -> N
     """Two daemons for the same tenant: the registry's generation fencing makes
     the earlier owner stale. The later publisher holds the live lease; the first
     daemon's next heartbeat detects it is fenced."""
-    d1 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker)
-    d2 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker)
+    d1 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+    d2 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
     d1.start()
     d2.start()  # higher generation — becomes the live owner
     try:
@@ -140,12 +152,12 @@ def test_invalid_tenant_rejected(tmp_path, bad) -> None:
     """The tenant is a discovery-file scope-key suffix; path-special values are
     rejected before Phase 2 wires arbitrary tenant strings (code-review M3)."""
     with pytest.raises(ValueError):
-        AspectWorkerDaemon(config_dir=tmp_path, tenant=bad, worker_factory=_FakeWorker)
+        AspectWorkerDaemon(config_dir=tmp_path, tenant=bad, worker_factory=_FakeWorker, queue_factory=_NoopQueue)
 
 
 def test_empty_tenant_rejected(tmp_path) -> None:
     with pytest.raises(ValueError):
-        AspectWorkerDaemon(config_dir=tmp_path, tenant="", worker_factory=_FakeWorker)
+        AspectWorkerDaemon(config_dir=tmp_path, tenant="", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
 
 
 def test_live_heartbeat_loop_detects_fencing(tmp_path) -> None:
@@ -153,9 +165,9 @@ def test_live_heartbeat_loop_detects_fencing(tmp_path) -> None:
     a newer daemon fenced this one and stand down (set _stop). Exercises the
     live scheduling path, not just the data model (code-review M2)."""
     d1 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
-                            worker_factory=_FakeWorker, heartbeat_interval=0.05)
+                            worker_factory=_FakeWorker, heartbeat_interval=0.05, queue_factory=_NoopQueue)
     d2 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
-                            worker_factory=_FakeWorker, heartbeat_interval=0.05)
+                            worker_factory=_FakeWorker, heartbeat_interval=0.05, queue_factory=_NoopQueue)
     d1.start()
     d2.start()  # higher generation — fences d1
     try:
