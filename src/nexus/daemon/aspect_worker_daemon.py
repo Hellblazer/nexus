@@ -79,6 +79,12 @@ _DEFAULT_STALE_TIMEOUT_S: int = 300
 #: is reclaimed within ~30s rather than waiting a full threshold-length interval.
 _DEFAULT_RECLAIM_INTERVAL: float = 30.0
 
+#: Grace window (s) to catch a daemon child that crashes immediately after spawn
+#: (RDR-173 P5). On the store path only at actual spawn time (deduped), so the
+#: cost is bounded; long enough for configure_logging + the credential guard to
+#: run and exit on the common misconfigurations.
+_SPAWN_LIVENESS_GRACE_S: float = 0.15
+
 
 def _daemon_version() -> str:
     try:
@@ -212,22 +218,30 @@ class AspectWorkerDaemon:
         prior worker death left BEHIND immediately, rather than waiting a full
         interval — in service mode this daemon is the SOLE reclaim owner."""
         while True:
-            queue = self._reclaim_queue
-            if queue is not None:
-                try:
-                    n = queue.reclaim_stale(self._stale_timeout)
-                    if n:
-                        _log.info(
-                            "aspect_worker_daemon.reclaimed_stale",
-                            tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
-                        )
-                except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
-                    _log.warning(
-                        "aspect_worker_daemon.reclaim_failed",
-                        tenant=self._tenant, error=str(exc),
-                    )
+            self._reclaim_once()
             if self._stop.wait(self._reclaim_interval):
                 break
+
+    def _reclaim_once(self) -> None:
+        """One reclaim sweep (the loop body; also the main-thread test seam).
+        Emits a structured signal when rows are reset (RDR-173 P5 observability,
+        nexus-xv5fl) so self-healing is observable, and logs a failure without
+        killing the loop."""
+        queue = self._reclaim_queue
+        if queue is None:
+            return
+        try:
+            n = queue.reclaim_stale(self._stale_timeout)
+            if n:
+                _log.info(
+                    "aspect_worker_daemon.reclaimed_stale",
+                    tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
+                )
+        except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
+            _log.warning(
+                "aspect_worker_daemon.reclaim_failed",
+                tenant=self._tenant, error=str(exc),
+            )
 
     def heartbeat_once(self) -> None:
         """Run a single heartbeat tick (test seam + the loop body)."""
@@ -284,18 +298,33 @@ class AspectWorkerDaemon:
             if self._reclaim_thread.is_alive():
                 _log.warning("aspect_worker_daemon.reclaim_thread_join_timeout", tenant=self._tenant)
             self._reclaim_thread = None
-        if self._reclaim_queue is not None:
-            try:
-                self._reclaim_queue.close()
-            except Exception as exc:  # noqa: BLE001 - queue close is best-effort during teardown
-                _log.warning("aspect_worker_daemon.reclaim_queue_close_failed", tenant=self._tenant, error=str(exc))
-            self._reclaim_queue = None
+        # Stop the worker BEFORE the final reclaim sweep so any row it was
+        # extracting counts as genuinely-undrained owned work.
         if self._worker is not None:
             try:
                 self._worker.stop(timeout=timeout)
             except Exception as exc:  # noqa: BLE001 - worker stop is best-effort during teardown
                 _log.warning("aspect_worker_daemon.worker_stop_failed", tenant=self._tenant, error=str(exc))
             self._worker = None
+        if self._reclaim_queue is not None:
+            # RDR-173 P5 item 3 (review): a final sweep makes the daemon's death
+            # OBSERVABLE — the rows it owned but could not finish — AND resets them
+            # to pending for the next daemon (recovery in one). reclaim_stale(0):
+            # the worker is already stopped, so any in_progress row is abandoned.
+            try:
+                undrained = self._reclaim_queue.reclaim_stale(0)
+                if undrained:
+                    _log.warning(
+                        "aspect_worker_daemon.stopping_with_undrained_rows",
+                        tenant=self._tenant, count=undrained,
+                    )
+            except Exception as exc:  # noqa: BLE001 - shutdown diagnostic is best-effort
+                _log.warning("aspect_worker_daemon.final_reclaim_failed", tenant=self._tenant, error=str(exc))
+            try:
+                self._reclaim_queue.close()
+            except Exception as exc:  # noqa: BLE001 - queue close is best-effort during teardown
+                _log.warning("aspect_worker_daemon.reclaim_queue_close_failed", tenant=self._tenant, error=str(exc))
+            self._reclaim_queue = None
         supervisor = self._supervisor
         if supervisor is not None:
             # A fenced loser does not own the record; mark/relinquish are
@@ -406,7 +435,7 @@ def ensure_aspect_worker_daemon(
         # lost to DEVNULL. Inherited env: NO env= override.
         spawn_log = open_child_log_or_devnull("aspect_worker_daemon.crash", config_dir)
         try:
-            _popen(
+            proc = _popen(
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=spawn_log,
@@ -416,7 +445,34 @@ def ensure_aspect_worker_daemon(
         finally:
             if not isinstance(spawn_log, int):
                 spawn_log.close()
+        # RDR-173 P5 (review CRITICAL): a successful Popen does NOT mean the
+        # daemon is up — the detached child runs _require_extraction_credentials
+        # + configure_logging, and the COMMON misconfiguration (claude missing,
+        # credential failure, import error) crashes the child immediately while
+        # the parent sees a clean return. Poll briefly so that fast crash is
+        # LOUD at the spawning (store) process, not only in the child's crash log.
+        # Best-effort + racy: a fast crash is caught; a slow one is missed (rarer)
+        # and the reclaim loop / next enqueue still recover the work.
+        _warn_if_child_died_fast(proc, tenant=tenant)
     return True
+
+
+def _warn_if_child_died_fast(proc: Any, *, tenant: str) -> None:
+    """Emit a LOUD signal if the just-spawned daemon child exited within a short
+    grace window (review CRITICAL: spawn-succeeds-child-dies was silent)."""
+    poll = getattr(proc, "poll", None)
+    if poll is None:
+        return  # injected fakes without poll() opt out
+    time.sleep(_SPAWN_LIVENESS_GRACE_S)
+    rc = poll()
+    if rc is not None:
+        _log.error(
+            "aspect_worker_daemon.spawn_child_died",
+            tenant=tenant, returncode=rc,
+            hint="daemon exited immediately after spawn — see the aspect_worker_daemon "
+                 "crash log under the config logs dir (commonly: claude not on PATH / "
+                 "credential failure / import error)",
+        )
 
 
 def run_aspect_worker_daemon(

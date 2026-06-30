@@ -80,6 +80,7 @@ class HttpAspectQueue(RawHandleGuardMixin):
         *,
         rename_lock: "threading.RLock | None" = None,
         _token: str | None = None,
+        timeout: float = 30.0,
     ) -> None:
         if base_url is not None:
             if _token is None:
@@ -107,7 +108,7 @@ class HttpAspectQueue(RawHandleGuardMixin):
         self._client = httpx.Client(
             base_url=self._base_url,
             headers=self._headers,
-            timeout=30.0,
+            timeout=timeout,
         )
         _log.info(
             "http_aspect_queue.init",
