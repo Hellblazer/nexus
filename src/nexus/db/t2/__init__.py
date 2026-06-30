@@ -577,7 +577,24 @@ class T2Database:
         Idempotent: subsequent calls against the same resolved path
         short-circuit via the ``_upgrade_done`` set in
         :mod:`nexus.db.migrations`.
+
+        RDR-176 Phase 1 (Gap 2, non-mutation): in service mode the local
+        ``.db`` is a migration SOURCE only and must stay byte-for-content
+        immutable so a downgrade is just "reinstall the prior CLI". Running
+        ``apply_pending`` here would re-stamp ``_nexus_version`` forward and
+        break the rollback guarantee, so skip entirely when the memory store
+        is service-backed. The Java service owns its own (Postgres) schema;
+        nothing on the SQLite side needs migrating. Enforced by
+        ``tests/db/test_rdr176_non_mutation.py``.
         """
+        from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred import — keep bootstrap_schema import-cheap on the steady-state path
+            StorageBackend,
+            storage_backend_for,
+        )
+
+        if storage_backend_for("memory") == StorageBackend.SERVICE:
+            return
+
         from nexus.db.migrations import (  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
             _upgrade_done,
             _upgrade_lock,

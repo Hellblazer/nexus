@@ -173,6 +173,21 @@ def ensure_installed_and_running() -> None:
     except Exception as exc:  # noqa: BLE001 — banner must never break boot
         _log.debug("first_run_banner_queue_failed", error=f"{type(exc).__name__}: {exc}")
 
+    # RDR-176 Phase 1 (Gap 2, non-mutation): the T2 daemon opens the local
+    # ``.db`` read-write with ``run_migrations=True`` and stamps
+    # ``_nexus_version`` forward — the PRIMARY mutation source that broke the
+    # downgrade guarantee in the 6.0.0 dogfood. In service mode the SQLite tier
+    # is a migration SOURCE only (the Java service is the live substrate), so do
+    # not launch the daemon at all. Enforced by tests/mcp/test_rdr176_first_run_no_daemon.py.
+    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred import — keep first-run import-cheap; storage_mode pulls os/enum only
+        StorageBackend,
+        storage_backend_for,
+    )
+
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        _log.debug("first_run_t2_daemon_skipped_service_mode")
+        return
+
     # Always ensure-running so the current session has a daemon.
     try:
         subprocess.run(

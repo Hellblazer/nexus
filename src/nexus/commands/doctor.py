@@ -16,6 +16,31 @@ _CHECK = "✓"
 _WARN = "✗"
 
 
+def _t2_diagnostic_connect(db_path: Path, sqlite3: Any) -> Any:
+    """Open the T2 SQLite DB for a read-only doctor diagnostic.
+
+    RDR-176 Phase 1 (Gap 2, non-mutation): in service mode the local ``.db`` is
+    a frozen migration source — a downgrade must find it byte-for-content
+    unchanged. ``PRAGMA journal_mode=WAL`` writes the DB header, so in service
+    mode open ``?mode=ro`` and skip the WAL pragma (these diagnostics only
+    SELECT). In sqlite mode keep the historical behaviour (WAL + busy_timeout)
+    so a concurrent MCP writer does not trip lock errors during the check.
+
+    ``sqlite3`` is passed in by the caller (each check imports it lazily to keep
+    CLI startup fast).
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 def _check_line(label: str, ok: bool, detail: str = "") -> str:
     status = _CHECK if ok else _WARN
     msg = f"  {status} {label}"
@@ -530,10 +555,8 @@ def _run_check_plan_library() -> None:
 
     # Context manager guards against a raise inside the count loop
     # leaking the connection (RDR-092 code-review S-3).
-    conn = sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only counts safe under WAL
+    conn = _t2_diagnostic_connect(db_path, sqlite3)
     try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA journal_mode=WAL")
 
         def _count(where: str) -> int:
             row = conn.execute(
@@ -2056,9 +2079,7 @@ def _run_check_taxonomy() -> None:
         click.echo("T2 database not found — nothing to check.")
         return
 
-    conn = sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only schema inspection
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = _t2_diagnostic_connect(db_path, sqlite3)
 
     tables = {
         r[0]

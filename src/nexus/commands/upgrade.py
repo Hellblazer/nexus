@@ -263,6 +263,25 @@ def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
 def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool = False) -> None:
     from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
+    # RDR-176 Phase 1 (Gap 2, non-mutation): in service mode the local SQLite
+    # T2 (and legacy Chroma T3) are a frozen migration SOURCE — the Java service
+    # owns its own Postgres schema. Opening the ``.db`` read-write here (PRAGMA
+    # journal_mode=WAL is a header write; bootstrap_version/apply_pending stamp
+    # ``_nexus_version``) would mutate the source and break the downgrade
+    # guarantee. There is no local schema to migrate, so no-op.
+    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred import — keep CLI startup cheap
+        StorageBackend,
+        storage_backend_for,
+    )
+
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        if not auto_mode:
+            click.echo(
+                "Service mode: the local SQLite/Chroma tiers are an immutable "
+                "migration source — no local schema migration to run."
+            )
+        return
+
     db_path = _db_path()
     current = _current_version()
     current_t = _parse_version(current)
