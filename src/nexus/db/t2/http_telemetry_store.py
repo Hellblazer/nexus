@@ -508,6 +508,22 @@ class HttpTelemetryStore(RawHandleGuardMixin):
             payload["last_hit_at"] = last_hit_at
         self._post("/v1/telemetry/import", payload)
 
+    def import_rows_batch(self, table: str, rows: list[dict[str, Any]]) -> int:
+        """RDR-176 P3 (bead nexus-t9rmg.18): fidelity-preserving BULK import for
+        one telemetry *table*.
+
+        POSTs ``{"table": table, "rows": rows}`` to ``/v1/telemetry/import_batch``
+        in ONE request — the service lands the whole batch under one tenant
+        transaction (GUC set once). Each row dict carries the same fields the
+        per-row ``import_*`` method for *table* sends (minus ``table``). Collapses
+        an N-row leg to ceil(N/batch). Empty list is a no-op; returns the number
+        of rows imported.
+        """
+        if not rows:
+            return 0
+        resp = self._post("/v1/telemetry/import_batch", {"table": table, "rows": rows})
+        return int(resp.get("imported", 0))
+
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _post(self, path: str, payload: dict[str, Any]) -> Any:

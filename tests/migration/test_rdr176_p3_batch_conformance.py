@@ -36,8 +36,10 @@ from nexus.db.t2.chash_etl import migrate_chash_rows
 from nexus.db.t2.http_chash_index import HttpChashIndex
 from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.db.t2.http_plan_library import HttpPlanLibrary
+from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 from nexus.db.t2.memory_etl import migrate_memory_rows
 from nexus.db.t2.plan_etl import migrate_plan_rows
+from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
 
 #: The per-call record cap (ChromaDB / service quota). A conformant ETL sends
 #: ceil(N / CAP) batches.
@@ -152,10 +154,42 @@ def _build_chash_store() -> object:
     return HttpChashIndex(base_url="http://svc", _token="t")
 
 
+# ── telemetry (per-row today across 6 tables) ────────────────────────────────
+
+
+def _seed_telemetry(db: Path, n: int) -> None:
+    """Seed N hook_failures rows (one of the six telemetry tables) — enough to
+    prove the per-table batch path; the other five stay empty (0 POSTs)."""
+    T2Database.bootstrap_schema(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO hook_failures (doc_id, collection, hook_name, error, "
+            "occurred_at, batch_doc_ids, is_batch, chain) VALUES (?,?,?,?,?,?,?,?)",
+            [
+                (f"doc{i}", "knowledge__rehearsal__minilm-l6-v2-384__v1",
+                 "post_store", f"err {i}", "2026-05-15T08:30:00Z", None, 0, "single")
+                for i in range(n)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _run_telemetry_etl(db: Path, store: object) -> None:
+    migrate_telemetry_rows(db, store)
+
+
+def _build_telemetry_store() -> object:
+    return HttpTelemetryStore(base_url="http://svc", _token="t")
+
+
 # (name, build_store, seed, run_etl, import_path, cap)
 _STORES = [
     ("memory", _build_memory_store, _seed_memory, _run_memory_etl, "/v1/memory/import_batch", CAP),
     ("plans", _build_plans_store, _seed_plans, _run_plans_etl, "/v1/plans/import_batch", CAP),
+    ("telemetry", _build_telemetry_store, _seed_telemetry, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
     ("chash", _build_chash_store, _seed_chash, _run_chash_etl, "/v1/chash/import", 200),
 ]
 
