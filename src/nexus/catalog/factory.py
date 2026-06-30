@@ -358,6 +358,12 @@ def make_catalog_client_for_migration(
     a specific Postgres service endpoint that may differ from the configured
     default (e.g. a fresh staging instance during an initial data load).
 
+    RDR-176 P2 (Gap 3): the primary callers now pass NO arguments — the CLI
+    migrate subcommands resolve ``(base_url, token)`` config-first themselves and
+    pass both, while ``migrate all`` / the orchestrator call this no-arg so the
+    client resolves URL+token config-first via ``resolve_service_endpoint``. The
+    explicit-args form remains for a caller that must target a non-default URL.
+
     Args:
         base_url: Override the service URL.  ``None`` falls back to the
             client's built-in env/config resolution (``NX_SERVICE_URL``).

@@ -13,6 +13,9 @@ probe, failing-first on a simulated current-edge 403 (bead nexus-t9rmg.9).
 """
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from nexus.migration.route_coverage import (
@@ -53,8 +56,36 @@ _EDGE_BLOCKED = frozenset(
 )
 
 
-def test_allowlist_is_the_canonical_enumerated_set() -> None:
+def test_allowlist_matches_the_frozen_enumerated_set() -> None:
+    """Edit-guard: a change to MIGRATION_ROUTES must be deliberate (update this
+    frozen copy too). This does NOT detect an OMISSION — a new ETL route absent
+    from both lists passes; that gap is covered by code review and the
+    real-endpoint check below."""
     assert tuple(MIGRATION_ROUTES) == _EXPECTED_ROUTES
+
+
+def test_every_route_is_a_real_endpoint_in_the_source_tree() -> None:
+    """Non-tautological completeness check: every allowlisted route must appear
+    as a literal somewhere in the nexus client OR the Java service handlers —
+    so a typo'd or fictional route in MIGRATION_ROUTES is caught (the tautology
+    test alone could not). The probe can only ever check routes it is given, so
+    a route that exists nowhere is dead allowlist weight that would false-alarm
+    the go-live gate forever."""
+
+    repo_root = Path(__file__).resolve().parents[2]
+    missing: list[str] = []
+    for route in MIGRATION_ROUTES:
+        # Search client + service source; exclude the allowlist module + tests
+        # so we are matching real call sites / handler registrations, not the
+        # enumeration itself.
+        hit = subprocess.run(
+            ["grep", "-rqF", "--include=*.py", "--include=*.java", route,
+             str(repo_root / "src" / "nexus"), str(repo_root / "service" / "src")],
+            capture_output=True,
+        )
+        if hit.returncode != 0:
+            missing.append(route)
+    assert missing == [], f"routes not found as real endpoints in source: {missing}"
 
 
 def test_gate_fails_on_current_edge_config() -> None:

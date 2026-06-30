@@ -69,6 +69,30 @@ def test_migrate_memory_resolves_token_from_config_not_env_only(
     assert constructed, "store was never constructed — auth gate blocked the run"
 
 
+def test_migrate_memory_fails_loud_when_no_token_anywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing the env-only gate must NOT make an unconfigured run silent: with
+    no token in env, config, or lease, the command fails with a clear,
+    actionable error (the new fail-loud path, replacing the old ClickException)."""
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    # No config token; neutralise any live supervisor lease on the dev box so
+    # the "nothing configured" case is deterministic.
+    monkeypatch.setattr(
+        "nexus.db.service_endpoint.discover_lease", lambda: (None, None)
+    )
+
+    db = _seed_empty_db(tmp_path)
+    result = CliRunner().invoke(
+        storage_cmd.migrate_memory_cmd,
+        ["--db", str(db), "--service-url", "http://127.0.0.1:1"],
+    )
+
+    assert result.exit_code != 0
+    assert "service_token" in result.output or "NX_SERVICE_TOKEN" in result.output
+
+
 def test_every_migrate_subcommand_exposes_service_url() -> None:
     """`--service-url` must be available on EVERY migrate subcommand, including
     `all` (today it has none). Excludes non-network helper subcommands."""

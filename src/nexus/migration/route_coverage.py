@@ -25,10 +25,21 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-#: The canonical migration endpoint allowlist (RDR-176 Research-2 §D). Every
-#: route the migration ETLs POST to, expanded from the path groups. This is the
-#: SINGLE SOURCE OF TRUTH: the edge allowlist (nginx) and the go-live gate both
-#: derive from it, so a new import route cannot ship without edge coverage.
+#: The canonical migration-path edge allowlist (RDR-176 Research-2 §D), expanded
+#: from the path groups. This is the SINGLE SOURCE OF TRUTH: the edge allowlist
+#: (nginx) and the go-live gate both derive from it, so a route the migration
+#: path needs cannot ship without edge coverage.
+#:
+#: Scope note: this is the set of routes the managed edge must PERMIT for the
+#: migration path, per RDR §D — not strictly "routes the ETL POSTs". It is a
+#: deliberate superset on two axes, because for a go-live SAFETY gate an
+#: over-inclusive false-alarm (a permitted-but-unused route the edge blocks) is
+#: far safer than an under-inclusive silent edge-block of a real migration route:
+#:   - ``/v1/chash/upsert_many`` is in §D though the current chash ETL writes via
+#:     ``/v1/chash/import`` (chash_etl.py — chosen to preserve ``created_at``).
+#:   - ``/v1/vectors/collections`` is a GET (collection listing), not a POST.
+#: When adding a NEW migration ETL endpoint, add it here — the gate cannot
+#: auto-detect an omission (the live probe only checks the routes it is given).
 MIGRATION_ROUTES: tuple[str, ...] = (
     "/v1/memory/import",
     "/v1/plans/import",
