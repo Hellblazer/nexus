@@ -553,17 +553,38 @@ CREATE TABLE aspect_extraction_queue (
 
 
 class _CaptureAspectsStore:
+    """RDR-176 P3: the aspects ETLs batch the transport; record one entry per
+    row in the batch and return the batch size."""
+
     def __init__(self) -> None:
         self.imported: list[dict] = []
         self.queued: list[dict] = []
+        self.highlights: list[dict] = []
+        self.promotions: list[dict] = []
 
     def import_aspect(self, body: dict) -> int:
         self.imported.append(body)
         return 1
 
+    def import_aspects_batch(self, rows: list[dict]) -> int:
+        self.imported.extend(rows)
+        return len(rows)
+
     def import_queue_row(self, body: dict) -> int:
         self.queued.append(body)
         return 1
+
+    def import_queue_batch(self, rows: list[dict]) -> int:
+        self.queued.extend(rows)
+        return len(rows)
+
+    def import_highlights_batch(self, rows: list[dict]) -> int:
+        self.highlights.extend(rows)
+        return len(rows)
+
+    def import_promotion_batch(self, rows: list[dict]) -> int:
+        self.promotions.extend(rows)
+        return len(rows)
 
 
 class TestAspectsPolicy:
@@ -832,7 +853,7 @@ CREATE TABLE relevance_log (
         aspects_db, catalog_db = TestAspectsPolicy()._seeded(tmp_path)
 
         class _RejectingQueue(_CaptureAspectsStore):
-            def import_queue_row(self, body):
+            def import_queue_batch(self, rows):
                 raise RuntimeError("rejected")
 
         collector = IssueCollector()

@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -346,9 +347,31 @@ public final class AspectHandler implements HttpHandler {
 
     private void handleImportAspect(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = serializeAspectBody(readBody(ex));
-        int n = repo.importAspect(tenant, body);
+        Map<String, Object> body = readBody(ex);
+        if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (Map<String, Object> r : castRows(body.get("rows"))) rows.add(serializeAspectBody(r));
+            HttpUtil.send(ex, 200, "{\"imported\":" + repo.importAspectsBatch(tenant, rows) + "}");
+            return;
+        }
+        int n = repo.importAspect(tenant, serializeAspectBody(body));
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
+    }
+
+    /** RDR-176 P3: cast a JSON ``rows`` array into a typed list. */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> castRows(Object raw) {
+        if (!(raw instanceof List<?> l)) {
+            throw new IllegalArgumentException("field 'rows' must be a JSON array");
+        }
+        List<Map<String, Object>> out = new ArrayList<>(l.size());
+        for (Object o : l) {
+            if (!(o instanceof Map<?, ?> m)) {
+                throw new IllegalArgumentException("each element of 'rows' must be an object");
+            }
+            out.add((Map<String, Object>) m);
+        }
+        return out;
     }
 
     /**
@@ -467,7 +490,12 @@ public final class AspectHandler implements HttpHandler {
 
     private void handleHighlightImport(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        int n = repo.importHighlight(tenant, readBody(ex));
+        Map<String, Object> body = readBody(ex);
+        if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
+            HttpUtil.send(ex, 200, "{\"imported\":" + repo.importHighlightsBatch(tenant, castRows(body.get("rows"))) + "}");
+            return;
+        }
+        int n = repo.importHighlight(tenant, body);
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
     }
 
@@ -582,7 +610,12 @@ public final class AspectHandler implements HttpHandler {
 
     private void handleQueueImport(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        int n = repo.importQueueRow(tenant, readBody(ex));
+        Map<String, Object> body = readBody(ex);
+        if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
+            HttpUtil.send(ex, 200, "{\"imported\":" + repo.importQueueBatch(tenant, castRows(body.get("rows"))) + "}");
+            return;
+        }
+        int n = repo.importQueueRow(tenant, body);
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
     }
 
@@ -601,7 +634,12 @@ public final class AspectHandler implements HttpHandler {
 
     private void handlePromotionImport(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        int n = repo.importPromotionRow(tenant, readBody(ex));
+        Map<String, Object> body = readBody(ex);
+        if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
+            HttpUtil.send(ex, 200, "{\"imported\":" + repo.importPromotionBatch(tenant, castRows(body.get("rows"))) + "}");
+            return;
+        }
+        int n = repo.importPromotionRow(tenant, body);
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
     }
 

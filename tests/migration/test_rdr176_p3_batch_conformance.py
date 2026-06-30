@@ -34,7 +34,10 @@ from nexus.db.chroma_quotas import QUOTAS
 from nexus.db.t2 import T2Database
 from nexus.db.t2.catalog_etl import _import_table
 from nexus.db.t2.chash_etl import migrate_chash_rows
+from nexus.db.t2.aspects_etl import migrate_aspects, migrate_queue
+from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 from nexus.db.t2.http_chash_index import HttpChashIndex
+from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
 from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.db.t2.http_plan_library import HttpPlanLibrary
 from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
@@ -220,12 +223,70 @@ def _build_taxonomy_store() -> object:
     return HttpTaxonomyStore(base_url="http://svc", _token="t")
 
 
+# ── aspects + aspect_queue (per-row today across 4 import paths) ──────────────
+
+
+def _seed_aspects(db: Path, n: int) -> None:
+    T2Database.bootstrap_schema(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO document_aspects (collection, source_path, "
+            "problem_formulation, confidence, extracted_at, model_version, "
+            "extractor_name) VALUES (?,?,?,?,?,?,?)",
+            [
+                ("knowledge__rehearsal__minilm-l6-v2-384__v1", f"/p/doc{i}.pdf",
+                 f"problem {i}", 0.9, "2026-05-15T08:30:00Z", "v1", "claude")
+                for i in range(n)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _run_aspects_etl(db: Path, store: object) -> None:
+    migrate_aspects(db, store)
+
+
+def _build_aspects_store() -> object:
+    return HttpDocumentAspectsStore(base_url="http://svc", _token="t")
+
+
+def _seed_queue(db: Path, n: int) -> None:
+    T2Database.bootstrap_schema(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO aspect_extraction_queue (collection, source_path, "
+            "content_hash, status, enqueued_at) VALUES (?,?,?,?,?)",
+            [
+                ("knowledge__rehearsal__minilm-l6-v2-384__v1", f"/p/doc{i}.pdf",
+                 f"{i:064x}", "pending", "2026-05-15T08:30:00Z")
+                for i in range(n)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _run_queue_etl(db: Path, store: object) -> None:
+    migrate_queue(db, store)
+
+
+def _build_queue_store() -> object:
+    return HttpAspectQueue(base_url="http://svc", _token="t")
+
+
 # (name, build_store, seed, run_etl, import_path, cap)
 _STORES = [
     ("memory", _build_memory_store, _seed_memory, _run_memory_etl, "/v1/memory/import_batch", CAP),
     ("plans", _build_plans_store, _seed_plans, _run_plans_etl, "/v1/plans/import_batch", CAP),
     ("telemetry", _build_telemetry_store, _seed_telemetry, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
     ("taxonomy", _build_taxonomy_store, _seed_taxonomy, _run_taxonomy_etl, "/v1/taxonomy/import_batch", CAP),
+    ("aspects", _build_aspects_store, _seed_aspects, _run_aspects_etl, "/v1/aspects/import", CAP),
+    ("aspect_queue", _build_queue_store, _seed_queue, _run_queue_etl, "/v1/aspects/queue/import", CAP),
     ("chash", _build_chash_store, _seed_chash, _run_chash_etl, "/v1/chash/import", 200),
 ]
 
