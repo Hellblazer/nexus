@@ -70,9 +70,12 @@ Retry policy (audit F8):
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import random
 import re
+import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -1362,13 +1365,7 @@ def _invoke_once_batch(prompt: str, *, timeout: int) -> dict:
     for the same reason as the single-paper path.
     """
     try:
-        result = subprocess.run(
-            ["claude", "-p", "--output-format", "json"],
-            input=prompt,
-            timeout=timeout,
-            capture_output=True,
-            text=True,
-        )
+        result = _run_claude_isolated(prompt, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise _TransientFailure(f"timeout after {timeout}s: {exc}") from exc
     except OSError as exc:
@@ -1517,6 +1514,51 @@ def _retry_subprocess(
     return None
 
 
+def _run_claude_isolated(
+    prompt: str,
+    timeout: float,
+    *,
+    _argv: list[str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run ``claude -p`` in its OWN process group and, on timeout, kill the WHOLE
+    group (RDR-173 RF-8 / nexus-yobit). ``subprocess.run`` would kill only the
+    direct child on TimeoutExpired, orphaning any grandchildren claude spawned,
+    which keep running + burning API quota with the row stuck in_progress.
+
+    ``start_new_session=True`` makes the child a session/group leader; on
+    TimeoutExpired we ``os.killpg`` the group (SIGKILL) so nothing is orphaned,
+    then reap. Behavioral parity with the old ``subprocess.run`` (stdin-fed
+    prompt, captured text output, raises ``subprocess.TimeoutExpired``).
+    """
+    argv = _argv or ["claude", "-p", "--output-format", "json"]
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(input=prompt, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        with contextlib.suppress(Exception):
+            proc.communicate(timeout=5)  # reap the killed group
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL the child's whole process group; fall back to killing just the
+    child if the group is already gone."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        with contextlib.suppress(Exception):
+            proc.kill()
+
+
 def _invoke_once(prompt: str) -> dict:
     """Single subprocess invocation. Raises ``_TransientFailure`` on
     retriable failure, ``_HardFailure`` on non-retriable. Returns the
@@ -1528,13 +1570,7 @@ def _invoke_once(prompt: str) -> dict:
     14-page documents in production. Stdin has no such limit.
     """
     try:
-        result = subprocess.run(
-            ["claude", "-p", "--output-format", "json"],
-            input=prompt,
-            timeout=180,
-            capture_output=True,
-            text=True,
-        )
+        result = _run_claude_isolated(prompt, timeout=180)
     except subprocess.TimeoutExpired as exc:
         raise _TransientFailure(f"timeout after 180s: {exc}") from exc
     except OSError as exc:
