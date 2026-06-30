@@ -32,10 +32,10 @@ def _t2_diagnostic_connect(db_path: Path, sqlite3: Any) -> Any:
     from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     if storage_backend_for("memory") == StorageBackend.SERVICE:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)  # epsilon-allow: nx doctor diagnostic — read-only inspection of the frozen migration source (service mode)
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only SELECT/counts safe under WAL
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
