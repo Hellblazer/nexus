@@ -890,6 +890,148 @@ public final class TaxonomyRepository {
         });
     }
 
+    /**
+     * RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): fidelity-preserving BULK import
+     * for one taxonomy *kind* ({@code topic} | {@code assignment} | {@code link}
+     * | {@code meta}).
+     *
+     * <p>Collapses a kind's batch to ONE round-trip and ONE tenant transaction:
+     * a single {@link TenantScope#withTenant} (RLS GUC {@code nexus.tenant} set
+     * ONCE per batch) wrapping the SAME INSERT each per-row {@code import*} method
+     * issues (topic: EXCLUDED merge keeping trigger-maintained doc_count;
+     * assignment: never-downgrade-projection + GREATEST similarity; link/meta:
+     * GREATEST). Strict timestamp parse per row. The per-row methods remain for
+     * the live/single-write path; this is the migration leg's GUC-once batch.
+     * topic_assignments is the 190k-row dogfood offender this fixes. Empty batch
+     * is a no-op.
+     *
+     * @return number of rows submitted.
+     */
+    public int importBatch(String tenant, String kind, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            for (Map<String, Object> r : rows) {
+                switch (kind) {
+                    case "topic" -> {
+                        String collection = optS(r, "collection");
+                        ensureCollectionRegistered(ctx, tenant, collection);
+                        ctx.insertInto(TOPICS,
+                                TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
+                                TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
+                                TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+                           .values(reqL(r, "id"), tenant, optS(r, "label"), optL(r, "parent_id"),
+                                   collection, optS(r, "centroid_hash"), optI(r, "doc_count", 0),
+                                   parseTsStrict(reqS(r, "created_at")), optS(r, "review_status"),
+                                   optS(r, "terms"))
+                           .onConflict(TOPICS.ID).doUpdate()
+                           .set(TOPICS.REVIEW_STATUS, field("EXCLUDED.review_status", String.class))
+                           .set(TOPICS.CENTROID_HASH, field("EXCLUDED.centroid_hash", String.class))
+                           .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
+                           .execute();
+                    }
+                    case "assignment" -> {
+                        String sourceCollection = optS(r, "source_collection");
+                        ensureCollectionRegistered(ctx, tenant, sourceCollection);
+                        String assignedAt = optS(r, "assigned_at");
+                        OffsetDateTime assignedAtTs = (assignedAt != null && !assignedAt.isBlank())
+                            ? parseTsStrict(assignedAt) : null;
+                        ctx.insertInto(TOPIC_ASSIGNMENTS,
+                                TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                                TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                                TOPIC_ASSIGNMENTS.SIMILARITY, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                                TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                           .values(tenant, reqS(r, "doc_id"), reqL(r, "topic_id"),
+                                   optS(r, "assigned_by"), optD(r, "similarity"), assignedAtTs,
+                                   sourceCollection)
+                           .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                                       TOPIC_ASSIGNMENTS.TOPIC_ID)
+                           .doUpdate()
+                           .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                                field("CASE WHEN EXCLUDED.assigned_by = 'projection'"
+                                    + " THEN 'projection'"
+                                    + " ELSE nexus.topic_assignments.assigned_by END", String.class))
+                           .set(TOPIC_ASSIGNMENTS.SIMILARITY,
+                                field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
+                                    + " COALESCE(EXCLUDED.similarity, -1.0))", Double.class))
+                           .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                                field("EXCLUDED.assigned_at", OffsetDateTime.class))
+                           .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                                field("EXCLUDED.source_collection", String.class))
+                           .execute();
+                    }
+                    case "link" -> ctx.insertInto(TOPIC_LINKS,
+                                TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
+                                TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
+                           .values(tenant, reqL(r, "from_topic_id"), reqL(r, "to_topic_id"),
+                                   optI(r, "link_count", 0), optS(r, "link_types"))
+                           .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
+                           .doUpdate()
+                           .set(TOPIC_LINKS.LINK_COUNT,
+                                field("GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count)", Integer.class))
+                           .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+                           .execute();
+                    case "meta" -> {
+                        String collection = reqS(r, "collection");
+                        ensureCollectionRegistered(ctx, tenant, collection);
+                        String lastAt = optS(r, "last_discover_at");
+                        OffsetDateTime lastAtTs = (lastAt != null && !lastAt.isBlank())
+                            ? parseTsStrict(lastAt) : null;
+                        ctx.insertInto(TAXONOMY_META,
+                                TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION,
+                                TAXONOMY_META.LAST_DISCOVER_DOC_COUNT, TAXONOMY_META.LAST_DISCOVER_AT)
+                           .values(tenant, collection, optI(r, "last_discover_doc_count", 0), lastAtTs)
+                           .onConflict(TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+                           .doUpdate()
+                           .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
+                                field("GREATEST(nexus.taxonomy_meta.last_discover_doc_count,"
+                                    + " EXCLUDED.last_discover_doc_count)", Integer.class))
+                           .set(TAXONOMY_META.LAST_DISCOVER_AT,
+                                field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
+                                    + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
+                           .execute();
+                    }
+                    default -> throw new IllegalArgumentException("Unknown taxonomy kind: " + kind);
+                }
+            }
+            log.debug("event=taxonomy_import_batch tenant={} kind={} rows={}", tenant, kind, rows.size());
+            return rows.size();
+        });
+    }
+
+    // ── batch map-extraction helpers (mirror TaxonomyHandler's per-row parse) ──
+    private static String reqS(Map<String, Object> r, String k) {
+        Object v = r.get(k);
+        if (v == null || v.toString().isEmpty()) throw new IllegalArgumentException("Missing required field: " + k);
+        return v.toString();
+    }
+    private static String optS(Map<String, Object> r, String k) {
+        Object v = r.get(k);
+        return v == null ? null : v.toString();
+    }
+    private static Double optD(Map<String, Object> r, String k) {
+        Object v = r.get(k);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.doubleValue();
+        try { return Double.parseDouble(v.toString()); } catch (NumberFormatException e) { return null; }
+    }
+    private static Long optL(Map<String, Object> r, String k) {
+        Object v = r.get(k);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.longValue();
+        try { return Long.parseLong(v.toString()); } catch (NumberFormatException e) { return null; }
+    }
+    private static long reqL(Map<String, Object> r, String k) {
+        Long l = optL(r, k);
+        if (l == null) throw new IllegalArgumentException("Missing required field: " + k);
+        return l;
+    }
+    private static int optI(Map<String, Object> r, String k, int def) {
+        Object v = r.get(k);
+        if (v instanceof Number n) return n.intValue();
+        if (v != null) { try { return Integer.parseInt(v.toString()); } catch (NumberFormatException ignored) { } }
+        return def;
+    }
+
     // ── Analytical methods (nexus-gmiaf.14 drop-in completion) ────────────────
 
     /**

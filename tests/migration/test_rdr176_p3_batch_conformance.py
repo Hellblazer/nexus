@@ -36,9 +36,11 @@ from nexus.db.t2.chash_etl import migrate_chash_rows
 from nexus.db.t2.http_chash_index import HttpChashIndex
 from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.db.t2.http_plan_library import HttpPlanLibrary
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 from nexus.db.t2.memory_etl import migrate_memory_rows
 from nexus.db.t2.plan_etl import migrate_plan_rows
+from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows
 from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
 
 #: The per-call record cap (ChromaDB / service quota). A conformant ETL sends
@@ -185,11 +187,44 @@ def _build_telemetry_store() -> object:
     return HttpTelemetryStore(base_url="http://svc", _token="t")
 
 
+# ── taxonomy (the 190k-row dogfood offender: store.import_* per row) ──────────
+
+
+def _seed_taxonomy(db: Path, n: int) -> None:
+    """Seed N topics rows (one of the four taxonomy kinds) — enough to prove the
+    per-kind batch path; assignments/links/meta stay empty (0 POSTs)."""
+    T2Database.bootstrap_schema(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO topics (id, label, parent_id, collection, centroid_hash, "
+            "doc_count, created_at, review_status, terms) VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                (i + 1, f"topic-{i}", None,
+                 "knowledge__rehearsal__minilm-l6-v2-384__v1", f"{i:032x}",
+                 0, "2026-05-15T08:30:00Z", "approved", "a b c")
+                for i in range(n)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _run_taxonomy_etl(db: Path, store: object) -> None:
+    migrate_taxonomy_rows(db, store)
+
+
+def _build_taxonomy_store() -> object:
+    return HttpTaxonomyStore(base_url="http://svc", _token="t")
+
+
 # (name, build_store, seed, run_etl, import_path, cap)
 _STORES = [
     ("memory", _build_memory_store, _seed_memory, _run_memory_etl, "/v1/memory/import_batch", CAP),
     ("plans", _build_plans_store, _seed_plans, _run_plans_etl, "/v1/plans/import_batch", CAP),
     ("telemetry", _build_telemetry_store, _seed_telemetry, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
+    ("taxonomy", _build_taxonomy_store, _seed_taxonomy, _run_taxonomy_etl, "/v1/taxonomy/import_batch", CAP),
     ("chash", _build_chash_store, _seed_chash, _run_chash_etl, "/v1/chash/import", 200),
 ]
 

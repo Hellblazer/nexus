@@ -51,6 +51,7 @@ MIGRATION_ROUTES: tuple[str, ...] = (
     "/v1/taxonomy/import/assignment",
     "/v1/taxonomy/import/link",
     "/v1/taxonomy/import/meta",
+    "/v1/taxonomy/import_batch",
     "/v1/aspects/import",
     "/v1/aspects/highlights/import",
     "/v1/aspects/promotion/import",
