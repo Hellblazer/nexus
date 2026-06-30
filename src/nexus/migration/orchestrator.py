@@ -49,7 +49,10 @@ _VERIFY_TABLES: dict[tuple[str, str], str] = {
     ("telemetry", "hook_failures"): "nexus.hook_failures",
     ("telemetry", "nx_answer_runs"): "nexus.nx_answer_runs",
     ("chash", "chash_index"): "nexus.chash_index",
+    ("catalog", "owners"): "nexus.catalog_owners",
     ("catalog", "documents"): "nexus.catalog_documents",
+    ("catalog", "collections"): "nexus.catalog_collections",
+    ("catalog", "document_chunks"): "nexus.catalog_document_chunks",
     ("catalog", "links"): "nexus.catalog_links",
 }
 
@@ -57,6 +60,19 @@ _VERIFY_TABLES: dict[tuple[str, str], str] = {
 #: ``ON CONFLICT DO UPDATE`` (nexus-d583z c): ``nexus.plans`` is keyed
 #: ``UNIQUE (tenant_id, project, query)``, so a landed count BELOW the
 #: written (ack) count is convergence-by-design, not data loss.
+#:
+#: RDR-176 Gap 1a: the three catalog relations added above
+#: (owners/collections/document_chunks) are deliberately NOT in this set. Their
+#: import is INSERT-or-preserve, never delete: owners/document_chunks use
+#: ``DO UPDATE`` on a key that maps 1:1 to a distinct source row (no collapse),
+#: and collections uses a conditional ``DO UPDATE`` that only upgrades pre-
+#: existing stubs (stubs inflate ``pg_count`` above ``written``, never deflate).
+#: ``pg_count >= written`` is therefore structurally guaranteed, so the strict
+#: ``pg_count < written`` mismatch check is correct and a real short copy is
+#: caught (verified by code-review-expert, 2026-06-29). A future catalog table
+#: whose SQLite source can carry duplicates under the PG unique key MUST be
+#: added here, or a by-design convergence collapse would read as a false
+#: mismatch.
 _VERIFY_TABLES_DEDUP: frozenset[str] = frozenset({"nexus.plans"})
 
 
@@ -88,8 +104,11 @@ class ServiceCountSource:
         try:
             from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-            token = os.environ.get("NX_SERVICE_TOKEN", "")
-            client = make_catalog_client_for_migration(base_url=None, token=token)
+            # RDR-176 P2 (Gap 3): no-arg → the factory's no-token branch returns
+            # a default-resolved catalog client that resolves URL+token config-
+            # first via resolve_service_endpoint (env>config>lease), the same
+            # unified chain the CLI migrate subcommands use. NOT env-only.
+            client = make_catalog_client_for_migration()
             try:
                 return client.relation_counts(relations)
             finally:
@@ -206,8 +225,9 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
         from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         from nexus.db.t2.catalog_etl import migrate_catalog  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-        token = os.environ.get("NX_SERVICE_TOKEN", "")
-        client = make_catalog_client_for_migration(base_url=None, token=token)
+        # RDR-176 P2 (Gap 3): no-arg → config-first URL+token resolution (NOT
+        # env-only); matches the CLI migrate subcommands and ServiceCountSource.
+        client = make_catalog_client_for_migration()
         try:
             return migrate_catalog(
                 s.catalog_db_path, client, collector=collector,

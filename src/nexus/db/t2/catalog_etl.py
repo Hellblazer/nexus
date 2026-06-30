@@ -14,7 +14,13 @@ IDEMPOTENT: each import route uses server-side upsert / DO NOTHING:
                        (all fields from EXCLUDED) via upsertOwner
 - ``documents``:      ON CONFLICT (tenant_id, tumbler) DO UPDATE
                        (GREATEST source_mtime, all other fields EXCLUDED)
-- ``collections``:    ON CONFLICT (tenant_id, name) DO NOTHING
+- ``collections``:    ON CONFLICT (tenant_id, name) DO UPDATE, conditional —
+                       only UPGRADES a pre-existing stub row (one whose
+                       embedding_model/content_type/owner_id are still empty);
+                       an already-populated row is left untouched (effective
+                       no-op). Insert-or-preserve, never delete, so the landed
+                       count is always >= the written count (see
+                       orchestrator._VERIFY_TABLES_DEDUP).
 - ``document_chunks``:ON CONFLICT (tenant_id, doc_id, position) DO UPDATE
                        (chash + all data cols from EXCLUDED; nexus-9wz72)
                        Convergent: re-index with changed content updates the

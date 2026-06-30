@@ -333,25 +333,37 @@ class CatalogRepositoryTest {
      * relation outside the whitelist (no arbitrary relation counts).
      *
      * <p>Scoped to the catalog relations the svc role can SELECT
-     * (catalog_documents / catalog_links); other verify relations
+     * (catalog_owners / catalog_documents / catalog_collections /
+     * catalog_document_chunks / catalog_links); other verify relations
      * (nexus.memory, …) are exercised in production where the service role
      * holds the grants.
+     *
+     * <p>RDR-176 Gap 1a (nexus-t9rmg.12): owners, collections, and
+     * document_chunks are now in the verify whitelist (previously only
+     * documents + links were counted, so a partial copy of the other three
+     * reconciled GREEN). Mirrors the Python {@code _VERIFY_TABLES} extension.
      */
     @Test @Order(40)
     void migration_relationCounts_whitelisted_and_tenant_scoped() {
         var counts = repo.relationCounts(TENANT_A, List.of(
+            "nexus.catalog_owners",
             "nexus.catalog_documents",
+            "nexus.catalog_collections",
+            "nexus.catalog_document_chunks",
             "nexus.catalog_links",
-            "nexus.pg_class",            // not whitelisted → omitted
-            "nexus.catalog_owners"       // not in the verify set → omitted
+            "nexus.pg_class"             // not whitelisted → omitted
         ));
         // catalog_documents has rows for TENANT_A from earlier ordered tests
         assertThat(counts).containsKey("nexus.catalog_documents");
         assertThat(counts.get("nexus.catalog_documents")).isGreaterThan(0L);
         assertThat(counts).containsKey("nexus.catalog_links");
+        // RDR-176 Gap 1a: the three formerly-unverified catalog relations are
+        // now counted (presence proves whitelisting; counts are tenant-scoped).
+        assertThat(counts).containsKey("nexus.catalog_owners");
+        assertThat(counts).containsKey("nexus.catalog_collections");
+        assertThat(counts).containsKey("nexus.catalog_document_chunks");
         // non-whitelisted relations are silently omitted
         assertThat(counts).doesNotContainKey("nexus.pg_class");
-        assertThat(counts).doesNotContainKey("nexus.catalog_owners");
     }
 
     @Test @Order(41)

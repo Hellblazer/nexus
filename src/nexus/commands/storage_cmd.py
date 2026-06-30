@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import click
@@ -205,8 +206,10 @@ def migrate_memory_cmd(
     running it multiple times produces no duplicates (server-side upsert on
     ``(tenant_id, project, title)``).  The SQLite source is NEVER modified.
 
-    Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
-    for the URL component; token is always read from NX_SERVICE_TOKEN).
+    Endpoint + token resolve config-first (RDR-176 P2): env (NX_SERVICE_URL /
+    NX_SERVICE_TOKEN) > config.yml (`nx config set service_url/service_token`) >
+    supervisor lease. --service-url overrides only the URL. No env var is
+    required if config.yml carries the credentials.
 
     Examples::
 
@@ -240,18 +243,9 @@ def migrate_memory_cmd(
     # Construct the HttpMemoryStore
     from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate memory.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
-
     try:
-        if service_url:
-            store = HttpMemoryStore(base_url=service_url, _token=token)
-        else:
-            store = HttpMemoryStore()
+        base_url, token = _migration_endpoint(service_url)
+        store = HttpMemoryStore(base_url=base_url, _token=token)
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -344,8 +338,10 @@ def migrate_plans_cmd(
     ``match_count``, ``match_conf_sum``, ``success_count``, and
     ``failure_count`` are copied verbatim from the source row.
 
-    Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
-    for the URL component; token is always read from NX_SERVICE_TOKEN).
+    Endpoint + token resolve config-first (RDR-176 P2): env (NX_SERVICE_URL /
+    NX_SERVICE_TOKEN) > config.yml (`nx config set service_url/service_token`) >
+    supervisor lease. --service-url overrides only the URL. No env var is
+    required if config.yml carries the credentials.
 
     Examples::
 
@@ -377,18 +373,9 @@ def migrate_plans_cmd(
 
     from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate plans.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
-
     try:
-        if service_url:
-            store = HttpPlanLibrary(base_url=service_url, _token=token)
-        else:
-            store = HttpPlanLibrary()
+        base_url, token = _migration_endpoint(service_url)
+        store = HttpPlanLibrary(base_url=base_url, _token=token)
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -482,8 +469,10 @@ def migrate_telemetry_cmd(
     writes timestamp columns VERBATIM from the source row. The SQLite source
     is NEVER modified (copy-not-move).
 
-    Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
-    for the URL component; token is always read from NX_SERVICE_TOKEN).
+    Endpoint + token resolve config-first (RDR-176 P2): env (NX_SERVICE_URL /
+    NX_SERVICE_TOKEN) > config.yml (`nx config set service_url/service_token`) >
+    supervisor lease. --service-url overrides only the URL. No env var is
+    required if config.yml carries the credentials.
 
     Examples::
 
@@ -519,18 +508,9 @@ def migrate_telemetry_cmd(
 
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate telemetry.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
-
     try:
-        if service_url:
-            store = HttpTelemetryStore(base_url=service_url, _token=token)
-        else:
-            store = HttpTelemetryStore()
+        base_url, token = _migration_endpoint(service_url)
+        store = HttpTelemetryStore(base_url=base_url, _token=token)
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -640,8 +620,10 @@ def migrate_taxonomy_cmd(
     (topic_id -> topics(id) IS enforced; assignments referencing a deleted topic
     fail and are reported, per the RDR-153 migration data-quality policy.)
 
-    Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
-    for the URL component; token is always read from NX_SERVICE_TOKEN).
+    Endpoint + token resolve config-first (RDR-176 P2): env (NX_SERVICE_URL /
+    NX_SERVICE_TOKEN) > config.yml (`nx config set service_url/service_token`) >
+    supervisor lease. --service-url overrides only the URL. No env var is
+    required if config.yml carries the credentials.
 
     Examples::
 
@@ -677,18 +659,9 @@ def migrate_taxonomy_cmd(
 
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate taxonomy.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
-
     try:
-        if service_url:
-            store = HttpTaxonomyStore(base_url=service_url, _token=token)
-        else:
-            store = HttpTaxonomyStore()
+        base_url, token = _migration_endpoint(service_url)
+        store = HttpTaxonomyStore(base_url=base_url, _token=token)
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -797,8 +770,10 @@ def migrate_chash_cmd(
     Chash entries are content-addressed and immutable; ``created_at`` is
     preserved verbatim.
 
-    Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
-    for the URL component; token is always read from NX_SERVICE_TOKEN).
+    Endpoint + token resolve config-first (RDR-176 P2): env (NX_SERVICE_URL /
+    NX_SERVICE_TOKEN) > config.yml (`nx config set service_url/service_token`) >
+    supervisor lease. --service-url overrides only the URL. No env var is
+    required if config.yml carries the credentials.
 
     Examples::
 
@@ -839,19 +814,13 @@ def migrate_chash_cmd(
         click.echo("[dry-run] No writes performed.")
         return
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate chash.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
-
     from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    if service_url:
-        store = HttpChashIndex(base_url=service_url)
-    else:
-        store = HttpChashIndex()
+    try:
+        base_url, token = _migration_endpoint(service_url)
+        store = HttpChashIndex(base_url=base_url, _token=token)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
 
     from nexus.db.t2.chash_etl import migrate_chash_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
@@ -940,8 +909,10 @@ def migrate_catalog_cmd(
     Insertion order: owners -> documents -> collections -> document_chunks
     -> links (respects cross-store FK constraints from fk-001-catalog).
 
-    Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
-    for the URL component; token is always read from NX_SERVICE_TOKEN).
+    Endpoint + token resolve config-first (RDR-176 P2): env (NX_SERVICE_URL /
+    NX_SERVICE_TOKEN) > config.yml (`nx config set service_url/service_token`) >
+    supervisor lease. --service-url overrides only the URL. No env var is
+    required if config.yml carries the credentials.
 
     Examples::
 
@@ -979,15 +950,9 @@ def migrate_catalog_cmd(
 
     from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate catalog.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
-
     try:
-        client = make_catalog_client_for_migration(base_url=service_url, token=token)
+        base_url, token = _migration_endpoint(service_url)
+        client = make_catalog_client_for_migration(base_url=base_url, token=token)
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -1329,10 +1294,18 @@ def _emit_store_report(
     help="SQLite catalog source (default: NX_CATALOG_DB_PATH or the "
          "canonical path).",
 )
+@click.option(
+    "--service-url",
+    "service_url",
+    default=None,
+    help="Base URL of the nexus-service. Config-first override: env "
+         "NX_SERVICE_URL > config.yml. Token resolves the same chain.",
+)
 def migrate_all_cmd(
     report_path: Path | None,
     db_path: Path | None,
     catalog_db_path: Path | None,
+    service_url: str | None,
 ) -> None:
     """Run ALL eight store migrations in the RDR-152 ladder order and emit
     ONE migration report (RDR-153 Phase 3).
@@ -1367,9 +1340,15 @@ def migrate_all_cmd(
     # Count verification routes through the service REST endpoint, not psql
     # (RDR-152 bars a direct Python PG connection). The verdict is folded
     # INTO the report so the artifact is self-contained for triage.
-    report = migrate_all(
-        sources, on_store=_on_store, on_store_failed=_on_store_failed,
-    )
+    #
+    # RDR-176 P2 (Gap 3): --service-url is a config-first override, scoped to
+    # this call so it cannot leak to a sibling command. The no-arg HTTP store
+    # and catalog clients the orchestrator builds then resolve URL+token via
+    # the unified env>config chain.
+    with _service_url_override(service_url):
+        report = migrate_all(
+            sources, on_store=_on_store, on_store_failed=_on_store_failed,
+        )
 
     _echo_verification(report)
 
@@ -1447,6 +1426,68 @@ def _resolve_catalog_db_path(explicit: Path | None) -> Path:
         return Path(env_path)
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     return nexus_config_dir() / "catalog" / ".catalog.db"
+
+
+def _migration_endpoint(service_url: str | None) -> tuple[str, str]:
+    """RDR-176 P2 (Gap 3): config-first ``(base_url, token)`` for a migration
+    client, with ``--service-url`` overriding only the URL.
+
+    Resolution mirrors :func:`nexus.db.service_endpoint.resolve_service_endpoint`
+    — env (``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN``) first, then the persisted
+    ``config.yml`` credentials a greenfield user set with ``nx config set``, then
+    the supervisor lease for the token. Retires the per-subcommand
+    ``NX_SERVICE_TOKEN``-env-only gate that refused a config-only user.
+
+    Returning the pair (rather than mutating ``os.environ['NX_SERVICE_URL']``)
+    keeps the resolution side-effect-free, so a ``--service-url`` on one
+    subcommand cannot bleed into a sibling command sharing the process (MCP
+    session / in-process pytest ``CliRunner``). Fails loud with a clear,
+    actionable :class:`RuntimeError` when no token is resolvable anywhere.
+    Enforced by ``tests/test_rdr176_p2_auth.py``.
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.db.service_endpoint import (  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        discover_lease,
+        resolve_service_endpoint,
+    )
+
+    if not service_url:
+        # Full config-first chain (URL + token), fails loud if no token.
+        return resolve_service_endpoint()
+
+    base_url = service_url.rstrip("/")
+    token = (get_credential("service_token") or "").strip() or None
+    if token is None:
+        _, token = discover_lease()
+    if not token:
+        raise RuntimeError(
+            "--service-url is set but no service_token is resolvable (neither "
+            "NX_SERVICE_TOKEN env, config.yml, nor supervisor lease): set it "
+            "with `nx config set service_token <bearer>` (or export "
+            "NX_SERVICE_TOKEN) and re-run."
+        )
+    return base_url, token
+
+
+@contextlib.contextmanager
+def _service_url_override(service_url: str | None) -> "Iterator[None]":
+    """Scope ``--service-url`` as ``NX_SERVICE_URL`` for the body, restoring the
+    prior value on exit so the override never leaks to a sibling command sharing
+    the process. Used by ``migrate all``, whose orchestrator builds no-arg
+    ``Http*Store()`` clients that resolve URL+token config-first from the env.
+    """
+    if not service_url:
+        yield
+        return
+    prev = os.environ.get("NX_SERVICE_URL")
+    os.environ["NX_SERVICE_URL"] = service_url
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("NX_SERVICE_URL", None)
+        else:
+            os.environ["NX_SERVICE_URL"] = prev
 
 
 def _resolve_db_path(explicit: Path | None) -> Path:
