@@ -302,8 +302,17 @@ migration time" is the target — the opposite of today.
   thread** (no cross-process queue to host, the storing process is the natural host, and the
   daemon's `claude -p` credential inheritance buys nothing locally).
 - Is fast batch ingest (`nx index`) also affected, and does it need the same host?
-- Should the SIGKILL-orphan hardening (RF-8: `start_new_session` + group-kill) ship with this
-  RDR or as a separate fix?
+- ~~Should the SIGKILL-orphan hardening (RF-8: `start_new_session` + group-kill) ship with this
+  RDR or as a separate fix?~~ **Resolved (P6, nexus-yobit): SEPARATE FIX (deferred).** The
+  prescribed `start_new_session` + `killpg`-on-timeout was implemented (code-review approved)
+  but the stacked critic found it not-justified to ship: it does NOT close the stated RF-8 (host
+  SIGKILL of the daemon is uncatchable — no Python runs to `killpg`), and `start_new_session` —
+  which is *required* for a safe `killpg` (else it kills the daemon's own group) — breaks the
+  SIGTERM-cleanup path, so claude survives a graceful daemon SIGTERM and burns quota up to 180s
+  on every restart (a common-bad traded for the rare-bad). RF-8 is NON-blocking: the Phase-3
+  reclaim-first loop already recovers the stranded row. The proper daemon-level fix (track claude
+  pids + SIGTERM handler; PR_SET_PDEATHSIG for the orphan; a non-vacuous grandchild-kill test) is
+  filed as **nexus-4r9ja**.
 
 ## History
 
