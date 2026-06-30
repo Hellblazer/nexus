@@ -32,6 +32,7 @@ import pytest
 
 from nexus.db.chroma_quotas import QUOTAS
 from nexus.db.t2 import T2Database
+from nexus.db.t2.catalog_etl import _import_table
 from nexus.db.t2.chash_etl import migrate_chash_rows
 from nexus.db.t2.http_chash_index import HttpChashIndex
 from nexus.db.t2.http_memory_store import HttpMemoryStore
@@ -227,6 +228,29 @@ _STORES = [
     ("taxonomy", _build_taxonomy_store, _seed_taxonomy, _run_taxonomy_etl, "/v1/taxonomy/import_batch", CAP),
     ("chash", _build_chash_store, _seed_chash, _run_chash_etl, "/v1/chash/import", 200),
 ]
+
+
+def test_catalog_import_table_is_o_n_over_batch() -> None:
+    """RDR-176 P3: the catalog ETL's _import_table primitive (used by owners,
+    documents, collections, links) must POST ceil(N/CAP) array batches, not N
+    per-row requests. Catalog uses an HttpCatalogClient + a heavy migrate_catalog
+    orchestration (orphan detection, next_seq re-POST), so the batching contract
+    is pinned here on the primitive directly; the full orchestration is covered
+    by tests/db/test_catalog_etl.py."""
+    posted: list[int] = []
+    result = _import_table(
+        table="owners",
+        rows=[{"tumbler_prefix": str(i)} for i in range(N_ROWS)],
+        transform=lambda r: r,
+        import_fn=lambda rows: posted.append(len(rows)),
+        batch_log_every=10_000,
+    )
+    assert len(posted) == math.ceil(N_ROWS / CAP), (
+        f"expected {math.ceil(N_ROWS / CAP)} array POST(s) for {N_ROWS} rows, "
+        f"got {len(posted)} — per-row, not batched"
+    )
+    assert sum(posted) == N_ROWS  # every row shipped exactly once
+    assert result["written"] == N_ROWS
 
 
 @pytest.mark.parametrize("name,build_store,seed,run_etl,import_path,cap", _STORES)
