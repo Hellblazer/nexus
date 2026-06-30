@@ -20,11 +20,18 @@ These tests pin the Phase-1 lifecycle contract:
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
-from nexus.daemon.aspect_worker_daemon import AspectWorkerDaemon
+from nexus.aspect_worker import AspectExtractionWorker
+from nexus.cli import main
+from nexus.daemon.aspect_worker_daemon import (
+    AspectWorkerDaemon,
+    _default_worker_factory,
+)
 from nexus.daemon.service_registry import ServiceRegistry, ttl_for_tier
 
 _ASPECT_TIER = "aspect_worker"
@@ -107,8 +114,6 @@ def test_cli_spawn_entrypoint_wires_run_with_tenant(tmp_path, monkeypatch) -> No
     """`nx daemon aspect-worker start --tenant T` is the Phase-1 spawn entrypoint
     (Phase 2's enqueue hook Popens it). It must resolve and call
     run_aspect_worker_daemon with the parsed config-dir + tenant."""
-    from nexus.cli import main
-
     calls: list[dict] = []
     monkeypatch.setattr(
         "nexus.daemon.aspect_worker_daemon.run_aspect_worker_daemon",
@@ -120,3 +125,45 @@ def test_cli_spawn_entrypoint_wires_run_with_tenant(tmp_path, monkeypatch) -> No
     )
     assert result.exit_code == 0, result.output
     assert calls == [{"config_dir": tmp_path, "tenant": "tenant-A"}]
+
+
+def test_default_worker_factory_builds_real_extraction_worker() -> None:
+    """Phase 1's deliverable is hosting the REAL AspectExtractionWorker. Pin the
+    default factory so a broken deferred import / constructor-signature change is
+    caught (it is zero-arg, in-process — needs no service queue)."""
+    worker = _default_worker_factory()
+    assert isinstance(worker, AspectExtractionWorker)
+
+
+@pytest.mark.parametrize("bad", ["a/b", ".hidden", "../escape"])
+def test_invalid_tenant_rejected(tmp_path, bad) -> None:
+    """The tenant is a discovery-file scope-key suffix; path-special values are
+    rejected before Phase 2 wires arbitrary tenant strings (code-review M3)."""
+    with pytest.raises(ValueError):
+        AspectWorkerDaemon(config_dir=tmp_path, tenant=bad, worker_factory=_FakeWorker)
+
+
+def test_empty_tenant_rejected(tmp_path) -> None:
+    with pytest.raises(ValueError):
+        AspectWorkerDaemon(config_dir=tmp_path, tenant="", worker_factory=_FakeWorker)
+
+
+def test_live_heartbeat_loop_detects_fencing(tmp_path) -> None:
+    """The actual heartbeat THREAD (not the heartbeat_once seam) must detect that
+    a newer daemon fenced this one and stand down (set _stop). Exercises the
+    live scheduling path, not just the data model (code-review M2)."""
+    d1 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
+                            worker_factory=_FakeWorker, heartbeat_interval=0.05)
+    d2 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
+                            worker_factory=_FakeWorker, heartbeat_interval=0.05)
+    d1.start()
+    d2.start()  # higher generation — fences d1
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not d1.is_fenced():
+            time.sleep(0.02)
+        assert d1.is_fenced() is True   # the LIVE heartbeat thread detected it
+        assert d2.is_fenced() is False
+    finally:
+        d1.stop()
+        d2.stop()

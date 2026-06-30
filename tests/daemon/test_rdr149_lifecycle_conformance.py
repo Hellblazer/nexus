@@ -142,7 +142,7 @@ class _FakeClock:
 
 class RecordHarness:
     tier: str
-    scope: str  # "uid" (one owner per user) | "session" (one per session-id)
+    scope: str  # "uid" (one per user) | "session" (one per session-id) | "tenant" (one per tenant)
     has_self_heal: bool
     has_version_cycle: bool
 

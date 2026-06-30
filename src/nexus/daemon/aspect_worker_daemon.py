@@ -99,6 +99,14 @@ class AspectWorkerDaemon:
     ) -> None:
         if not tenant:
             raise ValueError("aspect-worker daemon requires a non-empty tenant (per-tenant scope)")
+        # The tenant becomes a discovery-file scope key (``aspect_worker_addr.<tenant>``);
+        # reject path-special values before Phase 2 wires arbitrary tenant strings
+        # from request context (code-review M3).
+        if "/" in tenant or tenant.startswith("."):
+            raise ValueError(
+                f"invalid tenant {tenant!r}: must not contain '/' or start with '.' "
+                "(it is used as a registry scope-key / discovery-file suffix)"
+            )
         self._config_dir = Path(config_dir)
         self._tenant = tenant
         self._worker_factory = worker_factory
@@ -180,6 +188,11 @@ class AspectWorkerDaemon:
         self._stop.set()
         if self._hb_thread is not None:
             self._hb_thread.join(timeout=2.0)
+            if self._hb_thread.is_alive():
+                # Contested election flock held the tick past the join window; the
+                # thread is a daemon thread (reaped at process exit) but log it so a
+                # lingering reassert is not mistaken for a leak (code-review M1).
+                _log.warning("aspect_worker_daemon.heartbeat_thread_join_timeout", tenant=self._tenant)
             self._hb_thread = None
         if self._worker is not None:
             try:
@@ -201,6 +214,27 @@ class AspectWorkerDaemon:
         _log.info("aspect_worker_daemon.stopped", tenant=self._tenant)
 
 
+def _require_extraction_credentials() -> None:
+    """Fail LOUD at entrypoint if the ``claude`` binary is not on ``PATH``.
+
+    Without it, the daemon would publish its lease, heartbeat healthy, and then
+    silently fail extraction per-row inside ``claude -p`` — exactly the silent
+    store-time failure RDR-173 exists to eliminate. This is a fast presence
+    check, not an API-credential probe; the full inherited-env credential model
+    + its test are Phase 2's job. It is the minimum guard so a credential-bare
+    invocation refuses to start rather than masquerading as a working daemon.
+    """
+    import shutil  # noqa: PLC0415 - branch-local; trivial stdlib
+
+    if shutil.which("claude") is None:
+        raise RuntimeError(
+            "aspect-worker daemon: the `claude` binary is not on PATH — `claude -p` "
+            "extraction would silently fail every row. The daemon must be spawned as a "
+            "child of a credential-bearing process (RDR-173 credential model); refusing "
+            "to start a daemon that would heartbeat healthy but extract nothing."
+        )
+
+
 def run_aspect_worker_daemon(*, config_dir: Path, tenant: str) -> None:
     """Run an aspect-worker daemon to completion (start → serve → stop on signal).
 
@@ -212,9 +246,10 @@ def run_aspect_worker_daemon(*, config_dir: Path, tenant: str) -> None:
     from nexus.logging_setup import configure_logging  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     configure_logging("aspect_worker_daemon", config_dir=config_dir)
+    _require_extraction_credentials()
     daemon = AspectWorkerDaemon(config_dir=config_dir, tenant=tenant)
-    daemon.start()
     try:
+        daemon.start()
         daemon.run_until_signal()
     finally:
         daemon.stop()
