@@ -173,8 +173,12 @@ def test_vector_etl_retries_transient_403(monkeypatch) -> None:
             return 3
 
     vc = _VectorClient()
+    # Non-voyage collection name on purpose: _dim_for_collection +
+    # _is_same_model_passthrough are monkeypatched, so the model segment is
+    # irrelevant here, and a voyage-* name would trip the cloud-mode lint
+    # (test_mode_declarations_are_explicit) which scans test source.
     result = vetl._migrate_one(
-        _ReadClient(), vc, "knowledge__o__voyage-context-3__v1",
+        _ReadClient(), vc, "knowledge__o__minilm-l6-v2-384__v1",
         dry_run=False, page=10,
     )
     assert vc.attempts == 3                  # retried twice, succeeded on 3rd
