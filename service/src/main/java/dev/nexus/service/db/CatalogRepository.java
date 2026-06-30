@@ -72,7 +72,10 @@ public final class CatalogRepository {
         "nexus.hook_failures",
         "nexus.nx_answer_runs",
         "nexus.chash_index",
+        "nexus.catalog_owners",
         "nexus.catalog_documents",
+        "nexus.catalog_collections",
+        "nexus.catalog_document_chunks",
         "nexus.catalog_links"
     );
 
