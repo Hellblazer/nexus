@@ -129,7 +129,7 @@ def test_cli_spawn_entrypoint_wires_run_with_tenant(tmp_path, monkeypatch) -> No
     calls: list[dict] = []
     monkeypatch.setattr(
         "nexus.daemon.aspect_worker_daemon.run_aspect_worker_daemon",
-        lambda *, config_dir, tenant: calls.append({"config_dir": config_dir, "tenant": tenant}),
+        lambda *, config_dir, tenant, **_kw: calls.append({"config_dir": config_dir, "tenant": tenant}),
     )
     result = CliRunner().invoke(
         main,

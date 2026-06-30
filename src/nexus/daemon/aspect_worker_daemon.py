@@ -62,6 +62,23 @@ _HEARTBEAT_INTERVAL: float = 1.0
 #: the real :class:`~nexus.aspect_worker.AspectExtractionWorker`.
 WorkerFactory = Callable[[], Any]
 
+#: Stale-claim reclaim window (RDR-173 P3 / review CRITICAL-2). MUST exceed the
+#: ``extract_aspects`` subprocess budget (``aspect_extractor`` runs ``claude -p``
+#: with ``timeout=180``) with margin — otherwise the reclaim loop would reset a
+#: row this daemon's own worker is ACTIVELY extracting back to ``pending``, a
+#: second worker would re-claim it, and the original ``mark_done`` (a DELETE by
+#: doc_id with no status guard) would silently cancel the second slot →
+#: double-extraction + wasted quota. 300s = 180s budget + 120s margin. The old
+#: in-process SQLite default (60s) was safe only because the reclaim shared the
+#: worker's process; the multi-process daemon makes the race real.
+_DEFAULT_STALE_TIMEOUT_S: int = 300
+
+#: Reclaim SWEEP cadence (s) — how often we ask the service to reclaim, distinct
+#: from the staleness threshold above. 30s matches the T2 predecessor
+#: (``_ASPECT_RECLAIM_INTERVAL``), so a row that crosses the staleness threshold
+#: is reclaimed within ~30s rather than waiting a full threshold-length interval.
+_DEFAULT_RECLAIM_INTERVAL: float = 30.0
+
 
 def _daemon_version() -> str:
     try:
@@ -105,7 +122,7 @@ class AspectWorkerDaemon:
         worker_factory: WorkerFactory = _default_worker_factory,
         clock: Callable[[], float] = time.time,
         heartbeat_interval: float = _HEARTBEAT_INTERVAL,
-        stale_timeout_seconds: int = 60,
+        stale_timeout_seconds: int = _DEFAULT_STALE_TIMEOUT_S,
         reclaim_interval: float | None = None,
         queue_factory: Callable[[], Any] | None = None,
     ) -> None:
@@ -130,12 +147,16 @@ class AspectWorkerDaemon:
             clock=clock,
             ttl=ttl_for_tier(TIER),
         )
-        # RDR-173 P3 (RF-5): the daemon owns reclaim_stale. A stranded
-        # in_progress row is reset to pending on this interval so a worker death
-        # self-heals; the stale window passed to the service matches the worker's.
+        # RDR-173 P3 (RF-5): the daemon owns reclaim_stale. TWO decoupled knobs
+        # (review M1): _stale_timeout is the STALENESS THRESHOLD (a row must be
+        # in_progress longer than this to be reclaimed — kept > the 180s
+        # extraction budget to avoid false-reclaiming an in-flight row), while
+        # _reclaim_interval is the SWEEP CADENCE (how often we ask the service to
+        # reclaim — a frequent fixed 30s, matching the T2 predecessor, so a
+        # genuinely-stranded row recovers promptly once it crosses the threshold).
         self._stale_timeout = stale_timeout_seconds
         self._reclaim_interval = (
-            float(reclaim_interval) if reclaim_interval is not None else float(stale_timeout_seconds)
+            float(reclaim_interval) if reclaim_interval is not None else _DEFAULT_RECLAIM_INTERVAL
         )
         self._queue_factory = (
             queue_factory if queue_factory is not None
@@ -184,23 +205,29 @@ class AspectWorkerDaemon:
     def _reclaim_loop(self) -> None:
         """Periodically reset stranded ``in_progress`` rows to ``pending`` so a
         worker death self-heals (RF-5). Per-tenant: the service applies the
-        tenant GUC. A transient failure is logged and the loop continues."""
-        while not self._stop.wait(self._reclaim_interval):
+        tenant GUC. A transient failure is logged and the loop continues.
+
+        RECLAIM-FIRST, then sleep (review H1, mirroring the T2 predecessor
+        nexus-nhqll): a freshly (re)spawned daemon clears the stale-row backlog a
+        prior worker death left BEHIND immediately, rather than waiting a full
+        interval — in service mode this daemon is the SOLE reclaim owner."""
+        while True:
             queue = self._reclaim_queue
-            if queue is None:
-                continue
-            try:
-                n = queue.reclaim_stale(self._stale_timeout)
-                if n:
-                    _log.info(
-                        "aspect_worker_daemon.reclaimed_stale",
-                        tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
+            if queue is not None:
+                try:
+                    n = queue.reclaim_stale(self._stale_timeout)
+                    if n:
+                        _log.info(
+                            "aspect_worker_daemon.reclaimed_stale",
+                            tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
+                        )
+                except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
+                    _log.warning(
+                        "aspect_worker_daemon.reclaim_failed",
+                        tenant=self._tenant, error=str(exc),
                     )
-            except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
-                _log.warning(
-                    "aspect_worker_daemon.reclaim_failed",
-                    tenant=self._tenant, error=str(exc),
-                )
+            if self._stop.wait(self._reclaim_interval):
+                break
 
     def heartbeat_once(self) -> None:
         """Run a single heartbeat tick (test seam + the loop body)."""
@@ -250,7 +277,10 @@ class AspectWorkerDaemon:
                 _log.warning("aspect_worker_daemon.heartbeat_thread_join_timeout", tenant=self._tenant)
             self._hb_thread = None
         if self._reclaim_thread is not None:
-            self._reclaim_thread.join(timeout=2.0)
+            # 5s (> a normal sub-second reclaim_stale SQL UPDATE) so a reclaim
+            # call in flight at shutdown finishes rather than spuriously logging a
+            # join timeout (review M2); the loop wakes immediately on _stop.
+            self._reclaim_thread.join(timeout=5.0)
             if self._reclaim_thread.is_alive():
                 _log.warning("aspect_worker_daemon.reclaim_thread_join_timeout", tenant=self._tenant)
             self._reclaim_thread = None
@@ -389,19 +419,27 @@ def ensure_aspect_worker_daemon(
     return True
 
 
-def run_aspect_worker_daemon(*, config_dir: Path, tenant: str) -> None:
+def run_aspect_worker_daemon(
+    *,
+    config_dir: Path,
+    tenant: str,
+    stale_timeout_seconds: int = _DEFAULT_STALE_TIMEOUT_S,
+) -> None:
     """Run an aspect-worker daemon to completion (start → serve → stop on signal).
 
     The spawn entrypoint. MUST be launched as a child of a process that already
     has ``claude -p`` credentials (RDR-173 credential model); it inherits that
-    environment. Phase 2 wires the enqueue-hook spawn + tests the credential
-    inheritance.
+    environment. ``stale_timeout_seconds`` is the reclaim staleness threshold —
+    keep it above the ``claude -p`` extraction budget (review L3 operator knob).
     """
     from nexus.logging_setup import configure_logging  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     configure_logging("aspect_worker_daemon", config_dir=config_dir)
     _require_extraction_credentials()
-    daemon = AspectWorkerDaemon(config_dir=config_dir, tenant=tenant)
+    daemon = AspectWorkerDaemon(
+        config_dir=config_dir, tenant=tenant,
+        stale_timeout_seconds=stale_timeout_seconds,
+    )
     try:
         daemon.start()
         daemon.run_until_signal()

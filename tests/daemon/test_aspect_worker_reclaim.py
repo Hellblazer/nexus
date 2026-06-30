@@ -13,18 +13,30 @@ The leased daemon is the reclaim owner: a loop calls the service queue's
 service applies the tenant GUC), resetting stranded rows to ``pending`` so a
 daemon/worker death self-heals — the row is re-claimed and re-extracted.
 
-DECISION (the bead's Open Question): a SECOND scheduled ``reclaimStale`` in the
-Java service is REDUNDANT — the per-tenant daemon is the single reclaim owner.
-The Java endpoint stays un-scheduled (it already is); it remains callable for
-ops/tests. Avoiding a second scheduler also dodges a per-host cross-tenant sweep
-that RLS would (correctly) starve of rows.
+DECISION (the bead's Open Question): the per-tenant daemon is the PRIMARY reclaim
+owner; a second routinely-scheduled Java reclaim is NOT added now. The Java
+endpoint stays callable (ops/tests). Avoiding a per-host Java sweep also dodges a
+cross-tenant scan that RLS would (correctly) starve of rows.
+
+KNOWN CONSTRAINT (review): this leaves the daemon-down-AND-no-enqueue case
+uncovered — if the daemon has crashed and nothing new enqueues (the enqueue hook
+is the only respawn trigger), rows the dead daemon stranded stay stranded and
+is_drained() does not recover until a new enqueue spawns a daemon. Recovery: any
+new store re-spawns the daemon (reclaim-first clears the backlog at once), or an
+operator calls POST /queue/reclaim_stale directly. A slow (e.g. hourly) Java
+backstop sweep is the optional belt-and-suspenders, filed as a follow-up rather
+than shipped here (it needs an engine change + cut). See nexus-t7jeo.
 """
 from __future__ import annotations
 
 import time
 from pathlib import Path
 
-from nexus.daemon.aspect_worker_daemon import AspectWorkerDaemon
+from nexus.daemon.aspect_worker_daemon import (
+    _DEFAULT_RECLAIM_INTERVAL,
+    AspectWorkerDaemon,
+)
+from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
 
 
 class _FakeWorker:
@@ -74,7 +86,57 @@ def test_daemon_closes_reclaim_queue_on_stop(tmp_path: Path) -> None:
     )
     d.start()
     d.stop()
-    assert q.closed >= 1   # the reclaim queue handle is released on stop
+    assert q.closed == 1   # the reclaim queue handle is released exactly once (review M3)
+
+
+def test_reclaim_interval_defaults_to_sweep_cadence_not_stale_window(tmp_path: Path) -> None:
+    """The sweep cadence is DECOUPLED from the staleness threshold (review M1):
+    a large stale_timeout must NOT slow the sweep to a 5-minute interval."""
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="default",
+        worker_factory=_FakeWorker, queue_factory=_FakeQueue,
+        stale_timeout_seconds=300,  # large threshold
+    )
+    assert d._reclaim_interval == _DEFAULT_RECLAIM_INTERVAL  # not 300
+
+
+def test_reclaim_resets_stranded_row_and_drain_recovers(tmp_path: Path) -> None:
+    """RF-5 END-TO-END against the REAL SQLite queue (review CRITICAL-1): a row
+    stranded in_progress past the stale window is actually reset to pending by
+    the daemon's reclaim loop, and is_drained() recovers once it is re-processed.
+    Proves the state transition, not just that reclaim_stale was called."""
+    db = tmp_path / "q.db"
+    q = AspectExtractionQueue(db)
+    q.enqueue("knowledge__o__m__v1", "/p/doc.pdf", content_hash="h", content="c")
+    claimed = q.claim_next()                     # → in_progress, last_attempt_at = now
+    assert claimed is not None
+    assert q.pending_count() == 0
+    assert q.is_drained() is False               # an in_progress (non-failed) row blocks drain
+    # Backdate the claim so it is unambiguously stale (avoids second-granularity flake).
+    q.conn.execute("UPDATE aspect_extraction_queue SET last_attempt_at = datetime('now','-1 hour')")
+    q.conn.commit()
+
+    # The daemon opens its OWN handle on the same DB (stop() closes it).
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="default", worker_factory=_FakeWorker,
+        queue_factory=lambda: AspectExtractionQueue(db),
+        reclaim_interval=0.03, stale_timeout_seconds=60,
+    )
+    d.start()
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and q.pending_count() == 0:
+            time.sleep(0.02)
+        assert q.pending_count() == 1            # the stranded row was RESET to pending
+    finally:
+        d.stop()
+
+    # Re-process the now-pending row (the extraction a live worker would do).
+    again = q.claim_next()
+    assert again is not None
+    q.mark_done(again.collection, again.source_path)
+    assert q.is_drained() is True                # is_drained recovers after the full cycle
+    q.close()
 
 
 def test_reclaim_failure_does_not_kill_the_loop(tmp_path: Path) -> None:

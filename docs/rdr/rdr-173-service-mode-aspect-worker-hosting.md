@@ -290,10 +290,17 @@ migration time" is the target — the opposite of today.
 - **claude -p fan-out cap (multi-tenant):** N active tenants × M docs ⇒ up to N×M concurrent
   `claude -p` subprocesses. A per-tenant and/or global concurrency cap should be set at
   planning (irrelevant for v1's one tenant). (planning)
-- With the daemon owning `reclaim_stale`, is a *second* Java-side scheduled `reclaimStale`
-  redundant? (likely yes — planning)
-- Does the leased daemon replace the in-process worker in **local** mode too, or service-mode
-  only? (unifying on the daemon is cleaner; weigh against local-mode simplicity — planning)
+- ~~With the daemon owning `reclaim_stale`, is a *second* Java-side scheduled `reclaimStale`
+  redundant?~~ **Resolved (P3, nexus-6ew6o):** the per-tenant daemon is the PRIMARY reclaim owner
+  and no routine Java sweep is added now. KNOWN CONSTRAINT: this leaves the
+  daemon-down-AND-no-enqueue case uncovered (rows the dead daemon stranded stay stranded until a
+  new enqueue respawns it; recovery = a new store, or an operator `POST /queue/reclaim_stale`). An
+  optional slow (~hourly) Java backstop sweep is filed as **nexus-t7jeo** (needs an engine change
+  + cut; ship only if operational evidence shows daemons stay down without enqueues).
+- ~~Does the leased daemon replace the in-process worker in **local** mode too?~~ **Resolved (P2,
+  nexus-gtdtc): SERVICE mode → leased daemon; LOCAL (sqlite) mode → keep the in-process worker
+  thread** (no cross-process queue to host, the storing process is the natural host, and the
+  daemon's `claude -p` credential inheritance buys nothing locally).
 - Is fast batch ingest (`nx index`) also affected, and does it need the same host?
 - Should the SIGKILL-orphan hardening (RF-8: `start_new_session` + group-kill) ship with this
   RDR or as a separate fix?

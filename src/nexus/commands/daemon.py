@@ -2229,7 +2229,18 @@ def aspect_worker_group() -> None:
     default="default",
     help="Tenant scope for the lease (per-tenant; per-host needs BYPASSRLS, forbidden by RDR-152).",
 )
-def aspect_worker_start_cmd(config_dir_str: str | None, tenant: str) -> None:
+@click.option(
+    "--stale-timeout-seconds",
+    "stale_timeout_seconds",
+    type=int,
+    default=300,
+    show_default=True,
+    help="Reclaim staleness threshold; MUST exceed the claude -p extraction budget (180s) "
+    "or an in-flight row could be false-reclaimed.",
+)
+def aspect_worker_start_cmd(
+    config_dir_str: str | None, tenant: str, stale_timeout_seconds: int,
+) -> None:
     """Start the aspect-worker daemon (foreground; runs until SIGTERM/SIGINT).
 
     CREDENTIAL MODEL (RDR-173): this MUST be spawned as a CHILD of a process
@@ -2246,4 +2257,7 @@ def aspect_worker_start_cmd(config_dir_str: str | None, tenant: str) -> None:
     click.echo(
         f"Aspect-worker daemon starting (config_dir={config_dir}, tenant={tenant})..."
     )
-    run_aspect_worker_daemon(config_dir=config_dir, tenant=tenant)
+    run_aspect_worker_daemon(
+        config_dir=config_dir, tenant=tenant,
+        stale_timeout_seconds=stale_timeout_seconds,
+    )
