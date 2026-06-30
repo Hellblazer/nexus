@@ -65,6 +65,7 @@ from typing import Any
 import structlog
 
 from nexus.db.chroma_quotas import QUOTAS
+from nexus.retry import _etl_with_retry
 
 _log = structlog.get_logger(__name__)
 
@@ -319,7 +320,7 @@ def migrate_aspects(
                 keys.append(doc_id or f"row#{read}")
             if batch:
                 try:
-                    n = http_aspects.import_aspects_batch(batch)
+                    n = _etl_with_retry(http_aspects.import_aspects_batch, batch)
                     imported += n
                     skipped += len(batch) - n
                 except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
@@ -396,7 +397,7 @@ def migrate_highlights(
                 keys.append(str(row_dict.get("doc_id") or f"row#{read}"))
             if batch:
                 try:
-                    n = http_highlights.import_highlights_batch(batch)
+                    n = _etl_with_retry(http_highlights.import_highlights_batch, batch)
                     imported += n
                     skipped += len(batch) - n
                 except Exception as exc:  # noqa: BLE001 — batch failure recorded; continue (idempotent re-run)
@@ -514,7 +515,7 @@ def migrate_queue(
                 keys.append(q_doc_id or f"row#{read}")
             if batch:
                 try:
-                    n = http_queue.import_queue_batch(batch)
+                    n = _etl_with_retry(http_queue.import_queue_batch, batch)
                     imported += n
                     skipped += len(batch) - n
                 except Exception as exc:  # noqa: BLE001 — batch failure recorded; continue (idempotent re-run)
@@ -602,7 +603,7 @@ def migrate_promotion_log(
                 keys.append(str(row_dict.get("field_name") or ""))
             if batch:
                 try:
-                    n = http_aspects.import_promotion_batch(batch)
+                    n = _etl_with_retry(http_aspects.import_promotion_batch, batch)
                     imported += n
                     skipped += len(batch) - n
                 except Exception as exc:  # noqa: BLE001 — batch failure recorded; continue (idempotent re-run)

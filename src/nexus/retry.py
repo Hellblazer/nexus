@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Transient-error retry helpers for ChromaDB Cloud and Voyage AI.
+"""Transient-error retry helpers for ChromaDB Cloud, Voyage AI, and the
+migration ETLs.
 
 Leaf module — no nexus.* imports.  Only stdlib + httpx + structlog + soft voyageai.error.
 """
 from __future__ import annotations
 
 import random
+import socket
 import threading
 import time
+import urllib.error
 from collections.abc import Callable
 from typing import Any
 
@@ -57,8 +60,9 @@ def get_retry_stats() -> dict[str, float | int]:
     """Return a snapshot of retry counters — voyage + chroma, time + count.
 
     Returned keys: ``voyage_seconds``, ``voyage_count``, ``chroma_seconds``,
-    ``chroma_count``, ``total_seconds``, ``total_count``. Resetting the
-    counters is the caller's responsibility via :func:`reset_retry_stats`.
+    ``chroma_count``, ``etl_seconds``, ``etl_count``, ``total_seconds``,
+    ``total_count``. Resetting the counters is the caller's responsibility via
+    :func:`reset_retry_stats`.
     """
     with _retry_lock:
         return {
@@ -66,8 +70,10 @@ def get_retry_stats() -> dict[str, float | int]:
             "voyage_count": _voyage_retry_count,
             "chroma_seconds": _chroma_retry_seconds,
             "chroma_count": _chroma_retry_count,
-            "total_seconds": _voyage_retry_seconds + _chroma_retry_seconds,
-            "total_count": _voyage_retry_count + _chroma_retry_count,
+            "etl_seconds": _etl_retry_seconds,
+            "etl_count": _etl_retry_count,
+            "total_seconds": _voyage_retry_seconds + _chroma_retry_seconds + _etl_retry_seconds,
+            "total_count": _voyage_retry_count + _chroma_retry_count + _etl_retry_count,
         }
 
 
@@ -77,11 +83,14 @@ def reset_retry_stats() -> None:
     that run's backoffs."""
     global _voyage_retry_seconds, _voyage_retry_count
     global _chroma_retry_seconds, _chroma_retry_count
+    global _etl_retry_seconds, _etl_retry_count
     with _retry_lock:
         _voyage_retry_seconds = 0.0
         _voyage_retry_count = 0
         _chroma_retry_seconds = 0.0
         _chroma_retry_count = 0
+        _etl_retry_seconds = 0.0
+        _etl_retry_count = 0
 
 
 # ── ChromaDB transient-error retry ───────────────────────────────────────────
@@ -231,5 +240,103 @@ def _voyage_with_retry(
             # nexus-8g79.32: jittered sleep, see chroma path above.
             jittered = delay * (1.0 + (random.random() - 0.5) * 0.4)
             _add_voyage_retry(jittered)
+            time.sleep(jittered)
+            delay = min(delay * 2, 10.0)
+
+
+# ── Migration-ETL transient-edge retry (RDR-176 Gap 6) ───────────────────────
+#
+# The managed migration round-trips many records over the nginx edge. A
+# transient edge 403, a connection drop, or a read-timeout intermittently
+# strands a leg (vectors) or records a whole batch failed (T2) — prod
+# observed the vector leg succeeding only after two transient-403 retries.
+# Idempotent upsert / ON CONFLICT makes a BOUNDED re-send safe.
+#
+# This is MIGRATION-SCOPED on purpose: it classifies a 403 as retryable, which
+# would be wrong for a normal runtime store call (a real auth failure must
+# fail fast). It is therefore applied at the ETL call sites, NOT in the shared
+# HTTP-client `_post`. A genuinely-forbidden request still surfaces — it just
+# exhausts the (small) attempt bound first, then raises with its remedy.
+
+#: Only transient edge 403 is retried at the status level; 400/404/422 are real
+#: client errors and fail fast. Connection drops / read-timeouts retry via the
+#: transport-level checks below.
+_RETRYABLE_ETL_HTTP_STATUSES: frozenset[int] = frozenset({403})
+
+_etl_retry_seconds: float = 0.0
+_etl_retry_count: int = 0
+
+
+def _add_etl_retry(delay: float) -> None:
+    global _etl_retry_seconds, _etl_retry_count
+    with _retry_lock:
+        _etl_retry_seconds += delay
+        _etl_retry_count += 1
+
+
+def _is_retryable_etl_error(exc: BaseException) -> bool:
+    """Return True if *exc* is a transient migration-edge failure worth a bounded
+    retry: a nginx edge 403, a connection drop, or a read-timeout.
+
+    Real client errors (400/404/422), and any 401 (token rotation — handled by
+    the vector client's own auto-restart), are NOT retried here.
+    """
+    # Transport-level httpx (ConnectError, ReadTimeout, RemoteProtocolError, …).
+    if isinstance(exc, httpx.TransportError):
+        return True
+    # httpx response error — only the transient edge 403.
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_ETL_HTTP_STATUSES
+    # urllib.error.HTTPError is a URLError subclass — check it FIRST so a 404
+    # does not fall through to the blanket URLError (drop) branch below.
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _RETRYABLE_ETL_HTTP_STATUSES
+    # urllib transport drop (no HTTP response).
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    # stdlib read-timeout / connection drop (socket.timeout aliases TimeoutError
+    # on 3.10+; ConnectionResetError ⊂ ConnectionError).
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    # VectorServiceError-like: an explicit integer ``.code`` (duck-typed so this
+    # leaf module imports no nexus.*). None code → not classified here.
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code in _RETRYABLE_ETL_HTTP_STATUSES
+    return False
+
+
+def _etl_with_retry(
+    fn: Callable[..., Any],
+    *args: Any,
+    max_attempts: int = 3,
+    **kwargs: Any,
+) -> Any:
+    """Call *fn* with bounded backoff on transient migration-edge errors.
+
+    Retries up to *max_attempts* (default 3). Backoff 1→2→4 s, capped at 10 s,
+    ±20% jitter. Non-transient errors (and the final attempt) raise immediately.
+    Each retry emits a WARN line (``etl_transient_error_retry``) so a stalled
+    migration leg is visible instead of looking like a silent hang.
+
+    Safe because every migration write is idempotent (upsert / ON CONFLICT), so
+    re-sending a batch that may have partially landed is a no-op on the dupes.
+    """
+    delay = 1.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if attempt == max_attempts or not _is_retryable_etl_error(exc):
+                raise
+            _log.warning(
+                "etl_transient_error_retry",
+                attempt=attempt,
+                delay=delay,
+                error_type=type(exc).__name__,
+                error=str(exc)[:120],
+            )
+            jittered = delay * (1.0 + (random.random() - 0.5) * 0.4)
+            _add_etl_retry(jittered)
             time.sleep(jittered)
             delay = min(delay * 2, 10.0)

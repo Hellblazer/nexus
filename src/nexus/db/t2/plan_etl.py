@@ -61,6 +61,8 @@ from typing import Any
 
 import structlog
 
+from nexus.retry import _etl_with_retry
+
 _log = structlog.get_logger(__name__)
 
 # Column order matches ``_PLAN_COLUMNS`` in plan_library.py — used when reading
@@ -252,7 +254,7 @@ def migrate_plan_rows(
         if not batch:
             return
         try:
-            written_count += store.import_plans_batch(batch)
+            written_count += _etl_with_retry(store.import_plans_batch, batch)
         except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
             _log.error("plan_etl.batch_failed", count=len(batch), error=str(exc))
             if collector is not None:
