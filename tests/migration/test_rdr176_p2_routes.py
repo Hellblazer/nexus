@@ -79,7 +79,8 @@ def test_every_route_is_a_real_endpoint_in_the_source_tree() -> None:
         # so we are matching real call sites / handler registrations, not the
         # enumeration itself.
         hit = subprocess.run(
-            ["grep", "-rqF", "--include=*.py", "--include=*.java", route,
+            ["grep", "-rqF", "--include=*.py", "--include=*.java",
+             "--exclude=route_coverage.py", route,
              str(repo_root / "src" / "nexus"), str(repo_root / "service" / "src")],
             capture_output=True,
         )

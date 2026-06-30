@@ -104,9 +104,10 @@ class ServiceCountSource:
         try:
             from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-            # RDR-176 P2 (Gap 3): no-arg → HttpCatalogClient() resolves URL+token
-            # config-first via resolve_service_endpoint (env>config>lease), the
-            # same unified chain the CLI migrate subcommands use. NOT env-only.
+            # RDR-176 P2 (Gap 3): no-arg → the factory's no-token branch returns
+            # a default-resolved catalog client that resolves URL+token config-
+            # first via resolve_service_endpoint (env>config>lease), the same
+            # unified chain the CLI migrate subcommands use. NOT env-only.
             client = make_catalog_client_for_migration()
             try:
                 return client.relation_counts(relations)

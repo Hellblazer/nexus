@@ -1342,8 +1342,8 @@ def migrate_all_cmd(
     # INTO the report so the artifact is self-contained for triage.
     #
     # RDR-176 P2 (Gap 3): --service-url is a config-first override, scoped to
-    # this call so it cannot leak to a sibling command. The no-arg Http*Store()
-    # / HttpCatalogClient() the orchestrator builds then resolve URL+token via
+    # this call so it cannot leak to a sibling command. The no-arg HTTP store
+    # and catalog clients the orchestrator builds then resolve URL+token via
     # the unified env>config chain.
     with _service_url_override(service_url):
         report = migrate_all(

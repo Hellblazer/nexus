@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 
+from nexus.migration import orchestrator
 from nexus.migration.orchestrator import verify_counts
 
 # PG relation names for the five catalog tables (mirrors the documents/links
@@ -63,6 +64,37 @@ _FULL_WRITTEN = {
 
 def _full_pg() -> dict[str, int]:
     return {_REL[t]: n for t, n in _FULL_WRITTEN.items()}
+
+
+def test_service_count_source_builds_client_config_first_no_arg() -> None:
+    """RDR-176 P2 I1: ServiceCountSource must build the catalog client no-arg
+    (config-first), NOT pass an env-only NX_SERVICE_TOKEN. Guards against
+    re-introducing the env-only read."""
+
+
+
+
+    calls: list[tuple] = []
+
+    class _FakeClient:
+        def relation_counts(self, rels: list[str]) -> dict[str, int]:
+            return {r: 0 for r in rels}
+
+        def close(self) -> None:
+            pass
+
+    def _fake_factory(*args: object, **kwargs: object) -> _FakeClient:
+        calls.append((args, kwargs))
+        return _FakeClient()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "nexus.catalog.factory.make_catalog_client_for_migration",
+            _fake_factory,
+        )
+        orchestrator.ServiceCountSource().counts(["nexus.memory"])
+
+    assert calls == [((), {})], f"expected a no-arg client build, got {calls}"
 
 
 def test_full_catalog_copy_verifies() -> None:
