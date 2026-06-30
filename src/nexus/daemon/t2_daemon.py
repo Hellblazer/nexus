@@ -2200,6 +2200,22 @@ def run_t2_daemon(
 
     configure_logging("t2_daemon", config_dir=config_dir)
 
+    # RDR-176 Phase 1 (Gap 2, non-mutation): in service mode the local SQLite T2
+    # tier is a frozen migration source and the Java service is the live
+    # substrate — no client connects to this daemon. Starting it would open
+    # ``memory.db`` and ``.catalog.db`` read-write (T2Database(run_migrations=
+    # True) + the rich Catalog's construction-time backfill/rebuild), mutating
+    # the source and breaking the downgrade guarantee. The SQLite daemon has no
+    # role here, so do not start it.
+    from nexus.db.storage_mode import (  # noqa: PLC0415 - deferred to avoid circular import / CLI startup cost
+        StorageBackend,
+        storage_backend_for,
+    )
+
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        _log.info("t2_daemon_not_started_service_mode")
+        return
+
     async def _main() -> None:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(

@@ -1045,6 +1045,28 @@ class TestApproachSectionExtractor:
         text = "## Intro\n\nx.\n\n### Approach (two tracks)\n\nbody line.\n\n## Next\n\ny."
         assert _prg_extract_approach_section(text).strip() == "body line."
 
+    def test_extracts_proposed_approach_heading(self):
+        """'## Proposed Approach' is the most common phrasing (RDR-176) and must
+        be recognised — the 'Proposed' prefix previously defeated the matcher."""
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = (
+            "## Intro\n\nx.\n\n## Proposed Approach (pillars)\n\n"
+            "body line.\n\n## Next\n\ny."
+        )
+        assert _prg_extract_approach_section(text).strip() == "body line."
+
+    def test_extracts_proposed_plan_heading(self):
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = "## Intro\n\nx.\n\n### Proposed Plan\n\nbody line.\n\n## Next\n\ny."
+        assert _prg_extract_approach_section(text).strip() == "body line."
+
+    def test_proposed_solution_does_not_match(self):
+        """'Proposed' must only license Approach/Plan synonyms, not 'Proposed
+        Solution' (a differently-scoped section in many RDRs)."""
+        from nexus.commands.rdr import _prg_extract_approach_section
+        text = "## Intro\n\nx.\n\n## Proposed Solution\n\nbody.\n\n## Next\n\ny."
+        assert _prg_extract_approach_section(text) == ""
+
 
 class TestPhaseBlockParser:
     """Unit tests for _prg_parse_phase_block_items (nexus-4u6mt)."""

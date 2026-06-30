@@ -550,6 +550,30 @@ class Catalog:
         # cutover removes. Reads stay correct because the daemon-writer
         # keeps the SQLite projection current on every committed write
         # (WAL read-committed; RF-8 Q5).
+        #
+        # RDR-176 Phase 1 (Gap 2, non-mutation): in service mode the local
+        # ``.catalog.db`` is a frozen migration source — the Java service owns
+        # the live catalog. Both construction-time writes here AND the
+        # ``CatalogStore`` schema DDL + ALTER migrations (skipped under
+        # ``read_only``) would mutate that source and break the downgrade
+        # guarantee. Force read-only regardless of the caller's flag so every
+        # construction path — the daemon's ``_build_hosted_catalog`` and every
+        # ``nx catalog`` CLI command — is covered by the single seam. Enforced
+        # by tests/catalog/test_rdr176_catalog_non_mutation.py.
+        #
+        # Gate on existence: the guarantee protects a legacy ``.catalog.db`` that
+        # a prior 5.x install left behind (a real migration source). A
+        # never-existed file has no prior content to preserve, and a ``mode=ro``
+        # open cannot create it — so only force read-only when the file is
+        # actually present.
+        if not read_only and db_path.exists():
+            from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+                StorageBackend,
+                storage_backend_for,
+            )
+
+            if storage_backend_for("catalog") == StorageBackend.SERVICE:
+                read_only = True
         self._read_only = read_only
         self._dir = catalog_dir
         self._db = CatalogDB(db_path, read_only=read_only)
