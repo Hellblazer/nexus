@@ -7,7 +7,6 @@ Leaf module — no nexus.* imports.  Only stdlib + httpx + structlog + soft voya
 from __future__ import annotations
 
 import random
-import socket
 import threading
 import time
 import urllib.error
@@ -299,10 +298,19 @@ def _is_retryable_etl_error(exc: BaseException) -> bool:
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return True
     # VectorServiceError-like: an explicit integer ``.code`` (duck-typed so this
-    # leaf module imports no nexus.*). None code → not classified here.
+    # leaf module imports no nexus.*). A transient edge 403 wrapper carries
+    # ``code=403`` and retries here.
     code = getattr(exc, "code", None)
     if isinstance(code, int):
         return code in _RETRYABLE_ETL_HTTP_STATUSES
+    # Transport drop wrapped with no code: the managed vector path reframes a
+    # urllib/connection/timeout failure as ``VectorServiceError(code=None)`` via
+    # ``raise … from e``. Classify by the chained cause so a managed-path drop /
+    # read-timeout retries exactly like the local-path raw error would (the
+    # code-review gap: code=None wrappers were silently not retried).
+    cause = exc.__cause__ or exc.__context__
+    if isinstance(cause, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return True
     return False
 
 
@@ -314,10 +322,20 @@ def _etl_with_retry(
 ) -> Any:
     """Call *fn* with bounded backoff on transient migration-edge errors.
 
-    Retries up to *max_attempts* (default 3). Backoff 1→2→4 s, capped at 10 s,
-    ±20% jitter. Non-transient errors (and the final attempt) raise immediately.
-    Each retry emits a WARN line (``etl_transient_error_retry``) so a stalled
-    migration leg is visible instead of looking like a silent hang.
+    Retries up to *max_attempts* (default 3). Backoff 1→2 s between the attempts
+    (max_attempts=3 sleeps twice: ~1s + ~2s ≈ 3s of added latency before the
+    final raise), capped at 10 s, ±20% jitter. Non-transient errors (and the
+    final attempt) raise immediately. Each retry emits a WARN line
+    (``etl_transient_error_retry``) so a stalled migration leg is visible.
+
+    Two caveats: (1) a PERSISTENT failure (e.g. a real auth 403) is retried as
+    "transient" — the WARN carries ``persistent_if_all_fail=True`` to flag that
+    triage should treat repeated lines as a real failure, and the final raised
+    exception still carries its remedy message. (2) a genuine server STALL (the
+    request never returns) is bounded by the caller's per-call timeout, NOT by
+    this helper; retrying multiplies the worst-case stall by up to
+    *max_attempts* (e.g. 3× the vector leg's 600 s upsert timeout). The retry
+    only shortens recovery from errors that RAISE; it does not add a timeout.
 
     Safe because every migration write is idempotent (upsert / ON CONFLICT), so
     re-sending a batch that may have partially landed is a no-op on the dupes.
@@ -335,6 +353,7 @@ def _etl_with_retry(
                 delay=delay,
                 error_type=type(exc).__name__,
                 error=str(exc)[:120],
+                persistent_if_all_fail=True,
             )
             jittered = delay * (1.0 + (random.random() - 0.5) * 0.4)
             _add_etl_retry(jittered)

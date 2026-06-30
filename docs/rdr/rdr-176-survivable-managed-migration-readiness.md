@@ -375,7 +375,11 @@ bar; a leg that lands a subset is a failure, not a green.
   `retry.py`'s `sqlite3.OperationalError`-"locked" classification is not a SQLite *backend*
   use; it is transient-error handling for the local-mode path above. This decision ratifies
   the directive as RDR-176's acceptance frame. It does not itself remove any backend (that is
-  RDR-158).
+  RDR-158). A complete per-file enumeration of the ~44 `import sqlite3` sites and their
+  exception-class justification is deferred to RDR-158, where they are the direct subject of
+  removal or per-file ratification (e.g. an `import sqlite3` allowlist lint). This register
+  defines the exception vocabulary and acceptance frame; RDR-158 applies it per file. The
+  category boundaries above are the contract, not the file list, which is illustrative.
 
 ## Sequencing (implementation order)
 

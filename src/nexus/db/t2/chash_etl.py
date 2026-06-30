@@ -120,7 +120,7 @@ def migrate_chash_rows(
                 # read-timeout (idempotent import). raise_for_status surfaces a
                 # classifiable httpx.HTTPStatusError so the retry classifier can
                 # tell a transient 403 (retry) from a real 4xx (fail fast).
-                def _do_post():  # noqa: B023 — payload is loop-local, bound per iteration
+                def _do_post():  # noqa: B023 — called immediately in this loop iteration, before payload advances
                     r = http_chash._client.post("/v1/chash/import", json={"rows": payload})
                     r.raise_for_status()
                     return r

@@ -363,10 +363,24 @@ def migrate_all(
     ``on_store(store)`` fires before each store runs; ``on_store_failed(store,
     exc)`` fires when a store crashes (the crash is also recorded in the
     report); ``on_progress(store, written, read)`` fires after each store
-    completes, carrying that store's running written/read counts (RDR-176 Gap 5
-    observability — a long migration is otherwise silent except on failure).
-    All three are pure callbacks so the orchestrator never imports the CLI's
-    ``click`` — the RDR-159 guided upgrade engine wires its own sink.
+    completes SUCCESSFULLY, carrying that store's running written/read counts
+    (RDR-176 Gap 5 observability — a long migration is otherwise silent except
+    on failure). All three are pure callbacks so the orchestrator never imports
+    the CLI's ``click`` — the RDR-159 guided upgrade engine wires its own sink.
+
+    Progress granularity (RDR-176 Gap 5, intentional split): this callback is
+    PER-STORE (a rollup fired once the store finishes). PER-BATCH progress is
+    NOT a second callback — each ETL already emits per-batch ``*.progress`` INFO
+    events to the structlog stream that ``migrate all`` prints, so both
+    granularities are observable (per-batch via the log stream, per-store via
+    this callback + the report). Threading a per-batch callback through all
+    eight ETLs would duplicate the existing per-batch logs.
+
+    ``report["dest_counts"]`` holds the destination-side (pg) per-relation row
+    counts the count source reported. It is ``{}`` when verification is
+    ``indeterminate`` (nothing mappable, or the count source was unreachable) —
+    read it ALONGSIDE ``report["verification"]``: ``{}`` means "unavailable",
+    NOT "zero rows landed".
 
     The report's ``summary.total_failed == 0`` is the hard gate; the
     verification verdict (``verified`` / ``mismatch`` / ``indeterminate``)
@@ -380,9 +394,11 @@ def migrate_all(
     for etl in ordered(build_store_etls(sources)):
         if on_store is not None:
             on_store(etl.store)
+        crashed = False
         try:
             etl.run(sources, collector)
         except Exception as exc:  # noqa: BLE001 — recorded, never silent
+            crashed = True
             collector.record_event(
                 etl.store, etl.store,
                 issue_class="unexpected", constraint=etl.store,
@@ -390,24 +406,28 @@ def migrate_all(
             )
             if on_store_failed is not None:
                 on_store_failed(etl.store, exc)
-        # RDR-176 Gap 5: per-store progress signal once the store completes —
+        # RDR-176 Gap 5: per-store progress signal once the store COMPLETES —
         # the running written/read counts the collector accumulated for it. The
         # ETLs already emit per-batch INFO; this makes the orchestrator emit a
         # per-store rollup (INFO + callback) so `migrate all` is not silent.
-        s_written = sum(
-            collector.table_counts(etl.store, t)["written"]
-            for t in collector.tables_for(etl.store)
-        )
-        s_read = sum(
-            collector.table_counts(etl.store, t)["read"]
-            for t in collector.tables_for(etl.store)
-        )
-        _log.info(
-            "migrate_all.store_progress",
-            store=etl.store, written=s_written, read=s_read,
-        )
-        if on_progress is not None:
-            on_progress(etl.store, s_written, s_read)
+        # Suppressed on a crash: on_store_failed is the authoritative signal
+        # there, and a "0 written / 0 read" line would misread as "completed
+        # empty" rather than "crashed" (code-review-expert, 2026-06-30).
+        if not crashed:
+            s_written = sum(
+                collector.table_counts(etl.store, t)["written"]
+                for t in collector.tables_for(etl.store)
+            )
+            s_read = sum(
+                collector.table_counts(etl.store, t)["read"]
+                for t in collector.tables_for(etl.store)
+            )
+            _log.info(
+                "migrate_all.store_progress",
+                store=etl.store, written=s_written, read=s_read,
+            )
+            if on_progress is not None:
+                on_progress(etl.store, s_written, s_read)
 
     report = build_report(
         collector,

@@ -90,3 +90,60 @@ def test_migrate_all_report_has_dest_counts(tmp_path, monkeypatch) -> None:
     assert "dest_counts" in report
     assert report["dest_counts"]  # non-empty
     assert report["dest_counts"] == {r: 10 for r in (cs.seen or [])}
+
+
+class _UnreachableCountSource:
+    """A count source that cannot answer (service unreachable)."""
+
+    def counts(self, relations: list[str]) -> None:
+        return None
+
+
+def test_dest_counts_empty_and_indeterminate_when_count_source_unreachable(
+    tmp_path, monkeypatch,
+) -> None:
+    """When the count source is unreachable, dest_counts is {} AND verification
+    is 'indeterminate' — the two must be read together so {} reads as
+    'unavailable', never as 'zero rows landed' (code-review-expert, 2026-06-30)."""
+    monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls([]))
+
+    report = orch.migrate_all(
+        _sources(tmp_path), count_source=_UnreachableCountSource(),
+    )
+
+    assert report["verification"] == "indeterminate"
+    assert report["dest_counts"] == {}
+
+
+def test_no_progress_signal_for_crashed_store(tmp_path, monkeypatch) -> None:
+    """on_progress is suppressed for a store that crashes — on_store_failed is
+    the authoritative signal; a '0 written' progress line would misread as
+    'completed empty'."""
+    def _crashing_etls():
+        def _runner(store: str):
+            def run(sources: EtlSources, collector) -> dict:
+                if store == "plans":
+                    raise RuntimeError("mid-run partition")
+                collector.count_read(store, store, 10)
+                collector.count_written(store, store, 10)
+                return {}
+            return run
+        return [
+            StoreEtl(s, _runner(s))
+            for s in ("memory", "plans", "telemetry", "taxonomy",
+                      "aspects", "chash", "catalog", "aspects_queue")
+        ]
+
+    monkeypatch.setattr(orch, "build_store_etls", lambda s: _crashing_etls())
+    progress: list[str] = []
+    failed: list[str] = []
+    orch.migrate_all(
+        _sources(tmp_path),
+        count_source=_EchoCountSource(),
+        on_store_failed=lambda store, exc: failed.append(store),
+        on_progress=lambda store, w, r: progress.append(store),
+    )
+
+    assert "plans" in failed              # crash surfaced via on_store_failed
+    assert "plans" not in progress        # NOT also a progress line
+    assert "memory" in progress           # healthy stores still report
