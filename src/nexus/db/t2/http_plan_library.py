@@ -253,6 +253,52 @@ class HttpPlanLibrary(RawHandleGuardMixin):
         resp = self._post("/v1/plans/import", payload)
         return int(resp["id"])
 
+    @staticmethod
+    def build_import_row(**kwargs: Any) -> dict[str, Any]:
+        """Build one ``import_plans_batch`` row dict (same field shape as the
+        :meth:`import_plan` payload). Accepts the same keyword args; optional
+        ``last_used`` / ``disabled_at`` are omitted when ``None``."""
+        row: dict[str, Any] = {
+            "project":          kwargs.get("project") or "",
+            "query":            kwargs["query"],
+            "plan_json":        kwargs["plan_json"],
+            "outcome":          kwargs.get("outcome") or "success",
+            "tags":             kwargs.get("tags") or "",
+            "created_at":       kwargs["created_at"],
+            "ttl":              kwargs.get("ttl"),
+            "name":             kwargs.get("name"),
+            "verb":             kwargs.get("verb"),
+            "scope":            kwargs.get("scope"),
+            "dimensions":       kwargs.get("dimensions"),
+            "default_bindings": kwargs.get("default_bindings"),
+            "parent_dims":      kwargs.get("parent_dims"),
+            "use_count":        kwargs.get("use_count", 0),
+            "match_count":      kwargs.get("match_count", 0),
+            "match_conf_sum":   kwargs.get("match_conf_sum", 0.0),
+            "success_count":    kwargs.get("success_count", 0),
+            "failure_count":    kwargs.get("failure_count", 0),
+            "scope_tags":       kwargs.get("scope_tags") or "",
+            "match_text":       kwargs.get("match_text") or "",
+        }
+        if kwargs.get("last_used") is not None:
+            row["last_used"] = kwargs["last_used"]
+        if kwargs.get("disabled_at") is not None:
+            row["disabled_at"] = kwargs["disabled_at"]
+        return row
+
+    def import_plans_batch(self, rows: list[dict[str, Any]]) -> int:
+        """RDR-176 P3 (bead nexus-t9rmg.18): fidelity-preserving BULK import.
+
+        POSTs all *rows* (built via :meth:`build_import_row`) to
+        ``/v1/plans/import_batch`` in ONE request — the service lands them under
+        one tenant transaction. Collapses an N-row leg to ceil(N/batch). Caller
+        keeps each batch within the per-write quota. Empty list is a no-op.
+        """
+        if not rows:
+            return 0
+        resp = self._post("/v1/plans/import_batch", {"rows": rows})
+        return int(resp.get("imported", 0))
+
     # ── Read ───────────────────────────────────────────────────────────────────
 
     def get_plan(self, plan_id: int) -> dict[str, Any] | None:

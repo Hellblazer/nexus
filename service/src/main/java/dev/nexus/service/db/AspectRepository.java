@@ -454,6 +454,25 @@ public final class AspectRepository {
      * extracted_at is preserved verbatim (EXCLUDED.*). Returns count imported.
      */
     public int importAspect(String tenant, Map<String, Object> body) {
+        return tenantScope.withTenant(tenant, ctx -> doImportAspect(ctx, tenant, body));
+    }
+
+    /**
+     * RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): GUC-once bulk aspect import. ONE
+     * {@link TenantScope#withTenant} (RLS GUC set once per batch) summing the
+     * per-row {@link #doImportAspect}. Returns the number of rows actually
+     * written (sub-confidence rows count 0, matching the single-row path).
+     */
+    public int importAspectsBatch(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            int written = 0;
+            for (Map<String, Object> body : rows) written += doImportAspect(ctx, tenant, body);
+            return written;
+        });
+    }
+
+    private int doImportAspect(DSLContext ctx, String tenant, Map<String, Object> body) {
         double confidence = body.containsKey("confidence") && body.get("confidence") != null
             ? ((Number) body.get("confidence")).doubleValue()
             : -1.0;
@@ -462,7 +481,7 @@ public final class AspectRepository {
         String extractedAt = (String) body.get("extracted_at");
         OffsetDateTime extractedAtTs = parseTs(extractedAt);
 
-        return tenantScope.withTenant(tenant, ctx -> {
+        {
             ensureCollectionRegistered(ctx, tenant, (String) body.get("collection"));
             return ctx.insertInto(DOCUMENT_ASPECTS,
                     DOCUMENT_ASPECTS.TENANT_ID,
@@ -517,7 +536,7 @@ public final class AspectRepository {
                 .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
                 .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
                 .execute();
-        });
+        }
     }
 
     // ── document_highlights ────────────────────────────────────────────────────
@@ -647,12 +666,26 @@ public final class AspectRepository {
      * ETL import — fidelity-preserving highlight upsert.
      */
     public int importHighlight(String tenant, Map<String, Object> body) {
+        return tenantScope.withTenant(tenant, ctx -> doImportHighlight(ctx, tenant, body));
+    }
+
+    /** RDR-176 P3 (Gap 1): GUC-once bulk highlight import (one withTenant per batch). */
+    public int importHighlightsBatch(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            int written = 0;
+            for (Map<String, Object> body : rows) written += doImportHighlight(ctx, tenant, body);
+            return written;
+        });
+    }
+
+    private int doImportHighlight(DSLContext ctx, String tenant, Map<String, Object> body) {
         String docId = (String) body.get("doc_id");
         if (docId == null || docId.isBlank()) return 0;
         String ingestedAt = (String) body.get("ingested_at");
         OffsetDateTime ingestedAtTs = parseTs(ingestedAt);
 
-        return tenantScope.withTenant(tenant, ctx -> {
+        {
             ensureCollectionRegistered(ctx, tenant, (String) body.get("collection"));
             return ctx.insertInto(DOCUMENT_HIGHLIGHTS,
                     DOCUMENT_HIGHLIGHTS.TENANT_ID,
@@ -678,7 +711,7 @@ public final class AspectRepository {
                 .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
                 .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
                 .execute();
-        });
+        }
     }
 
     // ── aspect_extraction_queue ────────────────────────────────────────────────
@@ -1038,6 +1071,20 @@ public final class AspectRepository {
      * ETL import of a queue row — fidelity-preserving, never downgrades in_progress.
      */
     public int importQueueRow(String tenant, Map<String, Object> body) {
+        return tenantScope.withTenant(tenant, ctx -> doImportQueueRow(ctx, tenant, body));
+    }
+
+    /** RDR-176 P3 (Gap 1): GUC-once bulk aspect-queue import (one withTenant per batch). */
+    public int importQueueBatch(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            int written = 0;
+            for (Map<String, Object> body : rows) written += doImportQueueRow(ctx, tenant, body);
+            return written;
+        });
+    }
+
+    private int doImportQueueRow(DSLContext ctx, String tenant, Map<String, Object> body) {
         String collection = (String) body.get("collection");
         String sourcePath = (String) body.get("source_path");
         if (collection == null || sourcePath == null) return 0;
@@ -1051,7 +1098,7 @@ public final class AspectRepository {
         int retryCount = body.containsKey("retry_count")
             ? ((Number) body.get("retry_count")).intValue() : 0;
 
-        return tenantScope.withTenant(tenant, ctx -> {
+        {
             ensureCollectionRegistered(ctx, tenant, collection);
             return ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
                     ASPECT_EXTRACTION_QUEUE.TENANT_ID,
@@ -1091,7 +1138,7 @@ public final class AspectRepository {
                 .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
                 .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      EX_Q_LAST_ERROR_CASE)
                 .execute();
-        });
+        }
     }
 
     // ── aspect_promotion_log ───────────────────────────────────────────────────
@@ -1164,6 +1211,20 @@ public final class AspectRepository {
      * ETL import of a promotion log row (event log — DO NOTHING on conflict).
      */
     public int importPromotionRow(String tenant, Map<String, Object> body) {
+        return tenantScope.withTenant(tenant, ctx -> doImportPromotionRow(ctx, tenant, body));
+    }
+
+    /** RDR-176 P3 (Gap 1): GUC-once bulk aspect-promotion import (one withTenant per batch). */
+    public int importPromotionBatch(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            int written = 0;
+            for (Map<String, Object> body : rows) written += doImportPromotionRow(ctx, tenant, body);
+            return written;
+        });
+    }
+
+    private int doImportPromotionRow(DSLContext ctx, String tenant, Map<String, Object> body) {
         String fieldName  = (String) body.get("field_name");
         String promotedAt = (String) body.get("promoted_at");
         if (fieldName == null || promotedAt == null) return 0;
@@ -1173,7 +1234,7 @@ public final class AspectRepository {
         int rowsPruned     = body.containsKey("rows_pruned") ? ((Number) body.get("rows_pruned")).intValue() : 0;
         int pruned         = body.containsKey("pruned") && Boolean.TRUE.equals(body.get("pruned")) ? 1 : 0;
 
-        return tenantScope.withTenant(tenant, ctx ->
+        return
             ctx.insertInto(ASPECT_PROMOTION_LOG,
                     ASPECT_PROMOTION_LOG.TENANT_ID,
                     ASPECT_PROMOTION_LOG.FIELD_NAME,
@@ -1192,7 +1253,7 @@ public final class AspectRepository {
                     ASPECT_PROMOTION_LOG.FIELD_NAME,
                     ASPECT_PROMOTION_LOG.PROMOTED_AT)
                 .doNothing()
-                .execute());
+                .execute();
     }
 
     // ── Operator fast-path queries (RDR-152 bead nexus-l9hd8) ──────────────────

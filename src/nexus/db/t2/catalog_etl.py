@@ -485,7 +485,7 @@ def migrate_catalog(
         table="owners",
         rows=owners_rows,
         transform=_transform_owner,
-        import_fn=lambda payload: client._post("/import/owner", payload),
+        import_fn=lambda rows: client._post("/import/owner", {"rows": rows}),
         batch_log_every=batch_log_every,
         collector=collector,
     )
@@ -495,7 +495,7 @@ def migrate_catalog(
         table="documents",
         rows=docs_rows,
         transform=_transform_document,
-        import_fn=lambda payload: client._post("/import/document", payload),
+        import_fn=lambda rows: client._post("/import/document", {"rows": rows}),
         batch_log_every=batch_log_every,
         collector=collector,
     )
@@ -505,7 +505,7 @@ def migrate_catalog(
         table="collections",
         rows=collections_rows,
         transform=_transform_collection,
-        import_fn=lambda payload: client._post("/import/collection", payload),
+        import_fn=lambda rows: client._post("/import/collection", {"rows": rows}),
         batch_log_every=batch_log_every,
         collector=collector,
     )
@@ -519,11 +519,22 @@ def migrate_catalog(
         doc_id = crow["doc_id"]
         chunks_by_doc.setdefault(doc_id, []).append(crow)
 
+    # RDR-176 P3 (Gap 1): the /import/chunk envelope is doc-scoped ({doc_id,
+    # rows}); split each doc's chunks into <= quota-sized sub-batches so a doc
+    # with >300 chunks does not exceed MAX_RECORDS_PER_WRITE in one POST. (Cross-
+    # doc batching is not possible under the doc-scoped envelope; a doc with few
+    # chunks is still one POST — the server-side jOOQ batch is the further
+    # optimisation, bead nexus-1qpni.)
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    _chunk_cap = QUOTAS.MAX_RECORDS_PER_WRITE
+
     for doc_id, doc_chunks in chunks_by_doc.items():
         chunk_rows_payload = [_transform_chunk_row(c) for c in doc_chunks]
         chunk_read += len(doc_chunks)
         try:
-            client._post("/import/chunk", {"doc_id": doc_id, "rows": chunk_rows_payload})
+            for i in range(0, len(chunk_rows_payload), _chunk_cap):
+                sub = chunk_rows_payload[i: i + _chunk_cap]
+                client._post("/import/chunk", {"doc_id": doc_id, "rows": sub})
             chunk_written += len(doc_chunks)
         except Exception as exc:  # noqa: BLE001 — per-doc resilience; logged, one bad group must not abort ETL
             _log.error(
@@ -559,7 +570,7 @@ def migrate_catalog(
         table="links",
         rows=links_rows,
         transform=_transform_link,
-        import_fn=lambda payload: client._post("/import/link", payload),
+        import_fn=lambda rows: client._post("/import/link", {"rows": rows}),
         batch_log_every=batch_log_every,
         collector=collector,
     )
@@ -620,12 +631,51 @@ def _import_table(
     batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    """Import one table's rows via ``import_fn(payload)``."""
+    """Import one table's rows via ``import_fn(rows)`` (a batched array POST).
+
+    RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): the ``/v1/catalog/import/*``
+    endpoints accept a ``{"rows": [...]}`` array; ``import_fn`` POSTs the batch,
+    so the transfer count is ceil(N/quota), not N (the per-row shape the dogfood
+    hit). Each row is still TRANSFORMED per-row (a corrupt row is recorded +
+    excluded); only the NETWORK is batched. A server-side batch rejection is
+    recorded at batch granularity; the import is idempotent so a re-run lands it.
+    """
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    bsize = QUOTAS.MAX_RECORDS_PER_WRITE
+
     read_count = 0
     written_count = 0
     total = len(rows)
+    batch: list[dict[str, Any]] = []
+    keys: list[str] = []
 
     _log.info("catalog_etl.table_start", table=table, total_rows=total)
+
+    def _key(row: dict[str, Any], n: int) -> str:
+        return str(
+            row.get("tumbler_prefix") or row.get("tumbler") or row.get("name")
+            or row.get("from_tumbler") or f"row-{n}"
+        )
+
+    def _flush() -> None:
+        nonlocal written_count, batch, keys
+        if not batch:
+            return
+        try:
+            import_fn(batch)
+            written_count += len(batch)
+        except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
+            _log.error("catalog_etl.batch_failed", table=table, count=len(batch), error=str(exc))
+            if collector is not None:
+                for key in keys:
+                    collector.record(
+                        "catalog", table,
+                        issue_class="unexpected", constraint=table,
+                        reason=f"batch import rejected: {exc}",
+                        action="failed", sample_id=key,
+                    )
+        batch = []
+        keys = []
 
     for row in rows:
         read_count += 1
@@ -633,49 +683,31 @@ def _import_table(
             # Transform INSIDE the try (RDR-153 P2 critic): a corrupt row
             # must become a recorded failed issue, never abort the table.
             payload = transform(row)
-            import_fn(payload)
-            written_count += 1
-        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort table
-            # Log the key for the failing row; continue so one bad row
-            # doesn't abort the whole table.
-            key_hint = (
-                row.get("tumbler_prefix")
-                or row.get("tumbler")
-                or row.get("name")
-                or row.get("from_tumbler")
-                or f"row-{read_count}"
-            )
-            _log.error(
-                "catalog_etl.row_failed",
-                table=table,
-                key=key_hint,
-                error=str(exc),
-            )
+        except Exception as exc:  # noqa: BLE001 — per-row transform failure logged + recorded; continue
+            key_hint = _key(row, read_count)
+            _log.error("catalog_etl.row_failed", table=table, key=key_hint, error=str(exc))
             if collector is not None:
                 collector.record(
                     "catalog", table,
-                    issue_class="unexpected",
-                    constraint=table,
-                    reason=f"row rejected during import: {exc}",
-                    action="failed",
-                    sample_id=str(key_hint),
+                    issue_class="unexpected", constraint=table,
+                    reason=f"row rejected during transform: {exc}",
+                    action="failed", sample_id=str(key_hint),
                 )
+            continue
+
+        batch.append(payload)
+        keys.append(_key(row, read_count))
+        if len(batch) >= bsize:
+            _flush()
 
         if read_count % batch_log_every == 0:
             _log.info(
                 "catalog_etl.progress",
-                table=table,
-                read=read_count,
-                written=written_count,
-                total=total,
+                table=table, read=read_count, written=written_count, total=total,
             )
 
-    _log.info(
-        "catalog_etl.table_done",
-        table=table,
-        read=read_count,
-        written=written_count,
-    )
+    _flush()
+    _log.info("catalog_etl.table_done", table=table, read=read_count, written=written_count)
     return {"read": read_count, "written": written_count}
 
 

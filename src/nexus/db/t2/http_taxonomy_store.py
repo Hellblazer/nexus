@@ -1496,6 +1496,30 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
             "last_discover_at": last_discover_at,
         })
 
+    def import_rows_batch(self, kind: str, rows: list[dict[str, Any]]) -> int:
+        """RDR-176 P3 (bead nexus-t9rmg.18): fidelity-preserving BULK import for
+        one taxonomy *kind* (``topic`` | ``assignment`` | ``link`` | ``meta``).
+
+        POSTs ``{"kind": kind, "rows": payloads}`` to ``/v1/taxonomy/import_batch``
+        in ONE request — the service lands the whole batch under one tenant
+        transaction (GUC set once). *rows* are the ETL transform kwargs; only the
+        ``topic`` kind renames ``src_id`` → ``id`` to match the per-row import
+        payload (the other three already use matching keys). Collapses the
+        topic_assignments leg from N round-trips to ceil(N/batch) — the 190k-row
+        dogfood fix. Empty list is a no-op; returns the number of rows imported.
+        """
+        if not rows:
+            return 0
+        if kind == "topic":
+            payloads = [
+                {**{k: v for k, v in r.items() if k != "src_id"}, "id": r["src_id"]}
+                for r in rows
+            ]
+        else:
+            payloads = rows
+        resp = self._post("/import_batch", {"kind": kind, "rows": payloads})
+        return int(resp.get("imported", 0)) if isinstance(resp, dict) else 0
+
     def audit_collection(
         self,
         collection: str,

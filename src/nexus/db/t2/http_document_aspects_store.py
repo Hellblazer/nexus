@@ -323,6 +323,23 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin):
         r = self._post("/import", body)
         return int(r.get("imported", 0))
 
+    def import_aspects_batch(self, rows: list[dict[str, Any]]) -> int:
+        """RDR-176 P3 (bead nexus-t9rmg.18): GUC-once bulk aspect import — POST
+        all *rows* to /v1/aspects/import in ONE request. Returns rows written
+        (sub-confidence rows count 0). Empty list is a no-op."""
+        if not rows:
+            return 0
+        r = self._post("/import", {"rows": rows})
+        return int(r.get("imported", 0))
+
+    def import_promotion_batch(self, rows: list[dict[str, Any]]) -> int:
+        """RDR-176 P3: GUC-once bulk aspect-promotion import — POST all *rows* to
+        /v1/aspects/promotion/import in ONE request."""
+        if not rows:
+            return 0
+        r = self._post("/promotion/import", {"rows": rows})
+        return int(r.get("imported", 0))
+
     # ── RDR-089 SQL fast-path operator queries (bead nexus-l9hd8) ─────────────
 
     def operator_filter(

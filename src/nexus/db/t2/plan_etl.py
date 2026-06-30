@@ -236,36 +236,63 @@ def migrate_plan_rows(
         total_rows=total,
     )
 
+    # RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): batch the HTTP transport so the
+    # transfer count is ceil(N/_IMPORT_BATCH_SIZE), not N. Each row is still
+    # TRANSFORMED per-row (a corrupt row is recorded individually + excluded);
+    # only the NETWORK is batched. Idempotent re-run (ON CONFLICT DO UPDATE)
+    # lands a batch the server rejected wholesale.
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    _IMPORT_BATCH_SIZE = QUOTAS.MAX_RECORDS_PER_WRITE
+
+    batch: list[dict[str, Any]] = []
+    batch_keys: list[str] = []
+
+    def _flush() -> None:
+        nonlocal written_count, batch, batch_keys
+        if not batch:
+            return
+        try:
+            written_count += store.import_plans_batch(batch)
+        except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
+            _log.error("plan_etl.batch_failed", count=len(batch), error=str(exc))
+            if collector is not None:
+                for key in batch_keys:
+                    collector.record(
+                        "plans", "plans",
+                        issue_class="unexpected",
+                        constraint="plans",
+                        reason=f"batch import rejected: {exc}",
+                        action="failed",
+                        sample_id=key[:60],
+                    )
+        batch = []
+        batch_keys = []
+
     for row_dict in (dict(r) for r in rows):
         read_count += 1
-        # Transform INSIDE the try (RDR-153 P2 review): never-silent.
-        transformed: dict[str, Any] = {}
         try:
             transformed = _transform_row(row_dict)
-            store.import_plan(**transformed)
-            written_count += 1
-        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
+        except Exception as exc:  # noqa: BLE001 — per-row transform failure logged + recorded; migration continues
             _log.error(
                 "plan_etl.row_failed",
-                project=transformed.get("project", ""),
-                query_prefix=(
-                    transformed["query"][:40]
-                    if len(transformed.get("query", "")) > 40
-                    else transformed.get("query", "")
-                ),
+                project=row_dict.get("project", ""),
                 error=str(exc),
             )
-            # Continue processing remaining rows so a single failure
-            # doesn't abort the whole migration. RDR-153 catch-all.
             if collector is not None:
                 collector.record(
                     "plans", "plans",
                     issue_class="unexpected",
                     constraint="plans",
-                    reason=f"row rejected during import: {exc}",
+                    reason=f"row rejected during transform: {exc}",
                     action="failed",
-                    sample_id=str(transformed.get("query", ""))[:60],
+                    sample_id=str(row_dict.get("query", ""))[:60],
                 )
+            continue
+
+        batch.append(store.build_import_row(**transformed))
+        batch_keys.append(str(transformed.get("query", "")))
+        if len(batch) >= _IMPORT_BATCH_SIZE:
+            _flush()
 
         if read_count % batch_log_every == 0:
             _log.info(
@@ -274,6 +301,8 @@ def migrate_plan_rows(
                 written=written_count,
                 total=total,
             )
+
+    _flush()
 
     _log.info(
         "plan_etl.complete",

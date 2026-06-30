@@ -429,7 +429,8 @@ def migrate_taxonomy_rows(
     results["topics"] = _migrate_table(
         rows=topic_rows,
         transform_fn=_transform_topic,
-        import_fn=store.import_topic,
+        store=store,
+        kind="topic",
         table="topics",
         batch_log_every=batch_log_every,
         collector=collector,
@@ -440,7 +441,8 @@ def migrate_taxonomy_rows(
     results["assignments"] = _migrate_table(
         rows=assign_rows,
         transform_fn=_transform_assignment,
-        import_fn=store.import_assignment,
+        store=store,
+        kind="assignment",
         table="topic_assignments",
         batch_log_every=batch_log_every,
         collector=collector,
@@ -451,7 +453,8 @@ def migrate_taxonomy_rows(
     results["links"] = _migrate_table(
         rows=link_rows,
         transform_fn=_transform_link,
-        import_fn=store.import_topic_link,
+        store=store,
+        kind="link",
         table="topic_links",
         batch_log_every=batch_log_every,
         collector=collector,
@@ -462,7 +465,8 @@ def migrate_taxonomy_rows(
     results["meta"] = _migrate_table(
         rows=meta_rows,
         transform_fn=_transform_meta,
-        import_fn=store.import_taxonomy_meta,
+        store=store,
+        kind="meta",
         table="taxonomy_meta",
         batch_log_every=batch_log_every,
         collector=collector,
@@ -487,7 +491,8 @@ def _migrate_table(
     *,
     rows: list[dict[str, Any]],
     transform_fn: Any,
-    import_fn: Any,
+    store: Any,
+    kind: str,
     table: str,
     batch_log_every: int,
     collector: Any = None,
@@ -495,80 +500,78 @@ def _migrate_table(
 ) -> dict[str, int]:
     """Generic per-table migration loop. Returns ``{"read": N, "written": M, "skipped": K}``.
 
-    An ``import_fn`` that returns ``False`` counts the row as ``skipped`` rather than
-    ``written`` (an ``import_fn`` returning ``None`` counts as written). This is a generic
-    skip-accounting hook. NOTE: no current taxonomy ``import_fn`` returns ``False`` —
-    ``import_assignment`` always applies now that ``fk_ta_catalog_doc`` is gone
-    (nexus-sa14p), so ``skipped`` is 0 for assignments. The hook is retained for any
-    future ``import_fn`` that needs to skip-and-count a row.
+    RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): batches the HTTP transport via
+    ``store.import_rows_batch(kind, batch)`` so the transfer count is
+    ceil(N/quota), not N — the fix for the per-row topic_assignments leg (190k
+    rows = 190k requests). Each row is still TRANSFORMED per-row (a corrupt row
+    is recorded individually + excluded); only the NETWORK is batched. A
+    server-side batch rejection is recorded at batch granularity; the import is
+    idempotent (ON CONFLICT DO UPDATE) so a re-run lands it. ``skipped`` is 0
+    (no current taxonomy import returns a skip now that fk_ta_catalog_doc is gone,
+    nexus-sa14p).
     """
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    bsize = QUOTAS.MAX_RECORDS_PER_WRITE
+
     read_count = 0
     written_count = 0
-    skipped_count = 0
-    skipped_ids: list[str] = []
-    _SKIPPED_ID_CAP = 200  # bound memory; near-zero expected after catalog-first ETL
     total = len(rows)
+    batch: list[dict[str, Any]] = []
+    keys: list[str] = []
+
+    def _flush() -> None:
+        nonlocal written_count, batch, keys
+        if not batch:
+            return
+        try:
+            written_count += store.import_rows_batch(kind, batch)
+        except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
+            _log.error("taxonomy_etl.batch_failed", table=table, count=len(batch), error=str(exc))
+            if collector is not None:
+                for key in keys:
+                    collector.record(
+                        "taxonomy", table,
+                        issue_class="unexpected", constraint=table,
+                        reason=f"batch import rejected: {exc}",
+                        action="failed", sample_id=key,
+                    )
+        batch = []
+        keys = []
 
     for row_dict in rows:
         read_count += 1
         try:
             transformed = transform_fn(row_dict)
-            applied = import_fn(**transformed)
-            if applied is False:
-                skipped_count += 1
-                if skipped_count == 1:
-                    _log.warning("taxonomy_etl.first_skip", table=table)
-                # Record the skipped row's doc_id for audit (if present) — a fidelity
-                # migration must be auditable, not just an aggregate count.
-                doc_id = transformed.get("doc_id")
-                if doc_id is not None and len(skipped_ids) < _SKIPPED_ID_CAP:
-                    skipped_ids.append(str(doc_id))
-            else:
-                written_count += 1
-        except Exception as exc:  # noqa: BLE001 — best-effort per-item; logged and skipped, must not abort batch
+        except Exception as exc:  # noqa: BLE001 — per-row transform failure logged + recorded; migration continues
             _log.error(
                 "taxonomy_etl.row_failed",
-                table=table,
-                row_preview=str(row_dict)[:120],
-                error=str(exc),
+                table=table, row_preview=str(row_dict)[:120], error=str(exc),
             )
-            # Continue processing remaining rows — a single failure does not
-            # abort the migration. RDR-153 catch-all: never a silent drop.
             if collector is not None:
                 collector.record(
                     "taxonomy", table,
-                    issue_class="unexpected",
-                    constraint=table,
-                    reason=f"row rejected during import: {exc}",
-                    action="failed",
-                    sample_id=f"{table}#{read_count}",
+                    issue_class="unexpected", constraint=table,
+                    reason=f"row rejected during transform: {exc}",
+                    action="failed", sample_id=f"{table}#{read_count}",
                 )
+            continue
+
+        batch.append(transformed)
+        keys.append(f"{table}#{read_count}")
+        if len(batch) >= bsize:
+            _flush()
 
         if read_count % batch_log_every == 0:
             _log.info(
                 "taxonomy_etl.progress",
-                table=table,
-                read=read_count,
-                written=written_count,
-                skipped=skipped_count,
-                total=total,
+                table=table, read=read_count, written=written_count, total=total,
             )
 
-    if skipped_count:
-        _log.warning(
-            "taxonomy_etl.rows_skipped",
-            table=table,
-            skipped=skipped_count,
-            read=read_count,
-            # Sample of the skipped ids (capped) so an operator can audit which rows
-            # were dropped — full set is reproducible by re-running.
-            skipped_doc_ids_sample=skipped_ids,
-            skipped_ids_truncated=skipped_count > len(skipped_ids),
-        )
+    _flush()
 
     if collector is not None:
         # read includes pre-skipped orphans so read == source cardinality.
         collector.count_read("taxonomy", table, read_count + pre_skipped)
         collector.count_written("taxonomy", table, written_count)
 
-    return {"read": read_count, "written": written_count, "skipped": skipped_count}
+    return {"read": read_count, "written": written_count, "skipped": 0}

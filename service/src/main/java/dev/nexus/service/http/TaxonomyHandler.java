@@ -156,6 +156,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/import/assignment"         -> handleImportAssignment(exchange, tenant, method);
                 case "/import/link"               -> handleImportLink(exchange, tenant, method);
                 case "/import/meta"               -> handleImportMeta(exchange, tenant, method);
+                case "/import_batch"              -> handleImportBatch(exchange, tenant, method);
                 // Analytical (nexus-gmiaf.14 drop-in completion)
                 case "/icf/map"                        -> handleIcfMap(exchange, tenant, method);
                 case "/hubs"                           -> handleDetectHubs(exchange, tenant, method);
@@ -529,6 +530,36 @@ public final class TaxonomyHandler implements HttpHandler {
         String lastDiscoverAt        = optStringOrNull(body, "last_discover_at");
         repo.importTaxonomyMeta(tenant, collection, lastDiscoverDocCount, lastDiscoverAt);
         HttpUtil.send(ex, 200, "{\"ok\":true}");
+    }
+
+    /**
+     * POST /v1/taxonomy/import_batch — RDR-176 P3 (Gap 1, bead nexus-t9rmg.18).
+     *
+     * <p>Body {@code {"kind": "topic"|"assignment"|"link"|"meta", "rows": [ … ]}}.
+     * The whole batch for one kind lands under ONE tenant transaction (GUC set
+     * once) via {@link dev.nexus.service.db.TaxonomyRepository#importBatch} —
+     * the fix for the per-row topic_assignments leg (190k rows = 190k requests).
+     * Response 200 {@code {"imported": <int>}}.
+     */
+    private void handleImportBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String kind = requireString(body, "kind");
+        Object rowsObj = body.get("rows");
+        if (!(rowsObj instanceof List<?> rawRows)) {
+            throw new IllegalArgumentException("field 'rows' must be a JSON array");
+        }
+        List<Map<String, Object>> rows = new ArrayList<>(rawRows.size());
+        for (Object o : rawRows) {
+            if (!(o instanceof Map<?, ?> rm)) {
+                throw new IllegalArgumentException("each element of 'rows' must be an object");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> row = (Map<String, Object>) rm;
+            rows.add(row);
+        }
+        int imported = repo.importBatch(tenant, kind, rows);
+        HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

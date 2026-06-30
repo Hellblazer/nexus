@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -91,6 +92,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/frecency/upsert"        -> handleFrecencyUpsert(exchange, tenant, method);
                 case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
                 case "/import"                 -> handleImport(exchange, tenant, method);
+                case "/import_batch"           -> handleImportBatch(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -380,6 +382,35 @@ public final class TelemetryHandler implements HttpHandler {
         }
 
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * POST /v1/telemetry/import_batch — RDR-176 P3 (Gap 1, bead nexus-t9rmg.18).
+     *
+     * <p>Body {@code {"table": "<one of the six>", "rows": [ {<table fields>}, … ]}}.
+     * The whole batch for one table lands under ONE tenant transaction (GUC set
+     * once) via {@link dev.nexus.service.db.TelemetryRepository#importBatch}.
+     * Response 200 {@code {"imported": <int>}}.
+     */
+    private void handleImportBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String table = requireString(body, "table");
+        Object rowsObj = body.get("rows");
+        if (!(rowsObj instanceof List<?> rawRows)) {
+            throw new IllegalArgumentException("field 'rows' must be a JSON array");
+        }
+        List<Map<String, Object>> rows = new ArrayList<>(rawRows.size());
+        for (Object o : rawRows) {
+            if (!(o instanceof Map<?, ?> rm)) {
+                throw new IllegalArgumentException("each element of 'rows' must be an object");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> row = (Map<String, Object>) rm;
+            rows.add(row);
+        }
+        int imported = repo.importBatch(tenant, table, rows);
+        HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

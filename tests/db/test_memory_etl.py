@@ -235,8 +235,20 @@ class TestMigrateMemoryMocked:
         conn.close()
         return db_path
 
-    def test_migrate_calls_import_entry_for_each_row(self, tmp_path):
-        """migrate_memory_rows calls store.import_entry for each SQLite row."""
+    def _batch_store(self) -> MagicMock:
+        """A mock HttpMemoryStore for the RDR-176 P3 batched ETL: build_import_row
+        delegates to the REAL staticmethod (so batch rows are inspectable dicts)
+        and import_entries_batch returns the batch size."""
+        from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — match this file's deferred-import test style
+
+        s = MagicMock()
+        s.build_import_row.side_effect = HttpMemoryStore.build_import_row
+        s.import_entries_batch.side_effect = lambda rows: len(rows)
+        return s
+
+    def test_migrate_batches_all_rows(self, tmp_path):
+        """RDR-176 P3: migrate_memory_rows ships rows in ONE batched call, not
+        one per row (3 rows ≤ cap → a single import_entries_batch of 3)."""
         from nexus.db.t2.memory_etl import migrate_memory_rows
 
         db_path = self._make_sqlite_db([
@@ -244,13 +256,14 @@ class TestMigrateMemoryMocked:
             {"project": "p2", "title": "t2", "content": "c2"},
             {"project": "p3", "title": "t3", "content": "c3"},
         ])
-        mock_store = MagicMock()
-        mock_store.import_entry.return_value = 1
+        store = self._batch_store()
 
-        result = migrate_memory_rows(db_path, mock_store)
+        result = migrate_memory_rows(db_path, store)
         assert result["read"] == 3
         assert result["written"] == 3
-        assert mock_store.import_entry.call_count == 3
+        store.import_entry.assert_not_called()
+        assert store.import_entries_batch.call_count == 1
+        assert len(store.import_entries_batch.call_args.args[0]) == 3
 
     def test_source_sqlite_unchanged(self, tmp_path):
         """SQLite source rows must be untouched after ETL (copy-not-move)."""
@@ -262,35 +275,30 @@ class TestMigrateMemoryMocked:
         ]
         db_path = self._make_sqlite_db(rows)
 
-        mock_store = MagicMock()
-        mock_store.import_entry.return_value = 1
+        migrate_memory_rows(db_path, self._batch_store())
 
-        migrate_memory_rows(db_path, mock_store)
-
-        # Verify source DB still has all rows
         conn = sqlite3.connect(str(db_path))
         count = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
         conn.close()
         assert count == 2, "SQLite source must retain all rows after ETL"
 
     def test_idempotency_via_mock(self, tmp_path):
-        """Running ETL twice calls import_entry twice per row (idempotency is upsert on server)."""
+        """Running ETL twice batches once per run (idempotency is upsert on server)."""
         from nexus.db.t2.memory_etl import migrate_memory_rows
 
         db_path = self._make_sqlite_db([
             {"project": "p", "title": "t1", "content": "c1"},
             {"project": "p", "title": "t2", "content": "c2"},
         ])
-        mock_store = MagicMock()
-        mock_store.import_entry.return_value = 1
+        store = self._batch_store()
 
-        r1 = migrate_memory_rows(db_path, mock_store)
-        r2 = migrate_memory_rows(db_path, mock_store)
+        r1 = migrate_memory_rows(db_path, store)
+        r2 = migrate_memory_rows(db_path, store)
 
         assert r1["read"] == 2
         assert r2["read"] == 2
-        # import_entry called 2x each run = 4 total
-        assert mock_store.import_entry.call_count == 4
+        # one batched call per run = 2 total
+        assert store.import_entries_batch.call_count == 2
 
     def test_field_mapping_last_accessed_empty(self, tmp_path):
         """last_accessed='' in SQLite transforms to None (PG TIMESTAMPTZ nullable)."""
@@ -306,47 +314,37 @@ class TestMigrateMemoryMocked:
         assert result.get("last_accessed") is None
 
     def test_field_mapping_id_not_passed(self, tmp_path):
-        """SQLite id must NOT appear in the import_entry() call."""
+        """SQLite id must NOT appear in the batched import row."""
         from nexus.db.t2.memory_etl import migrate_memory_rows
 
         db_path = self._make_sqlite_db([
             {"project": "p", "title": "t", "content": "c"},
         ])
-        mock_store = MagicMock()
-        mock_store.import_entry.return_value = 99
+        store = self._batch_store()
 
-        migrate_memory_rows(db_path, mock_store)
+        migrate_memory_rows(db_path, store)
 
-        # Inspect call args: id must not appear in kwargs or positional args
-        assert mock_store.import_entry.call_count == 1
-        call_args = mock_store.import_entry.call_args
-        kwargs = call_args.kwargs if call_args else {}
-        args = call_args.args if call_args else ()
-        assert "id" not in kwargs
-        # The SQLite row id=1 must not be positionally passed
-        assert 1 not in args
+        assert store.import_entries_batch.call_count == 1
+        rows = store.import_entries_batch.call_args.args[0]
+        assert len(rows) == 1
+        assert "id" not in rows[0]
 
-    def test_import_entry_receives_timestamp(self, tmp_path):
-        """import_entry must be called with the source timestamp (not absent)."""
+    def test_batched_row_carries_timestamp_and_access_count(self, tmp_path):
+        """The batched import row must carry the source timestamp + access_count
+        verbatim (fidelity-preserving)."""
         from nexus.db.t2.memory_etl import migrate_memory_rows
 
         src_ts = "2026-05-15T08:30:00Z"
         db_path = self._make_sqlite_db([
             {"project": "p", "title": "t", "content": "c", "timestamp": src_ts, "access_count": 5},
         ])
-        mock_store = MagicMock()
-        mock_store.import_entry.return_value = 1
+        store = self._batch_store()
 
-        migrate_memory_rows(db_path, mock_store)
+        migrate_memory_rows(db_path, store)
 
-        call_args = mock_store.import_entry.call_args
-        kwargs = call_args.kwargs if call_args else {}
-        assert kwargs.get("timestamp") == src_ts, (
-            f"import_entry must receive source timestamp={src_ts!r}, got {kwargs.get('timestamp')!r}"
-        )
-        assert kwargs.get("access_count") == 5, (
-            f"import_entry must receive source access_count=5, got {kwargs.get('access_count')!r}"
-        )
+        rows = store.import_entries_batch.call_args.args[0]
+        assert rows[0]["timestamp"] == src_ts
+        assert rows[0]["access_count"] == 5
 
     def test_returns_counts(self, tmp_path):
         """migrate_memory_rows returns {read, written} counts."""
@@ -356,26 +354,20 @@ class TestMigrateMemoryMocked:
             {"project": "p", "title": "t1", "content": "c"},
             {"project": "p", "title": "t2", "content": "c"},
         ])
-        mock_store = MagicMock()
-        mock_store.import_entry.return_value = 1
 
-        result = migrate_memory_rows(db_path, mock_store)
-        assert "read" in result
-        assert "written" in result
+        result = migrate_memory_rows(db_path, self._batch_store())
         assert result["read"] == 2
         assert result["written"] == 2
 
     def test_empty_db_returns_zeros(self, tmp_path):
-        """An empty SQLite DB produces read=0, written=0."""
+        """An empty SQLite DB produces read=0, written=0 and no batch call."""
         from nexus.db.t2.memory_etl import migrate_memory_rows
 
-        db_path = self._make_sqlite_db([])
-        mock_store = MagicMock()
-
-        result = migrate_memory_rows(db_path, mock_store)
+        store = self._batch_store()
+        result = migrate_memory_rows(self._make_sqlite_db([]), store)
         assert result["read"] == 0
         assert result["written"] == 0
-        mock_store.import_entry.assert_not_called()
+        store.import_entries_batch.assert_not_called()
 
 
 # ── Integration tests: real service + hermetic Postgres ───────────────────────

@@ -91,6 +91,7 @@ public final class PlanHandler implements HttpHandler {
                 case "/metrics/run_start"   -> handleMetricsRunStart(exchange, tenant, method);
                 case "/metrics/run_outcome" -> handleMetricsRunOutcome(exchange, tenant, method);
                 case "/import"              -> handleImport(exchange, tenant, method);
+                case "/import_batch"        -> handleImportBatch(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -343,11 +344,49 @@ public final class PlanHandler implements HttpHandler {
      */
     private void handleImport(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        PlanRepository.ImportRow r = parsePlanRow(readBody(ex));
+        long id = repo.importRow(tenant, r.project(), r.query(), r.planJson(), r.outcome(),
+                                 r.tags(), r.createdAt(), r.ttlDays(), r.name(), r.verb(), r.scope(),
+                                 r.dimensions(), r.defaultBindings(), r.parentDims(), r.useCount(),
+                                 r.lastUsed(), r.matchCount(), r.matchConfSum(), r.successCount(),
+                                 r.failureCount(), r.scopeTags(), r.matchText(), r.disabledAt());
+        HttpUtil.send(ex, 200, json(Map.of("id", id)));
+    }
+
+    /**
+     * POST /v1/plans/import_batch — RDR-176 P3 (Gap 1, bead nexus-t9rmg.18).
+     *
+     * <p>Body {@code {"rows":[ {<same fields as /import>}, … ]}}; the batch lands
+     * in ONE tenant transaction (GUC set once) via
+     * {@link PlanRepository#importBatch}. Response 200 {@code {"imported":<int>}}.
+     */
+    private void handleImportBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
+        Object rowsObj = body.get("rows");
+        if (!(rowsObj instanceof List<?> rawRows)) {
+            throw new IllegalArgumentException("field 'rows' must be a JSON array");
+        }
+        List<PlanRepository.ImportRow> rows = new ArrayList<>(rawRows.size());
+        for (Object o : rawRows) {
+            if (!(o instanceof Map<?, ?> rm)) {
+                throw new IllegalArgumentException("each element of 'rows' must be an object");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> row = (Map<String, Object>) rm;
+            rows.add(parsePlanRow(row));
+        }
+        int imported = repo.importBatch(tenant, rows);
+        HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
+    }
+
+    /** Parse + validate one plan import row (shared by /import and /import_batch). */
+    private PlanRepository.ImportRow parsePlanRow(Map<String, Object> body) {
         String project         = optStringOrEmpty(body, "project");
         String query           = requireString(body, "query");
         String planJson        = requireString(body, "plan_json");
         String outcome         = optStringOrEmpty(body, "outcome");
+        outcome = outcome.isBlank() ? "success" : outcome;
         String tags            = optStringOrEmpty(body, "tags");
         Integer ttl            = optInt(body, "ttl");
         String name            = optStringOrNull(body, "name");
@@ -359,7 +398,6 @@ public final class PlanHandler implements HttpHandler {
         String scopeTags       = optStringOrEmpty(body, "scope_tags");
         String matchText       = optStringOrEmpty(body, "match_text");
 
-        // Fidelity fields
         String caRaw = requireString(body, "created_at");
         OffsetDateTime createdAt;
         try {
@@ -373,17 +411,13 @@ public final class PlanHandler implements HttpHandler {
         double matchConf  = optDoubleDefault(body, "match_conf_sum", 0.0);
         int successCount  = optIntDefault(body, "success_count",   0);
         int failureCount  = optIntDefault(body, "failure_count",   0);
-
         OffsetDateTime lastUsed    = parseOptTimestamp(body, "last_used");
         OffsetDateTime disabledAt  = parseOptTimestamp(body, "disabled_at");
 
-        long id = repo.importRow(tenant, project, query, planJson,
-                                 outcome.isBlank() ? "success" : outcome,
-                                 tags, createdAt, ttl, name, verb, scope, dimensions,
-                                 defaultBindings, parentDims, useCount, lastUsed,
-                                 matchCount, matchConf, successCount, failureCount,
-                                 scopeTags, matchText, disabledAt);
-        HttpUtil.send(ex, 200, json(Map.of("id", id)));
+        return new PlanRepository.ImportRow(project, query, planJson, outcome, tags, createdAt,
+                ttl, name, verb, scope, dimensions, defaultBindings, parentDims, useCount,
+                lastUsed, matchCount, matchConf, successCount, failureCount, scopeTags,
+                matchText, disabledAt);
     }
 
     // ── Serialization helpers ─────────────────────────────────────────────────

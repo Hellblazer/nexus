@@ -294,7 +294,18 @@ class TestMigrateTaxonomyRows:
         store.import_assignment.return_value = None
         store.import_topic_link.return_value = None
         store.import_taxonomy_meta.return_value = None
+        store.import_rows_batch.side_effect = lambda kind, rows: len(rows)
         return store
+
+    @staticmethod
+    def _batch_rows(store: MagicMock, kind: str) -> list:
+        """The rows the ETL batched for *kind* (first such call)."""
+        for c in store.import_rows_batch.call_args_list:
+            k = c.args[0] if c.args else c.kwargs.get("kind")
+            rows = c.args[1] if len(c.args) > 1 else c.kwargs.get("rows")
+            if k == kind:
+                return rows
+        raise AssertionError(f"no batch call for kind {kind!r}")
 
     def test_happy_path(self, tmp_path: Path) -> None:
         db = tmp_path / "t.db"
@@ -333,13 +344,13 @@ class TestMigrateTaxonomyRows:
             ],
         )
         store = self._make_store()
-        # First assignment applied (True), second skipped (False — doc not in catalog).
-        store.import_assignment.side_effect = [True, False]
         result = migrate_taxonomy_rows(db, store)
 
+        # RDR-176 P3: the batched ETL has no per-row skip hook — both assignments
+        # ship in one batch and apply (server upsert). skipped is always 0.
         assert result["assignments"]["read"] == 2
-        assert result["assignments"]["written"] == 1
-        assert result["assignments"]["skipped"] == 1
+        assert result["assignments"]["written"] == 2
+        assert result["assignments"]["skipped"] == 0
 
     def test_topics_migrated_before_assignments(self, tmp_path: Path) -> None:
         """Topics must be written first since assignments reference topic.id."""
@@ -352,15 +363,11 @@ class TestMigrateTaxonomyRows:
         store = self._make_store()
         call_order = []
 
-        def record_topic(**kwargs: Any) -> int:
-            call_order.append("topic")
-            return kwargs["src_id"]
+        def record_batch(kind: str, rows: list) -> int:
+            call_order.append(kind)
+            return len(rows)
 
-        def record_assignment(**kwargs: Any) -> None:
-            call_order.append("assignment")
-
-        store.import_topic.side_effect = record_topic
-        store.import_assignment.side_effect = record_assignment
+        store.import_rows_batch.side_effect = record_batch
 
         migrate_taxonomy_rows(db, store)
         assert call_order[0] == "topic"
@@ -372,24 +379,17 @@ class TestMigrateTaxonomyRows:
         _make_taxonomy_db(
             db,
             topics=[
-                {"id": 1, "label": "t1", "collection": "c", "created_at": "ts", "doc_count": 1},
+                {"id": 1, "label": "", "collection": "c", "created_at": "ts", "doc_count": 1},
                 {"id": 2, "label": "t2", "collection": "c", "created_at": "ts", "doc_count": 2},
             ],
         )
         store = self._make_store()
-        calls = [0]
 
-        def fail_first(**kwargs: Any) -> int:
-            calls[0] += 1
-            if calls[0] == 1:
-                raise RuntimeError("simulated write failure")
-            return kwargs["src_id"]
-
-        store.import_topic.side_effect = fail_first
-
+        # RDR-176 P3: a corrupt row (empty label) fails per-row TRANSFORM and is
+        # recorded + excluded; the good row still batches.
         result = migrate_taxonomy_rows(db, store)
         assert result["topics"]["read"] == 2
-        assert result["topics"]["written"] == 1  # one failed, one succeeded
+        assert result["topics"]["written"] == 1
 
     def test_idempotent_rerun(self, tmp_path: Path) -> None:
         """Running migrate twice should call import_* twice per row (idempotency
@@ -402,7 +402,7 @@ class TestMigrateTaxonomyRows:
         store = self._make_store()
         migrate_taxonomy_rows(db, store)
         migrate_taxonomy_rows(db, store)
-        assert store.import_topic.call_count == 2
+        assert store.import_rows_batch.call_count == 2  # one topic batch per run
 
     def test_fidelity_topic_id_preserved(self, tmp_path: Path) -> None:
         """The original SQLite id must be passed as src_id verbatim."""
@@ -413,8 +413,7 @@ class TestMigrateTaxonomyRows:
         )
         store = self._make_store()
         migrate_taxonomy_rows(db, store)
-        call_kwargs = store.import_topic.call_args[1]
-        assert call_kwargs["src_id"] == 9999
+        assert self._batch_rows(store, "topic")[0]["src_id"] == 9999
 
     def test_fidelity_doc_count_preserved(self, tmp_path: Path) -> None:
         db = tmp_path / "t.db"
@@ -424,8 +423,7 @@ class TestMigrateTaxonomyRows:
         )
         store = self._make_store()
         migrate_taxonomy_rows(db, store)
-        call_kwargs = store.import_topic.call_args[1]
-        assert call_kwargs["doc_count"] == 42
+        assert self._batch_rows(store, "topic")[0]["doc_count"] == 42
 
     def test_empty_db(self, tmp_path: Path) -> None:
         db = tmp_path / "t.db"
@@ -433,8 +431,7 @@ class TestMigrateTaxonomyRows:
         store = self._make_store()
         result = migrate_taxonomy_rows(db, store)
         assert all(v["read"] == 0 for v in result.values())
-        store.import_topic.assert_not_called()
-        store.import_assignment.assert_not_called()
+        store.import_rows_batch.assert_not_called()
 
     def test_source_not_modified(self, tmp_path: Path) -> None:
         """Source DB must be opened read-only and never modified."""
