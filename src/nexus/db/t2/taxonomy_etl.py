@@ -338,9 +338,16 @@ def migrate_taxonomy_rows(
             ).fetchall()
         }
 
-        # ── Topics: whole-load (parent_id self-FK needs parent-before-child
-        # topo-sort over the full set; topic counts are bounded, so this is not
-        # the memory concern nexus-lbolo targets — topic_assignments is). ──
+        # ── Topics: whole-load (parent_id self-FK needs a parent-before-child
+        # topo-sort over the full set, and the orphan filter below needs the
+        # full id set in memory). This is an O(N_topics) residual, NOT O(1):
+        # topic_rows (~600 B/dict) + valid_topic_ids (~28 B/int). It is not the
+        # memory concern nexus-lbolo targets because topics is small relative to
+        # assignments — production T2 taxonomies run hundreds–low-thousands of
+        # topics (≈single-digit MB) against the 190k-row topic_assignments leg
+        # that this change streams. If a future install ever drives topics into
+        # the 6-figure range, replace valid_topic_ids with an
+        # ``IN (SELECT id FROM topics)`` existence check and page topics too. ──
         topic_rows: list[dict[str, Any]] = []
         if "topics" in tables:
             avail = _available_columns(conn, "topics")
@@ -377,7 +384,17 @@ def migrate_taxonomy_rows(
         # (nexus-lbolo) so a 190k assignments table never materializes whole.
         # The valid set is the SOURCE topics (whole-loaded above); a row whose
         # parent is absent is skipped-and-recorded with its composite-key
-        # sample, exactly as the prior fetchall-then-filter pass did. ──
+        # sample, exactly as the prior fetchall-then-filter pass did.
+        #
+        # Failure-path note (vs the old eager pre-pass): orphans are now recorded
+        # DURING the stream, so if _migrate_table raises mid-table (e.g. the store
+        # is down and _etl_with_retry exhausts its bound), orphans on not-yet-read
+        # pages are NOT recorded and the post-call count_read is skipped — the
+        # orphan report for that run is partial. That is acceptable: such a run
+        # fails the total_failed==0 gate (it is not "done"), and the idempotent
+        # re-run re-reads from the top and records every orphan once the store is
+        # back. Eager pre-collection would re-read the whole table just to make a
+        # FAILED run's advisory complete — not worth the extra full scan. ──
         orphans = {"assignments": 0, "links": 0}
 
         def _valid_assignments() -> Iterator[dict[str, Any]]:
@@ -488,7 +505,6 @@ def _migrate_table(
     table: str,
     batch_log_every: int,
     collector: Any = None,
-    pre_skipped: int = 0,
     total: int = 0,
 ) -> dict[str, int]:
     """Generic per-table migration loop. Returns ``{"read": N, "written": M, "skipped": K}``.
@@ -562,8 +578,13 @@ def _migrate_table(
     _flush()
 
     if collector is not None:
-        # read includes pre-skipped orphans so read == source cardinality.
-        collector.count_read("taxonomy", table, read_count + pre_skipped)
+        # Records only the rows this call saw (valid rows the orphan-filter
+        # generator yielded). Orphans are skipped+recorded inside the filter and
+        # added to the collector's read via a SEPARATE count_read call by the
+        # caller AFTER this returns (count_read accumulates), so the reported
+        # read == source cardinality. ``total`` (a COUNT(*)) is cosmetic, for the
+        # progress log; when orphans exist read_count tops out below total.
+        collector.count_read("taxonomy", table, read_count)
         collector.count_written("taxonomy", table, written_count)
 
     return {"read": read_count, "written": written_count, "skipped": 0}

@@ -474,7 +474,7 @@ def _migrate_relevance_log(
     collector: Any = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "relevance_log")
-    rows = _iter_rows(conn, "relevance_log", _RELEVANCE_LOG_COLS)
+    rows = _iter_rows(conn, "relevance_log", _RELEVANCE_LOG_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "relevance_log", rows, _build_relevance,
                         collector=collector, batch_log_every=batch_log_every, total=total)
 
@@ -484,7 +484,7 @@ def _migrate_search_telemetry(
     collector: Any = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "search_telemetry")
-    rows = _iter_rows(conn, "search_telemetry", _SEARCH_TELEMETRY_COLS)
+    rows = _iter_rows(conn, "search_telemetry", _SEARCH_TELEMETRY_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "search_telemetry", rows, _build_search,
                         collector=collector, batch_log_every=batch_log_every, total=total)
 
@@ -494,7 +494,7 @@ def _migrate_tier_writes(
     collector: Any = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "tier_writes")
-    rows = _iter_rows(conn, "tier_writes", _TIER_WRITES_COLS)
+    rows = _iter_rows(conn, "tier_writes", _TIER_WRITES_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "tier_writes", rows, _build_tier,
                         collector=collector, batch_log_every=batch_log_every, total=total)
 
@@ -504,7 +504,7 @@ def _migrate_nx_answer_runs(
     collector: Any = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "nx_answer_runs")
-    rows = _iter_rows(conn, "nx_answer_runs", _NX_ANSWER_RUNS_COLS)
+    rows = _iter_rows(conn, "nx_answer_runs", _NX_ANSWER_RUNS_COLS, page_size=_READ_PAGE)
     valid_plan_ids: set[int] = set()
     try:
         valid_plan_ids = {int(r[0]) for r in conn.execute("SELECT id FROM plans").fetchall()}
@@ -550,7 +550,7 @@ def _migrate_hook_failures(
     collector: Any = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "hook_failures")
-    rows = _iter_rows(conn, "hook_failures", _HOOK_FAILURES_COLS)
+    rows = _iter_rows(conn, "hook_failures", _HOOK_FAILURES_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "hook_failures", rows, _build_hook,
                         collector=collector, batch_log_every=batch_log_every, total=total)
 
@@ -560,6 +560,6 @@ def _migrate_frecency(
     collector: Any = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "frecency")
-    rows = _iter_rows(conn, "frecency", _FRECENCY_COLS)
+    rows = _iter_rows(conn, "frecency", _FRECENCY_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "frecency", rows, _build_frecency,
                         collector=collector, batch_log_every=batch_log_every, total=total)
