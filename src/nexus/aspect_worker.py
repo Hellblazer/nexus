@@ -1288,21 +1288,24 @@ def aspect_extraction_enqueue_hook(
         _ensure_aspect_worker()
 
 
-def _best_effort_queue_depth() -> int:
-    """Pending-row count for the diagnostic signal (RDR-173 P5), or -1 if it
-    cannot be obtained cheaply. The service queue is reachable even when the
-    WORKER daemon is not, so this is usually answerable; best-effort so the
-    observability path never itself blocks or raises."""
+def _best_effort_queue_depth() -> int | None:
+    """Pending-row count for the diagnostic signal (RDR-173 P5), or None if it
+    cannot be obtained cheaply. The service queue is usually reachable even when
+    the WORKER daemon is not (the daemon-spawn path is only reached AFTER a
+    successful enqueue), so this normally answers. A SHORT 2s timeout (review H1)
+    keeps the observability path from blocking the store hook for the client's
+    default 30s in a full outage. (HttpAspectQueue.__init__ emits an info on
+    construct — expected on this diagnostic path.)"""
     try:
-        from nexus.daemon.aspect_worker_daemon import _default_aspect_queue  # noqa: PLC0415 — deferred; service-side
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred; service-side
 
-        q = _default_aspect_queue(_ENQUEUE_TENANT)
+        q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, timeout=2.0)
         try:
             return int(q.pending_count())
         finally:
             q.close()
     except Exception:  # noqa: BLE001 — diagnostic only; never block the store
-        return -1
+        return None
 
 
 def _ensure_aspect_worker() -> None:
@@ -1336,13 +1339,11 @@ def _ensure_aspect_worker() -> None:
         # by the outage), AND persist the RDR-172 hook_failures tripwire CI /
         # --fullstack can assert ZERO on. This is the exact silent-store-time
         # failure class RDR-173 exists to eliminate.
-        _log.warning(
-            "aspect_worker.daemon_unreachable",
-            tenant=_ENQUEUE_TENANT,
-            queue_depth=_best_effort_queue_depth(),
-            error=str(exc),
-            exc_info=True,
-        )
+        depth = _best_effort_queue_depth()
+        fields = {"tenant": _ENQUEUE_TENANT, "error": str(exc)}
+        if depth is not None:  # omit when unavailable rather than poison metrics with -1 (review M1)
+            fields["queue_depth"] = depth
+        _log.warning("aspect_worker.daemon_unreachable", exc_info=True, **fields)
         try:
             from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
 
