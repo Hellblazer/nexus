@@ -352,6 +352,30 @@ bar; a leg that lands a subset is a failure, not a green.
   collections, and document_chunks are unverified, so a partial copy passes green. That is
   a defect, not the contract: the acceptance bar is parity on **every** table (see Gap 1,
   bead for the `_VERIFY_TABLES` fix).
+- **SQLite is exception-only; the managed/service runtime uses none of it as a co-equal
+  tier** (Hal, 2026-06-29 directive; Gap 7 ratification). The default and only sanctioned
+  managed-runtime T2/T3 backend is the Postgres (pgvector) service. SQLite is a legacy
+  substrate being retired, not a co-equal backend, and there are NO new SQLite write paths.
+  Every surviving SQLite use is one of these documented, justified exception classes:
+  - **Local-mode single-user backend.** The SQLite-backed T2 stores (`db/t2/memory_store`,
+    `plan_library`, `telemetry`, `chash_index`, `document_aspects`, `document_highlights`,
+    `aspect_extraction_queue`, `catalog*`) and `db/migrations.py`, plus the local-mode
+    plumbing that reads them (`t2_daemon`, `hooks`, `health`, `pipeline_buffer`,
+    `search_engine`, and similar). In **service mode these are bypassed**: the `Http*` stores
+    route every read/write to PG under RLS (the storage-boundary lint enforces no direct
+    raw-handle use off the sanctioned path). This is the genuinely-offline / single-binary
+    exception. Its eventual consolidation/removal as a *runtime backend mode* is **RDR-158's
+    scope** (cf. `nexus-7bomn` / RDR-158 P3, "no sqlite opt-out backend as a supported
+    runtime mode"), which this RDR coordinates with rather than duplicates.
+  - **Read-only migration source.** The `*_etl.py` readers open the legacy 5.x SQLite
+    **read-only** (`mode=ro`) as the immutable upgrade source (Gap 2 non-mutation). One-time,
+    never written.
+  - **Test isolation.** Unit tests use a tmp-path SQLite + `chromadb.EphemeralClient` so the
+    suite needs no network or API keys (project testing convention).
+  `retry.py`'s `sqlite3.OperationalError`-"locked" classification is not a SQLite *backend*
+  use; it is transient-error handling for the local-mode path above. This decision ratifies
+  the directive as RDR-176's acceptance frame. It does not itself remove any backend (that is
+  RDR-158).
 
 ## Sequencing (implementation order)
 
