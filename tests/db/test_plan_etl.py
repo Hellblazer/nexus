@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from nexus.db.t2.http_plan_library import HttpPlanLibrary
 from nexus.db.t2.plan_etl import _transform_row, migrate_plan_rows, count_source_rows
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -90,28 +91,36 @@ def _make_plans_db(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 class _DuckPlanStore:
-    """Minimal duck-typed store capturing import_plan calls."""
+    """Duck-typed store for the RDR-176 P3 batched ETL: build_import_row
+    delegates to the real staticmethod; import_plans_batch records each NEW
+    (project, query) row in ``_calls`` (so existing per-row assertions hold) and
+    returns the batch size (server upserts every row)."""
 
     def __init__(self) -> None:
         self._calls: list[dict[str, Any]] = []
         self._by_key: dict[tuple[str, str], int] = {}  # (project, query) -> id
         self._next_id = 1
 
-    def import_plan(self, **kwargs: Any) -> int:
-        key = (kwargs.get("project", ""), kwargs["query"])
-        if key in self._by_key:
-            return self._by_key[key]
-        pid = self._next_id
-        self._next_id += 1
-        self._calls.append(kwargs)
-        self._by_key[key] = pid
-        return pid
+    def build_import_row(self, **kwargs: Any) -> dict[str, Any]:
+        return HttpPlanLibrary.build_import_row(**kwargs)
+
+    def import_plans_batch(self, rows: list[dict[str, Any]]) -> int:
+        for row in rows:
+            key = (row.get("project", ""), row["query"])
+            if key not in self._by_key:
+                self._by_key[key] = self._next_id
+                self._next_id += 1
+                self._calls.append(row)
+        return len(rows)
 
 
 class _FailingPlanStore:
-    """Store that raises on every call (simulates service unavailable)."""
+    """Store whose batch write raises (simulates service unavailable)."""
 
-    def import_plan(self, **kwargs: Any) -> int:
+    def build_import_row(self, **kwargs: Any) -> dict[str, Any]:
+        return HttpPlanLibrary.build_import_row(**kwargs)
+
+    def import_plans_batch(self, rows: list[dict[str, Any]]) -> int:
         raise RuntimeError("service unavailable")
 
 

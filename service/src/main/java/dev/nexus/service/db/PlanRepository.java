@@ -446,6 +446,44 @@ public final class PlanRepository {
                 scopeTags, matchText, disabledAt));
     }
 
+    /** One row of a fidelity-preserving plan batch import (mirrors {@link #importRow}'s args). */
+    public record ImportRow(String project, String query, String planJson, String outcome,
+                            String tags, OffsetDateTime createdAt, Integer ttlDays, String name,
+                            String verb, String scope, String dimensions, String defaultBindings,
+                            String parentDims, int useCount, OffsetDateTime lastUsed, int matchCount,
+                            double matchConfSum, int successCount, int failureCount, String scopeTags,
+                            String matchText, OffsetDateTime disabledAt) {}
+
+    /**
+     * RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): fidelity-preserving BULK import.
+     *
+     * <p>Collapses a batch to ONE round-trip and ONE tenant transaction: a single
+     * {@link TenantScope#withTenant} (RLS GUC {@code nexus.tenant} set ONCE per
+     * batch, not per row) wrapping the per-row {@link #doImport}. Unlike memory's
+     * 11-column store, plans has 22 columns and a delicate conflict clause
+     * ({@code coalesce(disabled_at)}, {@code greatest(last_used)}, EXCLUDED
+     * counters), so reusing the TESTED {@code doImport} per row inside one
+     * transaction is safer than hand-transcribing a 22-column multi-row statement
+     * — and still satisfies the contract (one HTTP round-trip per batch, GUC once,
+     * atomic commit/rollback, idempotent re-run). Empty batch is a no-op.
+     *
+     * @return the number of rows submitted.
+     */
+    public int importBatch(String tenant, java.util.List<ImportRow> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            for (ImportRow r : rows) {
+                doImport(ctx, tenant, r.project(), r.query(), r.planJson(), r.outcome(), r.tags(),
+                        r.createdAt(), r.ttlDays(), r.name(), r.verb(), r.scope(), r.dimensions(),
+                        r.defaultBindings(), r.parentDims(), r.useCount(), r.lastUsed(), r.matchCount(),
+                        r.matchConfSum(), r.successCount(), r.failureCount(), r.scopeTags(),
+                        r.matchText(), r.disabledAt());
+            }
+            log.debug("event=plan_import_batch tenant={} rows={}", tenant, rows.size());
+            return rows.size();
+        });
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────────
 
     private long doSave(DSLContext ctx,
