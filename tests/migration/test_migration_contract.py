@@ -249,6 +249,7 @@ def test_orchestrator_surface():
         "count_source",
         "on_store",
         "on_store_failed",
+        "on_progress",
         "migration_id",
     }
     assert _fields(EtlSources) == {"sqlite_path", "catalog_db_path"}

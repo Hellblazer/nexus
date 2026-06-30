@@ -84,6 +84,8 @@ from typing import Any
 
 import structlog
 
+from nexus.retry import _etl_with_retry
+
 _log = structlog.get_logger(__name__)
 
 # ── Column lists (match SQLite schema + migrations.py column additions) ────────
@@ -524,7 +526,7 @@ def _migrate_table(
         if not batch:
             return
         try:
-            written_count += store.import_rows_batch(kind, batch)
+            written_count += _etl_with_retry(store.import_rows_batch, kind, batch)
         except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
             _log.error("taxonomy_etl.batch_failed", table=table, count=len(batch), error=str(exc))
             if collector is not None:

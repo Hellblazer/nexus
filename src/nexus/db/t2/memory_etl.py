@@ -52,6 +52,8 @@ from typing import Any
 
 import structlog
 
+from nexus.retry import _etl_with_retry
+
 _log = structlog.get_logger(__name__)
 
 # Column order matches ``_COLUMNS`` in memory_store.py — used when reading
@@ -206,7 +208,8 @@ def migrate_memory_rows(
         if not batch:
             return
         try:
-            written_count += store.import_entries_batch(batch)
+            # RDR-176 Gap 6: bounded transient-edge retry (idempotent upsert).
+            written_count += _etl_with_retry(store.import_entries_batch, batch)
         except Exception as exc:  # noqa: BLE001 - batch ETL failure logged + recorded; migration continues (idempotent re-run)
             _log.error("memory_etl.batch_failed", count=len(batch), error=str(exc))
             if collector is not None:

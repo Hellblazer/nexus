@@ -44,6 +44,8 @@ from typing import Any
 
 import structlog
 
+from nexus.retry import _etl_with_retry
+
 _log = structlog.get_logger(__name__)
 
 # ── Column lists (explicit SELECT prevents column-order surprises) ─────────────
@@ -292,7 +294,7 @@ def _run_batched(
         if not batch:
             return
         try:
-            written_n += store.import_rows_batch(table, batch)
+            written_n += _etl_with_retry(store.import_rows_batch, table, batch)
         except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
             _log.error(f"telemetry_etl.{table}.batch_failed", count=len(batch), error=str(exc))
             if collector is not None:

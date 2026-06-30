@@ -109,6 +109,8 @@ from typing import Any
 
 import structlog
 
+from nexus.retry import _etl_with_retry
+
 _log = structlog.get_logger(__name__)
 
 # Tables read from the SQLite catalog (read-only, copy-not-move).
@@ -662,7 +664,7 @@ def _import_table(
         if not batch:
             return
         try:
-            import_fn(batch)
+            _etl_with_retry(import_fn, batch)
             written_count += len(batch)
         except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
             _log.error("catalog_etl.batch_failed", table=table, count=len(batch), error=str(exc))
