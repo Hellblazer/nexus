@@ -1279,4 +1279,29 @@ def aspect_extraction_enqueue_hook(
     if os.environ.get("NX_ASPECT_WORKER_AUTOSTART", "1") not in (
         "0", "false", "False", "no", "",
     ):
+        _ensure_aspect_worker()
+
+
+def _ensure_aspect_worker() -> None:
+    """RDR-173 P2 (bead nexus-gtdtc): ensure aspect extraction will run, without
+    tying it to the storing process's lifetime.
+
+    Decision (gtdtc Open Question): SERVICE mode → ensure the leased aspect-worker
+    DAEMON is up (discover/spawn-if-absent), so extraction completes for every
+    store path including short-lived CLI / one-shot / batch. LOCAL mode → keep the
+    in-process worker thread: there is no cross-process service queue to host, the
+    storing process is the natural host, and the daemon's claude -p credential
+    inheritance buys nothing there. Spawn failure is best-effort (the row is
+    already enqueued; the daemon self-heals on the next enqueue or via discover).
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+
+    if storage_backend_for("aspect_queue") != StorageBackend.SERVICE:
         ensure_worker_started()
+        return
+    try:
+        from nexus.daemon.aspect_worker_daemon import ensure_aspect_worker_daemon  # noqa: PLC0415 — deferred; daemon module is CLI/service-side
+
+        ensure_aspect_worker_daemon(config_dir=nexus_config_dir(), tenant="default")
+    except Exception as exc:  # noqa: BLE001 — best-effort spawn; the row is enqueued, do not fail the store
+        _log.warning("aspect_worker.ensure_daemon_failed", error=str(exc))
