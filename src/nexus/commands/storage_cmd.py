@@ -1335,6 +1335,12 @@ def migrate_all_cmd(
         click.echo(f"  {store}: CRASHED — {exc}", err=True)
         sys.stderr.flush()
 
+    def _on_progress(store: str, written: int, read: int) -> None:
+        # RDR-176 Gap 5: per-store completion line so a long migration reports
+        # progress instead of going silent between stores.
+        click.echo(f"  {store}: {written} written / {read} read")
+        sys.stdout.flush()
+
     # RDR-159 P-1a: the orchestration lives in nexus.migration now (the
     # guided upgrade engine + the conexus veneer consume the same callable).
     # Count verification routes through the service REST endpoint, not psql
@@ -1348,6 +1354,7 @@ def migrate_all_cmd(
     with _service_url_override(service_url):
         report = migrate_all(
             sources, on_store=_on_store, on_store_failed=_on_store_failed,
+            on_progress=_on_progress,
         )
 
     _echo_verification(report)

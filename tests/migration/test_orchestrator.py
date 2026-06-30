@@ -204,7 +204,7 @@ class TestVerifyCounts:
                 {"store": "plans", "tables": [{"table": "plans", "written": 98}]},
             ],
         }
-        status, notes = orch.verify_counts(
+        status, notes, _ = orch.verify_counts(
             report, _FakeCountSource({"nexus.plans": 80}),
         )
         assert status == "verified"
@@ -219,7 +219,7 @@ class TestVerifyCounts:
                 {"store": "plans", "tables": [{"table": "plans", "written": 0}]},
             ],
         }
-        status, notes = orch.verify_counts(
+        status, notes, _ = orch.verify_counts(
             report, _FakeCountSource({"nexus.plans": 50}),
         )
         assert status == "verified"
@@ -232,7 +232,7 @@ class TestVerifyCounts:
                 {"store": "telemetry", "tables": [{"table": "telemetry", "written": 5}]},
             ],
         }
-        status, notes = orch.verify_counts(
+        status, notes, _ = orch.verify_counts(
             report, _FakeCountSource({"nexus.memory": 1}),
         )
         assert status == "indeterminate"

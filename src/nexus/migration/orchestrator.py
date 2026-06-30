@@ -268,11 +268,15 @@ def _written_by_table(report: dict[str, Any]) -> dict[str, int]:
 
 def verify_counts(
     report: dict[str, Any], count_source: CountSource,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], dict[str, int]]:
     """Count-verify the migration against Postgres via *count_source*.
 
-    Returns ``(status, convergence_notes)`` where *status* is one of
-    ``"verified"`` | ``"mismatch"`` | ``"indeterminate"``:
+    Returns ``(status, convergence_notes, dest_counts)`` where *status* is one
+    of ``"verified"`` | ``"mismatch"`` | ``"indeterminate"`` and *dest_counts*
+    is the destination-side (pg) per-relation row counts the source reported
+    (``{}`` when nothing was mappable or the source was unreachable). RDR-176
+    Gap 5 surfaces *dest_counts* as a first-class observability metric instead
+    of discarding it:
 
     - **indeterminate** — nothing mappable to check, the source returned
       ``None`` (unreachable), or it omitted a requested relation. NEVER a
@@ -286,17 +290,17 @@ def verify_counts(
     written_by_table = _written_by_table(report)
     if not written_by_table:
         # nothing mappable to verify is NOT a pass
-        return "indeterminate", []
+        return "indeterminate", [], {}
 
     pg_counts = count_source.counts(list(written_by_table))
     if pg_counts is None:
-        return "indeterminate", []
+        return "indeterminate", [], {}
 
     convergence_notes: list[str] = []
     for relation, written in written_by_table.items():
         if relation not in pg_counts:
             # the source could not report this relation → cannot confirm
-            return "indeterminate", []
+            return "indeterminate", [], dict(pg_counts)
         pg_count = int(pg_counts[relation])
 
         if relation in _VERIFY_TABLES_DEDUP:
@@ -307,14 +311,14 @@ def verify_counts(
                     pg_count=pg_count, report_written=written,
                     note="convergence-aware: 0 rows landed from non-zero write count",
                 )
-                return "mismatch", []
+                return "mismatch", [], dict(pg_counts)
             if written > 0 and pg_count > written:
                 _log.error(
                     "migrate_all_verify_mismatch", relation=relation,
                     pg_count=pg_count, report_written=written,
                     note="convergence-aware: pg_count exceeds written (impossible under DO UPDATE)",
                 )
-                return "mismatch", []
+                return "mismatch", [], dict(pg_counts)
             delta = written - pg_count
             if written > 0 and delta > 0:
                 _log.info(
@@ -333,8 +337,8 @@ def verify_counts(
                     "migrate_all_verify_mismatch", relation=relation,
                     pg_count=pg_count, report_written=written,
                 )
-                return "mismatch", []
-    return "verified", convergence_notes
+                return "mismatch", [], dict(pg_counts)
+    return "verified", convergence_notes, dict(pg_counts)
 
 
 def migrate_all(
@@ -343,6 +347,7 @@ def migrate_all(
     count_source: CountSource | None = None,
     on_store: Callable[[str], None] | None = None,
     on_store_failed: Callable[[str, Exception], None] | None = None,
+    on_progress: Callable[[str, int, int], None] | None = None,
     migration_id: str | None = None,
 ) -> dict[str, Any]:
     """Run ALL eight store migrations in RDR-152 ladder order and return ONE
@@ -357,8 +362,11 @@ def migrate_all(
 
     ``on_store(store)`` fires before each store runs; ``on_store_failed(store,
     exc)`` fires when a store crashes (the crash is also recorded in the
-    report). Both are pure callbacks so the orchestrator never imports the
-    CLI's ``click`` — the RDR-159 guided upgrade engine wires its own sink.
+    report); ``on_progress(store, written, read)`` fires after each store
+    completes, carrying that store's running written/read counts (RDR-176 Gap 5
+    observability — a long migration is otherwise silent except on failure).
+    All three are pure callbacks so the orchestrator never imports the CLI's
+    ``click`` — the RDR-159 guided upgrade engine wires its own sink.
 
     The report's ``summary.total_failed == 0`` is the hard gate; the
     verification verdict (``verified`` / ``mismatch`` / ``indeterminate``)
@@ -382,6 +390,24 @@ def migrate_all(
             )
             if on_store_failed is not None:
                 on_store_failed(etl.store, exc)
+        # RDR-176 Gap 5: per-store progress signal once the store completes —
+        # the running written/read counts the collector accumulated for it. The
+        # ETLs already emit per-batch INFO; this makes the orchestrator emit a
+        # per-store rollup (INFO + callback) so `migrate all` is not silent.
+        s_written = sum(
+            collector.table_counts(etl.store, t)["written"]
+            for t in collector.tables_for(etl.store)
+        )
+        s_read = sum(
+            collector.table_counts(etl.store, t)["read"]
+            for t in collector.tables_for(etl.store)
+        )
+        _log.info(
+            "migrate_all.store_progress",
+            store=etl.store, written=s_written, read=s_read,
+        )
+        if on_progress is not None:
+            on_progress(etl.store, s_written, s_read)
 
     report = build_report(
         collector,
@@ -392,10 +418,14 @@ def migrate_all(
         target={"service_url": os.environ.get("NX_SERVICE_URL", "(lease)")},
         migration_id=mig_id,
     )
-    verification, convergence_notes = verify_counts(
+    verification, convergence_notes, dest_counts = verify_counts(
         report, count_source or ServiceCountSource(),
     )
     report["verification"] = verification
+    # RDR-176 Gap 5: surface the destination-side (pg) row counts as a first-
+    # class metric so "did rows actually land?" is answerable from the report,
+    # not by paginating the read API.
+    report["dest_counts"] = dest_counts
     # How many relations the count check actually reconciled (the mappable
     # subset present in this run) — surfaced so the operator artifact and the
     # CLI banner can name coverage instead of a vague "mappable relations".

@@ -98,7 +98,7 @@ def test_service_count_source_builds_client_config_first_no_arg() -> None:
 
 
 def test_full_catalog_copy_verifies() -> None:
-    status, _ = verify_counts(_catalog_report(_FULL_WRITTEN), _FakeCountSource(_full_pg()))
+    status, _, _ = verify_counts(_catalog_report(_FULL_WRITTEN), _FakeCountSource(_full_pg()))
     assert status == "verified"
 
 
@@ -110,7 +110,7 @@ def test_partial_catalog_table_copy_is_a_mismatch(partial_table: str) -> None:
     short copy is never checked and verify falsely returns 'verified'."""
     pg = _full_pg()
     pg[_REL[partial_table]] -= 1  # one row failed to land
-    status, _ = verify_counts(_catalog_report(_FULL_WRITTEN), _FakeCountSource(pg))
+    status, _, _ = verify_counts(_catalog_report(_FULL_WRITTEN), _FakeCountSource(pg))
     assert status == "mismatch", (
         f"a partial {partial_table} copy must be a verify mismatch, got {status!r}"
     )
