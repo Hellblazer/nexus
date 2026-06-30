@@ -39,6 +39,7 @@ FIELD MAPPING notes:
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -95,26 +96,58 @@ def _available_cols(conn: sqlite3.Connection, table: str) -> frozenset[str]:
         return frozenset()
 
 
-def _fetch(
-    conn: sqlite3.Connection,
-    table: str,
-    desired_cols: tuple[str, ...],
-) -> tuple[list[str], list[dict[str, Any]]]:
-    """Fetch all rows from *table*, projecting only columns present in the DB.
+#: SQLite read-page size (RDR-176 / nexus-lbolo). Caps peak memory at one page
+#: regardless of table size — the 190k-row case no longer materializes whole.
+_READ_PAGE: int = 1000
 
-    Returns ``(actual_col_list, rows_as_dicts)``. When the table does not
-    exist, returns ``([], [])``.
-    """
+
+def _select_cols(conn: sqlite3.Connection, table: str, desired_cols: tuple[str, ...]) -> list[str]:
+    """The subset of *desired_cols* present in *table* (empty if table absent)."""
     avail = _available_cols(conn, table)
     if not avail:
         _log.info("telemetry_etl.table_absent", table=table)
-        return [], []
-    select_cols = [c for c in desired_cols if c in avail]
-    if not select_cols:
-        return [], []
-    sql = f"SELECT {', '.join(select_cols)} FROM {table} ORDER BY ROWID ASC"
-    rows = conn.execute(sql).fetchall()
-    return select_cols, [dict(r) for r in rows]
+        return []
+    return [c for c in desired_cols if c in avail]
+
+
+def _count_rows(conn: sqlite3.Connection, table: str) -> int:
+    """Row count for *table* (0 if absent) — cheap, for the progress total."""
+    if not _available_cols(conn, table):
+        return 0
+    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def _iter_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    desired_cols: tuple[str, ...],
+    *,
+    page_size: int = _READ_PAGE,
+) -> Iterator[dict[str, Any]]:
+    """Yield *table*'s rows as projected dicts in LIMIT/OFFSET pages (RDR-176 /
+    nexus-lbolo: page the read so peak memory is one page, not the whole table).
+
+    Dicts are built from the projected columns directly, so this does not depend
+    on the connection's ``row_factory``. Stops on the first short page (no
+    trailing empty-page query).
+    """
+    cols = _select_cols(conn, table, desired_cols)
+    if not cols:
+        return
+    cols_sql = ", ".join(cols)
+    offset = 0
+    while True:
+        page = conn.execute(
+            f"SELECT {cols_sql} FROM {table} ORDER BY ROWID ASC "
+            f"LIMIT {page_size} OFFSET {offset}"
+        ).fetchall()
+        if not page:
+            break
+        for row in page:
+            yield dict(zip(cols, row))
+        if len(page) < page_size:
+            break
+        offset += page_size
 
 
 # ── Per-table transform helpers ───────────────────────────────────────────────
@@ -265,11 +298,12 @@ class _SkipRow(Exception):  # noqa: N818 — control-flow signal, not an error c
 def _run_batched(
     store: Any,
     table: str,
-    rows: list[dict[str, Any]],
+    rows: Iterable[dict[str, Any]],
     build: Any,
     *,
     collector: Any,
     batch_log_every: int,
+    total: int = 0,
 ) -> dict[str, int]:
     """RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): shared per-table batch driver.
 
@@ -284,7 +318,6 @@ def _run_batched(
     bsize = QUOTAS.MAX_RECORDS_PER_WRITE
 
     read_n = written_n = 0
-    total = len(rows)
     batch: list[dict[str, Any]] = []
     keys: list[str] = []
     _log.info(f"telemetry_etl.{table}.start", total=total)
@@ -440,34 +473,38 @@ def _migrate_relevance_log(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "relevance_log", _RELEVANCE_LOG_COLS)
+    total = _count_rows(conn, "relevance_log")
+    rows = _iter_rows(conn, "relevance_log", _RELEVANCE_LOG_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "relevance_log", rows, _build_relevance,
-                        collector=collector, batch_log_every=batch_log_every)
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _migrate_search_telemetry(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "search_telemetry", _SEARCH_TELEMETRY_COLS)
+    total = _count_rows(conn, "search_telemetry")
+    rows = _iter_rows(conn, "search_telemetry", _SEARCH_TELEMETRY_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "search_telemetry", rows, _build_search,
-                        collector=collector, batch_log_every=batch_log_every)
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _migrate_tier_writes(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "tier_writes", _TIER_WRITES_COLS)
+    total = _count_rows(conn, "tier_writes")
+    rows = _iter_rows(conn, "tier_writes", _TIER_WRITES_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "tier_writes", rows, _build_tier,
-                        collector=collector, batch_log_every=batch_log_every)
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _migrate_nx_answer_runs(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "nx_answer_runs", _NX_ANSWER_RUNS_COLS)
+    total = _count_rows(conn, "nx_answer_runs")
+    rows = _iter_rows(conn, "nx_answer_runs", _NX_ANSWER_RUNS_COLS, page_size=_READ_PAGE)
     valid_plan_ids: set[int] = set()
     try:
         valid_plan_ids = {int(r[0]) for r in conn.execute("SELECT id FROM plans").fetchall()}
@@ -475,7 +512,7 @@ def _migrate_nx_answer_runs(
         pass  # no plans table in source — every plan_id is then a dangler
     return _run_batched(store, "nx_answer_runs", rows,
                         lambda row, c: _build_nx(row, c, valid_plan_ids),
-                        collector=collector, batch_log_every=batch_log_every)
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _normalize_timestamp(raw: str) -> tuple[str, bool]:
@@ -512,15 +549,17 @@ def _migrate_hook_failures(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "hook_failures", _HOOK_FAILURES_COLS)
+    total = _count_rows(conn, "hook_failures")
+    rows = _iter_rows(conn, "hook_failures", _HOOK_FAILURES_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "hook_failures", rows, _build_hook,
-                        collector=collector, batch_log_every=batch_log_every)
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _migrate_frecency(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "frecency", _FRECENCY_COLS)
+    total = _count_rows(conn, "frecency")
+    rows = _iter_rows(conn, "frecency", _FRECENCY_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "frecency", rows, _build_frecency,
-                        collector=collector, batch_log_every=batch_log_every)
+                        collector=collector, batch_log_every=batch_log_every, total=total)
