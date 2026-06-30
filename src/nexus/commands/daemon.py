@@ -2204,3 +2204,46 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         click.echo(f"  {key}: {display}")
     if stale_warning:
         click.echo(f"warning: {stale_warning}", err=True)
+
+
+# ── Aspect-worker daemon (RDR-173): leased, per-tenant host for aspect extraction ──
+
+
+@daemon_group.group("aspect-worker")
+def aspect_worker_group() -> None:
+    """Aspect-worker daemon: a leased, per-tenant host for the aspect-extraction
+    loop (claim → claude -p → upsert document_aspects → mark_done) and the
+    reclaim_stale loop. One more leased tier on the RDR-149 substrate."""
+
+
+@aspect_worker_group.command("start")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override (default: ~/.config/nexus/).",
+)
+@click.option(
+    "--tenant",
+    "tenant",
+    default="default",
+    help="Tenant scope for the lease (per-tenant; per-host needs BYPASSRLS, forbidden by RDR-152).",
+)
+def aspect_worker_start_cmd(config_dir_str: str | None, tenant: str) -> None:
+    """Start the aspect-worker daemon (foreground; runs until SIGTERM/SIGINT).
+
+    CREDENTIAL MODEL (RDR-173): this MUST be spawned as a CHILD of a process
+    that already has ``claude -p`` credentials so it inherits the ``claude``
+    binary on ``PATH``, ``~/.claude``, and the Anthropic credential context.
+    The enqueue-hook spawn (Phase 2) Popens this command from the storing
+    process precisely so that inheritance happens; a credential-bare invocation
+    will fail extraction. The daemon rides the registry's per-tenant lease, so a
+    second start for the same tenant fences the predecessor (one owner survives).
+    """
+    from nexus.daemon.aspect_worker_daemon import run_aspect_worker_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    click.echo(
+        f"Aspect-worker daemon starting (config_dir={config_dir}, tenant={tenant})..."
+    )
+    run_aspect_worker_daemon(config_dir=config_dir, tenant=tenant)
