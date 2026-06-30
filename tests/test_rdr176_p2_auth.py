@@ -16,6 +16,7 @@ This is the Phase-2 auth entry test (bead nexus-t9rmg.7), failing-first:
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -91,6 +92,28 @@ def test_migrate_memory_fails_loud_when_no_token_anywhere(
 
     assert result.exit_code != 0
     assert "service_token" in result.output or "NX_SERVICE_TOKEN" in result.output
+
+
+def test_service_url_override_restores_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C1 fix: the scoped override must NOT leak — it restores the prior
+    NX_SERVICE_URL (or unsets it) on exit, so a --service-url on `migrate all`
+    cannot bleed into a sibling command sharing the process."""
+    # Prior unset → unset after.
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    with storage_cmd._service_url_override("http://override"):
+        assert os.environ["NX_SERVICE_URL"] == "http://override"
+    assert "NX_SERVICE_URL" not in os.environ
+
+    # Prior set → restored to the prior value after.
+    monkeypatch.setenv("NX_SERVICE_URL", "http://prior")
+    with storage_cmd._service_url_override("http://override"):
+        assert os.environ["NX_SERVICE_URL"] == "http://override"
+    assert os.environ["NX_SERVICE_URL"] == "http://prior"
+
+    # No override → no mutation.
+    with storage_cmd._service_url_override(None):
+        assert os.environ["NX_SERVICE_URL"] == "http://prior"
+    assert os.environ["NX_SERVICE_URL"] == "http://prior"
 
 
 def test_every_migrate_subcommand_exposes_service_url() -> None:
