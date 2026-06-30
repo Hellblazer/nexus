@@ -34,10 +34,16 @@ from nexus.db.chroma_quotas import QUOTAS
 from nexus.db.t2 import T2Database
 from nexus.db.t2.catalog_etl import _import_table
 from nexus.db.t2.chash_etl import migrate_chash_rows
-from nexus.db.t2.aspects_etl import migrate_aspects, migrate_queue
+from nexus.db.t2.aspects_etl import (
+    migrate_aspects,
+    migrate_highlights,
+    migrate_promotion_log,
+    migrate_queue,
+)
 from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 from nexus.db.t2.http_chash_index import HttpChashIndex
 from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
+from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore
 from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.db.t2.http_plan_library import HttpPlanLibrary
 from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
@@ -51,9 +57,11 @@ from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
 #: ceil(N / CAP) batches.
 CAP = QUOTAS.MAX_RECORDS_PER_WRITE  # 300
 
-#: Row count per store: strictly > CAP so a per-row ETL (N posts) is clearly
-#: distinguishable from a batched one (ceil(N/CAP) posts).
-N_ROWS = CAP + 50  # 350 → ceil(350/300) == 2
+#: Row count per store: strictly > 2*CAP so a per-row ETL (N posts) is clearly
+#: distinguishable from a batched one, AND so the EXACT cap matters —
+#: ceil(650/300)=3 but ceil(650/200)=4, so a regression to a 200-row batch
+#: (review H-1) would now FAIL the assertion instead of coincidentally passing.
+N_ROWS = 2 * CAP + 50  # 650 → ceil(650/300) == 3
 
 
 def _counting_client(counter: Counter) -> httpx.Client:
@@ -63,6 +71,18 @@ def _counting_client(counter: Counter) -> httpx.Client:
     def _handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
             counter[request.url.path] += 1
+            # Taxonomy multiplexes four kinds over ONE route
+            # (/v1/taxonomy/import_batch) with the kind in the body. The
+            # assignment/link kinds REQUIRE prerequisite topics to be seeded
+            # (else they orphan-skip), and those topics POST to the same route —
+            # so count per-kind too, letting a per-kind entry assert its own
+            # batch path in isolation from the prerequisite topics' POSTs.
+            try:
+                body = json.loads(request.content)
+                if isinstance(body, dict) and "kind" in body:
+                    counter[f"{request.url.path}#{body['kind']}"] += 1
+            except (ValueError, TypeError):
+                pass
         # Permissive body: import_entry reads ["id"], batch paths may read
         # ["imported"]/["ids"], others ["written"]/["count"]/["deleted"].
         return httpx.Response(
@@ -279,13 +299,153 @@ def _build_queue_store() -> object:
     return HttpAspectQueue(base_url="http://svc", _token="t")
 
 
+# ── Per-table / per-kind seeders for the SHARED-ROUTE stores ─────────────────
+# Critic finding (2026-06-30): seeding only ONE telemetry table (hook_failures)
+# or ONE taxonomy kind (topics) leaves the OTHER tables/kinds' batch paths
+# unverified — an empty table contributes 0 POSTs, so `== ceil(N/cap)` passes
+# vacuously off the single seeded table. topic_assignments (the literal 190k-row
+# dogfood offender) was the worst case. Fix: one entry PER table/kind, each
+# seeding N>cap rows into exactly that table so its own batch path drives the
+# count. The ETL still walks every table; only the seeded one POSTs.
+
+_TS = "2026-05-15T08:30:00Z"
+_COLL = "knowledge__rehearsal__minilm-l6-v2-384__v1"
+
+
+def _seed_into(db: Path, sql: str, rows: list) -> None:
+    T2Database.bootstrap_schema(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(sql, rows)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# telemetry: the other five tables (hook_failures = _seed_telemetry above)
+def _seed_tel_relevance(db: Path, n: int) -> None:
+    _seed_into(db, "INSERT INTO relevance_log (query, chunk_id, action, timestamp) "
+               "VALUES (?,?,?,?)", [(f"q{i}", f"c{i}", "click", _TS) for i in range(n)])
+
+
+def _seed_tel_search(db: Path, n: int) -> None:
+    _seed_into(db, "INSERT INTO search_telemetry (ts, query_hash, collection, raw_count, "
+               "kept_count) VALUES (?,?,?,?,?)", [(_TS, f"h{i}", _COLL, 10, 5) for i in range(n)])
+
+
+def _seed_tel_tier(db: Path, n: int) -> None:
+    _seed_into(db, "INSERT INTO tier_writes (session_id, ts, tool, tier) VALUES (?,?,?,?)",
+               [(f"s{i}", _TS, "search", "T3") for i in range(n)])
+
+
+def _seed_tel_nx(db: Path, n: int) -> None:
+    _seed_into(db, "INSERT INTO nx_answer_runs (question, step_count, final_text, cost_usd, "
+               "duration_ms, created_at) VALUES (?,?,?,?,?,?)",
+               [(f"q{i}", 1, "ans", 0.01, 100, _TS) for i in range(n)])
+
+
+def _seed_tel_frecency(db: Path, n: int) -> None:
+    _seed_into(db, "INSERT INTO frecency (chunk_id, embedded_at, ttl_days, frecency_score, "
+               "miss_count, last_hit_at) VALUES (?,?,?,?,?,?)",
+               [(f"c{i}", _TS, 30, 0.5, 0, _TS) for i in range(n)])
+
+
+# taxonomy: the other three kinds (topics = _seed_taxonomy above). Assignments
+# and links orphan-skip any row whose topic_id is not a SOURCE topic, so each
+# seeds the prerequisite topics it references (ids 1..n+1). Those topics POST to
+# the SAME route, hence the per-kind counting in _counting_client.
+def _seed_tax_assignments(db: Path, n: int) -> None:
+    T2Database.bootstrap_schema(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO topics (id, label, parent_id, collection, centroid_hash, "
+            "doc_count, created_at, review_status, terms) VALUES (?,?,?,?,?,?,?,?,?)",
+            [(i + 1, f"t{i}", None, _COLL, f"{i:032x}", 0, _TS, "approved", "a b")
+             for i in range(n + 1)],
+        )
+        conn.executemany(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, "
+            "source_collection) VALUES (?,?,?,?)",
+            [(f"d{i}", i + 1, "discover", _COLL) for i in range(n)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_tax_links(db: Path, n: int) -> None:
+    T2Database.bootstrap_schema(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO topics (id, label, parent_id, collection, centroid_hash, "
+            "doc_count, created_at, review_status, terms) VALUES (?,?,?,?,?,?,?,?,?)",
+            [(i + 1, f"t{i}", None, _COLL, f"{i:032x}", 0, _TS, "approved", "a b")
+             for i in range(n + 2)],
+        )
+        conn.executemany(
+            "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, "
+            "link_types) VALUES (?,?,?,?)",
+            [(1, i + 2, 3, "relates") for i in range(n)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_tax_meta(db: Path, n: int) -> None:
+    _seed_into(db, "INSERT INTO taxonomy_meta (collection, last_discover_doc_count, "
+               "last_discover_at) VALUES (?,?,?)", [(f"coll{i}", 0, _TS) for i in range(n)])
+
+
+# aspects: the highlights and promotion_log paths (distinct ROUTES, prod runs
+# all three via migrate_without_queue; the bare _run_aspects_etl above only hit
+# /v1/aspects/import).
+def _seed_highlights(db: Path, n: int) -> None:
+    _seed_into(db, "INSERT INTO document_highlights (doc_id, source_uri, collection, "
+               "highlights_md, mentions_md, ingested_at) VALUES (?,?,?,?,?,?)",
+               [(f"d{i}", f"file://d{i}", _COLL, "h", "m", _TS) for i in range(n)])
+
+
+def _run_highlights_etl(db: Path, store: object) -> None:
+    migrate_highlights(db, store)
+
+
+def _build_highlights_store() -> object:
+    return HttpDocumentHighlightsStore(base_url="http://svc", _token="t")
+
+
+def _seed_promotion(db: Path, n: int) -> None:
+    _seed_into(db, "INSERT INTO aspect_promotion_log (field_name, sql_type, column_added, "
+               "rows_backfilled, rows_pruned, pruned, promoted_at) VALUES (?,?,?,?,?,?,?)",
+               [(f"field{i}", "TEXT", 1, 0, 0, 0, _TS) for i in range(n)])
+
+
+def _run_promotion_etl(db: Path, store: object) -> None:
+    migrate_promotion_log(db, store)
+
+
 # (name, build_store, seed, run_etl, import_path, cap)
 _STORES = [
     ("memory", _build_memory_store, _seed_memory, _run_memory_etl, "/v1/memory/import_batch", CAP),
     ("plans", _build_plans_store, _seed_plans, _run_plans_etl, "/v1/plans/import_batch", CAP),
-    ("telemetry", _build_telemetry_store, _seed_telemetry, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
-    ("taxonomy", _build_taxonomy_store, _seed_taxonomy, _run_taxonomy_etl, "/v1/taxonomy/import_batch", CAP),
-    ("aspects", _build_aspects_store, _seed_aspects, _run_aspects_etl, "/v1/aspects/import", CAP),
+    # telemetry: one entry per table — every table's batch path proven independently
+    ("telemetry.hook_failures", _build_telemetry_store, _seed_telemetry, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
+    ("telemetry.relevance_log", _build_telemetry_store, _seed_tel_relevance, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
+    ("telemetry.search_telemetry", _build_telemetry_store, _seed_tel_search, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
+    ("telemetry.tier_writes", _build_telemetry_store, _seed_tel_tier, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
+    ("telemetry.nx_answer_runs", _build_telemetry_store, _seed_tel_nx, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
+    ("telemetry.frecency", _build_telemetry_store, _seed_tel_frecency, _run_telemetry_etl, "/v1/telemetry/import_batch", CAP),
+    # taxonomy: one entry per kind — topic_assignments is the 190k dogfood offender
+    ("taxonomy.topics", _build_taxonomy_store, _seed_taxonomy, _run_taxonomy_etl, "/v1/taxonomy/import_batch#topic", CAP),
+    ("taxonomy.topic_assignments", _build_taxonomy_store, _seed_tax_assignments, _run_taxonomy_etl, "/v1/taxonomy/import_batch#assignment", CAP),
+    ("taxonomy.topic_links", _build_taxonomy_store, _seed_tax_links, _run_taxonomy_etl, "/v1/taxonomy/import_batch#link", CAP),
+    ("taxonomy.taxonomy_meta", _build_taxonomy_store, _seed_tax_meta, _run_taxonomy_etl, "/v1/taxonomy/import_batch#meta", CAP),
+    # aspects: all three distinct routes (document_aspects, highlights, promotion_log)
+    ("aspects.document_aspects", _build_aspects_store, _seed_aspects, _run_aspects_etl, "/v1/aspects/import", CAP),
+    ("aspects.highlights", _build_highlights_store, _seed_highlights, _run_highlights_etl, "/v1/aspects/highlights/import", CAP),
+    ("aspects.promotion_log", _build_aspects_store, _seed_promotion, _run_promotion_etl, "/v1/aspects/promotion/import", CAP),
     ("aspect_queue", _build_queue_store, _seed_queue, _run_queue_etl, "/v1/aspects/queue/import", CAP),
     ("chash", _build_chash_store, _seed_chash, _run_chash_etl, "/v1/chash/import", 200),
 ]

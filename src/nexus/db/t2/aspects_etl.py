@@ -64,7 +64,15 @@ from typing import Any
 
 import structlog
 
+from nexus.db.chroma_quotas import QUOTAS
+
 _log = structlog.get_logger(__name__)
+
+#: HTTP batch / SQLite page size — the service write quota (300). Decoupling is
+#: unnecessary here because the page read equals the batch flush; both stay at
+#: the cap so transfer is exactly ceil(N / MAX_RECORDS_PER_WRITE) (RDR-176 P3,
+#: review H-1: previously 200, which under-filled batches by 33%).
+_BATCH: int = QUOTAS.MAX_RECORDS_PER_WRITE
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -213,7 +221,7 @@ def migrate_aspects(
     sqlite_path: Path,
     http_aspects,  # HttpDocumentAspectsStore instance
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
 ) -> dict[str, int]:
@@ -345,7 +353,7 @@ def migrate_highlights(
     sqlite_path: Path,
     http_highlights,  # HttpDocumentHighlightsStore instance
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
 ) -> dict[str, int]:
     """Migrate document_highlights from SQLite to Postgres via the HTTP service."""
@@ -422,7 +430,7 @@ def migrate_queue(
     sqlite_path: Path,
     http_queue,  # HttpAspectQueue instance
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
 ) -> dict[str, int]:
@@ -540,7 +548,7 @@ def migrate_promotion_log(
     sqlite_path: Path,
     http_aspects,  # HttpDocumentAspectsStore instance (uses /v1/aspects/promotion/import)
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
 ) -> dict[str, int]:
     """Migrate aspect_promotion_log from SQLite to Postgres via the HTTP service."""
@@ -626,7 +634,7 @@ def migrate_without_queue(
     http_aspects,
     http_highlights,
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
 ) -> dict[str, dict[str, int]]:
@@ -670,7 +678,7 @@ def migrate_all(
     http_highlights,
     http_queue,
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
 ) -> dict[str, dict[str, int]]:
