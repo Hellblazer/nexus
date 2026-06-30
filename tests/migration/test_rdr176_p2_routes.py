@@ -28,6 +28,7 @@ from nexus.migration.route_coverage import (
 # a route added to a store without edge coverage trips the equality assertion.
 _EXPECTED_ROUTES = (
     "/v1/memory/import",
+    "/v1/memory/import_batch",
     "/v1/plans/import",
     "/v1/telemetry/import",
     "/v1/taxonomy/import/topic",

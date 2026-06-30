@@ -42,6 +42,7 @@ from dataclasses import dataclass
 #: auto-detect an omission (the live probe only checks the routes it is given).
 MIGRATION_ROUTES: tuple[str, ...] = (
     "/v1/memory/import",
+    "/v1/memory/import_batch",
     "/v1/plans/import",
     "/v1/telemetry/import",
     "/v1/taxonomy/import/topic",

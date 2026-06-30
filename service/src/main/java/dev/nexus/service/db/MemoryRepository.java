@@ -676,6 +676,68 @@ public final class MemoryRepository {
                 ttlDays, timestamp, accessCount, lastAccessed));
     }
 
+    /**
+     * One row of a fidelity-preserving batch import. Tags null → "" (matches
+     * {@link #doImport}); fidelity fields (timestamp/accessCount/lastAccessed)
+     * are written verbatim.
+     */
+    public record ImportRow(String project, String title, String content, String tags,
+                            String session, String agent, Integer ttlDays,
+                            OffsetDateTime timestamp, int accessCount,
+                            OffsetDateTime lastAccessed) {}
+
+    /**
+     * RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): fidelity-preserving BULK import.
+     *
+     * <p>Collapses a batch of rows to ONE round-trip and ONE Postgres statement:
+     * a single multi-row {@code INSERT ... ON CONFLICT (tenant_id, project, title)
+     * DO UPDATE SET … = EXCLUDED.*} inside ONE {@link TenantScope#withTenant}
+     * transaction — so the RLS GUC ({@code nexus.tenant}) is set ONCE per batch,
+     * not once per row, and the whole batch commits or rolls back atomically
+     * (idempotent re-run on rollback). The ON CONFLICT clause matches the
+     * per-row {@link #doImport} exactly: content fields propagate from EXCLUDED,
+     * fidelity fields (timestamp/access_count/last_accessed) copy verbatim.
+     *
+     * <p>Mirrors {@code ChashRepository.upsertMany}. Empty batch is a no-op.
+     * Client-side batching keeps each call ≤ the per-write quota.
+     *
+     * @return the number of rows submitted (== rows.size()).
+     */
+    public int importBatch(String tenant, List<ImportRow> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            var insert = ctx.insertInto(MEMORY,
+                    MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE, MEMORY.CONTENT,
+                    MEMORY.TAGS, MEMORY.SESSION, MEMORY.AGENT, MEMORY.TIMESTAMP,
+                    MEMORY.TTL, MEMORY.ACCESS_COUNT, MEMORY.LAST_ACCESSED);
+            var step = insert.values(
+                    tenant, rows.get(0).project(), rows.get(0).title(), rows.get(0).content(),
+                    rows.get(0).tags() != null ? rows.get(0).tags() : "", rows.get(0).session(),
+                    rows.get(0).agent(), rows.get(0).timestamp(), rows.get(0).ttlDays(),
+                    rows.get(0).accessCount(), rows.get(0).lastAccessed());
+            for (int i = 1; i < rows.size(); i++) {
+                ImportRow r = rows.get(i);
+                step = step.values(
+                        tenant, r.project(), r.title(), r.content(),
+                        r.tags() != null ? r.tags() : "", r.session(), r.agent(),
+                        r.timestamp(), r.ttlDays(), r.accessCount(), r.lastAccessed());
+            }
+            step.onConflict(MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE)
+                .doUpdate()
+                .set(MEMORY.CONTENT,       excluded(MEMORY.CONTENT))
+                .set(MEMORY.TAGS,          excluded(MEMORY.TAGS))
+                .set(MEMORY.SESSION,       excluded(MEMORY.SESSION))
+                .set(MEMORY.AGENT,         excluded(MEMORY.AGENT))
+                .set(MEMORY.TTL,           excluded(MEMORY.TTL))
+                .set(MEMORY.TIMESTAMP,     excluded(MEMORY.TIMESTAMP))
+                .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
+                .set(MEMORY.LAST_ACCESSED, excluded(MEMORY.LAST_ACCESSED))
+                .execute();
+            log.debug("event=memory_import_batch tenant={} rows={}", tenant, rows.size());
+            return rows.size();
+        });
+    }
+
     private long doImport(DSLContext ctx,
                           String tenant,
                           String project,

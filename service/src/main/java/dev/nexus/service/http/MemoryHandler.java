@@ -99,6 +99,7 @@ public final class MemoryHandler implements HttpHandler {
                 case "/merge"          -> handleMerge(exchange, tenant, method);
                 case "/flag_stale"     -> handleFlagStale(exchange, tenant, method);
                 case "/import"         -> handleImport(exchange, tenant, method);
+                case "/import_batch"   -> handleImportBatch(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -414,7 +415,45 @@ public final class MemoryHandler implements HttpHandler {
      */
     private void handleImport(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        MemoryRepository.ImportRow r = parseImportRow(readBody(ex));
+        long id = repo.importRow(tenant, r.project(), r.title(), r.content(), r.tags(),
+                                 r.session(), r.agent(), r.ttlDays(), r.timestamp(),
+                                 r.accessCount(), r.lastAccessed());
+        HttpUtil.send(ex, 200, json(Map.of("id", id)));
+    }
+
+    /**
+     * POST /v1/memory/import_batch — RDR-176 P3 (Gap 1, bead nexus-t9rmg.18).
+     *
+     * <p>Body: {@code {"rows": [ {<same fields as /import>}, … ]}}. The whole
+     * batch lands in ONE multi-row INSERT under ONE tenant transaction (GUC set
+     * once), via {@link MemoryRepository#importBatch}. Per-row parse/validation
+     * is identical to {@code /import}; a malformed row fails the whole batch with
+     * a 400 (the client re-batches ≤ the per-write quota). Response 200:
+     * {@code {"imported": <int>}}.
+     */
+    private void handleImportBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
+        Object rowsObj = body.get("rows");
+        if (!(rowsObj instanceof List<?> rawRows)) {
+            throw new IllegalArgumentException("field 'rows' must be a JSON array");
+        }
+        List<MemoryRepository.ImportRow> rows = new ArrayList<>(rawRows.size());
+        for (Object o : rawRows) {
+            if (!(o instanceof Map<?, ?> rm)) {
+                throw new IllegalArgumentException("each element of 'rows' must be an object");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> row = (Map<String, Object>) rm;
+            rows.add(parseImportRow(row));
+        }
+        int imported = repo.importBatch(tenant, rows);
+        HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
+    }
+
+    /** Parse + validate one import row (shared by /import and /import_batch). */
+    private MemoryRepository.ImportRow parseImportRow(Map<String, Object> body) {
         String project  = requireString(body, "project");
         String title    = requireString(body, "title");
         String content  = requireString(body, "content");
@@ -423,7 +462,6 @@ public final class MemoryHandler implements HttpHandler {
         String agent    = optStringOrNull(body, "agent");
         Integer ttl     = optInt(body, "ttl");
 
-        // Required fidelity fields
         String tsRaw = requireString(body, "timestamp");
         OffsetDateTime timestamp;
         try {
@@ -443,7 +481,6 @@ public final class MemoryHandler implements HttpHandler {
             }
         }
 
-        // last_accessed: null/absent -> NULL (was '' in SQLite); non-null -> parse as ISO-8601
         OffsetDateTime lastAccessed = null;
         String laRaw = optStringOrNull(body, "last_accessed");
         if (laRaw != null && !laRaw.isBlank()) {
@@ -454,9 +491,8 @@ public final class MemoryHandler implements HttpHandler {
             }
         }
 
-        long id = repo.importRow(tenant, project, title, content, tags, session, agent, ttl,
-                                 timestamp, accessCount, lastAccessed);
-        HttpUtil.send(ex, 200, json(Map.of("id", id)));
+        return new MemoryRepository.ImportRow(project, title, content, tags, session,
+                                              agent, ttl, timestamp, accessCount, lastAccessed);
     }
 
     // ── Serialization helpers ─────────────────────────────────────────────────

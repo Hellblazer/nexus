@@ -212,6 +212,49 @@ class HttpMemoryStore(RawHandleGuardMixin):
         resp = self._post("/v1/memory/import", payload)
         return int(resp["id"])
 
+    @staticmethod
+    def build_import_row(
+        project: str,
+        title: str,
+        content: str,
+        timestamp: str,
+        tags: str = "",
+        ttl: int | None = None,
+        agent: str | None = None,
+        session: str | None = None,
+        access_count: int = 0,
+        last_accessed: str | None = None,
+    ) -> dict[str, Any]:
+        """Build one ``import_entries_batch`` row dict (same field shape as
+        :meth:`import_entry`'s payload). Optional fields omitted when ``None``."""
+        row: dict[str, Any] = {
+            "project": project, "title": title, "content": content,
+            "tags": tags or "", "ttl": ttl, "timestamp": timestamp,
+            "access_count": access_count,
+        }
+        if agent is not None:
+            row["agent"] = agent
+        if session is not None:
+            row["session"] = session
+        if last_accessed is not None:
+            row["last_accessed"] = last_accessed
+        return row
+
+    def import_entries_batch(self, rows: list[dict[str, Any]]) -> int:
+        """RDR-176 P3 (bead nexus-t9rmg.18): fidelity-preserving BULK import.
+
+        POSTs all *rows* (built via :meth:`build_import_row`) to
+        ``/v1/memory/import_batch`` in ONE request — the service lands them in a
+        single multi-row INSERT under one tenant transaction. Collapses an
+        N-row migration leg from N round-trips to ceil(N/batch). The caller is
+        responsible for keeping each batch within the per-write quota (≤300).
+        Returns the number of rows imported. An empty list is a no-op.
+        """
+        if not rows:
+            return 0
+        resp = self._post("/v1/memory/import_batch", {"rows": rows})
+        return int(resp.get("imported", 0))
+
     # ── Read ───────────────────────────────────────────────────────────────────
 
     def get(

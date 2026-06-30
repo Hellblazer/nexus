@@ -154,7 +154,7 @@ def _build_chash_store() -> object:
 
 # (name, build_store, seed, run_etl, import_path, cap)
 _STORES = [
-    ("memory", _build_memory_store, _seed_memory, _run_memory_etl, "/v1/memory/import", CAP),
+    ("memory", _build_memory_store, _seed_memory, _run_memory_etl, "/v1/memory/import_batch", CAP),
     ("plans", _build_plans_store, _seed_plans, _run_plans_etl, "/v1/plans/import", CAP),
     ("chash", _build_chash_store, _seed_chash, _run_chash_etl, "/v1/chash/import", 200),
 ]
