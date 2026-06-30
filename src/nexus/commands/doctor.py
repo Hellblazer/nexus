@@ -2079,8 +2079,15 @@ def _run_check_taxonomy() -> None:
         click.echo("T2 database not found — nothing to check.")
         return
 
-    conn = _t2_diagnostic_connect(db_path, sqlite3)
+    # Context manager guards against a raise/early-return leaking the
+    # connection, matching _run_check_plan_library (RDR-176 review M-3).
+    from contextlib import closing  # noqa: PLC0415 — branch-local; avoids import cost on the non-doctor path
 
+    with closing(_t2_diagnostic_connect(db_path, sqlite3)) as conn:
+        _run_check_taxonomy_body(conn)
+
+
+def _run_check_taxonomy_body(conn: Any) -> None:
     tables = {
         r[0]
         for r in conn.execute(
