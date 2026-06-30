@@ -21,24 +21,38 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import ClassVar
+
+import pytest
 
 import nexus.aspect_worker as aw
+import nexus.daemon.aspect_worker_daemon as awd
 from nexus.daemon.aspect_worker_daemon import (
     TIER,
+    _daemon_version,
     ensure_aspect_worker_daemon,
 )
-from nexus.db import storage_mode
 from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
     ttl_for_tier,
 )
+from nexus.db import storage_mode
+
+
+@pytest.fixture(autouse=True)
+def _clear_spawn_dedup():
+    """The intra-process spawn-suppression dict is a module global; clear it so
+    one test's spawn does not suppress the next test's expected spawn."""
+    awd._recent_spawn.clear()
+    yield
+    awd._recent_spawn.clear()
 
 
 class _FakePopen:
     """Captures the spawn argv + kwargs instead of forking a process."""
 
-    calls: list[dict] = []
+    calls: ClassVar[list[dict]] = []
 
     def __init__(self, argv, **kwargs) -> None:
         type(self).calls.append({"argv": argv, "kwargs": kwargs})
@@ -49,10 +63,14 @@ class _FakePopen:
         cls.calls = []
 
 
-def _publish_live_lease(config_dir: Path, tenant: str) -> None:
-    """Make discover(tenant) resolve a fresh lease (a daemon is 'already up')."""
+def _publish_live_lease(config_dir: Path, tenant: str, *, version: str | None = None) -> None:
+    """Make discover(tenant) resolve a fresh lease (a daemon is 'already up').
+    Defaults to the CURRENT daemon version so ensure_* reads it as up-to-date."""
     reg = ServiceRegistry(dir=config_dir, tier=TIER, ttl=ttl_for_tier(TIER))
-    sup = ServiceSupervisor(reg, scope_key=tenant, version="t", endpoint_provider=lambda: {"pid": os.getpid()})
+    sup = ServiceSupervisor(
+        reg, scope_key=tenant, version=version or _daemon_version(),
+        endpoint_provider=lambda: {"pid": os.getpid()},
+    )
     sup.publish_once()
 
 
@@ -134,3 +152,48 @@ def test_ensure_aspect_worker_spawn_failure_is_swallowed(monkeypatch) -> None:
 
     monkeypatch.setattr("nexus.daemon.aspect_worker_daemon.ensure_aspect_worker_daemon", _boom)
     aw._ensure_aspect_worker()  # must not raise
+
+
+def test_stale_version_lease_triggers_respawn(tmp_path: Path) -> None:
+    """A live lease on a DIFFERENT (stale) version must trigger a spawn — the new
+    daemon fences the stale predecessor. Closes the version_cycle carry-forward
+    (review SIG-1)."""
+    _FakePopen.reset()
+    _publish_live_lease(tmp_path, "default", version="0.0.0-ancient")
+    ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+    assert len(_FakePopen.calls) == 1   # stale version → respawn (fences the old)
+
+
+def test_intra_process_dedup_suppresses_repeat_spawn(tmp_path: Path) -> None:
+    """A batch of enqueues in ONE process must not fire N forks before the daemon
+    publishes: after the first spawn, subsequent calls within the suppression
+    window are no-ops (review M2)."""
+    _FakePopen.reset()
+    clock = [1000.0]
+    for _ in range(50):
+        ensure_aspect_worker_daemon(
+            config_dir=tmp_path, tenant="default",
+            _popen=_FakePopen, _clock=lambda: clock[0],
+        )
+    assert len(_FakePopen.calls) == 1   # 50 calls, ONE spawn (window suppresses)
+
+
+def test_enqueue_hook_service_mode_reaches_daemon_spawn(tmp_path, monkeypatch) -> None:
+    """END-TO-END: aspect_extraction_enqueue_hook with AUTOSTART on + SERVICE mode
+    must actually reach ensure_aspect_worker_daemon (not just _ensure_aspect_worker
+    in isolation) — proving the full hook chain wires through (review SIG-3)."""
+    _FakePopen.reset()
+    monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "1")
+    monkeypatch.setattr(storage_mode, "storage_backend_for",
+                        lambda _s: storage_mode.StorageBackend.SERVICE)
+    # The collection must have a registered extractor or the hook early-returns.
+    monkeypatch.setattr("nexus.aspect_extractor.select_config", lambda _c: object())
+    # The enqueue itself is routed through t2_index_write — stub it to a no-op so
+    # the test needs no live service queue.
+    monkeypatch.setattr("nexus.mcp_infra.t2_index_write", lambda fn: None)
+    monkeypatch.setattr(awd, "ensure_aspect_worker_daemon",
+                        lambda **k: _FakePopen(["spawned"], tenant=k.get("tenant")))
+    monkeypatch.setattr(aw, "nexus_config_dir", lambda: tmp_path)
+
+    aw.aspect_extraction_enqueue_hook("/p/doc.pdf", "knowledge__o__m__v1", "content")
+    assert len(_FakePopen.calls) == 1   # the hook chain reached the daemon-spawn path

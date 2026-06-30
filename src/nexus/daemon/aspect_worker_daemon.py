@@ -228,12 +228,29 @@ def _require_extraction_credentials() -> None:
     import shutil  # noqa: PLC0415 - branch-local; trivial stdlib
 
     if shutil.which("claude") is None:
-        raise RuntimeError(
+        msg = (
             "aspect-worker daemon: the `claude` binary is not on PATH — `claude -p` "
             "extraction would silently fail every row. The daemon must be spawned as a "
             "child of a credential-bearing process (RDR-173 credential model); refusing "
             "to start a daemon that would heartbeat healthy but extract nothing."
         )
+        # Route through structlog before raising so the failure is visible in the
+        # daemon's configured log stream, not ONLY in the spawn crash file (which
+        # may have degraded to DEVNULL) — the parent that Popen'd us cannot see
+        # this RuntimeError (review M1).
+        _log.error("aspect_worker_daemon.missing_claude_credentials")
+        raise RuntimeError(msg)
+
+
+# Intra-process spawn de-duplication (review M2). A long-lived MCP process
+# handling a batch of N concurrent stores would otherwise have every thread
+# discover "absent" before the first daemon publishes its lease and each fire a
+# Popen — N forks for one daemon. The lock serializes discover→spawn, and the
+# suppression window skips re-spawning while a just-spawned daemon comes up
+# (cross-process convergence is still the registry's generation fencing).
+_spawn_lock = threading.Lock()
+_recent_spawn: dict[str, float] = {}  # tenant -> monotonic deadline
+_SPAWN_SUPPRESS_WINDOW: float = 10.0
 
 
 def ensure_aspect_worker_daemon(
@@ -241,50 +258,69 @@ def ensure_aspect_worker_daemon(
     config_dir: Path | str,
     tenant: str = "default",
     _popen: Callable[..., Any] = subprocess.Popen,
+    _clock: Callable[[], float] = time.monotonic,
 ) -> bool:
-    """Spawn-if-absent: ensure a leased aspect-worker daemon is up for *tenant*
-    (RDR-173 P2 / bead nexus-gtdtc). The enqueue-hook replacement for the
-    in-process worker thread.
+    """Spawn-if-absent: ensure a CURRENT-version leased aspect-worker daemon is up
+    for *tenant* (RDR-173 P2 / bead nexus-gtdtc). The enqueue-hook replacement for
+    the in-process worker thread.
 
-    Discovers the Phase-1 leased tier; if a fresh lease already resolves, returns
-    without spawning. Otherwise spawns ``nx daemon aspect-worker start`` as a
-    CHILD that INHERITS this process's environment — the credential model
-    (nexus-x01oe): NO ``env=`` override, so the child sees ``PATH``, ``~/.claude``,
-    and the Anthropic credential context the storing process already uses for
-    ``claude -p``. Detached via ``start_new_session`` so the daemon outlives the
-    (often short-lived) storing process. Concurrent enqueues may each spawn; the
-    registry's single-flight election + generation fencing converges to one
-    surviving daemon per tenant. Returns True once a daemon is up (discovered or
-    just spawned).
+    Discovers the Phase-1 leased tier. If a fresh lease resolves AND its version
+    matches this binary, returns without spawning. If the lease is absent OR on a
+    STALE version, spawns ``nx daemon aspect-worker start`` — a new daemon claims
+    a higher generation and FENCES the stale predecessor (which exits on its next
+    heartbeat). This is the upgrade path the Phase-1 version_cycle N/A deferred to
+    the spawn authority (review SIG-1: the long-lived daemon would otherwise run
+    stale code forever).
+
+    Credential model (nexus-x01oe): the spawn passes NO ``env=`` override, so the
+    CHILD inherits this process's environment — ``PATH``, ``~/.claude``, and the
+    Anthropic credential context the storing process already uses for ``claude
+    -p``. Detached via ``start_new_session`` so the daemon outlives the (often
+    short-lived) storing process.
+
+    Returns True if a current-version daemon is up or a spawn was initiated;
+    the spawned daemon may not have published its lease yet (the name is
+    "ensure", not "running").
     """
     config_dir = Path(config_dir)
     registry = ServiceRegistry(dir=config_dir, tier=TIER, ttl=ttl_for_tier(TIER))
-    if registry.discover(tenant) is not None:
-        return True  # a live daemon already owns this tenant — nothing to spawn
+    current = _daemon_version()
+    with _spawn_lock:
+        rec = registry.discover(tenant)
+        if rec is not None and rec.version == current:
+            return True  # a current-version daemon already owns this tenant
+        # rec is None (absent) OR a stale-version lease (spawn fences it).
+        if _recent_spawn.get(tenant, 0.0) > _clock():
+            return True  # we spawned within the suppression window; it is coming up
+        _recent_spawn[tenant] = _clock() + _SPAWN_SUPPRESS_WINDOW
 
-    from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to break the CLI<->daemon import cycle
-    from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred; CLI/daemon-only
+        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to break the CLI<->daemon import cycle
+        from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred; CLI/daemon-only
 
-    argv = [
-        *_resolve_nx_bin(), "daemon", "aspect-worker", "start",
-        "--config-dir", str(config_dir), "--tenant", tenant,
-    ]
-    _log.info("aspect_worker_daemon.spawn_if_absent", tenant=tenant, argv=argv)
-    # Capture the spawn crash channel so the loud credential guard
-    # (_require_extraction_credentials) and any pre-logging failure are not lost
-    # to DEVNULL. Inherited env: NO env= override.
-    spawn_log = open_child_log_or_devnull("aspect_worker_daemon.crash", config_dir)
-    try:
-        _popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=spawn_log,
-            stderr=spawn_log,
-            start_new_session=True,
+        argv = [
+            *_resolve_nx_bin(), "daemon", "aspect-worker", "start",
+            "--config-dir", str(config_dir), "--tenant", tenant,
+        ]
+        _log.info(
+            "aspect_worker_daemon.spawn_if_absent",
+            tenant=tenant, argv=argv,
+            reason="stale_version" if rec is not None else "absent",
         )
-    finally:
-        if not isinstance(spawn_log, int):
-            spawn_log.close()
+        # Capture the spawn crash channel so the loud credential guard
+        # (_require_extraction_credentials) and any pre-logging failure are not
+        # lost to DEVNULL. Inherited env: NO env= override.
+        spawn_log = open_child_log_or_devnull("aspect_worker_daemon.crash", config_dir)
+        try:
+            _popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=spawn_log,
+                stderr=spawn_log,
+                start_new_session=True,
+            )
+        finally:
+            if not isinstance(spawn_log, int):
+                spawn_log.close()
     return True
 
 
