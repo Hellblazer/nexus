@@ -246,12 +246,18 @@ def _migrate_all(
 
 
 class _SkipRow(Exception):  # noqa: N818 — control-flow signal, not an error condition
-    """Raised by a row-builder to skip a corrupt row, recording it as failed."""
+    """Raised by a row-builder to skip a corrupt row, recording it as failed.
 
-    def __init__(self, reason: str, sample_id: str) -> None:
+    ``issue_class`` carries the policy classification (e.g. ``format_anomaly``
+    for an unparseable timestamp) so the batched driver records the same class
+    the per-row path did.
+    """
+
+    def __init__(self, reason: str, sample_id: str, issue_class: str = "unexpected") -> None:
         super().__init__(reason)
         self.reason = reason
         self.sample_id = sample_id
+        self.issue_class = issue_class
 
 
 def _run_batched(
@@ -309,7 +315,7 @@ def _run_batched(
             if collector is not None:
                 collector.record(
                     "telemetry", table,
-                    issue_class="unexpected", constraint=table,
+                    issue_class=skip.issue_class, constraint=table,
                     reason=skip.reason, action="failed", sample_id=skip.sample_id,
                 )
             continue
@@ -394,6 +400,7 @@ def _build_hook(row: dict[str, Any], collector: Any) -> tuple[dict[str, Any], st
         raise _SkipRow(
             f"unparseable timestamp (not ISO-8601-coercible): {raw_ts[:40]!r}",
             str(row.get("id", "?")),
+            issue_class="format_anomaly",
         ) from exc
     if normalized and collector is not None:
         collector.record(
