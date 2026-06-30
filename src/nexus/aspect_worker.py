@@ -1288,6 +1288,23 @@ def aspect_extraction_enqueue_hook(
         _ensure_aspect_worker()
 
 
+def _best_effort_queue_depth() -> int:
+    """Pending-row count for the diagnostic signal (RDR-173 P5), or -1 if it
+    cannot be obtained cheaply. The service queue is reachable even when the
+    WORKER daemon is not, so this is usually answerable; best-effort so the
+    observability path never itself blocks or raises."""
+    try:
+        from nexus.daemon.aspect_worker_daemon import _default_aspect_queue  # noqa: PLC0415 — deferred; service-side
+
+        q = _default_aspect_queue(_ENQUEUE_TENANT)
+        try:
+            return int(q.pending_count())
+        finally:
+            q.close()
+    except Exception:  # noqa: BLE001 — diagnostic only; never block the store
+        return -1
+
+
 def _ensure_aspect_worker() -> None:
     """RDR-173 P2 (bead nexus-gtdtc): ensure aspect extraction will run, without
     tying it to the storing process's lifetime.
@@ -1314,12 +1331,18 @@ def _ensure_aspect_worker() -> None:
 
         ensure_aspect_worker_daemon(config_dir=nexus_config_dir(), tenant=_ENQUEUE_TENANT)
     except Exception as exc:  # noqa: BLE001 — best-effort spawn; the row is enqueued, do not fail the store
-        # Mirror the enqueue-failure loudness tripwire (RDR-172): the spawn is
-        # best-effort, so persist a structured hook_failures row CI / --fullstack
-        # can assert ZERO on — otherwise a misconfigured daemon spawn (claude
-        # absent, etc.) is a silent store-time failure, the exact class RDR-173
-        # exists to eliminate. Phase 5 wires the metric onto this seam.
-        _log.warning("aspect_worker.ensure_daemon_failed", error=str(exc), exc_info=True)
+        # RDR-173 P5 observability (nexus-xv5fl): make the store-time failure
+        # LOUD with diagnostic context (tenant + how many rows are now stranded
+        # by the outage), AND persist the RDR-172 hook_failures tripwire CI /
+        # --fullstack can assert ZERO on. This is the exact silent-store-time
+        # failure class RDR-173 exists to eliminate.
+        _log.warning(
+            "aspect_worker.daemon_unreachable",
+            tenant=_ENQUEUE_TENANT,
+            queue_depth=_best_effort_queue_depth(),
+            error=str(exc),
+            exc_info=True,
+        )
         try:
             from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
 

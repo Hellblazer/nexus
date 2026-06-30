@@ -212,22 +212,30 @@ class AspectWorkerDaemon:
         prior worker death left BEHIND immediately, rather than waiting a full
         interval — in service mode this daemon is the SOLE reclaim owner."""
         while True:
-            queue = self._reclaim_queue
-            if queue is not None:
-                try:
-                    n = queue.reclaim_stale(self._stale_timeout)
-                    if n:
-                        _log.info(
-                            "aspect_worker_daemon.reclaimed_stale",
-                            tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
-                        )
-                except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
-                    _log.warning(
-                        "aspect_worker_daemon.reclaim_failed",
-                        tenant=self._tenant, error=str(exc),
-                    )
+            self._reclaim_once()
             if self._stop.wait(self._reclaim_interval):
                 break
+
+    def _reclaim_once(self) -> None:
+        """One reclaim sweep (the loop body; also the main-thread test seam).
+        Emits a structured signal when rows are reset (RDR-173 P5 observability,
+        nexus-xv5fl) so self-healing is observable, and logs a failure without
+        killing the loop."""
+        queue = self._reclaim_queue
+        if queue is None:
+            return
+        try:
+            n = queue.reclaim_stale(self._stale_timeout)
+            if n:
+                _log.info(
+                    "aspect_worker_daemon.reclaimed_stale",
+                    tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
+                )
+        except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
+            _log.warning(
+                "aspect_worker_daemon.reclaim_failed",
+                tenant=self._tenant, error=str(exc),
+            )
 
     def heartbeat_once(self) -> None:
         """Run a single heartbeat tick (test seam + the loop body)."""
