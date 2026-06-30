@@ -873,7 +873,7 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        for (var row : rows) repo.importOwner(tenant, row);
+        repo.importOwnersBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 
@@ -883,7 +883,7 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        for (var row : rows) repo.importDocument(tenant, row);
+        repo.importDocumentsBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 
@@ -893,7 +893,7 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        for (var row : rows) repo.importLink(tenant, row);
+        repo.importLinksBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 
@@ -905,7 +905,7 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
         }
         List<Map<String, Object>> rows = castRows(body.get("rows"));
-        for (var row : rows) repo.importChunk(tenant, docId, row);
+        repo.importChunksBatch(tenant, docId, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 
@@ -915,7 +915,7 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        for (var row : rows) repo.importCollection(tenant, row);
+        repo.importCollectionsBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 
