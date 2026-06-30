@@ -240,18 +240,10 @@ def migrate_memory_cmd(
     # Construct the HttpMemoryStore
     from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate memory.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
+    _apply_service_url_override(service_url)
 
     try:
-        if service_url:
-            store = HttpMemoryStore(base_url=service_url, _token=token)
-        else:
-            store = HttpMemoryStore()
+        store = HttpMemoryStore()
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -377,18 +369,10 @@ def migrate_plans_cmd(
 
     from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate plans.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
+    _apply_service_url_override(service_url)
 
     try:
-        if service_url:
-            store = HttpPlanLibrary(base_url=service_url, _token=token)
-        else:
-            store = HttpPlanLibrary()
+        store = HttpPlanLibrary()
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -519,18 +503,10 @@ def migrate_telemetry_cmd(
 
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate telemetry.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
+    _apply_service_url_override(service_url)
 
     try:
-        if service_url:
-            store = HttpTelemetryStore(base_url=service_url, _token=token)
-        else:
-            store = HttpTelemetryStore()
+        store = HttpTelemetryStore()
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -677,18 +653,10 @@ def migrate_taxonomy_cmd(
 
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate taxonomy.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
+    _apply_service_url_override(service_url)
 
     try:
-        if service_url:
-            store = HttpTaxonomyStore(base_url=service_url, _token=token)
-        else:
-            store = HttpTaxonomyStore()
+        store = HttpTaxonomyStore()
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -839,19 +807,11 @@ def migrate_chash_cmd(
         click.echo("[dry-run] No writes performed.")
         return
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate chash.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
+    _apply_service_url_override(service_url)
 
     from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    if service_url:
-        store = HttpChashIndex(base_url=service_url)
-    else:
-        store = HttpChashIndex()
+    store = HttpChashIndex()
 
     from nexus.db.t2.chash_etl import migrate_chash_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
@@ -979,15 +939,10 @@ def migrate_catalog_cmd(
 
     from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate catalog.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
+    _apply_service_url_override(service_url)
 
     try:
-        client = make_catalog_client_for_migration(base_url=service_url, token=token)
+        client = make_catalog_client_for_migration()
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -1329,10 +1284,18 @@ def _emit_store_report(
     help="SQLite catalog source (default: NX_CATALOG_DB_PATH or the "
          "canonical path).",
 )
+@click.option(
+    "--service-url",
+    "service_url",
+    default=None,
+    help="Base URL of the nexus-service. Config-first override: env "
+         "NX_SERVICE_URL > config.yml. Token resolves the same chain.",
+)
 def migrate_all_cmd(
     report_path: Path | None,
     db_path: Path | None,
     catalog_db_path: Path | None,
+    service_url: str | None,
 ) -> None:
     """Run ALL eight store migrations in the RDR-152 ladder order and emit
     ONE migration report (RDR-153 Phase 3).
@@ -1346,6 +1309,11 @@ def migrate_all_cmd(
     """
     from nexus.migration.etl_registry import EtlSources  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     from nexus.migration.orchestrator import migrate_all  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    # RDR-176 P2 (Gap 3): --service-url is a config-first override; the no-arg
+    # Http*Store()/HttpCatalogClient() the orchestrator builds resolve URL+token
+    # via the unified env>config chain.
+    _apply_service_url_override(service_url)
 
     sources = EtlSources(
         sqlite_path=_resolve_db_path(db_path),
@@ -1447,6 +1415,23 @@ def _resolve_catalog_db_path(explicit: Path | None) -> Path:
         return Path(env_path)
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     return nexus_config_dir() / "catalog" / ".catalog.db"
+
+
+def _apply_service_url_override(service_url: str | None) -> None:
+    """RDR-176 P2 (Gap 3): make ``--service-url`` a config-first override.
+
+    Setting ``NX_SERVICE_URL`` routes the URL through the SAME unified env>config
+    resolver (:func:`nexus.db.service_endpoint.resolve_service_endpoint`) that
+    every no-arg ``Http*Store()`` already uses, so BOTH the endpoint and the
+    bearer token resolve config-first — env (``NX_SERVICE_URL`` /
+    ``NX_SERVICE_TOKEN``) first, then the ``config.yml`` credentials a greenfield
+    user set with ``nx config set``. This is the exemplar ``migrate vectors``
+    established (nexus-pebfx.1); the six T2/catalog subcommands + ``migrate all``
+    adopt it here, retiring their ``NX_SERVICE_TOKEN``-env-only gate that refused
+    a config-only user. Enforced by ``tests/test_rdr176_p2_auth.py``.
+    """
+    if service_url:
+        os.environ["NX_SERVICE_URL"] = service_url
 
 
 def _resolve_db_path(explicit: Path | None) -> Path:
