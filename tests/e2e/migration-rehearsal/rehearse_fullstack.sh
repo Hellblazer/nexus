@@ -95,24 +95,46 @@ printf '%s' "$wlout" | grep -qiE "widget|sprocket|gadget" && ok "nx_answer (MCP)
 # and knowledge__* IS extractor-eligible — select_config → scholarly-paper-v1, then
 # per-document shape routing (RDR-145 Gap-3 / nexus-kmbys): a PAPER-shaped doc (the
 # workload's doc (a)) extracts via scholarly-paper-v1, prose via general-prose-v1.
-# So store_put enqueues and the lazy-spawned worker drains it IN the MCP process
-# during the session. Assert the END STATE (document_aspects > 0) as a HARD failure,
-# not a soft note — guarded by the non-vacuity check that store_put actually landed
-# the document (the knowledge-collection assertion above).
+# So store_put enqueues and the leased daemon drains it. Assert the END STATE
+# (document_aspects > 0) as a HARD failure, not a soft note — guarded by the
+# non-vacuity check that store_put actually landed the document (the knowledge-
+# collection assertion above).
 #
-# LIFECYCLE CAVEAT (P2.1 review): the worker is a daemon thread inside nx-mcp; when
-# claude -p exits it tears down nx-mcp and the worker dies WITHOUT a join. So the
-# extraction must complete BEFORE claude -p returns — this post-process poll only
-# absorbs PG read-visibility lag, it canNOT extend the drain window. A hard FAIL
-# here therefore means the in-session drain did not complete (the worker-lifecycle
-# question the prior soft-note dodged) — that is exactly the silent-loss class this
-# RDR makes loud, so it SHOULD fail rather than be excused. P2.5 (nexus-8zog5)
-# characterises whether the in-session drain is reliable on the real container; if
-# it is not, that is a NEW bug to file, not a reason to soften this gate.
-for _ in $(seq 1 12); do
+# RDR-173 LIFECYCLE (supersedes the pre-RDR-173 P2.1 caveat below): the worker is
+# NO LONGER an in-nx-mcp daemon thread. In SERVICE mode the enqueue hook spawns a
+# LEASED aspect-worker DAEMON, DETACHED via start_new_session (aspect_worker_daemon
+# .py), so it OUTLIVES the claude -p / nx-mcp teardown and drains the shared PG
+# queue independently (RF-4 — extraction no longer gated by the storing process's
+# lifetime). This post-teardown poll therefore LEGITIMATELY extends the drain
+# window: nx-mcp is already dead, yet the detached daemon keeps draining as long as
+# the container is alive. Give it real time — real extraction calls `claude -p`
+# per document (cold start, slow); 36s (the old in-process window) was far too
+# short for the 4-doc workload.
+#
+# Non-vacuity is PRESERVED by extending the window: on pre-RDR-173 code the in-
+# process worker dies with nx-mcp and NOTHING drains during this post-teardown poll
+# no matter how long it runs → document_aspects stays 0. Only the detached daemon
+# can move the needle here, so a green is the RF-4 proof, not a softened gate.
+#
+# Diagnostics first: prove the detached daemon actually outlived nx-mcp (RF-4) and
+# surface its crash/daemon logs so a 0-row result distinguishes "daemon never
+# spawned / crashed" (real bug) from "daemon draining, needs more time".
+LOGS_DIR="$HOME/.config/nexus/logs"
+note "leased-daemon liveness after nx-mcp teardown (RF-4 check):"
+if pgrep -af "aspect-worker" >/dev/null 2>&1; then
+  pgrep -af "aspect-worker" | sed 's/^/       proc: /'
+  ok "leased aspect-worker daemon SURVIVED nx-mcp teardown (RF-4: extraction host is process-independent)"
+else
+  note "no live aspect-worker process found post-teardown"
+fi
+for lg in aspect_worker_daemon.crash.log aspect_worker_daemon.log; do
+  if [ -s "$LOGS_DIR/$lg" ]; then note "tail $lg:"; tail -25 "$LOGS_DIR/$lg" | sed 's/^/       /'; fi
+done
+# Extended drain window: up to ~10 min (150 x 4s), break the instant a row lands.
+for _ in $(seq 1 150); do
   asp="$(q "select count(*) from nexus.document_aspects")"
   [ "${asp:-0}" -gt 0 ] 2>/dev/null && break
-  sleep 3
+  sleep 4
 done
 enq="$(q "select count(*) from nexus.aspect_extraction_queue")"
 pend="$(q "select count(*) from nexus.aspect_extraction_queue where status in ('pending','in_progress')")"
@@ -139,7 +161,7 @@ if [ "${asp:-0}" -gt 0 ] 2>/dev/null; then
   ok "SERVICE-MODE aspect pipeline works END-TO-END: store_put → enqueue → worker → document_aspects (${asp} rows, real extraction)"
 elif [ "${STORED_OK:-0}" -eq 1 ] 2>/dev/null; then
   if [ "${enq:-0}" -gt 0 ] 2>/dev/null; then
-    bad "SERVICE-MODE aspect pipeline BROKEN: enqueued=${enq} (pending=${pend:-?}) but document_aspects=0 — worker did not drain in-session before nx-mcp teardown (worker-lifecycle; Approach 5 / P2.2)"
+    bad "SERVICE-MODE aspect pipeline BROKEN: enqueued=${enq} (pending=${pend:-?}) but document_aspects=0 after the extended post-teardown drain window — the leased daemon did not drain the queue (see liveness/log diagnostics above: never spawned, crashed, or extraction stalled; RDR-173 RF-4 / Approach 5 / P2.2)"
   else
     bad "SERVICE-MODE aspect pipeline BROKEN: store_put landed but enqueued=0 AND document_aspects=0 — hook did not enqueue (the silent-loss class; Approach 5 / P2.2)"
   fi
