@@ -1052,3 +1052,47 @@ class TestResolveChash:
             assert result is None
         finally:
             server.shutdown()
+
+
+class TestByFilePathExactMatchGuard:
+    """GH #1350 / nexus-h9f1w: by_file_path(owner, fp) must return None for a
+    brand-new file even when the service /list ignores file_path under owner and
+    returns the FULL owner list. Trusting docs[0] mis-attributed a new file's
+    chunks to an unrelated doc, overwriting that doc's manifest (silent data
+    corruption, fired twice in prod). The client MUST filter by exact file_path.
+    """
+
+    def _client_returning(self, fake_server: str, documents: list[dict]):
+        c = HttpCatalogClient(base_url=fake_server, _token="test_tok")
+
+        def _fake_get(path: str, **params: Any) -> dict:
+            # Reproduce the buggy server: owner+file_path ignores file_path and
+            # returns the entire owner list regardless of the file_path param.
+            return {"documents": documents}
+
+        c._get = _fake_get  # type: ignore[method-assign]
+        return c
+
+    def test_new_file_under_populated_owner_returns_none(self, fake_server: str) -> None:
+        """The corruption trigger: querying a NEW path returns None, not docs[0]."""
+        owner_list = [
+            {"tumbler": "1.12.1", "title": "Beyond Similarity Search", "file_path": "existing/a.pdf"},
+            {"tumbler": "1.12.2", "title": "Other", "file_path": "existing/b.pdf"},
+        ]
+        c = self._client_returning(fake_server, owner_list)
+        assert c.by_file_path("1.12", "brand/new/paper.pdf") is None
+
+    def test_existing_file_returns_its_own_entry_not_docs0(self, fake_server: str) -> None:
+        """A real match is selected by exact file_path even when it is NOT docs[0]."""
+        owner_list = [
+            {"tumbler": "1.12.1", "title": "Beyond Similarity Search", "file_path": "existing/a.pdf"},
+            {"tumbler": "1.12.2", "title": "Target", "file_path": "existing/b.pdf"},
+        ]
+        c = self._client_returning(fake_server, owner_list)
+        entry = c.by_file_path("1.12", "existing/b.pdf")
+        assert entry is not None
+        assert str(entry.tumbler) == "1.12.2"
+
+    def test_empty_owner_returns_none(self, fake_server: str) -> None:
+        c = self._client_returning(fake_server, [])
+        assert c.by_file_path("1.12", "any/path.pdf") is None
