@@ -2,12 +2,14 @@
 title: "Survivable Managed-Migration Readiness: Batched ETL, First-Class Downgrade with an Immutable Source, Unified Config-First Auth, Edge Route Coverage, and Migration Observability"
 id: RDR-176
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-30
 accepted_date: 2026-06-30
+closed_date: 2026-07-01
+postmortem_waiver: "Clean close — all five phases (P1-P5, Gaps 1-7) shipped, gated (code-review + critic + test-validator + phase-review-gate, all PASS each phase), and merged. P4's live cloud→cloud gate (the RDR's own stated deferral point) PASSED 2026-07-01 against deployed engine-service-v0.1.15 (copied=5/dest=5). No divergence from the accepted design. Full closure record in T2 nexus_rdr/176 + epic nexus-t9rmg."
 related_issues: [nexus-gq5f9, nexus-1qpni, nexus-zvcou, nexus-6bhpm, nexus-tteq8]
 related: [RDR-152, RDR-155, RDR-156, RDR-158, RDR-159, RDR-166]
 ---
