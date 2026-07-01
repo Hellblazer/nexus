@@ -9,6 +9,7 @@ reviewed-by: self
 created: 2026-06-28
 accepted_date: 2026-06-28
 closed_date: 2026-07-01
+postmortem_waiver: "Clean close — leased aspect-worker daemon (Candidate A) shipped on the RDR-149 substrate and validated by P7 --fullstack (document_aspects=4, non-vacuous) against deployed engine v0.1.14. The one notable outcome (P7 surfaced the P0 native-image jOOQ RETURNING bug nexus-i9o37) is fully recorded in T2 rdr/173-P7-i9o37-SESSION-STATE-2026-07-01 and shipped as engine-service-v0.1.13. Deferrals nexus-4r9ja (P6/RF-8) + nexus-t7jeo tracked as own beads. Full closure record in T2 nexus_rdr/173."
 related_issues: [nexus-tih7j, nexus-575kd, nexus-8zog5]
 related_rdrs: [RDR-089, RDR-152, RDR-155, RDR-156, RDR-163, RDR-172, RDR-140, RDR-149]
 supersedes: []
