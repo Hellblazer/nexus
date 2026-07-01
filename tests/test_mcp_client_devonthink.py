@@ -16,6 +16,7 @@ returns before any connection is attempted).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -216,3 +217,47 @@ def test_write_helpers_reject_empty_input(monkeypatch) -> None:
     assert dt.dt_set_custom_metadata("Q", {}) is False
     assert dt.dt_set_annotation("Q", "") is False
     assert dt.dt_resolve_doi("") is None
+
+
+def test_dt_call_unwraps_real_exceptiongroup_to_root_cause(monkeypatch) -> None:
+    """GH #1351 / nexus-56pmt regression: a REAL ExceptionGroup raised through
+    asyncio.run (as an internal asyncio.TaskGroup produces on a sub-task
+    failure — the same mechanism open_session's SDK session uses) must
+    surface its actual root cause in the log, not the content-free
+    'unhandled errors in a TaskGroup (N sub-exception)' default __str__.
+
+    Plain (non-async) test: dt_call is CLI-path-only and asserts no running
+    loop; asyncio.run happens INSIDE dt_call itself."""
+    events: list[dict[str, Any]] = []
+
+    def _capture(logger, method_name, event_dict):
+        events.append(dict(event_dict))
+        raise structlog.DropEvent
+
+    class _BoomingSession:
+        async def __aenter__(self):
+            async def _boom() -> None:
+                raise ConnectionRefusedError("[Errno 61] Connection refused")
+
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(_boom())
+            return self  # pragma: no cover — TaskGroup raises on __aexit__ first
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(dt, "open_session", lambda endpoint: _BoomingSession())
+
+    structlog.configure(processors=[_capture])
+    try:
+        result = dt.dt_call("is_running")
+    finally:
+        structlog.reset_defaults()
+
+    assert result is None
+    failed = next(e for e in events if e.get("event") == "dt_call_failed")
+    assert failed["error_type"] == "ExceptionGroup", "must reproduce the reported failure shape"
+    assert "ConnectionRefusedError" in failed["error"]
+    assert "Connection refused" in failed["error"]
+    assert failed["error"] != "unhandled errors in a TaskGroup (1 sub-exception)"
+    assert failed["error"] != "unhandled errors in a TaskGroup (1 sub-exception)"

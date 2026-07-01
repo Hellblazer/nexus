@@ -61,6 +61,23 @@ class MCPEndpoint:
     timeout_s: float = 30.0
 
 
+def describe_exception(exc: BaseException) -> str:
+    """Render *exc* for logging, unwrapping (possibly nested) ``ExceptionGroup``s.
+
+    ``asyncio.run`` on a coroutine that opens a ``TaskGroup`` (as
+    :func:`open_session` does) wraps ANY failure in an ``ExceptionGroup``;
+    ``str(group)`` produces the content-free ``"unhandled errors in a
+    TaskGroup (N sub-exception(s))"`` — the actual root cause (connection
+    refused, transport teardown, protocol mismatch, ...) is invisible unless
+    the group is unwrapped (GH #1351 / nexus-56pmt). Every leaf exception's
+    type + message is reported, comma-joined for a multi-exception group.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        leaves = [describe_exception(sub) for sub in exc.exceptions]
+        return ", ".join(leaves)
+    return f"{type(exc).__name__}: {exc}"
+
+
 def _redact(arguments: Mapping[str, Any]) -> dict[str, Any]:
     """Return a copy of ``arguments`` with secret-looking values masked."""
     return {

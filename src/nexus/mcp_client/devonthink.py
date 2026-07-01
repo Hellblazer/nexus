@@ -23,7 +23,7 @@ from typing import Any, TypedDict
 import structlog
 
 from nexus.config import load_config
-from nexus.mcp_client.core import MCPEndpoint, call_tool, open_session
+from nexus.mcp_client.core import MCPEndpoint, call_tool, describe_exception, open_session
 
 log = structlog.get_logger(__name__)
 
@@ -89,7 +89,11 @@ def dt_call(tool: str, args: dict[str, Any] | None = None) -> dict[str, Any] | N
     try:
         return asyncio.run(_run())
     except Exception as exc:  # connect/transport failure → fail-soft  # noqa: BLE001 — transport boundary; fail-soft to None, logged at warning
-        log.warning("dt_call_failed", tool=tool, error=str(exc), error_type=type(exc).__name__)
+        # nexus-56pmt / GH #1351: asyncio.run's TaskGroup wraps ANY failure in an
+        # ExceptionGroup; str(exc) alone gives the content-free "unhandled errors
+        # in a TaskGroup (1 sub-exception)" — describe_exception unwraps to the
+        # real root cause (connection refused, transport teardown, ...).
+        log.warning("dt_call_failed", tool=tool, error=describe_exception(exc), error_type=type(exc).__name__)
         return None
 
 

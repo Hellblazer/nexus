@@ -103,3 +103,40 @@ async def test_call_tool_redacts_secret_args() -> None:
     logged_args = next((e.get("args") for e in events if "args" in e), {})
     assert logged_args.get("uuid") == "U"
     assert logged_args.get("authorization") == core.REDACTED
+
+
+# ── describe_exception: unwrap ExceptionGroup to the real root cause ─────────
+# GH #1351 / nexus-56pmt: dt_call and devonthink_status both stringified a
+# raised ExceptionGroup directly (str(exc)), producing the content-free
+# "unhandled errors in a TaskGroup (1 sub-exception)" — the actual failure
+# (connection refused, transport teardown, protocol mismatch, ...) was never
+# logged. describe_exception() unwraps (possibly nested) ExceptionGroups to
+# report every leaf exception's type + message.
+
+def test_describe_exception_plain_exception_unchanged() -> None:
+    exc = RuntimeError("connection refused")
+    assert core.describe_exception(exc) == "RuntimeError: connection refused"
+
+
+def test_describe_exception_unwraps_single_subexception() -> None:
+    leaf = ConnectionRefusedError("[Errno 61] Connection refused")
+    eg = ExceptionGroup("unhandled errors in a TaskGroup", [leaf])
+    described = core.describe_exception(eg)
+    assert "ConnectionRefusedError" in described
+    assert "Connection refused" in described
+    # Must NOT be the content-free default __str__ of the group alone.
+    assert described != str(eg)
+
+
+def test_describe_exception_unwraps_multiple_subexceptions() -> None:
+    eg = ExceptionGroup("multi", [ValueError("bad value"), TypeError("bad type")])
+    described = core.describe_exception(eg)
+    assert "ValueError: bad value" in described
+    assert "TypeError: bad type" in described
+
+
+def test_describe_exception_unwraps_nested_groups() -> None:
+    inner = ExceptionGroup("inner", [OSError("disk full")])
+    outer = ExceptionGroup("outer", [inner])
+    described = core.describe_exception(outer)
+    assert "OSError: disk full" in described
