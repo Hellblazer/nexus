@@ -529,6 +529,20 @@
                                         <buildArg>--enable-https</buildArg>
                                         <!-- Logback/SLF4J: initialize at build time -->
                                         <buildArg>--initialize-at-build-time=org.slf4j,ch.qos.logback</buildArg>
+                                        <!-- org.xml.sax.helpers: build-time-init the SAX helper/data classes
+                                             (LocatorImpl, AttributesImpl, NamespaceSupport, …) that logback's
+                                             build-time-initialized JoranConfigurator / SaxEventInterpreter
+                                             retains in the LoggerContext. Surfaced once
+                                             JooqRecordReflectionFeature.beforeAnalysis() touches the jOOQ
+                                             schema model at image-build time: that triggers jOOQ's slf4j
+                                             logging, which drives logback to parse logback.xml at build time
+                                             and retain SAX-config scaffolding in the build-time heap. Without
+                                             the Feature no logger fires at build time so these objects never
+                                             appear (RDR-173 P7 / nexus-i9o37). Whole package (not one class)
+                                             because the parse retains several of these holders; all are
+                                             stateless build-time-safe. Completes the existing ch.qos.logback
+                                             build-time-init intent. -->
+                                        <buildArg>--initialize-at-build-time=org.xml.sax.helpers</buildArg>
                                         <!-- jOOQ 3.20.11 + GraalVM 25 native-image initialization.
                                              nexus-lp2qo spike (2026-06-12): community metadata now
                                              ships a jOOQ 3.20.0 entry (tested 3.20.0-3.21.5, covers
