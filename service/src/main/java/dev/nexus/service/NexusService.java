@@ -15,6 +15,7 @@ import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AspectHandler;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.CatalogHandler;
+import dev.nexus.service.http.MigrationHandler;
 import dev.nexus.service.http.ChashHandler;
 import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.VersionHandler;
@@ -268,6 +269,15 @@ public final class NexusService {
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
         var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));
         catalogCtx.getFilters().addAll(authFilter);
+
+        // /v1/migration/* — cloud→cloud server-side ingest (RDR-176 P4, nexus-t9rmg.24).
+        // Only wired when a PgVectorRepository is present (the serving substrate);
+        // absent = the route 404s rather than NPEs.
+        if (pgVectorRepository != null) {
+            var migrationCtx = server.createContext(
+                    "/v1/migration", new MigrationHandler(pgVectorRepository));
+            migrationCtx.getFilters().addAll(authFilter);
+        }
 
         // /v1/tenants/* + /v1/service-tokens/* — token lifecycle admin (bead nexus-gmiaf.32.3).
         // Shares the live tokenStore + tokenCache so revoke invalidates the cache AuthFilter reads.
