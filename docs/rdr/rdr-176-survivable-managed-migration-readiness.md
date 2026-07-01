@@ -389,8 +389,17 @@ bar; a leg that lands a subset is a failure, not a green.
    completeness `_VERIFY_TABLES` fix, Gap 1a). Blocks any end-to-end managed test.
 3. **Gap 1 — T2/catalog bulk endpoints** (Java; `import_batch` via `withTenant`, jOOQ
    batch on the catalog array loop). Blocked on Gap 4 (routes reachable).
-4. **Gap 1 — cloud→cloud server-side** (Java + infra; blocked on the 1b credential/egress
-   design being locked). Highest-effort; reuses `ChromaRestClient.cloud`.
+4. **Gap 1 — cloud→cloud server-side** — CODE COMPLETE + MERGED 2026-07-01 (PR #1356,
+   beads `nexus-t9rmg.23`/`.24`). `POST /v1/migration/ingest-cloud` + `EgressProxy`
+   wiring on `ChromaRestClient.cloud()`; ephemeral client-supplied creds (in-memory,
+   never persisted/logged); read-only source resolve; count-parity. The 1b design was
+   DECIDED 2026-06-30 (both deliverables shipped); the ChromaCloud credential itself is
+   present (`.env` `CHROMA_API_KEY`/`CHROMA_TENANT`/`CHROMA_DATABASE`). Remaining for the
+   LIVE gate is mechanical, not design: (a) confirm a ChromaCloud source still holds
+   vectors to migrate; (b) engine cut (batch P3+P4) + cloud deploy so the route exists;
+   (c) verify cloud egress reaches `api.trychroma.com` (EgressProxy→squid); (d) a
+   `--with-cloud`-style gate leg hitting `ingest-cloud`. Highest-effort; reuses
+   `ChromaRestClient.cloud`.
 5. **Gap 5 — observability**, **Gap 6 — retry**, **Gap 7 — SQLite-exception docs**
    (coordinate RDR-158).
 
