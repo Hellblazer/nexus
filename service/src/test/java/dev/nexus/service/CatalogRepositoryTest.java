@@ -328,30 +328,68 @@ class CatalogRepositoryTest {
     }
 
     /**
+     * GH #1350 Fix B (nexus-lc8r5): documentsByOwnerAndFilePath must filter by
+     * BOTH owner prefix and exact file_path. The owner-only path returns the
+     * whole owner list, which drove the client's docs[0] mis-attribution
+     * (silent manifest overwrite).
+     */
+    @Test @Order(16)
+    void document_byOwnerAndFilePath_filtersByBoth() {
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "7.1", "title", "Owner7 A", "content_type", "paper",
+            "corpus", "knowledge", "file_path", "owner7/a.pdf"));
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "7.2", "title", "Owner7 B", "content_type", "paper",
+            "corpus", "knowledge", "file_path", "owner7/b.pdf"));
+
+        // Exact existing path under the owner: exactly one, the right one.
+        var hit = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/b.pdf");
+        assertThat(hit).hasSize(1);
+        assertThat(hit.get(0).get("tumbler")).isEqualTo("7.2");
+
+        // Brand-new path under a POPULATED owner: zero (this is what stops the
+        // corruption — the client no longer receives docs[0] of the owner).
+        var miss = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/brand-new.pdf");
+        assertThat(miss).isEmpty();
+    }
+
+    /**
      * RDR-159 P-1a (nexus-0wz93): relationCounts returns tenant-scoped row
      * counts for whitelisted migration-verify relations and OMITS any
      * relation outside the whitelist (no arbitrary relation counts).
      *
      * <p>Scoped to the catalog relations the svc role can SELECT
-     * (catalog_documents / catalog_links); other verify relations
+     * (catalog_owners / catalog_documents / catalog_collections /
+     * catalog_document_chunks / catalog_links); other verify relations
      * (nexus.memory, …) are exercised in production where the service role
      * holds the grants.
+     *
+     * <p>RDR-176 Gap 1a (nexus-t9rmg.12): owners, collections, and
+     * document_chunks are now in the verify whitelist (previously only
+     * documents + links were counted, so a partial copy of the other three
+     * reconciled GREEN). Mirrors the Python {@code _VERIFY_TABLES} extension.
      */
     @Test @Order(40)
     void migration_relationCounts_whitelisted_and_tenant_scoped() {
         var counts = repo.relationCounts(TENANT_A, List.of(
+            "nexus.catalog_owners",
             "nexus.catalog_documents",
+            "nexus.catalog_collections",
+            "nexus.catalog_document_chunks",
             "nexus.catalog_links",
-            "nexus.pg_class",            // not whitelisted → omitted
-            "nexus.catalog_owners"       // not in the verify set → omitted
+            "nexus.pg_class"             // not whitelisted → omitted
         ));
         // catalog_documents has rows for TENANT_A from earlier ordered tests
         assertThat(counts).containsKey("nexus.catalog_documents");
         assertThat(counts.get("nexus.catalog_documents")).isGreaterThan(0L);
         assertThat(counts).containsKey("nexus.catalog_links");
+        // RDR-176 Gap 1a: the three formerly-unverified catalog relations are
+        // now counted (presence proves whitelisting; counts are tenant-scoped).
+        assertThat(counts).containsKey("nexus.catalog_owners");
+        assertThat(counts).containsKey("nexus.catalog_collections");
+        assertThat(counts).containsKey("nexus.catalog_document_chunks");
         // non-whitelisted relations are silently omitted
         assertThat(counts).doesNotContainKey("nexus.pg_class");
-        assertThat(counts).doesNotContainKey("nexus.catalog_owners");
     }
 
     @Test @Order(41)

@@ -52,6 +52,8 @@ from typing import Any
 
 import structlog
 
+from nexus.retry import _etl_with_retry
+
 _log = structlog.get_logger(__name__)
 
 # Column order matches ``_COLUMNS`` in memory_store.py — used when reading
@@ -188,49 +190,71 @@ def migrate_memory_rows(
         total_rows=total,
     )
 
+    # RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): batch the HTTP transport so the
+    # transfer count is ceil(N/_IMPORT_BATCH_SIZE), not N (the per-row /import
+    # that made the dogfood take hours). Each row is still TRANSFORMED per-row
+    # so a single corrupt row is recorded individually and excluded — only the
+    # NETWORK is batched. A server-side batch rejection (whole-batch 400) is
+    # recorded at batch granularity; the ETL is idempotent (ON CONFLICT DO
+    # UPDATE) so a re-run lands the batch.
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    _IMPORT_BATCH_SIZE = QUOTAS.MAX_RECORDS_PER_WRITE
+
+    batch: list[dict[str, Any]] = []
+    batch_keys: list[tuple[str, str]] = []
+
+    def _flush() -> None:
+        nonlocal written_count, batch, batch_keys
+        if not batch:
+            return
+        try:
+            # RDR-176 Gap 6: bounded transient-edge retry (idempotent upsert).
+            written_count += _etl_with_retry(store.import_entries_batch, batch)
+        except Exception as exc:  # noqa: BLE001 - batch ETL failure logged + recorded; migration continues (idempotent re-run)
+            _log.error("memory_etl.batch_failed", count=len(batch), error=str(exc))
+            if collector is not None:
+                for proj, title in batch_keys:
+                    collector.record(
+                        "memory", "memory",
+                        issue_class="unexpected",
+                        constraint="memory(project,title)",
+                        reason=f"batch import rejected: {exc}; sample ids "
+                               "are <project>:<title>",
+                        action="failed",
+                        sample_id=f"{proj}:{title}",
+                    )
+        batch = []
+        batch_keys = []
+
     for row_dict in (dict(r) for r in rows):
         read_count += 1
-        # Transform INSIDE the try (RDR-153 P2 review): a corrupt row must
-        # become a recorded failed issue, never abort the loop unrecorded.
-        transformed: dict[str, Any] = {}
+        # Transform per-row (RDR-153 P2 review): a corrupt row must become a
+        # recorded failed issue, excluded from the batch, never abort the loop.
         try:
             transformed = _transform_row(row_dict)
-            store.import_entry(
-                project=transformed["project"],
-                title=transformed["title"],
-                content=transformed["content"],
-                timestamp=transformed["timestamp"],
-                tags=transformed["tags"],
-                ttl=transformed["ttl"],
-                session=transformed["session"],
-                agent=transformed["agent"],
-                access_count=transformed["access_count"],
-                last_accessed=transformed["last_accessed"],
-            )
-            written_count += 1
-        except Exception as exc:  # noqa: BLE001 - per-row ETL failure logged via log.error; migration continues
+        except Exception as exc:  # noqa: BLE001 - per-row transform failure logged + recorded; migration continues
             _log.error(
                 "memory_etl.row_failed",
-                project=transformed.get("project", row_dict.get("project", "?")),
-                title=transformed.get("title", row_dict.get("title", "?")),
+                project=row_dict.get("project", "?"),
+                title=row_dict.get("title", "?"),
                 error=str(exc),
             )
-            # Continue processing remaining rows so a single failure
-            # doesn't abort the whole migration. RDR-153 catch-all: the
-            # failure is recorded, never silently dropped.
             if collector is not None:
                 collector.record(
                     "memory", "memory",
                     issue_class="unexpected",
                     constraint="memory(project,title)",
-                    reason=f"row rejected during import: {exc}; sample ids "
+                    reason=f"row rejected during transform: {exc}; sample ids "
                            "are <project>:<title>",
                     action="failed",
-                    sample_id=(
-                        f"{transformed.get('project', row_dict.get('project', '?'))}"
-                        f":{transformed.get('title', row_dict.get('title', '?'))}"
-                    ),
+                    sample_id=f"{row_dict.get('project', '?')}:{row_dict.get('title', '?')}",
                 )
+            continue
+
+        batch.append(store.build_import_row(**transformed))
+        batch_keys.append((transformed["project"], transformed["title"]))
+        if len(batch) >= _IMPORT_BATCH_SIZE:
+            _flush()
 
         if read_count % batch_log_every == 0:
             _log.info(
@@ -239,6 +263,8 @@ def migrate_memory_rows(
                 written=written_count,
                 total=total,
             )
+
+    _flush()
 
     _log.info(
         "memory_etl.complete",

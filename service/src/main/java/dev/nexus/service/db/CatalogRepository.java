@@ -24,6 +24,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Condition;
+import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.SelectField;
 import org.jooq.Table;
@@ -72,7 +73,10 @@ public final class CatalogRepository {
         "nexus.hook_failures",
         "nexus.nx_answer_runs",
         "nexus.chash_index",
+        "nexus.catalog_owners",
         "nexus.catalog_documents",
+        "nexus.catalog_collections",
+        "nexus.catalog_document_chunks",
         "nexus.catalog_links"
     );
 
@@ -770,6 +774,24 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(T_DOCS)
                .where(F_DOC_TUMBLER.like(ownerPrefix + ".%"))
+               .orderBy(F_DOC_TUMBLER)
+               .fetch().map(r -> docRowFromRecord(r.intoMap()))
+        );
+    }
+
+    /**
+     * Documents by owner tumbler prefix AND file_path (exact). GH #1350 Fix B.
+     *
+     * <p>The combined predicate is the correct behaviour for
+     * {@code GET /list?owner=X&file_path=Y}: the owner-only path returns the
+     * full owner list, which caused {@code HttpCatalogClient.by_file_path} to
+     * mis-attribute a new file to an unrelated doc (silent manifest overwrite).
+     */
+    public List<Map<String, Object>> documentsByOwnerAndFilePath(
+            String tenant, String ownerPrefix, String filePath) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(documentFields()).from(T_DOCS)
+               .where(F_DOC_TUMBLER.like(ownerPrefix + ".%").and(F_DOC_FPATH.eq(filePath)))
                .orderBy(F_DOC_TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
@@ -1952,31 +1974,69 @@ public final class CatalogRepository {
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(T_OWNERS,
-                    F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
-                    F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD, F_OWN_SEQ)
-               .values(tenant,
-                       s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
-                       s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
-                       s(o,"head_hash"), lng(o,"next_seq", 0L))
-               .onConflict(F_OWN_TENANT, F_OWN_PREFIX)
-               .doUpdate()
-               .set(F_OWN_NAME, EX_OWN_NAME)
-               .set(F_OWN_TYPE, EX_OWN_TYPE)
-               .set(F_OWN_REPO, EX_OWN_REPO)
-               .set(F_OWN_DESC, EX_OWN_DESC)
-               .set(F_OWN_ROOT, EX_OWN_ROOT)
-               .set(F_OWN_HEAD, EX_OWN_HEAD)
-               .set(F_OWN_SEQ,  EX_OWN_SEQ_GREATEST)
-               .execute();
+            doImportOwner(ctx, tenant, o);
             return null;
         });
     }
 
+    /**
+     * RDR-176 P3 (Gap 1, bead nexus-t9rmg.18 / nexus-1qpni): GUC-once bulk owner
+     * import. ONE {@link TenantScope#withTenant} (RLS GUC set once per batch)
+     * wrapping the per-row {@link #doImportOwner} the single-row path uses — so a
+     * client array POST is one transaction with one GUC set, not one per row.
+     */
+    public int importOwnersBatch(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        if (TenantConstants.isWildcard(tenant)) {
+            throw new IllegalArgumentException(
+                "tenant '*' is a reserved sentinel and cannot own catalog entries");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            for (Map<String, Object> o : rows) doImportOwner(ctx, tenant, o);
+            return rows.size();
+        });
+    }
+
+    private void doImportOwner(DSLContext ctx, String tenant, Map<String, Object> o) {
+        ctx.insertInto(T_OWNERS,
+                F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
+                F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD, F_OWN_SEQ)
+           .values(tenant,
+                   s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
+                   s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
+                   s(o,"head_hash"), lng(o,"next_seq", 0L))
+           .onConflict(F_OWN_TENANT, F_OWN_PREFIX)
+           .doUpdate()
+           .set(F_OWN_NAME, EX_OWN_NAME)
+           .set(F_OWN_TYPE, EX_OWN_TYPE)
+           .set(F_OWN_REPO, EX_OWN_REPO)
+           .set(F_OWN_DESC, EX_OWN_DESC)
+           .set(F_OWN_ROOT, EX_OWN_ROOT)
+           .set(F_OWN_HEAD, EX_OWN_HEAD)
+           .set(F_OWN_SEQ,  EX_OWN_SEQ_GREATEST)
+           .execute();
+    }
+
     /** Fidelity-preserving document import. Uses GREATEST for source_mtime. */
     public void importDocument(String tenant, Map<String, Object> d) {
-        String metaJson = jsonOrNull(d.get("metadata"));
         tenantScope.withTenant(tenant, ctx -> {
+            doImportDocument(ctx, tenant, d);
+            return null;
+        });
+    }
+
+    /** RDR-176 P3 (Gap 1): GUC-once bulk document import (one withTenant per batch). */
+    public int importDocumentsBatch(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            for (Map<String, Object> d : rows) doImportDocument(ctx, tenant, d);
+            return rows.size();
+        });
+    }
+
+    private void doImportDocument(DSLContext ctx, String tenant, Map<String, Object> d) {
+        String metaJson = jsonOrNull(d.get("metadata"));
+        {
             ctx.insertInto(T_DOCS,
                     F_DOC_TENANT, F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_AUTHOR, F_DOC_YEAR,
                     F_DOC_CTYPE, F_DOC_FPATH, F_DOC_CORPUS, F_DOC_PCOLL, F_DOC_CHUNKS,
@@ -2019,8 +2079,7 @@ public final class CatalogRepository {
                .set(F_DOC_BIDOI,  EX_DOC_BIDOI)
                .set(F_DOC_BIAT,   EX_DOC_BIAT)
                .execute();
-            return null;
-        });
+        }
     }
 
     /**
@@ -2034,21 +2093,34 @@ public final class CatalogRepository {
      * stale link metadata surfaces in production.
      */
     public void importLink(String tenant, Map<String, Object> lnk) {
-        String metaJson = jsonOrNull(lnk.get("metadata"));
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(T_LINKS,
-                    F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
-                    F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
-               .values(DSL.val(tenant),
-                       DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
-                       DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
-                       jsonbVal(metaJson))
-               .onConflict(F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE)
-               .doNothing()
-               .execute();
+            doImportLink(ctx, tenant, lnk);
             return null;
         });
+    }
+
+    /** RDR-176 P3 (Gap 1): GUC-once bulk link import (one withTenant per batch). */
+    public int importLinksBatch(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            for (Map<String, Object> lnk : rows) doImportLink(ctx, tenant, lnk);
+            return rows.size();
+        });
+    }
+
+    private void doImportLink(DSLContext ctx, String tenant, Map<String, Object> lnk) {
+        String metaJson = jsonOrNull(lnk.get("metadata"));
+        ctx.insertInto(T_LINKS,
+                F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
+                F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
+           .values(DSL.val(tenant),
+                   DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
+                   DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
+                   DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
+                   jsonbVal(metaJson))
+           .onConflict(F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE)
+           .doNothing()
+           .execute();
     }
 
     /**
@@ -2061,22 +2133,39 @@ public final class CatalogRepository {
      */
     public void importChunk(String tenant, String docId, Map<String, Object> row) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(T_CHUNKS,
-                    F_CHK_TENANT, F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
-                    F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN)
-               .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
-                       i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
-               .onConflict(F_CHK_TENANT, F_CHK_DOC, F_CHK_POS)
-               .doUpdate()
-               .set(F_CHK_CHASH, EX_CHK_CHASH)
-               .set(F_CHK_IDX,   EX_CHK_IDX)
-               .set(F_CHK_LST,   EX_CHK_LST)
-               .set(F_CHK_LEN,   EX_CHK_LEN)
-               .set(F_CHK_CST,   EX_CHK_CST)
-               .set(F_CHK_CEN,   EX_CHK_CEN)
-               .execute();
+            doImportChunk(ctx, tenant, docId, row);
             return null;
         });
+    }
+
+    /**
+     * RDR-176 P3 (Gap 1): GUC-once bulk chunk import for ONE document — all
+     * *rows* land under one withTenant (one GUC set), matching the doc-scoped
+     * {@code {doc_id, rows}} import envelope.
+     */
+    public int importChunksBatch(String tenant, String docId, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            for (Map<String, Object> row : rows) doImportChunk(ctx, tenant, docId, row);
+            return rows.size();
+        });
+    }
+
+    private void doImportChunk(DSLContext ctx, String tenant, String docId, Map<String, Object> row) {
+        ctx.insertInto(T_CHUNKS,
+                F_CHK_TENANT, F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
+                F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN)
+           .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
+                   i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
+           .onConflict(F_CHK_TENANT, F_CHK_DOC, F_CHK_POS)
+           .doUpdate()
+           .set(F_CHK_CHASH, EX_CHK_CHASH)
+           .set(F_CHK_IDX,   EX_CHK_IDX)
+           .set(F_CHK_LST,   EX_CHK_LST)
+           .set(F_CHK_LEN,   EX_CHK_LEN)
+           .set(F_CHK_CST,   EX_CHK_CST)
+           .set(F_CHK_CEN,   EX_CHK_CEN)
+           .execute();
     }
 
     /**
@@ -2093,6 +2182,22 @@ public final class CatalogRepository {
      */
     public void importCollection(String tenant, Map<String, Object> coll) {
         tenantScope.withTenant(tenant, ctx -> {
+            doImportCollection(ctx, tenant, coll);
+            return null;
+        });
+    }
+
+    /** RDR-176 P3 (Gap 1): GUC-once bulk collection import (one withTenant per batch). */
+    public int importCollectionsBatch(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            for (Map<String, Object> coll : rows) doImportCollection(ctx, tenant, coll);
+            return rows.size();
+        });
+    }
+
+    private void doImportCollection(DSLContext ctx, String tenant, Map<String, Object> coll) {
+        {
             // Raw SQL for superseded_at / created_at: timestamptz NULL after catalog-002-1-temporal-typing.
             // DO UPDATE WHERE stub: only upgrades rows where all three discriminator columns are empty
             // (i.e. auto-registered stubs from RDR-156 P0.2 ensure-registration steps).
@@ -2117,8 +2222,7 @@ public final class CatalogRepository {
                 ni(i(coll, "legacy_grandfathered"), 0),
                 nne(s(coll, "superseded_by")), nz(s(coll, "superseded_at")),
                 nz(s(coll, "created_at")));
-            return null;
-        });
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════

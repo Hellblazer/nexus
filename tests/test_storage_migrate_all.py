@@ -84,7 +84,7 @@ def _invoke_all(runner, tmp_path: Path, order_sink: list[str], *args,
         return_value=_fake_etls(order_sink, fail_store=fail_store),
     ), patch(
         "nexus.migration.orchestrator.verify_counts",
-        return_value=(verify, []),
+        return_value=(verify, [], {}),
     ), patch.dict(
         "os.environ", {"NEXUS_CONFIG_DIR": str(config_dir)},
     ):
@@ -179,7 +179,7 @@ class TestMigrateAll:
             "nexus.migration.orchestrator.build_store_etls", _boom_etls,
         ), patch(
             "nexus.migration.orchestrator.verify_counts",
-            return_value=("indeterminate", []),
+            return_value=("indeterminate", [], {}),
         ), patch.dict(
             "os.environ", {"NEXUS_CONFIG_DIR": str(config_dir)},
         ):

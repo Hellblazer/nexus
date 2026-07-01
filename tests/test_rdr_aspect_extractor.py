@@ -37,7 +37,7 @@ class TestRouting:
         subprocess.run — the parser_fn shortcut takes precedence."""
         sample = _SAMPLE_RDR_DOC
 
-        with patch("subprocess.run", side_effect=AssertionError(
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "RDR extractor must not invoke subprocess",
         )):
             record = extract_aspects(
@@ -288,7 +288,7 @@ class TestParseRdrAspects:
 
 class TestExtractAspectsRdrPath:
     def test_extract_aspects_for_rdr_collection(self) -> None:
-        with patch("subprocess.run", side_effect=AssertionError(
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "RDR path must not invoke subprocess",
         )):
             record = extract_aspects(
@@ -307,7 +307,7 @@ class TestExtractAspectsRdrPath:
 
     def test_extract_aspects_handles_unparseable_rdr_gracefully(self) -> None:
         """Garbage input returns null-fields, not an exception."""
-        with patch("subprocess.run", side_effect=AssertionError(
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "RDR path must not invoke subprocess",
         )):
             record = extract_aspects(
@@ -339,7 +339,7 @@ class TestExtractAspectsRdrPath:
         from nexus import aspect_extractor as mod
         monkeypatch.setitem(mod._REGISTRY, "rdr__", bad_config)
 
-        with patch("subprocess.run", side_effect=AssertionError(
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "must not invoke subprocess",
         )):
             record = extract_aspects(

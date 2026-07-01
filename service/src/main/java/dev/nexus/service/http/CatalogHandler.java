@@ -199,8 +199,25 @@ public final class CatalogHandler implements HttpHandler {
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (Exception e) {
-            log.error("event=catalog_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
-            HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
+            // nexus-7e057 (RDR-172 follow-up): a client-supplied doc_id that is
+            // non-blank but UNREGISTERED violates fk_catalog_chunks_catalog_doc
+            // on the manifest write/append path — same bug class as nexus-ov0sw
+            // (AspectHandler's aspect_extraction_queue.doc_id FK). Map class-23
+            // integrity violations to a typed 409 ahead of the generic 500. The
+            // full driver message goes to the server log; the client body is
+            // sanitised to a fixed message + the sqlstate (never the raw jOOQ
+            // SQL, which would leak schema/constraint shape to any caller).
+            String sqlState = HttpUtil.sqlState23(e);
+            if (sqlState != null) {
+                log.warn("event=catalog_handler_integrity_violation op={} tenant={} sqlstate={} error={}",
+                    op, tenant, sqlState, e.getMessage());
+                HttpUtil.send(exchange, 409,
+                    "{\"error\":\"integrity constraint violation\",\"sqlstate\":"
+                    + HttpUtil.jsonString(sqlState) + "}");
+            } else {
+                log.error("event=catalog_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
+                HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
+            }
         }
     }
 
@@ -259,6 +276,12 @@ public final class CatalogHandler implements HttpHandler {
             docs = repo.documentsByContentType(tenant, contentType);
         } else if (corpus != null && !corpus.isBlank()) {
             docs = repo.documentsByCorpus(tenant, corpus);
+        } else if (owner != null && !owner.isBlank()
+                   && filePath != null && !filePath.isBlank()) {
+            // GH #1350 Fix B: owner+file_path must filter by BOTH. The owner-only
+            // branch below ignored file_path and returned the full owner list,
+            // driving the client's docs[0] mis-attribution (silent corruption).
+            docs = repo.documentsByOwnerAndFilePath(tenant, owner, filePath);
         } else if (owner != null && !owner.isBlank()) {
             docs = repo.documentsByOwner(tenant, owner);
         } else if (filePath != null && !filePath.isBlank()) {
@@ -870,30 +893,33 @@ public final class CatalogHandler implements HttpHandler {
     private void handleImportOwner(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        if (requireNonEmptyImportBody(exchange, body)) return;
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        for (var row : rows) repo.importOwner(tenant, row);
+        repo.importOwnersBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 
     private void handleImportDocument(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        if (requireNonEmptyImportBody(exchange, body)) return;
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        for (var row : rows) repo.importDocument(tenant, row);
+        repo.importDocumentsBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 
     private void handleImportLink(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        if (requireNonEmptyImportBody(exchange, body)) return;
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        for (var row : rows) repo.importLink(tenant, row);
+        repo.importLinksBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 
@@ -905,18 +931,37 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
         }
         List<Map<String, Object>> rows = castRows(body.get("rows"));
-        for (var row : rows) repo.importChunk(tenant, docId, row);
+        repo.importChunksBatch(tenant, docId, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 
     private void handleImportCollection(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        if (requireNonEmptyImportBody(exchange, body)) return;
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        for (var row : rows) repo.importCollection(tenant, row);
+        repo.importCollectionsBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
+    }
+
+    /**
+     * nexus-zbci5 (GH conexus-tsye): an empty request body previously fell
+     * through to {@code rows = List.of(body)} — a ONE-element list containing
+     * an EMPTY map — which then failed deep inside the repo batch-import
+     * (uncaught, surfaced as a generic 500). A batch import with zero content
+     * is always a client error; fail loud with a clean 400 before ever
+     * reaching the repo. Returns {@code true} (caller must return) if the
+     * response was already sent.
+     */
+    private boolean requireNonEmptyImportBody(HttpExchange exchange, Map<String, Object> body) throws IOException {
+        if (body.isEmpty()) {
+            HttpUtil.send(exchange, 400,
+                "{\"error\":\"request body required: either {\\\"rows\\\": [...]} or a single row object\"}");
+            return true;
+        }
+        return false;
     }
 
     // ══════════════════════════════════════════════════════════════════════════

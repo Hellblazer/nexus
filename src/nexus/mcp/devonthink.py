@@ -34,7 +34,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from nexus.mcp_client.core import MCPEndpoint, call_tool, open_session
+from nexus.mcp_client.core import MCPEndpoint, call_tool, describe_exception, open_session
 from nexus.mcp_client.devonthink import dt_mcp_url
 
 #: Whether the curated DT surface was registered at startup. Set by
@@ -122,7 +122,9 @@ async def devonthink_status() -> str:
             running = await call_tool(session, "is_running", {})
             dbs = await call_tool(session, "get_databases", {})
     except Exception as exc:  # noqa: BLE001 — boundary catch of DEVONthink availability probe; surfaced as JSON status
-        return json.dumps({"available": False, "reason": f"{type(exc).__name__}: {exc}"})
+        # nexus-56pmt / GH #1351: unwrap the TaskGroup ExceptionGroup so `reason`
+        # carries the real root cause, not the content-free group summary.
+        return json.dumps({"available": False, "reason": describe_exception(exc)})
     available = bool(running) and bool(running.get("running"))
     dbs_payload = dbs.get("result", dbs) if isinstance(dbs, dict) else dbs
     n_dbs = len(dbs_payload) if isinstance(dbs_payload, list) else 0

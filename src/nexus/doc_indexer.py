@@ -243,8 +243,12 @@ def _register_or_lookup_doc_id(
             source_mtime=source_mtime,
         )
         return str(tumbler)
-    except Exception:  # noqa: BLE001 — best-effort/telemetry path; failure logged at debug, must not crash caller
-        _log.debug("preflight_register_failed", exc_info=True)
+    except Exception:  # noqa: BLE001 — best-effort/telemetry path; must not crash caller
+        # nexus-h9f1w / GH #1350 Fix C: a preflight registration failure meant a
+        # new file gets no catalog node (orphan chunks) yet the ingest still
+        # reports success. Surface it at warning, not debug, so the operator can
+        # see a non-clean run instead of silent data loss.
+        _log.warning("preflight_register_failed", exc_info=True)
         return ""
     finally:
         if writer is not None:

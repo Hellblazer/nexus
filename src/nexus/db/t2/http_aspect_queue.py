@@ -80,6 +80,7 @@ class HttpAspectQueue(RawHandleGuardMixin):
         *,
         rename_lock: "threading.RLock | None" = None,
         _token: str | None = None,
+        timeout: float = 30.0,
     ) -> None:
         if base_url is not None:
             if _token is None:
@@ -107,7 +108,7 @@ class HttpAspectQueue(RawHandleGuardMixin):
         self._client = httpx.Client(
             base_url=self._base_url,
             headers=self._headers,
-            timeout=30.0,
+            timeout=timeout,
         )
         _log.info(
             "http_aspect_queue.init",
@@ -276,4 +277,12 @@ class HttpAspectQueue(RawHandleGuardMixin):
     def import_queue_row(self, body: dict[str, Any]) -> int:
         """Fidelity-preserving import for ETL. Returns 1 on success."""
         r = self._post("/import", body)
+        return int(r.get("imported", 0))
+
+    def import_queue_batch(self, rows: list[dict[str, Any]]) -> int:
+        """RDR-176 P3 (bead nexus-t9rmg.18): GUC-once bulk queue import — POST all
+        *rows* to /v1/aspects/queue/import in ONE request."""
+        if not rows:
+            return 0
+        r = self._post("/import", {"rows": rows})
         return int(r.get("imported", 0))

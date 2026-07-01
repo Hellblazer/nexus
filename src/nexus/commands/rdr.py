@@ -1582,9 +1582,14 @@ def _prg_extract_approach_section(text: str) -> str:
     false-positive on ``## Planned Work`` / ``## Planning`` (prefix) or
     ``## Plan Optimization`` (a differently-scoped section) — review
     findings on the first cut of this fix.
+
+    An optional ``Proposed`` prefix is honoured (``## Proposed Approach``,
+    ``### Proposed Plan``) — the most common RDR phrasing (RDR-176) — but
+    ONLY in front of the Approach/Plan synonyms, so ``## Proposed Solution``
+    (a differently-scoped section) still does not match (nexus phase-gate fix).
     """
     heading = re.search(
-        r"\n(#{2,4})[ \t]+(?:(?:Approach|Implementation Plan|Phases)\b[^\n]*|Plan[ \t]*)\r?\n",
+        r"\n(#{2,4})[ \t]+(?:Proposed[ \t]+)?(?:(?:Approach|Implementation Plan|Phases)\b[^\n]*|Plan[ \t]*)\r?\n",
         text,
         re.IGNORECASE,
     )

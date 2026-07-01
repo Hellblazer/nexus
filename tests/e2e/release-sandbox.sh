@@ -130,35 +130,46 @@ if [[ "$MODE" != "smoke" && "$MODE" != "shakedown" && "$MODE" != "shell" \
     _die "unknown mode: $MODE (use $0 help)"
 fi
 
-# ── Step 1 — reinstall (unless skipped) ──────────────────────────────────────
+# ── Step 1 — create sandbox HOME ─────────────────────────────────────────────
+
+if [[ -d "$SANDBOX" && $KEEP_EXISTING -eq 0 ]]; then
+    echo "[1/3] Recreating sandbox at $SANDBOX (use --keep-existing to reuse)"
+    rm -rf "$SANDBOX"
+elif [[ -d "$SANDBOX" ]]; then
+    echo "[1/3] Reusing existing sandbox at $SANDBOX"
+fi
+
+if [[ ! -d "$SANDBOX" ]]; then
+    echo "[1/3] Creating fresh sandbox at $SANDBOX ..."
+    "$REPO_ROOT/tests/e2e/sandbox.sh" >/dev/null
+fi
+
+# Activate the sandbox HOME/PATH BEFORE the reinstall below (not after, as
+# this script did until nexus-h9f1w-follow-up): `uv tool install` resolves
+# its default install location off $HOME (~/.local/share/uv/tools,
+# ~/.local/bin — confirmed via `HOME=X uv tool dir`), so activating first
+# makes the reinstall land entirely inside $SANDBOX/.local/{share/uv/tools,
+# bin} — genuinely isolated from the live global conexus venv. Running the
+# reinstall against the REAL $HOME (the old order) swapped the live venv
+# out from under every concurrent Claude Code session's nx-mcp servers +
+# T2/service daemons, tripping reinstall-tool.sh's live-holder guard with
+# no safe remedy short of --force (unsafe) or --cycle-daemons (which can't
+# even touch MCP-server subprocesses, only nx-managed daemons).
+# shellcheck source=/dev/null
+. "$SANDBOX/activate"
+
+# ── Step 2 — reinstall into the now-isolated sandbox tool dir (unless skipped) ──
 
 if (( SKIP_INSTALL == 0 )); then
-    echo "[1/3] Reinstalling nx CLI from $REPO_ROOT ..."
+    echo "[2/3] Reinstalling nx CLI from $REPO_ROOT (isolated: HOME=$SANDBOX) ..."
     (cd "$REPO_ROOT" && uv sync >/dev/null 2>&1)
     "$REPO_ROOT/scripts/reinstall-tool.sh" >/dev/null
     echo "      $(nx --version 2>/dev/null || echo 'nx --version failed')"
 else
-    echo "[1/3] Skipping reinstall (--skip-install). nx version: $(nx --version 2>/dev/null || echo 'unknown')"
-fi
-
-# ── Step 2 — create sandbox HOME ─────────────────────────────────────────────
-
-if [[ -d "$SANDBOX" && $KEEP_EXISTING -eq 0 ]]; then
-    echo "[2/3] Recreating sandbox at $SANDBOX (use --keep-existing to reuse)"
-    rm -rf "$SANDBOX"
-elif [[ -d "$SANDBOX" ]]; then
-    echo "[2/3] Reusing existing sandbox at $SANDBOX"
-fi
-
-if [[ ! -d "$SANDBOX" ]]; then
-    echo "[2/3] Creating fresh sandbox at $SANDBOX ..."
-    "$REPO_ROOT/tests/e2e/sandbox.sh" >/dev/null
+    echo "[2/3] Skipping reinstall (--skip-install). nx version: $(nx --version 2>/dev/null || echo 'unknown')"
 fi
 
 # ── Step 3 — execute mode ────────────────────────────────────────────────────
-
-# shellcheck source=/dev/null
-. "$SANDBOX/activate"
 
 case "$MODE" in
     smoke)

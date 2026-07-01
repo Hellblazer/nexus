@@ -1829,6 +1829,33 @@ nothing is installed unless BOTH gates pass. One verified seam covers the
 binary and the PG bundle (RDR-161). `--no-pg-bundle` installs only the
 service binary (e.g. a cloud habitat with a managed Postgres).
 
+### nx daemon aspect-worker start
+
+```
+nx daemon aspect-worker start [--config-dir DIR] [--tenant TENANT] [--stale-timeout-seconds N]
+```
+
+Start the aspect-worker daemon in the foreground (runs until SIGTERM/SIGINT):
+a leased, per-tenant host for the aspect-extraction loop (claim → `claude -p`
+→ upsert `document_aspects` → mark done) and the `reclaim_stale` loop — one
+more leased tier on the RDR-149 service-registry substrate (RDR-173). Rides
+a per-tenant lease, so a second `start` for the same tenant fences the
+predecessor (one owner survives).
+
+| Flag | Description |
+|------|-------------|
+| `--config-dir` | Config directory override (default: `~/.config/nexus/`) |
+| `--tenant` | Tenant scope for the lease (default `default`). Per-tenant only — per-host would need `BYPASSRLS`, forbidden by RDR-152 |
+| `--stale-timeout-seconds` | Reclaim staleness threshold (default `300`). MUST exceed the `claude -p` extraction budget (180s) or an in-flight row could be false-reclaimed |
+
+**Credential model (RDR-173):** this command MUST be spawned as a CHILD of a
+process that already has `claude -p` credentials, so it inherits the
+`claude` binary on `PATH`, `~/.claude`, and the Anthropic credential
+context — a credential-bare invocation fails extraction. In normal
+operation you never run this manually: the `store_put` enqueue hook
+spawns it automatically (spawn-if-absent, single-flight) from the storing
+process precisely so that inheritance happens.
+
 ---
 
 ## nx upgrade
@@ -2123,23 +2150,29 @@ recover).
 ### nx storage migrate all
 
 ```
-nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH]
+nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH] [--service-url URL]
 ```
 
-Run ALL seven T2 store migrations in the RDR-152 ladder order (memory →
-plans → telemetry → taxonomy → aspects → chash → catalog last) with one
+Run ALL eight T2 store migrations in the RDR-152 ladder order (memory →
+plans → telemetry → taxonomy → aspects → chash → catalog →
+aspects_queue — the last two trail so FK targets exist) with one
 shared issue collector, and emit ONE RDR-153 migration report (default:
 `~/.config/nexus/migration-reports/migration-<id>.json` — a run always
-produces an artifact). Exits non-zero when `summary.total_failed > 0`
-("migration is NOT clean") or when post-run count verification finds
-Postgres counts below the report's written totals. When psql/credentials
-cannot be resolved the verification is reported as **VERIFICATION
-INDETERMINATE** — a loud warning, never a silent skip (the RDR-152
-prod-copy.sh harness bug). The verdict is recorded in the report
-artifact (`"verification"`). Verification queries the LOCAL nx-managed
-Postgres (from `pg_credentials`) — when migrating against a remote
-service it reports on the local cluster only. Every per-store command
-also accepts `--report PATH` for a single-store report (a default-path
+produces an artifact). Prints a per-store progress line as each store
+completes (`<store>: <written> written / <read> read`, RDR-176 Gap 5) so a
+long migration doesn't go silent between stores. Exits non-zero when
+`summary.total_failed > 0` ("migration is NOT clean") or when post-run
+count verification finds Postgres counts below the report's written
+totals. When psql/credentials cannot be resolved the verification is
+reported as **VERIFICATION INDETERMINATE** — a loud warning, never a
+silent skip (the RDR-152 prod-copy.sh harness bug). The verdict is
+recorded in the report artifact (`"verification"`). Verification queries
+the LOCAL nx-managed Postgres (from `pg_credentials`) — when migrating
+against a remote service it reports on the local cluster only.
+`--service-url` overrides the nexus-service base URL (config-first chain:
+`--service-url` > `NX_SERVICE_URL` env > `config.yml`; the auth token
+resolves the same chain, RDR-176 Gap 3). Every per-store command also
+accepts `--report PATH` for a single-store report (a default-path
 artifact is written even when the flag is omitted, including on a
 mid-run crash — partial data beats no data). Note: `aspects` has no
 standalone command; it runs only via `migrate all`.

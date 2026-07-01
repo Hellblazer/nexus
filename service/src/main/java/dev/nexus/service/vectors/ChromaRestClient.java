@@ -98,15 +98,18 @@ public final class ChromaRestClient {
         this.database = database;
         this.apiKey   = apiKey;
         this.isCloud  = isCloud;
-        // nexus-f1syh NOTE: this client does NOT route through the egress proxy. It is
-        // the Chroma migration-read path and is NOT wired into the cloud serving engine
-        // (Main constructs only PgVectorRepository; Chroma serving retired in RDR-155
-        // P4a). If a cloud/private-subnet path ever calls cloud() (api.trychroma.com is
-        // external), wire EgressProxy.selector() onto this builder as the embedders do —
-        // a bare HttpClient will direct-connect and time out behind squid.
-        this.http = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        // RDR-176 P4 (nexus-t9rmg.24): the cloud() path (api.trychroma.com, external)
+        // MUST route through the egress proxy — from the private subnet a bare
+        // HttpClient direct-connects and times out behind squid. Wire
+        // EgressProxy.selector() exactly as the embedders (VoyageEmbedder) do, gated
+        // on isCloud so the local() migration-read path is unaffected (absent env =
+        // direct either way, so this is a no-op outside the proxied cloud).
+        var httpBuilder = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10));
+        if (isCloud) {
+            EgressProxy.selector().ifPresent(httpBuilder::proxy);
+        }
+        this.http = httpBuilder.build();
         this.mapper = new ObjectMapper();
     }
 
@@ -366,7 +369,31 @@ public final class ChromaRestClient {
                                    List<String> include,
                                    Map<String, Object> where) {
         String colId = getOrCreateCollection(collectionName);
+        return getById(colId, ids, limit, offset, include, where);
+    }
 
+    /**
+     * READ-ONLY collection resolve by name (RDR-176 P4, nexus-t9rmg.24). Unlike
+     * {@link #getOrCreateCollection} this NEVER creates: a migration READS from a
+     * user's source Chroma Cloud, so a missing/typo'd collection must fail loud,
+     * not silently spawn an empty collection in the source tenant. Throws if the
+     * collection does not exist.
+     */
+    public String getCollection(String collectionName) {
+        Map<String, Object> resp = doGet(collectionsBase() + "/" + collectionName);
+        Object id = resp.get("id");
+        if (id == null) {
+            throw new RuntimeException("Chroma collection not found: " + collectionName);
+        }
+        return id.toString();
+    }
+
+    /** {@link #get} against a PRE-RESOLVED collection id (no get-or-create). */
+    public Map<String, Object> getById(String collectionId,
+                                       List<String> ids,
+                                       int limit, int offset,
+                                       List<String> include,
+                                       Map<String, Object> where) {
         Map<String, Object> body = new HashMap<>();
         if (ids != null && !ids.isEmpty()) {
             body.put("ids", ids);
@@ -378,7 +405,7 @@ public final class ChromaRestClient {
             body.put("where", where);
         }
 
-        return doPost(collectionBase(colId) + "/get", body);
+        return doPost(collectionBase(collectionId) + "/get", body);
     }
 
     /**

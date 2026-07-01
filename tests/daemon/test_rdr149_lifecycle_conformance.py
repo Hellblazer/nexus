@@ -65,7 +65,7 @@ from nexus.daemon.t1_lease import T1LeasePublisher
 from nexus import session as _sess
 
 
-TIERS = ("t1", "t2", "t3", "storage_service")
+TIERS = ("t1", "t2", "t3", "storage_service", "aspect_worker")
 
 # Synthetic owner pids, never real live processes; liveness is injected.
 _OWNER_PID = 970001
@@ -142,7 +142,7 @@ class _FakeClock:
 
 class RecordHarness:
     tier: str
-    scope: str  # "uid" (one owner per user) | "session" (one per session-id)
+    scope: str  # "uid" (one per user) | "session" (one per session-id) | "tenant" (one per tenant)
     has_self_heal: bool
     has_version_cycle: bool
 
@@ -378,11 +378,29 @@ class StorageServiceRecordHarness(_LeaseHarness):
     _REGISTRY_TIER = "storage_service"
 
 
+class AspectWorkerRecordHarness(_LeaseHarness):
+    """RDR-173 P1 (nexus-plzhp): the aspect-worker rides the SAME leased registry
+    as T2/T3/storage_service — one more leased tier, not a bespoke daemon. Real
+    scope is per-tenant (per-host would need BYPASSRLS, forbidden by RDR-152);
+    the lifecycle mechanics exercised here (reap / fence / self-heal) are
+    key-agnostic, so the harness reuses the uid scope key — the per-tenant
+    keying itself is pinned by tests/daemon/test_aspect_worker_daemon.py. Unlike
+    T2/T3 there is no in-process version-cycle: an upgrade re-spawns the daemon
+    from the (upgraded) enqueue hook and the new generation fences the old, so
+    version_cycle is a documented N/A (like T1), not a wired cycle_to_current."""
+
+    tier = "aspect_worker"
+    scope = "tenant"
+    _REGISTRY_TIER = "aspect_worker"
+    has_version_cycle = False
+
+
 _HARNESS_CLASSES: dict[str, type[RecordHarness]] = {
     "t1": T1RecordHarness,
     "t2": T2RecordHarness,
     "t3": T3RecordHarness,
     "storage_service": StorageServiceRecordHarness,
+    "aspect_worker": AspectWorkerRecordHarness,
 }
 
 
@@ -394,19 +412,21 @@ GAP = "gap"
 SPEC = "spec"
 
 EXPECTATIONS: dict[str, dict[str, Any]] = {
-    "roundtrip": {"t1": "pass", "t2": "pass", "t3": "pass", "storage_service": "pass"},
-    "reap_ungraceful": {"t1": "pass", "t2": "pass", "t3": "pass", "storage_service": "pass"},
+    "roundtrip": {"t1": "pass", "t2": "pass", "t3": "pass", "storage_service": "pass", "aspect_worker": "pass"},
+    "reap_ungraceful": {"t1": "pass", "t2": "pass", "t3": "pass", "storage_service": "pass", "aspect_worker": "pass"},
     "self_heal": {
         "t1": "pass",  # RDR-149 P4: publisher heartbeat self-heals (#1114)
         "t2": "pass",
         "t3": "pass",  # RDR-149 P3: supervisor heartbeat self-heals
         "storage_service": "pass",  # RDR-149 P5.1: supervisor heartbeat self-heals
+        "aspect_worker": "pass",  # RDR-173 P1: rides the same supervisor heartbeat
     },
     "concurrent_one_owner": {
         "t1": "pass",  # RDR-149 P4: session-id scope converges to one owner
         "t2": "pass",
         "t3": "pass",
         "storage_service": "pass",  # uid-scoped, same lease fencing as T2/T3
+        "aspect_worker": "pass",  # per-tenant scope converges to one owner (RDR-173 P1)
     },
     "version_cycle": {
         # T1 is MCP-lifespan-owned, not covered by any upgrade-cycle: an
@@ -417,6 +437,10 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         "t2": "pass",
         "t3": "pass",  # RDR-149 P3: supervisor owns cycle_to_current (#1112)
         "storage_service": "pass",  # RDR-149 P5.1: _cycle_storage_service_to_current
+        # aspect-worker is spawn-if-absent from the enqueue hook; an upgrade
+        # re-spawns + generation-fences the predecessor rather than driving an
+        # in-process cycle_to_current (RDR-173 P1/P2) — documented N/A, like T1.
+        "aspect_worker": (GAP, "aspect-worker upgrade = re-spawn + fence, not in-process cycle; RDR-173"),
     },
     # RDR-149 P2/P3/P4/P5.1: all four tiers ride the primitive, so their lease
     # properties pass.
@@ -425,18 +449,21 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         "t2": "pass",
         "t3": "pass",
         "storage_service": "pass",  # RDR-149 P5.1: lease/generation kills pid-reuse
+        "aspect_worker": "pass",  # RDR-173 P1: lease/generation kills pid-reuse
     },
     "restart_higher_generation": {
         "t1": "pass",  # RDR-149 P4: generation fencing token
         "t2": "pass",
         "t3": "pass",
         "storage_service": "pass",  # RDR-149 P5.1: generation fencing token
+        "aspect_worker": "pass",  # RDR-173 P1: generation fencing token
     },
     "restart_race_fencing": {
         "t1": "pass",  # RDR-149 P4: CA-4 heartbeat-fencing arm
         "t2": "pass",
         "t3": "pass",
         "storage_service": "pass",  # RDR-149 P5.1: CA-4 heartbeat-fencing arm
+        "aspect_worker": "pass",  # RDR-173 P1: CA-4 heartbeat-fencing arm
     },
 }
 

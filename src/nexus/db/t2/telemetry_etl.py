@@ -39,10 +39,13 @@ FIELD MAPPING notes:
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
 import structlog
+
+from nexus.retry import _etl_with_retry
 
 _log = structlog.get_logger(__name__)
 
@@ -93,26 +96,58 @@ def _available_cols(conn: sqlite3.Connection, table: str) -> frozenset[str]:
         return frozenset()
 
 
-def _fetch(
-    conn: sqlite3.Connection,
-    table: str,
-    desired_cols: tuple[str, ...],
-) -> tuple[list[str], list[dict[str, Any]]]:
-    """Fetch all rows from *table*, projecting only columns present in the DB.
+#: SQLite read-page size (RDR-176 / nexus-lbolo). Caps peak memory at one page
+#: regardless of table size — the 190k-row case no longer materializes whole.
+_READ_PAGE: int = 1000
 
-    Returns ``(actual_col_list, rows_as_dicts)``. When the table does not
-    exist, returns ``([], [])``.
-    """
+
+def _select_cols(conn: sqlite3.Connection, table: str, desired_cols: tuple[str, ...]) -> list[str]:
+    """The subset of *desired_cols* present in *table* (empty if table absent)."""
     avail = _available_cols(conn, table)
     if not avail:
         _log.info("telemetry_etl.table_absent", table=table)
-        return [], []
-    select_cols = [c for c in desired_cols if c in avail]
-    if not select_cols:
-        return [], []
-    sql = f"SELECT {', '.join(select_cols)} FROM {table} ORDER BY ROWID ASC"
-    rows = conn.execute(sql).fetchall()
-    return select_cols, [dict(r) for r in rows]
+        return []
+    return [c for c in desired_cols if c in avail]
+
+
+def _count_rows(conn: sqlite3.Connection, table: str) -> int:
+    """Row count for *table* (0 if absent) — cheap, for the progress total."""
+    if not _available_cols(conn, table):
+        return 0
+    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def _iter_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    desired_cols: tuple[str, ...],
+    *,
+    page_size: int = _READ_PAGE,
+) -> Iterator[dict[str, Any]]:
+    """Yield *table*'s rows as projected dicts in LIMIT/OFFSET pages (RDR-176 /
+    nexus-lbolo: page the read so peak memory is one page, not the whole table).
+
+    Dicts are built from the projected columns directly, so this does not depend
+    on the connection's ``row_factory``. Stops on the first short page (no
+    trailing empty-page query).
+    """
+    cols = _select_cols(conn, table, desired_cols)
+    if not cols:
+        return
+    cols_sql = ", ".join(cols)
+    offset = 0
+    while True:
+        page = conn.execute(
+            f"SELECT {cols_sql} FROM {table} ORDER BY ROWID ASC "
+            f"LIMIT {page_size} OFFSET {offset}"
+        ).fetchall()
+        if not page:
+            break
+        for row in page:
+            yield dict(zip(cols, row))
+        if len(page) < page_size:
+            break
+        offset += page_size
 
 
 # ── Per-table transform helpers ───────────────────────────────────────────────
@@ -245,209 +280,239 @@ def _migrate_all(
     return results
 
 
-def _migrate_relevance_log(
-    conn: sqlite3.Connection, store: Any, batch_log_every: int,
-    collector: Any = None,
+class _SkipRow(Exception):  # noqa: N818 — control-flow signal, not an error condition
+    """Raised by a row-builder to skip a corrupt row, recording it as failed.
+
+    ``issue_class`` carries the policy classification (e.g. ``format_anomaly``
+    for an unparseable timestamp) so the batched driver records the same class
+    the per-row path did.
+    """
+
+    def __init__(self, reason: str, sample_id: str, issue_class: str = "unexpected") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.sample_id = sample_id
+        self.issue_class = issue_class
+
+
+def _run_batched(
+    store: Any,
+    table: str,
+    rows: Iterable[dict[str, Any]],
+    build: Any,
+    *,
+    collector: Any,
+    batch_log_every: int,
+    total: int = 0,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "relevance_log", _RELEVANCE_LOG_COLS)
+    """RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): shared per-table batch driver.
+
+    Each row is TRANSFORMED per-row by ``build(row, collector)`` (which may raise
+    :class:`_SkipRow` to drop+record a corrupt row, or emit a per-row advisory);
+    valid rows accumulate and ship via ``store.import_rows_batch(table, batch)``
+    at ceil(N/quota) — only the NETWORK is batched. A server-side batch rejection
+    is recorded at batch granularity; the import is idempotent (DO NOTHING /
+    GREATEST) so a re-run lands it.
+    """
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    bsize = QUOTAS.MAX_RECORDS_PER_WRITE
+
     read_n = written_n = 0
-    total = len(rows)
-    _log.info("telemetry_etl.relevance_log.start", total=total)
+    batch: list[dict[str, Any]] = []
+    keys: list[str] = []
+    _log.info(f"telemetry_etl.{table}.start", total=total)
+
+    def _flush() -> None:
+        nonlocal written_n, batch, keys
+        if not batch:
+            return
+        try:
+            written_n += _etl_with_retry(store.import_rows_batch, table, batch)
+        except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
+            _log.error(f"telemetry_etl.{table}.batch_failed", count=len(batch), error=str(exc))
+            if collector is not None:
+                for key in keys:
+                    collector.record(
+                        "telemetry", table,
+                        issue_class="unexpected", constraint=table,
+                        reason=f"batch import rejected: {exc}",
+                        action="failed", sample_id=key,
+                    )
+        batch = []
+        keys = []
 
     for row in rows:
         read_n += 1
         try:
-            store.import_relevance_row(
-                query=row.get("query", ""),
-                chunk_id=row.get("chunk_id", ""),
-                collection=_str_or_empty(row.get("collection")),
-                action=row.get("action", ""),
-                session_id=_str_or_empty(row.get("session_id")),
-                timestamp=row.get("timestamp", ""),
-            )
-            written_n += 1
-        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
-            _log.error(
-                "telemetry_etl.relevance_log.row_failed",
-                query_prefix=str(row.get("query", ""))[:40],
-                error=str(exc),
-            )
+            row_dict, sample_id = build(row, collector)
+        except _SkipRow as skip:
+            _log.error(f"telemetry_etl.{table}.row_failed", error=skip.reason)
             if collector is not None:
                 collector.record(
-                    "telemetry", "relevance_log",
-                    issue_class="unexpected",
-                    constraint="relevance_log",
-                    reason=f"row rejected during import: {exc}",
-                    action="failed",
-                    sample_id=f"relevance_log#{read_n}",
+                    "telemetry", table,
+                    issue_class=skip.issue_class, constraint=table,
+                    reason=skip.reason, action="failed", sample_id=skip.sample_id,
                 )
+            continue
+        batch.append(row_dict)
+        keys.append(sample_id)
+        if len(batch) >= bsize:
+            _flush()
         if read_n % batch_log_every == 0:
-            _log.info("telemetry_etl.relevance_log.progress",
-                      read=read_n, written=written_n, total=total)
+            _log.info(f"telemetry_etl.{table}.progress", read=read_n, written=written_n, total=total)
 
+    _flush()
     return {"read": read_n, "written": written_n}
+
+
+def _build_relevance(row: dict[str, Any], _collector: Any) -> tuple[dict[str, Any], str]:
+    return {
+        "query":      row.get("query", ""),
+        "chunk_id":   row.get("chunk_id", ""),
+        "collection": _str_or_empty(row.get("collection")),
+        "action":     row.get("action", ""),
+        "session_id": _str_or_empty(row.get("session_id")),
+        "timestamp":  row.get("timestamp", ""),
+    }, f"relevance_log#{row.get('id', '?')}"
+
+
+def _build_search(row: dict[str, Any], _collector: Any) -> tuple[dict[str, Any], str]:
+    return {
+        "ts":           row.get("ts", ""),
+        "query_hash":   row.get("query_hash", ""),
+        "collection":   row.get("collection", ""),
+        "raw_count":    _int_or_zero(row.get("raw_count")),
+        "kept_count":   _int_or_zero(row.get("kept_count")),
+        "top_distance": row.get("top_distance"),
+        "threshold":    row.get("threshold"),
+    }, f"search_telemetry#{row.get('id', '?')}"
+
+
+def _build_tier(row: dict[str, Any], _collector: Any) -> tuple[dict[str, Any], str]:
+    return {
+        "session_id":   _str_or_empty(row.get("session_id")),
+        "ts":           row.get("ts", ""),
+        "tool":         _str_or_empty(row.get("tool")),
+        "tier":         _str_or_empty(row.get("tier")),
+        "agent":        _nullable_str(row.get("agent")),
+        "project":      _nullable_str(row.get("project")),
+        "target_title": _nullable_str(row.get("target_title")),
+    }, f"tier_writes#{row.get('id', '?')}"
+
+
+def _build_nx(row: dict[str, Any], collector: Any, valid_plan_ids: set[int]) -> tuple[dict[str, Any], str]:
+    plan_id = _nullable_int(row.get("plan_id"))
+    # RDR-153 soft-dangler policy: plan_id has NO enforced FK — a row whose plan
+    # was deleted still imports (preserving event history); an advisory records
+    # the dangling reference.
+    if collector is not None and plan_id is not None and plan_id not in valid_plan_ids:
+        collector.record(
+            "telemetry", "nx_answer_runs",
+            issue_class="soft_dangler",
+            constraint="nx_answer_runs.plan_id -> plans.id (not enforced)",
+            reason="plan deleted; row imports with dangling reference; "
+                   "sample ids are <run_id>:<plan_id>",
+            action="flagged",
+            sample_id=f"{row.get('id')}:{plan_id}",
+        )
+    return {
+        "question":           row.get("question", ""),
+        "plan_id":            plan_id,
+        "matched_confidence": row.get("matched_confidence"),
+        "step_count":         _int_or_zero(row.get("step_count")),
+        "final_text":         _str_or_empty(row.get("final_text")),
+        "cost_usd":           row.get("cost_usd"),
+        "duration_ms":        _int_or_zero(row.get("duration_ms")),
+        "created_at":         row.get("created_at", ""),
+    }, f"nx_answer_runs#{row.get('id', '?')}"
+
+
+def _build_hook(row: dict[str, Any], collector: Any) -> tuple[dict[str, Any], str]:
+    raw_ts = row.get("occurred_at", "")
+    try:
+        occurred_at, normalized = _normalize_timestamp(raw_ts)
+    except ValueError as exc:
+        raise _SkipRow(
+            f"unparseable timestamp (not ISO-8601-coercible): {raw_ts[:40]!r}",
+            str(row.get("id", "?")),
+            issue_class="format_anomaly",
+        ) from exc
+    if normalized and collector is not None:
+        collector.record(
+            "telemetry", "hook_failures",
+            issue_class="format_anomaly",
+            constraint="hook_failures.occurred_at",
+            reason="space-form timestamp normalized to ISO-8601 T form",
+            action="handled",
+            sample_id=str(row.get("id", "?")),
+        )
+    return {
+        "doc_id":        _str_or_empty(row.get("doc_id")),
+        "collection":    _str_or_empty(row.get("collection")),
+        "hook_name":     row.get("hook_name", ""),
+        "error":         _str_or_empty(row.get("error")),
+        "occurred_at":   occurred_at,
+        "batch_doc_ids": _nullable_str(row.get("batch_doc_ids")),
+        "is_batch":      bool(row.get("is_batch", False)),
+        "chain":         _nullable_str(row.get("chain")),
+    }, f"hook_failures#{row.get('id', '?')}"
+
+
+def _build_frecency(row: dict[str, Any], _collector: Any) -> tuple[dict[str, Any], str]:
+    return {
+        "chunk_id":       row.get("chunk_id", ""),
+        "embedded_at":    _nullable_str(row.get("embedded_at")),
+        "ttl_days":       _int_or_zero(row.get("ttl_days")),
+        "frecency_score": _float_or_zero(row.get("frecency_score")),
+        "miss_count":     _int_or_zero(row.get("miss_count")),
+        "last_hit_at":    _nullable_str(row.get("last_hit_at")),
+    }, f"frecency#{row.get('chunk_id', '?')}"
+
+
+def _migrate_relevance_log(
+    conn: sqlite3.Connection, store: Any, batch_log_every: int,
+    collector: Any = None,
+) -> dict[str, int]:
+    total = _count_rows(conn, "relevance_log")
+    rows = _iter_rows(conn, "relevance_log", _RELEVANCE_LOG_COLS, page_size=_READ_PAGE)
+    return _run_batched(store, "relevance_log", rows, _build_relevance,
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _migrate_search_telemetry(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "search_telemetry", _SEARCH_TELEMETRY_COLS)
-    read_n = written_n = 0
-    total = len(rows)
-    _log.info("telemetry_etl.search_telemetry.start", total=total)
-
-    for row in rows:
-        read_n += 1
-        try:
-            store.import_search_row(
-                ts=row.get("ts", ""),
-                query_hash=row.get("query_hash", ""),
-                collection=row.get("collection", ""),
-                raw_count=_int_or_zero(row.get("raw_count")),
-                kept_count=_int_or_zero(row.get("kept_count")),
-                top_distance=row.get("top_distance"),
-                threshold=row.get("threshold"),
-            )
-            written_n += 1
-        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
-            _log.error(
-                "telemetry_etl.search_telemetry.row_failed",
-                ts=str(row.get("ts", ""))[:30],
-                error=str(exc),
-            )
-            if collector is not None:
-                collector.record(
-                    "telemetry", "search_telemetry",
-                    issue_class="unexpected",
-                    constraint="search_telemetry",
-                    reason=f"row rejected during import: {exc}",
-                    action="failed",
-                    sample_id=f"search_telemetry#{read_n}",
-                )
-        if read_n % batch_log_every == 0:
-            _log.info("telemetry_etl.search_telemetry.progress",
-                      read=read_n, written=written_n, total=total)
-
-    return {"read": read_n, "written": written_n}
+    total = _count_rows(conn, "search_telemetry")
+    rows = _iter_rows(conn, "search_telemetry", _SEARCH_TELEMETRY_COLS, page_size=_READ_PAGE)
+    return _run_batched(store, "search_telemetry", rows, _build_search,
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _migrate_tier_writes(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "tier_writes", _TIER_WRITES_COLS)
-    read_n = written_n = 0
-    total = len(rows)
-    _log.info("telemetry_etl.tier_writes.start", total=total)
-
-    for row in rows:
-        read_n += 1
-        try:
-            store.import_tier_write(
-                session_id=_str_or_empty(row.get("session_id")),
-                ts=row.get("ts", ""),
-                tool=_str_or_empty(row.get("tool")),
-                tier=_str_or_empty(row.get("tier")),
-                # agent/project/target_title are nullable in SQLite — preserve NULL so PG
-                # aggregations (GROUP BY agent, WHERE agent IS NOT NULL) are not corrupted
-                # by empty-string coercion.  Use _nullable_str (returns None for None/"").
-                agent=_nullable_str(row.get("agent")),
-                project=_nullable_str(row.get("project")),
-                target_title=_nullable_str(row.get("target_title")),
-            )
-            written_n += 1
-        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
-            _log.error(
-                "telemetry_etl.tier_writes.row_failed",
-                ts=str(row.get("ts", ""))[:30],
-                error=str(exc),
-            )
-            if collector is not None:
-                collector.record(
-                    "telemetry", "tier_writes",
-                    issue_class="unexpected",
-                    constraint="tier_writes",
-                    reason=f"row rejected during import: {exc}",
-                    action="failed",
-                    sample_id=f"tier_writes#{read_n}",
-                )
-        if read_n % batch_log_every == 0:
-            _log.info("telemetry_etl.tier_writes.progress",
-                      read=read_n, written=written_n, total=total)
-
-    return {"read": read_n, "written": written_n}
+    total = _count_rows(conn, "tier_writes")
+    rows = _iter_rows(conn, "tier_writes", _TIER_WRITES_COLS, page_size=_READ_PAGE)
+    return _run_batched(store, "tier_writes", rows, _build_tier,
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _migrate_nx_answer_runs(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "nx_answer_runs", _NX_ANSWER_RUNS_COLS)
-    read_n = written_n = 0
-    total = len(rows)
-    _log.info("telemetry_etl.nx_answer_runs.start", total=total)
-
-    # RDR-153 soft-dangler policy: plan_id has NO enforced FK — rows with a
-    # deleted plan IMPORT (preserving event history) and an advisory records
-    # the dangling reference. Valid plan ids come from the same source db.
+    total = _count_rows(conn, "nx_answer_runs")
+    rows = _iter_rows(conn, "nx_answer_runs", _NX_ANSWER_RUNS_COLS, page_size=_READ_PAGE)
     valid_plan_ids: set[int] = set()
     try:
-        valid_plan_ids = {
-            int(r[0]) for r in conn.execute("SELECT id FROM plans").fetchall()
-        }
+        valid_plan_ids = {int(r[0]) for r in conn.execute("SELECT id FROM plans").fetchall()}
     except sqlite3.OperationalError:
         pass  # no plans table in source — every plan_id is then a dangler
-
-    for row in rows:
-        read_n += 1
-        plan_id = _nullable_int(row.get("plan_id"))
-        if (
-            collector is not None
-            and plan_id is not None
-            and plan_id not in valid_plan_ids
-        ):
-            collector.record(
-                "telemetry", "nx_answer_runs",
-                issue_class="soft_dangler",
-                constraint="nx_answer_runs.plan_id -> plans.id (not enforced)",
-                reason="plan deleted; row imports with dangling reference; "
-                       "sample ids are <run_id>:<plan_id>",
-                action="flagged",
-                sample_id=f"{row.get('id')}:{plan_id}",
-            )
-        try:
-            store.import_nx_answer_run(
-                question=row.get("question", ""),
-                plan_id=_nullable_int(row.get("plan_id")),
-                matched_confidence=row.get("matched_confidence"),
-                step_count=_int_or_zero(row.get("step_count")),
-                final_text=_str_or_empty(row.get("final_text")),
-                cost_usd=row.get("cost_usd"),
-                duration_ms=_int_or_zero(row.get("duration_ms")),
-                created_at=row.get("created_at", ""),
-            )
-            written_n += 1
-        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
-            _log.error(
-                "telemetry_etl.nx_answer_runs.row_failed",
-                question_prefix=str(row.get("question", ""))[:40],
-                error=str(exc),
-            )
-            if collector is not None:
-                collector.record(
-                    "telemetry", "nx_answer_runs",
-                    issue_class="unexpected",
-                    constraint="nx_answer_runs",
-                    reason=f"row rejected during import: {exc}",
-                    action="failed",
-                    sample_id=f"nx_answer_runs#{read_n}",
-                )
-        if read_n % batch_log_every == 0:
-            _log.info("telemetry_etl.nx_answer_runs.progress",
-                      read=read_n, written=written_n, total=total)
-
-    return {"read": read_n, "written": written_n}
+    return _run_batched(store, "nx_answer_runs", rows,
+                        lambda row, c: _build_nx(row, c, valid_plan_ids),
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _normalize_timestamp(raw: str) -> tuple[str, bool]:
@@ -484,113 +549,17 @@ def _migrate_hook_failures(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "hook_failures", _HOOK_FAILURES_COLS)
-    read_n = written_n = 0
-    total = len(rows)
-    _log.info("telemetry_etl.hook_failures.start", total=total)
-
-    for row in rows:
-        read_n += 1
-        raw_ts = row.get("occurred_at", "")
-        try:
-            occurred_at, normalized = _normalize_timestamp(raw_ts)
-        except ValueError:
-            _log.error(
-                "telemetry_etl.hook_failures.unparseable_timestamp",
-                occurred_at=raw_ts[:40],
-            )
-            if collector is not None:
-                collector.record(
-                    "telemetry", "hook_failures",
-                    issue_class="format_anomaly",
-                    constraint="hook_failures.occurred_at",
-                    reason=f"unparseable timestamp (not ISO-8601-coercible): "
-                           f"{raw_ts[:40]!r}",
-                    action="failed",
-                    sample_id=str(row.get("id", read_n)),
-                )
-            continue
-        if normalized and collector is not None:
-            collector.record(
-                "telemetry", "hook_failures",
-                issue_class="format_anomaly",
-                constraint="hook_failures.occurred_at",
-                reason="space-form timestamp normalized to ISO-8601 T form",
-                action="handled",
-                sample_id=str(row.get("id", read_n)),
-            )
-        try:
-            store.import_hook_failure(
-                doc_id=_str_or_empty(row.get("doc_id")),
-                collection=_str_or_empty(row.get("collection")),
-                hook_name=row.get("hook_name", ""),
-                error=_str_or_empty(row.get("error")),
-                occurred_at=occurred_at,
-                batch_doc_ids=_nullable_str(row.get("batch_doc_ids")),
-                is_batch=bool(row.get("is_batch", False)),
-                chain=_nullable_str(row.get("chain")),
-            )
-            written_n += 1
-        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
-            _log.error(
-                "telemetry_etl.hook_failures.row_failed",
-                hook_name=str(row.get("hook_name", "")),
-                error=str(exc),
-            )
-            if collector is not None:
-                collector.record(
-                    "telemetry", "hook_failures",
-                    issue_class="unexpected",
-                    constraint="hook_failures",
-                    reason=f"row rejected during import: {exc}",
-                    action="failed",
-                    sample_id=str(row.get("id", read_n)),
-                )
-        if read_n % batch_log_every == 0:
-            _log.info("telemetry_etl.hook_failures.progress",
-                      read=read_n, written=written_n, total=total)
-
-    return {"read": read_n, "written": written_n}
+    total = _count_rows(conn, "hook_failures")
+    rows = _iter_rows(conn, "hook_failures", _HOOK_FAILURES_COLS, page_size=_READ_PAGE)
+    return _run_batched(store, "hook_failures", rows, _build_hook,
+                        collector=collector, batch_log_every=batch_log_every, total=total)
 
 
 def _migrate_frecency(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
     collector: Any = None,
 ) -> dict[str, int]:
-    _, rows = _fetch(conn, "frecency", _FRECENCY_COLS)
-    read_n = written_n = 0
-    total = len(rows)
-    _log.info("telemetry_etl.frecency.start", total=total)
-
-    for row in rows:
-        read_n += 1
-        try:
-            store.import_frecency_row(
-                chunk_id=row.get("chunk_id", ""),
-                embedded_at=_nullable_str(row.get("embedded_at")),
-                ttl_days=_int_or_zero(row.get("ttl_days")),
-                frecency_score=_float_or_zero(row.get("frecency_score")),
-                miss_count=_int_or_zero(row.get("miss_count")),
-                last_hit_at=_nullable_str(row.get("last_hit_at")),
-            )
-            written_n += 1
-        except Exception as exc:  # noqa: BLE001 — per-row resilience; logged, one bad row must not abort ETL
-            _log.error(
-                "telemetry_etl.frecency.row_failed",
-                chunk_id=str(row.get("chunk_id", ""))[:32],
-                error=str(exc),
-            )
-            if collector is not None:
-                collector.record(
-                    "telemetry", "frecency",
-                    issue_class="unexpected",
-                    constraint="frecency",
-                    reason=f"row rejected during import: {exc}",
-                    action="failed",
-                    sample_id=f"frecency#{read_n}",
-                )
-        if read_n % batch_log_every == 0:
-            _log.info("telemetry_etl.frecency.progress",
-                      read=read_n, written=written_n, total=total)
-
-    return {"read": read_n, "written": written_n}
+    total = _count_rows(conn, "frecency")
+    rows = _iter_rows(conn, "frecency", _FRECENCY_COLS, page_size=_READ_PAGE)
+    return _run_batched(store, "frecency", rows, _build_frecency,
+                        collector=collector, batch_log_every=batch_log_every, total=total)

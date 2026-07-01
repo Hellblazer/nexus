@@ -156,6 +156,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/import/assignment"         -> handleImportAssignment(exchange, tenant, method);
                 case "/import/link"               -> handleImportLink(exchange, tenant, method);
                 case "/import/meta"               -> handleImportMeta(exchange, tenant, method);
+                case "/import_batch"              -> handleImportBatch(exchange, tenant, method);
                 // Analytical (nexus-gmiaf.14 drop-in completion)
                 case "/icf/map"                        -> handleIcfMap(exchange, tenant, method);
                 case "/hubs"                           -> handleDetectHubs(exchange, tenant, method);
@@ -182,8 +183,22 @@ public final class TaxonomyHandler implements HttpHandler {
             log.debug("event=taxonomy_bad_request tenant={} op={} error={}", tenant, op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
         } catch (Exception e) {
-            log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
-            HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            // nexus-7e057 (RDR-172 follow-up): a client-supplied topic_id that
+            // does not exist violates the topic_assignments/topic_relations FK
+            // to topics(id) (e.g. assignTopic's INSERT) — same bug class as
+            // nexus-ov0sw. Map class-23 integrity violations to a typed 409
+            // ahead of the generic 500; sanitised client body (fixed message +
+            // sqlstate only), full detail to the server log.
+            String sqlState = HttpUtil.sqlState23(e);
+            if (sqlState != null) {
+                log.warn("event=taxonomy_handler_integrity_violation tenant={} op={} sqlstate={} error={}",
+                    tenant, op, sqlState, e.getMessage());
+                HttpUtil.send(exchange, 409, json(Map.of(
+                    "error", "integrity constraint violation", "sqlstate", sqlState)));
+            } else {
+                log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
+                HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            }
         }
     }
 
@@ -529,6 +544,36 @@ public final class TaxonomyHandler implements HttpHandler {
         String lastDiscoverAt        = optStringOrNull(body, "last_discover_at");
         repo.importTaxonomyMeta(tenant, collection, lastDiscoverDocCount, lastDiscoverAt);
         HttpUtil.send(ex, 200, "{\"ok\":true}");
+    }
+
+    /**
+     * POST /v1/taxonomy/import_batch — RDR-176 P3 (Gap 1, bead nexus-t9rmg.18).
+     *
+     * <p>Body {@code {"kind": "topic"|"assignment"|"link"|"meta", "rows": [ … ]}}.
+     * The whole batch for one kind lands under ONE tenant transaction (GUC set
+     * once) via {@link dev.nexus.service.db.TaxonomyRepository#importBatch} —
+     * the fix for the per-row topic_assignments leg (190k rows = 190k requests).
+     * Response 200 {@code {"imported": <int>}}.
+     */
+    private void handleImportBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String kind = requireString(body, "kind");
+        Object rowsObj = body.get("rows");
+        if (!(rowsObj instanceof List<?> rawRows)) {
+            throw new IllegalArgumentException("field 'rows' must be a JSON array");
+        }
+        List<Map<String, Object>> rows = new ArrayList<>(rawRows.size());
+        for (Object o : rawRows) {
+            if (!(o instanceof Map<?, ?> rm)) {
+                throw new IllegalArgumentException("each element of 'rows' must be an object");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> row = (Map<String, Object>) rm;
+            rows.add(row);
+        }
+        int imported = repo.importBatch(tenant, kind, rows);
+        HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

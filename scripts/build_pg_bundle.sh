@@ -120,6 +120,62 @@ build_pgvector() {
     make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config" install
 }
 
+fixup_macos_relocatability() {
+    # macOS ONLY. PostgreSQL's own "relocatable by design" claim (see the file
+    # header) covers find_my_exec-based internal path resolution (sharedir,
+    # pkglibdir) — it says NOTHING about the dynamic linker's dylib load paths.
+    # `configure`/`make install` bakes the literal absolute --prefix build path
+    # into every libpq-linked client binary's LC_LOAD_DYLIB (and into
+    # libpq.5.dylib's own LC_ID_DYLIB). Linux gets $ORIGIN-relative RPATH from
+    # PG's own build system by default; macOS does not — this is a well-known
+    # PG/macOS packaging gap. Confirmed 2026-07-01 (GH issue-equivalent: a
+    # released bundle's psql/createdb/pg_dump/... all dyld-abort with "Library
+    # not loaded: <literal CI runner build path>/libpq.5.dylib" on ANY machine
+    # other than the exact CI runner path — every prior macOS release shipped
+    # broken, undetected because nothing in the release pipeline ever ran a
+    # real macOS relocation check against the published artifact).
+    #
+    # Fix: rewrite every shared lib's own ID to @rpath/<name>, rewrite every
+    # LC_LOAD_DYLIB reference to those libs (in both executables and other
+    # dylibs) to @rpath/<name>, and add an @loader_path-relative LC_RPATH so
+    # @rpath resolves regardless of where the tree is extracted (bin/ -> ../lib,
+    # lib/ -> its own directory for lib-to-lib deps like libecpg -> libpq).
+    [ "$uname_s" = "Darwin" ] || return 0
+    log "macOS: rewriting absolute libpq/libecpg/libpgtypes install names -> @rpath"
+    local libs=(libpq.5.dylib libecpg.6.dylib libpgtypes.3.dylib libecpg_compat.3.dylib)
+    local lib f
+    for lib in "${libs[@]}"; do
+        [ -f "${BUNDLE_PREFIX}/lib/${lib}" ] || continue
+        install_name_tool -id "@rpath/${lib}" "${BUNDLE_PREFIX}/lib/${lib}"
+    done
+    while IFS= read -r -d '' f; do
+        for lib in "${libs[@]}"; do
+            install_name_tool -change "${BUNDLE_PREFIX}/lib/${lib}" "@rpath/${lib}" "$f" 2>/dev/null || true
+        done
+        case "$f" in
+            "${BUNDLE_PREFIX}/bin/"*) install_name_tool -add_rpath "@loader_path/../lib" "$f" 2>/dev/null || true ;;
+            "${BUNDLE_PREFIX}/lib/"*) install_name_tool -add_rpath "@loader_path" "$f" 2>/dev/null || true ;;
+        esac
+    done < <(find "${BUNDLE_PREFIX}/bin" "${BUNDLE_PREFIX}/lib" -type f \
+             \( -perm -u+x -o -name "*.dylib" \) -print0 2>/dev/null)
+
+    # Fail loud at BUILD time, not at a user's `nx init` months later: relocate
+    # a COPY to a scratch dir distinct from BUNDLE_PREFIX and prove psql itself
+    # (the exact binary that broke in production) actually runs from there. This
+    # is deliberately independent of/in addition to the release-pipeline gate —
+    # belt-and-suspenders per this bug's blast radius.
+    local smoke_dir; smoke_dir="$(mktemp -d)"
+    cp -R "${BUNDLE_PREFIX}" "${smoke_dir}/relocated"
+    if ! "${smoke_dir}/relocated/bin/psql" --version >/dev/null 2>&1; then
+        echo "FATAL: psql still not relocatable after the @rpath fixup — aborting build" >&2
+        "${smoke_dir}/relocated/bin/psql" --version || true
+        rm -rf "$smoke_dir"
+        exit 1
+    fi
+    rm -rf "$smoke_dir"
+    log "macOS relocatability smoke PASSED (psql runs from a distinct copy)"
+}
+
 verify_and_mark() {
     log "verify complete tool set + injected extension"
     local b vector_lib pkglib sharedir
@@ -148,5 +204,6 @@ mkdir -p "$BUNDLE_PREFIX"
 install_prereqs
 build_pg
 build_pgvector
+fixup_macos_relocatability
 verify_and_mark
 log "bundle complete: ${BUNDLE_PREFIX}"

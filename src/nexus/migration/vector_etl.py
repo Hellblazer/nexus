@@ -83,6 +83,7 @@ from typing import Any, Callable, Literal
 import structlog
 
 from nexus.db.chroma_quotas import QUOTAS
+from nexus.retry import _etl_with_retry
 from nexus.migration.chroma_read import (
     iter_collection_chunks,
     list_collection_names,
@@ -409,7 +410,12 @@ def _migrate_one(
                         missing_vectors=missing,
                         provenance_mismatch=mis_provenance,
                     )
-            vector_client.upsert_chunks(
+            # RDR-176 Gap 6: bounded retry on a transient edge 403 / connection
+            # drop / read-timeout — the upsert is idempotent on (tenant, target,
+            # chash), so re-sending a batch that may have partially landed is a
+            # no-op on the dupes. A real failure exhausts the bound, then raises.
+            _etl_with_retry(
+                vector_client.upsert_chunks,
                 target,
                 [c["id"] for c in batch],
                 [c["document"] for c in batch],

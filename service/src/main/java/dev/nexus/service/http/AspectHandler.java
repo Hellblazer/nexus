@@ -14,7 +14,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -171,33 +171,13 @@ public final class AspectHandler implements HttpHandler {
     }
 
     /**
-     * Walk the cause chain for a {@link SQLException} whose SQLSTATE is class 23
-     * (integrity-constraint violation: 23502 not-null, 23503 foreign-key, 23505
-     * unique, 23514 check). Returns the offending SQLSTATE string, or {@code null}
-     * if no class-23 cause exists.
-     *
-     * <p>jOOQ wraps the driver exception in a {@code DataAccessException}, so the
-     * constraint violation is a cause of the thrown runtime exception, not the
-     * top-level throwable — hence the chain walk. The walk is depth-bounded to
-     * tolerate a malformed (self- or mutually-referential) cause chain.
-     *
-     * <p>Walks the {@link Throwable#getCause()} chain only — correct for the
-     * PostgreSQL JDBC driver, which wraps via {@code initCause()}. It does NOT
-     * traverse {@link SQLException#getNextException()} (used by some other
-     * drivers for chained violations); generalise here if a non-PG driver is
-     * ever introduced.
+     * @deprecated moved to {@link HttpUtil#sqlState23} (nexus-7e057) so sibling
+     * handlers share one implementation; kept as a delegate for source
+     * compatibility with existing direct callers/tests of this class.
      */
+    @Deprecated
     static String sqlState23(Throwable t) {
-        Throwable c = t;
-        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
-            if (c instanceof SQLException se) {
-                String state = se.getSQLState();
-                if (state != null && state.startsWith("23")) {
-                    return state;
-                }
-            }
-        }
-        return null;
+        return HttpUtil.sqlState23(t);
     }
 
     // ── document_aspects handlers ──────────────────────────────────────────────
@@ -346,9 +326,31 @@ public final class AspectHandler implements HttpHandler {
 
     private void handleImportAspect(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = serializeAspectBody(readBody(ex));
-        int n = repo.importAspect(tenant, body);
+        Map<String, Object> body = readBody(ex);
+        if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (Map<String, Object> r : castRows(body.get("rows"))) rows.add(serializeAspectBody(r));
+            HttpUtil.send(ex, 200, "{\"imported\":" + repo.importAspectsBatch(tenant, rows) + "}");
+            return;
+        }
+        int n = repo.importAspect(tenant, serializeAspectBody(body));
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
+    }
+
+    /** RDR-176 P3: cast a JSON ``rows`` array into a typed list. */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> castRows(Object raw) {
+        if (!(raw instanceof List<?> l)) {
+            throw new IllegalArgumentException("field 'rows' must be a JSON array");
+        }
+        List<Map<String, Object>> out = new ArrayList<>(l.size());
+        for (Object o : l) {
+            if (!(o instanceof Map<?, ?> m)) {
+                throw new IllegalArgumentException("each element of 'rows' must be an object");
+            }
+            out.add((Map<String, Object>) m);
+        }
+        return out;
     }
 
     /**
@@ -467,7 +469,12 @@ public final class AspectHandler implements HttpHandler {
 
     private void handleHighlightImport(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        int n = repo.importHighlight(tenant, readBody(ex));
+        Map<String, Object> body = readBody(ex);
+        if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
+            HttpUtil.send(ex, 200, "{\"imported\":" + repo.importHighlightsBatch(tenant, castRows(body.get("rows"))) + "}");
+            return;
+        }
+        int n = repo.importHighlight(tenant, body);
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
     }
 
@@ -582,7 +589,12 @@ public final class AspectHandler implements HttpHandler {
 
     private void handleQueueImport(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        int n = repo.importQueueRow(tenant, readBody(ex));
+        Map<String, Object> body = readBody(ex);
+        if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
+            HttpUtil.send(ex, 200, "{\"imported\":" + repo.importQueueBatch(tenant, castRows(body.get("rows"))) + "}");
+            return;
+        }
+        int n = repo.importQueueRow(tenant, body);
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
     }
 
@@ -601,7 +613,12 @@ public final class AspectHandler implements HttpHandler {
 
     private void handlePromotionImport(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        int n = repo.importPromotionRow(tenant, readBody(ex));
+        Map<String, Object> body = readBody(ex);
+        if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
+            HttpUtil.send(ex, 200, "{\"imported\":" + repo.importPromotionBatch(tenant, castRows(body.get("rows"))) + "}");
+            return;
+        }
+        int n = repo.importPromotionRow(tenant, body);
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
     }
 

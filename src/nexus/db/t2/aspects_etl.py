@@ -64,7 +64,16 @@ from typing import Any
 
 import structlog
 
+from nexus.db.chroma_quotas import QUOTAS
+from nexus.retry import _etl_with_retry
+
 _log = structlog.get_logger(__name__)
+
+#: HTTP batch / SQLite page size — the service write quota (300). Decoupling is
+#: unnecessary here because the page read equals the batch flush; both stay at
+#: the cap so transfer is exactly ceil(N / MAX_RECORDS_PER_WRITE) (RDR-176 P3,
+#: review H-1: previously 200, which under-filled batches by 33%).
+_BATCH: int = QUOTAS.MAX_RECORDS_PER_WRITE
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -213,7 +222,7 @@ def migrate_aspects(
     sqlite_path: Path,
     http_aspects,  # HttpDocumentAspectsStore instance
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
 ) -> dict[str, int]:
@@ -258,6 +267,13 @@ def migrate_aspects(
             rows = conn.execute(f"{select_sql} LIMIT {batch_size} OFFSET {offset}").fetchall()
             if not rows:
                 break
+            # RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): batch this page's surviving
+            # rows into ONE import_aspects_batch POST. Orphan-skip + transform
+            # failures stay per-row (recorded + excluded); only the network is
+            # batched. A sub-confidence row returns 0 from the batch, so
+            # skipped += (batch_size - imported_this_flush).
+            batch: list[dict[str, Any]] = []
+            keys: list[str] = []
             for row in rows:
                 row_dict = dict(row)
                 read += 1
@@ -284,12 +300,7 @@ def migrate_aspects(
                     continue
                 try:
                     body = _transform_aspect(row_dict)
-                    n = http_aspects.import_aspect(body)
-                    if n > 0:
-                        imported += 1
-                    else:
-                        skipped += 1
-                except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
+                except Exception as exc:  # noqa: BLE001 — per-row transform failure logged + recorded; continue
                     errors += 1
                     _log.warning(
                         "aspects_etl.migrate_aspects.row_error",
@@ -300,12 +311,29 @@ def migrate_aspects(
                     if collector is not None:
                         collector.record(
                             "aspects", "document_aspects",
-                            issue_class="unexpected",
-                            constraint="document_aspects",
-                            reason=f"row rejected during import: {exc}",
-                            action="failed",
-                            sample_id=doc_id or f"row#{read}",
+                            issue_class="unexpected", constraint="document_aspects",
+                            reason=f"row rejected during transform: {exc}",
+                            action="failed", sample_id=doc_id or f"row#{read}",
                         )
+                    continue
+                batch.append(body)
+                keys.append(doc_id or f"row#{read}")
+            if batch:
+                try:
+                    n = _etl_with_retry(http_aspects.import_aspects_batch, batch)
+                    imported += n
+                    skipped += len(batch) - n
+                except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
+                    errors += len(batch)
+                    _log.warning("aspects_etl.migrate_aspects.batch_error", count=len(batch), error=str(exc))
+                    if collector is not None:
+                        for key in keys:
+                            collector.record(
+                                "aspects", "document_aspects",
+                                issue_class="unexpected", constraint="document_aspects",
+                                reason=f"batch import rejected: {exc}",
+                                action="failed", sample_id=key,
+                            )
             offset += batch_size
     finally:
         conn.close()
@@ -326,7 +354,7 @@ def migrate_highlights(
     sqlite_path: Path,
     http_highlights,  # HttpDocumentHighlightsStore instance
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
 ) -> dict[str, int]:
     """Migrate document_highlights from SQLite to Postgres via the HTTP service."""
@@ -344,32 +372,45 @@ def migrate_highlights(
             ).fetchall()
             if not rows:
                 break
+            # RDR-176 P3 (Gap 1): batch this page into ONE import_highlights_batch.
+            batch: list[dict[str, Any]] = []
+            keys: list[str] = []
             for row in rows:
                 row_dict = dict(row)
                 read += 1
                 try:
                     body = _transform_highlight(row_dict)
-                    n = http_highlights.import_highlight(body)
-                    if n > 0:
-                        imported += 1
-                    else:
-                        skipped += 1
-                except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
+                except Exception as exc:  # noqa: BLE001 — per-row transform failure recorded; continue
                     errors += 1
-                    _log.warning(
-                        "aspects_etl.migrate_highlights.row_error",
-                        doc_id=row_dict.get("doc_id"),
-                        error=str(exc),
-                    )
+                    _log.warning("aspects_etl.migrate_highlights.row_error",
+                                 doc_id=row_dict.get("doc_id"), error=str(exc))
                     if collector is not None:
                         collector.record(
                             "aspects", "document_highlights",
-                            issue_class="unexpected",
-                            constraint="document_highlights",
-                            reason=f"row rejected during import: {exc}",
+                            issue_class="unexpected", constraint="document_highlights",
+                            reason=f"row rejected during transform: {exc}",
                             action="failed",
                             sample_id=str(row_dict.get("doc_id") or f"row#{read}"),
                         )
+                    continue
+                batch.append(body)
+                keys.append(str(row_dict.get("doc_id") or f"row#{read}"))
+            if batch:
+                try:
+                    n = _etl_with_retry(http_highlights.import_highlights_batch, batch)
+                    imported += n
+                    skipped += len(batch) - n
+                except Exception as exc:  # noqa: BLE001 — batch failure recorded; continue (idempotent re-run)
+                    errors += len(batch)
+                    _log.warning("aspects_etl.migrate_highlights.batch_error", count=len(batch), error=str(exc))
+                    if collector is not None:
+                        for key in keys:
+                            collector.record(
+                                "aspects", "document_highlights",
+                                issue_class="unexpected", constraint="document_highlights",
+                                reason=f"batch import rejected: {exc}",
+                                action="failed", sample_id=key,
+                            )
             offset += batch_size
     finally:
         conn.close()
@@ -390,7 +431,7 @@ def migrate_queue(
     sqlite_path: Path,
     http_queue,  # HttpAspectQueue instance
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
 ) -> dict[str, int]:
@@ -427,6 +468,9 @@ def migrate_queue(
             rows = conn.execute(f"{select_sql} LIMIT {batch_size} OFFSET {offset}").fetchall()
             if not rows:
                 break
+            # RDR-176 P3 (Gap 1): batch this page into ONE import_queue_batch POST.
+            batch: list[dict[str, Any]] = []
+            keys: list[str] = []
             for row in rows:
                 row_dict = dict(row)
                 read += 1
@@ -451,12 +495,7 @@ def migrate_queue(
                     continue
                 try:
                     body = _transform_queue_row(row_dict)
-                    n = http_queue.import_queue_row(body)
-                    if n > 0:
-                        imported += 1
-                    else:
-                        skipped += 1
-                except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
+                except Exception as exc:  # noqa: BLE001 — per-row transform failure recorded; continue
                     errors += 1
                     _log.warning(
                         "aspects_etl.migrate_queue.row_error",
@@ -467,12 +506,29 @@ def migrate_queue(
                     if collector is not None:
                         collector.record(
                             "aspects", "aspect_extraction_queue",
-                            issue_class="unexpected",
-                            constraint="aspect_extraction_queue",
-                            reason=f"row rejected during import: {exc}",
-                            action="failed",
-                            sample_id=q_doc_id or f"row#{read}",
+                            issue_class="unexpected", constraint="aspect_extraction_queue",
+                            reason=f"row rejected during transform: {exc}",
+                            action="failed", sample_id=q_doc_id or f"row#{read}",
                         )
+                    continue
+                batch.append(body)
+                keys.append(q_doc_id or f"row#{read}")
+            if batch:
+                try:
+                    n = _etl_with_retry(http_queue.import_queue_batch, batch)
+                    imported += n
+                    skipped += len(batch) - n
+                except Exception as exc:  # noqa: BLE001 — batch failure recorded; continue (idempotent re-run)
+                    errors += len(batch)
+                    _log.warning("aspects_etl.migrate_queue.batch_error", count=len(batch), error=str(exc))
+                    if collector is not None:
+                        for key in keys:
+                            collector.record(
+                                "aspects", "aspect_extraction_queue",
+                                issue_class="unexpected", constraint="aspect_extraction_queue",
+                                reason=f"batch import rejected: {exc}",
+                                action="failed", sample_id=key,
+                            )
             offset += batch_size
     finally:
         conn.close()
@@ -493,7 +549,7 @@ def migrate_promotion_log(
     sqlite_path: Path,
     http_aspects,  # HttpDocumentAspectsStore instance (uses /v1/aspects/promotion/import)
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
 ) -> dict[str, int]:
     """Migrate aspect_promotion_log from SQLite to Postgres via the HTTP service."""
@@ -521,38 +577,46 @@ def migrate_promotion_log(
             ).fetchall()
             if not rows:
                 break
+            # RDR-176 P3 (Gap 1): batch this page into ONE import_promotion_batch POST.
+            batch: list[dict[str, Any]] = []
+            keys: list[str] = []
             for row in rows:
                 row_dict = dict(row)
                 try:
                     body = _transform_promotion_row(row_dict)
-                    # POST to /v1/aspects/promotion/import
-                    import httpx  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-                    resp = http_aspects._client.post(
-                        "/v1/aspects/promotion/import",
-                        content=json.dumps(body),
-                    )
-                    resp.raise_for_status()
-                    n = resp.json().get("imported", 0)
-                    if n > 0:
-                        imported += 1
-                    else:
-                        skipped += 1
-                except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
+                except Exception as exc:  # noqa: BLE001 — per-row transform failure recorded; continue
                     errors += 1
                     _log.warning(
                         "aspects_etl.migrate_promotion_log.row_error",
-                        field_name=row_dict.get("field_name"),
-                        error=str(exc),
+                        field_name=row_dict.get("field_name"), error=str(exc),
                     )
                     if collector is not None:
                         collector.record(
                             "aspects", "aspect_promotion_log",
-                            issue_class="unexpected",
-                            constraint="aspect_promotion_log",
-                            reason=f"row rejected during import: {exc}",
+                            issue_class="unexpected", constraint="aspect_promotion_log",
+                            reason=f"row rejected during transform: {exc}",
                             action="failed",
-                            sample_id=f"row#{imported + skipped + errors}",
+                            sample_id=str(row_dict.get("field_name") or f"row#{imported + skipped + errors}"),
                         )
+                    continue
+                batch.append(body)
+                keys.append(str(row_dict.get("field_name") or ""))
+            if batch:
+                try:
+                    n = _etl_with_retry(http_aspects.import_promotion_batch, batch)
+                    imported += n
+                    skipped += len(batch) - n
+                except Exception as exc:  # noqa: BLE001 — batch failure recorded; continue (idempotent re-run)
+                    errors += len(batch)
+                    _log.warning("aspects_etl.migrate_promotion_log.batch_error", count=len(batch), error=str(exc))
+                    if collector is not None:
+                        for key in keys:
+                            collector.record(
+                                "aspects", "aspect_promotion_log",
+                                issue_class="unexpected", constraint="aspect_promotion_log",
+                                reason=f"batch import rejected: {exc}",
+                                action="failed", sample_id=key,
+                            )
             offset += batch_size
     finally:
         conn.close()
@@ -571,7 +635,7 @@ def migrate_without_queue(
     http_aspects,
     http_highlights,
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
 ) -> dict[str, dict[str, int]]:
@@ -615,7 +679,7 @@ def migrate_all(
     http_highlights,
     http_queue,
     *,
-    batch_size: int = 200,
+    batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
 ) -> dict[str, dict[str, int]]:

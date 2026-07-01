@@ -15,6 +15,24 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, call
 
+
+def _batch_mock_store() -> MagicMock:
+    """Mock HttpTelemetryStore for the RDR-176 P3 batched ETL: import_rows_batch
+    returns the batch size; per-table rows are inspectable via _batched_row."""
+    store = MagicMock()
+    store.import_rows_batch.side_effect = lambda table, rows: len(rows)
+    return store
+
+
+def _batched_row(store: MagicMock, table: str, index: int = 0) -> dict:
+    """Return the *index*-th row dict that the ETL batched for *table*."""
+    for c in store.import_rows_batch.call_args_list:
+        t = c.args[0] if c.args else c.kwargs.get("table")
+        rows = c.args[1] if len(c.args) > 1 else c.kwargs.get("rows")
+        if t == table:
+            return rows[index]
+    raise AssertionError(f"no batch call for table {table!r}")
+
 import pytest
 
 from nexus.db.t2.telemetry_etl import (
@@ -99,13 +117,7 @@ class TestTierWriteNullPreservation:
 
     def test_null_agent_passed_as_none_to_store(self):
         """NULL agent in SQLite must be passed as None to store.import_tier_write."""
-        store = MagicMock()
-        store.import_tier_write.return_value = None
-        store.import_relevance_row.return_value = None
-        store.import_search_row.return_value = None
-        store.import_nx_answer_run.return_value = None
-        store.import_hook_failure.return_value = None
-        store.import_frecency_row.return_value = None
+        store = _batch_mock_store()
 
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             db_path = Path(f.name)
@@ -131,24 +143,17 @@ class TestTierWriteNullPreservation:
             db_path.unlink(missing_ok=True)
 
         # Verify the call that reached the store
-        assert store.import_tier_write.call_count == 1
-        _, kwargs = store.import_tier_write.call_args
-        assert kwargs["agent"] is None, (
-            f"agent must be None (not '') for NULL SQLite value; got {kwargs['agent']!r}")
-        assert kwargs["project"] is None, (
+        row = _batched_row(store, "tier_writes")
+        assert row["agent"] is None, (
+            f"agent must be None (not '') for NULL SQLite value; got {row['agent']!r}")
+        assert row["project"] is None, (
             f"project must be None (not '') for NULL SQLite value; got {kwargs['project']!r}")
-        assert kwargs["target_title"] is None, (
+        assert row["target_title"] is None, (
             f"target_title must be None (not '') for NULL SQLite value; got {kwargs['target_title']!r}")
 
     def test_populated_agent_passed_verbatim(self):
         """Non-NULL agent in SQLite must be passed verbatim to store."""
-        store = MagicMock()
-        store.import_tier_write.return_value = None
-        store.import_relevance_row.return_value = None
-        store.import_search_row.return_value = None
-        store.import_nx_answer_run.return_value = None
-        store.import_hook_failure.return_value = None
-        store.import_frecency_row.return_value = None
+        store = _batch_mock_store()
 
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             db_path = Path(f.name)
@@ -172,20 +177,14 @@ class TestTierWriteNullPreservation:
         finally:
             db_path.unlink(missing_ok=True)
 
-        _, kwargs = store.import_tier_write.call_args
-        assert kwargs["agent"] == "developer"
-        assert kwargs["project"] == "nexus"
-        assert kwargs["target_title"] == "impl-notes.md"
+        row = _batched_row(store, "tier_writes")
+        assert row["agent"] == "developer"
+        assert row["project"] == "nexus"
+        assert row["target_title"] == "impl-notes.md"
 
     def test_empty_string_agent_becomes_none(self):
         """Empty-string agent in SQLite (legacy rows) must also become None."""
-        store = MagicMock()
-        store.import_tier_write.return_value = None
-        store.import_relevance_row.return_value = None
-        store.import_search_row.return_value = None
-        store.import_nx_answer_run.return_value = None
-        store.import_hook_failure.return_value = None
-        store.import_frecency_row.return_value = None
+        store = _batch_mock_store()
 
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             db_path = Path(f.name)
@@ -209,8 +208,8 @@ class TestTierWriteNullPreservation:
         finally:
             db_path.unlink(missing_ok=True)
 
-        _, kwargs = store.import_tier_write.call_args
-        assert kwargs["agent"] is None, (
+        row = _batched_row(store, "tier_writes")
+        assert row["agent"] is None, (
             "empty-string agent must also map to None (not '') via _nullable_str")
 
 
@@ -241,11 +240,7 @@ class TestNxAnswerRunPlanIdType:
 
     @staticmethod
     def _mock_store() -> MagicMock:
-        store = MagicMock()
-        for m in ("import_tier_write", "import_relevance_row", "import_search_row",
-                  "import_nx_answer_run", "import_hook_failure", "import_frecency_row"):
-            getattr(store, m).return_value = None
-        return store
+        return _batch_mock_store()
 
     def test_integer_plan_id_passed_as_int_not_str(self):
         store = self._mock_store()
@@ -257,11 +252,10 @@ class TestNxAnswerRunPlanIdType:
         finally:
             db_path.unlink(missing_ok=True)
 
-        assert store.import_nx_answer_run.call_count == 1
-        _, kwargs = store.import_nx_answer_run.call_args
-        assert kwargs["plan_id"] == 42
-        assert isinstance(kwargs["plan_id"], int), (
-            f"plan_id must be int, not {type(kwargs['plan_id']).__name__} — "
+        row = _batched_row(store, "nx_answer_runs")
+        assert row["plan_id"] == 42
+        assert isinstance(row["plan_id"], int), (
+            f"plan_id must be int, not {type(row['plan_id']).__name__} — "
             "a str trips the service ((Number) plan_id) cast (nexus-5gaj7)"
         )
 
@@ -275,8 +269,8 @@ class TestNxAnswerRunPlanIdType:
         finally:
             db_path.unlink(missing_ok=True)
 
-        _, kwargs = store.import_nx_answer_run.call_args
-        assert kwargs["plan_id"] is None
+        row = _batched_row(store, "nx_answer_runs")
+        assert row["plan_id"] is None
 
 
 # ── Unit tests: copy-not-move ──────────────────────────────────────────────────

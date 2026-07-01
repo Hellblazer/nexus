@@ -446,3 +446,31 @@ class TestManagedServiceProbeCheck:
         from nexus.health import _check_managed_service_probe
         res = _check_managed_service_probe()
         assert len(res) == 1 and res[0].ok is False and res[0].warn is True and res[0].fatal is False
+
+
+def test_run_health_checks_survives_unresolvable_catalog_endpoint(monkeypatch, tmp_path) -> None:
+    """nexus-<bead> regression: run_health_checks()'s OWN make_catalog_reader()
+    call (feeding _check_catalog, distinct from _check_git_hooks' already-
+    guarded call) was unguarded. In service mode with no reachable
+    nexus-service — e.g. a bare `nx doctor` before `nx daemon service start`
+    — resolve_service_config() raises RuntimeError, which propagated
+    uncaught out of run_health_checks() and crashed the whole `nx doctor`
+    command instead of degrading gracefully like every sibling check.
+
+    Discovered live via upgrade-shakeout.sh (10/12 FAIL) during the 6.1.0
+    release gate.
+    """
+    import nexus.health as health_mod
+
+    def _boom():
+        raise RuntimeError("nexus-service endpoint is not resolvable (NX_STORAGE_BACKEND=service): ...")
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", _boom)
+    monkeypatch.chdir(tmp_path)
+
+    # Must not raise — this is the exact call site that crashed `nx doctor`.
+    results, _is_local = health_mod.run_health_checks()
+
+    catalog_results = [r for r in results if r.label == "Catalog"]
+    assert catalog_results, "Catalog check must still report, degraded, not vanish"
+    assert catalog_results[0].ok is True

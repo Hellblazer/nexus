@@ -37,6 +37,8 @@ from typing import Any
 
 import structlog
 
+from nexus.retry import _etl_with_retry
+
 _log = structlog.get_logger(__name__)
 
 #: Number of rows sent per /v1/chash/import POST call.
@@ -114,14 +116,15 @@ def migrate_chash_rows(
 
             try:
                 # Use the import endpoint on the underlying HTTP client directly.
-                resp = http_chash._client.post(
-                    "/v1/chash/import",
-                    json={"rows": payload},
-                )
-                if not resp.is_success:
-                    raise RuntimeError(
-                        f"HTTP {resp.status_code}: {resp.text[:200]}"
-                    )
+                # RDR-176 Gap 6: bounded retry on a transient edge 403 / drop /
+                # read-timeout (idempotent import). raise_for_status surfaces a
+                # classifiable httpx.HTTPStatusError so the retry classifier can
+                # tell a transient 403 (retry) from a real 4xx (fail fast).
+                def _do_post():  # noqa: B023 — called immediately in this loop iteration, before payload advances
+                    r = http_chash._client.post("/v1/chash/import", json={"rows": payload})
+                    r.raise_for_status()
+                    return r
+                resp = _etl_with_retry(_do_post)
                 batch_imported = resp.json().get("imported", 0)
                 imported += batch_imported
                 _log.info(

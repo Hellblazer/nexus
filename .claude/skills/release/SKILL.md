@@ -90,6 +90,8 @@ Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migr
 
 Must end with `[done]` and confirm the new schema version. Halt on any failure.
 
+This reinstall is genuinely isolated (fixed 2026-07-01, `137d2688`) — safe to run with live Claude Code sessions/MCP servers active, no `--force`/`--cycle-daemons` needed. If it ever refuses with a live-holder error again, suspect a step-ordering regression in `release-sandbox.sh` (sandbox `HOME` must activate *before* the reinstall, since `uv tool install` resolves its install location off `$HOME`) before reaching for `--force`.
+
 ### 6b. Run upgrade-shakeout (~3-5 min, conditional)
 
 Required when the release touches the **upgrade path** an installed user traverses: hook stanzas (`src/nexus/commands/hooks.py`), the `nx doctor` drift checks, plugin name / marketplace.json `source.ref` pinning, or any migration touchpoint. `release-sandbox.sh smoke` tests one version in isolation; this tests `FROM_VERSION` to this branch.

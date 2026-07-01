@@ -70,9 +70,12 @@ Retry policy (audit F8):
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import random
 import re
+import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -84,6 +87,7 @@ from urllib.parse import quote
 
 import structlog
 
+from nexus import pdeathsig as _pdeathsig
 from nexus.aspect_readers import ReadFail, ReadOk, read_source, uri_for
 from nexus.db.t2.document_aspects import AspectRecord
 from nexus.mcp_infra import get_t3
@@ -1362,13 +1366,7 @@ def _invoke_once_batch(prompt: str, *, timeout: int) -> dict:
     for the same reason as the single-paper path.
     """
     try:
-        result = subprocess.run(
-            ["claude", "-p", "--output-format", "json"],
-            input=prompt,
-            timeout=timeout,
-            capture_output=True,
-            text=True,
-        )
+        result = _run_claude_isolated(prompt, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise _TransientFailure(f"timeout after {timeout}s: {exc}") from exc
     except OSError as exc:
@@ -1517,6 +1515,77 @@ def _retry_subprocess(
     return None
 
 
+def _run_claude_isolated(
+    prompt: str,
+    timeout: float,
+    *,
+    _argv: list[str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run ``claude -p`` isolated so it is never orphaned burning API quota
+    (RDR-173 RF-8 / nexus-4r9ja). Two independent mechanisms cover the death
+    scenarios:
+
+    - **Subprocess timeout** — ``start_new_session=True`` makes the child a
+      session/group leader; on ``TimeoutExpired`` we ``os.killpg`` the whole
+      group (SIGKILL). This reaches grandchildren that stay in claude's group.
+      NOTE the residual boundary: a grandchild that creates its OWN session
+      (e.g. an MCP server started with ``setsid`` / ``start_new_session``) is in
+      a different group and is NOT reached by this ``killpg`` — PR_SET_PDEATHSIG
+      is not inherited through ``exec`` into it either, so such grandchildren can
+      still be orphaned on the timeout path. Then reap.
+    - **Parent (daemon) death** — ``preexec_fn`` arms ``PR_SET_PDEATHSIG=SIGKILL``
+      so the kernel kills claude when the aspect-worker daemon dies by ANY means,
+      including an uncatchable ``SIGKILL`` where no Python cleanup can run. This
+      is the actual RF-8 close. Linux-only (gated on ``LIBC is not None``).
+
+    Graceful daemon ``SIGTERM`` shutdown: the daemon's ``stop()`` joins the
+    worker thread with a BOUNDED window (``AspectWorkerDaemon.stop(timeout)``,
+    default 10 s) so a short in-flight extraction drains (finishes — the quota is
+    already spent). An extraction still running when the join window elapses is
+    NOT waited on further: the daemon proceeds to exit and PR_SET_PDEATHSIG kills
+    claude at process exit (bounded quota-burn, no orphan). The unbounded
+    "let in-flight complete" drain is the separate RDR-173 P4 path
+    (``drain_worker`` / ``stop_claiming``), not this SIGTERM stop.
+
+    **macOS / non-Linux gap:** ``PR_SET_PDEATHSIG`` has no equivalent, so a
+    daemon SIGKILL there CAN orphan claude until its own ``timeout`` elapses.
+    Accepted by OS limitation: prod is Linux; the Phase-3 reclaim-first loop
+    recovers the stranded ``in_progress`` row regardless, leaving only bounded
+    quota-burn; macOS is a dev-only host.
+
+    Behavioral parity with the old ``subprocess.run`` (stdin-fed prompt,
+    captured text output, raises ``subprocess.TimeoutExpired``).
+    """
+    argv = _argv or ["claude", "-p", "--output-format", "json"]
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        preexec_fn=(_pdeathsig.set_pdeathsig_preexec if _pdeathsig.LIBC is not None else None),
+    )
+    try:
+        out, err = proc.communicate(input=prompt, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        with contextlib.suppress(Exception):
+            proc.communicate(timeout=5)  # reap the killed group
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL the child's whole process group; fall back to killing just the
+    child if the group is already gone."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        with contextlib.suppress(Exception):
+            proc.kill()
+
+
 def _invoke_once(prompt: str) -> dict:
     """Single subprocess invocation. Raises ``_TransientFailure`` on
     retriable failure, ``_HardFailure`` on non-retriable. Returns the
@@ -1528,13 +1597,7 @@ def _invoke_once(prompt: str) -> dict:
     14-page documents in production. Stdin has no such limit.
     """
     try:
-        result = subprocess.run(
-            ["claude", "-p", "--output-format", "json"],
-            input=prompt,
-            timeout=180,
-            capture_output=True,
-            text=True,
-        )
+        result = _run_claude_isolated(prompt, timeout=180)
     except subprocess.TimeoutExpired as exc:
         raise _TransientFailure(f"timeout after 180s: {exc}") from exc
     except OSError as exc:

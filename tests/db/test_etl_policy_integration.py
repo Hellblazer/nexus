@@ -118,14 +118,32 @@ class _CaptureStore:
         self.fail_on: dict[str, int] = {}  # method -> 1-based call index
 
     def __getattr__(self, name: str):
+        # RDR-176 P3: the batched ETLs call build_import_row (returns a row dict)
+        # then an import_*_batch method (returns the batch size). A batch method's
+        # rows arg is the LAST positional list; we record one entry per row (so
+        # per-row .calls assertions still hold) and honour fail_on by failing the
+        # WHOLE batch (a server-side rejection rejects the batch, not one row).
+        if name == "build_import_row":
+            return lambda **kwargs: dict(kwargs)
         if not name.startswith("import_"):
             raise AttributeError(name)
 
         def _record(*args, **kwargs):
+            rows = next((a for a in reversed(args) if isinstance(a, list)), None)
+            if rows is not None:  # batched call: import_rows_batch(table/kind, rows)
+                # key per-row records by the table/kind str arg when present (so
+                # tests still read calls["hook_failures"], calls["topic"], …),
+                # else by method name (memory/plans batches have no kind arg).
+                key = next((a for a in args if isinstance(a, str)), name)
+                self.calls.setdefault(key, []).extend(rows)
+                if key in self.fail_on or name in self.fail_on:
+                    raise RuntimeError(f"injected failure on {name} (batch of {len(rows)})")
+                return len(rows)
             seq = self.calls.setdefault(name, [])
             seq.append(kwargs or (args[0] if args else {}))
             if self.fail_on.get(name) == len(seq):
                 raise RuntimeError(f"injected failure on {name} #{len(seq)}")
+            return None
 
         return _record
 
@@ -161,7 +179,7 @@ class TestTaxonomyPolicy:
         migrate_taxonomy_rows(db, store, collector=collector)
 
         # Valid rows imported; orphans NEVER reach the store.
-        imported = {c["doc_id"] for c in store.calls["import_assignment"]}
+        imported = {c["doc_id"] for c in store.calls["assignment"]}
         assert imported == {"chash-a", "chash-b"}
         (issue,) = [
             i for i in collector.issues_for("taxonomy", "topic_assignments")
@@ -179,7 +197,7 @@ class TestTaxonomyPolicy:
 
         migrate_taxonomy_rows(db, store, collector=collector)
 
-        links = store.calls["import_topic_link"]
+        links = store.calls["link"]
         assert len(links) == 1
         assert (links[0]["from_topic_id"], links[0]["to_topic_id"]) == (1, 2)
         (issue,) = [
@@ -226,7 +244,7 @@ class TestTaxonomyPolicy:
         issue and the run continues (no abort, no silent drop)."""
         db = self._seeded_db(tmp_path)
         store = _CaptureStore()
-        store.fail_on["import_topic"] = 2   # second topic write blows up
+        store.fail_on["topic"] = True   # the topic batch write blows up
         collector = IssueCollector()
 
         migrate_taxonomy_rows(db, store, collector=collector)
@@ -236,10 +254,12 @@ class TestTaxonomyPolicy:
             if i.action == "failed"
         ]
         assert issue.issue_class == "unexpected"
-        assert issue.count == 1
-        assert collector.table_counts("taxonomy", "topics")["written"] == 1
+        # Whole-batch failure: both topics in the batch are recorded failed
+        # (re-run is idempotent). Matches the chash batch-failure contract.
+        assert issue.count == 2
+        assert collector.table_counts("taxonomy", "topics")["written"] == 0
         # The run continued: assignments still migrated.
-        assert len(store.calls["import_assignment"]) == 2
+        assert len(store.calls["assignment"]) == 2
 
     def test_rerun_is_idempotent_at_etl_level(self, tmp_path: Path) -> None:
         """Re-run after parent repair must not raise (server-side
@@ -298,7 +318,7 @@ class TestTelemetryPolicy:
 
         migrate_telemetry_rows(db, store, collector=collector)
 
-        by_ts = {c["occurred_at"] for c in store.calls["import_hook_failure"]}
+        by_ts = {c["occurred_at"] for c in store.calls["hook_failures"]}
         # Canonical form is OFFSET-QUALIFIED: the Java strict import
         # parser (OffsetDateTime.parse) rejects naive timestamps — the
         # actual nexus-9sjn3 root cause (0/234 imported). Naive == UTC.
@@ -328,7 +348,7 @@ class TestTelemetryPolicy:
         assert issue.issue_class == "format_anomaly"
         assert issue.count == 1
         # The unparseable row was NOT written.
-        assert len(store.calls["import_hook_failure"]) == 2
+        assert len(store.calls["hook_failures"]) == 2
         assert collector.table_counts("telemetry", "hook_failures") == {
             "read": 3, "written": 2,
         }
@@ -343,7 +363,7 @@ class TestTelemetryPolicy:
         migrate_telemetry_rows(db, store, collector=collector)
 
         # All three runs imported — danglers are not dropped.
-        assert len(store.calls["import_nx_answer_run"]) == 3
+        assert len(store.calls["nx_answer_runs"]) == 3
         (issue,) = [
             i for i in collector.issues_for("telemetry", "nx_answer_runs")
             if i.action == "flagged"
@@ -478,8 +498,8 @@ class TestCatalogPolicy:
 
         migrate_catalog(db, client, collector=collector)
 
-        # ALL three links imported — flag, never drop.
-        assert len(client.posts["/import/link"]) == 3
+        # ALL three links imported (in one array POST) — flag, never drop.
+        assert sum(len(p["rows"]) for p in client.posts["/import/link"]) == 3
         (issue,) = [
             i for i in collector.issues_for("catalog", "links")
             if i.action == "flagged"
@@ -533,17 +553,38 @@ CREATE TABLE aspect_extraction_queue (
 
 
 class _CaptureAspectsStore:
+    """RDR-176 P3: the aspects ETLs batch the transport; record one entry per
+    row in the batch and return the batch size."""
+
     def __init__(self) -> None:
         self.imported: list[dict] = []
         self.queued: list[dict] = []
+        self.highlights: list[dict] = []
+        self.promotions: list[dict] = []
 
     def import_aspect(self, body: dict) -> int:
         self.imported.append(body)
         return 1
 
+    def import_aspects_batch(self, rows: list[dict]) -> int:
+        self.imported.extend(rows)
+        return len(rows)
+
     def import_queue_row(self, body: dict) -> int:
         self.queued.append(body)
         return 1
+
+    def import_queue_batch(self, rows: list[dict]) -> int:
+        self.queued.extend(rows)
+        return len(rows)
+
+    def import_highlights_batch(self, rows: list[dict]) -> int:
+        self.highlights.extend(rows)
+        return len(rows)
+
+    def import_promotion_batch(self, rows: list[dict]) -> int:
+        self.promotions.extend(rows)
+        return len(rows)
 
 
 class TestAspectsPolicy:
@@ -664,20 +705,21 @@ class TestCleanStoreCountsAndCatchAll:
             [("p", "t1", "c1"), ("p", "t2", "c2"), ("p", "t3", "c3")],
         )
         store = _CaptureStore()
-        store.fail_on["import_entry"] = 2
+        store.fail_on["import_entries_batch"] = True
         collector = IssueCollector()
 
         migrate_memory_rows(db, store, collector=collector)
 
         assert collector.table_counts("memory", "memory") == {
-            "read": 3, "written": 2,
+            "read": 3, "written": 0,
         }
         (issue,) = [
             i for i in collector.issues_for("memory", "memory")
             if i.action == "failed"
         ]
         assert issue.issue_class == "unexpected"
-        assert issue.count == 1
+        # Whole-batch failure records every row in the rejected batch.
+        assert issue.count == 3
 
     def test_plans_counts_and_failed_catch_all(self, tmp_path: Path) -> None:
         from nexus.db.t2.plan_etl import migrate_plan_rows
@@ -697,19 +739,19 @@ class TestCleanStoreCountsAndCatchAll:
         conn.commit()
         conn.close()
         store = _CaptureStore()
-        store.fail_on["import_plan"] = 1
+        store.fail_on["import_plans_batch"] = True
         collector = IssueCollector()
 
         migrate_plan_rows(db, store, collector=collector)
 
         assert collector.table_counts("plans", "plans") == {
-            "read": 2, "written": 1,
+            "read": 2, "written": 0,
         }
         (issue,) = [
             i for i in collector.issues_for("plans", "plans")
             if i.action == "failed"
         ]
-        assert issue.count == 1
+        assert issue.count == 2
 
     def test_chash_batch_error_records_failed_per_row(self, tmp_path: Path) -> None:
         from nexus.db.t2.chash_etl import migrate_chash_rows
@@ -768,7 +810,7 @@ CREATE TABLE relevance_log (
             ("q", "d1", 1), ("q", "d2", 2),
         ])
         store = _CaptureStore()
-        store.fail_on["import_relevance_row"] = 1
+        store.fail_on["relevance_log"] = 1
         collector = IssueCollector()
 
         migrate_telemetry_rows(db, store, collector=collector)
@@ -778,29 +820,32 @@ CREATE TABLE relevance_log (
             if i.action == "failed"
         ]
         assert len(failed) == 1
-        assert failed[0].count == 1
+        # Whole-batch failure records both relevance rows in the rejected batch.
+        assert failed[0].count == 2
 
     def test_catalog_import_failure_recorded(self, tmp_path: Path) -> None:
         from nexus.db.t2.catalog_etl import migrate_catalog
 
         db = TestCatalogPolicy()._seeded_db(tmp_path)
 
-        class _FailingSecondDoc(_CaptureCatalogClient):
+        class _FailingDocBatch(_CaptureCatalogClient):
             def _post(self, path, payload):
                 super()._post(path, payload)
-                if path == "/import/document" and len(self.posts[path]) == 2:
+                if path == "/import/document":
                     raise RuntimeError("injected")
                 return {"imported": 1}
 
         collector = IssueCollector()
-        migrate_catalog(db, _FailingSecondDoc(), collector=collector)
+        migrate_catalog(db, _FailingDocBatch(), collector=collector)
 
         (issue,) = [
             i for i in collector.issues_for("catalog", "documents")
             if i.action == "failed"
         ]
-        assert issue.count == 1
-        assert collector.table_counts("catalog", "documents")["written"] == 1
+        # Both seeded docs ship in one array POST; rejecting it records both
+        # (re-run idempotent) and writes none.
+        assert issue.count == 2
+        assert collector.table_counts("catalog", "documents")["written"] == 0
 
     def test_queue_import_rejection_recorded(self, tmp_path: Path) -> None:
         from nexus.db.t2.aspects_etl import migrate_queue
@@ -808,7 +853,7 @@ CREATE TABLE relevance_log (
         aspects_db, catalog_db = TestAspectsPolicy()._seeded(tmp_path)
 
         class _RejectingQueue(_CaptureAspectsStore):
-            def import_queue_row(self, body):
+            def import_queue_batch(self, rows):
                 raise RuntimeError("rejected")
 
         collector = IssueCollector()

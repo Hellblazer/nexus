@@ -2,12 +2,14 @@
 title: "Aspect-Worker Hosting in the Post-RDR-152 Service Topology: The Extraction Worker Has No Persistent Host, So Short-Lived Store Paths Never Extract"
 id: RDR-173
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-28
 accepted_date: 2026-06-28
+closed_date: 2026-07-01
+postmortem_waiver: "Clean close — leased aspect-worker daemon (Candidate A) shipped on the RDR-149 substrate and validated by P7 --fullstack (document_aspects=4, non-vacuous) against deployed engine v0.1.14. The one notable outcome (P7 surfaced the P0 native-image jOOQ RETURNING bug nexus-i9o37) is fully recorded in T2 rdr/173-P7-i9o37-SESSION-STATE-2026-07-01 and shipped as engine-service-v0.1.13. Deferrals nexus-4r9ja (P6/RF-8) + nexus-t7jeo tracked as own beads. Full closure record in T2 nexus_rdr/173."
 related_issues: [nexus-tih7j, nexus-575kd, nexus-8zog5]
 related_rdrs: [RDR-089, RDR-152, RDR-155, RDR-156, RDR-163, RDR-172, RDR-140, RDR-149]
 supersedes: []
@@ -290,13 +292,29 @@ migration time" is the target — the opposite of today.
 - **claude -p fan-out cap (multi-tenant):** N active tenants × M docs ⇒ up to N×M concurrent
   `claude -p` subprocesses. A per-tenant and/or global concurrency cap should be set at
   planning (irrelevant for v1's one tenant). (planning)
-- With the daemon owning `reclaim_stale`, is a *second* Java-side scheduled `reclaimStale`
-  redundant? (likely yes — planning)
-- Does the leased daemon replace the in-process worker in **local** mode too, or service-mode
-  only? (unifying on the daemon is cleaner; weigh against local-mode simplicity — planning)
+- ~~With the daemon owning `reclaim_stale`, is a *second* Java-side scheduled `reclaimStale`
+  redundant?~~ **Resolved (P3, nexus-6ew6o):** the per-tenant daemon is the PRIMARY reclaim owner
+  and no routine Java sweep is added now. KNOWN CONSTRAINT: this leaves the
+  daemon-down-AND-no-enqueue case uncovered (rows the dead daemon stranded stay stranded until a
+  new enqueue respawns it; recovery = a new store, or an operator `POST /queue/reclaim_stale`). An
+  optional slow (~hourly) Java backstop sweep is filed as **nexus-t7jeo** (needs an engine change
+  + cut; ship only if operational evidence shows daemons stay down without enqueues).
+- ~~Does the leased daemon replace the in-process worker in **local** mode too?~~ **Resolved (P2,
+  nexus-gtdtc): SERVICE mode → leased daemon; LOCAL (sqlite) mode → keep the in-process worker
+  thread** (no cross-process queue to host, the storing process is the natural host, and the
+  daemon's `claude -p` credential inheritance buys nothing locally).
 - Is fast batch ingest (`nx index`) also affected, and does it need the same host?
-- Should the SIGKILL-orphan hardening (RF-8: `start_new_session` + group-kill) ship with this
-  RDR or as a separate fix?
+- ~~Should the SIGKILL-orphan hardening (RF-8: `start_new_session` + group-kill) ship with this
+  RDR or as a separate fix?~~ **Resolved (P6, nexus-yobit): SEPARATE FIX (deferred).** The
+  prescribed `start_new_session` + `killpg`-on-timeout was implemented (code-review approved)
+  but the stacked critic found it not-justified to ship: it does NOT close the stated RF-8 (host
+  SIGKILL of the daemon is uncatchable — no Python runs to `killpg`), and `start_new_session` —
+  which is *required* for a safe `killpg` (else it kills the daemon's own group) — breaks the
+  SIGTERM-cleanup path, so claude survives a graceful daemon SIGTERM and burns quota up to 180s
+  on every restart (a common-bad traded for the rare-bad). RF-8 is NON-blocking: the Phase-3
+  reclaim-first loop already recovers the stranded row. The proper daemon-level fix (track claude
+  pids + SIGTERM handler; PR_SET_PDEATHSIG for the orphan; a non-vacuous grandchild-kill test) is
+  filed as **nexus-4r9ja**.
 
 ## History
 

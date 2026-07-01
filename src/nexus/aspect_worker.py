@@ -73,6 +73,12 @@ from nexus.config import nexus_config_dir
 
 _log = structlog.get_logger(__name__)
 
+#: RDR-173 P2: the tenant scope the enqueue hook ensures a leased aspect-worker
+#: daemon for. v1 is single-tenant; multi-tenant routing derives this from
+#: request context (see the TODO in _ensure_aspect_worker). Matches
+#: HttpAspectQueue.DEFAULT_TENANT.
+_ENQUEUE_TENANT: str = "default"
+
 # ── Bounded backoff-retry ladder (RDR-163 P1, nexus-ztpt6) ──────────────────
 #
 # A transient failure re-queues the row with a backoff interval the WORKER
@@ -1279,4 +1285,76 @@ def aspect_extraction_enqueue_hook(
     if os.environ.get("NX_ASPECT_WORKER_AUTOSTART", "1") not in (
         "0", "false", "False", "no", "",
     ):
+        _ensure_aspect_worker()
+
+
+def _best_effort_queue_depth() -> int | None:
+    """Pending-row count for the diagnostic signal (RDR-173 P5), or None if it
+    cannot be obtained cheaply. The service queue is usually reachable even when
+    the WORKER daemon is not (the daemon-spawn path is only reached AFTER a
+    successful enqueue), so this normally answers. A SHORT 2s timeout (review H1)
+    keeps the observability path from blocking the store hook for the client's
+    default 30s in a full outage. (HttpAspectQueue.__init__ emits an info on
+    construct — expected on this diagnostic path.)"""
+    try:
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred; service-side
+
+        q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, timeout=2.0)
+        try:
+            return int(q.pending_count())
+        finally:
+            q.close()
+    except Exception:  # noqa: BLE001 — diagnostic only; never block the store
+        return None
+
+
+def _ensure_aspect_worker() -> None:
+    """RDR-173 P2 (bead nexus-gtdtc): ensure aspect extraction will run, without
+    tying it to the storing process's lifetime.
+
+    Decision (gtdtc Open Question): SERVICE mode → ensure the leased aspect-worker
+    DAEMON is up (discover/spawn-if-absent), so extraction completes for every
+    store path including short-lived CLI / one-shot / batch. LOCAL mode → keep the
+    in-process worker thread: there is no cross-process service queue to host, the
+    storing process is the natural host, and the daemon's claude -p credential
+    inheritance buys nothing there. Spawn failure is best-effort (the row is
+    already enqueued; the daemon self-heals on the next enqueue or via discover).
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+
+    if storage_backend_for("aspect_queue") != StorageBackend.SERVICE:
         ensure_worker_started()
+        return
+    # TODO(RDR-173 multi-tenant): v1 runs a single default tenant, so the leased
+    # daemon's scope key is the literal _ENQUEUE_TENANT. When per-request tenant
+    # routing lands, derive the tenant from the store's request/connection context
+    # here (the ensure_aspect_worker_daemon `tenant=` seam already supports it).
+    try:
+        from nexus.daemon.aspect_worker_daemon import ensure_aspect_worker_daemon  # noqa: PLC0415 — deferred; daemon module is CLI/service-side
+
+        ensure_aspect_worker_daemon(config_dir=nexus_config_dir(), tenant=_ENQUEUE_TENANT)
+    except Exception as exc:  # noqa: BLE001 — best-effort spawn; the row is enqueued, do not fail the store
+        # RDR-173 P5 observability (nexus-xv5fl): make the store-time failure
+        # LOUD with diagnostic context (tenant + how many rows are now stranded
+        # by the outage), AND persist the RDR-172 hook_failures tripwire CI /
+        # --fullstack can assert ZERO on. This is the exact silent-store-time
+        # failure class RDR-173 exists to eliminate.
+        depth = _best_effort_queue_depth()
+        fields = {"tenant": _ENQUEUE_TENANT, "error": str(exc)}
+        if depth is not None:  # omit when unavailable rather than poison metrics with -1 (review M1)
+            fields["queue_depth"] = depth
+        _log.warning("aspect_worker.daemon_unreachable", exc_info=True, **fields)
+        try:
+            from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+
+            t2_index_write(
+                lambda t2: t2.telemetry.record_hook_failure(
+                    doc_id="",
+                    collection="",
+                    hook_name="aspect_worker_daemon_spawn",
+                    error=str(exc)[:2000],
+                    chain="document",
+                )
+            )
+        except Exception:  # noqa: BLE001 — tripwire persist is best-effort; never block the store
+            _log.warning("aspect_worker.ensure_daemon_tripwire_persist_failed", error=str(exc))
