@@ -751,14 +751,26 @@ class HttpCatalogClient:
     def by_file_path(
         self, owner: Tumbler | str, file_path: str
     ) -> CatalogEntry | None:
+        # nexus-h9f1w / GH #1350: the service /list ignores file_path when owner
+        # is set and returns the FULL owner list, so a brand-new file's query
+        # yields docs[0] (an unrelated doc). Trusting docs[0] mis-attributed the
+        # new file's chunks to that doc, overwriting its manifest (silent data
+        # corruption). Filter by exact file_path client-side; correct regardless
+        # of the server-side bug (Fix B tracked separately).
         result = self._get("/list", owner=str(owner), file_path=file_path)
         docs = result.get("documents", []) if result else []
-        return _to_entry(docs[0]) if docs else None
+        match = [d for d in docs if d.get("file_path") == file_path]
+        return _to_entry(match[0]) if match else None
 
     def by_source_uri(self, uri: str) -> CatalogEntry | None:
+        # nexus-h9f1w / GH #1350: same docs[0]-trust class as by_file_path.
+        # Defense-in-depth exact-match filter (the server currently filters
+        # source_uri correctly; this guards against an owner-list-leak-style
+        # regression and keeps the sibling lookups consistent).
         result = self._get("/list", source_uri=uri)
         docs = result.get("documents", []) if result else []
-        return _to_entry(docs[0]) if docs else None
+        match = [d for d in docs if d.get("source_uri") == uri]
+        return _to_entry(match[0]) if match else None
 
     def find_by_file_path(self, file_path: str) -> CatalogEntry | None:
         """Return the first document matching file_path (no owner filter).
@@ -767,9 +779,15 @@ class HttpCatalogClient:
         known owner (nexus-xnz0o).  Uses GET /list?file_path=X (owner-agnostic
         form supported by the Java /list endpoint).
         """
+        # nexus-h9f1w / GH #1350: exact-match guard, same class as by_file_path.
+        # The owner-agnostic /list routes to documentsByFilePath (exact eq) so
+        # this is a no-op today; kept for consistency + regression defense. When
+        # a path is shared across owners the server returns >1 match and this
+        # preserves the documented "first match" contract.
         result = self._get("/list", file_path=file_path)
         docs = result.get("documents", []) if result else []
-        return _to_entry(docs[0]) if docs else None
+        match = [d for d in docs if d.get("file_path") == file_path]
+        return _to_entry(match[0]) if match else None
 
     def by_owner(self, owner: Tumbler | str) -> list[CatalogEntry]:
         return self._docs_from(self._get("/list", owner=str(owner)))

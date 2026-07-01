@@ -2,12 +2,13 @@
 title: "Aspect-Worker Hosting in the Post-RDR-152 Service Topology: The Extraction Worker Has No Persistent Host, So Short-Lived Store Paths Never Extract"
 id: RDR-173
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-28
 accepted_date: 2026-06-28
+closed_date: 2026-07-01
 related_issues: [nexus-tih7j, nexus-575kd, nexus-8zog5]
 related_rdrs: [RDR-089, RDR-152, RDR-155, RDR-156, RDR-163, RDR-172, RDR-140, RDR-149]
 supersedes: []
@@ -302,8 +303,17 @@ migration time" is the target — the opposite of today.
   thread** (no cross-process queue to host, the storing process is the natural host, and the
   daemon's `claude -p` credential inheritance buys nothing locally).
 - Is fast batch ingest (`nx index`) also affected, and does it need the same host?
-- Should the SIGKILL-orphan hardening (RF-8: `start_new_session` + group-kill) ship with this
-  RDR or as a separate fix?
+- ~~Should the SIGKILL-orphan hardening (RF-8: `start_new_session` + group-kill) ship with this
+  RDR or as a separate fix?~~ **Resolved (P6, nexus-yobit): SEPARATE FIX (deferred).** The
+  prescribed `start_new_session` + `killpg`-on-timeout was implemented (code-review approved)
+  but the stacked critic found it not-justified to ship: it does NOT close the stated RF-8 (host
+  SIGKILL of the daemon is uncatchable — no Python runs to `killpg`), and `start_new_session` —
+  which is *required* for a safe `killpg` (else it kills the daemon's own group) — breaks the
+  SIGTERM-cleanup path, so claude survives a graceful daemon SIGTERM and burns quota up to 180s
+  on every restart (a common-bad traded for the rare-bad). RF-8 is NON-blocking: the Phase-3
+  reclaim-first loop already recovers the stranded row. The proper daemon-level fix (track claude
+  pids + SIGTERM handler; PR_SET_PDEATHSIG for the orphan; a non-vacuous grandchild-kill test) is
+  filed as **nexus-4r9ja**.
 
 ## History
 

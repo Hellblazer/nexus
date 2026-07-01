@@ -2,12 +2,13 @@
 title: "Service-Mode Aspect-Enqueue Silent Failure: store_put's Enqueue 500s on the RDR-156 doc_id FK and the Hook Swallows It"
 id: RDR-172
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-27
 accepted_date: 2026-06-27
+closed_date: 2026-07-01
 related_issues: [nexus-ov0sw]
 related_rdrs: [RDR-089, RDR-152, RDR-156, RDR-142, RDR-145, RDR-163]
 supersedes: []
