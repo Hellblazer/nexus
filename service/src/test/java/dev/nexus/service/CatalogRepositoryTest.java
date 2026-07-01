@@ -328,6 +328,32 @@ class CatalogRepositoryTest {
     }
 
     /**
+     * GH #1350 Fix B (nexus-lc8r5): documentsByOwnerAndFilePath must filter by
+     * BOTH owner prefix and exact file_path. The owner-only path returns the
+     * whole owner list, which drove the client's docs[0] mis-attribution
+     * (silent manifest overwrite).
+     */
+    @Test @Order(16)
+    void document_byOwnerAndFilePath_filtersByBoth() {
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "7.1", "title", "Owner7 A", "content_type", "paper",
+            "corpus", "knowledge", "file_path", "owner7/a.pdf"));
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "7.2", "title", "Owner7 B", "content_type", "paper",
+            "corpus", "knowledge", "file_path", "owner7/b.pdf"));
+
+        // Exact existing path under the owner: exactly one, the right one.
+        var hit = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/b.pdf");
+        assertThat(hit).hasSize(1);
+        assertThat(hit.get(0).get("tumbler")).isEqualTo("7.2");
+
+        // Brand-new path under a POPULATED owner: zero (this is what stops the
+        // corruption — the client no longer receives docs[0] of the owner).
+        var miss = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/brand-new.pdf");
+        assertThat(miss).isEmpty();
+    }
+
+    /**
      * RDR-159 P-1a (nexus-0wz93): relationCounts returns tenant-scoped row
      * counts for whitelisted migration-verify relations and OMITS any
      * relation outside the whitelist (no arbitrary relation counts).

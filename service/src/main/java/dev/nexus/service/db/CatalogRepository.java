@@ -779,6 +779,24 @@ public final class CatalogRepository {
         );
     }
 
+    /**
+     * Documents by owner tumbler prefix AND file_path (exact). GH #1350 Fix B.
+     *
+     * <p>The combined predicate is the correct behaviour for
+     * {@code GET /list?owner=X&file_path=Y}: the owner-only path returns the
+     * full owner list, which caused {@code HttpCatalogClient.by_file_path} to
+     * mis-attribute a new file to an unrelated doc (silent manifest overwrite).
+     */
+    public List<Map<String, Object>> documentsByOwnerAndFilePath(
+            String tenant, String ownerPrefix, String filePath) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(documentFields()).from(T_DOCS)
+               .where(F_DOC_TUMBLER.like(ownerPrefix + ".%").and(F_DOC_FPATH.eq(filePath)))
+               .orderBy(F_DOC_TUMBLER)
+               .fetch().map(r -> docRowFromRecord(r.intoMap()))
+        );
+    }
+
     /** Documents by content_type. */
     public List<Map<String, Object>> documentsByContentType(String tenant, String contentType) {
         return tenantScope.withTenant(tenant, ctx ->
