@@ -876,6 +876,7 @@ public final class CatalogHandler implements HttpHandler {
     private void handleImportOwner(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        if (requireNonEmptyImportBody(exchange, body)) return;
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
@@ -886,6 +887,7 @@ public final class CatalogHandler implements HttpHandler {
     private void handleImportDocument(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        if (requireNonEmptyImportBody(exchange, body)) return;
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
@@ -896,6 +898,7 @@ public final class CatalogHandler implements HttpHandler {
     private void handleImportLink(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        if (requireNonEmptyImportBody(exchange, body)) return;
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
@@ -918,11 +921,30 @@ public final class CatalogHandler implements HttpHandler {
     private void handleImportCollection(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        if (requireNonEmptyImportBody(exchange, body)) return;
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
         repo.importCollectionsBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
+    }
+
+    /**
+     * nexus-zbci5 (GH conexus-tsye): an empty request body previously fell
+     * through to {@code rows = List.of(body)} — a ONE-element list containing
+     * an EMPTY map — which then failed deep inside the repo batch-import
+     * (uncaught, surfaced as a generic 500). A batch import with zero content
+     * is always a client error; fail loud with a clean 400 before ever
+     * reaching the repo. Returns {@code true} (caller must return) if the
+     * response was already sent.
+     */
+    private boolean requireNonEmptyImportBody(HttpExchange exchange, Map<String, Object> body) throws IOException {
+        if (body.isEmpty()) {
+            HttpUtil.send(exchange, 400,
+                "{\"error\":\"request body required: either {\\\"rows\\\": [...]} or a single row object\"}");
+            return true;
+        }
+        return false;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
