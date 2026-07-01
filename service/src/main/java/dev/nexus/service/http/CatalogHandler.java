@@ -259,6 +259,12 @@ public final class CatalogHandler implements HttpHandler {
             docs = repo.documentsByContentType(tenant, contentType);
         } else if (corpus != null && !corpus.isBlank()) {
             docs = repo.documentsByCorpus(tenant, corpus);
+        } else if (owner != null && !owner.isBlank()
+                   && filePath != null && !filePath.isBlank()) {
+            // GH #1350 Fix B: owner+file_path must filter by BOTH. The owner-only
+            // branch below ignored file_path and returned the full owner list,
+            // driving the client's docs[0] mis-attribution (silent corruption).
+            docs = repo.documentsByOwnerAndFilePath(tenant, owner, filePath);
         } else if (owner != null && !owner.isBlank()) {
             docs = repo.documentsByOwner(tenant, owner);
         } else if (filePath != null && !filePath.isBlank()) {
