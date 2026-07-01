@@ -9,6 +9,7 @@ reviewed-by: self
 created: 2026-06-27
 accepted_date: 2026-06-27
 closed_date: 2026-07-01
+postmortem_waiver: "Clean close — all three surfaces (client catalog_doc_id, server SQLSTATE-23→4xx, loudness tripwire) shipped and validated end-to-end via RDR-173 P7 --fullstack (document_aspects=4) against deployed engine v0.1.14. No divergence from the accepted design; full closure record in T2 nexus_rdr/172. Deferral nexus-7e057 tracked as its own bead."
 related_issues: [nexus-ov0sw]
 related_rdrs: [RDR-089, RDR-152, RDR-156, RDR-142, RDR-145, RDR-163]
 supersedes: []
