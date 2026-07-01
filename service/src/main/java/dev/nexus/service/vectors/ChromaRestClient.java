@@ -369,7 +369,31 @@ public final class ChromaRestClient {
                                    List<String> include,
                                    Map<String, Object> where) {
         String colId = getOrCreateCollection(collectionName);
+        return getById(colId, ids, limit, offset, include, where);
+    }
 
+    /**
+     * READ-ONLY collection resolve by name (RDR-176 P4, nexus-t9rmg.24). Unlike
+     * {@link #getOrCreateCollection} this NEVER creates: a migration READS from a
+     * user's source Chroma Cloud, so a missing/typo'd collection must fail loud,
+     * not silently spawn an empty collection in the source tenant. Throws if the
+     * collection does not exist.
+     */
+    public String getCollection(String collectionName) {
+        Map<String, Object> resp = doGet(collectionsBase() + "/" + collectionName);
+        Object id = resp.get("id");
+        if (id == null) {
+            throw new RuntimeException("Chroma collection not found: " + collectionName);
+        }
+        return id.toString();
+    }
+
+    /** {@link #get} against a PRE-RESOLVED collection id (no get-or-create). */
+    public Map<String, Object> getById(String collectionId,
+                                       List<String> ids,
+                                       int limit, int offset,
+                                       List<String> include,
+                                       Map<String, Object> where) {
         Map<String, Object> body = new HashMap<>();
         if (ids != null && !ids.isEmpty()) {
             body.put("ids", ids);
@@ -381,7 +405,7 @@ public final class ChromaRestClient {
             body.put("where", where);
         }
 
-        return doPost(collectionBase(colId) + "/get", body);
+        return doPost(collectionBase(collectionId) + "/get", body);
     }
 
     /**

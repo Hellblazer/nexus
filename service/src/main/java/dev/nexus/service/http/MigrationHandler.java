@@ -11,7 +11,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,21 +25,29 @@ import java.util.Map;
  * <em>entirely server-side</em>: the service pulls each chunk page (ids,
  * documents, pre-computed embeddings, metadatas) straight from ChromaCloud and
  * upserts into pgvector. The client only triggers + monitors — it NEVER
- * round-trips a vector. This is the managed-cloud analogue of the local
- * migrate-to-service path (RDR-176 §Decision "cloud→cloud server-side").
+ * round-trips a vector.
  *
  * <p><b>Ephemeral credentials (Pillar 1b).</b> The source ChromaCloud
  * {@code tenant}/{@code database}/{@code api_key} are client-supplied in the
  * request body and held in method-local variables for the request lifetime
- * ONLY: never written to any persistent store, never logged (no request-body
- * logging on this route; error logs carry the exception, not the body). The
- * response echoes per-collection counts, never the credentials.
+ * ONLY: never persisted, never logged. Error logs carry the exception TYPE, not
+ * its message (a Chroma error message can embed the response body, which is
+ * third-party-controlled) and never the request body. The response echoes
+ * per-collection counts, never the credentials.
+ *
+ * <p><b>Correctness signals.</b> The response carries both {@code copied}
+ * (chunks read from the source) and {@code dest_counts} (rows actually present
+ * in pgvector after the upsert) per collection, so the client-side monitor can
+ * verify parity (content-addressing means dest ≤ source-read when the source has
+ * duplicate chunk text). A total drop (source had chunks, pgvector has none) is
+ * a hard 500. A mid-copy failure returns 500 with the partial {@code copied}
+ * progress so the operator can target a retry (upsert is idempotent via ON
+ * CONFLICT).
  *
  * <p><b>Egress.</b> The default {@link CloudSource} routes ChromaCloud reads
- * through {@link ChromaRestClient#cloud} which now wires {@code EgressProxy}
- * (api.trychroma.com is external and must traverse squid from the private
- * subnet). A {@link CloudSourceFactory} seam lets tests supply a fake source
- * with no network.
+ * through {@link ChromaRestClient#cloud} which wires {@code EgressProxy}
+ * (api.trychroma.com is external, behind squid). A {@link CloudSourceFactory}
+ * seam lets tests supply a fake source with no network.
  */
 public final class MigrationHandler implements HttpHandler {
 
@@ -46,6 +56,9 @@ public final class MigrationHandler implements HttpHandler {
 
     /** Chroma read/upsert page size (Chroma quota MAX_RECORDS_PER_WRITE). */
     static final int PAGE = 300;
+
+    /** Trigger-request body cap: the body is a small JSON of creds + names. */
+    static final int MAX_BODY_BYTES = 1 << 20;  // 1 MiB
 
     /** One page of chunks read from a cloud source (server-side, pre-embedded). */
     public record ChunkPage(List<String> ids, List<String> documents,
@@ -73,6 +86,11 @@ public final class MigrationHandler implements HttpHandler {
         CloudSource open(String tenant, String database, String apiKey);
     }
 
+    /** Thrown for a well-formed-but-invalid request → rendered as 400. */
+    private static final class BadRequest extends RuntimeException {
+        BadRequest(String message) { super(message); }
+    }
+
     private final PgVectorRepository pgVectors;
     private final CloudSourceFactory sourceFactory;
 
@@ -96,76 +114,150 @@ public final class MigrationHandler implements HttpHandler {
         }
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod();
+        if (!path.endsWith("/ingest-cloud")) {
+            HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
+            return;
+        }
+        if (!"POST".equals(method)) {
+            HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
+            return;
+        }
+        handleIngestCloud(exchange, tenant);
+    }
+
+    private void handleIngestCloud(HttpExchange exchange, String tenant) throws IOException {
+        // Progress + parity accumulators live OUT here so a mid-copy failure can
+        // still report which collections landed (targeted-retry signal).
+        Map<String, Integer> copied = new LinkedHashMap<>();
+        Map<String, Integer> destCounts = new LinkedHashMap<>();
         try {
-            if (path.endsWith("/ingest-cloud") && "POST".equals(method)) {
-                handleIngestCloud(exchange, tenant);
-            } else if (path.endsWith("/ingest-cloud")) {
-                HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
-            } else {
-                HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
+            Map<String, Object> body = MAPPER.readValue(readBodyCapped(exchange), Map.class);
+
+            // Client-supplied EPHEMERAL credentials — method-local only. Never
+            // logged, never persisted; they leave this method solely as the
+            // arguments to sourceFactory.open(...) and die with the request.
+            String srcTenant = requireString(body, "source_tenant");
+            String srcDatabase = requireString(body, "source_database");
+            String srcApiKey = requireString(body, "source_api_key");
+            List<String> requested = stringListOrNull(body.get("collections"));
+
+            try (CloudSource src = sourceFactory.open(srcTenant, srcDatabase, srcApiKey)) {
+                List<String> available = src.collections();
+                List<String> collections;
+                if (requested != null && !requested.isEmpty()) {
+                    // Fail loud on a typo'd / absent collection rather than a
+                    // silent 200 with copied=0 (a "success" that copied nothing).
+                    List<String> unknown = new ArrayList<>();
+                    for (String c : requested) {
+                        if (!available.contains(c)) unknown.add(c);
+                    }
+                    if (!unknown.isEmpty()) {
+                        throw new BadRequest("collections not present in source: " + unknown);
+                    }
+                    collections = requested;
+                } else {
+                    collections = available;  // full-footprint copy
+                }
+
+                for (String coll : collections) {
+                    int total = 0;
+                    for (int offset = 0; ; offset += PAGE) {
+                        ChunkPage page = src.read(coll, PAGE, offset);
+                        int n = page.ids().size();
+                        if (n == 0) break;
+                        // Server-side upsert of PRE-COMPUTED vectors — no re-embed,
+                        // no client round-trip.
+                        pgVectors.upsertChunksWithVectors(tenant, coll,
+                                page.ids(), page.documents(), page.embeddings(), page.metadatas());
+                        total += n;
+                        if (n < PAGE) break;  // short page = last page
+                    }
+                    copied.put(coll, total);
+                    log.info("event=migration_ingest_cloud_collection tenant={} collection={} chunks={}",
+                            tenant, coll, total);
+                }
             }
-        } catch (IllegalArgumentException bad) {
+
+            // Count-parity gate (RDR-176 invariant). dest_counts is pgvector's
+            // actual row count per collection AFTER the upsert; a total drop
+            // (source had chunks, dest has none) is a hard failure. dest ≤ copied
+            // is possible under content-addressed dedup, so it is reported (for
+            // the client-side monitor) rather than force-failed here.
+            List<String> dropped = new ArrayList<>();
+            for (Map.Entry<String, Integer> e : copied.entrySet()) {
+                int dest = pgVectors.count(tenant, e.getKey());
+                destCounts.put(e.getKey(), dest);
+                if (e.getValue() > 0 && dest == 0) dropped.add(e.getKey());
+            }
+            if (!dropped.isEmpty()) {
+                log.warn("event=migration_ingest_cloud_parity_drop tenant={} collections={}",
+                        tenant, dropped);
+                HttpUtil.send(exchange, 500, MAPPER.writeValueAsString(Map.of(
+                        "error", "count-parity failure: source chunks did not land",
+                        "dropped_collections", dropped,
+                        "copied", copied, "dest_counts", destCounts)));
+                return;
+            }
+
+            int grand = copied.values().stream().mapToInt(Integer::intValue).sum();
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of(
+                    "copied", copied, "dest_counts", destCounts, "total", grand)));
+
+        } catch (BadRequest bad) {
             HttpUtil.send(exchange, 400, "{\"error\":" + HttpUtil.jsonString(bad.getMessage()) + "}");
-        } catch (Exception e) {  // noqa — must not echo the request body (credentials)
-            // Log the exception, NOT the body: a stack trace from the Chroma client
-            // or pgvector upsert carries no credential (the api key is only ever a
-            // header/local var). Generic client message.
-            log.warn("event=migration_ingest_cloud_failed tenant={} error={}", tenant, e.toString());
-            HttpUtil.send(exchange, 500, "{\"error\":\"ingest-cloud failed\"}");
+        } catch (Exception e) {  // noqa — must not echo the request body / creds
+            // Log the exception TYPE only: a Chroma error message can embed the
+            // (third-party-controlled) response body, and the request body carries
+            // the api key — neither may reach the logs. The partial `copied` map is
+            // safe (collection→count) and gives the operator a targeted-retry basis.
+            log.warn("event=migration_ingest_cloud_failed tenant={} error_type={}",
+                    tenant, e.getClass().getName());
+            HttpUtil.send(exchange, 500, MAPPER.writeValueAsString(Map.of(
+                    "error", "ingest-cloud failed",
+                    "copied_before_failure", copied)));
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private void handleIngestCloud(HttpExchange exchange, String tenant) throws IOException {
-        Map<String, Object> body = MAPPER.readValue(exchange.getRequestBody(), Map.class);
-
-        // Client-supplied EPHEMERAL credentials — method-local only. Never logged,
-        // never persisted; they leave this method solely as the arguments to
-        // sourceFactory.open(...) and die with the request.
-        String srcTenant = requireString(body, "source_tenant");
-        String srcDatabase = requireString(body, "source_database");
-        String srcApiKey = requireString(body, "source_api_key");
-        List<String> requested = (List<String>) body.get("collections");
-
-        Map<String, Integer> copied = new LinkedHashMap<>();
-        try (CloudSource src = sourceFactory.open(srcTenant, srcDatabase, srcApiKey)) {
-            List<String> collections = (requested != null && !requested.isEmpty())
-                    ? requested : src.collections();
-            for (String coll : collections) {
-                int total = 0;
-                for (int offset = 0; ; offset += PAGE) {
-                    ChunkPage page = src.read(coll, PAGE, offset);
-                    int n = page.ids().size();
-                    if (n == 0) break;
-                    // Server-side upsert of the PRE-COMPUTED vectors — no re-embed,
-                    // no client round-trip.
-                    pgVectors.upsertChunksWithVectors(tenant, coll,
-                            page.ids(), page.documents(), page.embeddings(), page.metadatas());
-                    total += n;
-                    if (n < PAGE) break;  // short page = last page
-                }
-                copied.put(coll, total);
-                log.info("event=migration_ingest_cloud_collection tenant={} collection={} chunks={}",
-                        tenant, coll, total);
+    /** Read the request body with a hard size cap (H3): never buffer unbounded input. */
+    private static byte[] readBodyCapped(HttpExchange exchange) throws IOException {
+        try (InputStream in = exchange.getRequestBody()) {
+            byte[] buf = in.readNBytes(MAX_BODY_BYTES + 1);
+            if (buf.length > MAX_BODY_BYTES) {
+                throw new BadRequest("request body exceeds " + MAX_BODY_BYTES + " bytes");
             }
+            return buf;
         }
-
-        int grand = copied.values().stream().mapToInt(Integer::intValue).sum();
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
-                Map.of("copied", copied, "total", grand)));
     }
 
     private static String requireString(Map<String, Object> body, String key) {
         Object v = body.get(key);
         if (!(v instanceof String s) || s.isBlank()) {
-            throw new IllegalArgumentException(key + " (non-blank string) is required");
+            throw new BadRequest(key + " (non-blank string) is required");
         }
         return s;
+    }
+
+    /** Validate an optional {@code collections} list is null or a list of strings. */
+    private static List<String> stringListOrNull(Object v) {
+        if (v == null) return null;
+        if (!(v instanceof List<?> raw)) {
+            throw new BadRequest("collections must be a list of strings");
+        }
+        List<String> out = new ArrayList<>(raw.size());
+        for (Object o : raw) {
+            if (!(o instanceof String s)) {
+                throw new BadRequest("collections must be a list of strings");
+            }
+            out.add(s);
+        }
+        return out;
     }
 
     /** Default {@link CloudSource}: egress-routed ChromaCloud via {@link ChromaRestClient}. */
     static final class ChromaCloudSource implements CloudSource {
         private final ChromaRestClient chroma;
+        // Resolve each collection id ONCE (read-only), reused across pages.
+        private final Map<String, String> idCache = new HashMap<>();
 
         private ChromaCloudSource(String tenant, String database, String apiKey) {
             this.chroma = ChromaRestClient.cloud(tenant, database, apiKey);
@@ -188,7 +280,10 @@ public final class MigrationHandler implements HttpHandler {
         @Override
         @SuppressWarnings("unchecked")
         public ChunkPage read(String collection, int limit, int offset) {
-            Map<String, Object> resp = chroma.get(collection, null, limit, offset,
+            // READ-ONLY resolve (getCollection, not getOrCreate) so a migration
+            // never creates a collection in the user's SOURCE tenant.
+            String colId = idCache.computeIfAbsent(collection, chroma::getCollection);
+            Map<String, Object> resp = chroma.getById(colId, null, limit, offset,
                     List.of("documents", "embeddings", "metadatas"), null);
             List<String> ids = (List<String>) resp.getOrDefault("ids", List.of());
             if (ids == null || ids.isEmpty()) return ChunkPage.empty();

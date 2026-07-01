@@ -41,6 +41,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -51,18 +52,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-176 Phase 4 (bead nexus-t9rmg.23 P4.T / .24 P4) — cloud→cloud server-side
  * ingest contract.
  *
- * <p>Two load-bearing assertions:
+ * <p>Assertions:
  * <ol>
- *   <li><b>Server-side copy, zero client vectors.</b> {@code POST
+ *   <li><b>Server-side copy, zero client vectors + parity signal.</b> {@code POST
  *       /v1/migration/ingest-cloud} pulls pre-embedded chunks from a
- *       {@link MigrationHandler.CloudSource} (here a fake — no ChromaCloud/network)
- *       and lands them in pgvector. The client body carries only the trigger +
- *       source credentials; it never sends a vector, and the response echoes only
- *       counts.</li>
- *   <li><b>Ephemeral credentials (Pillar 1b).</b> The client-supplied
- *       ChromaCloud api key is used solely to open the source, then discarded: it
- *       appears in NO log line, NOT in the response body, and NOT in any persisted
- *       chunk metadata.</li>
+ *       {@link MigrationHandler.CloudSource} (fake — no ChromaCloud/network) and
+ *       lands them in pgvector; the response echoes both {@code copied} (source
+ *       reads) and {@code dest_counts} (pgvector rows).</li>
+ *   <li><b>Ephemeral credentials (Pillar 1b).</b> The api key appears in NO log
+ *       line, NOT the response body, and NOT any persisted chunk metadata — on
+ *       BOTH the happy and the mid-copy-failure paths.</li>
+ *   <li><b>Pagination.</b> A &gt;PAGE collection is copied across multiple pages
+ *       with a correctly advancing offset.</li>
+ *   <li><b>Fail loud.</b> Missing api key or an unknown source collection → 400;
+ *       a mid-copy failure → 500 carrying the partial progress.</li>
  * </ol>
  *
  * <p>Integration over mocks: real Testcontainers pgvector + real
@@ -78,9 +81,10 @@ class MigrationHandlerIngestCloudTest {
     private static final String SVC_PASS = "svc_migr_ingest_test_pass";
     private static final String TENANT   = "migr-ingest-tenant";
 
-    // 384-dim collection (minilm token) so the fake vectors stay small.
+    // 384-dim collections (minilm token) so the fake vectors stay small.
     private static final String COLL_A = "knowledge__migr__minilm-l6-v2-384__v1";
     private static final String COLL_B = "docs__migr__minilm-l6-v2-384__v1";
+    private static final String COLL_BIG = "knowledge__migrbig__minilm-l6-v2-384__v1";
 
     // The sentinel credential we scan for across logs / response / persisted rows.
     private static final String SECRET_API_KEY = "ck-SENTINEL-super-secret-cloud-key-DO-NOT-LEAK";
@@ -144,76 +148,147 @@ class MigrationHandlerIngestCloudTest {
         if (pg != null) pg.stop();
     }
 
+    @org.junit.jupiter.api.BeforeEach
+    void clearChunks() throws SQLException {
+        // PER_CLASS shares one DB across tests; isolate each test's parity/count
+        // assertions by truncating the chunk tables (superuser bypasses RLS).
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            for (int dim : new int[] {384, 768, 1024}) {
+                su.createStatement().execute("TRUNCATE nexus.chunks_" + dim);
+            }
+        }
+    }
+
     @Test
-    void ingestCloud_copiesServerSide_andNeverLeaksCredentials() throws Exception {
-        // Fake source: 2 collections, pre-embedded chunks. Records the creds it was
-        // opened with so we can prove the handler USED them (in-memory) but leaked
-        // them nowhere.
+    void ingestCloud_copiesServerSide_reportsParity_andNeverLeaksCredentials() throws Exception {
         var openedWith = new AtomicReference<String[]>();
         FakeCloud fake = new FakeCloud(openedWith);
-        // chash ids are the 32-char chunk_text_hash (chunks_<dim>_chash_len_check).
-        fake.put(COLL_A, "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "alpha one", 384);
-        fake.put(COLL_A, "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2", "alpha two", 384);
-        fake.put(COLL_B, "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1", "bravo one", 384);
+        fake.put(COLL_A, chash("a", 1), "alpha one");
+        fake.put(COLL_A, chash("a", 2), "alpha two");
+        fake.put(COLL_B, chash("b", 1), "bravo one");
 
-        MigrationHandler handler = new MigrationHandler(pgVectors, fake);
+        Logger root = (Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            CapturingExchange ex = post(reqBody(SECRET_API_KEY, List.of(COLL_A, COLL_B)));
+            handleWithTenant(new MigrationHandler(pgVectors, fake), ex);
 
-        ListAppender<ILoggingEvent> logs = attachLogCapture();
+            assertThat(ex.status).as("ingest-cloud returns 200").isEqualTo(200);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> resp = MAPPER.readValue(ex.bodyString(), Map.class);
+            assertThat(resp.get("total")).isEqualTo(3);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> copied = (Map<String, Object>) resp.get("copied");
+            assertThat(copied).containsEntry(COLL_A, 2).containsEntry(COLL_B, 1);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> destCounts = (Map<String, Object>) resp.get("dest_counts");
+            assertThat(destCounts).as("parity: dest_counts == copied")
+                .containsEntry(COLL_A, 2).containsEntry(COLL_B, 1);
 
-        String reqBody = MAPPER.writeValueAsString(Map.of(
-            "source_tenant", "src-tenant",
-            "source_database", "src-db",
-            "source_api_key", SECRET_API_KEY,
-            "collections", List.of(COLL_A, COLL_B)));
-        CapturingExchange ex = new CapturingExchange("POST",
-            URI.create("/v1/migration/ingest-cloud"), reqBody);
-        handleWithTenant(handler, ex);
+            // Vectors actually landed server-side (client sent none).
+            assertThat(superuserCount(384, COLL_A)).isEqualTo(2L);
+            assertThat(superuserCount(384, COLL_B)).isEqualTo(1L);
 
-        // (1) Server-side copy succeeded; response is counts only.
-        assertThat(ex.status).as("ingest-cloud returns 200").isEqualTo(200);
-        @SuppressWarnings("unchecked")
-        Map<String, Object> resp = MAPPER.readValue(ex.bodyString(), Map.class);
-        assertThat(resp.get("total")).isEqualTo(3);
-        @SuppressWarnings("unchecked")
-        Map<String, Object> copied = (Map<String, Object>) resp.get("copied");
-        assertThat(copied).containsEntry(COLL_A, 2).containsEntry(COLL_B, 1);
+            // The handler used the client's ephemeral creds (in-memory only).
+            assertThat(openedWith.get()).containsExactly("src-tenant", "src-db", SECRET_API_KEY);
 
-        // (2) The vectors actually landed in pgvector server-side (client sent none).
-        assertThat(superuserCount(384, COLL_A)).as("COLL_A chunks in chunks_384").isEqualTo(2L);
-        assertThat(superuserCount(384, COLL_B)).as("COLL_B chunks in chunks_384").isEqualTo(1L);
-
-        // (3) The handler DID use the client-supplied ephemeral creds (in-memory).
-        assertThat(openedWith.get())
-            .as("handler opened the source with the client's ephemeral creds")
-            .containsExactly("src-tenant", "src-db", SECRET_API_KEY);
-
-        // (4) The api key leaked NOWHERE: not the response body ...
-        assertThat(ex.bodyString()).doesNotContain(SECRET_API_KEY);
-        //     ... not any log line ...
-        for (ILoggingEvent e : logs.list) {
-            assertThat(e.getFormattedMessage())
-                .as("no log line may contain the ephemeral api key").doesNotContain(SECRET_API_KEY);
+            // The api key leaked NOWHERE: response, logs, persisted metadata.
+            assertNoKeyLeak(ex, logs);
+        } finally {
+            root.detachAppender(logs);
         }
-        //     ... not any persisted chunk metadata.
-        assertThat(allChunkMetadataText(384))
-            .as("the api key must not be persisted in any chunk metadata")
-            .doesNotContain(SECRET_API_KEY);
+    }
+
+    @Test
+    void ingestCloud_paginatesLargeCollection_withAdvancingOffset() throws Exception {
+        int count = MigrationHandler.PAGE + 1;  // 301 → two pages (300 then 1)
+        FakeCloud fake = new FakeCloud(new AtomicReference<>());
+        for (int i = 0; i < count; i++) fake.put(COLL_BIG, chash("big", i), "doc " + i);
+
+        CapturingExchange ex = post(reqBody(SECRET_API_KEY, List.of(COLL_BIG)));
+        handleWithTenant(new MigrationHandler(pgVectors, fake), ex);
+
+        assertThat(ex.status).isEqualTo(200);
+        assertThat(superuserCount(384, COLL_BIG))
+            .as("all 301 chunks landed across two pages").isEqualTo((long) count);
+        assertThat(fake.offsetsFor(COLL_BIG))
+            .as("offset advanced by PAGE across pages").containsExactly(0, MigrationHandler.PAGE);
+    }
+
+    @Test
+    void ingestCloud_midCopyFailure_returns500_withPartialProgress_noLeak() throws Exception {
+        FakeCloud fake = new FakeCloud(new AtomicReference<>());
+        fake.put(COLL_A, chash("fa", 1), "ok one");
+        fake.put(COLL_B, chash("fb", 1), "never read");  // present in source ...
+        fake.failReadOn(COLL_B);                          // ... but its read throws mid-copy
+
+        Logger root = (Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            CapturingExchange ex = post(reqBody(SECRET_API_KEY, List.of(COLL_A, COLL_B)));
+            handleWithTenant(new MigrationHandler(pgVectors, fake), ex);
+
+            assertThat(ex.status).as("mid-copy failure → 500").isEqualTo(500);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> resp = MAPPER.readValue(ex.bodyString(), Map.class);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> partial = (Map<String, Object>) resp.get("copied_before_failure");
+            assertThat(partial).as("collections that landed before the failure are reported")
+                .containsEntry(COLL_A, 1);
+            // Even on the failure path the api key must not leak.
+            assertNoKeyLeak(ex, logs);
+        } finally {
+            root.detachAppender(logs);
+        }
+    }
+
+    @Test
+    void ingestCloud_unknownCollection_returns400() throws Exception {
+        FakeCloud fake = new FakeCloud(new AtomicReference<>());
+        fake.put(COLL_A, chash("u", 1), "present");
+        CapturingExchange ex = post(reqBody(SECRET_API_KEY, List.of("knowledge__typo__minilm-l6-v2-384__v1")));
+        handleWithTenant(new MigrationHandler(pgVectors, fake), ex);
+        assertThat(ex.status).as("a requested collection absent from source → 400").isEqualTo(400);
+        assertThat(ex.bodyString()).contains("not present in source");
     }
 
     @Test
     void ingestCloud_missingApiKey_returns400() throws Exception {
         MigrationHandler handler = new MigrationHandler(pgVectors,
             (t, d, k) -> { throw new AssertionError("source must not be opened on a bad request"); });
-        String reqBody = MAPPER.writeValueAsString(Map.of(
+        String body = MAPPER.writeValueAsString(Map.of(
             "source_tenant", "src-tenant", "source_database", "src-db"));  // no api key
-        CapturingExchange ex = new CapturingExchange("POST",
-            URI.create("/v1/migration/ingest-cloud"), reqBody);
+        CapturingExchange ex = post(body);
         handleWithTenant(handler, ex);
-        assertThat(ex.status).as("missing source_api_key → 400").isEqualTo(400);
+        assertThat(ex.status).isEqualTo(400);
         assertThat(ex.bodyString()).contains("source_api_key");
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /** Collision-free 32-char chash id: 4-char tag field + 28-digit index. */
+    private static String chash(String tag, int i) {
+        String t = (tag + "xxxx").substring(0, 4);
+        return t + String.format("%028d", i);  // exactly 32 chars, unique per i
+    }
+
+    private static String reqBody(String apiKey, List<String> collections) throws Exception {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("source_tenant", "src-tenant");
+        m.put("source_database", "src-db");
+        m.put("source_api_key", apiKey);
+        m.put("collections", collections);
+        return MAPPER.writeValueAsString(m);
+    }
+
+    private static CapturingExchange post(String body) {
+        return new CapturingExchange("POST", URI.create("/v1/migration/ingest-cloud"), body);
+    }
 
     private void handleWithTenant(MigrationHandler handler, CapturingExchange ex) throws Exception {
         RequestContext.set(new RequestContext.Principal(TENANT, null, false, false));
@@ -224,12 +299,13 @@ class MigrationHandlerIngestCloudTest {
         }
     }
 
-    private ListAppender<ILoggingEvent> attachLogCapture() {
-        Logger root = (Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        root.addAppender(appender);
-        return appender;
+    private void assertNoKeyLeak(CapturingExchange ex, ListAppender<ILoggingEvent> logs) throws SQLException {
+        assertThat(ex.bodyString()).as("api key not in response body").doesNotContain(SECRET_API_KEY);
+        for (ILoggingEvent e : logs.list) {
+            assertThat(e.getFormattedMessage()).as("api key not in any log line").doesNotContain(SECRET_API_KEY);
+        }
+        assertThat(allChunkMetadataText(384))
+            .as("api key not persisted in any chunk metadata").doesNotContain(SECRET_API_KEY);
     }
 
     private long superuserCount(int dim, String collection) throws SQLException {
@@ -247,32 +323,35 @@ class MigrationHandlerIngestCloudTest {
     private String allChunkMetadataText(int dim) throws SQLException {
         StringBuilder sb = new StringBuilder();
         try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT metadata::text FROM nexus.chunks_" + dim);
+             PreparedStatement ps = su.prepareStatement("SELECT metadata::text FROM nexus.chunks_" + dim);
              ResultSet rs = ps.executeQuery()) {
             while (rs.next()) sb.append(rs.getString(1)).append('\n');
         }
         return sb.toString();
     }
 
-    /** Fake in-memory cloud source — records the creds it was opened with. */
+    /** Fake in-memory cloud source: records opened creds + read offsets; can fail. */
     private static final class FakeCloud implements MigrationHandler.CloudSourceFactory {
-        private final Map<String, List<String>> ids = new java.util.LinkedHashMap<>();
-        private final Map<String, List<String>> docs = new java.util.LinkedHashMap<>();
-        private final Map<String, List<float[]>> vecs = new java.util.LinkedHashMap<>();
+        private final Map<String, List<String>> ids = new LinkedHashMap<>();
+        private final Map<String, List<String>> docs = new LinkedHashMap<>();
+        private final Map<String, List<float[]>> vecs = new LinkedHashMap<>();
+        private final Map<String, List<Integer>> offsets = new LinkedHashMap<>();
+        private String failReadOn;
         private final AtomicReference<String[]> openedWith;
 
-        FakeCloud(AtomicReference<String[]> openedWith) {
-            this.openedWith = openedWith;
-        }
+        FakeCloud(AtomicReference<String[]> openedWith) { this.openedWith = openedWith; }
 
-        void put(String coll, String id, String doc, int dim) {
-            float[] v = new float[dim];
-            v[0] = 1.0f;  // arbitrary unit-ish vector; value irrelevant to this test
+        void put(String coll, String id, String doc) {
+            float[] v = new float[384];
+            v[0] = 1.0f;
             ids.computeIfAbsent(coll, k -> new ArrayList<>()).add(id);
             docs.computeIfAbsent(coll, k -> new ArrayList<>()).add(doc);
             vecs.computeIfAbsent(coll, k -> new ArrayList<>()).add(v);
         }
+
+        void failReadOn(String coll) { this.failReadOn = coll; }
+
+        List<Integer> offsetsFor(String coll) { return offsets.getOrDefault(coll, List.of()); }
 
         @Override
         public MigrationHandler.CloudSource open(String tenant, String database, String apiKey) {
@@ -285,16 +364,20 @@ class MigrationHandlerIngestCloudTest {
 
                 @Override
                 public MigrationHandler.ChunkPage read(String coll, int limit, int offset) {
+                    offsets.computeIfAbsent(coll, k -> new ArrayList<>()).add(offset);
+                    if (coll.equals(failReadOn)) {
+                        // Message intentionally embeds a fake secret-shaped token to
+                        // prove the handler does not echo exception messages.
+                        throw new RuntimeException("chroma read failed body={token:" + SECRET_API_KEY + "}");
+                    }
                     List<String> cids = ids.getOrDefault(coll, List.of());
                     if (offset >= cids.size()) return MigrationHandler.ChunkPage.empty();
                     int end = Math.min(offset + limit, cids.size());
                     List<Map<String, Object>> metas = new ArrayList<>();
                     for (int i = offset; i < end; i++) metas.add(Map.of("k", "v"));
                     return new MigrationHandler.ChunkPage(
-                        cids.subList(offset, end),
-                        docs.get(coll).subList(offset, end),
-                        vecs.get(coll).subList(offset, end),
-                        metas);
+                        cids.subList(offset, end), docs.get(coll).subList(offset, end),
+                        vecs.get(coll).subList(offset, end), metas);
                 }
             };
         }
