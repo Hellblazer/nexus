@@ -2,12 +2,13 @@
 title: "Aspect-Worker Hosting in the Post-RDR-152 Service Topology: The Extraction Worker Has No Persistent Host, So Short-Lived Store Paths Never Extract"
 id: RDR-173
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-28
 accepted_date: 2026-06-28
+closed_date: 2026-07-01
 related_issues: [nexus-tih7j, nexus-575kd, nexus-8zog5]
 related_rdrs: [RDR-089, RDR-152, RDR-155, RDR-156, RDR-163, RDR-172, RDR-140, RDR-149]
 supersedes: []
