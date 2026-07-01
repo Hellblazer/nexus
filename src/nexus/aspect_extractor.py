@@ -87,6 +87,7 @@ from urllib.parse import quote
 
 import structlog
 
+from nexus import pdeathsig as _pdeathsig
 from nexus.aspect_readers import ReadFail, ReadOk, read_source, uri_for
 from nexus.db.t2.document_aspects import AspectRecord
 from nexus.mcp_infra import get_t3
@@ -1520,15 +1521,32 @@ def _run_claude_isolated(
     *,
     _argv: list[str] | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run ``claude -p`` in its OWN process group and, on timeout, kill the WHOLE
-    group (RDR-173 RF-8 / nexus-yobit). ``subprocess.run`` would kill only the
-    direct child on TimeoutExpired, orphaning any grandchildren claude spawned,
-    which keep running + burning API quota with the row stuck in_progress.
+    """Run ``claude -p`` isolated so it is never orphaned burning API quota
+    (RDR-173 RF-8 / nexus-4r9ja). Two independent mechanisms cover the death
+    scenarios:
 
-    ``start_new_session=True`` makes the child a session/group leader; on
-    TimeoutExpired we ``os.killpg`` the group (SIGKILL) so nothing is orphaned,
-    then reap. Behavioral parity with the old ``subprocess.run`` (stdin-fed
-    prompt, captured text output, raises ``subprocess.TimeoutExpired``).
+    - **Subprocess timeout** — ``start_new_session=True`` makes the child a
+      session/group leader; on ``TimeoutExpired`` we ``os.killpg`` the whole
+      group (SIGKILL), so any grandchildren claude spawned (e.g. MCP servers)
+      die too, not just the direct child. Then reap.
+    - **Parent (daemon) death** — ``preexec_fn`` arms ``PR_SET_PDEATHSIG=SIGKILL``
+      so the kernel kills claude when the aspect-worker daemon dies by ANY means,
+      including an uncatchable ``SIGKILL`` where no Python cleanup can run. This
+      is the actual RF-8 close. Linux-only (gated on ``LIBC is not None``).
+
+    Graceful daemon ``SIGTERM`` is **drain, not abort**: the daemon's ``stop()``
+    joins the in-flight extraction so it finishes (the quota is already spent),
+    bounded by the caller's subprocess ``timeout``. Only hard death (SIGKILL) or
+    the timeout kills claude.
+
+    **macOS / non-Linux gap:** ``PR_SET_PDEATHSIG`` has no equivalent, so a
+    daemon SIGKILL there CAN orphan claude until its own ``timeout`` elapses.
+    Accepted by OS limitation: prod is Linux; the Phase-3 reclaim-first loop
+    recovers the stranded ``in_progress`` row regardless, leaving only bounded
+    quota-burn; macOS is a dev-only host.
+
+    Behavioral parity with the old ``subprocess.run`` (stdin-fed prompt,
+    captured text output, raises ``subprocess.TimeoutExpired``).
     """
     argv = _argv or ["claude", "-p", "--output-format", "json"]
     proc = subprocess.Popen(
@@ -1538,6 +1556,7 @@ def _run_claude_isolated(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        preexec_fn=(_pdeathsig.set_pdeathsig_preexec if _pdeathsig.LIBC is not None else None),
     )
     try:
         out, err = proc.communicate(input=prompt, timeout=timeout)

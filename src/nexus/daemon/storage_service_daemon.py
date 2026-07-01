@@ -56,7 +56,6 @@ No direct-mode fallback — a service/PG outage is always fatal for callers.
 from __future__ import annotations
 
 import contextlib
-import ctypes
 import errno
 import os
 import re
@@ -64,7 +63,6 @@ import shutil
 import signal
 import socket
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -72,6 +70,7 @@ from typing import Any, Callable, Optional
 
 import structlog
 
+from nexus import pdeathsig as _pdeathsig
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     ServiceRegistry,
@@ -94,67 +93,14 @@ _REGISTRY_TIER: str = "storage_service"
 #: The host the Java service binds to (loopback-only, no cross-host federation).
 _SERVICE_HOST: str = "127.0.0.1"
 
-#: PR_SET_PDEATHSIG (linux/prctl.h): deliver a signal to THIS process when its
-#: parent dies. nexus-03bcg / f9y78: the supervisor spawns the JVM as a child;
-#: arming pdeathsig makes the JVM die WITH its supervisor, so an OOM-killed
-#: supervisor leaves NO orphaned-but-serving JVM. That removes the double-JVM
-#: hazard at heal-on-next-use WITHOUT a pid-keyed addr file or orphan sweep
-#: (both banned by the RDR-149 lifecycle gate — liveness stays lease-TTL).
-_PR_SET_PDEATHSIG: int = 1
-
-#: libc handle for the prctl(2) call, loaded ONCE at import (not in preexec_fn —
-#: only the pre-loaded function pointer is async-signal-safe to call post-fork).
-#: ``CDLL(None)`` resolves already-loaded symbols (works on glibc AND musl);
-#: ``None`` on non-Linux platforms, where PR_SET_PDEATHSIG does not exist.
-#: The pid of the process that imported this module — the supervisor, for the
-#: ``nx daemon service start --foreground`` process. Used by the pdeathsig race
-#: guard (below) to detect fork-vs-parent-death reparenting in a way that is
-#: subreaper-agnostic (``getppid()==1`` misses systemd/container subreapers,
-#: which reparent to themselves, not init).
-_SUPERVISOR_PID: int = os.getpid()
-
-_LIBC: ctypes.CDLL | None
-if sys.platform.startswith("linux"):
-    try:
-        _LIBC = ctypes.CDLL(None, use_errno=True)
-        _LIBC.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong]
-        _LIBC.prctl.restype = ctypes.c_int
-    except (OSError, AttributeError):  # pragma: no cover — libc/prctl must exist on Linux, but never crash import
-        _LIBC = None
-else:
-    _LIBC = None
-
-
-def _set_pdeathsig_preexec() -> None:
-    """``preexec_fn`` for the JVM child: arm PR_SET_PDEATHSIG so the JVM dies
-    when its supervisor (parent) dies — no orphaned service, no double-JVM on
-    heal-on-next-use (nexus-03bcg, RDR-149-aligned).
-
-    Runs in the child after ``fork()``, before ``exec()``. Async-signal-safe:
-    only the import-time-loaded ``_LIBC.prctl``, ``os.getppid``, ``os.write``,
-    and ``os._exit`` (NO structlog / allocation post-fork). No-op off Linux.
-
-    Two robustness details:
-    - A failed prctl (seccomp/SELinux/ancient kernel) is surfaced via an
-      async-signal-safe ``os.write`` to fd 2 — otherwise the orphan hazard would
-      silently reinstate with no diagnostic.
-    - Closes the fork-vs-parent-death race: if the supervisor died before prctl
-      ran, the signal was missed; ``getppid() != _SUPERVISOR_PID`` (the supervisor
-      that forked us) means we were reparented, so exit rather than orphan. This
-      is subreaper-agnostic (unlike a ``getppid()==1`` check).
-
-    NOTE (macOS / non-Linux): PR_SET_PDEATHSIG has no equivalent, so the
-    orphaned-JVM hazard persists on the inline/no-autostart path there; under
-    launchd the supervisor is restarted but a prior OOM orphan is NOT killed (it
-    lingers as a port-less, lease-less zombie until reboot). The Linux container
-    OOM scenario — the one this targets — is fully covered.
-    """
-    if _LIBC is None:  # non-Linux: PR_SET_PDEATHSIG unavailable
-        return
-    if _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL) != 0:
-        os.write(2, b"nexus: prctl(PR_SET_PDEATHSIG) failed; JVM will not die with supervisor\n")
-    if os.getppid() != _SUPERVISOR_PID:  # reparented → supervisor already dead → don't orphan
-        os._exit(0)
+#: PR_SET_PDEATHSIG arming lives in the shared ``nexus.pdeathsig`` primitive so
+#: the JVM child (nexus-03bcg: an OOM-killed supervisor leaves NO orphaned-but-
+#: serving JVM, no pid-keyed addr file or orphan sweep — both banned by the
+#: RDR-149 lifecycle gate) and the aspect-worker's ``claude -p`` child
+#: (nexus-4r9ja, RDR-173 RF-8) use ONE implementation. Re-exported under the
+#: historical names so the Popen call site below and its tests are unchanged.
+_LIBC = _pdeathsig.LIBC
+_set_pdeathsig_preexec = _pdeathsig.set_pdeathsig_preexec
 
 #: Path suffix of the spawn lock file inside config_dir.
 _SPAWN_LOCK_FILE: str = "storage_service_spawn.lock"
