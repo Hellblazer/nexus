@@ -2220,7 +2220,20 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
     from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid circular import
     _cat_path = catalog_path()
-    _cat = make_catalog_reader()
+    try:
+        _cat = make_catalog_reader()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        # Discovered via upgrade-shakeout.sh (10/12 FAIL) during the 6.1.0
+        # release gate: unlike every sibling check in this function (chroma
+        # pagination, storage-service health, migration state, RLS — all
+        # explicitly "gated internally... always safe to run"), this call was
+        # unguarded. In service mode with no reachable nexus-service (e.g. a
+        # bare `nx doctor` before `nx daemon service start`),
+        # resolve_service_config() raises RuntimeError uncaught, crashing the
+        # entire doctor command instead of degrading like _check_catalog
+        # already knows how to (cat=None -> "not initialized").
+        _log.warning("doctor_catalog_reader_unavailable", error=str(exc))
+        _cat = None
     results.extend(_check_catalog(_cat, _cat_path))
 
     # RDR-152 / bead nexus-gmiaf.33: storage-service checks.
