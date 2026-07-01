@@ -183,8 +183,22 @@ public final class TaxonomyHandler implements HttpHandler {
             log.debug("event=taxonomy_bad_request tenant={} op={} error={}", tenant, op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
         } catch (Exception e) {
-            log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
-            HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            // nexus-7e057 (RDR-172 follow-up): a client-supplied topic_id that
+            // does not exist violates the topic_assignments/topic_relations FK
+            // to topics(id) (e.g. assignTopic's INSERT) — same bug class as
+            // nexus-ov0sw. Map class-23 integrity violations to a typed 409
+            // ahead of the generic 500; sanitised client body (fixed message +
+            // sqlstate only), full detail to the server log.
+            String sqlState = HttpUtil.sqlState23(e);
+            if (sqlState != null) {
+                log.warn("event=taxonomy_handler_integrity_violation tenant={} op={} sqlstate={} error={}",
+                    tenant, op, sqlState, e.getMessage());
+                HttpUtil.send(exchange, 409, json(Map.of(
+                    "error", "integrity constraint violation", "sqlstate", sqlState)));
+            } else {
+                log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
+                HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            }
         }
     }
 

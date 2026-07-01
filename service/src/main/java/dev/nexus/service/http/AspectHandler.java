@@ -14,7 +14,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -172,33 +171,13 @@ public final class AspectHandler implements HttpHandler {
     }
 
     /**
-     * Walk the cause chain for a {@link SQLException} whose SQLSTATE is class 23
-     * (integrity-constraint violation: 23502 not-null, 23503 foreign-key, 23505
-     * unique, 23514 check). Returns the offending SQLSTATE string, or {@code null}
-     * if no class-23 cause exists.
-     *
-     * <p>jOOQ wraps the driver exception in a {@code DataAccessException}, so the
-     * constraint violation is a cause of the thrown runtime exception, not the
-     * top-level throwable — hence the chain walk. The walk is depth-bounded to
-     * tolerate a malformed (self- or mutually-referential) cause chain.
-     *
-     * <p>Walks the {@link Throwable#getCause()} chain only — correct for the
-     * PostgreSQL JDBC driver, which wraps via {@code initCause()}. It does NOT
-     * traverse {@link SQLException#getNextException()} (used by some other
-     * drivers for chained violations); generalise here if a non-PG driver is
-     * ever introduced.
+     * @deprecated moved to {@link HttpUtil#sqlState23} (nexus-7e057) so sibling
+     * handlers share one implementation; kept as a delegate for source
+     * compatibility with existing direct callers/tests of this class.
      */
+    @Deprecated
     static String sqlState23(Throwable t) {
-        Throwable c = t;
-        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
-            if (c instanceof SQLException se) {
-                String state = se.getSQLState();
-                if (state != null && state.startsWith("23")) {
-                    return state;
-                }
-            }
-        }
-        return null;
+        return HttpUtil.sqlState23(t);
     }
 
     // ── document_aspects handlers ──────────────────────────────────────────────
