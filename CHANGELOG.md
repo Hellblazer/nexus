@@ -6,7 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Target: **6.0.0** — the migration-capable release. The storage substrate moves
+## [6.0.0] - 2026-06-29
+
+The migration-capable release. The storage substrate moves
 from ChromaDB to Postgres 17 + pgvector behind a native service, and
 `nx guided-upgrade` is the one-command, validated, rollback-safe path that
 carries an existing install across. This is the first of a two-release
