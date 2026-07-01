@@ -68,6 +68,7 @@ def main() -> int:
     # ── 1. Seed a throwaway collection into ChromaCloud ──────────────────────
     client = chromadb.CloudClient(tenant=src_tenant, database=src_db, api_key=src_key)
     with_cleanup = False
+    dest_cleanup_ids: list[str] = []
     try:
         try:
             client.delete_collection(COLLECTION)  # idempotent re-run
@@ -76,6 +77,7 @@ def main() -> int:
         coll = client.create_collection(COLLECTION)
         with_cleanup = True
         ids = [_chash(i) for i in range(N_CHUNKS)]
+        dest_cleanup_ids = list(ids)  # same chash ids land verbatim in pgvector
         embeddings = [[1.0 if j == i % DIM else 0.0 for j in range(DIM)] for i in range(N_CHUNKS)]
         docs = [f"ingest-cloud gate chunk {i}" for i in range(N_CHUNKS)]
         metas = [{"gate": "ingest-cloud", "i": i} for i in range(N_CHUNKS)]
@@ -120,9 +122,32 @@ def main() -> int:
         if with_cleanup:
             try:
                 client.delete_collection(COLLECTION)
-                print(f"[cleanup] deleted ChromaCloud collection {COLLECTION}")
+                print(f"[cleanup] deleted ChromaCloud SOURCE collection {COLLECTION}")
             except Exception as e:  # noqa: BLE001 — cleanup is best-effort
-                print(f"[cleanup] WARNING: could not delete {COLLECTION}: {e}", file=sys.stderr)
+                print(f"[cleanup] WARNING: could not delete source {COLLECTION}: {e}", file=sys.stderr)
+            # DEST-side cleanup: ingest-cloud lands the same chash ids verbatim in
+            # pgvector on the target tenant; a passing run leaves them there
+            # otherwise, so a repeat run against a real tenant would accumulate
+            # residue. Idempotent — a 0-count delete is a silent no-op.
+            try:
+                del_resp = httpx.post(
+                    f"{url}/v1/vectors/store-delete",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "X-Nexus-Tenant": tenant,
+                        "Content-Type": "application/json",
+                    },
+                    json={"collection": COLLECTION, "ids": dest_cleanup_ids},
+                    timeout=30.0,
+                )
+                if del_resp.status_code == 200:
+                    n = (del_resp.json() or {}).get("deleted", "?")
+                    print(f"[cleanup] deleted {n} pgvector DEST chunks from {COLLECTION}")
+                else:
+                    print(f"[cleanup] WARNING: dest cleanup returned {del_resp.status_code}: "
+                         f"{del_resp.text[:200]}", file=sys.stderr)
+            except Exception as e:  # noqa: BLE001 — cleanup is best-effort
+                print(f"[cleanup] WARNING: could not delete dest chunks: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
