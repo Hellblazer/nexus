@@ -488,10 +488,16 @@ jobs:
           trap cleanup EXIT
           "$root/bin/initdb" --no-locale -D "$data" -U "$(id -un)" >/dev/null
           "$root/bin/pg_ctl" -D "$data" -o "-p 59987 -k $sock" -l "$reloc/pg.log" start
+          # Two SEPARATE psql calls, not one semicolon-joined -tAc: psql echoes
+          # each statement's own output (a DDL's completion tag AND a SELECT's
+          # row) concatenated into one combined -tAc stream, which is NOT the
+          # bare "vector" this assertion originally (incorrectly) expected.
+          "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -c \
+            "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null
           out="$("$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -tAc \
-            "CREATE EXTENSION IF NOT EXISTS vector; SELECT extname FROM pg_extension WHERE extname='vector';")"
+            "SELECT extname FROM pg_extension WHERE extname='vector'")"
           if [ "$out" != "vector" ]; then
-            echo "::error::relocation gate FAILED for $ASSET — CREATE EXTENSION vector did not return 'vector' (got: '$out')"
+            echo "::error::relocation gate FAILED for $ASSET — SELECT extname did not return 'vector' (got: '$out')"
             cat "$reloc/pg.log" >&2 || true
             exit 1
           fi
