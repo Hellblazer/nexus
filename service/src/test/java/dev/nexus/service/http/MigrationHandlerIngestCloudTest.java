@@ -238,8 +238,8 @@ class MigrationHandlerIngestCloudTest {
             Map<String, Object> resp = MAPPER.readValue(ex.bodyString(), Map.class);
             @SuppressWarnings("unchecked")
             Map<String, Object> partial = (Map<String, Object>) resp.get("copied_before_failure");
-            assertThat(partial).as("collections that landed before the failure are reported")
-                .containsEntry(COLL_A, 1);
+            assertThat(partial).as("only the collection that landed before the failure is reported")
+                .containsExactly(Map.entry(COLL_A, 1));
             // Even on the failure path the api key must not leak.
             assertNoKeyLeak(ex, logs);
         } finally {
