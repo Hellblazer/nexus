@@ -1527,17 +1527,25 @@ def _run_claude_isolated(
 
     - **Subprocess timeout** — ``start_new_session=True`` makes the child a
       session/group leader; on ``TimeoutExpired`` we ``os.killpg`` the whole
-      group (SIGKILL), so any grandchildren claude spawned (e.g. MCP servers)
-      die too, not just the direct child. Then reap.
+      group (SIGKILL). This reaches grandchildren that stay in claude's group.
+      NOTE the residual boundary: a grandchild that creates its OWN session
+      (e.g. an MCP server started with ``setsid`` / ``start_new_session``) is in
+      a different group and is NOT reached by this ``killpg`` — PR_SET_PDEATHSIG
+      is not inherited through ``exec`` into it either, so such grandchildren can
+      still be orphaned on the timeout path. Then reap.
     - **Parent (daemon) death** — ``preexec_fn`` arms ``PR_SET_PDEATHSIG=SIGKILL``
       so the kernel kills claude when the aspect-worker daemon dies by ANY means,
       including an uncatchable ``SIGKILL`` where no Python cleanup can run. This
       is the actual RF-8 close. Linux-only (gated on ``LIBC is not None``).
 
-    Graceful daemon ``SIGTERM`` is **drain, not abort**: the daemon's ``stop()``
-    joins the in-flight extraction so it finishes (the quota is already spent),
-    bounded by the caller's subprocess ``timeout``. Only hard death (SIGKILL) or
-    the timeout kills claude.
+    Graceful daemon ``SIGTERM`` shutdown: the daemon's ``stop()`` joins the
+    worker thread with a BOUNDED window (``AspectWorkerDaemon.stop(timeout)``,
+    default 10 s) so a short in-flight extraction drains (finishes — the quota is
+    already spent). An extraction still running when the join window elapses is
+    NOT waited on further: the daemon proceeds to exit and PR_SET_PDEATHSIG kills
+    claude at process exit (bounded quota-burn, no orphan). The unbounded
+    "let in-flight complete" drain is the separate RDR-173 P4 path
+    (``drain_worker`` / ``stop_claiming``), not this SIGTERM stop.
 
     **macOS / non-Linux gap:** ``PR_SET_PDEATHSIG`` has no equivalent, so a
     daemon SIGKILL there CAN orphan claude until its own ``timeout`` elapses.

@@ -37,6 +37,14 @@ _PR_SET_PDEATHSIG: int = 1
 #: ``getppid()==1`` check, which misses systemd/container subreapers). Captured
 #: at import; every process that spawns an armed child imports this module in
 #: that same process, so this equals the spawning process's pid.
+#:
+#: CONSTRAINT: this module must be imported in the SAME process that calls
+#: ``Popen`` with the preexec. A ``multiprocessing`` fork-start child would
+#: inherit ``_IMPORTER_PID`` from its parent, then call ``Popen`` — the
+#: grandchild's ``getppid()`` (the fork-child's pid) would differ from the
+#: inherited ``_IMPORTER_PID`` and the race guard would fire ``os._exit(0)`` on
+#: every spawn even with the parent alive. Exec-based subprocess spawning (the
+#: only pattern in this codebase — CLI, MCP server, daemons) is safe.
 _IMPORTER_PID: int = os.getpid()
 
 #: libc handle for the prctl(2) call, loaded ONCE at import (not in the

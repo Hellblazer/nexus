@@ -6,18 +6,21 @@ scenarios must not leave claude orphaned burning API quota:
 
 1. **Subprocess timeout** — the child runs in its OWN session/group
    (``start_new_session=True``); on ``TimeoutExpired`` the WHOLE group is
-   SIGKILL'd (``os.killpg``), so grandchildren claude spawned (e.g. MCP servers)
-   die too — not just the direct child.
+   SIGKILL'd (``os.killpg``), reaching grandchildren that stay in claude's group
+   (a grandchild that creates its own session escapes — documented residual gap).
 2. **Parent (daemon) death** — the child is armed with ``PR_SET_PDEATHSIG`` via
    ``preexec_fn`` so the kernel kills it when the aspect-worker daemon dies by
    ANY means, including an uncatchable SIGKILL. This is the actual RF-8 close.
 
-DECISION (nexus-4r9ja, brainstorming-gate 2026-07-01): graceful daemon SIGTERM
-is DRAIN, not abort — the in-flight extraction finishes (quota already spent),
-bounded by the subprocess timeout. Only hard death (SIGKILL) or timeout kills
-claude. macOS has no PR_SET_PDEATHSIG, so a daemon SIGKILL there can orphan
-claude until its own timeout; accepted (prod is Linux; reclaim-first recovers
-the row; macOS is dev-only).
+DECISION (nexus-4r9ja, brainstorming-gate 2026-07-01): on graceful daemon
+SIGTERM the ``stop()`` join gives a BOUNDED drain window (default 10 s) — a
+short in-flight extraction finishes (quota already spent); a longer one is
+killed by PR_SET_PDEATHSIG at process exit (bounded quota-burn, no orphan). The
+unbounded in-flight-completion drain is the separate RDR-173 P4
+``drain_worker`` / ``stop_claiming`` path, not the SIGTERM stop. macOS has no
+PR_SET_PDEATHSIG, so a daemon SIGKILL there can orphan claude until its own
+timeout; accepted (prod is Linux; reclaim-first recovers the row; macOS is
+dev-only).
 """
 from __future__ import annotations
 
@@ -77,13 +80,15 @@ def test_timeout_kills_grandchild_not_just_direct_child(tmp_path) -> None:
         "open(sys.argv[1], 'w').write(str(gc.pid))\n"
         "time.sleep(30)\n"                                   # keep the group alive
     )
+    # timeout=3.0 (not 1.5) so the child reliably starts python + spawns the
+    # grandchild + writes the pidfile BEFORE the kill fires, even on loaded CI.
     with pytest.raises(subprocess.TimeoutExpired):
         ax._run_claude_isolated(
-            "x", timeout=1.5,
+            "x", timeout=3.0,
             _argv=["python", "-c", child_prog, str(pidfile)],
         )
 
-    assert _wait_until(pidfile.exists, timeout=2.0), "child never spawned the grandchild"
+    assert _wait_until(pidfile.exists, timeout=4.0), "child never spawned the grandchild"
     gc_pid = int(pidfile.read_text().strip())
     try:
         assert _wait_until(lambda: not _pid_alive(gc_pid)), (
