@@ -164,7 +164,7 @@ class TestCollectionRouting:
         a subprocess mock that would have raised if called."""
         from nexus.aspect_extractor import extract_aspects
 
-        with patch("subprocess.run", side_effect=AssertionError("must not be called")):
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError("must not be called")):
             result = extract_aspects(
                 content="content",
                 source_path="/p1.pdf",
@@ -178,19 +178,20 @@ class TestCollectionRouting:
 
 class TestSuccessfulExtraction:
     def test_subprocess_invocation_shape(self, monkeypatch) -> None:
-        """``extract_aspects`` invokes ``claude -p --output-format json``
-        with the prompt fed via stdin (kwargs['input']), timeout=180,
-        capture_output=True, text=True. Stdin replaces argv to bypass
-        macOS ARG_MAX (errno 7) on multi-page papers."""
+        """``extract_aspects`` routes through the isolated runner with the prompt
+        (carrying the paper content) and the single-paper 180s budget. The
+        claude-argv + stdin + start_new_session invariants are pinned at the
+        runner level in tests/test_aspect_extractor_subprocess_isolation.py
+        (RDR-173 RF-8 moved the subprocess call into _run_claude_isolated)."""
         from nexus.aspect_extractor import extract_aspects
 
         captured: list[dict] = []
 
-        def fake_run(args, **kwargs):
-            captured.append({"args": args, "kwargs": kwargs})
+        def fake_run(prompt, timeout, **kwargs):
+            captured.append({"prompt": prompt, "timeout": timeout})
             return _make_completed(_ok_stdout())
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         extract_aspects(
             content="some paper text",
             source_path="/p1.pdf",
@@ -198,39 +199,33 @@ class TestSuccessfulExtraction:
         )
 
         assert len(captured) == 1
-        args = captured[0]["args"]
-        kwargs = captured[0]["kwargs"]
-        assert args == ["claude", "-p", "--output-format", "json"]
-        # Prompt is stdin-fed, not argv. Must include the paper content.
-        assert "some paper text" in kwargs.get("input", "")
-        assert kwargs.get("timeout") == 180
-        assert kwargs.get("capture_output") is True
-        assert kwargs.get("text") is True
+        assert "some paper text" in captured[0]["prompt"]   # content flows via the prompt
+        assert captured[0]["timeout"] == 180
 
     def test_argv_size_is_bounded_regardless_of_content_length(
         self, monkeypatch,
     ) -> None:
-        """Long documents must not bloat argv. The whole point of stdin
-        is that 14-page papers no longer trip macOS ARG_MAX."""
+        """Long documents never touch argv — the content rides the prompt (which
+        the isolated runner feeds via stdin), so a 14-page paper cannot trip
+        macOS ARG_MAX (errno 7)."""
         from nexus.aspect_extractor import extract_aspects
 
-        captured: list[dict] = []
+        captured: list[str] = []
 
-        def fake_run(args, **kwargs):
-            captured.append({"args": args, "kwargs": kwargs})
+        def fake_run(prompt, timeout, **kwargs):
+            captured.append(prompt)
             return _make_completed(_ok_stdout())
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        big_content = "X" * 200_000  # 200 KB — would have tripped E2BIG
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
+        big_content = "X" * 200_000  # 200 KB — would have tripped E2BIG on argv
         extract_aspects(
             content=big_content,
             source_path="/big.pdf",
             collection="knowledge__delos",
         )
-        # argv must stay tiny — only fixed flags. The content lives in stdin.
-        argv_bytes = sum(len(s) + 1 for s in captured[0]["args"])
-        assert argv_bytes < 256, f"argv unexpectedly grew to {argv_bytes} bytes"
-        assert len(captured[0]["kwargs"]["input"]) >= 200_000
+        # The big content is carried by the prompt (→ stdin in the runner),
+        # never as an argv token.
+        assert len(captured[0]) >= 200_000
 
     def test_strips_markdown_code_fence_around_json(self, monkeypatch) -> None:
         """The Claude CLI sometimes wraps JSON in a ```json ... ```
@@ -240,7 +235,7 @@ class TestSuccessfulExtraction:
         from nexus.aspect_extractor import extract_aspects
 
         monkeypatch.setattr(
-            subprocess, "run",
+            "nexus.aspect_extractor._run_claude_isolated",
             lambda *a, **kw: _make_completed(_ok_stdout(fence=True)),
         )
         record = extract_aspects(
@@ -266,7 +261,7 @@ class TestSuccessfulExtraction:
             calls.append(1)
             return _make_completed(json.dumps({"session_id": "x"}))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         record = extract_aspects(
             content="x", source_path="/p1.pdf", collection="knowledge__delos",
         )
@@ -278,7 +273,7 @@ class TestSuccessfulExtraction:
         from nexus.aspect_extractor import extract_aspects
 
         monkeypatch.setattr(
-            subprocess, "run", lambda *a, **kw: _make_completed(_ok_stdout()),
+            "nexus.aspect_extractor._run_claude_isolated", lambda *a, **kw: _make_completed(_ok_stdout()),
         )
         record = extract_aspects(
             content=_PAPER_SHAPED_CONTENT,
@@ -326,10 +321,10 @@ class TestContentSourcing:
         from nexus.aspect_extractor import extract_aspects
 
         def fake_run(args, **kwargs):
-            assert "INLINE_CONTENT_HERE" in kwargs.get("input", "")
+            assert "INLINE_CONTENT_HERE" in args
             return _make_completed(_ok_stdout())
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         extract_aspects(
             content="INLINE_CONTENT_HERE",
             source_path="/path/never/read.pdf",
@@ -358,7 +353,7 @@ class TestContentSourcing:
             ),
         )
 
-        with patch("subprocess.run", side_effect=AssertionError(
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "subprocess must NOT be called when read_source fails",
         )):
             result = extract_aspects(
@@ -396,10 +391,10 @@ class TestContentSourcing:
         monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
 
         def fake_run(args, **kwargs):
-            assert "T3_REASSEMBLED_CONTENT_FROM_CHUNKS" in kwargs.get("input", "")
+            assert "T3_REASSEMBLED_CONTENT_FROM_CHUNKS" in args
             return _make_completed(_ok_stdout())
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         record = extract_aspects(
             content="",
             source_path="/missing/on/disk.pdf",  # would fail if disk was tried
@@ -421,10 +416,10 @@ class TestContentSourcing:
         captured: list[str] = []
 
         def fake_run(args, **kwargs):
-            captured.append(kwargs.get("input", ""))
+            captured.append(args)
             return _make_completed(_ok_stdout())
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         extract_aspects(
             content="paper text with\x00null\x00bytes embedded",
             source_path="/p1.pdf",
@@ -452,7 +447,7 @@ class TestContentSourcing:
                 detail="FileNotFoundError: missing.pdf",
             ),
         )
-        with patch("subprocess.run", side_effect=AssertionError(
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "subprocess must NOT be called when read_source fails",
         )):
             result = extract_aspects(
@@ -590,10 +585,10 @@ class TestUriDispatch:
         monkeypatch.setattr("nexus.aspect_extractor.get_t3", lambda: client)
 
         def fake_run(args, **kwargs):
-            assert "Knowledge note about update capture." in kwargs.get("input", "")
+            assert "Knowledge note about update capture." in args
             return _make_completed(_ok_stdout())
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
 
         result = extract_aspects(
             content="",
@@ -629,7 +624,7 @@ class TestUriDispatch:
         )
         monkeypatch.setattr("nexus.aspect_extractor.get_t3", lambda: client)
 
-        with patch("subprocess.run", side_effect=AssertionError(
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "subprocess must NOT be called for a planted ghost",
         )):
             result = extract_aspects(
@@ -660,7 +655,7 @@ class TestUriDispatch:
             return ReadOk(text="x", metadata={})
 
         monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
-        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _make_completed(_ok_stdout()))
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", lambda *a, **kw: _make_completed(_ok_stdout()))
 
         extract_aspects(
             content="",
@@ -714,7 +709,7 @@ class TestUriDispatch:
             return ReadOk(text="content", metadata={"scheme": "chroma"})
 
         monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
-        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _make_completed(_ok_stdout()))
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", lambda *a, **kw: _make_completed(_ok_stdout()))
 
         extract_aspects(
             content="",
@@ -739,7 +734,7 @@ class TestRetry:
                 raise subprocess.TimeoutExpired(cmd=args, timeout=180)
             return _make_completed(_ok_stdout())
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         record = extract_aspects(
             content="x", source_path="/p1.pdf", collection="knowledge__delos",
         )
@@ -762,7 +757,7 @@ class TestRetry:
             idx[0] += 1
             return o
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         record = extract_aspects(
             content="x", source_path="/p1.pdf", collection="knowledge__delos",
         )
@@ -783,7 +778,7 @@ class TestRetry:
             idx[0] += 1
             return o
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         record = extract_aspects(
             content="x", source_path="/p1.pdf", collection="knowledge__delos",
         )
@@ -804,7 +799,7 @@ class TestRetry:
             calls.append(1)
             return _make_completed(bad_payload)
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         record = extract_aspects(
             content=_PAPER_SHAPED_CONTENT, source_path="/p1.pdf",
             collection="knowledge__delos",
@@ -833,7 +828,7 @@ class TestRetry:
                 "", stderr="Error: invalid API key", returncode=2,
             )
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         record = extract_aspects(
             content="x", source_path="/p1.pdf", collection="knowledge__delos",
         )
@@ -853,7 +848,7 @@ class TestRetry:
             calls.append(1)
             raise subprocess.TimeoutExpired(cmd=a[0], timeout=180)
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         record = extract_aspects(
             content="x", source_path="/p1.pdf", collection="knowledge__delos",
         )
@@ -880,7 +875,7 @@ class TestRetry:
             calls.append(1)
             raise OSError(7, "Argument list too long")
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         record = extract_aspects(
             content="x", source_path="/p1.pdf",
             collection="knowledge__delos",
@@ -959,7 +954,7 @@ class TestBatchExtraction:
             })
             return _make_completed(_wrap_inner(inner))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         records = extract_aspects_batch([
             ("knowledge__delos", "/p1.pdf", "content 1"),
             ("knowledge__delos", "/p2.pdf", "content 2"),
@@ -1009,7 +1004,7 @@ class TestBatchExtraction:
             })
             return _make_completed(_wrap_inner(inner))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         records = extract_aspects_batch([
             ("knowledge__delos", "/p1.pdf", "content 1"),
             ("knowledge__delos", "/p2.pdf", "content 2"),
@@ -1046,7 +1041,7 @@ class TestBatchExtraction:
             })
             return _make_completed(_wrap_inner(inner))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         records = extract_aspects_batch([
             ("knowledge__delos", "/p1.pdf", "content 1"),
             ("knowledge__delos", "/p2.pdf", "content 2"),
@@ -1091,7 +1086,7 @@ class TestBatchExtraction:
             })
             return _make_completed(_wrap_inner(inner))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         records = extract_aspects_batch([
             ("knowledge__delos", "/p1.pdf", "content 1"),
             ("knowledge__delos", "/p2.pdf", "content 2"),
@@ -1156,7 +1151,7 @@ class TestBatchExtraction:
     def test_batch_empty_input_returns_empty(self, monkeypatch) -> None:
         from nexus.aspect_extractor import extract_aspects_batch
 
-        with patch("subprocess.run", side_effect=AssertionError(
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "must not call subprocess on empty input",
         )):
             records = extract_aspects_batch([])
@@ -1170,7 +1165,7 @@ class TestBatchExtraction:
         # Unsupported collection only → no subprocess call.
         # code__* is unsupported by design (aspect extraction targets
         # prose claims, not source-code chunks).
-        with patch("subprocess.run", side_effect=AssertionError(
+        with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "must not call subprocess for unsupported-only batch",
         )):
             records = extract_aspects_batch([
@@ -1203,7 +1198,7 @@ class TestBatchExtraction:
             })
             return _make_completed(_wrap_inner(inner))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         records = extract_aspects_batch([
             ("code__nexus", "/skip.py", "content"),  # unsupported
             ("knowledge__delos", "/p1.pdf", "content 1"),
@@ -1222,7 +1217,7 @@ class TestBatchExtraction:
         captured_prompt: list[str] = []
 
         def fake_run(args, **kwargs):
-            captured_prompt.append(kwargs.get("input", ""))
+            captured_prompt.append(args)
             inner = json.dumps({
                 "papers": [
                     {
@@ -1239,7 +1234,7 @@ class TestBatchExtraction:
             })
             return _make_completed(_wrap_inner(inner))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         extract_aspects_batch([
             ("knowledge__delos", "/p1.pdf", "content with\x00null bytes"),
         ])
@@ -1255,7 +1250,7 @@ class TestBatchExtraction:
         headers_seen: list[str] = []
 
         def fake_run(args, **kwargs):
-            prompt = kwargs.get("input", "")
+            prompt = args
             is_prose = "NOT scholarly papers" in prompt
             headers_seen.append("prose" if is_prose else "paper")
             # Echo back whichever source_paths the prompt carried.
@@ -1276,7 +1271,7 @@ class TestBatchExtraction:
             key = "documents" if is_prose else "papers"
             return _make_completed(_wrap_inner(json.dumps({key: papers})))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         records = extract_aspects_batch([
             ("knowledge__delos", "/paper.pdf", _PAPER_SHAPED_CONTENT),
             ("knowledge__delos", "/note.md", "A short design note about caching. No paper structure here."),
@@ -1299,7 +1294,7 @@ class TestBatchExtraction:
 
         def fake_run(args, **kwargs):
             calls.append(1)
-            prompt = kwargs.get("input", "")
+            prompt = args
             papers = [
                 {
                     "source_path": sp,
@@ -1316,7 +1311,7 @@ class TestBatchExtraction:
             ]
             return _make_completed(_wrap_inner(json.dumps({"papers": papers})))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         records = extract_aspects_batch([
             ("knowledge__delos", "/a.md", "Just a note about onboarding."),
             ("knowledge__delos", "/b.md", "Another general essay on workflow."),
@@ -1333,7 +1328,7 @@ class TestBatchExtraction:
         def boom(*a, **kw):
             raise AssertionError("subprocess must not run for a parser_fn config")
 
-        monkeypatch.setattr(subprocess, "run", boom)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", boom)
         rdr_content = (
             "---\n"
             "id: RDR-999\nstatus: accepted\ntype: decision\n"
@@ -1448,7 +1443,7 @@ class TestDocumentShapeClassifier:
         from nexus.aspect_extractor import extract_aspects
 
         def fake_run(args, **kwargs):
-            prompt = kwargs.get("input", "")
+            prompt = args
             assert "NOT a" in prompt and "scholarly paper" in prompt, (
                 "prose doc must use the general-prose prompt"
             )
@@ -1462,7 +1457,7 @@ class TestDocumentShapeClassifier:
                 "confidence": 0.7,
             })))
 
-        monkeypatch.setattr(_sp, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         rec = extract_aspects(
             content=self._PROSE, source_path="/note.md",
             collection="knowledge__delos",
@@ -1540,11 +1535,9 @@ class TestGap3KnowledgeNoteRouting:
         prompt that instructs datasets/baselines ``[]``) before returning the
         prose-contract payload — so the empty fields are tied to the routing
         under test, not merely echoed."""
-        import subprocess as _sp
         from nexus.aspect_extractor import extract_aspects
 
-        def fake_run(args, **kwargs):
-            prompt = kwargs.get("input", "")
+        def fake_run(prompt, *a, **kwargs):
             assert "NOT a" in prompt and "scholarly paper" in prompt, (
                 "knowledge__knowledge prose note must use the general-prose prompt"
             )
@@ -1558,7 +1551,7 @@ class TestGap3KnowledgeNoteRouting:
                 "confidence": 0.6,
             })))
 
-        monkeypatch.setattr(_sp, "run", fake_run)
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
         rec = extract_aspects(
             content=self._NOTE, source_path="my-note",
             collection="knowledge__knowledge",
