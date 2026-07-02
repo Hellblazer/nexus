@@ -750,6 +750,30 @@ class TelemetryRepositoryTest {
             .isEmpty();
     }
 
+    @Test @Order(34)
+    void probeIds_timestampInstantEquivalence_offsetFormMatchesZuluImport() {
+        // R1 substantive-critic (2026-07-02): the VERBATIM-ECHO design's
+        // central claim — parseTsStrict compares INSTANTS, so a row imported
+        // with a "...Z" timestamp must probe as present when the candidate
+        // key renders the same instant as "...+00:00" (and the echoed tuple
+        // is the CALLER's form, never the stored rendering). This is the
+        // exact drift class the design exists to defuse; pin it.
+        repo.importRelevanceRow(TENANT_A,
+            "instant-eq-query", "instant-eq-chunk", "code__nexus", "store_put", "sess-eq",
+            "2025-05-08T12:30:00Z");
+
+        var offsetFormKey = List.<Object>of(
+            "instant-eq-query", "instant-eq-chunk", "store_put", "sess-eq",
+            "2025-05-08T12:30:00+00:00");
+
+        var present = repo.probeIds(TENANT_A, "relevance_log", List.of(offsetFormKey));
+
+        assertThat(present)
+            .as("+00:00 candidate must match the Z-imported instant, echoed in the CALLER's form")
+            .hasSize(1)
+            .containsExactly(offsetFormKey);
+    }
+
     @Test @Order(35)
     void probeIds_unknownTable_throwsIllegalArgument() {
         assertThatThrownBy(() ->
