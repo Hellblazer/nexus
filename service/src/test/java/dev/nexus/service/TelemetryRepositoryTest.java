@@ -638,6 +638,141 @@ class TelemetryRepositoryTest {
         }
     }
 
+    // ── probeIds (RDR-178 wave-2 P1, bead nexus-s3dd4.3) ──────────────────────
+    // Membership-probe identity endpoint for the verify-fill inner loop:
+    // given candidate conflict-key tuples, return the subset already present.
+    // Conflict-key column order/arity here mirrors telemetry-001-baseline.xml
+    // verbatim (see per-table UNIQUE indexes / PK definitions).
+
+    @Test @Order(26)
+    void probeIds_relevanceLog_returnsPresentSubsetVerbatim() {
+        repo.importRelevanceRow(TENANT_A,
+            "probe-query", "probe-chunk-1", "code__nexus", "store_put", "probe-sess",
+            "2025-05-01T00:00:00Z");
+
+        var presentKey = List.<Object>of(
+            "probe-query", "probe-chunk-1", "store_put", "probe-sess", "2025-05-01T00:00:00Z");
+        var missingKey = List.<Object>of(
+            "probe-query", "probe-chunk-NEVER", "store_put", "probe-sess", "2025-05-01T00:00:00Z");
+
+        var present = repo.probeIds(TENANT_A, "relevance_log", List.of(presentKey, missingKey));
+
+        assertThat(present)
+            .as("probeIds must echo back exactly the present key, verbatim")
+            .hasSize(1)
+            .containsExactly(presentKey);
+    }
+
+    @Test @Order(27)
+    void probeIds_searchTelemetry_returnsPresentSubset() {
+        repo.importSearchRow(TENANT_A,
+            "2025-05-02T00:00:00Z", "probe-hash-01", "probe-coll", 10, 5, 0.4, 0.5);
+
+        var presentKey = List.<Object>of("2025-05-02T00:00:00Z", "probe-hash-01", "probe-coll");
+        var missingKey = List.<Object>of("2025-05-02T00:00:00Z", "probe-hash-NEVER", "probe-coll");
+
+        var present = repo.probeIds(TENANT_A, "search_telemetry", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(28)
+    void probeIds_tierWrites_returnsPresentSubset() {
+        repo.importTierWriteRow(TENANT_A,
+            "probe-sess-tier", "2025-05-03T00:00:00Z", "memory_put", "T2", null, null, null);
+
+        var presentKey = List.<Object>of("probe-sess-tier", "2025-05-03T00:00:00Z", "memory_put", "T2");
+        var missingKey = List.<Object>of("probe-sess-tier", "2025-05-03T00:00:00Z", "memory_put", "T3");
+
+        var present = repo.probeIds(TENANT_A, "tier_writes", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(29)
+    void probeIds_nxAnswerRuns_returnsPresentSubset() {
+        repo.importNxAnswerRunRow(TENANT_A,
+            "probe question?", null, null, 1, "", 0.0, 0L, "2025-05-04T00:00:00Z");
+
+        var presentKey = List.<Object>of("probe question?", "2025-05-04T00:00:00Z");
+        var missingKey = List.<Object>of("probe question NEVER ASKED?", "2025-05-04T00:00:00Z");
+
+        var present = repo.probeIds(TENANT_A, "nx_answer_runs", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(32)
+    void probeIds_hookFailures_returnsPresentSubset() {
+        repo.importHookFailureRow(TENANT_A,
+            "probe-doc-1", "code__nexus", "probe-hook", "boom", "2025-05-05T00:00:00Z",
+            null, false, "single");
+
+        var presentKey = List.<Object>of("probe-doc-1", "probe-hook", "2025-05-05T00:00:00Z");
+        var missingKey = List.<Object>of("probe-doc-NEVER", "probe-hook", "2025-05-05T00:00:00Z");
+
+        var present = repo.probeIds(TENANT_A, "hook_failures", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(33)
+    void probeIds_frecency_returnsPresentSubset() {
+        repo.upsertFrecency(TENANT_A,
+            "probe-chunk-frecency", "2025-05-06T00:00:00Z", 30, 1.5, 2, "2025-05-06T00:00:00Z");
+
+        var presentKey = List.<Object>of("probe-chunk-frecency");
+        var missingKey = List.<Object>of("probe-chunk-frecency-NEVER");
+
+        var present = repo.probeIds(TENANT_A, "frecency", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(34)
+    void probeIds_tenantScoped_secondTenantSeesNothing() {
+        repo.importRelevanceRow(TENANT_A,
+            "tenant-scoped-query", "tenant-scoped-chunk", "code__nexus", "store_put", "sess-scoped",
+            "2025-05-07T00:00:00Z");
+
+        var key = List.<Object>of(
+            "tenant-scoped-query", "tenant-scoped-chunk", "store_put", "sess-scoped",
+            "2025-05-07T00:00:00Z");
+
+        var presentForOwner = repo.probeIds(TENANT_A, "relevance_log", List.of(key));
+        assertThat(presentForOwner)
+            .as("owning tenant must see its own row as present")
+            .hasSize(1);
+
+        var presentForOther = repo.probeIds(TENANT_B, "relevance_log", List.of(key));
+        assertThat(presentForOther)
+            .as("RLS: a second tenant must see NOTHING for the first tenant's row")
+            .isEmpty();
+    }
+
+    @Test @Order(35)
+    void probeIds_unknownTable_throwsIllegalArgument() {
+        assertThatThrownBy(() ->
+            repo.probeIds(TENANT_A, "not_a_real_table", List.of(List.of("x"))))
+            .as("probeIds with an unknown table must throw")
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(36)
+    void probeIds_wrongArity_throwsIllegalArgument() {
+        // frecency's conflict key is 1-tuple [chunk_id]; feed it 2 elements.
+        assertThatThrownBy(() ->
+            repo.probeIds(TENANT_A, "frecency", List.of(List.of("chunk-a", "extra"))))
+            .as("probeIds with a mis-sized key tuple must throw")
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(37)
+    void probeIds_emptyKeys_returnsEmptyList() {
+        var present = repo.probeIds(TENANT_A, "relevance_log", List.of());
+        assertThat(present).isEmpty();
+    }
+
     // ── RLS ────────────────────────────────────────────────────────────────────
 
     @Test @Order(24)

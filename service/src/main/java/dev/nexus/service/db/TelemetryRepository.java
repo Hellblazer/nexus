@@ -817,6 +817,117 @@ public final class TelemetryRepository {
         }
     }
 
+    // ── ids probe (RDR-178 wave-2 P1, bead nexus-s3dd4.3) ─────────────────────
+
+    /**
+     * Membership-probe for the verify-fill inner loop: given up to 300
+     * candidate conflict-key tuples for one of the six telemetry tables,
+     * return the SUBSET that already exists in this tenant's rows.
+     *
+     * <p>Matched tuples are echoed back VERBATIM from the input — never
+     * reconstructed from the stored TIMESTAMPTZ/TEXT values — so a caller
+     * computing {@code source_keys - present_keys} in Python cannot
+     * false-negative on timestamp string-formatting drift (e.g. Postgres
+     * rendering {@code "+00:00"} where the source sent {@code "Z"}). The
+     * batch-size cap itself is enforced by the HTTP handler
+     * ({@code TelemetryHandler}); this method just probes whatever it is
+     * given (empty input is a no-op).
+     *
+     * <p>Conflict-key column order per table (tenant_id is implicit via RLS;
+     * matches the UNIQUE indexes / PK defined in
+     * {@code telemetry-001-baseline.xml} verbatim — see that changelog for
+     * the authoritative source):
+     * <ul>
+     *   <li>{@code relevance_log}:    [query, chunk_id, action, session_id, timestamp]</li>
+     *   <li>{@code search_telemetry}: [ts, query_hash, collection]</li>
+     *   <li>{@code tier_writes}:      [session_id, ts, tool, tier]</li>
+     *   <li>{@code nx_answer_runs}:   [question, created_at]</li>
+     *   <li>{@code hook_failures}:    [doc_id, hook_name, occurred_at]</li>
+     *   <li>{@code frecency}:         [chunk_id]</li>
+     * </ul>
+     *
+     * <p>Implemented as one {@code EXISTS} check per candidate (not a single
+     * row-value {@code IN} or {@code VALUES}-CTE join) inside ONE
+     * {@link TenantScope#withTenant} transaction (RLS GUC set once) — at
+     * <=300 candidates this is a handful of index-backed lookups, and
+     * per-key EXISTS sidesteps the round-trip-formatting problem above by
+     * construction (the DB comparison is instant-vs-instant on TIMESTAMPTZ
+     * columns; only the ECHOED input string ever leaves this method).
+     *
+     * @throws IllegalArgumentException on an unknown {@code table}, or a key
+     *     tuple whose arity does not match that table's conflict-key column
+     *     count.
+     */
+    public List<List<Object>> probeIds(String tenant, String table, List<List<Object>> keys) {
+        if (keys == null || keys.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            List<List<Object>> present = new ArrayList<>();
+            for (List<Object> key : keys) {
+                boolean exists = switch (table) {
+                    case "relevance_log" -> {
+                        requireArity(table, key, 5);
+                        yield ctx.fetchExists(ctx.selectFrom(RELEVANCE_LOG).where(
+                            RELEVANCE_LOG.QUERY.eq(ks(key, 0))
+                                .and(RELEVANCE_LOG.CHUNK_ID.eq(ks(key, 1)))
+                                .and(RELEVANCE_LOG.ACTION.eq(ks(key, 2)))
+                                .and(RELEVANCE_LOG.SESSION_ID.eq(ks(key, 3)))
+                                .and(RELEVANCE_LOG.TIMESTAMP.eq(parseTsStrict(ks(key, 4))))));
+                    }
+                    case "search_telemetry" -> {
+                        requireArity(table, key, 3);
+                        yield ctx.fetchExists(ctx.selectFrom(SEARCH_TELEMETRY).where(
+                            SEARCH_TELEMETRY.TS.eq(parseTsStrict(ks(key, 0)))
+                                .and(SEARCH_TELEMETRY.QUERY_HASH.eq(ks(key, 1)))
+                                .and(SEARCH_TELEMETRY.COLLECTION.eq(ks(key, 2)))));
+                    }
+                    case "tier_writes" -> {
+                        requireArity(table, key, 4);
+                        yield ctx.fetchExists(ctx.selectFrom(TIER_WRITES).where(
+                            TIER_WRITES.SESSION_ID.eq(ks(key, 0))
+                                .and(TIER_WRITES.TS.eq(parseTsStrict(ks(key, 1))))
+                                .and(TIER_WRITES.TOOL.eq(ks(key, 2)))
+                                .and(TIER_WRITES.TIER.eq(ks(key, 3)))));
+                    }
+                    case "nx_answer_runs" -> {
+                        requireArity(table, key, 2);
+                        yield ctx.fetchExists(ctx.selectFrom(NX_ANSWER_RUNS).where(
+                            NX_ANSWER_RUNS.QUESTION.eq(ks(key, 0))
+                                .and(NX_ANSWER_RUNS.CREATED_AT.eq(parseTsStrict(ks(key, 1))))));
+                    }
+                    case "hook_failures" -> {
+                        requireArity(table, key, 3);
+                        yield ctx.fetchExists(ctx.selectFrom(HOOK_FAILURES).where(
+                            HOOK_FAILURES.DOC_ID.eq(ks(key, 0))
+                                .and(HOOK_FAILURES.HOOK_NAME.eq(ks(key, 1)))
+                                .and(HOOK_FAILURES.OCCURRED_AT.eq(parseTsStrict(ks(key, 2))))));
+                    }
+                    case "frecency" -> {
+                        requireArity(table, key, 1);
+                        yield ctx.fetchExists(ctx.selectFrom(FRECENCY).where(
+                            FRECENCY.CHUNK_ID.eq(ks(key, 0))));
+                    }
+                    default -> throw new IllegalArgumentException("Unknown table: " + table);
+                };
+                if (exists) present.add(key);
+            }
+            return present;
+        });
+    }
+
+    /** Candidate-key element accessor: null-safe stringify (empty-string columns never store NULL). */
+    private static String ks(List<Object> key, int idx) {
+        Object v = key.get(idx);
+        return v == null ? "" : v.toString();
+    }
+
+    private static void requireArity(String table, List<Object> key, int expected) {
+        if (key.size() != expected) {
+            throw new IllegalArgumentException(
+                "table '" + table + "' conflict key must have " + expected +
+                " elements, got " + key.size());
+        }
+    }
+
     // ── batch map-extraction helpers (mirror TelemetryHandler's per-row parse) ──
     private static String reqS(Map<String, Object> r, String k) {
         Object v = r.get(k);
