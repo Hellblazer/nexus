@@ -655,6 +655,15 @@ def read_rows_for_fill(
     A row that fails transform (currently only ``hook_failures`` on an
     unparseable timestamp) is SKIPPED and recorded via *collector* — same
     ``_SkipRow`` policy ``_run_batched`` applies, never a crash.
+
+    INVARIANT for future retention/TTL authors (R3b critique, 2026-07-02):
+    verify-fill treats a target-side-absent key as a HOLE and re-imports
+    it. As of today NO retention/pruning mechanism deletes rows from these
+    tables target-side, so that is correct. The moment a retention sweep
+    is added to any telemetry table, verify-fill will silently RESURRECT
+    pruned rows unless the fill path learns to exclude retention-expired
+    source rows (e.g. only probe/fill rows newer than the retention
+    horizon). Do not add retention without updating this path.
     """
     if table == "nx_answer_runs":
         cols = _NX_ANSWER_RUNS_COLS
