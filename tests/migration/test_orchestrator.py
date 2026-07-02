@@ -383,6 +383,35 @@ class TestMigrateAllPreflight:
         assert executed == []
         assert "nexus.migration._nexus_5drgy_missing_module" in str(excinfo.value)
 
+    def test_skipped_store_import_breakage_does_not_block_pending_stores(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Wave-1 composed review (2026-07-02): pre-flight (Gap 1) must not
+        run against stores excluded via skip_stores (Gap 7) — an import
+        breakage in an already-migrated store never executes, so it must not
+        abort genuinely-pending stores."""
+        executed: list[str] = []
+
+        def _etls(_s):
+            def bad_run(sources: EtlSources, collector) -> dict:
+                from nexus.migration._nexus_5drgy_missing_module import Thing  # noqa: F401,PLC0415
+
+                return {}
+
+            def good_run(sources: EtlSources, collector) -> dict:
+                executed.append("plans")
+                return {}
+
+            return [StoreEtl("memory", bad_run), StoreEtl("plans", good_run)]
+
+        monkeypatch.setattr(orch, "build_store_etls", _etls)
+        report = orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+            skip_stores=frozenset({"memory"}),
+        )
+        assert executed == ["plans"]
+        assert report["skipped_stores"] == ["memory"]
+
     def test_green_path_proceeds_through_the_ladder(self, tmp_path, monkeypatch) -> None:
         order: list[str] = []
         monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls(order))

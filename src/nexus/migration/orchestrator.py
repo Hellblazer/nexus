@@ -479,7 +479,10 @@ def migrate_all(
     # nexus-5drgy: import every ladder step's ETL module BEFORE any store
     # runs or any report is built — a version-skewed wheel must abort the
     # ENTIRE run up front, never mid-run after earlier stores have written.
-    assert_etls_importable(etls)
+    # Skipped stores (Gap 7) never run, so their ETL modules are excluded:
+    # an import breakage in an already-migrated store must not block
+    # genuinely-pending stores (wave-1 composed review, 2026-07-02).
+    assert_etls_importable([e for e in etls if e.store not in skip_stores])
 
     collector = IssueCollector()
     mig_id = migration_id or str(uuid.uuid4())
