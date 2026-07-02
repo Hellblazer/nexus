@@ -24,7 +24,7 @@ from, so a second pass genuinely observes post-fill convergence. This is
 the only way "second pass filled == 0" is evidence of anything rather than
 a tautology.
 
-Three surfaces + one composed CLI case, per the bead:
+Four surfaces + one composed CLI case, per the bead:
 
 1. ``TestChashRegressionFaultInjection`` — the chash relational path
    (:func:`nexus.migration.orchestrator.verify_fill_chash`), N=200/K=3.
@@ -36,21 +36,28 @@ Three surfaces + one composed CLI case, per the bead:
    ``document_chunks`` path (the ACTUAL 2026-07-01 incident shape, at
    fixture scale: K=3 of N=200 instead of 270-of-138k), via
    :func:`nexus.migration.orchestrator.verify_fill_catalog`.
-4. ``TestComposedCliFaultInjection`` — one CLI-level case
+4. ``TestTelemetryFaultInjection`` — the telemetry per-table delta path
+   (:func:`nexus.migration.orchestrator.verify_fill_telemetry`), the
+   residual disclosed at the original P6 landing (2026-07-02, see below):
+   a MAPPED table (``hook_failures``, N=200/K=3), an UNMAPPED table
+   (``frecency``, N=200/K=3 — pinning that an unmapped table still gets
+   genuine delta fill, never a full re-send), and a multi-column
+   conflict-key fidelity case (``search_telemetry``) proving the diff
+   identifies a hole by its FULL conflict-key tuple, not a partial-column
+   match.
+5. ``TestComposedCliFaultInjection`` — one CLI-level case
    (``nx storage migrate chash --verify-fill``, driven twice through the
    same stateful fakes) proving the wiring end-to-end, not just the
    library functions.
 
 Explicitly OUT of scope (residual scope on the parent bead nexus-s3dd4,
-NOT this module): telemetry's FAULT-INJECTION coverage — P3b
-(nexus-s3dd4.14) wired the real per-table delta-fill path
-(``verify_fill_telemetry`` in ``orchestrator.py``, tested against fake
-clients in ``test_verify_fill_wiring.py``), but the STATEFUL,
-self-mutating-fake fault-injection style this module uses (K-of-N hole,
-second-pass-is-a-true-no-op) has not been extended to telemetry yet — that
-remains P6's (nexus-s3dd4.7) job. Also out of scope: the
-``tests/e2e/migration-rehearsal`` hole-punch journey (cloud-gated, needs a
-deployed engine — separate follow-up).
+NOT this module): the ``tests/e2e/migration-rehearsal`` hole-punch
+journey (cloud-gated, needs a deployed engine — separate follow-up). This
+is now the ONLY residual — telemetry's fault-injection coverage (the gap
+disclosed at the original P6 landing, 2026-07-02: P3b/nexus-s3dd4.14
+wired the real per-table delta-fill path but the STATEFUL,
+self-mutating-fake fault-injection style this module uses had not been
+extended to it) is closed by ``TestTelemetryFaultInjection`` above.
 
 Also out of scope (P6 critic, 2026-07-02): the 300-row pagination
 boundary of the identity-fetch surfaces. The fakes here answer presence
@@ -74,7 +81,12 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.migration.orchestrator import verify_fill_catalog, verify_fill_chash
+from nexus.db.t2.telemetry_etl import conflict_key
+from nexus.migration.orchestrator import (
+    verify_fill_catalog,
+    verify_fill_chash,
+    verify_fill_telemetry,
+)
 from nexus.migration.vector_etl import migrate_collections, verify_fill_collections
 
 # Reuse the locked copy-not-move ETL fakes + seeding helpers (single source of
@@ -86,6 +98,11 @@ from tests.migration.test_vector_etl import (  # noqa: PLC2701 — shared test f
     _coll,
     _seed_source,
 )
+
+# Reuse the locked 6-table telemetry seeding helper (single source of truth;
+# mirrors test_verify_fill_wiring.py's own precedent for cross-file test-fake
+# reuse — a drift in the schema trips both suites).
+from tests.db.test_telemetry_etl import _seed_full_telemetry_db  # noqa: PLC2701 — shared test fixture
 
 _N = 200
 _K = 3
@@ -463,7 +480,247 @@ class TestCatalogDocumentChunksFaultInjection:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. composed CLI-level case
+# 4. telemetry (P6 residual close-out, nexus-s3dd4.7 comment 2026-07-02 14:29)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _StatefulTelemetryTarget:
+    """Single stateful object serving THREE roles against the SAME
+    ``present_by_table`` dict: the per-table identity source
+    (``probe_ids``), the import target (``import_rows_batch`` mutates the
+    same dict on receipt, keyed via the REAL ``conflict_key`` so a fault
+    scenario's expectations and the fake's own state can never drift
+    apart), and — via ``_LiveTelemetryCountSource`` below — the outer
+    count source for the two ``_VERIFY_TABLES``-mapped tables
+    (``hook_failures``, ``nx_answer_runs``). Same non-tautology discipline
+    as ``_StatefulChashTarget``/``_StatefulCatalogChunkTarget`` above: a
+    second pass genuinely re-probes post-fill state rather than replaying
+    a canned snapshot."""
+
+    def __init__(self, present_by_table: dict[str, set[tuple[Any, ...]]]) -> None:
+        self.present_by_table: dict[str, set[tuple[Any, ...]]] = {
+            t: set(s) for t, s in present_by_table.items()
+        }
+        self.probe_calls: list[tuple[str, list[list[Any]]]] = []
+        self.import_calls: list[tuple[str, list[dict[str, Any]]]] = []
+
+    def probe_ids(self, table: str, keys: list[list[Any]]) -> list[list[Any]]:
+        self.probe_calls.append((table, [list(k) for k in keys]))
+        present = self.present_by_table.get(table, set())
+        return [list(k) for k in keys if tuple(k) in present]
+
+    def import_rows_batch(self, table: str, rows: list[dict[str, Any]]) -> int:
+        self.import_calls.append((table, list(rows)))
+        for row in rows:
+            self.present_by_table.setdefault(table, set()).add(conflict_key(table, row))
+        return len(rows)
+
+    def close(self) -> None:
+        pass
+
+    @property
+    def total_rows_sent(self) -> int:
+        return sum(len(rows) for _t, rows in self.import_calls)
+
+
+#: relation (as reported by ``_VERIFY_TABLES``) -> telemetry table name,
+#: the inverse of the mapping ``verify_fill_telemetry`` uses internally.
+_TELEMETRY_RELATION_TO_TABLE = {
+    "nexus.hook_failures": "hook_failures",
+    "nexus.nx_answer_runs": "nx_answer_runs",
+}
+
+
+class _LiveTelemetryCountSource:
+    """Derives the two mapped-relation counts LIVE from the SAME
+    ``present_by_table`` dict the stateful target mutates on import — a
+    static/canned count would make a second pass indistinguishable from a
+    re-send bug (module docstring's non-tautology requirement)."""
+
+    def __init__(self, target: _StatefulTelemetryTarget) -> None:
+        self._target = target
+
+    def counts(self, relations: list[str]) -> dict[str, int]:
+        return {
+            r: len(
+                self._target.present_by_table.get(
+                    _TELEMETRY_RELATION_TO_TABLE.get(r, ""), set(),
+                )
+            )
+            for r in relations
+        }
+
+
+class TestTelemetryFaultInjection:
+    """P6 residual close-out (nexus-s3dd4.7 comment 2026-07-02 14:29): the
+    original P6 landing extended the stateful K-of-N fault-injection style
+    to chash/vectors/catalog but explicitly disclosed telemetry as
+    out-of-scope. This class closes that gap for
+    :func:`nexus.migration.orchestrator.verify_fill_telemetry`."""
+
+    def test_hole_of_k_in_mapped_table_filled_not_full_resend_then_second_pass_noop(
+        self, tmp_path: Path,
+    ) -> None:
+        """hook_failures IS ``_VERIFY_TABLES``-mapped (``nexus.hook_failures``)
+        — the outer count-diff goes divergent, and the inner probe/fill
+        loop must send exactly the K-row hole, never the N-row table."""
+        db = tmp_path / "t2.db"
+        hooks = [
+            {
+                "doc_id": f"d{i:04d}", "hook_name": "h1",
+                "occurred_at": "2024-01-01T00:00:00+00:00",  # already-canonical: no _normalize_timestamp drift
+            }
+            for i in range(_N)
+        ]
+        _seed_full_telemetry_db(db, hooks=hooks)
+
+        all_keys = {conflict_key("hook_failures", r) for r in hooks}
+        holed_rows = hooks[50 : 50 + _K]  # noqa: E203
+        holed_keys = {conflict_key("hook_failures", r) for r in holed_rows}
+        target = _StatefulTelemetryTarget({"hook_failures": all_keys - holed_keys})
+        count_source = _LiveTelemetryCountSource(target)
+
+        # ── pass 1: divergent -> fill exactly the hole ──────────────────
+        result1 = verify_fill_telemetry(db, target, count_source=count_source)
+
+        assert "fallback" not in result1  # never the store-wide full-ETL escape hatch
+        assert result1["outer"]["hook_failures"]["status"] == "divergent"
+        fill1 = result1["fill"]["hook_failures"]
+        assert fill1["missing"] == _K
+        assert fill1["filled"] == _K  # (a): K, never N
+        assert result1["total_filled"] == _K
+
+        # (b): the spy received EXACTLY K rows total, not the 200-row table
+        assert target.total_rows_sent == _K
+        sent_keys = {
+            conflict_key("hook_failures", row)
+            for _t, rows in target.import_calls
+            for row in rows
+        }
+        assert sent_keys == holed_keys
+
+        # (c): the hole is now genuinely closed in the (stateful) target
+        assert target.present_by_table["hook_failures"] == all_keys
+
+        # ── pass 2: true no-op ───────────────────────────────────────────
+        result2 = verify_fill_telemetry(db, target, count_source=count_source)
+
+        assert result2["outer"]["hook_failures"]["status"] == "parity"  # (c)
+        assert "hook_failures" not in result2["fill"]  # skip-on-parity, zero probe at all
+        assert result2["total_filled"] == 0  # (d)
+        assert target.total_rows_sent == _K  # (d): no further rows sent
+        assert len(target.import_calls) == 1  # still just the one batch from pass 1
+
+    def test_hole_of_k_in_unmapped_table_filled_not_full_resend_then_second_pass_noop(
+        self, tmp_path: Path,
+    ) -> None:
+        """frecency has NO ``_VERIFY_TABLES`` relation — its outer verdict
+        is ALWAYS ``indeterminate``, by design (nexus-s3dd4.14 design
+        decision 1). This pins that "always indeterminate" does NOT mean
+        "always full re-send": ``probe_ids`` still delta-fills exactly the
+        K-row hole out of N, every pass, on the strength of the identity
+        probe alone."""
+        db = tmp_path / "t2.db"
+        frecency_rows = [{"chunk_id": f"fc{i:04d}"} for i in range(_N)]
+        _seed_full_telemetry_db(db, frecency=frecency_rows)
+
+        all_keys = {conflict_key("frecency", r) for r in frecency_rows}
+        holed_rows = frecency_rows[50 : 50 + _K]  # noqa: E203
+        holed_keys = {conflict_key("frecency", r) for r in holed_rows}
+        target = _StatefulTelemetryTarget({"frecency": all_keys - holed_keys})
+        count_source = _LiveTelemetryCountSource(target)
+
+        # ── pass 1: indeterminate outer, but the probe finds exactly K missing ──
+        result1 = verify_fill_telemetry(db, target, count_source=count_source)
+
+        assert "fallback" not in result1
+        assert result1["outer"]["frecency"]["status"] == "indeterminate"  # unmapped, always
+        fill1 = result1["fill"]["frecency"]
+        assert fill1["missing"] == _K
+        assert fill1["filled"] == _K  # (a): K, never N=200
+        assert result1["total_filled"] == _K
+
+        # (b): the spy received EXACTLY K rows total, not the 200-row table
+        assert target.total_rows_sent == _K
+        sent_keys = {
+            conflict_key("frecency", row)
+            for _t, rows in target.import_calls
+            for row in rows
+        }
+        assert sent_keys == holed_keys
+
+        # (c): the hole is now genuinely closed in the (stateful) target
+        assert target.present_by_table["frecency"] == all_keys
+
+        # ── pass 2: true no-op (still probed every pass -- unmapped never
+        # reaches outer "parity" -- but the identity diff finds nothing left) ──
+        result2 = verify_fill_telemetry(db, target, count_source=count_source)
+
+        fill2 = result2["fill"]["frecency"]
+        assert fill2["missing"] == 0  # (c)
+        assert fill2["filled"] == 0  # (d)
+        assert result2["total_filled"] == 0
+        assert target.total_rows_sent == _K  # (d): no further rows sent
+        assert len(target.import_calls) == 1  # still just the one batch from pass 1
+
+    def test_multi_column_conflict_key_identifies_holed_row_by_full_tuple(
+        self, tmp_path: Path,
+    ) -> None:
+        """search_telemetry's conflict key is the 3-column tuple
+        ``(ts, query_hash, collection)``. Four rows share pairwise columns
+        with each other (same ``query_hash``+``collection`` as the holed
+        row except for ``ts``; same ``ts`` except for ``query_hash``; same
+        ``ts``+``query_hash`` except for ``collection``) -- if the fill
+        diffed on any PARTIAL sub-tuple instead of the full key, it would
+        either wrongly re-send an already-present row or wrongly skip the
+        genuinely-missing one. Asserting exact row IDENTITY of what was
+        sent is the load-bearing check here, not just a count."""
+        db = tmp_path / "t2.db"
+        present_row = {"ts": "2024-04-01T00:00:00Z", "query_hash": "qh1", "collection": "code__x"}
+        holed_row = {"ts": "2024-04-02T00:00:00Z", "query_hash": "qh1", "collection": "code__x"}
+        same_ts_diff_hash = {"ts": "2024-04-01T00:00:00Z", "query_hash": "qh2", "collection": "code__x"}
+        same_ts_hash_diff_coll = {"ts": "2024-04-01T00:00:00Z", "query_hash": "qh1", "collection": "code__y"}
+        rows = [present_row, holed_row, same_ts_diff_hash, same_ts_hash_diff_coll]
+        _seed_full_telemetry_db(db, search=rows)
+
+        present_keys = {
+            conflict_key("search_telemetry", r)
+            for r in (present_row, same_ts_diff_hash, same_ts_hash_diff_coll)
+        }
+        holed_key = conflict_key("search_telemetry", holed_row)
+        target = _StatefulTelemetryTarget({"search_telemetry": present_keys})
+        count_source = _LiveTelemetryCountSource(target)
+
+        # ── pass 1: exactly the one holed (ts, query_hash, collection) tuple ──
+        result1 = verify_fill_telemetry(db, target, count_source=count_source)
+
+        assert result1["outer"]["search_telemetry"]["status"] == "indeterminate"  # unmapped
+        fill1 = result1["fill"]["search_telemetry"]
+        assert fill1["missing"] == 1
+        assert fill1["filled"] == 1
+        assert result1["total_filled"] == 1
+
+        sent_keys = {
+            conflict_key("search_telemetry", row)
+            for _t, rows_sent in target.import_calls
+            for row in rows_sent
+        }
+        assert sent_keys == {holed_key}  # full-tuple identity, not a partial-column match
+        assert target.total_rows_sent == 1
+
+        # ── pass 2: true no-op ───────────────────────────────────────────
+        result2 = verify_fill_telemetry(db, target, count_source=count_source)
+
+        fill2 = result2["fill"]["search_telemetry"]
+        assert fill2["missing"] == 0
+        assert fill2["filled"] == 0
+        assert result2["total_filled"] == 0
+        assert target.total_rows_sent == 1
+        assert len(target.import_calls) == 1  # still just the one batch from pass 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. composed CLI-level case
 # ═══════════════════════════════════════════════════════════════════════════
 
 _CLI_N = 50
