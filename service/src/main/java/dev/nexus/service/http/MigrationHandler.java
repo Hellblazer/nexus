@@ -5,6 +5,7 @@ package dev.nexus.service.http;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import dev.nexus.service.db.MigrationJobRepository;
 import dev.nexus.service.vectors.ChromaRestClient;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
@@ -17,9 +18,15 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
- * RDR-176 Phase 4 (Gap 1, bead nexus-t9rmg.24) — cloud→cloud server-side ingest.
+ * RDR-176 Phase 4 (Gap 1, bead nexus-t9rmg.24) / RDR-178 Gap 5 (bead nexus-melvx) —
+ * cloud→cloud server-side ingest, in two modes.
  *
  * <p>{@code POST /v1/migration/ingest-cloud} drives a ChromaCloud→pgvector copy
  * <em>entirely server-side</em>: the service pulls each chunk page (ids,
@@ -27,22 +34,50 @@ import java.util.Map;
  * upserts into pgvector. The client only triggers + monitors — it NEVER
  * round-trips a vector.
  *
- * <p><b>Ephemeral credentials (Pillar 1b).</b> The source ChromaCloud
- * {@code tenant}/{@code database}/{@code api_key} are client-supplied in the
- * request body and held in method-local variables for the request lifetime
- * ONLY: never persisted, never logged. Error logs carry the exception TYPE, not
- * its message (a Chroma error message can embed the response body, which is
- * third-party-controlled) and never the request body. The response echoes
- * per-collection counts, never the credentials.
+ * <p><b>Two modes (nexus-melvx).</b> Production 2026-07-01 found that a synchronous
+ * copy of a &gt;~6k-chunk collection (&gt;~60s at ~105 chunks/s) outlives the nginx
+ * proxy timeout and 504s at the edge while the copy continues DETACHED — no
+ * completion signal, no progress, no error channel (5 of 52 collections that night).
+ * <ul>
+ *   <li><b>Async (default).</b> The request is validated synchronously (creds
+ *       present, {@code collections} a non-empty list) and a {@code migration_jobs}
+ *       row is created in {@code queued} state, then submitted to a bounded worker
+ *       pool ({@link #MAX_CONCURRENT_JOBS} concurrent; further jobs wait in the
+ *       pool's queue while their DB row stays {@code queued}). The response is
+ *       {@code 202 {"job_id": ...}} — immediate, well under any proxy timeout.
+ *       {@code GET /v1/migration/jobs/{id}} polls state + per-collection progress.
+ *       Idempotent: a POST naming the same (tenant, collection-set) as an existing
+ *       queued/running job returns THAT job's id rather than starting a second copy
+ *       (see {@link MigrationJobRepository#createOrReuseJob}).</li>
+ *   <li><b>Sync (back-compat, {@code "sync": true} in the body).</b> The ORIGINAL
+ *       RDR-176 P4 contract: the copy runs on the request thread and the response
+ *       is the final result (200 with {@code copied}/{@code dest_counts}/{@code total},
+ *       or 500 with {@code copied_before_failure} on a mid-copy failure). {@code
+ *       collections} may be omitted for a full-footprint copy of every source
+ *       collection. Preserved because the small-collection fast path and the
+ *       existing RDR-153/parity gate depend on this exact response shape.</li>
+ * </ul>
  *
- * <p><b>Correctness signals.</b> The response carries both {@code copied}
- * (chunks read from the source) and {@code dest_counts} (rows actually present
- * in pgvector after the upsert) per collection, so the client-side monitor can
- * verify parity (content-addressing means dest ≤ source-read when the source has
- * duplicate chunk text). A total drop (source had chunks, pgvector has none) is
- * a hard 500. A mid-copy failure returns 500 with the partial {@code copied}
- * progress so the operator can target a retry (upsert is idempotent via ON
- * CONFLICT).
+ * <p><b>Ephemeral credentials (Pillar 1b; extended by the 2026-07-02 gate-critique
+ * BINDING constraint for the jobs table).</b> The source ChromaCloud
+ * {@code tenant}/{@code database}/{@code api_key} are client-supplied in the
+ * request body and held in method-local variables — for the SYNC request's
+ * lifetime, or for the ASYNC worker task's lifetime (captured by the submitted
+ * lambda, discarded when the task completes) — ONLY: never persisted, never
+ * logged, and NEVER passed to {@link MigrationJobRepository} (see its class
+ * javadoc and {@code migration-001-baseline.xml}). Error logs (and the async job's
+ * persisted {@code error} column) carry the exception TYPE, not its message (a
+ * Chroma error message can embed the response body, which is third-party-
+ * controlled) and never the request body. Responses echo per-collection counts,
+ * never the credentials.
+ *
+ * <p><b>Correctness signals.</b> Both modes report {@code copied} (chunks read
+ * from the source) and {@code dest}/{@code dest_counts} (rows actually present in
+ * pgvector after the upsert) per collection, so the client-side monitor can verify
+ * parity (content-addressing means dest ≤ source-read when the source has
+ * duplicate chunk text). The sync mode's total drop (source had chunks, pgvector
+ * has none) is a hard 500; the async mode's per-collection failure marks the job
+ * {@code failed} with the exception type.
  *
  * <p><b>Egress.</b> The default {@link CloudSource} routes ChromaCloud reads
  * through {@link ChromaRestClient#cloud} which wires {@code EgressProxy}
@@ -59,6 +94,17 @@ public final class MigrationHandler implements HttpHandler {
 
     /** Trigger-request body cap: the body is a small JSON of creds + names. */
     static final int MAX_BODY_BYTES = 1 << 20;  // 1 MiB
+
+    /**
+     * Bounded async-job concurrency (bead nexus-melvx design point 2): production
+     * 2026-07-01 saw 3 detached copies stacking with zero admission control. At most
+     * this many jobs run at once; further submissions queue (their DB row stays
+     * {@code queued} until a worker thread picks them up).
+     */
+    static final int MAX_CONCURRENT_JOBS = 2;
+
+    /** URL prefix for the job-status route: {@code GET /v1/migration/jobs/<id>}. */
+    private static final String JOBS_PATH_PREFIX = "/v1/migration/jobs/";
 
     /** One page of chunks read from a cloud source (server-side, pre-embedded). */
     public record ChunkPage(List<String> ids, List<String> documents,
@@ -93,16 +139,31 @@ public final class MigrationHandler implements HttpHandler {
 
     private final PgVectorRepository pgVectors;
     private final CloudSourceFactory sourceFactory;
+    private final MigrationJobRepository jobRepo;
+    private final ExecutorService jobExecutor;
 
     /** Production wiring: the default source is egress-routed ChromaCloud. */
-    public MigrationHandler(PgVectorRepository pgVectors) {
-        this(pgVectors, ChromaCloudSource::open);
+    public MigrationHandler(PgVectorRepository pgVectors, MigrationJobRepository jobRepo) {
+        this(pgVectors, ChromaCloudSource::open, jobRepo);
     }
 
     /** Test wiring: inject a fake {@link CloudSourceFactory}. */
-    MigrationHandler(PgVectorRepository pgVectors, CloudSourceFactory sourceFactory) {
+    MigrationHandler(PgVectorRepository pgVectors, CloudSourceFactory sourceFactory,
+                     MigrationJobRepository jobRepo) {
         this.pgVectors = pgVectors;
         this.sourceFactory = sourceFactory;
+        this.jobRepo = jobRepo;
+        // Bounded pool: exactly MAX_CONCURRENT_JOBS threads, unbounded queue beyond
+        // that — a job's DB row stays "queued" for as long as it sits in this queue,
+        // which is exactly the "further jobs queue" admission-control requirement.
+        this.jobExecutor = new ThreadPoolExecutor(
+                MAX_CONCURRENT_JOBS, MAX_CONCURRENT_JOBS, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                r -> {
+                    Thread t = new Thread(r, "migration-job-worker");
+                    t.setDaemon(true);
+                    return t;
+                });
     }
 
     @Override
@@ -114,33 +175,95 @@ public final class MigrationHandler implements HttpHandler {
         }
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod();
-        if (!path.endsWith("/ingest-cloud")) {
-            HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
+
+        if (path.endsWith("/ingest-cloud")) {
+            if (!"POST".equals(method)) {
+                HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
+                return;
+            }
+            handleIngestCloud(exchange, tenant);
             return;
         }
-        if (!"POST".equals(method)) {
-            HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
+
+        if (path.startsWith(JOBS_PATH_PREFIX)) {
+            if (!"GET".equals(method)) {
+                HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
+                return;
+            }
+            String jobId = path.substring(JOBS_PATH_PREFIX.length());
+            if (jobId.isBlank() || jobId.contains("/")) {
+                HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
+                return;
+            }
+            handleGetJob(exchange, tenant, jobId);
             return;
         }
-        handleIngestCloud(exchange, tenant);
+
+        HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
     }
 
+    /**
+     * Parse + shape-validate the request body ONCE (the exchange's input stream
+     * can only be read once), then dispatch to the sync or async path. Shape
+     * validation (creds present; collections non-empty for async) is mode-agnostic
+     * and always fails fast with 4xx — it runs before either path touches the
+     * network or the job repository.
+     */
     private void handleIngestCloud(HttpExchange exchange, String tenant) throws IOException {
+        String srcTenant;
+        String srcDatabase;
+        String srcApiKey;
+        List<String> requested;
+        boolean sync;
+        try {
+            Map<String, Object> body = MAPPER.readValue(readBodyCapped(exchange), Map.class);
+
+            // Client-supplied EPHEMERAL credentials — method-local only from here on.
+            // Never logged, never persisted; for async they are captured by the
+            // worker lambda submitted below and die with that task.
+            srcTenant = requireString(body, "source_tenant");
+            srcDatabase = requireString(body, "source_database");
+            srcApiKey = requireString(body, "source_api_key");
+            requested = stringListOrNull(body.get("collections"));
+            sync = Boolean.TRUE.equals(body.get("sync"));
+
+            if (!sync && (requested == null || requested.isEmpty())) {
+                // Async mode has no synchronous network round-trip to discover a
+                // full-footprint collection list (that is precisely the slow call
+                // being deferred to the worker), so it requires an explicit list.
+                throw new BadRequest("collections (non-empty list) is required unless "
+                        + "\"sync\": true is set (sync mode supports full-footprint copy)");
+            }
+        } catch (BadRequest bad) {
+            HttpUtil.send(exchange, 400, "{\"error\":" + HttpUtil.jsonString(bad.getMessage()) + "}");
+            return;
+        } catch (Exception e) {
+            log.warn("event=migration_ingest_cloud_bad_request tenant={} error_type={}",
+                    tenant, e.getClass().getName());
+            HttpUtil.send(exchange, 400, "{\"error\":\"malformed request body\"}");
+            return;
+        }
+
+        if (sync) {
+            handleIngestCloudSync(exchange, tenant, srcTenant, srcDatabase, srcApiKey, requested);
+        } else {
+            handleIngestCloudAsync(exchange, tenant, srcTenant, srcDatabase, srcApiKey, requested);
+        }
+    }
+
+    /**
+     * BACK-COMPAT sync path — the original RDR-176 P4 contract, byte-for-byte
+     * (modulo taking its already-parsed arguments instead of parsing the body
+     * itself). The copy runs on the request thread; the response IS the result.
+     */
+    private void handleIngestCloudSync(HttpExchange exchange, String tenant,
+                                       String srcTenant, String srcDatabase, String srcApiKey,
+                                       List<String> requested) throws IOException {
         // Progress + parity accumulators live OUT here so a mid-copy failure can
         // still report which collections landed (targeted-retry signal).
         Map<String, Integer> copied = new LinkedHashMap<>();
         Map<String, Integer> destCounts = new LinkedHashMap<>();
         try {
-            Map<String, Object> body = MAPPER.readValue(readBodyCapped(exchange), Map.class);
-
-            // Client-supplied EPHEMERAL credentials — method-local only. Never
-            // logged, never persisted; they leave this method solely as the
-            // arguments to sourceFactory.open(...) and die with the request.
-            String srcTenant = requireString(body, "source_tenant");
-            String srcDatabase = requireString(body, "source_database");
-            String srcApiKey = requireString(body, "source_api_key");
-            List<String> requested = stringListOrNull(body.get("collections"));
-
             try (CloudSource src = sourceFactory.open(srcTenant, srcDatabase, srcApiKey)) {
                 List<String> available = src.collections();
                 List<String> collections;
@@ -160,18 +283,7 @@ public final class MigrationHandler implements HttpHandler {
                 }
 
                 for (String coll : collections) {
-                    int total = 0;
-                    for (int offset = 0; ; offset += PAGE) {
-                        ChunkPage page = src.read(coll, PAGE, offset);
-                        int n = page.ids().size();
-                        if (n == 0) break;
-                        // Server-side upsert of PRE-COMPUTED vectors — no re-embed,
-                        // no client round-trip.
-                        pgVectors.upsertChunksWithVectors(tenant, coll,
-                                page.ids(), page.documents(), page.embeddings(), page.metadatas());
-                        total += n;
-                        if (n < PAGE) break;  // short page = last page
-                    }
+                    int total = copyCollection(tenant, src, coll);
                     copied.put(coll, total);
                     log.info("event=migration_ingest_cloud_collection tenant={} collection={} chunks={}",
                             tenant, coll, total);
@@ -216,6 +328,110 @@ public final class MigrationHandler implements HttpHandler {
                     "error", "ingest-cloud failed",
                     "copied_before_failure", copied)));
         }
+    }
+
+    /**
+     * ASYNC path (default; RDR-178 Gap 5, nexus-melvx). Creates/reuses a job row
+     * and returns 202 immediately; the actual copy runs on {@link #jobExecutor}.
+     */
+    private void handleIngestCloudAsync(HttpExchange exchange, String tenant,
+                                        String srcTenant, String srcDatabase, String srcApiKey,
+                                        List<String> requested) throws IOException {
+        try {
+            MigrationJobRepository.CreateResult result = jobRepo.createOrReuseJob(tenant, requested);
+            if (result.created()) {
+                jobExecutor.submit(() -> runJob(tenant, result.jobId(), srcTenant, srcDatabase, srcApiKey, requested));
+            }
+            // else: an existing queued/running job already covers this (tenant,
+            // collection-set) — idempotent return, no second copy started.
+            HttpUtil.send(exchange, 202, MAPPER.writeValueAsString(Map.of("job_id", result.jobId())));
+        } catch (Exception e) {
+            log.warn("event=migration_ingest_cloud_job_create_failed tenant={} error_type={}",
+                    tenant, e.getClass().getName());
+            HttpUtil.send(exchange, 500, MAPPER.writeValueAsString(Map.of(
+                    "error", "failed to create migration job")));
+        }
+    }
+
+    /**
+     * Worker-thread body for one async job. Credentials are captured ONLY by this
+     * lambda's closure (see {@link #handleIngestCloudAsync}) and are never passed
+     * to {@link #jobRepo} — the job repository has no credential-shaped parameter
+     * on any method (BINDING constraint, see {@link MigrationJobRepository}).
+     */
+    private void runJob(String tenant, String jobId, String srcTenant, String srcDatabase, String srcApiKey,
+                        List<String> collections) {
+        try {
+            jobRepo.markRunning(tenant, jobId);
+        } catch (Exception e) {
+            // markRunning is OUTSIDE the main try/catch below (it must run first),
+            // so it needs its own guard — an uncaught exception here would strand
+            // the job in "queued" forever with no error recorded.
+            log.warn("event=migration_ingest_cloud_job_mark_running_failed tenant={} job_id={} error_type={}",
+                    tenant, jobId, e.getClass().getName());
+            jobRepo.markFailed(tenant, jobId, e.getClass().getName());
+            return;
+        }
+        try (CloudSource src = sourceFactory.open(srcTenant, srcDatabase, srcApiKey)) {
+            List<String> available = src.collections();
+            List<String> unknown = new ArrayList<>();
+            for (String c : collections) {
+                if (!available.contains(c)) unknown.add(c);
+            }
+            if (!unknown.isEmpty()) {
+                throw new BadRequest("collections not present in source: " + unknown);
+            }
+
+            for (String coll : collections) {
+                int total = copyCollection(tenant, src, coll);
+                int dest = pgVectors.count(tenant, coll);
+                // expected == total (copied): page reads are exhaustive per
+                // collection today; see MigrationJobRepository#recordCollectionResult.
+                jobRepo.recordCollectionResult(tenant, jobId, coll, total, dest, total);
+                log.info("event=migration_ingest_cloud_job_collection tenant={} job_id={} collection={} chunks={}",
+                        tenant, jobId, coll, total);
+            }
+            jobRepo.markDone(tenant, jobId);
+            log.info("event=migration_ingest_cloud_job_done tenant={} job_id={}", tenant, jobId);
+        } catch (Exception e) {  // noqa — must not persist the raw exception message / creds
+            // Same credential-safety posture as the sync path: the exception TYPE
+            // only, never the message (can embed a third-party response body).
+            log.warn("event=migration_ingest_cloud_job_failed tenant={} job_id={} error_type={}",
+                    tenant, jobId, e.getClass().getName());
+            jobRepo.markFailed(tenant, jobId, e.getClass().getName());
+        }
+    }
+
+    private void handleGetJob(HttpExchange exchange, String tenant, String jobId) throws IOException {
+        try {
+            Optional<Map<String, Object>> job = jobRepo.getJob(tenant, jobId);
+            if (job.isEmpty()) {
+                HttpUtil.send(exchange, 404, "{\"error\":\"job not found\"}");
+                return;
+            }
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(job.get()));
+        } catch (Exception e) {
+            log.warn("event=migration_job_get_failed tenant={} job_id={} error_type={}",
+                    tenant, jobId, e.getClass().getName());
+            HttpUtil.send(exchange, 500, "{\"error\":\"failed to fetch job\"}");
+        }
+    }
+
+    /** Page-copy one collection from {@code src} into pgvector. Shared by both modes. */
+    private int copyCollection(String tenant, CloudSource src, String coll) {
+        int total = 0;
+        for (int offset = 0; ; offset += PAGE) {
+            ChunkPage page = src.read(coll, PAGE, offset);
+            int n = page.ids().size();
+            if (n == 0) break;
+            // Server-side upsert of PRE-COMPUTED vectors — no re-embed,
+            // no client round-trip.
+            pgVectors.upsertChunksWithVectors(tenant, coll,
+                    page.ids(), page.documents(), page.embeddings(), page.metadatas());
+            total += n;
+            if (n < PAGE) break;  // short page = last page
+        }
+        return total;
     }
 
     /** Read the request body with a hard size cap (H3): never buffer unbounded input. */
