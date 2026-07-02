@@ -281,11 +281,11 @@ class TestMigrateAllVerifyFill:
                 {s: (lambda sources: {}) for s in
                  ("memory", "plans", "telemetry", "taxonomy")},
             ),
-            # chash/catalog under verify_fill=True construct REAL service
-            # clients (verify_fill_chash/verify_fill_catalog own that, by
-            # design, since a delta fill genuinely needs the real
-            # IdentitySource surfaces) -- stub them here too so this
-            # "flag is wired" test needs no live service.
+            # chash/catalog/telemetry under verify_fill=True construct REAL
+            # service clients (verify_fill_chash/verify_fill_catalog/
+            # verify_fill_telemetry own that, by design, since a delta fill
+            # genuinely needs the real IdentitySource surfaces) -- stub them
+            # here too so this "flag is wired" test needs no live service.
             patch(
                 "nexus.migration.orchestrator.verify_fill_chash",
                 lambda *a, **k: {
@@ -301,12 +301,23 @@ class TestMigrateAllVerifyFill:
                 },
             ),
             patch(
+                "nexus.migration.orchestrator.verify_fill_telemetry",
+                lambda *a, **k: {
+                    "store": "telemetry", "outer": {}, "fill": {},
+                    "total_filled": 0, "convergence_notes": [],
+                },
+            ),
+            patch(
                 "nexus.migration.orchestrator._open_chash_store",
                 lambda: _make_fake_chash_store({}, [])(),
             ),
             patch(
                 "nexus.migration.orchestrator._open_catalog_client",
                 lambda: type("_FakeCatalogClient", (), {"close": lambda self: None})(),
+            ),
+            patch(
+                "nexus.migration.orchestrator._open_telemetry_store",
+                lambda: type("_FakeTelemetryStore", (), {"close": lambda self: None})(),
             ),
             patch.dict("os.environ", {"NEXUS_CONFIG_DIR": str(config_dir)}),
         ):
@@ -315,11 +326,12 @@ class TestMigrateAllVerifyFill:
             ])
 
         assert result.exit_code == 0, result.output
-        # chash/catalog are real-etls here (fakes), so verify_fill_chash /
-        # verify_fill_catalog are NOT invoked by the CLI in this fake-etl
-        # setup -- build_store_etls is fully replaced. This test's purpose
-        # is narrower: prove --verify-fill is accepted and threaded through
-        # to migrate_all() without CLI-level errors.
+        # chash/catalog/telemetry are real-etls here (fakes), so
+        # verify_fill_chash / verify_fill_catalog / verify_fill_telemetry
+        # are NOT invoked by the CLI in this fake-etl setup -- build_store_etls
+        # is fully replaced. This test's purpose is narrower: prove
+        # --verify-fill is accepted and threaded through to migrate_all()
+        # without CLI-level errors.
         assert "memory" in order
 
 

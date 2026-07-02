@@ -578,3 +578,111 @@ def _migrate_frecency(
     return _run_batched(store, "frecency", rows, _build_frecency,
                         collector=collector, batch_log_every=batch_log_every, total=total,
                         breaker=breaker)
+
+
+# ── verify-fill P3b (nexus-s3dd4.14): conflict-key extraction + materialized
+#    per-table read, for the inner identity-diff + fill loop ─────────────────
+#
+# HttpTelemetryStore.probe_ids (RDR-178 wave-2 P1) is a genuine membership
+# probe for ALL SIX tables — the constants/helpers below are the single
+# source of truth for (a) which columns compose each table's conflict key,
+# in probe_ids' wire order, and (b) reading + TRANSFORMING a whole table's
+# rows for the diff (reusing the exact _build_* transform _run_batched uses,
+# so a filled row is byte-for-byte what a full ETL would have sent).
+
+#: Conflict-key column order per table, IN THE SAME ORDER
+#: ``HttpTelemetryStore.probe_ids`` expects — verbatim transcription of
+#: ``TelemetryRepository.probeIds``'s javadoc (itself transcribed from the
+#: UNIQUE indexes / PK in ``telemetry-001-baseline.xml``; see that method's
+#: docstring, the single source of truth this mirrors). NOTE
+#: ``relevance_log``'s key does NOT include ``collection`` (nexus-s3dd4.14
+#: R1 note 1) even though ``collection`` is a real column on the row.
+CONFLICT_KEY_COLUMNS: dict[str, tuple[str, ...]] = {
+    "relevance_log":    ("query", "chunk_id", "action", "session_id", "timestamp"),
+    "search_telemetry": ("ts", "query_hash", "collection"),
+    "tier_writes":      ("session_id", "ts", "tool", "tier"),
+    "nx_answer_runs":   ("question", "created_at"),
+    "hook_failures":    ("doc_id", "hook_name", "occurred_at"),
+    "frecency":         ("chunk_id",),
+}
+
+
+def conflict_key(table: str, row: dict[str, Any]) -> tuple[Any, ...]:
+    """Extract *row*'s conflict-key TUPLE for *table*, in
+    ``CONFLICT_KEY_COLUMNS`` / ``probe_ids`` wire order.
+
+    *row* MUST already be the TRANSFORMED dict shape (e.g. from
+    :func:`read_rows_for_fill` / the ``_build_*`` helpers — the same shape
+    ``import_rows_batch`` sends), not a raw SQLite row: ``session_id`` is
+    only coalesced to ``""`` (never ``None``) after transform, and
+    ``hook_failures.occurred_at`` is only in canonical ISO-8601 form after
+    ``_build_hook``'s ``_normalize_timestamp`` pass.
+    """
+    return tuple(row[c] for c in CONFLICT_KEY_COLUMNS[table])
+
+
+#: table -> (SQLite column tuple, per-row build function) for the five
+#: tables whose ``_build_*`` signature is ``(row, collector) -> (dict, str)``.
+#: ``nx_answer_runs`` needs an extra ``valid_plan_ids`` argument (its build
+#: function differs in signature) and is handled specially in
+#: :func:`read_rows_for_fill`.
+_SIMPLE_BUILDERS: dict[str, tuple[tuple[str, ...], Any]] = {
+    "relevance_log":    (_RELEVANCE_LOG_COLS, _build_relevance),
+    "search_telemetry": (_SEARCH_TELEMETRY_COLS, _build_search),
+    "tier_writes":      (_TIER_WRITES_COLS, _build_tier),
+    "hook_failures":    (_HOOK_FAILURES_COLS, _build_hook),
+    "frecency":         (_FRECENCY_COLS, _build_frecency),
+}
+
+
+def read_rows_for_fill(
+    conn: sqlite3.Connection, table: str, *, collector: Any = None,
+) -> list[dict[str, Any]]:
+    """Read + TRANSFORM ALL of *table*'s rows for the verify-fill inner
+    loop (P3b) — the SAME per-row ``_build_*`` transform ``_migrate_all``
+    uses, so a filled row is byte-for-byte identical to what a full ETL
+    would have sent (the conflict-key diff and the eventual
+    ``import_rows_batch`` payload must both see the transformed shape, not
+    the raw SQLite row).
+
+    Unlike ``_run_batched`` (which STREAMS rows through ``_iter_rows`` and
+    ships each batch immediately), this MATERIALIZES the whole table — the
+    verify-fill diff needs the complete source key set to compute against
+    ``HttpTelemetryStore.probe_ids`` before any row is sent. Mirrors
+    chash's ``_read_chash_rows_by_collection`` (same materialize-then-diff
+    shape).
+
+    A row that fails transform (currently only ``hook_failures`` on an
+    unparseable timestamp) is SKIPPED and recorded via *collector* — same
+    ``_SkipRow`` policy ``_run_batched`` applies, never a crash.
+    """
+    if table == "nx_answer_runs":
+        cols = _NX_ANSWER_RUNS_COLS
+        valid_plan_ids: set[int] = set()
+        try:
+            valid_plan_ids = {
+                int(r[0]) for r in conn.execute("SELECT id FROM plans").fetchall()
+            }
+        except sqlite3.OperationalError:
+            pass  # no plans table in source -- every plan_id is then a dangler
+
+        def build(row: dict[str, Any], c: Any) -> tuple[dict[str, Any], str]:
+            return _build_nx(row, c, valid_plan_ids)
+    else:
+        cols, build = _SIMPLE_BUILDERS[table]
+
+    rows: list[dict[str, Any]] = []
+    for raw in _iter_rows(conn, table, cols, page_size=_READ_PAGE):
+        try:
+            row_dict, _sample_id = build(raw, collector)
+        except _SkipRow as skip:
+            _log.error(f"telemetry_etl.{table}.row_failed", error=skip.reason)
+            if collector is not None:
+                collector.record(
+                    "telemetry", table,
+                    issue_class=skip.issue_class, constraint=table,
+                    reason=skip.reason, action="failed", sample_id=skip.sample_id,
+                )
+            continue
+        rows.append(row_dict)
+    return rows

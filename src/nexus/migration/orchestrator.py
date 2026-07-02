@@ -878,14 +878,266 @@ def verify_fill_catalog(
     }
 
 
+# ── telemetry: real IdentitySource (probe_ids) + fill orchestration ──────────
+#
+# RDR-178 wave-2 P3b (nexus-s3dd4.14): the delta path for the six telemetry
+# tables, gated on the wave-3 engine cut (engine-service-v0.1.18+, the
+# ``/v1/telemetry/ids/probe`` membership-probe endpoint — P1, nexus-s3dd4.3).
+
+_TELEMETRY_TABLES: tuple[str, ...] = (
+    "relevance_log", "search_telemetry", "tier_writes",
+    "nx_answer_runs", "hook_failures", "frecency",
+)
+
+
+class _TelemetryProbeIdentitySource:
+    """Real :class:`~nexus.migration.verify_fill.IdentitySource` wiring for
+    ONE telemetry table via ``HttpTelemetryStore.probe_ids``.
+
+    Unlike chash's/catalog's flat single-column identities, a telemetry
+    conflict key is a MULTI-COLUMN tuple (see
+    ``telemetry_etl.CONFLICT_KEY_COLUMNS``) — ``fill_missing``'s
+    ``str``-typed ``IdentitySource``/``key_fn`` contract is duck-typed to
+    tuples here (hashable, comparable, exactly what the diff needs; the
+    same widening precedent as ``verify_fill._manifest_key`` accepting two
+    real row shapes despite its own narrower declared type).
+
+    A failure here (transport error, 5xx, …) reports the same as chash's/
+    catalog's real ``IdentitySource`` wiring: ``present() -> None`` ->
+    indeterminate for THIS table only — including a 404, in the unlikely
+    event one reaches this far. The MIXED-FLEET 404 case (R1 note 2: a
+    pre-v0.1.18 engine 404s ``/v1/telemetry/ids/probe`` entirely) is a
+    store-wide capability gap, not a per-table condition, so it is checked
+    ONCE up front by :func:`_telemetry_probe_supported` — by the time this
+    class's ``present()`` runs, capability has already been confirmed.
+    """
+
+    def __init__(self, store: Any, table: str, key_tuples: list[tuple[Any, ...]]) -> None:
+        self._store = store
+        self._table = table
+        self._key_tuples = key_tuples
+
+    def present(self) -> set[tuple[Any, ...]] | None:
+        try:
+            present = self._store.probe_ids(
+                self._table, [list(k) for k in self._key_tuples],
+            )
+        except Exception as exc:  # noqa: BLE001 — unreachable surface -> indeterminate (verify_fill's own documented contract); the store-wide 404-capability case is pre-screened by _telemetry_probe_supported before this is ever reached
+            _log.warning(
+                "verify_fill.telemetry_identity_unreachable",
+                table=self._table, error=str(exc),
+            )
+            return None
+        return {tuple(k) for k in present}
+
+
+def _telemetry_import_fn(store: Any, table: str) -> Callable[[list[dict[str, Any]]], Any]:
+    def _import(batch: list[dict[str, Any]]) -> Any:
+        return store.import_rows_batch(table, batch)
+    return _import
+
+
+def _telemetry_probe_supported(
+    store: Any, rows_by_table: dict[str, list[dict[str, Any]]],
+) -> bool:
+    """One-shot capability probe (R1 note 2, mixed-fleet 404): pick the
+    first table (deterministic sort) with >=1 row needing a fill decision
+    and probe its FIRST row's conflict key alone.
+    ``/v1/telemetry/ids/probe`` is ONE endpoint shared by all six tables —
+    a 404 on it means every subsequent probe would also 404, so this is
+    checked ONCE, up front, rather than re-discovered per table.
+
+    Returns ``False`` ONLY on a confirmed 404 (old engine, no capability
+    at all). Any other outcome — success, or a non-404 failure (which the
+    per-table :class:`_TelemetryProbeIdentitySource` will independently
+    re-encounter and report as indeterminate for THAT table) — returns
+    ``True``: only a genuine store-wide capability gap forces the full-ETL
+    fallback; a transient failure must not.
+    """
+    import httpx  # noqa: PLC0415 — deferred; only needed on this capability-check path
+    from nexus.db.t2.telemetry_etl import conflict_key  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    for table in sorted(rows_by_table):
+        rows = rows_by_table[table]
+        if not rows:
+            continue
+        probe_key = conflict_key(table, rows[0])
+        try:
+            store.probe_ids(table, [list(probe_key)])
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return False
+        except Exception:  # noqa: BLE001 — any other transport failure: capability presumed present, the per-table probe will independently report indeterminate for that table
+            pass
+        return True
+    return True  # nothing needs filling at all -- vacuously "supported"
+
+
+def verify_fill_telemetry(
+    sqlite_path: Path,
+    http_telemetry: Any,
+    *,
+    count_source: "CountSource | None" = None,
+    batch_size: int = 300,
+    breaker: Any = None,
+    collector: Any = None,
+) -> dict[str, Any]:
+    """RDR-178 wave-2 P3b (nexus-s3dd4.14): verify-fill (delta) for the
+    ``telemetry`` store — all six tables, uniformly.
+
+    Design decision 1 (R1 open question — the 4 unmapped tables): the outer
+    count-diff (``_VERIFY_TABLES``) maps only 2/6 tables (``hook_failures``,
+    ``nx_answer_runs``) to a PG relation — the other four
+    (``relevance_log``, ``search_telemetry``, ``tier_writes``,
+    ``frecency``) have NO count-parity fast path and are therefore ALWAYS
+    ``indeterminate`` at the outer level. Per ``verify_fill.py``'s own
+    contract an indeterminate table is NEVER a silent pass — but here
+    "never a pass" does NOT mean "fall back to a full re-send", because
+    ``HttpTelemetryStore.probe_ids`` (P1) is a genuine per-table identity
+    surface for ALL SIX tables regardless of the count-relation mapping.
+    So every table (mapped or not) gets the SAME treatment: a MAPPED,
+    PARITY table skips its probe entirely (zero HTTP writes, matching
+    chash/catalog); every OTHER table (divergent, or indeterminate because
+    unmapped) is probed via ``probe_ids`` and only the rows genuinely
+    missing are re-sent.
+
+    Design decision 2 (R1 open question — the DO-NOTHING event-log
+    question): is a count-diff + identity fill worth it for append-only
+    event-log tables (``relevance_log``/``tier_writes``/``nx_answer_runs``/
+    ``hook_failures``), or is a bounded full re-send acceptable? Settled
+    here as YES, delta-fill them too — rejected the alternative (full
+    re-send for the 4 unmapped tables) because that is EXACTLY the
+    2026-07-01-incident shape verify-fill exists to avoid: these are the
+    append-mostly tables most likely to grow into the hundreds of
+    thousands of rows, ``probe_ids`` makes the cheap per-table diff
+    available for them regardless of the PG count-relation gap, and
+    ``import_rows_batch`` is idempotent (``DO NOTHING`` / composite PK) so
+    there is no correctness reason to prefer a full re-send over a precise
+    one. A store-wide full-ETL fallback is reserved for the ONE case where
+    NO diff is possible at all — see decision 3.
+
+    Design decision 3 (R1 note 2 — mixed-fleet 404): a pre-v0.1.18 engine
+    404s ``/v1/telemetry/ids/probe`` (it does not exist yet). This is
+    checked ONCE, up front, via :func:`_telemetry_probe_supported` — NOT
+    caught per table, and NOT allowed to propagate and crash
+    ``migrate all`` (``HttpTelemetryStore.probe_ids`` intentionally does
+    NOT catch transport errors — fail-closed by design, see its own
+    docstring). On a confirmed 404 this falls back to
+    :func:`~nexus.db.t2.telemetry_etl.migrate_telemetry_rows` (the
+    unchanged full ETL) for the ENTIRE telemetry store — never per-table
+    indeterminate-fill, never a blind resend passed off as a fill.
+
+    Scope boundary: this function is wired into :func:`migrate_all`'s
+    ``verify_fill=True`` ladder loop (mirroring ``chash``/``catalog``).
+    The single-store CLI command (``nx storage migrate telemetry
+    --verify-fill``) is NOT re-wired here — it continues to call
+    :func:`verify_fill_generic_or_full` (the P4 CLI-flag-surface behavior,
+    unconditional full ETL on any non-parity table). Out of P3b's scope
+    (CLI flag-surface wiring); tracked as residual follow-up on the parent
+    bead.
+    """
+    from nexus.db.t2.telemetry_etl import (  # noqa: PLC0415 — R2-style import-cycle guard, mirrors verify_fill_chash/verify_fill_catalog
+        _open_ro,
+        conflict_key,
+        count_source_rows,
+        migrate_telemetry_rows,
+        read_rows_for_fill,
+    )
+    from nexus.migration.verify_fill import fill_missing, verify_store_counts  # noqa: PLC0415 — R2 import-cycle guard, mirrored from verify_fill.py
+    from nexus.retry import EtlCircuitBreaker  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    batch_size = clamp_fill_batch_size(batch_size)
+    cs = count_source or ServiceCountSource()
+
+    source_counts = count_source_rows(sqlite_path)
+    outer_verdicts = verify_store_counts("telemetry", cs, source_counts)
+
+    conn = _open_ro(sqlite_path)
+    try:
+        rows_by_table: dict[str, list[dict[str, Any]]] = {}
+        for table in _TELEMETRY_TABLES:
+            status = outer_verdicts.get(table, {}).get("status", "indeterminate")
+            if status == "parity":
+                continue  # zero-write skip, matches chash/catalog
+            rows_by_table[table] = read_rows_for_fill(conn, table, collector=collector)
+    finally:
+        conn.close()
+
+    if rows_by_table and not _telemetry_probe_supported(http_telemetry, rows_by_table):
+        _log.warning(
+            "verify_fill.telemetry_probe_unsupported_full_fallback",
+            reason="pre-v0.1.18 engine -- /v1/telemetry/ids/probe 404'd",
+        )
+        full_results = migrate_telemetry_rows(
+            sqlite_path, http_telemetry, collector=collector, breaker=breaker,
+        )
+        total_filled = sum(v["written"] for v in full_results.values())
+        return {
+            "store": "telemetry", "outer": outer_verdicts, "fallback": "full_etl",
+            "full_results": full_results, "total_filled": total_filled,
+            "convergence_notes": dedup_convergence_notes("telemetry", outer_verdicts),
+        }
+
+    fill_results: dict[str, Any] = {}
+    total_filled = 0
+    for table in sorted(rows_by_table):
+        rows = rows_by_table[table]
+        if not rows:
+            fill_results[table] = {
+                "source_count": 0, "target_count": None, "missing": 0,
+                "filled": 0, "status": "parity",
+            }
+            continue
+
+        key_tuples = [conflict_key(table, r) for r in rows]
+
+        def _key_fn(r: dict[str, Any], _t: str = table) -> tuple[Any, ...]:
+            return conflict_key(_t, r)
+
+        identity_source = _TelemetryProbeIdentitySource(http_telemetry, table, key_tuples)
+        result = _try_fill(
+            lambda: fill_missing(  # noqa: B023 — invoked immediately by _try_fill, not deferred past this iteration
+                source_rows=rows,
+                key_fn=_key_fn,
+                identity_source=identity_source,
+                import_fn=_telemetry_import_fn(http_telemetry, table),
+                batch_size=batch_size,
+                breaker=breaker,
+                table=table,
+            ),
+            store="telemetry", table_name=table, collector=collector,
+            recovery=lambda: _recover_flat_fill(identity_source, rows, _key_fn),  # noqa: B023
+        )
+        fill_results[table] = result
+        total_filled += result["filled"]
+
+    if collector is not None:
+        for table, result in fill_results.items():
+            collector.count_read("telemetry", table, result.get("source_count", 0))
+            collector.count_written("telemetry", table, result.get("filled", 0))
+
+    return {
+        "store": "telemetry", "outer": outer_verdicts, "fill": fill_results,
+        "total_filled": total_filled,
+        "convergence_notes": dedup_convergence_notes("telemetry", outer_verdicts),
+    }
+
+
 # ── generic stores: outer-verify-only, skip-on-parity else full ETL ──────────
 #
-# memory/plans/telemetry/taxonomy have NO wired inner-fill surface yet
-# (P3b, gated on the wave-3 engine cut) — but the outer count-diff loop is
-# store-agnostic and reuses each store's EXISTING ``count_source_rows``
-# (the --dry-run counting function), so these four stores still benefit
-# from "skip the full re-send when nothing changed" even without a delta
-# fill path. A non-parity table falls back to the unchanged full ETL.
+# memory/plans/taxonomy have NO wired inner-fill surface yet — but the
+# outer count-diff loop is store-agnostic and reuses each store's EXISTING
+# ``count_source_rows`` (the --dry-run counting function), so these three
+# stores still benefit from "skip the full re-send when nothing changed"
+# even without a delta fill path. A non-parity table falls back to the
+# unchanged full ETL.
+#
+# telemetry graduated to REAL delta-fill wiring in P3b (nexus-s3dd4.14, see
+# ``verify_fill_telemetry`` below) once the wave-3 engine
+# (``/v1/telemetry/ids/probe``, engine-service-v0.1.18+) landed — it is
+# handled in :func:`migrate_all`'s ladder loop the same way chash/catalog
+# are, NOT through ``_GENERIC_VERIFY_FILL_COUNTERS`` below.
 
 
 def _memory_source_counts(sources: EtlSources) -> dict[str, int]:
@@ -901,19 +1153,18 @@ def _plans_source_counts(sources: EtlSources) -> dict[str, int]:
 
 
 def _telemetry_source_counts(sources: EtlSources) -> dict[str, int]:
+    """Retained for :func:`verify_fill_generic_or_full`-shaped callers and
+    its own regression coverage (``test_telemetry_source_counts_passes_
+    all_six_tables_through``). No longer consulted by
+    ``_GENERIC_VERIFY_FILL_COUNTERS`` / :func:`migrate_all` since P3b
+    (nexus-s3dd4.14) — telemetry now has REAL per-table delta-fill wiring
+    (:func:`verify_fill_telemetry`), so a 2/6-table PG mapping no longer
+    forces an all-or-nothing store-level decision; each table (mapped or
+    not) is diffed and filled independently. See ``verify_fill_telemetry``'s
+    docstring for the full design rationale."""
     from nexus.db.t2.telemetry_etl import count_source_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     counts = count_source_rows(sources.sqlite_path)
-    # ALL six telemetry tables pass through, deliberately including the 4
-    # with no _VERIFY_TABLES PG mapping (relevance_log, search_telemetry,
-    # tier_writes, frecency). Those land ``indeterminate`` in
-    # verify_store_counts — and indeterminate is never a pass — so a
-    # telemetry --verify-fill can NEVER skip the full ETL on the strength
-    # of the 2 mapped tables alone. Pre-filtering to the mapped pair made
-    # 2/6-table parity read as store-level parity, silently skipping the
-    # ETL over an undetectable hole in the other 4 (R4 substantive-critic
-    # HIGH, 2026-07-02). Telemetry becomes skippable only when .14/RDR-177
-    # gives every table a verify seam.
     return dict(counts)
 
 
@@ -929,14 +1180,15 @@ def _taxonomy_source_counts(sources: EtlSources) -> dict[str, int]:
 
 
 #: store -> function computing its _VERIFY_TABLES-shaped source counts, for
-#: the generic (outer-verify-only) verify-fill path. ``chash``/``catalog``
-#: are handled separately (real delta fill, see above); ``aspects`` /
-#: ``aspects_queue`` are NOT in this map (no dry-run counting seam wired
-#: today) and always run the full ETL under verify-fill, same as before.
+#: the generic (outer-verify-only) verify-fill path. ``chash``/``catalog``/
+#: ``telemetry`` are handled separately (real delta fill — see
+#: ``verify_fill_chash`` / ``verify_fill_catalog`` / ``verify_fill_telemetry``
+#: above/below); ``aspects`` / ``aspects_queue`` are NOT in this map (no
+#: dry-run counting seam wired today) and always run the full ETL under
+#: verify-fill, same as before.
 _GENERIC_VERIFY_FILL_COUNTERS: dict[str, Callable[[EtlSources], dict[str, int]]] = {
     "memory": _memory_source_counts,
     "plans": _plans_source_counts,
-    "telemetry": _telemetry_source_counts,
     "taxonomy": _taxonomy_source_counts,
 }
 
@@ -949,9 +1201,13 @@ def verify_fill_generic_or_full(
     count_source: "CountSource | None" = None,
 ) -> tuple[dict[str, "TableVerdict"], Any | None, list[str]]:
     """CLI-facing generic verify-fill gate for a store with NO delta-fill
-    surface yet (memory/plans/telemetry/taxonomy — P3b). Runs ONLY the
-    outer count-diff: *run_full* (the store's existing unchanged ETL) is
-    SKIPPED entirely when every table is at parity; otherwise it is called.
+    surface yet (memory/plans/taxonomy — and, still, ``nx storage migrate
+    telemetry --verify-fill``'s single-store CLI command, which continues
+    to call this generic gate directly rather than
+    :func:`verify_fill_telemetry` — see that function's docstring for the
+    scope boundary). Runs ONLY the outer count-diff: *run_full* (the
+    store's existing unchanged ETL) is SKIPPED entirely when every table is
+    at parity; otherwise it is called.
 
     Returns ``(verdicts, full_result_or_None, convergence_notes)`` — the
     single-store CLI commands use ``full_result is None`` as the "nothing
@@ -983,6 +1239,14 @@ def _open_catalog_client() -> Any:
     from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     return make_catalog_client_for_migration()
+
+
+def _open_telemetry_store() -> Any:
+    """No-arg ``HttpTelemetryStore`` — resolves its endpoint config-first,
+    same as :func:`_open_chash_store` / :func:`_open_catalog_client`."""
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    return HttpTelemetryStore()
 
 
 def _etl_import_modules(run: Callable[[EtlSources, Any], dict]) -> tuple[str, ...]:
@@ -1118,8 +1382,9 @@ def migrate_all(
     store that ran and wrote zero rows). Default ``frozenset()`` is fully
     backward compatible — every store always runs.
 
-    ``verify_fill`` (RDR-178 wave-2 P4, nexus-s3dd4.5): when True, run the
-    delta path instead of the unconditional full re-send. Per store:
+    ``verify_fill`` (RDR-178 wave-2 P4, nexus-s3dd4.5; telemetry P3b,
+    nexus-s3dd4.14): when True, run the delta path instead of the
+    unconditional full re-send. Per store:
 
     - ``chash`` / ``catalog`` — real inner-fill wiring
       (:func:`verify_fill_chash` / :func:`verify_fill_catalog`): the outer
@@ -1127,11 +1392,20 @@ def migrate_all(
       (send ONLY the missing rows, or — for catalog's documents/links,
       which have no wired fill surface — fall back to the full ETL for the
       whole store).
-    - ``memory`` / ``plans`` / ``telemetry`` / ``taxonomy`` — outer-verify
-      only (no delta fill surface yet, P3b): parity SKIPS the store
-      entirely (folded into ``skip_stores`` / ``report["skipped_stores"]`
-      — the same signal an already-migrated pre-flight uses); non-parity
-      falls back to the unchanged full ETL.
+    - ``telemetry`` — real inner-fill wiring (:func:`verify_fill_telemetry`,
+      P3b): PER-TABLE, not store-wide — a table WITH a PG count mapping
+      (``hook_failures``/``nx_answer_runs``) skips its probe on parity; the
+      other four (no count mapping, always indeterminate) are ALWAYS probed
+      and delta-filled via ``HttpTelemetryStore.probe_ids`` (never treated
+      as a store-wide "run the full ETL" signal). The ONE case that DOES
+      fall back to the whole-store full ETL is a confirmed 404 on
+      ``/v1/telemetry/ids/probe`` (pre-v0.1.18 engine, mixed-fleet gate —
+      see that function's docstring).
+    - ``memory`` / ``plans`` / ``taxonomy`` — outer-verify only (no delta
+      fill surface yet): parity SKIPS the store entirely (folded into
+      ``skip_stores`` / ``report["skipped_stores"]`` — the same signal an
+      already-migrated pre-flight uses); non-parity falls back to the
+      unchanged full ETL.
     - ``aspects`` / ``aspects_queue`` — always the full ETL (no counting
       seam wired for these yet); ``verify_fill`` has no effect on them.
 
@@ -1208,6 +1482,19 @@ def migrate_all(
                 finally:
                     with contextlib.suppress(Exception):
                         catalog_client.close()
+                verify_fill_outer[etl.store] = result["outer"]
+                verify_fill_results[etl.store] = result
+                verify_fill_notes.extend(result["convergence_notes"])
+            elif verify_fill and etl.store == "telemetry":
+                telemetry_store = _open_telemetry_store()
+                try:
+                    result = verify_fill_telemetry(
+                        sources.sqlite_path, telemetry_store, count_source=cs,
+                        collector=collector,
+                    )
+                finally:
+                    with contextlib.suppress(Exception):
+                        telemetry_store.close()
                 verify_fill_outer[etl.store] = result["outer"]
                 verify_fill_results[etl.store] = result
                 verify_fill_notes.extend(result["convergence_notes"])

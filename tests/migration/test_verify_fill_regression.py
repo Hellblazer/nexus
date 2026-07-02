@@ -42,11 +42,15 @@ Three surfaces + one composed CLI case, per the bead:
    library functions.
 
 Explicitly OUT of scope (residual scope on the parent bead nexus-s3dd4,
-NOT this module): the telemetry surface (rides the .14/v0.1.18 engine
-cut — no wired inner-fill surface yet, see
-``verify_fill_generic_or_full``/``_telemetry_source_counts`` in
-``orchestrator.py``) and the ``tests/e2e/migration-rehearsal`` hole-punch
-journey (cloud-gated, needs a deployed engine — separate follow-up).
+NOT this module): telemetry's FAULT-INJECTION coverage — P3b
+(nexus-s3dd4.14) wired the real per-table delta-fill path
+(``verify_fill_telemetry`` in ``orchestrator.py``, tested against fake
+clients in ``test_verify_fill_wiring.py``), but the STATEFUL,
+self-mutating-fake fault-injection style this module uses (K-of-N hole,
+second-pass-is-a-true-no-op) has not been extended to telemetry yet — that
+remains P6's (nexus-s3dd4.7) job. Also out of scope: the
+``tests/e2e/migration-rehearsal`` hole-punch journey (cloud-gated, needs a
+deployed engine — separate follow-up).
 
 Also out of scope (P6 critic, 2026-07-02): the 300-row pagination
 boundary of the identity-fetch surfaces. The fakes here answer presence

@@ -204,6 +204,65 @@ class TestFillMissingBatching:
         assert src.call_count == 1
 
 
+# ── fill_missing: telemetry-shaped MULTI-COLUMN conflict keys (P3b) ──────────
+#
+# verify-fill P3b (nexus-s3dd4.14): the telemetry inner loop reuses
+# fill_missing UNMODIFIED against HttpTelemetryStore.probe_ids, whose
+# conflict keys are multi-column TUPLES (e.g. hook_failures' (doc_id,
+# hook_name, occurred_at)), not the single-string keys every other caller
+# (chash/catalog) uses. fill_missing's key_fn/IdentitySource contract is
+# declared str-typed but never enforced at runtime -- this proves tuple
+# keys work identically (hashable, comparable), the same widening precedent
+# ManifestSource's _manifest_key already established for a different shape.
+
+
+class TestFillMissingTupleKeys:
+    def test_multi_column_conflict_key_diff_fills_only_missing(self) -> None:
+        # shaped like hook_failures: (doc_id, hook_name, occurred_at)
+        source_rows = [
+            {"doc_id": "d1", "hook_name": "h1", "occurred_at": "2024-01-01T00:00:00Z"},
+            {"doc_id": "d2", "hook_name": "h1", "occurred_at": "2024-01-02T00:00:00Z"},
+            {"doc_id": "d3", "hook_name": "h2", "occurred_at": "2024-01-03T00:00:00Z"},
+        ]
+        # d1's row already landed; d2/d3 are missing
+        present = {("d1", "h1", "2024-01-01T00:00:00Z")}
+        spy = _SpyImportFn()
+
+        result = vf.fill_missing(
+            source_rows=source_rows,
+            key_fn=lambda r: (r["doc_id"], r["hook_name"], r["occurred_at"]),
+            identity_source=_FakeIdentitySource(present),  # type: ignore[arg-type]
+            import_fn=spy,
+            batch_size=200,
+            breaker=EtlCircuitBreaker(),
+        )
+
+        assert result["missing"] == 2
+        assert result["filled"] == 2
+        assert {(r["doc_id"], r["hook_name"], r["occurred_at"]) for b in spy.batches for r in b} == {
+            ("d2", "h1", "2024-01-02T00:00:00Z"),
+            ("d3", "h2", "2024-01-03T00:00:00Z"),
+        }
+
+    def test_single_column_tuple_key_frecency_shaped(self) -> None:
+        # shaped like frecency: (chunk_id,) -- a 1-tuple, not a bare string
+        source_rows = [{"chunk_id": f"c{i}"} for i in range(5)]
+        present = {(f"c{i}",) for i in range(3)}
+        spy = _SpyImportFn()
+
+        result = vf.fill_missing(
+            source_rows=source_rows,
+            key_fn=lambda r: (r["chunk_id"],),
+            identity_source=_FakeIdentitySource(present),  # type: ignore[arg-type]
+            import_fn=spy,
+            batch_size=200,
+            breaker=EtlCircuitBreaker(),
+        )
+
+        assert result["missing"] == 2
+        assert {r["chunk_id"] for b in spy.batches for r in b} == {"c3", "c4"}
+
+
 # ── fill_missing_document_chunks: position-bearing manifest ──────────────────
 
 

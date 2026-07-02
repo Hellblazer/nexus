@@ -4,11 +4,13 @@ of REAL client -> IdentitySource/ManifestSource adapters.
 
 test_verify_fill_cli.py drives the CLI seam end-to-end; this module tests
 :func:`nexus.migration.orchestrator.verify_fill_chash` /
-:func:`~nexus.migration.orchestrator.verify_fill_catalog` directly against
+:func:`~nexus.migration.orchestrator.verify_fill_catalog` /
+:func:`~nexus.migration.orchestrator.verify_fill_telemetry` directly against
 fake service clients — the catalog delta path (owners/collections/
-document_chunks fill + the documents/links full-ETL fallback) and the R3
-breaker-give-up partial-progress recovery, neither of which the CLI test
-exercises directly.
+document_chunks fill + the documents/links full-ETL fallback), the
+telemetry per-table delta path (mapped-vs-unmapped tables, the
+mixed-fleet-404 full-ETL fallback), and the R3 breaker-give-up
+partial-progress recovery, none of which the CLI test exercises directly.
 """
 from __future__ import annotations
 
@@ -17,16 +19,24 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import httpx
+
 from nexus.migration.orchestrator import (
     EtlSources,
     _telemetry_source_counts,
     verify_fill_catalog,
     verify_fill_chash,
     verify_fill_generic_or_full,
+    verify_fill_telemetry,
 )
 from nexus.db.t2.telemetry_etl import count_source_rows
 from nexus.migration.migration_report import IssueCollector
 from nexus.retry import EtlCircuitBreaker
+
+# Reuse the locked telemetry-table seeding helper (single source of truth for
+# the 6-table schema; mirrors test_verify_fill_regression.py's own precedent
+# for cross-file test-fake reuse).
+from tests.db.test_telemetry_etl import _seed_full_telemetry_db  # noqa: PLC2701 — shared test fixture
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -267,6 +277,20 @@ class TestVerifyFillCatalog:
 
 
 class TestTelemetryPartialCoverageGuard:
+    """NOTE (P3b, nexus-s3dd4.14): ``verify_fill_generic_or_full`` itself is
+    UNCHANGED — this class still validates its own general contract (an
+    unmapped table is never silently treated as a store-level pass) and
+    remains a true regression for any caller that DOES go through this
+    generic path (``nx storage migrate telemetry --verify-fill``'s
+    single-store CLI command still does, see ``verify_fill_telemetry``'s
+    "Scope boundary" docstring paragraph). ``migrate_all`` no longer routes
+    the ``telemetry`` store through this function — it calls
+    :func:`~nexus.migration.orchestrator.verify_fill_telemetry` directly,
+    which enforces the EQUIVALENT guarantee (no unmapped table is ever
+    silently skipped) at PER-TABLE granularity instead of an
+    all-or-nothing store-level full-ETL fallback — see
+    ``TestVerifyFillTelemetry`` below for that surface's own regression."""
+
     def test_unmapped_telemetry_tables_force_full_etl_even_when_mapped_pair_is_parity(
         self,
     ) -> None:
@@ -315,3 +339,213 @@ class TestTelemetryPartialCoverageGuard:
         ).keys())
         assert got == expected
         assert {"relevance_log", "search_telemetry", "tier_writes", "frecency"} <= got
+
+
+# ── verify_fill_telemetry (P3b, nexus-s3dd4.14) ───────────────────────────────
+
+
+class _FakeTelemetryClient:
+    """Fake ``HttpTelemetryStore`` for ``verify_fill_telemetry`` wiring tests.
+
+    ``present_by_table`` maps table -> set of conflict-key TUPLES already
+    "landed" in the target; ``probe_ids`` answers membership from it. NOT a
+    stateful/self-mutating fake (test_verify_fill_regression.py's P6 fault-
+    injection style) — telemetry fault-injection is explicitly out of P6's
+    scope (see that module's docstring); these tests validate the WIRING
+    (which table gets probed, which rows get sent, the 404 fallback), not a
+    second convergence pass.
+    """
+
+    def __init__(
+        self,
+        present_by_table: dict[str, set[tuple]] | None = None,
+        *,
+        force_404: bool = False,
+    ) -> None:
+        self._present_by_table = present_by_table or {}
+        self._force_404 = force_404
+        self.probe_calls: list[tuple[str, list[list]]] = []
+        self.import_calls: list[tuple[str, list[dict]]] = []
+
+    def probe_ids(self, table: str, keys: list[list]) -> list[list]:
+        self.probe_calls.append((table, [list(k) for k in keys]))
+        if self._force_404:
+            request = httpx.Request("POST", "http://fake/v1/telemetry/ids/probe")
+            response = httpx.Response(404, request=request, json={"error": "not found"})
+            raise httpx.HTTPStatusError("404 Not Found", request=request, response=response)
+        present = self._present_by_table.get(table, set())
+        return [list(k) for k in keys if tuple(k) in present]
+
+    def import_rows_batch(self, table: str, rows: list[dict]) -> int:
+        self.import_calls.append((table, list(rows)))
+        return len(rows)
+
+    def close(self) -> None:
+        pass
+
+
+class TestVerifyFillTelemetry:
+    def test_mixed_parity_divergent_and_unmapped_tables_in_one_run(
+        self, tmp_path: Path,
+    ) -> None:
+        """The core P3b scenario: a mapped-parity table skips its probe
+        entirely; a mapped-divergent table and all FOUR unmapped tables
+        (relevance_log/search_telemetry/tier_writes/frecency — no
+        _VERIFY_TABLES relation, always outer-indeterminate) are each probed
+        and filled with EXACTLY their missing rows, never a full re-send."""
+        db = tmp_path / "t2.db"
+        _seed_full_telemetry_db(
+            db,
+            hooks=[  # mapped, PG count == source count -> parity, no probe
+                {"doc_id": "d1", "hook_name": "h1", "occurred_at": "2024-01-01T00:00:00Z"},
+                {"doc_id": "d2", "hook_name": "h1", "occurred_at": "2024-01-02T00:00:00Z"},
+                {"doc_id": "d3", "hook_name": "h2", "occurred_at": "2024-01-03T00:00:00Z"},
+            ],
+            nx=[  # mapped, PG count < source count -> divergent, probe+fill
+                {"question": f"q{i}", "created_at": f"2024-02-0{i}T00:00:00Z"}
+                for i in range(1, 6)  # 5 source rows
+            ],
+            relevance=[  # unmapped -> always indeterminate -> probe+fill
+                {"query": f"q{i}", "chunk_id": f"c{i}", "action": "store_put",
+                 "timestamp": f"2024-03-0{i}T00:00:00Z"}
+                for i in range(1, 5)  # 4 source rows
+            ],
+            search=[  # unmapped, but everything already present -> 0 missing
+                {"ts": "2024-04-01T00:00:00Z", "query_hash": "h1", "collection": "code__x"},
+                {"ts": "2024-04-02T00:00:00Z", "query_hash": "h2", "collection": "code__x"},
+            ],
+            tier=[],  # unmapped, empty source -> trivial parity, no probe
+            frecency=[{"chunk_id": "fc1"}],  # unmapped, missing -> probe+fill
+        )
+
+        # target already has: 2 of 5 nx_answer_runs; 1 of 4 relevance_log;
+        # BOTH search_telemetry rows; 0 of 1 frecency.
+        present = {
+            "nx_answer_runs": {("q1", "2024-02-01T00:00:00Z"), ("q2", "2024-02-02T00:00:00Z")},
+            "relevance_log": {("q1", "c1", "store_put", "", "2024-03-01T00:00:00Z")},
+            "search_telemetry": {
+                ("2024-04-01T00:00:00Z", "h1", "code__x"),
+                ("2024-04-02T00:00:00Z", "h2", "code__x"),
+            },
+            "frecency": set(),
+        }
+        client = _FakeTelemetryClient(present)
+        count_source = _FakeCountSource({
+            "nexus.hook_failures": 3,     # matches source -> parity
+            "nexus.nx_answer_runs": 2,    # short -> divergent
+        })
+
+        result = verify_fill_telemetry(db, client, count_source=count_source)
+
+        # hook_failures: mapped parity -> zero probe calls, zero import calls
+        assert all(t != "hook_failures" for t, _ in client.probe_calls)
+        assert all(t != "hook_failures" for t, _ in client.import_calls)
+        assert "hook_failures" not in result["fill"]
+
+        # tier_writes: empty source -> zero probe calls at all
+        assert all(t != "tier_writes" for t, _ in client.probe_calls)
+        assert result["fill"]["tier_writes"] == {
+            "source_count": 0, "target_count": None, "missing": 0,
+            "filled": 0, "status": "parity",
+        }
+
+        # nx_answer_runs: mapped divergent -> exactly the 3 missing rows sent
+        assert result["fill"]["nx_answer_runs"]["missing"] == 3
+        assert result["fill"]["nx_answer_runs"]["filled"] == 3
+        nx_sent = {
+            (r["question"], r["created_at"])
+            for t, rows in client.import_calls if t == "nx_answer_runs"
+            for r in rows
+        }
+        assert nx_sent == {
+            ("q3", "2024-02-03T00:00:00Z"),
+            ("q4", "2024-02-04T00:00:00Z"),
+            ("q5", "2024-02-05T00:00:00Z"),
+        }
+
+        # relevance_log: UNMAPPED (no _VERIFY_TABLES relation) but STILL
+        # probed + delta-filled, never a full re-send over the whole table.
+        assert result["fill"]["relevance_log"]["missing"] == 3
+        assert result["fill"]["relevance_log"]["filled"] == 3
+        relevance_sent = {
+            r["chunk_id"]
+            for t, rows in client.import_calls if t == "relevance_log"
+            for r in rows
+        }
+        assert relevance_sent == {"c2", "c3", "c4"}
+
+        # search_telemetry: unmapped, probed, everything already present ->
+        # zero rows sent (not a full re-send of the 2 source rows either).
+        assert result["fill"]["search_telemetry"]["missing"] == 0
+        assert all(t != "search_telemetry" for t, _ in client.import_calls)
+
+        # frecency: unmapped, single missing row -> filled
+        assert result["fill"]["frecency"]["missing"] == 1
+        assert result["fill"]["frecency"]["filled"] == 1
+
+        assert result["total_filled"] == 3 + 3 + 0 + 1  # nx + relevance + search + frecency
+        assert "fallback" not in result
+
+    def test_pre_v0_1_18_engine_404_falls_back_to_full_etl_never_crashes(
+        self, tmp_path: Path,
+    ) -> None:
+        """R1 note 2 (mixed-fleet gate): a pre-v0.1.18 engine 404s
+        /v1/telemetry/ids/probe. This must NOT crash migrate-all and must
+        NOT be treated as "nothing present" (which would blindly re-send
+        every row as "missing") -- it falls back to the unchanged full
+        telemetry ETL for the WHOLE store."""
+        db = tmp_path / "t2.db"
+        _seed_full_telemetry_db(db, hooks=[
+            {"doc_id": "d1", "hook_name": "h1", "occurred_at": "2024-01-01T00:00:00Z"},
+        ])
+        client = _FakeTelemetryClient(force_404=True)
+        count_source = _FakeCountSource({"nexus.hook_failures": 0})  # divergent -> needs fill
+
+        full_etl_called = {"n": 0}
+
+        def _fake_migrate_telemetry_rows(sqlite_path, store, *, collector=None, breaker=None):
+            full_etl_called["n"] += 1
+            return {t: {"read": 0, "written": 0} for t in (
+                "relevance_log", "search_telemetry", "tier_writes",
+                "nx_answer_runs", "hook_failures", "frecency",
+            )} | {"hook_failures": {"read": 1, "written": 1}}
+
+        with patch(
+            "nexus.db.t2.telemetry_etl.migrate_telemetry_rows",
+            side_effect=_fake_migrate_telemetry_rows,
+        ):
+            result = verify_fill_telemetry(db, client, count_source=count_source)
+
+        assert full_etl_called["n"] == 1
+        assert result["fallback"] == "full_etl"
+        assert result["total_filled"] == 1
+        # never a blind "everything missing" send through import_rows_batch
+        assert client.import_calls == []
+
+    def test_non_404_probe_failure_is_indeterminate_for_that_table_only(
+        self, tmp_path: Path,
+    ) -> None:
+        """A transient (non-404) probe failure must NOT trigger the
+        store-wide full-ETL fallback -- only a confirmed capability gap
+        (404) does that. A 5xx/transport error reports indeterminate for
+        that table alone, same as chash's/catalog's real IdentitySource
+        wiring."""
+        db = tmp_path / "t2.db"
+        _seed_full_telemetry_db(db, hooks=[
+            {"doc_id": "d1", "hook_name": "h1", "occurred_at": "2024-01-01T00:00:00Z"},
+        ])
+
+        class _FlakyClient(_FakeTelemetryClient):
+            def probe_ids(self, table, keys):
+                self.probe_calls.append((table, [list(k) for k in keys]))
+                raise ConnectionError("simulated transient outage")
+
+        client = _FlakyClient()
+        count_source = _FakeCountSource({"nexus.hook_failures": 0})
+
+        result = verify_fill_telemetry(db, client, count_source=count_source)
+
+        assert "fallback" not in result  # NOT a store-wide full-ETL fallback
+        assert result["fill"]["hook_failures"]["status"] == "indeterminate"
+        assert result["fill"]["hook_failures"]["filled"] == 0
+        assert client.import_calls == []
