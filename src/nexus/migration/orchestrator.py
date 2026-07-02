@@ -22,6 +22,8 @@ code path.
 from __future__ import annotations
 
 import contextlib
+import dis
+import importlib
 import os
 import uuid
 from typing import Any, Callable, Protocol
@@ -341,6 +343,78 @@ def verify_counts(
     return "verified", convergence_notes, dict(pg_counts)
 
 
+def _etl_import_modules(run: Callable[[EtlSources, Any], dict]) -> tuple[str, ...]:
+    """Module names a store's runner imports, read off its own bytecode.
+
+    Every ``build_store_etls`` closure defers its imports (PLC0415) to
+    inside the runner body so a single-store failure surfaces there, not at
+    registry-build time. This walks the runner's ``IMPORT_NAME`` bytecode
+    operands to recover exactly the modules it will import when called — a
+    reflection of the ladder's own closures, not a hand-maintained copy that
+    could drift from them (nexus-5drgy).
+    """
+    return tuple(
+        instr.argval
+        for instr in dis.get_instructions(run.__code__)
+        if instr.opname == "IMPORT_NAME"
+    )
+
+
+class EtlPreflightFailed(RuntimeError):
+    """Raised before ANY store runs when a ladder step's ETL module cannot
+    be imported.
+
+    The 2026-06-30 production migration crashed 6/8 stores mid-run with
+    ``ModuleNotFoundError`` because the missing module only surfaced when
+    that store's turn came up in the ladder — after earlier stores had
+    already written (nexus-5drgy). A migration must be all-runnable or
+    not-started, so this check runs before the first store executes and
+    aborts the whole run on the first missing module.
+    """
+
+    def __init__(self, failures: list[tuple[str, str, str]]) -> None:
+        # (store, module, error)
+        self.failures = failures
+        modules = sorted({module for _, module, _ in failures})
+        lines = "\n".join(
+            f"  - {store}: {module} — {error}"
+            for store, module, error in failures
+        )
+        super().__init__(
+            "migrate-all preflight failed — aborting before any store ran. "
+            f"{len(modules)} ETL module(s) could not be imported: "
+            f"{', '.join(modules)}. This is almost always a wheel/orchestrator "
+            "version skew (the installed package is missing a module the "
+            "orchestrator references) — reinstall a consistent build "
+            "(e.g. scripts/reinstall-tool.sh) and re-run:\n" + lines
+        )
+
+
+def assert_etls_importable(etls: list[StoreEtl]) -> None:
+    """Pre-flight (nexus-5drgy, RDR-178 Gap 1): import every ladder step's
+    ETL module BEFORE any store executes.
+
+    Raises :class:`EtlPreflightFailed` naming every unimportable module if
+    any is found; imports nothing else and touches no store. Called by
+    :func:`migrate_all` ahead of the ladder loop so a version-skewed wheel
+    fails loudly up front instead of mid-run.
+    """
+    failures: list[tuple[str, str, str]] = []
+    for etl in etls:
+        for module in _etl_import_modules(etl.run):
+            try:
+                importlib.import_module(module)
+            except ImportError as exc:
+                failures.append((etl.store, module, str(exc)))
+    if failures:
+        _log.error(
+            "migrate_all_preflight_failed",
+            failures=[f"{s}:{m}" for s, m, _ in failures],
+        )
+        raise EtlPreflightFailed(failures)
+    _log.info("migrate_all_preflight_clear", stores=[e.store for e in etls])
+
+
 def migrate_all(
     sources: EtlSources,
     *,
@@ -388,10 +462,16 @@ def migrate_all(
     how many relations the count source actually reconciled. The caller maps
     both onto its own exit / unlock semantics.
     """
+    etls = ordered(build_store_etls(sources))
+    # nexus-5drgy: import every ladder step's ETL module BEFORE any store
+    # runs or any report is built — a version-skewed wheel must abort the
+    # ENTIRE run up front, never mid-run after earlier stores have written.
+    assert_etls_importable(etls)
+
     collector = IssueCollector()
     mig_id = migration_id or str(uuid.uuid4())
 
-    for etl in ordered(build_store_etls(sources)):
+    for etl in etls:
         if on_store is not None:
             on_store(etl.store)
         crashed = False

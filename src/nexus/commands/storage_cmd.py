@@ -1326,7 +1326,10 @@ def migrate_all_cmd(
     never SKIP-then-'all passed').
     """
     from nexus.migration.etl_registry import EtlSources  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    from nexus.migration.orchestrator import migrate_all  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.migration.orchestrator import (  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        EtlPreflightFailed,
+        migrate_all,
+    )
 
     sources = EtlSources(
         sqlite_path=_resolve_db_path(db_path),
@@ -1360,10 +1363,16 @@ def migrate_all_cmd(
     # and catalog clients the orchestrator builds then resolve URL+token via
     # the unified env>config chain.
     with _service_url_override(service_url):
-        report = migrate_all(
-            sources, on_store=_on_store, on_store_failed=_on_store_failed,
-            on_progress=_on_progress,
-        )
+        try:
+            report = migrate_all(
+                sources, on_store=_on_store, on_store_failed=_on_store_failed,
+                on_progress=_on_progress,
+            )
+        except EtlPreflightFailed as exc:
+            # nexus-5drgy: preflight aborted before any store ran — no report
+            # was built, nothing was written. Surface the exact module(s) so
+            # the operator can reinstall a consistent build.
+            raise click.ClickException(str(exc)) from exc
 
     _echo_verification(report)
 

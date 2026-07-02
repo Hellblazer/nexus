@@ -11,6 +11,8 @@ this one callable — there is no second orchestration code path.
 """
 from __future__ import annotations
 
+import pytest
+
 from nexus.migration import orchestrator as orch
 from nexus.migration.etl_registry import EtlSources, StoreEtl
 
@@ -250,6 +252,95 @@ class TestBuildStoreEtls:
         # store names does not touch the service.
         etls = orch.build_store_etls(EtlSources(sqlite_path=None, catalog_db_path=None))  # type: ignore[arg-type]
         assert [e.store for e in etls] == list(LADDER_ORDER)
+
+
+# ── nexus-5drgy: pre-flight ETL import check (RDR-178 Gap 1) ─────────────────
+#
+# Jun-30 production run: `build_store_etls` defers each store's imports
+# (PLC0415) to when that store's turn comes up, so a version-skewed wheel
+# (orchestrator referencing an ETL module the installed wheel lacked) only
+# surfaced AFTER earlier stores had already written. `migrate_all` must
+# import every ladder step's ETL module up front and abort the ENTIRE run —
+# before any store executes — on the first missing module.
+
+
+class TestEtlImportModules:
+    def test_derives_module_names_from_runner_bytecode(self) -> None:
+        # Not a hand-maintained copy: parsed straight off the real
+        # build_store_etls closures, so it cannot drift from what each
+        # store's runner actually imports at call time.
+        etls = orch.build_store_etls(
+            EtlSources(sqlite_path=None, catalog_db_path=None)  # type: ignore[arg-type]
+        )
+        by_store = {e.store: orch._etl_import_modules(e.run) for e in etls}
+        assert set(by_store["memory"]) == {
+            "nexus.db.t2.http_memory_store", "nexus.db.t2.memory_etl",
+        }
+        assert set(by_store["aspects"]) == {
+            "nexus.db.t2.aspects_etl",
+            "nexus.db.t2.http_document_aspects_store",
+            "nexus.db.t2.http_document_highlights_store",
+        }
+        assert set(by_store["catalog"]) == {
+            "nexus.catalog.factory", "nexus.db.t2.catalog_etl",
+        }
+
+    def test_runner_with_no_imports_yields_empty_tuple(self) -> None:
+        def run(sources: EtlSources, collector) -> dict:
+            return {}
+
+        assert orch._etl_import_modules(run) == ()
+
+
+class TestAssertEtlsImportable:
+    def test_green_path_all_real_etl_modules_import_cleanly(self) -> None:
+        etls = orch.build_store_etls(
+            EtlSources(sqlite_path=None, catalog_db_path=None)  # type: ignore[arg-type]
+        )
+        orch.assert_etls_importable(etls)  # must not raise
+
+    def test_missing_module_raises_before_returning(self) -> None:
+        def run(sources: EtlSources, collector) -> dict:
+            from nexus.migration._nexus_5drgy_missing_module import Thing  # noqa: F401,PLC0415
+
+            return {}
+
+        with pytest.raises(orch.EtlPreflightFailed) as excinfo:
+            orch.assert_etls_importable([StoreEtl("memory", run)])
+        assert "nexus.migration._nexus_5drgy_missing_module" in str(excinfo.value)
+        assert "memory" in str(excinfo.value)
+
+
+class TestMigrateAllPreflight:
+    def test_aborts_before_any_store_executes(self, tmp_path, monkeypatch) -> None:
+        executed: list[str] = []
+
+        def _bad_etls(_s):
+            def run(sources: EtlSources, collector) -> dict:
+                from nexus.migration._nexus_5drgy_missing_module import Thing  # noqa: F401,PLC0415
+
+                executed.append("memory")  # would only run if preflight failed to gate
+                return {}
+
+            return [StoreEtl("memory", run)]
+
+        monkeypatch.setattr(orch, "build_store_etls", _bad_etls)
+        with pytest.raises(orch.EtlPreflightFailed) as excinfo:
+            orch.migrate_all(_sources(tmp_path), count_source=_FakeCountSource({}))
+        assert executed == []
+        assert "nexus.migration._nexus_5drgy_missing_module" in str(excinfo.value)
+
+    def test_green_path_proceeds_through_the_ladder(self, tmp_path, monkeypatch) -> None:
+        order: list[str] = []
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls(order))
+        report = orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+        )
+        assert order == [
+            "memory", "plans", "telemetry", "taxonomy",
+            "aspects", "chash", "catalog", "aspects_queue",
+        ]
+        assert report["summary"]["total_failed"] == 0
 
 
 class TestVerifyTables:
