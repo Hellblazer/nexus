@@ -35,8 +35,6 @@ from typing import TYPE_CHECKING, TypedDict
 
 import structlog
 
-from nexus.migration.orchestrator import _VERIFY_TABLES, _VERIFY_TABLES_DEDUP
-
 if TYPE_CHECKING:
     from nexus.migration.orchestrator import CountSource
 
@@ -103,9 +101,24 @@ def verify_store_counts(
     not a hole — this mirrors ``orchestrator.verify_counts``'s dedup branch
     (orchestrator.py) so both surfaces agree on what "parity" means for a
     dedup relation.
+
+    Caveat (R2 critique, 2026-07-02): count-parity is a NECESSARY but not
+    SUFFICIENT condition for row-identity parity — a same-count-but-
+    different-rows state is invisible to this outer loop by design (the
+    accepted Approach A tradeoff: cheap count pre-check, identity diff only
+    on divergence). No live write path can produce that state absent a bug
+    elsewhere (importBatch keys are drawn 1:1 from source rows under
+    ``ON CONFLICT DO UPDATE``), which is why it is a safe skip signal for
+    FILL purposes specifically — not a general drift detector.
     """
     if not source_counts:
         return {}
+
+    # Deferred import: P4 wires verify-fill INTO orchestrator.py, so a
+    # module-level import here would complete an orchestrator→verify_fill→
+    # orchestrator cycle (same reason ServiceCountSource.counts defers its
+    # catalog-factory import). R2 substantive-critic finding, 2026-07-02.
+    from nexus.migration.orchestrator import _VERIFY_TABLES  # noqa: PLC0415 — import-cycle guard, see above
 
     table_relations: dict[str, str] = {
         table: relation
@@ -151,6 +164,8 @@ def verify_store_counts(
 
 def _table_status(relation: str, source_count: int, target_count: int) -> str:
     """Parity/divergent verdict for one already-resolved relation count."""
+    from nexus.migration.orchestrator import _VERIFY_TABLES_DEDUP  # noqa: PLC0415 — import-cycle guard, see verify_store_counts
+
     if relation in _VERIFY_TABLES_DEDUP:
         # Mirrors orchestrator.verify_counts's convergence-aware dedup
         # branch: written=0 is a trivial pass; 0 < target <= source is an
