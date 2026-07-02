@@ -2241,11 +2241,16 @@ def _check_migration_reports(reports_dir: Path | None = None) -> list[HealthResu
     """RDR-178 Gap 1 (nexus-aigpt): read the newest migration report and
     fail loud when it recorded failures or an unverified run.
 
-    ``verification`` absent or anything other than ``"verified"`` (including
-    ``"indeterminate"`` and ``"mismatch"``) counts as failure — the
+    ``verification`` present but anything other than ``"verified"``
+    (``"indeterminate"``, ``"mismatch"``) counts as failure — the
     nexus-r0esi precedent: never SKIP-then-report-all-passed. The vocabulary
     is the orchestrator's: ``verify_counts()`` emits exactly
     ``"verified" | "mismatch" | "indeterminate"`` (never "passed").
+
+    ``verification`` KEY entirely absent + zero failures = a legacy report
+    from pre-6.2 tooling that never recorded verdicts → non-fatal WARN with
+    a one-time re-verify suggestion, never a fatal alarm (the false-positive
+    split, 2026-07-02). Absent + failures recorded stays fatal.
     """
     label = "Migration reports"
     if reports_dir is None:
@@ -2287,6 +2292,34 @@ def _check_migration_reports(reports_dir: Path | None = None) -> list[HealthResu
             label=label,
             ok=True,
             detail=f"clean ({report_path.name}): total_failed=0, verification=verified",
+        )]
+
+    # Legacy-artifact split (2026-07-02, Hal): a report with ZERO failures
+    # whose ``verification`` KEY is entirely absent was written by pre-6.2
+    # tooling that never recorded a verdict — a benign, knowable artifact
+    # (modern writers ALWAYS record one; see _emit_store_report). Reporting
+    # it FATAL is a crying-wolf alarm on day one of every upgrade — the
+    # false-positive class that trains operators to ignore doctor. It
+    # warns (non-fatal) with a one-time-actionable fix instead. A MODERN
+    # report saying mismatch/indeterminate, or any total_failed > 0, stays
+    # fatal — the nexus-r0esi never-silently-pass rule keeps its teeth
+    # where the signal is real. (A modern report can never hit this
+    # branch: its verification key is always present.)
+    if not failed and "verification" not in report:
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            fatal=False,
+            detail=(
+                f"{report_path.name}: clean (total_failed=0) but predates "
+                f"verification recording (pre-6.2 tooling) — unverified, not failed"
+            ),
+            fix_suggestions=[
+                "Re-verify once with the current tooling (near-no-op on an already-migrated system):",
+                "  nx storage migrate all --verify-fill",
+                "This writes a fresh report with a real verification verdict and clears this warning.",
+            ],
         )]
 
     per_store_failures: list[str] = []

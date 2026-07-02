@@ -24,7 +24,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from nexus.db.t2.memory_store import _MEMORY_SCHEMA_SQL
+import inspect
+
 from nexus.health import _check_migration_divergence, _check_migration_reports
+from nexus.migration.orchestrator import verify_counts
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -162,10 +165,26 @@ class TestCheckMigrationReports:
         assert r.fatal is True
         assert "indeterminate" in r.detail
 
-    def test_verification_absent_fails(self, tmp_path):
-        """An absent verification key must never be silently treated as passed."""
+    def test_verification_absent_clean_warns_not_fatal(self, tmp_path):
+        """The legacy-artifact split (2026-07-02): a ZERO-failure report whose
+        verification KEY is absent was written by pre-6.2 tooling that never
+        recorded verdicts — a benign, knowable artifact. It must surface as a
+        non-fatal WARN with the one-time --verify-fill suggestion, never a
+        fatal crying-wolf alarm — but it is still NOT ok/silently passed."""
         reports_dir = tmp_path / "migration-reports"
         _write_report(reports_dir, total_failed=0, verification=None)
+        results = _check_migration_reports(reports_dir=reports_dir)
+        r = results[0]
+        assert r.ok is False       # never silently treated as passed
+        assert r.warn is True
+        assert r.fatal is False
+        assert "predates verification recording" in r.detail
+        assert any("--verify-fill" in s for s in r.fix_suggestions)
+
+    def test_verification_absent_with_failures_stays_fatal(self, tmp_path):
+        """The legacy split never softens a report that RECORDED failures."""
+        reports_dir = tmp_path / "migration-reports"
+        _write_report(reports_dir, total_failed=7, verification=None)
         results = _check_migration_reports(reports_dir=reports_dir)
         r = results[0]
         assert r.ok is False
@@ -196,10 +215,6 @@ class TestCheckMigrationReports:
     def test_reader_accepts_the_writers_success_literal(self):
         """Pin the writer side of the handshake: verify_counts()'s success
         return is the literal "verified" — the exact string doctor accepts."""
-        import inspect
-
-        from nexus.migration.orchestrator import verify_counts
-
         src = inspect.getsource(verify_counts)
         assert 'return "verified"' in src
         assert '"passed"' not in src
