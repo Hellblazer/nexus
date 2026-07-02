@@ -658,104 +658,163 @@ public final class TelemetryRepository {
         });
     }
 
+    /** PG Int16 bind-count limit is 32767; keep a safety margin (nexus-1usso). */
+    private static final int MAX_BATCH_PARAMS = 30_000;
+
     /**
-     * RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): fidelity-preserving BULK import
-     * for any of the six telemetry tables.
+     * nexus-1usso: fidelity-preserving BULK import for any of the six
+     * telemetry tables — ONE multi-row {@code INSERT} statement per chunk
+     * (chunked at {@link #MAX_BATCH_PARAMS} bind params), mirroring {@code
+     * ChashRepository.doImportBatch} (f0ab406f). Previously this looped a
+     * per-row {@code .set(...).execute()} inside one transaction (GUC set
+     * once, but still N round-trips) — the plan-audit finding on nexus-1usso
+     * ("has the endpoint" != "batches at the DB") applies here too.
      *
-     * <p>Collapses a table's batch to ONE round-trip and ONE tenant transaction:
-     * a single {@link TenantScope#withTenant} (RLS GUC {@code nexus.tenant} set
-     * ONCE per batch) wrapping a loop of the SAME INSERT each per-row {@code
-     * import*Row} method issues — {@code DO NOTHING} for the five event logs,
-     * frecency's {@code GREATEST}/{@code LEAST} {@code DO UPDATE}. Rows come from
+     * <p>{@code DO NOTHING} for the five event logs (no dedup needed — intra-
+     * statement conflicts against {@code DO NOTHING} are a documented no-op,
+     * unlike {@code DO UPDATE} which cannot affect the same row twice).
+     * frecency's {@code GREATEST}/{@code LEAST} {@code DO UPDATE} dedupes on
+     * {@code chunk_id} within a chunk, last occurrence wins. Rows come from
      * the trusted ETL; the strict timestamp parse ({@link #parseTsStrict}) is
-     * applied per row so a blank ts fails the batch rather than silently stamping
-     * {@code now()}. The per-row methods remain for the live/single-write path;
-     * this mirrors their INSERTs to keep GUC-once for the migration leg. Empty
-     * batch is a no-op.
+     * applied per row so a blank ts fails the batch rather than silently
+     * stamping {@code now()}. The per-row methods remain for the live/
+     * single-write path. Empty batch is a no-op.
      *
      * @return number of rows submitted.
      */
     public int importBatch(String tenant, String table, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            for (Map<String, Object> r : rows) {
-                switch (table) {
-                    case "relevance_log" -> ctx.insertInto(RELEVANCE_LOG)
-                        .set(RELEVANCE_LOG.TENANT_ID, tenant)
-                        .set(RELEVANCE_LOG.QUERY, reqS(r, "query"))
-                        .set(RELEVANCE_LOG.CHUNK_ID, reqS(r, "chunk_id"))
-                        .set(RELEVANCE_LOG.COLLECTION, str(optS(r, "collection")))
-                        .set(RELEVANCE_LOG.ACTION, reqS(r, "action"))
-                        .set(RELEVANCE_LOG.SESSION_ID, str(optS(r, "session_id")))
-                        .set(RELEVANCE_LOG.TIMESTAMP, parseTsStrict(reqS(r, "timestamp")))
-                        .onConflictDoNothing().execute();
-                    case "search_telemetry" -> ctx.insertInto(SEARCH_TELEMETRY)
-                        .set(SEARCH_TELEMETRY.TENANT_ID, tenant)
-                        .set(SEARCH_TELEMETRY.TS, parseTsStrict(reqS(r, "ts")))
-                        .set(SEARCH_TELEMETRY.QUERY_HASH, reqS(r, "query_hash"))
-                        .set(SEARCH_TELEMETRY.COLLECTION, reqS(r, "collection"))
-                        .set(SEARCH_TELEMETRY.RAW_COUNT, reqI(r, "raw_count"))
-                        .set(SEARCH_TELEMETRY.KEPT_COUNT, reqI(r, "kept_count"))
-                        .set(SEARCH_TELEMETRY.TOP_DISTANCE, optD(r, "top_distance"))
-                        .set(SEARCH_TELEMETRY.THRESHOLD, optD(r, "threshold"))
-                        .onConflictDoNothing().execute();
-                    case "tier_writes" -> ctx.insertInto(TIER_WRITES)
-                        .set(TIER_WRITES.TENANT_ID, tenant)
-                        .set(TIER_WRITES.SESSION_ID, str(optS(r, "session_id")))
-                        .set(TIER_WRITES.TS, parseTsStrict(reqS(r, "ts")))
-                        .set(TIER_WRITES.TOOL, reqS(r, "tool"))
-                        .set(TIER_WRITES.TIER, reqS(r, "tier"))
-                        .set(TIER_WRITES.AGENT, optS(r, "agent"))
-                        .set(TIER_WRITES.PROJECT, optS(r, "project"))
-                        .set(TIER_WRITES.TARGET_TITLE, optS(r, "target_title"))
-                        .onConflictDoNothing().execute();
-                    case "nx_answer_runs" -> ctx.insertInto(NX_ANSWER_RUNS)
-                        .set(NX_ANSWER_RUNS.TENANT_ID, tenant)
-                        .set(NX_ANSWER_RUNS.QUESTION, reqS(r, "question"))
-                        .set(NX_ANSWER_RUNS.PLAN_ID, optL(r, "plan_id"))
-                        .set(NX_ANSWER_RUNS.MATCHED_CONFIDENCE, optD(r, "matched_confidence"))
-                        .set(NX_ANSWER_RUNS.STEP_COUNT, optI(r, "step_count", 0))
-                        .set(NX_ANSWER_RUNS.FINAL_TEXT, str(optS(r, "final_text")))
-                        .set(NX_ANSWER_RUNS.COST_USD, optDd(r, "cost_usd", 0.0))
-                        .set(NX_ANSWER_RUNS.DURATION_MS, optLd(r, "duration_ms", 0L))
-                        .set(NX_ANSWER_RUNS.CREATED_AT, parseTsStrict(reqS(r, "created_at")))
-                        .onConflictDoNothing().execute();
-                    case "hook_failures" -> ctx.insertInto(HOOK_FAILURES)
-                        .set(HOOK_FAILURES.TENANT_ID, tenant)
-                        .set(HOOK_FAILURES.DOC_ID, str(optS(r, "doc_id")))
-                        .set(HOOK_FAILURES.COLLECTION, str(optS(r, "collection")))
-                        .set(HOOK_FAILURES.HOOK_NAME, reqS(r, "hook_name"))
-                        .set(HOOK_FAILURES.ERROR, str(optS(r, "error")))
-                        .set(HOOK_FAILURES.OCCURRED_AT, parseTsStrict(reqS(r, "occurred_at")))
-                        .set(HOOK_FAILURES.BATCH_DOC_IDS, optS(r, "batch_doc_ids"))
-                        .set(HOOK_FAILURES.IS_BATCH, Boolean.TRUE.equals(r.get("is_batch")) ? 1 : 0)
-                        .set(HOOK_FAILURES.CHAIN, str(optS(r, "chain")).isBlank() ? "single" : str(optS(r, "chain")))
-                        .onConflictDoNothing().execute();
-                    case "frecency" -> {
-                        OffsetDateTime embeddedAt = optTsLenient(r, "embedded_at");
-                        OffsetDateTime lastHitAt  = optTsLenient(r, "last_hit_at");
-                        ctx.insertInto(FRECENCY)
-                            .set(FRECENCY.TENANT_ID, tenant)
-                            .set(FRECENCY.CHUNK_ID, reqS(r, "chunk_id"))
-                            .set(FRECENCY.EMBEDDED_AT, embeddedAt)
-                            .set(FRECENCY.TTL_DAYS, optI(r, "ttl_days", 0))
-                            .set(FRECENCY.FRECENCY_SCORE, optDd(r, "frecency_score", 0.0))
-                            .set(FRECENCY.MISS_COUNT, optI(r, "miss_count", 0))
-                            .set(FRECENCY.LAST_HIT_AT, lastHitAt)
-                            .onConflict(FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID).doUpdate()
-                            .set(FRECENCY.FRECENCY_SCORE, greatest(field(name("excluded", "frecency_score"), Double.class), FRECENCY.FRECENCY_SCORE))
-                            .set(FRECENCY.MISS_COUNT, greatest(field(name("excluded", "miss_count"), Integer.class), FRECENCY.MISS_COUNT))
-                            .set(FRECENCY.LAST_HIT_AT, greatest(field(name("excluded", "last_hit_at"), OffsetDateTime.class), FRECENCY.LAST_HIT_AT))
-                            .set(FRECENCY.TTL_DAYS, greatest(field(name("excluded", "ttl_days"), Integer.class), FRECENCY.TTL_DAYS))
-                            .set(FRECENCY.EMBEDDED_AT, least(field(name("excluded", "embedded_at"), OffsetDateTime.class), FRECENCY.EMBEDDED_AT))
-                            .execute();
-                    }
-                    default -> throw new IllegalArgumentException("Unknown table: " + table);
-                }
+            switch (table) {
+                case "relevance_log"    -> importRelevanceLogBatch(ctx, tenant, rows);
+                case "search_telemetry" -> importSearchTelemetryBatch(ctx, tenant, rows);
+                case "tier_writes"      -> importTierWritesBatch(ctx, tenant, rows);
+                case "nx_answer_runs"   -> importNxAnswerRunsBatch(ctx, tenant, rows);
+                case "hook_failures"    -> importHookFailuresBatch(ctx, tenant, rows);
+                case "frecency"         -> importFrecencyBatch(ctx, tenant, rows);
+                default -> throw new IllegalArgumentException("Unknown table: " + table);
             }
             log.debug("event=telemetry_import_batch tenant={} table={} rows={}", tenant, table, rows.size());
             return rows.size();
         });
+    }
+
+    private static void importRelevanceLogBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 7);
+        for (int start = 0; start < rows.size(); start += chunkSize) {
+            var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
+            var insert = ctx.insertInto(RELEVANCE_LOG,
+                    RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY, RELEVANCE_LOG.CHUNK_ID,
+                    RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.ACTION, RELEVANCE_LOG.SESSION_ID,
+                    RELEVANCE_LOG.TIMESTAMP);
+            for (var r : batch) {
+                insert = insert.values(tenant, reqS(r, "query"), reqS(r, "chunk_id"),
+                        str(optS(r, "collection")), reqS(r, "action"), str(optS(r, "session_id")),
+                        parseTsStrict(reqS(r, "timestamp")));
+            }
+            insert.onConflictDoNothing().execute();
+        }
+    }
+
+    private static void importSearchTelemetryBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 8);
+        for (int start = 0; start < rows.size(); start += chunkSize) {
+            var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
+            var insert = ctx.insertInto(SEARCH_TELEMETRY,
+                    SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH,
+                    SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT,
+                    SEARCH_TELEMETRY.TOP_DISTANCE, SEARCH_TELEMETRY.THRESHOLD);
+            for (var r : batch) {
+                insert = insert.values(tenant, parseTsStrict(reqS(r, "ts")), reqS(r, "query_hash"),
+                        reqS(r, "collection"), reqI(r, "raw_count"), reqI(r, "kept_count"),
+                        optD(r, "top_distance"), optD(r, "threshold"));
+            }
+            insert.onConflictDoNothing().execute();
+        }
+    }
+
+    private static void importTierWritesBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 8);
+        for (int start = 0; start < rows.size(); start += chunkSize) {
+            var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
+            var insert = ctx.insertInto(TIER_WRITES,
+                    TIER_WRITES.TENANT_ID, TIER_WRITES.SESSION_ID, TIER_WRITES.TS, TIER_WRITES.TOOL,
+                    TIER_WRITES.TIER, TIER_WRITES.AGENT, TIER_WRITES.PROJECT, TIER_WRITES.TARGET_TITLE);
+            for (var r : batch) {
+                insert = insert.values(tenant, str(optS(r, "session_id")), parseTsStrict(reqS(r, "ts")),
+                        reqS(r, "tool"), reqS(r, "tier"), optS(r, "agent"), optS(r, "project"),
+                        optS(r, "target_title"));
+            }
+            insert.onConflictDoNothing().execute();
+        }
+    }
+
+    private static void importNxAnswerRunsBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
+        for (int start = 0; start < rows.size(); start += chunkSize) {
+            var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
+            var insert = ctx.insertInto(NX_ANSWER_RUNS,
+                    NX_ANSWER_RUNS.TENANT_ID, NX_ANSWER_RUNS.QUESTION, NX_ANSWER_RUNS.PLAN_ID,
+                    NX_ANSWER_RUNS.MATCHED_CONFIDENCE, NX_ANSWER_RUNS.STEP_COUNT, NX_ANSWER_RUNS.FINAL_TEXT,
+                    NX_ANSWER_RUNS.COST_USD, NX_ANSWER_RUNS.DURATION_MS, NX_ANSWER_RUNS.CREATED_AT);
+            for (var r : batch) {
+                insert = insert.values(tenant, reqS(r, "question"), optL(r, "plan_id"),
+                        optD(r, "matched_confidence"), optI(r, "step_count", 0), str(optS(r, "final_text")),
+                        optDd(r, "cost_usd", 0.0), optLd(r, "duration_ms", 0L),
+                        parseTsStrict(reqS(r, "created_at")));
+            }
+            insert.onConflictDoNothing().execute();
+        }
+    }
+
+    private static void importHookFailuresBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
+        for (int start = 0; start < rows.size(); start += chunkSize) {
+            var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
+            var insert = ctx.insertInto(HOOK_FAILURES,
+                    HOOK_FAILURES.TENANT_ID, HOOK_FAILURES.DOC_ID, HOOK_FAILURES.COLLECTION,
+                    HOOK_FAILURES.HOOK_NAME, HOOK_FAILURES.ERROR, HOOK_FAILURES.OCCURRED_AT,
+                    HOOK_FAILURES.BATCH_DOC_IDS, HOOK_FAILURES.IS_BATCH, HOOK_FAILURES.CHAIN);
+            for (var r : batch) {
+                String chain = str(optS(r, "chain"));
+                insert = insert.values(tenant, str(optS(r, "doc_id")), str(optS(r, "collection")),
+                        reqS(r, "hook_name"), str(optS(r, "error")), parseTsStrict(reqS(r, "occurred_at")),
+                        optS(r, "batch_doc_ids"), Boolean.TRUE.equals(r.get("is_batch")) ? 1 : 0,
+                        chain.isBlank() ? "single" : chain);
+            }
+            insert.onConflictDoNothing().execute();
+        }
+    }
+
+    private static void importFrecencyBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        // Conflict key: (tenant_id, chunk_id). tenant is constant for this call.
+        // Dedupe last-wins (defensive; the ETL source's PK makes intra-batch
+        // duplicates impossible in practice — same rationale as ChashRepository).
+        var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
+        for (var r : rows) unique.put(reqS(r, "chunk_id"), r);
+        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 7);
+        for (int start = 0; start < deduped.size(); start += chunkSize) {
+            var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+            var insert = ctx.insertInto(FRECENCY,
+                    FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID, FRECENCY.EMBEDDED_AT, FRECENCY.TTL_DAYS,
+                    FRECENCY.FRECENCY_SCORE, FRECENCY.MISS_COUNT, FRECENCY.LAST_HIT_AT);
+            for (var r : batch) {
+                OffsetDateTime embeddedAt = optTsLenient(r, "embedded_at");
+                OffsetDateTime lastHitAt  = optTsLenient(r, "last_hit_at");
+                insert = insert.values(tenant, reqS(r, "chunk_id"), embeddedAt,
+                        optI(r, "ttl_days", 0), optDd(r, "frecency_score", 0.0),
+                        optI(r, "miss_count", 0), lastHitAt);
+            }
+            insert.onConflict(FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID).doUpdate()
+                  .set(FRECENCY.FRECENCY_SCORE, greatest(field(name("excluded", "frecency_score"), Double.class), FRECENCY.FRECENCY_SCORE))
+                  .set(FRECENCY.MISS_COUNT, greatest(field(name("excluded", "miss_count"), Integer.class), FRECENCY.MISS_COUNT))
+                  .set(FRECENCY.LAST_HIT_AT, greatest(field(name("excluded", "last_hit_at"), OffsetDateTime.class), FRECENCY.LAST_HIT_AT))
+                  .set(FRECENCY.TTL_DAYS, greatest(field(name("excluded", "ttl_days"), Integer.class), FRECENCY.TTL_DAYS))
+                  .set(FRECENCY.EMBEDDED_AT, least(field(name("excluded", "embedded_at"), OffsetDateTime.class), FRECENCY.EMBEDDED_AT))
+                  .execute();
+        }
     }
 
     // ── batch map-extraction helpers (mirror TelemetryHandler's per-row parse) ──
@@ -800,7 +859,7 @@ public final class TelemetryRepository {
         if (v != null) { try { return Integer.parseInt(v.toString()); } catch (NumberFormatException ignored) { } }
         return def;
     }
-    private OffsetDateTime optTsLenient(Map<String, Object> r, String k) {
+    private static OffsetDateTime optTsLenient(Map<String, Object> r, String k) {
         String s = optS(r, k);
         return (s != null && !s.isBlank()) ? parseTs(s) : OffsetDateTime.now(ZoneOffset.UTC);
     }

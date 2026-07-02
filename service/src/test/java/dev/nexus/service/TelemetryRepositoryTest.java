@@ -657,6 +657,72 @@ class TelemetryRepositoryTest {
           .isInstanceOfAny(PSQLException.class, SQLException.class);
     }
 
+    // ── importBatch: ONE multi-row INSERT per table (nexus-1usso) ───────────────
+    // Plan-audit correction: importBatch HAD the endpoint but looped per-row
+    // .execute() inside its single tenant transaction (N round-trips). These
+    // tests exercise the multi-row conversion for all six tables.
+
+    @Test @Order(40)
+    void importBatch_relevanceLog_multiRow_insertsAll_doNothingOnReimport() {
+        int n = repo.importBatch(TENANT_A, "relevance_log", List.of(
+            Map.of("query", "batch-rl-q0", "chunk_id", "batch-rl-c0", "collection", "knowledge__nexus",
+                   "action", "store_put", "session_id", "sess-0", "timestamp", PAST_TS),
+            Map.of("query", "batch-rl-q1", "chunk_id", "batch-rl-c1", "collection", "knowledge__nexus",
+                   "action", "store_put", "session_id", "sess-1", "timestamp", PAST_TS)));
+        assertThat(n).isEqualTo(2);
+        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q0", "batch-rl-c0", "", "", 5)).hasSize(1);
+        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q1", "batch-rl-c1", "", "", 5)).hasSize(1);
+
+        // Re-import (same rows) — DO NOTHING must not duplicate.
+        repo.importBatch(TENANT_A, "relevance_log", List.of(
+            Map.of("query", "batch-rl-q0", "chunk_id", "batch-rl-c0", "collection", "knowledge__nexus",
+                   "action", "store_put", "session_id", "sess-0", "timestamp", PAST_TS)));
+        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q0", "batch-rl-c0", "", "", 5)).hasSize(1);
+    }
+
+    @Test @Order(41)
+    void importBatch_frecency_multiRow_greatestMerge_intraBatchDedupeLastWins() {
+        // Two rows for the SAME chunk_id in ONE batch — must dedupe (last wins),
+        // since a single multi-row ON CONFLICT DO UPDATE cannot affect the same
+        // row twice.
+        int n = repo.importBatch(TENANT_A, "frecency", List.of(
+            Map.of("chunk_id", "batch-frec-1", "embedded_at", "2024-01-01T00:00:00Z",
+                   "ttl_days", 30, "frecency_score", 0.3, "miss_count", 2,
+                   "last_hit_at", "2024-02-01T00:00:00Z"),
+            Map.of("chunk_id", "batch-frec-1", "embedded_at", "2024-01-01T00:00:00Z",
+                   "ttl_days", 30, "frecency_score", 0.8, "miss_count", 9,
+                   "last_hit_at", "2024-03-01T00:00:00Z")));
+        assertThat(n).as("rows submitted (contract unchanged), not rows landed").isEqualTo(2);
+
+        var got = repo.getFrecency(TENANT_A, "batch-frec-1");
+        assertThat(got).isPresent();
+        assertThat(((Number) got.get().get("frecency_score")).doubleValue()).isEqualTo(0.8);
+        assertThat(((Number) got.get().get("miss_count")).intValue()).isEqualTo(9);
+
+        // Re-import with STALE (lower) values — GREATEST must not roll back live values.
+        repo.importBatch(TENANT_A, "frecency", List.of(
+            Map.of("chunk_id", "batch-frec-1", "embedded_at", "2024-01-01T00:00:00Z",
+                   "ttl_days", 30, "frecency_score", 0.1, "miss_count", 1,
+                   "last_hit_at", "2024-01-15T00:00:00Z")));
+        var afterStale = repo.getFrecency(TENANT_A, "batch-frec-1");
+        assertThat(((Number) afterStale.get().get("frecency_score")).doubleValue())
+            .as("GREATEST: must not roll back to stale 0.1").isEqualTo(0.8);
+        assertThat(((Number) afterStale.get().get("miss_count")).intValue())
+            .as("GREATEST: must not roll back to stale 1").isEqualTo(9);
+    }
+
+    @Test @Order(42)
+    void importBatch_unknownTable_throws() {
+        assertThatThrownBy(() -> repo.importBatch(TENANT_A, "bogus-table", List.of(Map.of())))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(43)
+    void importBatch_emptyAndNull_returnZero() {
+        assertThat(repo.importBatch(TENANT_A, "relevance_log", List.of())).isZero();
+        assertThat(repo.importBatch(TENANT_A, "relevance_log", null)).isZero();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {

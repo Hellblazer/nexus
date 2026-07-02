@@ -835,6 +835,145 @@ class TaxonomyRepositoryTest {
         assertThat(bRoot).isPositive();
     }
 
+    // ── importBatch: ONE multi-row INSERT per kind (nexus-1usso) ────────────────
+    // Plan-audit correction on nexus-1usso: importBatch HAD an endpoint but still
+    // looped per-row .execute() inside its single tenant transaction (N round-trips).
+    // These tests exercise the multi-row conversion for all four kinds plus the
+    // intra-batch dedupe a single ON CONFLICT DO UPDATE statement requires.
+
+    @Test @Order(46)
+    void importBatch_topic_multiRow_insertsAll_andExcludedMergeOnReimport() {
+        long id0 = 9900200L;
+        long id1 = 9900201L;
+        int n = repo.importBatch(TENANT_A, "topic", List.of(
+            m("id", id0, "label", "batch-t0", "collection", "knowledge__batch_topic",
+              "centroid_hash", "ch0", "doc_count", 5, "created_at", PAST_TS,
+              "review_status", "pending", "terms", "[\"a\"]"),
+            m("id", id1, "label", "batch-t1", "collection", "knowledge__batch_topic",
+              "centroid_hash", "ch1", "doc_count", 9, "created_at", PAST_TS,
+              "review_status", "pending", "terms", "[\"b\"]")));
+        assertThat(n).isEqualTo(2);
+        assertThat(repo.getTopicById(TENANT_A, id0)).isPresent();
+        assertThat(repo.getTopicById(TENANT_A, id1)).isPresent();
+        assertThat(((Number) repo.getTopicById(TENANT_A, id0).get().get("doc_count")).intValue()).isEqualTo(5);
+
+        // Re-import (one-row batch) with different review_status/centroid_hash/terms —
+        // EXCLUDED merge applies exactly as the single-row importTopic path. doc_count
+        // is trigger-maintained and NOT an ETL merge participant — seed of 5 survives.
+        repo.importBatch(TENANT_A, "topic", List.of(
+            m("id", id0, "label", "batch-t0", "collection", "knowledge__batch_topic",
+              "centroid_hash", "ch0-v2", "doc_count", 999, "created_at", PAST_TS,
+              "review_status", "accepted", "terms", "[\"a\",\"z\"]")));
+        var row = repo.getTopicById(TENANT_A, id0).get();
+        assertThat(row.get("review_status")).isEqualTo("accepted");
+        assertThat(((Number) row.get("doc_count")).intValue()).isEqualTo(5);
+    }
+
+    @Test @Order(47)
+    void importBatch_assignment_multiRow_neverDowngradesProjection_greatestSimilarity() {
+        long t0 = repo.importTopic(TENANT_A, 9900210L, "batch-assign-t0", null, "knowledge__batch_assign",
+                                   null, 0, PAST_TS, "pending", null);
+        long t1 = repo.importTopic(TENANT_A, 9900211L, "batch-assign-t1", null, "knowledge__batch_assign",
+                                   null, 0, PAST_TS, "pending", null);
+
+        int n = repo.importBatch(TENANT_A, "assignment", List.of(
+            m("doc_id", "batch-a-doc-1", "topic_id", t0, "assigned_by", "projection",
+              "similarity", 0.5, "assigned_at", PAST_TS, "source_collection", "knowledge__batch_assign"),
+            m("doc_id", "batch-a-doc-2", "topic_id", t1, "assigned_by", "manual",
+              "similarity", null, "assigned_at", PAST_TS, "source_collection", "knowledge__batch_assign")));
+        assertThat(n).isEqualTo(2);
+        assertThat(repo.getTopicDocIds(TENANT_A, t0, 0)).contains("batch-a-doc-1");
+        assertThat(repo.getTopicDocIds(TENANT_A, t1, 0)).contains("batch-a-doc-2");
+
+        // Re-import same (doc_id, topic_id) with assigned_by='hdbscan' + lower similarity —
+        // never downgrade projection, GREATEST similarity.
+        repo.importBatch(TENANT_A, "assignment", List.of(
+            m("doc_id", "batch-a-doc-1", "topic_id", t0, "assigned_by", "hdbscan",
+              "similarity", 0.2, "assigned_at", PAST_TS, "source_collection", "knowledge__batch_assign")));
+        // chunkGroundedIn only matches assigned_by='projection' rows — if the CASE
+        // logic had downgraded assigned_by to 'hdbscan' this would come back empty.
+        // GREATEST(0.5, 0.2) also confirms similarity was not clobbered downward.
+        assertThat(repo.chunkGroundedIn(TENANT_A, "batch-a-doc-1", "knowledge__batch_assign"))
+            .contains(0.5);
+    }
+
+    @Test @Order(48)
+    void importBatch_link_multiRow_greatestLinkCount() {
+        long t0 = repo.importTopic(TENANT_A, 9900220L, "batch-link-t0", null, "knowledge__batch_link",
+                                   null, 0, PAST_TS, "pending", null);
+        long t1 = repo.importTopic(TENANT_A, 9900221L, "batch-link-t1", null, "knowledge__batch_link",
+                                   null, 0, PAST_TS, "pending", null);
+        long t2 = repo.importTopic(TENANT_A, 9900222L, "batch-link-t2", null, "knowledge__batch_link",
+                                   null, 0, PAST_TS, "pending", null);
+
+        int n = repo.importBatch(TENANT_A, "link", List.of(
+            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 7, "link_types", "co-occur"),
+            m("from_topic_id", t0, "to_topic_id", t2, "link_count", 4, "link_types", "co-occur")));
+        assertThat(n).isEqualTo(2);
+
+        var pairs = repo.getTopicLinkPairs(TENANT_A, List.of(t0, t1, t2));
+        assertThat(pairs).hasSize(2);
+
+        // Re-import with a LOWER link_count for (t0,t1) — GREATEST(7,3) keeps 7.
+        repo.importBatch(TENANT_A, "link", List.of(
+            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 3, "link_types", "co-occur")));
+        var updated = repo.getTopicLinkPairs(TENANT_A, List.of(t0, t1, t2)).stream()
+            .filter(p -> ((Number) p.get("from_topic_id")).longValue() == t0
+                      && ((Number) p.get("to_topic_id")).longValue() == t1)
+            .findFirst();
+        assertThat(updated).isPresent();
+        assertThat(((Number) updated.get().get("link_count")).intValue()).isEqualTo(7);
+    }
+
+    @Test @Order(49)
+    void importBatch_meta_multiRow_distinctCollections_greatestCounters() {
+        String colX = "knowledge__batch_meta_x";
+        String colY = "knowledge__batch_meta_y";
+        int n = repo.importBatch(TENANT_A, "meta", List.of(
+            m("collection", colX, "last_discover_doc_count", 50, "last_discover_at", PAST_TS),
+            m("collection", colY, "last_discover_doc_count", 12, "last_discover_at", PAST_TS)));
+        assertThat(n).isEqualTo(2);
+        assertThat(repo.getLastDiscoverDocCount(TENANT_A, colX)).contains(50);
+        assertThat(repo.getLastDiscoverDocCount(TENANT_A, colY)).contains(12);
+
+        // Re-import colX with a LOWER count — GREATEST(50,20) keeps 50.
+        repo.importBatch(TENANT_A, "meta", List.of(
+            m("collection", colX, "last_discover_doc_count", 20, "last_discover_at", PAST_TS)));
+        assertThat(repo.getLastDiscoverDocCount(TENANT_A, colX)).contains(50);
+    }
+
+    @Test @Order(50)
+    void importBatch_topic_intraBatchDuplicate_lastWins_noError() {
+        // A single multi-row INSERT ... ON CONFLICT cannot touch the same row
+        // twice (PG: "cannot affect row a second time") — the repo must dedupe
+        // within the batch, last occurrence winning.
+        long id = 9900230L;
+        int n = repo.importBatch(TENANT_A, "topic", List.of(
+            m("id", id, "label", "dup-a", "collection", "knowledge__batch_dup",
+              "centroid_hash", "ch-a", "doc_count", 1, "created_at", PAST_TS,
+              "review_status", "pending", "terms", "[\"a\"]"),
+            m("id", id, "label", "dup-b", "collection", "knowledge__batch_dup",
+              "centroid_hash", "ch-b", "doc_count", 2, "created_at", PAST_TS,
+              "review_status", "accepted", "terms", "[\"b\"]")));
+        assertThat(n).isEqualTo(2); // rows submitted (contract unchanged), not rows landed
+        var row = repo.getTopicById(TENANT_A, id);
+        assertThat(row).isPresent();
+        assertThat(row.get().get("label")).isEqualTo("dup-b");
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(2);
+    }
+
+    @Test @Order(51)
+    void importBatch_emptyAndNull_returnZero() {
+        assertThat(repo.importBatch(TENANT_A, "topic", List.of())).isZero();
+        assertThat(repo.importBatch(TENANT_A, "topic", null)).isZero();
+    }
+
+    @Test @Order(52)
+    void importBatch_unknownKind_throws() {
+        assertThatThrownBy(() -> repo.importBatch(TENANT_A, "bogus-kind", List.of(m("id", 1L))))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     /** Build a {@code Map<String,Object>} from alternating key/value varargs (mixed value types). */

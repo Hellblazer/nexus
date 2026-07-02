@@ -457,18 +457,114 @@ public final class AspectRepository {
         return tenantScope.withTenant(tenant, ctx -> doImportAspect(ctx, tenant, body));
     }
 
+    /** PG Int16 bind-count limit is 32767; keep a safety margin (nexus-1usso). */
+    private static final int MAX_BATCH_PARAMS = 30_000;
+
     /**
-     * RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): GUC-once bulk aspect import. ONE
-     * {@link TenantScope#withTenant} (RLS GUC set once per batch) summing the
-     * per-row {@link #doImportAspect}. Returns the number of rows actually
-     * written (sub-confidence rows count 0, matching the single-row path).
+     * nexus-1usso: GUC-once bulk aspect import — ONE multi-row {@code INSERT
+     * ... ON CONFLICT} statement per chunk, mirroring {@code
+     * ChashRepository.doImportBatch} (f0ab406f). The RDR-176 P3 endpoint
+     * already existed but still looped the per-row {@link #doImportAspect}
+     * (N round-trips) — the plan-audit finding on nexus-1usso ("has the
+     * endpoint" != "batches at the DB") applies to every Aspect import
+     * method. The confidence gate is applied BEFORE the multi-row insert
+     * (sub-confidence rows never reach it, matching the single-row path's
+     * skip semantics); kept rows are then deduped on {@code (collection,
+     * source_path)} — the conflict key — within a chunk, last occurrence
+     * wins. Returns the number of rows actually written (sub-confidence
+     * rows count 0, matching the single-row path) — NOT the post-dedup
+     * landed count, since each surviving row independently satisfied the
+     * confidence gate.
      */
     public int importAspectsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            int written = 0;
-            for (Map<String, Object> body : rows) written += doImportAspect(ctx, tenant, body);
-            return written;
+            List<Map<String, Object>> kept = new ArrayList<>();
+            for (var body : rows) {
+                double confidence = body.containsKey("confidence") && body.get("confidence") != null
+                    ? ((Number) body.get("confidence")).doubleValue()
+                    : -1.0;
+                if (confidence >= MIN_CONFIDENCE) kept.add(body);
+            }
+            if (kept.isEmpty()) return 0;
+
+            var collections = new java.util.LinkedHashSet<String>();
+            for (var body : kept) {
+                String c = (String) body.get("collection");
+                if (c != null) collections.add(c);
+            }
+            for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+
+            // Conflict key: (tenant_id, collection, source_path). tenant constant.
+            var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
+            for (var body : kept) {
+                unique.put(body.get("collection") + " " + body.get("source_path"), body);
+            }
+            List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+            final int cols = 16;
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+            for (int start = 0; start < deduped.size(); start += chunkSize) {
+                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                var insert = ctx.insertInto(DOCUMENT_ASPECTS,
+                        DOCUMENT_ASPECTS.TENANT_ID,
+                        DOCUMENT_ASPECTS.COLLECTION,
+                        DOCUMENT_ASPECTS.SOURCE_PATH,
+                        DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
+                        DOCUMENT_ASPECTS.PROPOSED_METHOD,
+                        DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,
+                        DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES,
+                        DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,
+                        DOCUMENT_ASPECTS.EXTRAS,
+                        DOCUMENT_ASPECTS.CONFIDENCE,
+                        DOCUMENT_ASPECTS.EXTRACTED_AT,
+                        DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                        DOCUMENT_ASPECTS.SOURCE_URI,
+                        DOCUMENT_ASPECTS.SALIENT_SENTENCES,
+                        DOCUMENT_ASPECTS.DOC_ID);
+                for (var body : batch) {
+                    double confidence = ((Number) body.get("confidence")).doubleValue();
+                    OffsetDateTime extractedAtTs = parseTs((String) body.get("extracted_at"));
+                    insert = insert.values(
+                            tenant,
+                            (String) body.get("collection"),
+                            (String) body.get("source_path"),
+                            (String) body.get("problem_formulation"),
+                            (String) body.get("proposed_method"),
+                            (String) body.get("experimental_datasets"),
+                            (String) body.get("experimental_baselines"),
+                            (String) body.get("experimental_results"),
+                            (String) body.get("extras"),
+                            confidence,
+                            extractedAtTs,
+                            (String) body.get("model_version"),
+                            (String) body.get("extractor_name"),
+                            (String) body.get("source_uri"),
+                            (String) body.get("salient_sentences"),
+                            nullIfBlank((String) body.get("doc_id")));
+                }
+                insert.onConflict(
+                        DOCUMENT_ASPECTS.TENANT_ID,
+                        DOCUMENT_ASPECTS.COLLECTION,
+                        DOCUMENT_ASPECTS.SOURCE_PATH)
+                      .doUpdate()
+                      .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
+                      .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
+                      .set(DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,  EX_EXPERIMENTAL_DATASETS)
+                      .set(DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES, EX_EXPERIMENTAL_BASELINES)
+                      .set(DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,   EX_EXPERIMENTAL_RESULTS)
+                      .set(DOCUMENT_ASPECTS.EXTRAS,                 EX_EXTRAS)
+                      .set(DOCUMENT_ASPECTS.CONFIDENCE,             EX_CONFIDENCE)
+                      .set(DOCUMENT_ASPECTS.EXTRACTED_AT,           EX_EXTRACTED_AT)
+                      .set(DOCUMENT_ASPECTS.MODEL_VERSION,          EX_MODEL_VERSION)
+                      .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME,         EX_EXTRACTOR_NAME)
+                      .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI_COALESCE)
+                      .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
+                      .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
+                      .execute();
+            }
+            return kept.size();
         });
     }
 
@@ -669,13 +765,69 @@ public final class AspectRepository {
         return tenantScope.withTenant(tenant, ctx -> doImportHighlight(ctx, tenant, body));
     }
 
-    /** RDR-176 P3 (Gap 1): GUC-once bulk highlight import (one withTenant per batch). */
+    /**
+     * nexus-1usso: GUC-once bulk highlight import — ONE multi-row {@code
+     * INSERT ... ON CONFLICT} statement per chunk. Rows with a blank
+     * {@code doc_id} are skipped BEFORE the insert (matching the single-row
+     * path's skip semantics); kept rows are deduped on {@code doc_id} — the
+     * conflict key — within a chunk, last occurrence wins. Returns the
+     * number of rows actually written (blank-doc_id rows count 0).
+     */
     public int importHighlightsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            int written = 0;
-            for (Map<String, Object> body : rows) written += doImportHighlight(ctx, tenant, body);
-            return written;
+            List<Map<String, Object>> kept = new ArrayList<>();
+            for (var body : rows) {
+                String docId = (String) body.get("doc_id");
+                if (docId != null && !docId.isBlank()) kept.add(body);
+            }
+            if (kept.isEmpty()) return 0;
+
+            var collections = new java.util.LinkedHashSet<String>();
+            for (var body : kept) {
+                String c = (String) body.get("collection");
+                if (c != null) collections.add(c);
+            }
+            for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+
+            var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
+            for (var body : kept) unique.put((String) body.get("doc_id"), body);
+            List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+            final int cols = 7;
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+            for (int start = 0; start < deduped.size(); start += chunkSize) {
+                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                var insert = ctx.insertInto(DOCUMENT_HIGHLIGHTS,
+                        DOCUMENT_HIGHLIGHTS.TENANT_ID,
+                        DOCUMENT_HIGHLIGHTS.DOC_ID,
+                        DOCUMENT_HIGHLIGHTS.SOURCE_URI,
+                        DOCUMENT_HIGHLIGHTS.COLLECTION,
+                        DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
+                        DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
+                        DOCUMENT_HIGHLIGHTS.INGESTED_AT);
+                for (var body : batch) {
+                    String ingestedAt = (String) body.get("ingested_at");
+                    OffsetDateTime ingestedAtTs = parseTs(ingestedAt);
+                    insert = insert.values(
+                            tenant,
+                            (String) body.get("doc_id"),
+                            (String) body.get("source_uri"),
+                            (String) body.get("collection"),
+                            (String) body.getOrDefault("highlights_md", ""),
+                            (String) body.getOrDefault("mentions_md", ""),
+                            ingestedAtTs);
+                }
+                insert.onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
+                      .doUpdate()
+                      .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)
+                      .set(DOCUMENT_HIGHLIGHTS.COLLECTION,    EX_HL_COLLECTION)
+                      .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, EX_HL_HIGHLIGHTS)
+                      .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
+                      .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
+                      .execute();
+            }
+            return kept.size();
         });
     }
 
@@ -1214,12 +1366,60 @@ public final class AspectRepository {
         return tenantScope.withTenant(tenant, ctx -> doImportPromotionRow(ctx, tenant, body));
     }
 
-    /** RDR-176 P3 (Gap 1): GUC-once bulk aspect-promotion import (one withTenant per batch). */
+    /**
+     * nexus-1usso: GUC-once bulk aspect-promotion import — ONE multi-row
+     * {@code INSERT ... ON CONFLICT DO NOTHING} statement per chunk. No
+     * dedup needed: intra-statement conflicts against {@code DO NOTHING}
+     * are a documented no-op (unlike {@code DO UPDATE}, which cannot affect
+     * the same row twice), and {@code .execute()} on a {@code DO NOTHING}
+     * statement returns exactly the count of NEWLY inserted rows — so
+     * summing it across chunks reproduces the per-row loop's "count of
+     * rows actually written" contract exactly, without a synthetic dedup
+     * count. Rows missing {@code field_name}/{@code promoted_at} are
+     * skipped BEFORE the insert (matching the single-row path).
+     */
     public int importPromotionBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
+            List<Map<String, Object>> valid = new ArrayList<>();
+            for (var body : rows) {
+                String fieldName  = (String) body.get("field_name");
+                String promotedAt = (String) body.get("promoted_at");
+                if (fieldName != null && promotedAt != null) valid.add(body);
+            }
+            if (valid.isEmpty()) return 0;
+
             int written = 0;
-            for (Map<String, Object> body : rows) written += doImportPromotionRow(ctx, tenant, body);
+            final int cols = 8;
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+            for (int start = 0; start < valid.size(); start += chunkSize) {
+                var batch = valid.subList(start, Math.min(start + chunkSize, valid.size()));
+                var insert = ctx.insertInto(ASPECT_PROMOTION_LOG,
+                        ASPECT_PROMOTION_LOG.TENANT_ID,
+                        ASPECT_PROMOTION_LOG.FIELD_NAME,
+                        ASPECT_PROMOTION_LOG.SQL_TYPE,
+                        ASPECT_PROMOTION_LOG.COLUMN_ADDED,
+                        ASPECT_PROMOTION_LOG.ROWS_BACKFILLED,
+                        ASPECT_PROMOTION_LOG.ROWS_PRUNED,
+                        ASPECT_PROMOTION_LOG.PRUNED,
+                        ASPECT_PROMOTION_LOG.PROMOTED_AT);
+                for (var body : batch) {
+                    String fieldName = (String) body.get("field_name");
+                    OffsetDateTime promotedAtTs = parseTs((String) body.get("promoted_at"));
+                    int columnAdded    = body.containsKey("column_added") && Boolean.TRUE.equals(body.get("column_added")) ? 1 : 0;
+                    int rowsBackfilled = body.containsKey("rows_backfilled") ? ((Number) body.get("rows_backfilled")).intValue() : 0;
+                    int rowsPruned     = body.containsKey("rows_pruned") ? ((Number) body.get("rows_pruned")).intValue() : 0;
+                    int pruned         = body.containsKey("pruned") && Boolean.TRUE.equals(body.get("pruned")) ? 1 : 0;
+                    insert = insert.values(tenant, fieldName, (String) body.getOrDefault("sql_type", "TEXT"),
+                            columnAdded, rowsBackfilled, rowsPruned, pruned, promotedAtTs);
+                }
+                written += insert.onConflict(
+                        ASPECT_PROMOTION_LOG.TENANT_ID,
+                        ASPECT_PROMOTION_LOG.FIELD_NAME,
+                        ASPECT_PROMOTION_LOG.PROMOTED_AT)
+                    .doNothing()
+                    .execute();
+            }
             return written;
         });
     }

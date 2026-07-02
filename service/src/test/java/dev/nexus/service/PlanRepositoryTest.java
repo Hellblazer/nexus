@@ -515,6 +515,115 @@ class PlanRepositoryTest {
         assertThat(row.getTags()).as("no-reason disable must not modify tags").isEqualTo("tag-a");
     }
 
+    // ── importBatch: ONE multi-row INSERT (nexus-1usso) ──────────────────────
+    // Plan-audit correction: importBatch HAD the endpoint but looped the
+    // per-row doImport inside one transaction (N round-trips). These tests
+    // exercise the multi-row conversion + its ON CONFLICT fidelity semantics.
+
+    @Test
+    @Order(16)
+    void importBatch_multiRow_insertsAll_fidelityFieldsPreserved() {
+        var rows = List.of(
+            new PlanRepository.ImportRow("proj-batch", "batch query 0", "{\"v\":0}", "success",
+                "tag0", OffsetDateTime.of(2025, 2, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, "name0",
+                "verb0", "scope0", null, null, null,
+                3, null, 7, 1.5, 2, 1, "", "", null),
+            new PlanRepository.ImportRow("proj-batch", "batch query 1", "{\"v\":1}", "success",
+                "tag1", OffsetDateTime.of(2025, 2, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, "name1",
+                "verb1", "scope1", null, null, null,
+                4, null, 8, 2.5, 3, 0, "", "", null));
+
+        int n = repo.importBatch(TENANT_A, rows);
+        assertThat(n).isEqualTo(2);
+
+        var listed = repo.listPlans(TENANT_A, "proj-batch", 100, true);
+        var q0 = listed.stream().filter(r -> "batch query 0".equals(r.getQuery())).findFirst();
+        assertThat(q0).isPresent();
+        assertThat(q0.get().getPlanJson()).isEqualTo("{\"v\":0}");
+        assertThat(q0.get().getMatchCount()).isEqualTo(7);
+        assertThat(q0.get().getUseCount()).isEqualTo(3);
+
+        var q1 = listed.stream().filter(r -> "batch query 1".equals(r.getQuery())).findFirst();
+        assertThat(q1).isPresent();
+        assertThat(q1.get().getMatchCount()).isEqualTo(8);
+    }
+
+    @Test
+    @Order(17)
+    void importBatch_reimport_sourceAuthoritativeCounters_greatestLastUsed() {
+        // Mirrors Order(13)'s single-row importRow contract, exercised through
+        // the multi-row importBatch path: additive counters use EXCLUDED
+        // (source wins); last_used uses GREATEST (null-safe high-water mark).
+        var seed = List.of(new PlanRepository.ImportRow(
+            "proj-batch-reimport", "reimport query", "{\"v\":1}", "success", "test",
+            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, null, null, null,
+            null, null, null, 5, null, 10, 2.5, 4, 1, "", "reimport query", null));
+        repo.importBatch(TENANT_A, seed);
+
+        long id = repo.listPlans(TENANT_A, "proj-batch-reimport", 100, true).stream()
+            .filter(r -> "reimport query".equals(r.getQuery())).findFirst().get().getId();
+
+        // Live traffic advances counters on the PG side.
+        repo.incrementMatchMetrics(TENANT_A, id, 0.9);
+        repo.incrementRunOutcome(TENANT_A, id, true);
+        repo.incrementRunStarted(TENANT_A, id);
+        OffsetDateTime pgLastUsed = repo.getById(TENANT_A, id).get().getLastUsed();
+        assertThat(pgLastUsed).isNotNull();
+
+        // Re-import (batch, one row) with LOWER counters + null last_used.
+        var reimport = List.of(new PlanRepository.ImportRow(
+            "proj-batch-reimport", "reimport query", "{\"v\":1}", "success", "test",
+            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, null, null, null,
+            null, null, null, 5, null, 10, 2.5, 4, 1, "", "reimport query", null));
+        repo.importBatch(TENANT_A, reimport);
+
+        var after = repo.getById(TENANT_A, id).get();
+        assertThat(after.getMatchCount()).as("EXCLUDED source wins, not GREATEST").isEqualTo(10);
+        assertThat(after.getSuccessCount()).isEqualTo(4);
+        assertThat(after.getLastUsed())
+            .as("null source last_used must not clobber the live GREATEST high-water mark")
+            .isEqualTo(pgLastUsed);
+
+        // Newer source last_used advances the high-water mark.
+        OffsetDateTime newer = pgLastUsed.plusSeconds(3600);
+        repo.importBatch(TENANT_A, List.of(new PlanRepository.ImportRow(
+            "proj-batch-reimport", "reimport query", "{\"v\":1}", "success", "test",
+            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, null, null, null,
+            null, null, null, 5, newer, 10, 2.5, 4, 1, "", "reimport query", null)));
+        var afterNewer = repo.getById(TENANT_A, id).get();
+        assertThat(afterNewer.getLastUsed().withOffsetSameInstant(ZoneOffset.UTC))
+            .isEqualTo(newer.withOffsetSameInstant(ZoneOffset.UTC));
+    }
+
+    @Test
+    @Order(18)
+    void importBatch_intraBatchDuplicate_lastWins_noError() {
+        // A single multi-row INSERT ... ON CONFLICT cannot touch the same row
+        // twice (PG: "cannot affect row a second time") — the repo must dedupe
+        // within the batch on (project, query), last occurrence winning.
+        OffsetDateTime createdAt = OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+        var rows = List.of(
+            new PlanRepository.ImportRow("proj-batch-dup", "dup query", "{\"v\":\"a\"}", "success",
+                "", createdAt, null, null, null, null, null, null, null, 0, null, 0, 0.0, 0, 0, "", "", null),
+            new PlanRepository.ImportRow("proj-batch-dup", "dup query", "{\"v\":\"b\"}", "success",
+                "", createdAt, null, null, null, null, null, null, null, 0, null, 0, 0.0, 0, 0, "", "", null));
+
+        int n = repo.importBatch(TENANT_A, rows);
+        assertThat(n).as("rows submitted (contract unchanged), not rows landed").isEqualTo(2);
+
+        var listed = repo.listPlans(TENANT_A, "proj-batch-dup", 100, true);
+        var matches = listed.stream().filter(r -> "dup query".equals(r.getQuery())).toList();
+        assertThat(matches).hasSize(1);
+        assertThat(matches.get(0).getPlanJson()).isEqualTo("{\"v\":\"b\"}");
+    }
+
+    @Test
+    @Order(19)
+    void importBatch_emptyAndNull_returnZero() {
+        assertThat(repo.importBatch(TENANT_A, List.of())).isZero();
+        assertThat(repo.importBatch(TENANT_A, null)).isZero();
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {

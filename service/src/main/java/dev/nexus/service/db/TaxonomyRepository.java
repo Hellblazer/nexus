@@ -910,92 +910,177 @@ public final class TaxonomyRepository {
     public int importBatch(String tenant, String kind, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            for (Map<String, Object> r : rows) {
-                switch (kind) {
-                    case "topic" -> {
-                        String collection = optS(r, "collection");
-                        ensureCollectionRegistered(ctx, tenant, collection);
-                        ctx.insertInto(TOPICS,
-                                TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
-                                TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
-                                TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS)
-                           .values(reqL(r, "id"), tenant, optS(r, "label"), optL(r, "parent_id"),
-                                   collection, optS(r, "centroid_hash"), optI(r, "doc_count", 0),
-                                   parseTsStrict(reqS(r, "created_at")), optS(r, "review_status"),
-                                   optS(r, "terms"))
-                           .onConflict(TOPICS.ID).doUpdate()
-                           .set(TOPICS.REVIEW_STATUS, field("EXCLUDED.review_status", String.class))
-                           .set(TOPICS.CENTROID_HASH, field("EXCLUDED.centroid_hash", String.class))
-                           .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
-                           .execute();
-                    }
-                    case "assignment" -> {
-                        String sourceCollection = optS(r, "source_collection");
-                        ensureCollectionRegistered(ctx, tenant, sourceCollection);
-                        String assignedAt = optS(r, "assigned_at");
-                        OffsetDateTime assignedAtTs = (assignedAt != null && !assignedAt.isBlank())
-                            ? parseTsStrict(assignedAt) : null;
-                        ctx.insertInto(TOPIC_ASSIGNMENTS,
-                                TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                                TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                                TOPIC_ASSIGNMENTS.SIMILARITY, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                                TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-                           .values(tenant, reqS(r, "doc_id"), reqL(r, "topic_id"),
-                                   optS(r, "assigned_by"), optD(r, "similarity"), assignedAtTs,
-                                   sourceCollection)
-                           .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                                       TOPIC_ASSIGNMENTS.TOPIC_ID)
-                           .doUpdate()
-                           .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                                field("CASE WHEN EXCLUDED.assigned_by = 'projection'"
-                                    + " THEN 'projection'"
-                                    + " ELSE nexus.topic_assignments.assigned_by END", String.class))
-                           .set(TOPIC_ASSIGNMENTS.SIMILARITY,
-                                field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
-                                    + " COALESCE(EXCLUDED.similarity, -1.0))", Double.class))
-                           .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                                field("EXCLUDED.assigned_at", OffsetDateTime.class))
-                           .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                                field("EXCLUDED.source_collection", String.class))
-                           .execute();
-                    }
-                    case "link" -> ctx.insertInto(TOPIC_LINKS,
-                                TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
-                                TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
-                           .values(tenant, reqL(r, "from_topic_id"), reqL(r, "to_topic_id"),
-                                   optI(r, "link_count", 0), optS(r, "link_types"))
-                           .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
-                           .doUpdate()
-                           .set(TOPIC_LINKS.LINK_COUNT,
-                                field("GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count)", Integer.class))
-                           .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
-                           .execute();
-                    case "meta" -> {
-                        String collection = reqS(r, "collection");
-                        ensureCollectionRegistered(ctx, tenant, collection);
-                        String lastAt = optS(r, "last_discover_at");
-                        OffsetDateTime lastAtTs = (lastAt != null && !lastAt.isBlank())
-                            ? parseTsStrict(lastAt) : null;
-                        ctx.insertInto(TAXONOMY_META,
-                                TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION,
-                                TAXONOMY_META.LAST_DISCOVER_DOC_COUNT, TAXONOMY_META.LAST_DISCOVER_AT)
-                           .values(tenant, collection, optI(r, "last_discover_doc_count", 0), lastAtTs)
-                           .onConflict(TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
-                           .doUpdate()
-                           .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
-                                field("GREATEST(nexus.taxonomy_meta.last_discover_doc_count,"
-                                    + " EXCLUDED.last_discover_doc_count)", Integer.class))
-                           .set(TAXONOMY_META.LAST_DISCOVER_AT,
-                                field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
-                                    + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
-                           .execute();
-                    }
-                    default -> throw new IllegalArgumentException("Unknown taxonomy kind: " + kind);
-                }
-            }
+            int n = switch (kind) {
+                case "topic"      -> importTopicsBatch(ctx, tenant, rows);
+                case "assignment" -> importAssignmentsBatch(ctx, tenant, rows);
+                case "link"       -> importLinksBatch(ctx, tenant, rows);
+                case "meta"       -> importMetaBatch(ctx, tenant, rows);
+                default -> throw new IllegalArgumentException("Unknown taxonomy kind: " + kind);
+            };
             log.debug("event=taxonomy_import_batch tenant={} kind={} rows={}", tenant, kind, rows.size());
-            return rows.size();
+            return n;
         });
+    }
+
+    /**
+     * nexus-1usso: every {@code importBatch} kind below lands its whole
+     * request in ONE multi-row {@code INSERT ... ON CONFLICT} statement
+     * (chunked at {@link #MAX_BATCH_PARAMS} bind params for PG's Int16
+     * bind-count limit), mirroring {@code ChashRepository.doImportBatch}
+     * (f0ab406f). Rows are deduped on each table's conflict key within a
+     * chunk — last occurrence wins — because a single multi-row
+     * {@code ON CONFLICT DO UPDATE} cannot affect the same row twice.
+     */
+    private static final int MAX_BATCH_PARAMS = 30_000;
+
+    private static int importTopicsBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        // Register each DISTINCT collection once (was: once per row).
+        var collections = new java.util.LinkedHashSet<String>();
+        for (var r : rows) {
+            String c = optS(r, "collection");
+            if (c != null) collections.add(c);
+        }
+        for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+
+        // Dedupe on id (the conflict key), last occurrence wins.
+        var unique = new LinkedHashMap<Long, Map<String, Object>>(rows.size());
+        for (var r : rows) unique.put(reqL(r, "id"), r);
+        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+        final int cols = 10;
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+        for (int start = 0; start < deduped.size(); start += chunkSize) {
+            List<Map<String, Object>> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+            var insert = ctx.insertInto(TOPICS,
+                    TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
+                    TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
+                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS);
+            for (var r : batch) {
+                insert = insert.values(reqL(r, "id"), tenant, optS(r, "label"), optL(r, "parent_id"),
+                        optS(r, "collection"), optS(r, "centroid_hash"), optI(r, "doc_count", 0),
+                        parseTsStrict(reqS(r, "created_at")), optS(r, "review_status"),
+                        optS(r, "terms"));
+            }
+            insert.onConflict(TOPICS.ID).doUpdate()
+                  .set(TOPICS.REVIEW_STATUS, field("EXCLUDED.review_status", String.class))
+                  .set(TOPICS.CENTROID_HASH, field("EXCLUDED.centroid_hash", String.class))
+                  .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
+                  .execute();
+        }
+        return rows.size();
+    }
+
+    private static int importAssignmentsBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        var collections = new java.util.LinkedHashSet<String>();
+        for (var r : rows) {
+            String c = optS(r, "source_collection");
+            if (c != null) collections.add(c);
+        }
+        for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+
+        // Conflict key: (tenant_id, doc_id, topic_id). tenant is constant for this call.
+        var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
+        for (var r : rows) unique.put(reqS(r, "doc_id") + "::" + reqL(r, "topic_id"), r);
+        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+        final int cols = 7;
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+        for (int start = 0; start < deduped.size(); start += chunkSize) {
+            List<Map<String, Object>> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+            var insert = ctx.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SIMILARITY, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
+            for (var r : batch) {
+                String assignedAt = optS(r, "assigned_at");
+                OffsetDateTime assignedAtTs = (assignedAt != null && !assignedAt.isBlank())
+                    ? parseTsStrict(assignedAt) : null;
+                insert = insert.values(tenant, reqS(r, "doc_id"), reqL(r, "topic_id"),
+                        optS(r, "assigned_by"), optD(r, "similarity"), assignedAtTs,
+                        optS(r, "source_collection"));
+            }
+            insert.onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                               TOPIC_ASSIGNMENTS.TOPIC_ID)
+                  .doUpdate()
+                  .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                       field("CASE WHEN EXCLUDED.assigned_by = 'projection'"
+                           + " THEN 'projection'"
+                           + " ELSE nexus.topic_assignments.assigned_by END", String.class))
+                  .set(TOPIC_ASSIGNMENTS.SIMILARITY,
+                       field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
+                           + " COALESCE(EXCLUDED.similarity, -1.0))", Double.class))
+                  .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                       field("EXCLUDED.assigned_at", OffsetDateTime.class))
+                  .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                       field("EXCLUDED.source_collection", String.class))
+                  .execute();
+        }
+        return rows.size();
+    }
+
+    private static int importLinksBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        // Conflict key: (tenant_id, from_topic_id, to_topic_id).
+        var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
+        for (var r : rows) unique.put(reqL(r, "from_topic_id") + "::" + reqL(r, "to_topic_id"), r);
+        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+        final int cols = 5;
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+        for (int start = 0; start < deduped.size(); start += chunkSize) {
+            List<Map<String, Object>> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+            var insert = ctx.insertInto(TOPIC_LINKS,
+                    TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
+                    TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES);
+            for (var r : batch) {
+                insert = insert.values(tenant, reqL(r, "from_topic_id"), reqL(r, "to_topic_id"),
+                        optI(r, "link_count", 0), optS(r, "link_types"));
+            }
+            insert.onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
+                  .doUpdate()
+                  .set(TOPIC_LINKS.LINK_COUNT,
+                       field("GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count)", Integer.class))
+                  .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+                  .execute();
+        }
+        return rows.size();
+    }
+
+    private static int importMetaBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+        var collections = new java.util.LinkedHashSet<String>();
+        for (var r : rows) collections.add(reqS(r, "collection"));
+        for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+
+        // Conflict key: (tenant_id, collection).
+        var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
+        for (var r : rows) unique.put(reqS(r, "collection"), r);
+        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+        final int cols = 4;
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+        for (int start = 0; start < deduped.size(); start += chunkSize) {
+            List<Map<String, Object>> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+            var insert = ctx.insertInto(TAXONOMY_META,
+                    TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION,
+                    TAXONOMY_META.LAST_DISCOVER_DOC_COUNT, TAXONOMY_META.LAST_DISCOVER_AT);
+            for (var r : batch) {
+                String lastAt = optS(r, "last_discover_at");
+                OffsetDateTime lastAtTs = (lastAt != null && !lastAt.isBlank())
+                    ? parseTsStrict(lastAt) : null;
+                insert = insert.values(tenant, reqS(r, "collection"),
+                        optI(r, "last_discover_doc_count", 0), lastAtTs);
+            }
+            insert.onConflict(TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+                  .doUpdate()
+                  .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
+                       field("GREATEST(nexus.taxonomy_meta.last_discover_doc_count,"
+                           + " EXCLUDED.last_discover_doc_count)", Integer.class))
+                  .set(TAXONOMY_META.LAST_DISCOVER_AT,
+                       field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
+                           + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
+                  .execute();
+        }
+        return rows.size();
     }
 
     // ── batch map-extraction helpers (mirror TaxonomyHandler's per-row parse) ──
