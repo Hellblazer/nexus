@@ -4,7 +4,7 @@ migration-report artifacts.
 
 - ``_check_migration_reports`` (nexus-aigpt): reads the NEWEST
   ``<config>/migration-reports/migration-*.json`` report and fails loud
-  (fatal) when ``summary.total_failed > 0`` or ``verification != "passed"``.
+  (fatal) when ``summary.total_failed > 0`` or ``verification != "verified"``.
   Reference incident: report migration-9141ebaf sat unread for a month with
   total_failed=120, verification=indeterminate, and nothing ever surfaced it.
 
@@ -34,7 +34,7 @@ def _write_report(
     *,
     migration_id: str = "abc12345",
     total_failed: int = 0,
-    verification: str | None = "passed",
+    verification: str | None = "verified",
     service_url: str = "https://api.conexus-nexus.com",
     completed_at: str | None = None,
     stores: list[dict] | None = None,
@@ -113,7 +113,7 @@ class TestCheckMigrationReports:
 
     def test_clean_report_passes(self, tmp_path):
         reports_dir = tmp_path / "migration-reports"
-        _write_report(reports_dir, total_failed=0, verification="passed")
+        _write_report(reports_dir, total_failed=0, verification="verified")
         results = _check_migration_reports(reports_dir=reports_dir)
         assert len(results) == 1
         r = results[0]
@@ -179,6 +179,31 @@ class TestCheckMigrationReports:
         assert r.ok is False
         assert r.fatal is True
 
+    def test_verification_passed_is_not_the_vocabulary(self, tmp_path):
+        """Cross-module contract regression (wave-1 critic finding): the
+        writer — orchestrator.verify_counts() — emits exactly
+        "verified" | "mismatch" | "indeterminate". "passed" is NOT a value
+        any report ever carries; the reader accepting it (as it originally
+        did, `!= "passed"`) made a clean verified run fail doctor forever.
+        A literal "passed" must be treated as unverified."""
+        reports_dir = tmp_path / "migration-reports"
+        _write_report(reports_dir, total_failed=0, verification="passed")
+        results = _check_migration_reports(reports_dir=reports_dir)
+        r = results[0]
+        assert r.ok is False
+        assert r.fatal is True
+
+    def test_reader_accepts_the_writers_success_literal(self):
+        """Pin the writer side of the handshake: verify_counts()'s success
+        return is the literal "verified" — the exact string doctor accepts."""
+        import inspect
+
+        from nexus.migration.orchestrator import verify_counts
+
+        src = inspect.getsource(verify_counts)
+        assert 'return "verified"' in src
+        assert '"passed"' not in src
+
     def test_reads_newest_report_only(self, tmp_path):
         """Two reports present: an older FAILED one and a newer CLEAN one —
         only the newest is read, and it passes."""
@@ -189,7 +214,7 @@ class TestCheckMigrationReports:
         )
         _write_report(
             reports_dir, migration_id="newer", total_failed=0,
-            verification="passed", mtime_offset=0.0,
+            verification="verified", mtime_offset=0.0,
         )
         results = _check_migration_reports(reports_dir=reports_dir)
         r = results[0]
@@ -200,7 +225,7 @@ class TestCheckMigrationReports:
         reports_dir = tmp_path / "migration-reports"
         _write_report(
             reports_dir, migration_id="older", total_failed=0,
-            verification="passed", mtime_offset=-100.0,
+            verification="verified", mtime_offset=-100.0,
         )
         _write_report(
             reports_dir, migration_id="newer", total_failed=3,

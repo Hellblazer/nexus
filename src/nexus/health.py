@@ -2240,9 +2240,11 @@ def _check_migration_reports(reports_dir: Path | None = None) -> list[HealthResu
     """RDR-178 Gap 1 (nexus-aigpt): read the newest migration report and
     fail loud when it recorded failures or an unverified run.
 
-    ``verification`` absent or anything other than ``"passed"`` (including
-    ``"indeterminate"``) counts as failure — the nexus-r0esi precedent:
-    never SKIP-then-report-all-passed.
+    ``verification`` absent or anything other than ``"verified"`` (including
+    ``"indeterminate"`` and ``"mismatch"``) counts as failure — the
+    nexus-r0esi precedent: never SKIP-then-report-all-passed. The vocabulary
+    is the orchestrator's: ``verify_counts()`` emits exactly
+    ``"verified" | "mismatch" | "indeterminate"`` (never "passed").
     """
     label = "Migration reports"
     if reports_dir is None:
@@ -2277,13 +2279,13 @@ def _check_migration_reports(reports_dir: Path | None = None) -> list[HealthResu
     verification = report.get("verification")
 
     failed = total_failed > 0
-    unverified = verification != "passed"
+    unverified = verification != "verified"
 
     if not failed and not unverified:
         return [HealthResult(
             label=label,
             ok=True,
-            detail=f"clean ({report_path.name}): total_failed=0, verification=passed",
+            detail=f"clean ({report_path.name}): total_failed=0, verification=verified",
         )]
 
     per_store_failures: list[str] = []
