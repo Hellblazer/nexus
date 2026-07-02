@@ -17,7 +17,14 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from nexus.migration.orchestrator import verify_fill_catalog, verify_fill_chash
+from nexus.migration.orchestrator import (
+    EtlSources,
+    _telemetry_source_counts,
+    verify_fill_catalog,
+    verify_fill_chash,
+    verify_fill_generic_or_full,
+)
+from nexus.db.t2.telemetry_etl import count_source_rows
 from nexus.migration.migration_report import IssueCollector
 from nexus.retry import EtlCircuitBreaker
 
@@ -257,3 +264,54 @@ class TestVerifyFillCatalog:
         # real client methods were exercised, not a full re-send
         assert any(p[0] == "/import/owner" for p in client.posts)
         assert any(p[0] == "/import/chunk" for p in client.posts)
+
+
+class TestTelemetryPartialCoverageGuard:
+    def test_unmapped_telemetry_tables_force_full_etl_even_when_mapped_pair_is_parity(
+        self,
+    ) -> None:
+        """R4 substantive-critic HIGH (2026-07-02): only hook_failures +
+        nx_answer_runs have a _VERIFY_TABLES mapping; the other 4 telemetry
+        tables land ``indeterminate`` and indeterminate is never a pass —
+        so a --verify-fill telemetry run must NEVER skip the full ETL on
+        2/6-table parity. A hole in e.g. frecency would otherwise be
+        undetectable."""
+        source_counts = {
+            "hook_failures": 3,      # mapped, parity below
+            "nx_answer_runs": 7,     # mapped, parity below
+            "relevance_log": 100,    # unmapped -> indeterminate
+            "search_telemetry": 50,  # unmapped -> indeterminate
+            "tier_writes": 25,       # unmapped -> indeterminate
+            "frecency": 10,          # unmapped -> indeterminate (drifted or not: unknowable)
+        }
+        ran = {"full": 0}
+
+        def run_full() -> str:
+            ran["full"] += 1
+            return "full-etl-ran"
+
+        verdicts, full_result, _notes = verify_fill_generic_or_full(
+            "telemetry", source_counts, run_full,
+            count_source=_FakeCountSource({
+                "nexus.hook_failures": 3,
+                "nexus.nx_answer_runs": 7,
+            }),
+        )
+
+        assert ran["full"] == 1
+        assert full_result == "full-etl-ran"
+        assert verdicts["hook_failures"]["status"] == "parity"
+        assert verdicts["frecency"]["status"] == "indeterminate"
+
+    def test_telemetry_source_counts_passes_all_six_tables_through(
+        self, tmp_path: Path,
+    ) -> None:
+        db = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db))
+        conn.close()
+        expected = set(count_source_rows(db).keys())
+        got = set(_telemetry_source_counts(
+            EtlSources(sqlite_path=db, catalog_db_path=None),  # type: ignore[arg-type]
+        ).keys())
+        assert got == expected
+        assert {"relevance_log", "search_telemetry", "tier_writes", "frecency"} <= got

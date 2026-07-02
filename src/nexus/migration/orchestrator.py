@@ -904,10 +904,17 @@ def _telemetry_source_counts(sources: EtlSources) -> dict[str, int]:
     from nexus.db.t2.telemetry_etl import count_source_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     counts = count_source_rows(sources.sqlite_path)
-    # Only hook_failures + nx_answer_runs carry a _VERIFY_TABLES mapping;
-    # the other 4 telemetry tables have no PG relation to diff against
-    # (unchecked either way, matching the full-ETL verify path).
-    return {k: v for k, v in counts.items() if k in ("hook_failures", "nx_answer_runs")}
+    # ALL six telemetry tables pass through, deliberately including the 4
+    # with no _VERIFY_TABLES PG mapping (relevance_log, search_telemetry,
+    # tier_writes, frecency). Those land ``indeterminate`` in
+    # verify_store_counts — and indeterminate is never a pass — so a
+    # telemetry --verify-fill can NEVER skip the full ETL on the strength
+    # of the 2 mapped tables alone. Pre-filtering to the mapped pair made
+    # 2/6-table parity read as store-level parity, silently skipping the
+    # ETL over an undetectable hole in the other 4 (R4 substantive-critic
+    # HIGH, 2026-07-02). Telemetry becomes skippable only when .14/RDR-177
+    # gives every table a verify seam.
+    return dict(counts)
 
 
 def _taxonomy_source_counts(sources: EtlSources) -> dict[str, int]:
