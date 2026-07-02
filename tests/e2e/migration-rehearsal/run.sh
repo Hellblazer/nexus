@@ -4,6 +4,7 @@
 #   tests/e2e/migration-rehearsal/run.sh              # ONNX leg only (secret-free)
 #   tests/e2e/migration-rehearsal/run.sh --with-cloud # + Voyage leg (reads .env)
 #   tests/e2e/migration-rehearsal/run.sh --no-build   # reuse existing wheel/JAR
+#   tests/e2e/migration-rehearsal/run.sh --hole-punch # verify-fill delta-fill proof (nexus-s3dd4.7)
 #
 # Builds the wheel on the host and the LINUX native nexus-service binary in a
 # GraalVM container (RDR-161: the native binary is the sole launch artifact; the
@@ -26,6 +27,7 @@ COLD=0
 COMPREHENSIVE=0
 STRESS=0
 FULLSTACK=0
+HOLE_PUNCH=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= the guided-upgrade version-pin floor and PASSES.
 # Derived from the product constant (REQUIRED_RELEASE_VERSION) so this stamp can
@@ -58,6 +60,7 @@ for a in "$@"; do
     --comprehensive) COMPREHENSIVE=1 ;;  # Phase D: daily-driver surface on the default rehearse.sh
     --stress)     STRESS=1 ;;            # Phase E: concurrency + queue-drain stress on the default rehearse.sh
     --fullstack)  FULLSTACK=1 ;;         # standalone: full topology (service + nx-mcp + claude) MCP-driven enqueue + worker drain
+    --hole-punch) HOLE_PUNCH=1 ;;        # standalone: verify-fill delta-fill proof against a real fault-injected PG target (nexus-s3dd4.7)
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -90,6 +93,12 @@ trap '_guided_restore' EXIT
 [ "$COMPREHENSIVE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ]; } && { echo "--comprehensive runs on the default rehearse path; it cannot combine with --cold/--guided (they override the entrypoint)" >&2; exit 2; }
 [ "$STRESS" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ]; } && { echo "--stress runs on the default rehearse path; it cannot combine with --cold/--guided (they override the entrypoint)" >&2; exit 2; }
 [ "$FULLSTACK" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ]; } && { echo "--fullstack is a standalone full-topology run (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+# --hole-punch is a standalone journey: it reuses the --cold box's staging
+# internally (cheapest to compose — no native GraalVM build) but drives its
+# own entrypoint (rehearse_hole_punch.sh, nexus-s3dd4.7), never combined with
+# another flow flag.
+[ "$HOLE_PUNCH" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ]; } && { echo "--hole-punch is a standalone verify-fill delta-fill journey (its own cold-acquire entrypoint); do not combine with other legs" >&2; exit 2; }
+[ "$HOLE_PUNCH" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--hole-punch always rebuilds the wheel + cold-acquires the binary; --no-build is irrelevant" >&2; exit 2; }
 
 if [ "$GUIDED" = 1 ]; then
   # --guided force-rebuilds the native binary with the stamp baked in, so it is
@@ -104,9 +113,10 @@ if [ "$GUIDED" = 1 ]; then
 fi
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
-if [ "$COLD" = 1 ]; then
-  # nexus-4mm24: the cold box acquires the PUBLISHED binary + PG bundle at
-  # runtime — NO local native build, NO stamping. Just the wheel.
+if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
+  # nexus-4mm24 / nexus-s3dd4.7: the cold box (and --hole-punch, which reuses
+  # it) acquires the PUBLISHED binary + PG bundle at runtime — NO local native
+  # build, NO stamping. Just the wheel.
   echo "[1/2] Building the conexus wheel (host)…"
   uv build --wheel >/dev/null 2>&1
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/" >&2; exit 1; }
@@ -135,24 +145,25 @@ else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
 fi
 
-if [ "$COLD" = 0 ]; then
+if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ]; then
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/ — drop --no-build" >&2; exit 1; }
   [ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
 fi
 
-echo "[stage] Staging a minimal build context + building image (COLD=$COLD WITH_CLOUD=$WITH_CLOUD)…"
+echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_PUNCH=$HOLE_PUNCH WITH_CLOUD=$WITH_CLOUD)…"
 # Flatten wheel + JAR + driver to fixed names in a tiny throwaway context. The
 # repo .dockerignore excludes dist/, and the inputs live in three different
 # trees — staging sidesteps both without touching the shared .dockerignore.
 STAGE="$(mktemp -d)"
 trap '_guided_restore; rm -rf "$STAGE"' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
-if [ "$COLD" = 1 ]; then
+if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
   # nexus-4mm24: NOTHING the service needs is staged — the cold box acquires the
   # binary + PG bundle from the published release at runtime. Only the wheel +
-  # the cold driver + seed travel in.
+  # both cold drivers (rehearse_cold.sh, rehearse_hole_punch.sh — nexus-s3dd4.7)
+  # + seed travel in; the entrypoint below picks the right one.
   cp "$HERE/Dockerfile.cold" "$STAGE/Dockerfile"
-  cp "$HERE/rehearse_cold.sh" "$HERE/seed_legacy.py" "$STAGE/"
+  cp "$HERE/rehearse_cold.sh" "$HERE/rehearse_hole_punch.sh" "$HERE/seed_legacy.py" "$STAGE/"
 elif [ "$FULLSTACK" = 1 ]; then
   # Full topology: native binary + the fullstack Dockerfile (adds linux claude) +
   # the fullstack driver. Same native-binary staging as the default path.
@@ -192,8 +203,9 @@ fi
 docker build -q -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE" >/dev/null
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
-if [ "$COLD" = 1 ]; then
-  # nexus-4mm24: tell the cold box which published release to acquire from.
+if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
+  # nexus-4mm24 / nexus-s3dd4.7: tell the cold box which published release to
+  # acquire from (--hole-punch needs v0.1.18+ for /v1/telemetry/ids/probe).
   run_env+=(-e "NEXUS_SERVICE_TAG=$COLD_TAG")
 fi
 if [ "$WITH_CLOUD" = 1 ]; then
@@ -226,6 +238,11 @@ if [ "$FULLSTACK" = 1 ]; then
   docker run --rm "${run_env[@]}" \
     -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
     "$IMAGE"
+elif [ "$HOLE_PUNCH" = 1 ]; then
+  # nexus-s3dd4.7: override the cold box's default entrypoint to drive the
+  # verify-fill hole-punch journey instead of the plain cold-acquire MVV.
+  docker run --rm "${run_env[@]}" --entrypoint /bin/bash "$IMAGE" \
+    /home/nexus/rehearse_hole_punch.sh
 elif [ "$COLD" = 1 ]; then
   # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"

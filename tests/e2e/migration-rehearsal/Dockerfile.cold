@@ -50,8 +50,11 @@ RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     && uv pip install --python /home/nexus/nxenv /tmp/conexus-*.whl \
     && nx --version
 
-# Driver + seed last (trivial layers).
+# Driver + seed last (trivial layers). rehearse_hole_punch.sh (nexus-s3dd4.7)
+# reuses this SAME cold-acquire box via run.sh --hole-punch, which overrides
+# the entrypoint below — see run.sh for the --entrypoint swap.
 COPY rehearse_cold.sh /home/nexus/rehearse_cold.sh
+COPY rehearse_hole_punch.sh /home/nexus/rehearse_hole_punch.sh
 COPY seed_legacy.py /home/nexus/seed_legacy.py
 
 ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_cold.sh"]
