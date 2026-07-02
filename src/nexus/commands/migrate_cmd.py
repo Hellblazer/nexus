@@ -163,6 +163,7 @@ def _run_migration(
     service_url: str | None,
     *,
     assume_yes: bool = False,
+    skip_t2_stores: frozenset[str] = frozenset(),
 ) -> None:
     """Drive the full guided migration through the nexus engine.
 
@@ -170,6 +171,14 @@ def _run_migration(
     to ``run_guided_upgrade`` and renders the verdict. A block leaves the
     sentinel ``migrated-failed`` (reads stay degraded-LOUD) and exits non-zero;
     rollback is offered, never auto-invoked (RF-5, copy-not-move).
+
+    ``skip_t2_stores`` (RDR-178 Gap 7, nexus-1sx01): T2 store names the
+    caller's already-migrated pre-flight (``guided_upgrade.
+    detect_already_migrated``) has confirmed are covered by a clean report
+    with no newer local writes. Threaded to ``run_guided_upgrade`` as a
+    ``functools.partial(migrate_all, skip_stores=...)`` override for the T2
+    step — empty (the default) reproduces the prior unconditional behavior
+    exactly.
     """
     from nexus.migration.driver import run_guided_upgrade  # noqa: PLC0415 — heavy migration dep deferred to subcommand scope
     from nexus.migration.orchestrator import EtlSources  # noqa: PLC0415 — heavy migration dep deferred to subcommand scope
@@ -252,6 +261,13 @@ def _run_migration(
         click.echo(f"  progress: {done}/{total} collection(s) migrated")
         sys.stdout.flush()
 
+    run_t2 = None
+    if skip_t2_stores:
+        from functools import partial  # noqa: PLC0415 — deferred import — avoids import-time cost / circular deps
+        from nexus.migration.orchestrator import migrate_all  # noqa: PLC0415 — heavy migration dep deferred to subcommand scope
+
+        run_t2 = partial(migrate_all, skip_stores=skip_t2_stores)
+
     try:
         result = run_guided_upgrade(
             sources=EtlSources(
@@ -263,6 +279,7 @@ def _run_migration(
             local_path=local_path,
             on_progress=_on_progress,
             on_leg_result=_on_leg_result,
+            run_t2=run_t2,
         )
     finally:
         _close_quietly(catalog_client)

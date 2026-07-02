@@ -16,7 +16,10 @@ a no-op instead of standing up a service for an empty footprint.
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +32,8 @@ from nexus.migration.detection import (
     open_read_legs,
     voyage_key_available,
 )
+from nexus.migration.etl_registry import LADDER_ORDER
+from nexus.migration.migration_report import load_report
 
 _log = structlog.get_logger(__name__)
 
@@ -118,6 +123,284 @@ def detect_pending_migration(
         unsupported=len(report.unsupported),
     )
     return PreflightDetection(report=report, needs_migration=needs)
+
+
+# ── RDR-178 Gap 7 (nexus-1sx01): already-migrated detection ────────────────
+#
+# The 2026-07-01 production incident: a guided-upgrade re-run re-shipped
+# 158k catalog rows to patch a 270-row hole because nothing distinguished
+# "source data present" (detect_pending_migration's Chroma-only signal,
+# which stays True forever post-success because copy-not-move retains
+# Chroma) from "already migrated". This section closes that gap for the
+# T2 SQLite side ONLY — the side the incident actually hit, and the side
+# with a durable evidence trail (the RDR-153 migration-report artifacts
+# under ``<config>/migration-reports/``). It does NOT attempt "already
+# migrated" detection for the T3 Chroma legs (that is the migrate-leg
+# delta-shipping mode, nexus-s3dd4, Wave 2 — explicitly out of scope here)
+# and does NOT invent a new durable marker: the existing report artifacts
+# ARE the positive signal the original bead asked for.
+
+#: (table, timestamp-column) freshness probe per RDR-152 ladder store — the
+#: SINGLE anchor table each store's ETL writes first/primarily. Used only to
+#: detect "have there been local writes since the report we would otherwise
+#: trust completed"; a store whose newer writes land ONLY in a secondary
+#: table (e.g. ``taxonomy.topic_assignments`` rather than ``topics``) is not
+#: caught by this coarse probe. That is an accepted MVP limitation — the
+#: probe is used only to decide whether to SKIP re-shipping, never to
+#: confirm correctness, and a false skip is still safe (copy-not-move — the
+#: source is never at risk, only re-verified less eagerly).
+FRESHNESS_PROBES: dict[str, tuple[str, str]] = {
+    "memory": ("memory", "timestamp"),
+    "plans": ("plans", "created_at"),
+    "telemetry": ("search_telemetry", "ts"),
+    "taxonomy": ("topics", "created_at"),
+    "aspects": ("document_aspects", "extracted_at"),
+    "chash": ("chash_index", "created_at"),
+    "catalog": ("documents", "indexed_at"),
+    "aspects_queue": ("aspect_extraction_queue", "enqueued_at"),
+}
+
+
+@dataclass(frozen=True)
+class StoreMigrationStatus:
+    """One T2 store's already-migrated verdict for one pre-flight.
+
+    ``line`` is the human-readable evidence trail rendered to the operator
+    (e.g. ``"memory: already migrated 2026-07-01T12:00:00+00:00, no newer
+    local writes"``) — never silent, so a skip is always auditable.
+    """
+
+    store: str
+    skip: bool
+    line: str
+
+
+@dataclass(frozen=True)
+class AlreadyMigratedPlan:
+    """The per-store skip/run breakdown from :func:`detect_already_migrated`."""
+
+    statuses: tuple[StoreMigrationStatus, ...]
+
+    @property
+    def skip_stores(self) -> frozenset[str]:
+        return frozenset(s.store for s in self.statuses if s.skip)
+
+    @property
+    def run_stores(self) -> frozenset[str]:
+        return frozenset(s.store for s in self.statuses if not s.skip)
+
+    @property
+    def all_skipped(self) -> bool:
+        """True iff every EVALUATED store is covered.
+
+        An empty plan (no statuses at all) is deliberately NOT
+        ``all_skipped`` — "nothing was evaluated" must never read as
+        "everything is a no-op".
+        """
+        return bool(self.statuses) and not self.run_stores
+
+    def summary_lines(self) -> list[str]:
+        return [s.line for s in self.statuses]
+
+
+def _default_reports_dir() -> Path:
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — avoids import-time cost / circular deps
+
+    return nexus_config_dir() / "migration-reports"
+
+
+def _load_reports(dir_path: Path) -> list[dict[str, Any]]:
+    """Load every ``*.json`` report under *dir_path*.
+
+    A corrupt / unparseable / non-object file is logged and skipped — a
+    durable evidence trail must degrade gracefully, never crash the
+    pre-flight (mirrors :func:`detect_pending_migration`'s own
+    fail-loud-only-on-real-errors posture, but a bad artifact on disk is
+    evidence noise, not a real error).
+    """
+    if not dir_path.is_dir():
+        return []
+    reports: list[dict[str, Any]] = []
+    for f in sorted(dir_path.glob("*.json")):
+        try:
+            reports.append(load_report(f))
+        except (OSError, ValueError) as exc:
+            _log.warning(
+                "guided_upgrade_report_unreadable", path=str(f), error=str(exc)
+            )
+    return reports
+
+
+def _store_failed_count(report: dict[str, Any], store: str) -> int | None:
+    """Sum ``failed`` across *store*'s tables in *report*; ``None`` when the
+    store is not present in this report at all (distinct from a present
+    store with zero failures)."""
+    for entry in report.get("stores", []) or []:
+        if entry.get("store") == store:
+            return sum(int(t.get("failed", 0)) for t in entry.get("tables", []) or [])
+    return None
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp (``Z`` or ``+00:00`` suffix); ``None`` on
+    anything unparseable — never raises (both report and SQLite timestamps
+    are foreign input here)."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _has_newer_local_writes(
+    sqlite_path: str | Path, probe: tuple[str, str], report_completed_at: str,
+) -> bool | None:
+    """True iff *probe*'s anchor table has a row newer than
+    *report_completed_at*; False if confirmed not; None if freshness cannot
+    be evaluated (missing file/table/column, or an unparseable timestamp on
+    either side).
+
+    ``None`` is the CONSERVATIVE-TOWARD-TRUST branch by design: the caller
+    (:func:`_decide_store`) treats "cannot evaluate" the same as "no probe
+    configured" — report-presence-alone, per the RDR-178 Gap 7 spec's
+    explicit fallback. *table*/*column* come from the fixed internal
+    :data:`FRESHNESS_PROBES` map only, never external input.
+    """
+    report_dt = _parse_ts(report_completed_at)
+    if report_dt is None:
+        return None
+    path = Path(sqlite_path)
+    if not path.exists():
+        return None
+    table, column = probe
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return None
+    try:
+        cur = conn.execute(f"SELECT MAX({column}) FROM {table}")  # noqa: S608 — table/column from the fixed internal FRESHNESS_PROBES map
+        row = cur.fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if not row or row[0] is None:
+        return False
+    local_dt = _parse_ts(str(row[0]))
+    if local_dt is None:
+        return None
+    return local_dt > report_dt
+
+
+def _decide_store(
+    store: str, reports: list[dict[str, Any]], *, sqlite_path: str | Path,
+) -> StoreMigrationStatus:
+    candidates = [r for r in reports if _store_failed_count(r, store) is not None]
+    if not candidates:
+        return StoreMigrationStatus(
+            store, False, f"{store}: no migration report found — will migrate"
+        )
+
+    latest = max(candidates, key=lambda r: str(r.get("completed_at") or ""))
+    completed_at = str(latest.get("completed_at") or "")
+
+    failed = _store_failed_count(latest, store) or 0
+    if failed > 0:
+        return StoreMigrationStatus(
+            store, False,
+            f"{store}: latest report ({completed_at}) shows {failed} failed "
+            "row(s) — will migrate",
+        )
+
+    # A single-store report (``nx storage migrate <store>``) never carries a
+    # top-level "verification" key (RDR-153 §schema); its ABSENCE is judged
+    # on the store's own failed count alone (the "per-store success entries"
+    # fallback). Present but not "verified" (mismatch / indeterminate)
+    # taints the WHOLE report — the report records one verdict per run, not
+    # per store (nexus-r0esi: an unverifiable run is never a pass).
+    verification = latest.get("verification")
+    if verification is not None and verification != "verified":
+        return StoreMigrationStatus(
+            store, False,
+            f"{store}: latest report ({completed_at}) verification="
+            f"{verification!r} — will migrate",
+        )
+
+    probe = FRESHNESS_PROBES.get(store)
+    freshness_confirmed = False
+    if probe is not None and completed_at:
+        newer = _has_newer_local_writes(sqlite_path, probe, completed_at)
+        if newer is True:
+            return StoreMigrationStatus(
+                store, False,
+                f"{store}: local writes newer than the report ({completed_at}) "
+                "— will migrate",
+            )
+        freshness_confirmed = newer is False
+
+    if freshness_confirmed:
+        line = f"{store}: already migrated {completed_at}, no newer local writes"
+    else:
+        line = (
+            f"{store}: already migrated {completed_at} (no local freshness "
+            "signal for this store — trusting the report)"
+        )
+    return StoreMigrationStatus(store, True, line)
+
+
+def detect_already_migrated(
+    *,
+    sqlite_path: str | Path,
+    reports_dir: str | Path | None = None,
+    stores: Iterable[str] = LADDER_ORDER,
+    force: bool = False,
+) -> AlreadyMigratedPlan:
+    """RDR-178 Gap 7: per-T2-store already-migrated detection.
+
+    For each of *stores* (default: the full RDR-152 ladder), finds the
+    NEWEST migration-report artifact under *reports_dir* (default
+    ``<config>/migration-reports``) that mentions the store, and marks it
+    SKIP when that report shows zero failed rows for the store, its
+    run-level ``verification`` (if present) is ``"verified"``, and the
+    store's anchor table (:data:`FRESHNESS_PROBES`) has no row newer than
+    the report's ``completed_at`` (or has no configured/evaluable probe, in
+    which case report-presence alone is trusted).
+
+    ``force=True`` bypasses ALL of the above — no report is read, no SQLite
+    connection is opened — and marks every store to run unconditionally.
+    This is the escape hatch (this module had no prior ``--force``-style
+    convention to extend, so this establishes it).
+
+    Cheap and side-effect-free: reads local JSON files + issues bounded
+    ``SELECT MAX(...)`` probes against the T2 SQLite source. No network
+    call — this is precisely the "cheap...signal the module already has
+    access to" the WORK spec calls for, reusing the RDR-153 report
+    artifacts rather than inventing a second durable marker.
+    """
+    store_tuple = tuple(stores)
+    if force:
+        return AlreadyMigratedPlan(
+            statuses=tuple(
+                StoreMigrationStatus(
+                    s, False, f"{s}: --force — migrating unconditionally"
+                )
+                for s in store_tuple
+            )
+        )
+
+    dir_path = Path(reports_dir) if reports_dir is not None else _default_reports_dir()
+    reports = _load_reports(dir_path)
+    statuses = tuple(
+        _decide_store(s, reports, sqlite_path=sqlite_path) for s in store_tuple
+    )
+    plan = AlreadyMigratedPlan(statuses=statuses)
+    _log.info(
+        "guided_upgrade_already_migrated_detect",
+        skip=sorted(plan.skip_stores),
+        run=sorted(plan.run_stores),
+    )
+    return plan
 
 
 # ── ez5.4 seam + ez5.7: readiness contract ─────────────────────────────────

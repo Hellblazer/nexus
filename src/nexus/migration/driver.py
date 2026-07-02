@@ -139,6 +139,7 @@ def run_guided_upgrade(
     on_progress: Callable[[int, int], None] | None = None,
     on_leg_result: Callable[[Any], None] | None = None,
     reopen_leg: Callable[[str], Any] | None = None,
+    run_t2: Callable[[Any], dict[str, Any]] | None = None,
 ) -> GuidedUpgradeResult:
     """Run the full detect → sequence → validate guided upgrade.
 
@@ -148,6 +149,16 @@ def run_guided_upgrade(
     taxonomy floor reads. ``voyage_key_present`` defaults to the deployment-mode
     probe. ``on_progress(done, total)`` / ``on_leg_result(result)`` are pure
     progress sinks (the CLI wires ``click.echo``).
+
+    ``run_t2`` (RDR-178 Gap 7, nexus-1sx01): an override for the T2
+    ``migrate all`` step, threaded straight to
+    :func:`nexus.migration.sequencer.run_sequenced_migration`'s own
+    ``run_t2`` seam. The guided-upgrade CLI uses this to pass
+    ``functools.partial(migrate_all, skip_stores=...)`` once its
+    already-migrated pre-flight (:func:`detect_already_migrated`) has
+    identified stores with no newer local writes since a clean report.
+    ``None`` (the default) preserves the prior behavior exactly — the
+    sequencer's own default (``migrate_all`` unconditionally) applies.
 
     Returns a :class:`GuidedUpgradeResult`. The sentinel is left ``migrated``
     only on a clean unlock-failure window that cannot occur here: a clean run
@@ -204,6 +215,13 @@ def run_guided_upgrade(
             target_names=target_names,
         )
 
+    # Only pass run_t2 through when explicitly given — omitting the kwarg
+    # entirely when it is None preserves the exact prior call shape for
+    # every existing caller/test (the sequencer's own default applies).
+    _seq_kwargs: dict[str, Any] = {}
+    if run_t2 is not None:
+        _seq_kwargs["run_t2"] = run_t2
+
     sequence = run_sequenced_migration(
         detection,
         sources=sources,
@@ -211,6 +229,7 @@ def run_guided_upgrade(
         voyage_key_present=key_present,
         on_progress=on_progress,
         cross_model_targets=target_names,
+        **_seq_kwargs,
     )
 
     # A fresh-user no-op (nothing data-bearing) is a clean success with no

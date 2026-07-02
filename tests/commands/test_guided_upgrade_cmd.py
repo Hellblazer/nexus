@@ -14,13 +14,16 @@ from click.testing import CliRunner
 
 from nexus.commands.guided_upgrade_cmd import guided_upgrade_cmd
 from nexus.migration.guided_upgrade import (
+    AlreadyMigratedPlan,
     HealthGateResult,
     PreflightDetection,
     ProvisionResult,
     ServiceReadiness,
+    StoreMigrationStatus,
     VoyageCapabilityOutcome,
 )
 from nexus.migration.detection import CollectionClassification, DetectionReport
+from nexus.migration.etl_registry import LADDER_ORDER
 
 _MOD = "nexus.commands.guided_upgrade_cmd"
 
@@ -343,3 +346,88 @@ class TestGuidedUpgradeCmd:
         assert "service-url" in result.output.lower()
         est.assert_not_called()
         mig.assert_not_called()
+
+
+class TestAlreadyMigratedWiring:
+    """RDR-178 Gap 7 (nexus-1sx01): already-migrated T2 stores are echoed and
+    threaded through to ``_run_migration`` as ``skip_t2_stores``."""
+
+    def _plan(self, *, skip: frozenset[str]) -> AlreadyMigratedPlan:
+        return AlreadyMigratedPlan(
+            statuses=tuple(
+                StoreMigrationStatus(
+                    s, s in skip,
+                    f"{s}: already migrated 2026-07-01, no newer local writes"
+                    if s in skip else f"{s}: no migration report found — will migrate",
+                )
+                for s in LADDER_ORDER
+            )
+        )
+
+    def test_skip_stores_are_echoed_and_forwarded(self) -> None:
+        plan = self._plan(skip=frozenset({"memory", "plans"}))
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 2)), \
+             patch(f"{_MOD}.detect_already_migrated", return_value=plan) as det, \
+             patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 0, result.output
+        assert "already migrated 2026-07-01" in result.output
+        det.assert_called_once()
+        assert det.call_args.kwargs["force"] is False
+        mig.assert_called_once_with(
+            None, None, None, "http://127.0.0.1:8099",
+            skip_t2_stores=frozenset({"memory", "plans"}),
+        )
+
+    def test_nothing_skipped_reproduces_the_exact_prior_call_shape(self) -> None:
+        plan = self._plan(skip=frozenset())
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 2)), \
+             patch(f"{_MOD}.detect_already_migrated", return_value=plan), \
+             patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 0, result.output
+        assert "already migrated" not in result.output
+        # No skip_t2_stores kwarg at all when nothing is skipped.
+        mig.assert_called_once_with(None, None, None, "http://127.0.0.1:8099")
+
+    def test_force_flag_is_forwarded_to_detection(self) -> None:
+        plan = self._plan(skip=frozenset())
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 2)), \
+             patch(f"{_MOD}.detect_already_migrated", return_value=plan) as det, \
+             patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration"):
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes", "--force"])
+        assert result.exit_code == 0, result.output
+        det.assert_called_once()
+        assert det.call_args.kwargs["force"] is True
+
+    def test_all_skipped_still_migrates_for_the_t3_leg(self) -> None:
+        # T3 (Chroma) is out of scope for this bead (nexus-s3dd4, Wave 2) —
+        # even when every T2 store is covered, the command still proceeds
+        # because `pre.needs_migration` is True (Chroma data still present).
+        plan = self._plan(skip=frozenset(LADDER_ORDER))
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 2)), \
+             patch(f"{_MOD}.detect_already_migrated", return_value=plan), \
+             patch(f"{_MOD}.establish_verified_service", return_value=_ready()) as est, \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 0, result.output
+        est.assert_called_once()  # still provisions — T3 leg is untouched by this bead
+        mig.assert_called_once_with(
+            None, None, None, "http://127.0.0.1:8099",
+            skip_t2_stores=frozenset(LADDER_ORDER),
+        )

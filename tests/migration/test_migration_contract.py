@@ -63,6 +63,11 @@ def test_run_guided_upgrade_signature():
         "on_progress",
         "on_leg_result",
         "reopen_leg",
+        # RDR-178 Gap 7 (nexus-1sx01): optional T2-step override, threaded
+        # straight to the sequencer's own `run_t2` seam. Additive + backward
+        # compatible — default None reproduces the prior behavior exactly;
+        # the veneer need not pass it to keep working.
+        "run_t2",
     }
 
 
@@ -251,5 +256,9 @@ def test_orchestrator_surface():
         "on_store_failed",
         "on_progress",
         "migration_id",
+        # RDR-178 Gap 7 (nexus-1sx01): already-migrated store skip seam.
+        # Additive + backward compatible — default frozenset() reproduces
+        # the prior unconditional behavior exactly.
+        "skip_stores",
     }
     assert _fields(EtlSources) == {"sqlite_path", "catalog_db_path"}

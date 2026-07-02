@@ -2046,7 +2046,7 @@ List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revo
 ## nx guided-upgrade
 
 ```
-nx guided-upgrade [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--timeout SECS] [--yes]
+nx guided-upgrade [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--timeout SECS] [--yes] [--force]
 ```
 
 The **one-command upgrade from a pre-6.0 (ChromaDB) install to the service
@@ -2070,12 +2070,22 @@ service must be able to serve them — fail loud before migrating) → drive
   provisioning a local one; requires `NX_SERVICE_TOKEN` to be set.
 - `--timeout SECS` bounds the wait for the service to become healthy (default 120).
 - `--yes` / `-y` skips the confirmation prompt.
+- `--force` (RDR-178 Gap 7) skips already-migrated detection and re-migrates
+  every T2 store unconditionally.
 
 A not-ready or wrong-version service **hard-fails before any migration**.
-Idempotent and safe to re-run, but **not a no-op after success** — a re-run
-re-copies at full cost (the ChromaDB source is intact, so it is re-detected). On
-a validation block it leaves the `migrated-failed` sentinel and offers a rollback
-command (copy-not-move; never auto-reverts). Operational narrative:
+Idempotent and safe to re-run. The **T2 (SQLite) side is a true no-op on
+re-run** (RDR-178 Gap 7): before migrating, the command consults the newest
+`<config>/migration-reports/` artifacts plus a local-SQLite freshness probe
+and skips any T2 store already covered by a clean report with no newer local
+writes — printing an `already migrated <date>, no newer local writes` line
+per skipped store. `--force` bypasses this and re-migrates every T2 store
+unconditionally. The **T3 (ChromaDB → pgvector) side is NOT yet a no-op** —
+copy-not-move leaves the ChromaDB source intact, so it is always re-detected
+and re-verified at full cost (already-migrated detection for the T3 legs is
+tracked separately, RDR-178 Wave 2). On a validation block it leaves the
+`migrated-failed` sentinel and offers a rollback command (copy-not-move;
+never auto-reverts). Operational narrative:
 [`docs/migration-runbook.md`](migration-runbook.md).
 
 ## nx migrate-to-service

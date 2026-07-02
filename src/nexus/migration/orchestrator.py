@@ -423,6 +423,7 @@ def migrate_all(
     on_store_failed: Callable[[str, Exception], None] | None = None,
     on_progress: Callable[[str, int, int], None] | None = None,
     migration_id: str | None = None,
+    skip_stores: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Run ALL eight store migrations in RDR-152 ladder order and return ONE
     RDR-153 report dict (with the verification verdict folded in).
@@ -461,6 +462,18 @@ def migrate_all(
     is the advisory count check, with ``report["relations_checked"]`` naming
     how many relations the count source actually reconciled. The caller maps
     both onto its own exit / unlock semantics.
+
+    ``skip_stores`` (RDR-178 Gap 7, nexus-1sx01): store names to skip
+    entirely — no ETL call, no read/write counts, not even an
+    ``on_store``/``on_progress`` callback. The caller (the guided-upgrade
+    already-migrated pre-flight) has independently confirmed these stores
+    are already migrated with no newer local writes; re-running them here
+    would re-ship data for nothing (the 2026-07-01 incident: 158k catalog
+    rows re-sent to patch a 270-row hole). Skipped stores are recorded in
+    ``report["skipped_stores"]`` for observability — they carry no read/
+    write/failed counts of their own (this is a distinct signal from a
+    store that ran and wrote zero rows). Default ``frozenset()`` is fully
+    backward compatible — every store always runs.
     """
     etls = ordered(build_store_etls(sources))
     # nexus-5drgy: import every ladder step's ETL module BEFORE any store
@@ -470,8 +483,13 @@ def migrate_all(
 
     collector = IssueCollector()
     mig_id = migration_id or str(uuid.uuid4())
+    skipped: list[str] = []
 
     for etl in etls:
+        if etl.store in skip_stores:
+            skipped.append(etl.store)
+            _log.info("migrate_all.store_skipped_already_migrated", store=etl.store)
+            continue
         if on_store is not None:
             on_store(etl.store)
         crashed = False
@@ -532,4 +550,6 @@ def migrate_all(
     report["relations_checked"] = len(_written_by_table(report))
     if convergence_notes:
         report["verification_convergence_notes"] = convergence_notes
+    if skipped:
+        report["skipped_stores"] = skipped
     return report

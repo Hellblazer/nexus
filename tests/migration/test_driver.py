@@ -193,6 +193,46 @@ def test_fresh_user_noop_clean_success(monkeypatch, _sources):
     assert set(closables) == {"detect-local", "detect-cloud"}
 
 
+def test_run_t2_passthrough_only_when_provided(monkeypatch, _sources):
+    """RDR-178 Gap 7 (nexus-1sx01): ``run_t2`` is forwarded to the sequencer
+    ONLY when the caller explicitly supplies it — omitting it preserves the
+    sequencer's own default (``migrate_all``), never an explicit ``None``
+    overriding it (which would break every caller unaware of this seam)."""
+    captured: dict[str, object] = {}
+
+    def _open_read_legs(local_path=None):
+        return _FakeClient("l", closables=[]), _FakeClient("c", closables=[])
+
+    def _classify(*, local_client, cloud_client, voyage_key_present):
+        return _detection()
+
+    def _run_sequenced(
+        det, *, sources, run_leg, voyage_key_present,
+        on_progress=None, cross_model_targets=None, run_t2="UNSET",
+    ):
+        captured["run_t2"] = run_t2
+        return _sequence(ok=True, phase="not-migrating")
+
+    monkeypatch.setattr(driver, "open_read_legs", _open_read_legs)
+    monkeypatch.setattr(driver, "classify_collections", _classify)
+    monkeypatch.setattr(driver, "run_sequenced_migration", _run_sequenced)
+
+    driver.run_guided_upgrade(
+        sources=_sources, vector_client=object(), catalog_client=object(),
+        t2_db_path=_sources.sqlite_path,
+    )
+    assert captured["run_t2"] == "UNSET"  # kwarg omitted entirely
+
+    def _fake_run_t2(sources):  # noqa: ANN001, ANN202
+        return {}
+
+    driver.run_guided_upgrade(
+        sources=_sources, vector_client=object(), catalog_client=object(),
+        t2_db_path=_sources.sqlite_path, run_t2=_fake_run_t2,
+    )
+    assert captured["run_t2"] is _fake_run_t2
+
+
 def test_sequence_block_no_validation(monkeypatch, _sources):
     order: list[str] = []
     closables: list[str] = []

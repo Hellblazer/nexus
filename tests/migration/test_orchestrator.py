@@ -162,6 +162,59 @@ class TestMigrateAll:
         assert report["relations_checked"] == 2
 
 
+class TestSkipStores:
+    """RDR-178 Gap 7 (nexus-1sx01): the already-migrated skip seam."""
+
+    def test_skipped_store_is_not_run(self, tmp_path, monkeypatch) -> None:
+        order: list[str] = []
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls(order))
+        orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+            skip_stores=frozenset({"catalog"}),
+        )
+        assert "catalog" not in order
+        assert order == [
+            "memory", "plans", "telemetry", "taxonomy",
+            "aspects", "chash", "aspects_queue",
+        ]
+
+    def test_skipped_store_gets_no_callbacks(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls([]))
+        on_store_seen: list[str] = []
+        on_progress_seen: list[str] = []
+        orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+            skip_stores=frozenset({"memory"}),
+            on_store=on_store_seen.append,
+            on_progress=lambda store, w, r: on_progress_seen.append(store),
+        )
+        assert "memory" not in on_store_seen
+        assert "memory" not in on_progress_seen
+
+    def test_skipped_stores_recorded_in_report_not_counted(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls([]))
+        report = orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+            skip_stores=frozenset({"memory", "plans"}),
+        )
+        assert report["skipped_stores"] == ["memory", "plans"]
+        # 6 remaining stores x 10 read/written each (see _fake_etls)
+        assert report["summary"]["total_read"] == 60
+        assert report["summary"]["total_written"] == 60
+        assert report["summary"]["total_failed"] == 0
+
+    def test_no_skip_stores_key_when_nothing_skipped(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls([]))
+        report = orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+        )
+        assert "skipped_stores" not in report
+
+
 # ── Count verification through the injected source ───────────────────────────
 
 
