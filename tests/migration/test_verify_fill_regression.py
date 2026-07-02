@@ -47,6 +47,16 @@ cut — no wired inner-fill surface yet, see
 ``verify_fill_generic_or_full``/``_telemetry_source_counts`` in
 ``orchestrator.py``) and the ``tests/e2e/migration-rehearsal`` hole-punch
 journey (cloud-gated, needs a deployed engine — separate follow-up).
+
+Also out of scope (P6 critic, 2026-07-02): the 300-row pagination
+boundary of the identity-fetch surfaces. The fakes here answer presence
+from in-memory dicts with no limit/offset walk, so an off-by-one at a
+page boundary in the REAL clients (registered_chashes_for_collection,
+existing_ids, chashes_for_collection) is invisible at any N — bumping
+N past 300 would not make these tests exercise it. Real-client paging
+belongs to the client's own tests + the cloud e2e journey above; the
+2026-07-01 incident's page-count dimension (270 of 138k, many pages)
+is therefore reproduced here in hole/table RATIO only.
 """
 from __future__ import annotations
 
