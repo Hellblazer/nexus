@@ -241,7 +241,13 @@ def test_registry_has_rule():
 
 
 def test_hooks_json_registers():
-    """RDR-125: PreToolUse:Bash hook is registered in sn, not nx."""
+    """The grep-routing PreToolUse hook is registered NOWHERE.
+
+    History: RDR-125 migrated it nx -> sn; commit a69bea88 (2026-07-01)
+    then removed it from sn too — the hook's block frequently surfaced as
+    silently-empty bash output, a lie by omission. The script stays on
+    disk as dead code for reference, but neither plugin may register it.
+    """
     sn_hooks_json = PROJECT_ROOT / "sn" / "hooks" / "hooks.json"
     sn_data = json.loads(sn_hooks_json.read_text())
     sn_bash_hooks = sn_data["hooks"].get("PreToolUse", [])
@@ -250,7 +256,10 @@ def test_hooks_json_registers():
         for entry in sn_bash_hooks if entry.get("matcher") == "Bash"
         for h in entry.get("hooks", [])
     )
-    assert sn_found, "Expected sn/hooks/hooks.json PreToolUse:Bash to register the script"
+    assert not sn_found, (
+        "grep-routing hook re-registered in sn/hooks/hooks.json; "
+        "a69bea88 removed it deliberately (silently-empty grep output)."
+    )
 
     nx_hooks_json = PROJECT_ROOT / "conexus" / "hooks" / "hooks.json"
     nx_data = json.loads(nx_hooks_json.read_text())

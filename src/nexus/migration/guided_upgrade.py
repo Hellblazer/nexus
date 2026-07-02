@@ -275,7 +275,7 @@ def _has_newer_local_writes(
         return None
     table, column = probe
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)  # epsilon-allow: Gap-7 already-migrated freshness probe — read-only (mode=ro URI) on the frozen migration source, never T2Database
     except sqlite3.OperationalError:
         return None
     try:

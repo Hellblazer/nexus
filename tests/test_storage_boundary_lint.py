@@ -481,7 +481,16 @@ def test_dual_population_baseline_locked():
     # 18 = +1 for RDR-155 P5.2 (nexus-9n4pn): migration/vector_etl.py
     # verify_taxonomy_consistency read-only T2 source read (mode=ro URI,
     # taxonomy-consistency check; ETL-adjacent reader, never a T2 writer).
-    assert result.epsilon_allow_connects == 18, (
+    # 19 = +1 for RDR-178 Gap 2 (nexus-14ndm): health.py divergence check —
+    # read-only mode=ro URI on the local memory.db, doctor tripwire.
+    # 20 = +1 for RDR-178 P4 (nexus-s3dd4.5): migration/orchestrator.py
+    # chash-rows-by-collection ETL source read (migration SOURCE SQLite,
+    # never T2Database).
+    # 21 = +1 for RDR-178 Gap 7 (nexus-1sx01): migration/guided_upgrade.py
+    # already-migrated freshness probe — read-only mode=ro URI on the
+    # frozen migration source (annotation added at full-suite triage,
+    # 2026-07-02; the site itself landed 4776f0c8).
+    assert result.epsilon_allow_connects == 21, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

@@ -433,19 +433,22 @@ def test_indexer_has_zero_unallowed_voyageai_after_cutover():
 
 
 def test_lint_baseline_unchanged_after_voyageai_extension():
-    """The existing baseline metrics (epsilon_allow_connects == 18,
+    """The existing baseline metrics (epsilon_allow_connects == 21,
     total_violations == 0, t2database_constructions == 31) must remain
     stable after adding voyageai to the BANLIST.
 
     This ensures the lint extension does not silently break existing counts.
     (18 = +1 for RDR-155 P5.2 nexus-9n4pn: migration/vector_etl.py read-only
-    taxonomy-consistency T2 read — same bump as test_storage_boundary_lint.)"""
+    taxonomy-consistency T2 read; 19-21 = RDR-178 additions — health.py
+    divergence check (Gap 2), orchestrator.py chash source read (P4),
+    guided_upgrade.py freshness probe (Gap 7) — same bumps documented in
+    test_storage_boundary_lint.test_dual_population_baseline_locked.)"""
     result = _lint_check()
     assert result.total_violations == 0, (
         f"Baseline violation count changed after voyageai lint extension: "
         f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
     )
-    assert result.epsilon_allow_connects == 18, (
+    assert result.epsilon_allow_connects == 21, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-
