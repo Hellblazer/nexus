@@ -282,6 +282,36 @@ def get_mineru_server_url(repo_root: Path | None = None) -> str:
         return f"http://127.0.0.1:{live}"
     return configured
 
+
+def get_mineru_configured_fixed_port(repo_root: Path | None = None) -> int | None:
+    """Return the port from an explicit, non-default local ``mineru_server_url``.
+
+    ``get_mineru_server_url`` treats a non-default ``pdf.mineru_server_url``
+    as binding operator intent (RDR-148 Gap 1) — but that precedence was
+    read-only: ``nx mineru start``'s own port default (``--port 0`` ==
+    auto-assign) ignored config entirely, so an operator with a fixed local
+    port in config who ran a bare ``nx mineru start`` got a live server on a
+    *different* random port than what the rest of the system (``nx doctor``,
+    the PDF pipeline) was told to look for — a silently disconnected server
+    that reported success (nexus incident 2026-07-01).
+
+    This gives the start path the same read: a non-default, ``127.0.0.1``/
+    ``localhost``-hosted URL with a parseable port is "the operator already
+    told us where to bind" and should be honored as the auto-assign default,
+    not overridden by a fresh random port. Returns ``None`` for the default
+    URL, an unparseable URL, or a non-local host (e.g. a remote/launchctl
+    URL an operator manages out-of-band — nothing to bind here).
+    """
+    import urllib.parse  # noqa: PLC0415 — deferred; only needed on this rare path
+
+    configured = get_pdf_config(repo_root).mineru_server_url
+    if configured == _MINERU_DEFAULT_URL:
+        return None
+    parsed = urllib.parse.urlparse(configured)
+    if parsed.hostname not in ("127.0.0.1", "localhost"):
+        return None
+    return parsed.port
+
 def get_mineru_table_enable(repo_root: Path | None = None) -> bool:
     return get_pdf_config(repo_root).mineru_table_enable
 
