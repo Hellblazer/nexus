@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.1.0] - 2026-07-01
+
+Plugin version aligned with conexus 6.1.0. No plugin-side changes — this
+release's work (leased aspect-worker daemon, migration batching/
+observability/retry, the macOS engine-bundle relocatability fix, and
+several catalog/DEVONthink bug fixes) is entirely in the `nx` CLI/engine,
+not the plugin surface.
+
 ## [6.0.0] - 2026-06-29
 
 Plugin version aligned with conexus 6.0.0 (the migration-capable release:

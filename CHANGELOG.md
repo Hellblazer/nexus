@@ -6,6 +6,69 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.1.0] - 2026-07-01
+
+Aspect-extraction now survives short-lived storing processes, the migration
+tooling gained batching/observability/retry hardening, and the macOS install
+path is fixed — every prior `engine-service` release shipped a PostgreSQL
+bundle that crashed on any machine other than the exact CI build host.
+
+### Added
+
+- **Leased aspect-worker daemon (RDR-173).** Aspect extraction no longer
+  depends on the storing process's lifetime: `store_put`'s enqueue hook
+  spawns a per-tenant, leased daemon (spawn-if-absent, single-flight) on the
+  RDR-149 service-registry substrate to host the extraction loop
+  (`claim → claude -p → upsert document_aspects → mark_done`) and a
+  `reclaim_stale` sweep. New command: `nx daemon aspect-worker start`. The
+  `claude -p` child is armed with `PR_SET_PDEATHSIG` so a daemon death by any
+  means (including an uncatchable `SIGKILL`) can never orphan it burning API
+  quota.
+- **Batched, observable, retry-hardened migration (RDR-176).** `nx storage
+  migrate all` now runs all eight T2 stores with GUC-once batched imports
+  (O(N/batch) instead of per-row — the 190k-row taxonomy table alone dropped
+  from per-row to a single batch pass), prints per-store progress
+  (`<store>: <written> written / <read> read`), and bounded transient-edge
+  retry (nginx 403 / dropped connection / read-timeout) at every ETL call
+  site. Service-mode SQLite T2 is now formally an immutable migration
+  source — downgrade is a reinstall of the prior CLI, never a
+  backup/restore. Auth across storage commands is unified config-first
+  (`--service-url` flag > `NX_SERVICE_URL` env > `config.yml`).
+
+### Fixed
+
+- **macOS PostgreSQL bundle was never relocatable.** Every `engine-service`
+  release through v0.1.15 shipped `psql`/`createdb`/`pg_dump`/`initdb`/...
+  binaries whose dynamic-linker paths were baked to the literal CI build
+  host — any install on a real machine crashed with `dyld: Library not
+  loaded` the first time `nx init` tried to provision Postgres. Fixed at
+  the build (`install_name_tool` rewrite to `@rpath`) and release-pipeline
+  level (a real relocation gate now proves `initdb → start → CREATE
+  EXTENSION vector` against the exact artifact before it can be signed and
+  published). `engine-service-v0.1.17` is the first verified-relocatable
+  macOS release.
+- **Catalog `by_file_path` mis-attributed new files to an unrelated
+  document, corrupting its chunk manifest.** The service's `/list` endpoint
+  ignored `file_path` when `owner` was set and returned the full owner
+  list; the client trusted `docs[0]`, so indexing a new file under a
+  populated owner silently overwrote another document's manifest. Fixed
+  client-side (exact-match filter) and server-side (`/list` now honors
+  both parameters together).
+- **DEVONthink bridge failures were undiagnosable.** `nx dt`'s `is_running`
+  probe logged the content-free `"unhandled errors in a TaskGroup (1
+  sub-exception)"` instead of the real connection/transport failure. The
+  underlying `ExceptionGroup` is now unwrapped to its actual root cause.
+- Catalog `import/{owner,document,link,collection}` returned a bare 500 on
+  an empty request body instead of a clean 400.
+- Extended the RDR-172 SQLSTATE-class-23-to-typed-409 mapping (client-input
+  integrity violations, e.g. an unregistered `doc_id` or nonexistent
+  `topic_id`) from `AspectHandler` to `CatalogHandler`'s manifest write
+  path and `TaxonomyHandler`'s topic-assignment path.
+- **`nx doctor` crashed uncaught when the nexus-service endpoint wasn't
+  resolvable** (e.g. running it before `nx daemon service start`) instead
+  of reporting a clean, degraded catalog check like every other health
+  check already does.
+
 ## [6.0.0] - 2026-06-29
 
 The migration-capable release. The storage substrate moves
