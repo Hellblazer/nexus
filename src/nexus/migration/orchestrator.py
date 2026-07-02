@@ -26,12 +26,16 @@ import dis
 import importlib
 import os
 import uuid
-from typing import Any, Callable, Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import structlog
 
 from nexus.migration.etl_registry import EtlSources, StoreEtl, ordered
 from nexus.migration.migration_report import IssueCollector, build_report
+
+if TYPE_CHECKING:
+    from nexus.migration.verify_fill import TableVerdict
 
 _log = structlog.get_logger(__name__)
 
@@ -343,6 +347,637 @@ def verify_counts(
     return "verified", convergence_notes, dict(pg_counts)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# RDR-178 wave-2 P4 (nexus-s3dd4.5): verify-fill CLI wiring.
+#
+# ``verify_fill.py`` (P2/P3a) built the outer count-diff loop
+# (:func:`~nexus.migration.verify_fill.verify_store_counts`) and the inner
+# identity-diff + fill primitives (:func:`~nexus.migration.verify_fill.fill_missing`
+# / :func:`~nexus.migration.verify_fill.fill_missing_document_chunks`) as
+# pure, client-agnostic functions. This section is P4's job: wire REAL
+# clients (HttpChashIndex, HttpCatalogClient) as
+# :class:`~nexus.migration.verify_fill.IdentitySource` /
+# :class:`~nexus.migration.verify_fill.ManifestSource` implementations, and
+# orchestrate the outer-verify -> inner-fill decision per store.
+#
+# Deferred imports of ``nexus.migration.verify_fill`` throughout this
+# section mirror verify_fill.py's OWN deferred imports of THIS module's
+# constants (see the R2 cycle-guard comment in verify_fill.py) — the two
+# modules import each other's symbols, so both sides must defer to runtime.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def resolve_target_service_url(explicit: str | None = None) -> str:
+    """Best-effort RESOLVED service URL for a migration report's
+    ``target.service_url`` field.
+
+    Report-writer fixup (epic te885 comment 2026-07-02 04:19): both
+    :func:`migrate_all` and the CLI's per-store ``_emit_store_report`` used
+    to write the literal string ``"(lease)"`` when ``NX_SERVICE_URL`` was
+    unset — a placeholder that reads as a real hostname and blinds any
+    downstream divergence check on the artifact. This resolves the ACTUAL
+    endpoint the same way the migration clients do (env, then config.yml,
+    then the supervisor lease), falling back to the loud ``"(unresolved)"``
+    marker (never a value that could be mistaken for a real endpoint).
+    """
+    if explicit:
+        return explicit.rstrip("/")
+    env_url = os.environ.get("NX_SERVICE_URL", "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+    try:
+        from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        url, _token = resolve_service_endpoint()
+        return url
+    except Exception:  # noqa: BLE001 — best-effort report label, never fatal
+        return "(unresolved)"
+
+
+def clamp_fill_batch_size(batch_size: int) -> int:
+    """Clamp *batch_size* to the ``chroma_quotas`` ``MAX_RECORDS_PER_WRITE``
+    ceiling (300).
+
+    R3 review note 2 (2026-07-02): ``fill_missing`` /
+    ``fill_missing_document_chunks`` accept a caller-supplied ``batch_size``
+    with NO internal clamp — P4 owns enforcing the ceiling here so an
+    oversized caller-supplied value cannot trip the ``/v1/*/import`` quota.
+    """
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — deferred; branch-local quota constant
+
+    return max(1, min(int(batch_size), QUOTAS.MAX_RECORDS_PER_WRITE))
+
+
+def dedup_convergence_notes(
+    store: str, verdicts: dict[str, "TableVerdict"],
+) -> list[str]:
+    """Recompute convergence notes for dedup tables from a
+    :func:`~nexus.migration.verify_fill.verify_store_counts` verdict map.
+
+    R2 critic finding (2026-07-02): ``TableVerdict`` intentionally carries
+    no ``convergence_notes`` field of its own. Surface WHY a dedup table
+    (e.g. ``nexus.plans``) parity'd despite ``target_count < source_count``
+    by recomputing the delta from the verdict's OWN ``source_count`` /
+    ``target_count`` pair — never re-derive dedup semantics from scratch.
+    Wording mirrors :func:`verify_counts`'s ``convergence_notes`` exactly so
+    the two surfaces read identically.
+    """
+    notes: list[str] = []
+    for table, verdict in verdicts.items():
+        if verdict["status"] != "parity":
+            continue
+        relation = _VERIFY_TABLES.get((store, table))
+        if relation is None or relation not in _VERIFY_TABLES_DEDUP:
+            continue
+        src, tgt = verdict["source_count"], verdict["target_count"]
+        if tgt is None or src <= 0:
+            continue
+        delta = src - tgt
+        if delta > 0:
+            notes.append(
+                f"{relation}: {tgt} rows from {src} source rows; {delta} "
+                f"converged onto existing keys by UNIQUE constraint via DO "
+                f"UPDATE — by design"
+            )
+    return notes
+
+
+def _try_fill(
+    fn: Callable[[], dict[str, Any]],
+    *,
+    store: str,
+    table_name: str,
+    collector: Any,
+    recovery: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Wrap ONE inner-fill call so a circuit-breaker give-up records partial
+    progress in the migration report instead of crashing the whole
+    verify-fill run (R3 review note 1: ``fill_missing`` /
+    ``fill_missing_document_chunks`` propagate a breaker give-up WITHOUT a
+    partial ``FillResult`` — that loss happens INSIDE ``verify_fill.py``,
+    which P4 does not own, so recovery here is necessarily a best-effort
+    RE-PROBE of the identity surface after the failure, not a reconstruction
+    of ``verify_fill.py``'s internal state).
+
+    *recovery* (optional) computes a best-effort partial result after the
+    failure (typically re-probing the target's identity surface — every
+    batch that succeeded before the breaker gave up already landed,
+    idempotent writes, so the re-probe reflects rows genuinely confirmed
+    present). When omitted, the failure is still recorded (never silent)
+    with ``filled=0``. Never re-raises: the caller continues with the next
+    unit of work; the failure is recorded into *collector* so it still
+    gates ``summary.total_failed``.
+    """
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 — R3 note 1: a breaker give-up must not crash verify-fill; record + continue
+        _log.error("verify_fill.fill_call_failed", table=table_name, error=str(exc))
+        partial = (
+            recovery()
+            if recovery is not None
+            else {
+                "source_count": 0, "target_count": None, "missing": None,
+                "filled": 0, "status": "indeterminate",
+            }
+        )
+        if collector is not None:
+            collector.record_event(
+                store, table_name,
+                issue_class="unexpected", constraint=table_name,
+                reason=(
+                    f"verify-fill circuit breaker gave up: {exc} — "
+                    f"filled={partial.get('filled', 0)} confirmed landed "
+                    f"before giving up"
+                ),
+                action="failed",
+            )
+        return partial
+
+
+def _recover_flat_fill(
+    identity_source: Any,
+    source_rows: list[dict[str, Any]],
+    key_fn: Callable[[dict[str, Any]], str],
+) -> dict[str, Any]:
+    """Best-effort partial :class:`~nexus.migration.verify_fill.FillResult`
+    after a breaker give-up: re-probe *identity_source* and count how many
+    of *source_rows* are NOW present. Used as :func:`_try_fill`'s
+    ``recovery`` for the flat (single identity-set) fill shapes — chash
+    (per collection), catalog owners, catalog collections."""
+    try:
+        post_present = identity_source.present()
+    except Exception:  # noqa: BLE001 — best-effort recovery probe only
+        post_present = None
+    if post_present is None:
+        return {
+            "source_count": len(source_rows), "target_count": None,
+            "missing": None, "filled": 0, "status": "indeterminate",
+        }
+    filled = sum(1 for r in source_rows if key_fn(r) in post_present)
+    return {
+        "source_count": len(source_rows), "target_count": len(post_present),
+        "missing": len(source_rows) - filled, "filled": filled,
+        "status": "indeterminate",
+    }
+
+
+# ── chash: real IdentitySource + fill orchestration ──────────────────────────
+
+
+class _ChashCollectionIdentitySource:
+    """Real :class:`~nexus.migration.verify_fill.IdentitySource` wiring for
+    ``chash_index``, scoped to ONE physical_collection (chash's identity
+    surface — ``registered_chashes_for_collection`` — is collection-scoped;
+    the same chash value can legitimately appear in multiple collections, so
+    the diff must not conflate them)."""
+
+    def __init__(self, http_chash: Any, collection: str) -> None:
+        self._http_chash = http_chash
+        self._collection = collection
+
+    def present(self) -> set[str] | None:
+        try:
+            return self._http_chash.registered_chashes_for_collection(self._collection)
+        except Exception as exc:  # noqa: BLE001 — unreachable surface -> indeterminate (verify_fill's own documented contract)
+            _log.warning(
+                "verify_fill.chash_identity_unreachable",
+                collection=self._collection, error=str(exc),
+            )
+            return None
+
+
+def _read_chash_rows_by_collection(sqlite_path: Path) -> dict[str, list[dict[str, str]]]:
+    """Group SQLite ``chash_index`` rows by ``physical_collection`` — chash's
+    natural fill scope, mirroring ``chash_etl.migrate_chash_rows``'s own
+    read query (never duplicated transform logic, just the SELECT)."""
+    import sqlite3  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
+
+    conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)  # epsilon-allow: ETL source-read; sqlite_path is the migration SOURCE SQLite, never T2Database
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT chash, physical_collection, created_at FROM chash_index"
+        ).fetchall()
+    finally:
+        conn.close()
+    by_collection: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        chash = row["chash"] or ""
+        collection = row["physical_collection"] or ""
+        if not chash or not collection:
+            continue
+        by_collection.setdefault(collection, []).append({
+            "chash": chash,
+            "collection": collection,
+            "created_at": row["created_at"] or "1970-01-01T00:00:00Z",
+        })
+    return by_collection
+
+
+def _chash_import_fn(http_chash: Any) -> Callable[[list[dict[str, Any]]], Any]:
+    def _import(batch: list[dict[str, Any]]) -> Any:
+        resp = http_chash._client.post("/v1/chash/import", json={"rows": batch})
+        resp.raise_for_status()
+        return resp
+    return _import
+
+
+def verify_fill_chash(
+    sqlite_path: Path,
+    http_chash: Any,
+    *,
+    count_source: "CountSource | None" = None,
+    batch_size: int = 200,
+    breaker: Any = None,
+    collector: Any = None,
+) -> dict[str, Any]:
+    """RDR-178 P4: verify-fill (delta) for the ``chash`` store.
+
+    Runs the outer count-diff against ``chash_index``'s total row count; on
+    parity the fill is skipped entirely (zero HTTP writes — the design's
+    "no-op verify = one HTTP call" goal). On divergence OR indeterminacy
+    (verify_fill.py's documented contract: an indeterminate outer verdict is
+    treated the same as divergent for safety) runs the inner
+    :func:`~nexus.migration.verify_fill.fill_missing` PER PHYSICAL
+    COLLECTION — chash's identity surface is collection-scoped.
+
+    A per-collection circuit-breaker give-up is caught via :func:`_try_fill`
+    and converted into a partial-progress record rather than aborting the
+    whole command.
+    """
+    from nexus.migration.verify_fill import fill_missing, verify_store_counts  # noqa: PLC0415 — R2 import-cycle guard, mirrored from verify_fill.py
+    from nexus.retry import EtlCircuitBreaker  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    batch_size = clamp_fill_batch_size(batch_size)
+    cs = count_source or ServiceCountSource()
+
+    by_collection = _read_chash_rows_by_collection(sqlite_path)
+    total_rows = sum(len(rows) for rows in by_collection.values())
+
+    outer_verdicts = verify_store_counts(
+        "chash", cs, {"chash_index": total_rows},
+    )
+    outer_status = outer_verdicts.get("chash_index", {}).get("status", "indeterminate")
+
+    fill_by_collection: dict[str, Any] = {}
+    total_filled = 0
+    if outer_status != "parity":
+        for collection, rows in sorted(by_collection.items()):
+            key_fn: Callable[[dict[str, Any]], str] = lambda r: (r["chash"] or "")[:32]  # noqa: E731
+            identity_source = _ChashCollectionIdentitySource(http_chash, collection)
+            result = _try_fill(
+                lambda: fill_missing(  # noqa: B023 — invoked immediately by _try_fill, not deferred past this iteration
+                    source_rows=rows,
+                    key_fn=key_fn,
+                    identity_source=identity_source,
+                    import_fn=_chash_import_fn(http_chash),
+                    batch_size=batch_size,
+                    breaker=breaker,
+                    table=f"chash_index[{collection}]",
+                ),
+                store="chash", table_name="chash_index", collector=collector,
+                recovery=lambda: _recover_flat_fill(identity_source, rows, key_fn),  # noqa: B023
+            )
+            fill_by_collection[collection] = result
+            total_filled += result["filled"]
+
+    if collector is not None:
+        collector.count_read("chash", "chash_index", total_rows)
+        collector.count_written("chash", "chash_index", total_filled)
+
+    return {
+        "store": "chash",
+        "outer": outer_verdicts,
+        "fill": fill_by_collection,
+        "total_filled": total_filled,
+        "convergence_notes": dedup_convergence_notes("chash", outer_verdicts),
+    }
+
+
+# ── catalog: real IdentitySource/ManifestSource + fill orchestration ─────────
+
+
+class _CatalogFlatIdentitySource:
+    """Real :class:`~nexus.migration.verify_fill.IdentitySource` wiring for
+    a flat catalog listing endpoint (owners: ``list_owners()``/
+    ``tumbler_prefix``; collections: ``list_collections()``/``name``)."""
+
+    def __init__(self, fetch: Callable[[], list[dict[str, Any]]], key: str) -> None:
+        self._fetch = fetch
+        self._key = key
+
+    def present(self) -> set[str] | None:
+        try:
+            rows = self._fetch()
+        except Exception as exc:  # noqa: BLE001 — unreachable surface -> indeterminate
+            _log.warning(
+                "verify_fill.catalog_identity_unreachable", key=self._key, error=str(exc),
+            )
+            return None
+        return {r.get(self._key) for r in rows if r.get(self._key)}
+
+
+class _CatalogChashIdentitySource:
+    """Real :class:`~nexus.migration.verify_fill.IdentitySource` wiring for
+    ``document_chunks``'s collection-level chash pre-filter
+    (``HttpCatalogClient.chashes_for_collection`` returns ``set[str]`` —
+    R2 wiring note, accepted verbatim)."""
+
+    def __init__(self, client: Any, collection: str) -> None:
+        self._client = client
+        self._collection = collection
+
+    def present(self) -> set[str] | None:
+        try:
+            return self._client.chashes_for_collection(self._collection)
+        except Exception as exc:  # noqa: BLE001 — unreachable surface -> indeterminate
+            _log.warning(
+                "verify_fill.catalog_chash_identity_unreachable",
+                collection=self._collection, error=str(exc),
+            )
+            return None
+
+
+class _CatalogManifestSource:
+    """Real :class:`~nexus.migration.verify_fill.ManifestSource` wiring
+    (``HttpCatalogClient.get_manifest`` returns ``list[ManifestRow]``
+    dataclasses — ``verify_fill._manifest_key`` already accepts them
+    verbatim, fix e7b42d36 — R2 wiring note)."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def manifest_for(self, doc_id: str) -> list[Any] | None:
+        try:
+            return self._client.get_manifest(doc_id)
+        except Exception as exc:  # noqa: BLE001 — unreachable surface -> indeterminate
+            _log.warning(
+                "verify_fill.catalog_manifest_unreachable", doc_id=doc_id, error=str(exc),
+            )
+            return None
+
+
+#: catalog tables with NO wired inner-fill surface yet (P3a covers only
+#: owners/collections/document_chunks — the incident-recovery slice).
+_CATALOG_NO_FILL_SURFACE: tuple[str, ...] = ("documents", "links")
+
+
+def verify_fill_catalog(
+    catalog_db_path: Path,
+    client: Any,
+    *,
+    count_source: "CountSource | None" = None,
+    batch_size: int = 300,
+    breaker: Any = None,
+    collector: Any = None,
+) -> dict[str, Any]:
+    """RDR-178 P4: verify-fill (delta) for the ``catalog`` store.
+
+    Outer count-diff across the 5 mapped catalog relations. ``documents`` /
+    ``links`` have NO wired inner-fill surface (P3a's identity-inventory
+    only covers owners/collections/document_chunks); if EITHER is non-parity
+    this falls back to the FULL :func:`~nexus.db.t2.catalog_etl.migrate_catalog`
+    ETL for the whole store — a partial/incoherent catalog write (chunks
+    filled but their parent documents never re-sent) would be worse than a
+    full re-send. When documents+links are at parity, owners/collections/
+    document_chunks are each delta-filled independently.
+    """
+    from nexus.db.t2.catalog_etl import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        _fetch_all,
+        _open_ro,
+        _transform_chunk_row,
+        _transform_collection,
+        _transform_owner,
+        count_source_rows,
+        migrate_catalog,
+    )
+    from nexus.migration.verify_fill import (  # noqa: PLC0415 — R2 import-cycle guard, mirrored from verify_fill.py
+        fill_missing,
+        fill_missing_document_chunks,
+        verify_store_counts,
+    )
+    from nexus.retry import EtlCircuitBreaker  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    batch_size = clamp_fill_batch_size(batch_size)
+    cs = count_source or ServiceCountSource()
+
+    source_counts = count_source_rows(catalog_db_path)
+    # count_source_rows also reports "_meta" (unmapped bookkeeping) —
+    # verify_store_counts marks it indeterminate harmlessly; it never
+    # participates in the fallback decision below.
+    outer_verdicts = verify_store_counts("catalog", cs, source_counts)
+
+    needs_full_fallback = any(
+        outer_verdicts.get(t, {}).get("status", "indeterminate") != "parity"
+        for t in _CATALOG_NO_FILL_SURFACE
+    )
+    if needs_full_fallback:
+        _log.info(
+            "verify_fill.catalog_full_fallback",
+            reason="documents/links have no inner-fill surface (P3a scope) "
+                   "and are not at parity",
+        )
+        full_results = migrate_catalog(
+            catalog_db_path, client, collector=collector, breaker=breaker,
+        )
+        total_filled = sum(
+            full_results[k]["written"]
+            for k in ("owners", "documents", "collections", "document_chunks", "links")
+            if k in full_results
+        )
+        return {
+            "store": "catalog", "outer": outer_verdicts, "fallback": "full_etl",
+            "full_results": full_results, "total_filled": total_filled,
+            "convergence_notes": dedup_convergence_notes("catalog", outer_verdicts),
+        }
+
+    conn = _open_ro(catalog_db_path)
+    try:
+        owners_rows = _fetch_all(conn, "owners")
+        collections_rows = _fetch_all(conn, "collections")
+        chunk_rows = _fetch_all(conn, "document_chunks")
+        doc_rows = _fetch_all(conn, "documents")
+    finally:
+        conn.close()
+
+    fill_results: dict[str, Any] = {}
+    total_filled = 0
+
+    if outer_verdicts.get("owners", {}).get("status") != "parity":
+        payload_rows = [_transform_owner(r) for r in owners_rows]
+        identity_source = _CatalogFlatIdentitySource(client.list_owners, "tumbler_prefix")
+        key_fn: Callable[[dict[str, Any]], str] = lambda r: r["tumbler_prefix"]  # noqa: E731
+        result = _try_fill(
+            lambda: fill_missing(
+                source_rows=payload_rows, key_fn=key_fn,
+                identity_source=identity_source,
+                import_fn=lambda rows: client._post("/import/owner", {"rows": rows}),
+                batch_size=batch_size, breaker=breaker, table="owners",
+            ),
+            store="catalog", table_name="owners", collector=collector,
+            recovery=lambda: _recover_flat_fill(identity_source, payload_rows, key_fn),
+        )
+        fill_results["owners"] = result
+        total_filled += result["filled"]
+
+    if outer_verdicts.get("collections", {}).get("status") != "parity":
+        payload_rows = [_transform_collection(r) for r in collections_rows]
+        identity_source = _CatalogFlatIdentitySource(client.list_collections, "name")
+        key_fn = lambda r: r["name"]  # noqa: E731
+        result = _try_fill(
+            lambda: fill_missing(
+                source_rows=payload_rows, key_fn=key_fn,
+                identity_source=identity_source,
+                import_fn=lambda rows: client._post("/import/collection", {"rows": rows}),
+                batch_size=batch_size, breaker=breaker, table="collections",
+            ),
+            store="catalog", table_name="collections", collector=collector,
+            recovery=lambda: _recover_flat_fill(identity_source, payload_rows, key_fn),
+        )
+        fill_results["collections"] = result
+        total_filled += result["filled"]
+
+    if outer_verdicts.get("document_chunks", {}).get("status") != "parity":
+        collection_for_doc = {
+            r["tumbler"]: r.get("physical_collection") or "" for r in doc_rows
+        }
+        payload_rows = [
+            {**_transform_chunk_row(r), "doc_id": r["doc_id"]} for r in chunk_rows
+        ]
+        result = _try_fill(
+            lambda: fill_missing_document_chunks(
+                source_rows=payload_rows,
+                collection_for_doc=collection_for_doc,
+                identity_source_factory=lambda coll: _CatalogChashIdentitySource(client, coll),
+                manifest_source=_CatalogManifestSource(client),
+                import_fn=lambda doc_id, rows: client._post(
+                    "/import/chunk", {"doc_id": doc_id, "rows": rows},
+                ),
+                batch_size=batch_size, breaker=breaker,
+            ),
+            store="catalog", table_name="document_chunks", collector=collector,
+            recovery=lambda: {
+                "source_count": len(payload_rows), "missing": None,
+                "filled": 0, "indeterminate": len(payload_rows), "status": "indeterminate",
+            },
+        )
+        fill_results["document_chunks"] = result
+        total_filled += result.get("filled", 0)
+
+    if collector is not None:
+        for table, result in fill_results.items():
+            collector.count_read("catalog", table, result.get("source_count", 0))
+            collector.count_written("catalog", table, result.get("filled", 0))
+
+    return {
+        "store": "catalog", "outer": outer_verdicts, "fill": fill_results,
+        "total_filled": total_filled,
+        "convergence_notes": dedup_convergence_notes("catalog", outer_verdicts),
+    }
+
+
+# ── generic stores: outer-verify-only, skip-on-parity else full ETL ──────────
+#
+# memory/plans/telemetry/taxonomy have NO wired inner-fill surface yet
+# (P3b, gated on the wave-3 engine cut) — but the outer count-diff loop is
+# store-agnostic and reuses each store's EXISTING ``count_source_rows``
+# (the --dry-run counting function), so these four stores still benefit
+# from "skip the full re-send when nothing changed" even without a delta
+# fill path. A non-parity table falls back to the unchanged full ETL.
+
+
+def _memory_source_counts(sources: EtlSources) -> dict[str, int]:
+    from nexus.db.t2.memory_etl import count_source_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    return {"memory": count_source_rows(sources.sqlite_path)}
+
+
+def _plans_source_counts(sources: EtlSources) -> dict[str, int]:
+    from nexus.db.t2.plan_etl import count_source_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    return {"plans": count_source_rows(sources.sqlite_path)}
+
+
+def _telemetry_source_counts(sources: EtlSources) -> dict[str, int]:
+    from nexus.db.t2.telemetry_etl import count_source_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    counts = count_source_rows(sources.sqlite_path)
+    # Only hook_failures + nx_answer_runs carry a _VERIFY_TABLES mapping;
+    # the other 4 telemetry tables have no PG relation to diff against
+    # (unchecked either way, matching the full-ETL verify path).
+    return {k: v for k, v in counts.items() if k in ("hook_failures", "nx_answer_runs")}
+
+
+def _taxonomy_source_counts(sources: EtlSources) -> dict[str, int]:
+    from nexus.db.t2.taxonomy_etl import count_source_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    counts = count_source_rows(sources.sqlite_path)
+    return {
+        "topics": counts.get("topics", 0),
+        "topic_assignments": counts.get("assignments", 0),
+        "topic_links": counts.get("links", 0),
+    }
+
+
+#: store -> function computing its _VERIFY_TABLES-shaped source counts, for
+#: the generic (outer-verify-only) verify-fill path. ``chash``/``catalog``
+#: are handled separately (real delta fill, see above); ``aspects`` /
+#: ``aspects_queue`` are NOT in this map (no dry-run counting seam wired
+#: today) and always run the full ETL under verify-fill, same as before.
+_GENERIC_VERIFY_FILL_COUNTERS: dict[str, Callable[[EtlSources], dict[str, int]]] = {
+    "memory": _memory_source_counts,
+    "plans": _plans_source_counts,
+    "telemetry": _telemetry_source_counts,
+    "taxonomy": _taxonomy_source_counts,
+}
+
+
+def verify_fill_generic_or_full(
+    store: str,
+    source_counts: dict[str, int],
+    run_full: Callable[[], Any],
+    *,
+    count_source: "CountSource | None" = None,
+) -> tuple[dict[str, "TableVerdict"], Any | None, list[str]]:
+    """CLI-facing generic verify-fill gate for a store with NO delta-fill
+    surface yet (memory/plans/telemetry/taxonomy — P3b). Runs ONLY the
+    outer count-diff: *run_full* (the store's existing unchanged ETL) is
+    SKIPPED entirely when every table is at parity; otherwise it is called.
+
+    Returns ``(verdicts, full_result_or_None, convergence_notes)`` — the
+    single-store CLI commands use ``full_result is None`` as the "nothing
+    to do" signal (mirrors :func:`migrate_all`'s ``skip_stores`` fold-in for
+    the multi-store path, at store granularity here since a single-store
+    command has nothing else to fold into).
+    """
+    from nexus.migration.verify_fill import verify_store_counts  # noqa: PLC0415 — R2 import-cycle guard, mirrored from verify_fill.py
+
+    cs = count_source or ServiceCountSource()
+    verdicts = verify_store_counts(store, cs, source_counts)
+    notes = dedup_convergence_notes(store, verdicts)
+    if verdicts and all(v["status"] == "parity" for v in verdicts.values()):
+        return verdicts, None, notes
+    return verdicts, run_full(), notes
+
+
+def _open_chash_store() -> Any:
+    """No-arg ``HttpChashIndex`` — resolves its endpoint config-first, same
+    as :func:`build_store_etls`'s ``_chash`` closure."""
+    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    return HttpChashIndex()
+
+
+def _open_catalog_client() -> Any:
+    """No-arg catalog client — resolves its endpoint config-first, same as
+    :func:`build_store_etls`'s ``_catalog`` closure."""
+    from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    return make_catalog_client_for_migration()
+
+
 def _etl_import_modules(run: Callable[[EtlSources, Any], dict]) -> tuple[str, ...]:
     """Module names a store's runner imports, read off its own bytecode.
 
@@ -424,6 +1059,7 @@ def migrate_all(
     on_progress: Callable[[str, int, int], None] | None = None,
     migration_id: str | None = None,
     skip_stores: frozenset[str] = frozenset(),
+    verify_fill: bool = False,
 ) -> dict[str, Any]:
     """Run ALL eight store migrations in RDR-152 ladder order and return ONE
     RDR-153 report dict (with the verification verdict folded in).
@@ -474,8 +1110,53 @@ def migrate_all(
     write/failed counts of their own (this is a distinct signal from a
     store that ran and wrote zero rows). Default ``frozenset()`` is fully
     backward compatible — every store always runs.
+
+    ``verify_fill`` (RDR-178 wave-2 P4, nexus-s3dd4.5): when True, run the
+    delta path instead of the unconditional full re-send. Per store:
+
+    - ``chash`` / ``catalog`` — real inner-fill wiring
+      (:func:`verify_fill_chash` / :func:`verify_fill_catalog`): the outer
+      count-diff decides parity (zero writes) vs. divergent/indeterminate
+      (send ONLY the missing rows, or — for catalog's documents/links,
+      which have no wired fill surface — fall back to the full ETL for the
+      whole store).
+    - ``memory`` / ``plans`` / ``telemetry`` / ``taxonomy`` — outer-verify
+      only (no delta fill surface yet, P3b): parity SKIPS the store
+      entirely (folded into ``skip_stores`` / ``report["skipped_stores"]`
+      — the same signal an already-migrated pre-flight uses); non-parity
+      falls back to the unchanged full ETL.
+    - ``aspects`` / ``aspects_queue`` — always the full ETL (no counting
+      seam wired for these yet); ``verify_fill`` has no effect on them.
+
+    Every store's outer verdicts feed ``report["verify_fill"]`` (present
+    only when ``verify_fill=True``) — see :func:`dedup_convergence_notes`
+    for why a dedup table can legitimately parity below its source count.
     """
     etls = ordered(build_store_etls(sources))
+    cs = count_source or ServiceCountSource()
+    verify_fill_outer: dict[str, dict[str, Any]] = {}
+    verify_fill_results: dict[str, Any] = {}
+    verify_fill_notes: list[str] = []
+    skip_stores = set(skip_stores)
+
+    if verify_fill:
+        # Generic (outer-verify-only) stores: compute parity BEFORE the
+        # ladder loop so an all-parity store folds into the EXISTING
+        # skip_stores mechanism (Gap 7) — no new report field needed for
+        # "this store needed nothing", the artifact already has one.
+        from nexus.migration.verify_fill import verify_store_counts  # noqa: PLC0415 — R2 import-cycle guard, mirrored from verify_fill.py
+
+        for store, counts_fn in _GENERIC_VERIFY_FILL_COUNTERS.items():
+            if store in skip_stores:
+                continue
+            verdicts = verify_store_counts(store, cs, counts_fn(sources))
+            verify_fill_outer[store] = verdicts
+            verify_fill_notes.extend(dedup_convergence_notes(store, verdicts))
+            if verdicts and all(v["status"] == "parity" for v in verdicts.values()):
+                skip_stores.add(store)
+                _log.info("migrate_all.verify_fill_skip_parity", store=store)
+
+    skip_stores = frozenset(skip_stores)
     # nexus-5drgy: import every ladder step's ETL module BEFORE any store
     # runs or any report is built — a version-skewed wheel must abort the
     # ENTIRE run up front, never mid-run after earlier stores have written.
@@ -497,7 +1178,34 @@ def migrate_all(
             on_store(etl.store)
         crashed = False
         try:
-            etl.run(sources, collector)
+            if verify_fill and etl.store == "chash":
+                store_client = _open_chash_store()
+                try:
+                    result = verify_fill_chash(
+                        sources.sqlite_path, store_client, count_source=cs,
+                        collector=collector,
+                    )
+                finally:
+                    with contextlib.suppress(Exception):
+                        store_client.close()
+                verify_fill_outer[etl.store] = result["outer"]
+                verify_fill_results[etl.store] = result
+                verify_fill_notes.extend(result["convergence_notes"])
+            elif verify_fill and etl.store == "catalog":
+                catalog_client = _open_catalog_client()
+                try:
+                    result = verify_fill_catalog(
+                        sources.catalog_db_path, catalog_client, count_source=cs,
+                        collector=collector,
+                    )
+                finally:
+                    with contextlib.suppress(Exception):
+                        catalog_client.close()
+                verify_fill_outer[etl.store] = result["outer"]
+                verify_fill_results[etl.store] = result
+                verify_fill_notes.extend(result["convergence_notes"])
+            else:
+                etl.run(sources, collector)
         except Exception as exc:  # noqa: BLE001 — recorded, never silent
             crashed = True
             collector.record_event(
@@ -536,12 +1244,13 @@ def migrate_all(
             "sqlite": str(sources.sqlite_path),
             "catalog_db": str(sources.catalog_db_path),
         },
-        target={"service_url": os.environ.get("NX_SERVICE_URL", "(lease)")},
+        # RDR-178 P4 report-writer fixup (b): the RESOLVED endpoint, never
+        # the misleading "(lease)" placeholder (epic te885 comment
+        # 2026-07-02 04:19).
+        target={"service_url": resolve_target_service_url()},
         migration_id=mig_id,
     )
-    verification, convergence_notes, dest_counts = verify_counts(
-        report, count_source or ServiceCountSource(),
-    )
+    verification, convergence_notes, dest_counts = verify_counts(report, cs)
     report["verification"] = verification
     # RDR-176 Gap 5: surface the destination-side (pg) row counts as a first-
     # class metric so "did rows actually land?" is answerable from the report,
@@ -551,8 +1260,22 @@ def migrate_all(
     # subset present in this run) — surfaced so the operator artifact and the
     # CLI banner can name coverage instead of a vague "mappable relations".
     report["relations_checked"] = len(_written_by_table(report))
-    if convergence_notes:
-        report["verification_convergence_notes"] = convergence_notes
+    all_convergence_notes = list(convergence_notes) + verify_fill_notes
+    if all_convergence_notes:
+        report["verification_convergence_notes"] = all_convergence_notes
     if skipped:
         report["skipped_stores"] = skipped
+    if verify_fill:
+        # Additive report field (RDR-178 P4): per-table outer verdicts +
+        # the chash/catalog delta-fill results, keyed by store. Additive so
+        # the RDR-153 per-table key set (locked by
+        # tests/migration/test_migration_report.py::test_table_key_set_locked)
+        # is never touched.
+        report["verify_fill"] = {
+            "outer": verify_fill_outer,
+            "results": verify_fill_results,
+            "total_filled": sum(
+                r.get("total_filled", 0) for r in verify_fill_results.values()
+            ),
+        }
     return report

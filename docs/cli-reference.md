@@ -2160,7 +2160,7 @@ recover).
 ### nx storage migrate all
 
 ```
-nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH] [--service-url URL]
+nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--verify-fill]
 ```
 
 Run ALL eight T2 store migrations in the RDR-152 ladder order (memory →
@@ -2187,6 +2187,28 @@ artifact is written even when the flag is omitted, including on a
 mid-run crash — partial data beats no data). Note: `aspects` has no
 standalone command; it runs only via `migrate all`.
 
+`--verify-fill` (RDR-178 wave-2): a re-run to patch a small hole no
+longer re-sends the whole run. Per store:
+
+- `chash` / `catalog` — the outer count-diff decides parity (zero writes)
+  vs. divergent (send ONLY the rows genuinely missing from the target,
+  per `physical_collection` for chash; owners/collections/document_chunks
+  independently for catalog). Catalog's `documents`/`links` tables have
+  no delta-fill surface yet — if either diverges, the whole catalog store
+  falls back to the full ETL (never a partial/incoherent write).
+- `memory` / `plans` / `telemetry` / `taxonomy` — outer-verify only (no
+  delta-fill surface yet): a store already at parity is **skipped
+  entirely** (folded into `report["skipped_stores"]`, same signal as an
+  already-migrated pre-flight); a non-parity store falls back to the
+  unchanged full ETL.
+- `aspects` / `aspects_queue` — always the full ETL; unaffected by the flag.
+
+The report gains an additive `"verify_fill"` key (`{"outer": {...},
+"results": {...}, "total_filled": N}`) — absent on a normal run. A dedup
+relation (`nexus.plans`) that parities below its source count due to
+`ON CONFLICT DO UPDATE` convergence is surfaced as a
+`verification_convergence_notes` entry, never mistaken for a hole.
+
 ### nx storage migration-report show
 
 ```
@@ -2201,17 +2223,21 @@ class/action/count/sample), and the gate verdict — **GATE: PASS** when
 `summary.total_failed == 0`, otherwise **GATE: FAIL** with a non-zero
 exit (scriptable; this is the RDR-152 Phase-4 SQLite-deletion gate
 predicate). The reader lives in `nexus.migration` and survives the
-`src/nexus/db/t2` deletion.
+`src/nexus/db/t2` deletion. When the artifact carries the additive
+`"verify_fill"` key (a `--verify-fill` run), also prints a
+`verify-fill: total_filled=N` line, one `<store>.<table>: filled=N
+status=...` line per table that was actually diffed, any convergence
+notes, and the list of stores skipped entirely (already at parity).
 
 Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-not-move (the source is never modified) and idempotent (server-side upsert; re-runs produce no duplicates). All require `NX_SERVICE_TOKEN`.
 
 ### nx storage migrate
 
 ```
-nx storage migrate memory|plans|telemetry|taxonomy|chash|catalog [--db PATH] [--service-url URL] [--dry-run]
+nx storage migrate memory|plans|telemetry|taxonomy|chash|catalog [--db PATH] [--service-url URL] [--dry-run] [--verify-fill]
 ```
 
-Migrate a T2 SQLite store into the Postgres service tier through the validated HTTP seam.
+Migrate a T2 SQLite store into the Postgres service tier through the validated HTTP seam. `--verify-fill` (RDR-178 wave-2) runs the delta path instead of the unconditional full re-send — see `nx storage migrate all` above for the per-store semantics (a single-store invocation applies the same store's rule in isolation). Every per-store command's report always carries a populated `"verification"` verdict now (not just `migrate all`'s), and `target.service_url` records the RESOLVED endpoint, never a `"(lease)"` placeholder.
 
 ### nx storage migrate vectors
 

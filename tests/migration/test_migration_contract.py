@@ -262,5 +262,9 @@ def test_orchestrator_surface():
         # Additive + backward compatible — default frozenset() reproduces
         # the prior unconditional behavior exactly.
         "skip_stores",
+        # RDR-178 wave-2 P4 (nexus-s3dd4.5): verify-fill (delta) mode seam.
+        # Additive + backward compatible — default False reproduces the
+        # prior unconditional full-re-send behavior exactly.
+        "verify_fill",
     }
     assert _fields(EtlSources) == {"sqlite_path", "catalog_db_path"}
