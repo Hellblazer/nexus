@@ -84,6 +84,9 @@ from nexus.migration.vector_etl import (
     migrate_local,
     rollback_collections,
     verify_counts,
+    verify_fill_cloud,
+    verify_fill_collections,
+    verify_fill_local,
     verify_taxonomy_consistency,
 )
 
@@ -177,6 +180,12 @@ class FakeVectorClient:
         return len(self.store.get(collection, {})) + self._count_delta.get(
             collection, 0
         )
+
+    def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
+        """Membership probe (mirrors ``HttpVectorClient.existing_ids``):
+        the subset of *ids* actually present in *collection*."""
+        col = self.store.get(collection, {})
+        return {i for i in ids if i in col}
 
     def list_collections(self) -> list[dict]:
         return [
@@ -808,6 +817,279 @@ class TestRollbackUnit:
 
         with pytest.raises(RuntimeError, match="deletes may have been swallowed"):
             rollback_collections(source_client, fake, collections=[name])
+
+
+# ── Unit: verify-fill (delta) — RDR-178 wave-2, nexus-s3dd4.6 ───────────────
+#
+# Generalizes te885.1's operator-driven pg->pg reconciliation (per-collection
+# chash set-difference, embeddings-verbatim upsert, zero Voyage cost) as the
+# vectors leg's first verify-fill consumer. Mirrors rollback_collections' own
+# id-presence intersection idiom (including its "swallowed error" guard).
+
+
+class TestVerifyFillCollectionsUnit:
+    def test_parity_target_sends_nothing(self, source_client) -> None:
+        """A target already holding every source chash is 'verified' — zero
+        upsert calls, zero cost (the entire point of verify-fill)."""
+        name = _coll("vf-parity")
+        _seed_source(source_client, name, 5)
+        fake = FakeVectorClient()
+        migrate_collections(source_client, fake, leg="local")  # pre-populate target
+        fake.upsert_calls.clear()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        assert isinstance(report, MigrationReport)
+        result = report.results[0]
+        assert isinstance(result, CollectionResult)
+        assert result.status == "verified"
+        assert result.source_count == 5
+        assert result.missing_count == 0
+        assert result.filled_count == 0
+        assert result.written_count == 0
+        assert fake.upsert_calls == []
+        assert report.ok is True
+        assert report.total_written == 0
+
+    def test_partial_delta_fills_only_missing(self, source_client) -> None:
+        """A target holding SOME of the source's chashes only receives the
+        missing subset on the wire — the 270-row-hole-in-158k-row-store
+        scenario this whole wave exists to fix."""
+        name = _coll("vf-delta")
+        ids = _seed_source(source_client, name, 10)
+        fake = FakeVectorClient()
+        migrate_collections(source_client, fake, leg="local")
+        for missing_id in ids[:3]:
+            fake.store[name].pop(missing_id, None)
+        fake.upsert_calls.clear()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "filled"
+        assert result.source_count == 10
+        assert result.missing_count == 3
+        assert result.filled_count == 3
+        assert result.written_count == 3
+        sent_ids = {i for _, batch in fake.upsert_calls for i in batch}
+        assert sent_ids == set(ids[:3])
+        assert fake.count(name) == 10
+        assert report.ok is True
+        assert report.total_written == 3
+
+    def test_fresh_empty_target_fills_everything(self, source_client) -> None:
+        """A NEVER-migrated (empty) target is a legitimate 100% delta
+        (te885.1's post-cutover-collections case) — not indeterminate."""
+        name = _coll("vf-fresh")
+        ids = _seed_source(source_client, name, 4)
+        fake = FakeVectorClient()  # target never touched
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "filled"
+        assert result.missing_count == 4
+        assert result.filled_count == 4
+        assert sorted(fake.store[name]) == sorted(ids)
+        assert report.ok is True
+
+    def test_suspicious_all_absent_probe_flags_indeterminate(
+        self, source_client
+    ) -> None:
+        """A target that demonstrably holds every source row (count() > 0,
+        and post-write count still matches — the writes are genuinely
+        idempotent no-ops) yet whose existing_ids probe reported NONE of
+        the source's ids present is the rollback_collections
+        'swallowed-error' signature — verify-fill must surface this as
+        indeterminate, never a silently-successful 'filled' (nexus-r0esi:
+        never blind-fill), even though the resend itself was harmless."""
+        name = _coll("vf-suspicious")
+        _seed_source(source_client, name, 4)
+
+        class _ProbeDegradedClient(FakeVectorClient):
+            """existing_ids ALWAYS reports empty — mirrors HttpVectorClient's
+            documented fail-open-to-empty-set contract on a probe failure."""
+
+            def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
+                return set()
+
+        fake = _ProbeDegradedClient()
+        migrate_collections(source_client, fake, leg="local")  # target genuinely holds all 4
+        fake.upsert_calls.clear()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "indeterminate"
+        assert result.missing_count == 4
+        assert report.ok is False
+        # The resend itself was a harmless idempotent no-op: still 4 rows.
+        assert fake.count(name) == 4
+
+    def test_passthrough_embeddings_scoped_to_missing_subset_only(
+        self, source_client
+    ) -> None:
+        """nexus-hxry2 same-model passthrough still applies to a verify-fill
+        run, but ONLY the missing rows' vectors are forwarded — present rows
+        never appear in an upsert call at all."""
+        name = _coll("vf-passthrough", model=_MODEL_768)
+        ids = _seed_source(source_client, name, 4, embedding_model=_MODEL_768)
+        fake = FakeVectorClient()
+        migrate_collections(source_client, fake, leg="local")
+        for missing_id in ids[:1]:
+            fake.store[name].pop(missing_id, None)
+        fake.upsert_calls.clear()
+        fake.upsert_embeddings.clear()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "filled"
+        assert result.filled_count == 1
+        assert len(fake.upsert_calls) == 1
+        _collection, sent_ids = fake.upsert_calls[0]
+        assert sent_ids == ids[:1]
+        assert fake.upsert_embeddings[0] is not None
+        assert len(fake.upsert_embeddings[0]) == 1
+
+    def test_upsert_failure_reports_failed_with_partial_filled_count(
+        self, source_client
+    ) -> None:
+        name = _coll("vf-fail")
+        _seed_source(source_client, name, 3)
+        fake = FailingUpsertClient(fail_for=name)
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "failed"
+        assert result.filled_count == 0
+        assert report.ok is False
+
+    def test_nonconformant_collection_reuses_skip_classification(
+        self, source_client
+    ) -> None:
+        """verify-fill shares the EXACT same skip/derived classification as
+        migrate (:func:`_skip_result_for_nonconformant`) — a non-conformant
+        collection is never silently probed."""
+        legacy = "knowledge__legacy"
+        _seed_source(source_client, legacy, 2)
+        fake = FakeVectorClient()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "skipped"
+        assert all(c != legacy for c, _ in fake.upsert_calls)
+
+    def test_derived_collection_skipped_clean(self, source_client) -> None:
+        derived = "taxonomy__centroids"
+        _seed_source(source_client, derived, 5)
+        fake = FakeVectorClient()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "skipped-derived"
+        assert report.ok is True
+
+    def test_post_write_count_mismatch_still_fails_verify_fill(
+        self, source_client
+    ) -> None:
+        """The exact post-write count gate (_migrate_one's contract) also
+        holds for verify-fill: a lossy target is a failed collection, never
+        a green 'filled'."""
+        name = _coll("vf-mismatch")
+        _seed_source(source_client, name, 5)
+        fake = FakeVectorClient(count_delta={name: -2})  # under-reports
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "failed"
+        assert "count mismatch" in result.reason
+        assert report.ok is False
+
+    def test_empty_collection_verifies_cleanly(self, source_client) -> None:
+        name = _coll("vf-empty")
+        _seed_source(source_client, name, 0)
+        fake = FakeVectorClient()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "verified"
+        assert result.source_count == 0
+        assert result.missing_count == 0
+        assert report.ok is True
+
+    def test_cross_model_target_diffed_not_source(self, source_client) -> None:
+        """RDR-162 cross-model verify-fill: the presence probe runs against
+        the TARGET (model-remapped) collection, never the source name."""
+        source = _coll("vf-xm", model=_MODEL_384)
+        target = _coll("vf-xm", model="voyage-context-3")
+        ids = _seed_source(source_client, source, 3)
+        fake = FakeVectorClient()
+        fake.store[target] = {ids[0]: ("chunk text 0000", {"position": 0})}
+
+        report = verify_fill_collections(
+            source_client, fake, leg="local", target_names={source: target}
+        )
+
+        result = report.results[0]
+        assert result.status == "filled"
+        assert result.missing_count == 2
+        assert result.target_collection == target
+        sent_ids = {i for coll, batch in fake.upsert_calls for i in batch if coll == target}
+        assert sent_ids == set(ids[1:])
+
+
+class TestVerifyFillLegRouting:
+    def test_local_leg_routes_through_local_opener(
+        self, source_client, monkeypatch, tmp_path
+    ) -> None:
+        name = _coll("vfleg-local")
+        _seed_source(source_client, name, 3)
+        opened: list[Path] = []
+
+        def fake_open(path):
+            opened.append(Path(path))
+            return source_client
+
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.open_local_read_client", fake_open
+        )
+        fake = FakeVectorClient()
+
+        report = verify_fill_local(tmp_path / "chroma", fake)
+
+        assert opened == [tmp_path / "chroma"]
+        assert report.leg == "local"
+        assert report.results[0].collection == name
+        assert report.results[0].missing_count == 3
+
+    def test_cloud_leg_routes_through_cloud_opener(
+        self, source_client, monkeypatch
+    ) -> None:
+        name = _coll("vfleg-cloud")
+        _seed_source(source_client, name, 2)
+        opened: list[bool] = []
+
+        def fake_open(**kwargs):
+            opened.append(True)
+            return source_client
+
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.open_cloud_read_client", fake_open
+        )
+        fake = FakeVectorClient()
+
+        report = verify_fill_cloud(fake)
+
+        assert opened == [True]
+        assert report.leg == "cloud"
+        assert report.results[0].collection == name
+        assert report.results[0].missing_count == 2
 
 
 # ── Unit: count verification ──────────────────────────────────────────────────
