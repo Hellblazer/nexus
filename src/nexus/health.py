@@ -1757,10 +1757,12 @@ def _check_migration_state(
        so the completeness of applied changesets is guaranteed by the service
        being up (/health).  This query confirms the table itself is reachable.
 
-    2. No row has ``exectype != 'EXECUTED'``.  Rows with FAILED or RERAN
-       exectype indicate a mid-run failure or a manually-rerun changeset that
-       left partial state; either can cause the service to refuse to start on
-       the next boot.
+    2. No row has ``exectype = 'FAILED'``.  A FAILED changeset aborted
+       mid-execution and left partial state, which can cause the service to
+       refuse to start on the next boot. A ``RERAN`` exectype (a
+       ``runOnChange`` changeset — e.g. GRANT statements — reapplied after
+       its checksum changed) is Liquibase's normal, sanctioned behavior and
+       is reported informationally, not as a failure.
 
     3. No EXECUTED row has a NULL md5sum.  Liquibase checksums every changeset
        on re-run; a NULL checksum on an applied changeset causes Liquibase to
@@ -1867,8 +1869,19 @@ def _check_migration_state(
             fatal=True,
         )]
 
-    # Query 2: non-EXECUTED rows (FAILED or RERAN drift).
-    drift_sql = "SELECT COUNT(*) FROM databasechangelog WHERE exectype != 'EXECUTED';"
+    # Query 2: FAILED rows (real drift) vs RERAN/other non-EXECUTED rows.
+    # nexus incident 2026-07-01: this used to treat ANY exectype != 'EXECUTED'
+    # as fatal, but RERAN is Liquibase's own legitimate outcome for a
+    # runOnChange changeset (e.g. GRANT statements reapplied after a checksum
+    # change) — not evidence of a mid-run failure. A healthy DB with two
+    # reapplied grant changesets was reported as a hard FAIL, indistinguishable
+    # from real corruption. Only FAILED indicates a changeset that aborted
+    # mid-execution and left partial state.
+    drift_sql = (
+        "SELECT COUNT(*) FILTER (WHERE exectype='FAILED'), "
+        "COUNT(*) FILTER (WHERE exectype NOT IN ('EXECUTED','FAILED')) "
+        "FROM databasechangelog;"
+    )
     proc2 = _run_psql(
         psql_bin, host, port, dbname, user, password, drift_sql,
         psql_runner=psql_runner,
@@ -1883,8 +1896,19 @@ def _check_migration_state(
         )]
 
     raw2 = proc2.stdout.strip()
+    parts = raw2.split("|")
+    if len(parts) != 2:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Migration drift query returned unexpected output: {raw2!r}"
+            ),
+            fatal=True,
+        )]
     try:
-        drift = int(raw2)
+        failed = int(parts[0])
+        reran = int(parts[1])
     except ValueError:
         return [HealthResult(
             label="Schema migrations",
@@ -1895,21 +1919,28 @@ def _check_migration_state(
             fatal=True,
         )]
 
-    if drift != 0:
+    if failed != 0:
         return [HealthResult(
             label="Schema migrations",
             ok=False,
             detail=(
-                f"Migration state mismatch: {drift} changeset(s) with "
-                "exectype != 'EXECUTED' (FAILED or RERAN drift)"
+                f"Migration state mismatch: {failed} changeset(s) FAILED "
+                "(mid-run failure, partial state)"
             ),
             fix_suggestions=[
                 "Inspect: psql -c \"SELECT id,exectype FROM databasechangelog "
-                "WHERE exectype != 'EXECUTED'\"",
+                "WHERE exectype='FAILED'\"",
                 "Re-run: nx init --service to recover",
             ],
             fatal=True,
         )]
+
+    reran_note = ""
+    if reran != 0:
+        reran_note = (
+            f" ({reran} changeset(s) legitimately RERAN — e.g. a runOnChange "
+            "grant reapplied after a checksum change; not a failure)"
+        )
 
     # Query 3: NULL md5sum on EXECUTED rows.
     # A NULL checksum causes Liquibase validation to fail on next boot even
@@ -1963,7 +1994,10 @@ def _check_migration_state(
     return [HealthResult(
         label="Schema migrations",
         ok=True,
-        detail=f"Schema migrations: {total} applied (all EXECUTED, checksums present)",
+        detail=(
+            f"Schema migrations: {total} applied (0 FAILED, checksums present)"
+            f"{reran_note}"
+        ),
     )]
 
 
