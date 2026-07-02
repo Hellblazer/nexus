@@ -59,6 +59,14 @@ wired the real per-table delta-fill path but the STATEFUL,
 self-mutating-fake fault-injection style this module uses had not been
 extended to it) is closed by ``TestTelemetryFaultInjection`` above.
 
+Also out of scope BY DESIGN (r6b critic, 2026-07-02): breaker/502-burst
+fault injection is NOT re-instantiated per surface here — the retry arc
+is owned by test_rdr178_gap3_circuit_breaker.py (the 502-burst survival
+regression) and test_verify_fill_wiring.py's breaker-give-up recovery
+test, and every surface's inner fill (chash/catalog/telemetry) shares
+the identical fill_missing + _etl_batch_with_breaker plumbing, so one
+instance covers the shared path. Same practice as chash/catalog/vectors.
+
 Also out of scope (P6 critic, 2026-07-02): the 300-row pagination
 boundary of the identity-fetch surfaces. The fakes here answer presence
 from in-memory dicts with no limit/offset walk, so an off-by-one at a
