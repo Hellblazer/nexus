@@ -158,7 +158,7 @@ public final class ScratchRepository {
 
             List<ScratchRecord> recs = dsl.selectFrom(SCRATCH)
                 .where(tsCondition)
-                .orderBy(rankField.desc())
+                .orderBy(rankField.desc(), SCRATCH.ID.asc())
                 .limit(limit)
                 .fetch();
 

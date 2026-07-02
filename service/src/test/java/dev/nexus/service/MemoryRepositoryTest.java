@@ -297,4 +297,30 @@ class MemoryRepositoryTest {
             .as("null session must be stored as NULL (not empty string)")
             .isNull();
     }
+
+    @Test
+    void search_equalRankRows_returnDeterministicIdOrder() {
+        // nexus-te885.11 (conexus bus 4918/4920): ts_rank has no corpus/IDF
+        // component, so identical content = identical rank — and without a
+        // tiebreak, equal-rank rows surface in HEAP order, which a migration
+        // (or any UPDATE) permutes. Non-vacuous by construction: after both
+        // inserts, row A is re-upserted, moving its tuple version to the END
+        // of the heap — heap order becomes (B, A) while id order stays
+        // (A, B). Without the ", id ASC" tiebreak this test fails.
+        String proj = "tiebreak-proj-" + System.nanoTime();
+        long idA = repo.upsert(TENANT_A, proj, "tiebreak-alpha",
+                "identical searchable tiebreak content", "t", null, null, 30);
+        long idB = repo.upsert(TENANT_A, proj, "tiebreak-beta",
+                "identical searchable tiebreak content", "t", null, null, 30);
+        // move A's tuple to the heap tail (same content: rank unchanged)
+        repo.upsert(TENANT_A, proj, "tiebreak-alpha",
+                "identical searchable tiebreak content", "t", null, null, 30);
+
+        var rows = repo.search(TENANT_A, "tiebreak content", proj);
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).getId())
+            .as("equal ts_rank rows must return in deterministic id ASC order, not heap order")
+            .isEqualTo(Math.min(idA, idB));
+        assertThat(rows.get(1).getId()).isEqualTo(Math.max(idA, idB));
+    }
 }
