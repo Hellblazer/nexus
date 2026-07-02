@@ -344,11 +344,14 @@ class ManifestSource(Protocol):
     row's specific ``(doc_id, position)`` is present (RDR-108 D1: identical
     chunk text collapses to ONE chash; multiple manifest rows can share it).
 
-    Returns the target's manifest rows for *doc_id* — each a dict with at
-    least ``position`` and ``chash`` — or ``None`` when unreachable.
+    Returns the target's manifest rows for *doc_id* — each either a dict
+    with at least ``position`` and ``chash`` keys OR an object with
+    ``.position``/``.chash`` attributes (``HttpCatalogClient.get_manifest``
+    returns ``list[ManifestRow]`` dataclasses; both shapes are accepted,
+    see :func:`_manifest_key`) — or ``None`` when unreachable.
     """
 
-    def manifest_for(self, doc_id: str) -> list[dict[str, Any]] | None: ...
+    def manifest_for(self, doc_id: str) -> list[Any] | None: ...
 
 
 class DocFillResult(TypedDict):
@@ -453,9 +456,7 @@ def fill_missing_document_chunks(
                 )
                 indeterminate += len(candidates)
             else:
-                target_keys = {
-                    (m["position"], (m.get("chash") or "")[:32]) for m in target_manifest
-                }
+                target_keys = {_manifest_key(m) for m in target_manifest}
                 to_fill.extend(
                     r for r in candidates
                     if (r["position"], (r.get("chash") or "")[:32]) not in target_keys
@@ -479,3 +480,20 @@ def fill_missing_document_chunks(
         "filled": filled,
         "indeterminate": indeterminate,
     }
+
+
+def _manifest_key(row: Any) -> tuple[int, str]:
+    """``(position, chash[:32])`` from a target manifest row of EITHER shape.
+
+    R3 substantive-critic finding (2026-07-02): the only real manifest fetch,
+    ``HttpCatalogClient.get_manifest``, returns ``list[ManifestRow]``
+    (frozen dataclass, attribute access — RDR-168 return-type parity),
+    while test fakes and wire-shaped callers hand in plain dicts. A
+    dict-only key extraction would raise ``TypeError`` the moment .5/.6
+    wire in the real client. Accept both shapes here so the
+    :class:`ManifestSource` contract is satisfied by ``get_manifest``
+    verbatim.
+    """
+    if isinstance(row, dict):
+        return (row["position"], (row.get("chash") or "")[:32])
+    return (row.position, (row.chash or "")[:32])

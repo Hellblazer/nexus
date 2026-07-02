@@ -317,6 +317,46 @@ class TestFillMissingDocumentChunks:
         # set) so both required a precise manifest fetch
         assert set(manifest_source.calls) == {"doc-A", "doc-B"}
 
+    def test_manifest_source_accepts_real_manifestrow_dataclasses(self) -> None:
+        # R3 substantive-critic regression (2026-07-02): the only real
+        # manifest fetch -- HttpCatalogClient.get_manifest -- returns
+        # list[ManifestRow] (frozen dataclass, attribute access), NOT dicts.
+        # The diff must consume that shape verbatim, or .5/.6 wiring the
+        # real client raises TypeError on the first candidate resolution.
+        from nexus.catalog.catalog_writes import ManifestRow  # noqa: PLC0415 — real-shape import scoped to this regression
+
+        chash_present = "c" * 32
+        chash_missing = "d" * 32
+        source_rows = [
+            {"doc_id": "doc-A", "position": 1, "chash": chash_present},  # landed
+            {"doc_id": "doc-A", "position": 2, "chash": chash_present},  # hole, same chash
+            {"doc_id": "doc-A", "position": 3, "chash": chash_missing},  # definite miss
+        ]
+        identity_factory = _FakeIdentitySourceFactory({"coll-1": {chash_present}})
+        manifest_source = _FakeManifestSource({
+            "doc-A": [ManifestRow(position=1, chash=chash_present)],
+        })
+        spy = _SpyChunkImportFn()
+
+        result = vf.fill_missing_document_chunks(
+            source_rows=source_rows,
+            collection_for_doc={"doc-A": "coll-1"},
+            identity_source_factory=identity_factory,
+            manifest_source=manifest_source,
+            import_fn=spy,
+            batch_size=300,
+            breaker=EtlCircuitBreaker(),
+        )
+
+        assert result["missing"] == 2
+        assert result["filled"] == 2
+        sent = [row for _, batch in spy.calls for row in batch]
+        # definite-missing rows fill before resolved candidates; assert
+        # exact CONTENT as a set (order is an implementation detail).
+        assert {(r["position"], r["chash"]) for r in sent} == {
+            (2, chash_present), (3, chash_missing),
+        }
+
     def test_docs_with_all_chashes_present_never_trigger_manifest_fetch(self) -> None:
         source_rows = [{"doc_id": "doc-A", "position": 0, "chash": "c" * 32}]
         collection_for_doc = {"doc-A": "coll-1"}
