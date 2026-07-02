@@ -2,11 +2,13 @@
 title: "Unattended Migration: Industrialize the Store-Migration Path from Babysat to Autonomous"
 id: RDR-178
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-07-02
 priority: high
 author: Hal Hildebrand
+reviewed-by: self
 created: 2026-07-01
-related_issues: [nexus-te885, nexus-aigpt, nexus-5drgy, nexus-14ndm, nexus-ob4vc, nexus-melvx, nexus-1usso, nexus-ekk4o, nexus-s3dd4, nexus-t0p7o, nexus-1sx01]
+related_issues: [nexus-te885, nexus-te885.1, nexus-te885.2, nexus-aigpt, nexus-5drgy, nexus-14ndm, nexus-ob4vc, nexus-melvx, nexus-1usso, nexus-ekk4o, nexus-s3dd4, nexus-t0p7o, nexus-1sx01]
 related: [RDR-152, RDR-153, RDR-155, RDR-159, RDR-176, RDR-177]
 ---
 
