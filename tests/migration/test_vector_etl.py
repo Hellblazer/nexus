@@ -501,6 +501,68 @@ class TestMigrateCollectionsUnit:
         assert all(c != legacy for c, _ in fake.upsert_calls)
         assert report.ok is False
 
+    def test_derived_collection_skipped_clean(self, source_client) -> None:
+        """nexus-t0p7o (RDR-178 Gap 6): ``taxonomy__centroids`` is DERIVED
+        data (recomputable via ``nx taxonomy discover``) — a non-empty,
+        non-conformant derived collection must NOT redden the run. It is
+        reported as its own status, distinct from a genuinely-unknown
+        nonconformant name, and never attempted as an upsert."""
+        derived = "taxonomy__centroids"
+        good = _coll("etlunit-derived-good")
+        _seed_source(source_client, derived, 447)
+        _seed_source(source_client, good, 3)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        by_name = {r.collection: r for r in report.results}
+        assert by_name[derived].status == "skipped-derived"
+        assert by_name[derived].source_count == 447
+        assert by_name[derived].written_count == 0
+        assert "derived" in by_name[derived].reason
+        assert "regenerate" in by_name[derived].reason
+        assert "nx taxonomy" in by_name[derived].reason
+        assert by_name[good].status == "migrated"
+        # No upsert was even attempted for the derived collection.
+        assert all(c != derived for c, _ in fake.upsert_calls)
+        # A known-derived skip must not fail the run.
+        assert report.ok is True
+        assert report.derived_skipped_count == 1
+
+    def test_derived_collection_empty_still_reported_derived(self, source_client) -> None:
+        """An empty derived collection stays classified 'skipped-derived'
+        (not 'skipped-empty') — the classification is about WHY the
+        collection is exempt, not about its current row count."""
+        derived = "taxonomy__centroids"
+        _seed_source(source_client, derived, 0)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "skipped-derived"
+        assert result.source_count == 0
+        assert report.ok is True
+
+    def test_unknown_nonconformant_collection_still_fails_the_run(
+        self, source_client
+    ) -> None:
+        """A genuinely-unknown nonconformant name (not in the derived
+        registry) must STILL redden the run — the derived carve-out is
+        explicit-opt-in only, never a blanket allow for any nonconformant
+        name (nexus-t0p7o constraint 2)."""
+        unknown = "knowledge__legacy-unknown"
+        _seed_source(source_client, unknown, 5)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "skipped"
+        assert result.status != "skipped-derived"
+        assert report.ok is False
+        assert report.derived_skipped_count == 0
+
     def test_failed_collection_does_not_abort_run(self, source_client) -> None:
         """A service-rejected collection is reported failed; the remaining
         collections still migrate (no abort-all, no silent loss)."""
@@ -1591,10 +1653,13 @@ class TestSkippedEmptyDisposition:
     def test_empty_nonconformant_is_skipped_empty_and_green(
         self, source_client,
     ) -> None:
-        # taxonomy__centroids: the OTHER real empty non-conformant from the
-        # production run (tuples__* now route to "excluded" before the
-        # disposition probe runs).
-        empty_legacy = "taxonomy__centroids"
+        # A generic empty non-conformant collection NOT on the derived
+        # registry (tuples__* now route to "excluded" before the
+        # disposition probe runs; taxonomy__centroids is now covered by the
+        # more specific "skipped-derived" class — see
+        # test_derived_collection_empty_still_reported_derived in
+        # TestMigrateCollectionsUnit, nexus-t0p7o / RDR-178 Gap 6).
+        empty_legacy = "knowledge__legacy-empty"
         good = _coll("etlop-good")
         source_client.create_collection(empty_legacy)  # 0 chunks
         _seed_source(source_client, good, 2)

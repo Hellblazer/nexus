@@ -161,6 +161,33 @@ class TestEtlOperability:
         assert "skipped-empty" in result.output
         assert "NOT clean" not in result.output
 
+    def test_derived_skip_exits_zero_and_shows_regenerate_hint(
+        self, runner, monkeypatch, tmp_path
+    ) -> None:
+        """nexus-t0p7o (RDR-178 Gap 6): a known-derived nonconformant
+        collection (``taxonomy__centroids``) must exit clean AND the
+        operator-facing summary must explain how to regenerate it."""
+
+        def fake_migrate_local(local_path, vector_client, **kw):
+            return _report(
+                "local",
+                CollectionResult(_COLL, 3, 3, "migrated"),
+                CollectionResult(
+                    "taxonomy__centroids", 447, 0, "skipped-derived",
+                    "skipped (derived — regenerate on target via nx taxonomy)",
+                ),
+            )
+
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.migrate_local", fake_migrate_local
+        )
+        result = runner.invoke(migrate_vectors_cmd, ["--local-path", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "skipped-derived" in result.output
+        assert "NOT clean" not in result.output
+        assert "regenerate" in result.output
+        assert "nx taxonomy" in result.output
+
     def test_live_progress_lines_emitted_per_collection(
         self, runner, monkeypatch, tmp_path
     ) -> None:

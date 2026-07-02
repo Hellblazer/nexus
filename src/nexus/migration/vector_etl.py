@@ -103,13 +103,38 @@ _log = structlog.get_logger(__name__)
 # is never migrated. They are excluded from DEFAULT enumeration (reported,
 # never silent) so accumulating tuples data cannot fail the straggler
 # sweep; naming one explicitly via --collections still migrates/refuses it.
+# "skipped-derived" (RDR-178 Gap 6, nexus-t0p7o): a nonconformant collection
+# on the EXPLICIT :data:`_DERIVED_COLLECTIONS` allowlist — DERIVED data
+# recomputable from a durable source (taxonomy centroids from T2 topics via
+# `nx taxonomy discover`), never the migration's source of truth. A
+# real-content run must report clean even though this collection cannot
+# dim-dispatch. Distinct from "skipped-empty": the exemption is about WHY
+# the collection is exempt (derived, not lost data), not its row count —
+# unlike an empty nonconformant collection, a non-empty derived one is
+# reported here too and still does not redden the run. This is an
+# EXPLICIT opt-in registry, never a blanket allow: any nonconformant name
+# NOT on the registry still falls through to "skipped" and stays red (the
+# guard `test_nonconformant_collection_skipped_loud` protects).
 MigrationStatus = Literal[
-    "migrated", "failed", "skipped", "skipped-empty", "excluded", "dry-run",
+    "migrated", "failed", "skipped", "skipped-empty", "skipped-derived",
+    "excluded", "dry-run",
 ]
 
 #: Collection-name prefixes excluded from DEFAULT enumeration (explicit
 #: --collections naming overrides). Session-ephemeral, die-with-Chroma data.
 EPHEMERAL_EXCLUDE_PREFIXES: tuple[str, ...] = ("tuples__",)
+
+#: Nonconformant collection names known to hold DERIVED data — recomputable
+#: from a durable source, so their absence from pgvector is not data loss.
+#: ``taxonomy__centroids`` (447 rows in the 2026-07-01 production dry-run)
+#: is regenerated on the target post-cutover via ``nx taxonomy discover``
+#: (source of truth: T2 ``topics``/``topic_assignments``). Adding a name
+#: here is a deliberate, reviewed claim that the collection is safely
+#: regenerable — it is NOT a general nonconformant-name allowlist.
+_DERIVED_COLLECTIONS: frozenset[str] = frozenset({"taxonomy__centroids"})
+
+#: Human-readable regeneration hint appended to every derived-skip reason.
+_DERIVED_SKIP_HINT = "skipped (derived — regenerate on target via nx taxonomy)"
 
 #: Model-segment → pgvector table dimension. MIRRORS the Java authority
 #: ``PgVectorRepository.MODEL_DIMS`` (service/src/main/java/dev/nexus/
@@ -201,7 +226,8 @@ class MigrationReport:
     @property
     def ok(self) -> bool:
         return all(
-            r.status in ("migrated", "dry-run", "skipped-empty", "excluded")
+            r.status
+            in ("migrated", "dry-run", "skipped-empty", "skipped-derived", "excluded")
             for r in self.results
         )
 
@@ -212,6 +238,20 @@ class MigrationReport:
     @property
     def total_written(self) -> int:
         return sum(r.written_count for r in self.results)
+
+    @property
+    def derived_skipped_count(self) -> int:
+        """Count of collections skipped as known-derived (RDR-178 Gap 6) —
+        reported separately from ``failed``/``skipped`` in the run summary
+        so an operator can see "regenerate these" apart from "fix these"."""
+        return sum(1 for r in self.results if r.status == "skipped-derived")
+
+    @property
+    def failed_or_skipped_count(self) -> int:
+        """Count of collections in a red terminal state (``failed`` or
+        ``skipped``) — the ones that actually need operator attention,
+        as opposed to :attr:`derived_skipped_count` (informational only)."""
+        return sum(1 for r in self.results if r.status in ("failed", "skipped"))
 
 
 def _dim_for_collection(name: str) -> tuple[int | None, str]:
@@ -293,6 +333,24 @@ def _migrate_one(
     is_cross_model = target != name
     dim, reason = _dim_for_collection(target)
     if dim is None:
+        # RDR-178 Gap 6 (nexus-t0p7o): an EXPLICIT derived-data exemption,
+        # checked before the empty/nonempty disposition below — a derived
+        # collection is exempt regardless of row count (its data is not
+        # lost, it is recomputed on the target), unlike the generic
+        # nonconformant path where only an EMPTY collection is safe.
+        if name in _DERIVED_COLLECTIONS:
+            try:
+                derived_count = int(read_client.get_collection(name).count())
+            except Exception:  # noqa: BLE001 - best-effort count probe; degrades to -1 sentinel
+                derived_count = -1
+            _log.info(
+                "vector_etl_skip_derived",
+                collection=name,
+                count=derived_count,
+            )
+            return CollectionResult(
+                name, max(derived_count, 0), 0, "skipped-derived", _DERIVED_SKIP_HINT,
+            )
         # nexus-pebfx.3 disposition rule: probe the source count. Empty +
         # non-conformant cannot lose data — report "skipped-empty" (clean).
         # Unreadable counts as data (conservative: stays red).

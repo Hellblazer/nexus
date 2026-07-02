@@ -1190,8 +1190,8 @@ def _echo_summary_table(report) -> None:
     (nexus-pebfx.3 item 4). Sorted failures-first so the actionable rows
     are adjacent to the verdict line."""
     rank = {
-        "failed": 0, "skipped": 1, "skipped-empty": 2, "excluded": 3,
-        "dry-run": 4, "migrated": 5,
+        "failed": 0, "skipped": 1, "skipped-derived": 2, "skipped-empty": 3,
+        "excluded": 4, "dry-run": 5, "migrated": 6,
     }
     rows = sorted(report.results, key=lambda r: (rank.get(r.status, 9), r.collection))
     name_w = max([len(r.collection) for r in rows] + [10])
@@ -1205,9 +1205,12 @@ def _echo_summary_table(report) -> None:
         )
         # Rows with a reason carry it — the table is the permanent
         # scrollback record and must be sufficient on its own (no structlog
-        # scrolling). skipped-empty included: the operator reviewing a
-        # redirected log needs the disposition rationale in the table.
-        if r.reason and r.status in ("failed", "skipped", "skipped-empty", "excluded"):
+        # scrolling). skipped-empty/skipped-derived included: the operator
+        # reviewing a redirected log needs the disposition rationale (for
+        # skipped-derived, the "nx taxonomy" regeneration hint) in the table.
+        if r.reason and r.status in (
+            "failed", "skipped", "skipped-empty", "skipped-derived", "excluded",
+        ):
             line += f"  — {r.reason}"
         click.echo(line)
     click.echo("-" * (13 + 1 + name_w + 27))
@@ -1215,6 +1218,11 @@ def _echo_summary_table(report) -> None:
         f"{'TOTAL':<13} {report.leg + ' leg':<{name_w}} {report.total_source:>8} "
         f"{report.total_written:>8}   ok={report.ok}"
     )
+    if report.derived_skipped_count:
+        click.echo(
+            f"({report.derived_skipped_count} derived collection(s) skipped "
+            "clean — regenerate on the target via nx taxonomy)"
+        )
     sys.stdout.flush()
 # ── RDR-153 Phase 3: migrate-all orchestration ───────────────────────────────
 
