@@ -109,7 +109,7 @@ from typing import Any
 
 import structlog
 
-from nexus.retry import _etl_with_retry
+from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 
 _log = structlog.get_logger(__name__)
 
@@ -405,6 +405,7 @@ def migrate_catalog(
     *,
     batch_log_every: int = 50,
     collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, dict[str, int]]:
     """Copy all rows from a SQLite catalog into Postgres via *client*.
 
@@ -429,6 +430,12 @@ def migrate_catalog(
         client:          An ``HttpCatalogClient`` (or duck-typed) instance
                          connected to the Postgres service.
         batch_log_every: Emit a progress log line every N rows.
+        breaker:         Shared :class:`~nexus.retry.EtlCircuitBreaker` for
+                         this whole catalog leg (RDR-178 Gap 3) — ONE
+                         instance spans owners/documents/collections/
+                         document_chunks/links/next_seq_reconcile so "N
+                         consecutive" reflects the leg's health, not a
+                         single table. Defaults to a fresh instance.
 
     Returns:
         ``{"owners": {"read": N, "written": M}, "documents": {...}, ...}``
@@ -437,6 +444,7 @@ def migrate_catalog(
     Copy-not-move guarantee: ``_open_ro`` opens the file with ``?mode=ro``
     so the SQLite source is read-only at the OS level.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     conn = _open_ro(catalog_db_path)
     try:
         owners_rows    = _fetch_all(conn, "owners")
@@ -490,6 +498,7 @@ def migrate_catalog(
         import_fn=lambda rows: client._post("/import/owner", {"rows": rows}),
         batch_log_every=batch_log_every,
         collector=collector,
+        breaker=breaker,
     )
 
     # ── 2. documents (depends on owners) ───────────────────────────────────────
@@ -500,6 +509,7 @@ def migrate_catalog(
         import_fn=lambda rows: client._post("/import/document", {"rows": rows}),
         batch_log_every=batch_log_every,
         collector=collector,
+        breaker=breaker,
     )
 
     # ── 3. collections (independent of docs, but after owners) ─────────────────
@@ -510,6 +520,7 @@ def migrate_catalog(
         import_fn=lambda rows: client._post("/import/collection", {"rows": rows}),
         batch_log_every=batch_log_every,
         collector=collector,
+        breaker=breaker,
     )
 
     # ── 4. document_chunks (depends on documents) ──────────────────────────────
@@ -536,7 +547,16 @@ def migrate_catalog(
         try:
             for i in range(0, len(chunk_rows_payload), _chunk_cap):
                 sub = chunk_rows_payload[i: i + _chunk_cap]
-                client._post("/import/chunk", {"doc_id": doc_id, "rows": sub})
+                # RDR-178 Gap 3 (nexus-ob4vc): this call used to POST
+                # directly with NO retry wrapper at all — the genuine
+                # bypassed call site behind the 270-row catalog manifest
+                # loss on 2026-07-01 (unlike chash_etl, which DID route
+                # through _etl_with_retry but was blocked by the classifier
+                # gap fixed in nexus.retry._RETRYABLE_ETL_HTTP_STATUSES).
+                _etl_batch_with_breaker(
+                    client._post, "/import/chunk", {"doc_id": doc_id, "rows": sub},
+                    breaker=breaker,
+                )
             chunk_written += len(doc_chunks)
         except Exception as exc:  # noqa: BLE001 — per-doc resilience; logged, one bad group must not abort ETL
             _log.error(
@@ -575,6 +595,7 @@ def migrate_catalog(
         import_fn=lambda rows: client._post("/import/link", {"rows": rows}),
         batch_log_every=batch_log_every,
         collector=collector,
+        breaker=breaker,
     )
 
     # ── 6. _meta — SKIPPED intentionally ──────────────────────────────────────
@@ -596,7 +617,7 @@ def migrate_catalog(
     # only a lower bound and would reuse deleted slots on a compacted catalog.
     doc_tumblers = [r["tumbler"] for r in docs_rows]
     high_water = _read_owner_high_water(catalog_db_path)
-    reconcile = _reconcile_next_seq(client, owners_rows, doc_tumblers, high_water)
+    reconcile = _reconcile_next_seq(client, owners_rows, doc_tumblers, high_water, breaker=breaker)
     results["next_seq_reconcile"] = {
         "read": 0,
         "written": reconcile["reconciled"],
@@ -632,6 +653,7 @@ def _import_table(
     import_fn: Any,
     batch_log_every: int,
     collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """Import one table's rows via ``import_fn(rows)`` (a batched array POST).
 
@@ -641,7 +663,12 @@ def _import_table(
     hit). Each row is still TRANSFORMED per-row (a corrupt row is recorded +
     excluded); only the NETWORK is batched. A server-side batch rejection is
     recorded at batch granularity; the import is idempotent so a re-run lands it.
+
+    RDR-178 Gap 3 (nexus-ob4vc): *breaker* (defaults to a fresh instance when
+    unset) paces retries on a sustained transient outage instead of dropping
+    the batch after one bounded ``_etl_with_retry`` cycle.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     bsize = QUOTAS.MAX_RECORDS_PER_WRITE
 
@@ -664,7 +691,7 @@ def _import_table(
         if not batch:
             return
         try:
-            _etl_with_retry(import_fn, batch)
+            _etl_batch_with_breaker(import_fn, batch, breaker=breaker)
             written_count += len(batch)
         except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
             _log.error("catalog_etl.batch_failed", table=table, count=len(batch), error=str(exc))
@@ -746,6 +773,8 @@ def _reconcile_next_seq(
     owners_rows: list[dict[str, Any]],
     doc_tumblers: list[str],
     high_water: dict[str, int],
+    *,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """Reconcile ``next_seq`` on each owner so post-cutover tumbler allocation can
     neither collide with NOR reuse a migrated tumbler.
@@ -768,6 +797,7 @@ def _reconcile_next_seq(
 
     Returns ``{"reconciled": N, "failed": M}``.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     reconciled = 0
     failed = 0
     for owner in owners_rows:
@@ -792,7 +822,9 @@ def _reconcile_next_seq(
         payload = _transform_owner(owner)
         payload["next_seq"] = floor
         try:
-            client._post("/import/owner", payload)
+            # RDR-178 Gap 3: was an unwrapped client._post — same bypass
+            # class as the document_chunks loop above, fixed the same way.
+            _etl_batch_with_breaker(client._post, "/import/owner", payload, breaker=breaker)
             reconciled += 1
             _log.info(
                 "catalog_etl.next_seq_reconciled",

@@ -45,7 +45,7 @@ from typing import Any
 
 import structlog
 
-from nexus.retry import _etl_with_retry
+from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 
 _log = structlog.get_logger(__name__)
 
@@ -210,6 +210,7 @@ def migrate_telemetry_rows(
     *,
     batch_log_every: int = 100,
     collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, Any]:
     """Copy all telemetry rows from SQLite into Postgres via *store*.
 
@@ -223,14 +224,18 @@ def migrate_telemetry_rows(
         store:           An ``HttpTelemetryStore`` (or compatible) instance
                          connected to the Postgres service.
         batch_log_every: Emit a progress log line every N rows per table.
+        breaker:         Shared :class:`~nexus.retry.EtlCircuitBreaker`
+                         (RDR-178 Gap 3) spanning all six tables.
 
     Returns:
         ``{"table": {"read": N, "written": M}, ...}`` for each of the six tables.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     conn = _open_ro(source_db_path)
     try:
         return _migrate_all(
             conn, store, batch_log_every=batch_log_every, collector=collector,
+            breaker=breaker,
         )
     finally:
         conn.close()
@@ -242,26 +247,28 @@ def _migrate_all(
     *,
     batch_log_every: int,
     collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, Any]:
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     results: dict[str, Any] = {}
 
     results["relevance_log"]    = _migrate_relevance_log(
-        conn, store, batch_log_every, collector=collector,
+        conn, store, batch_log_every, collector=collector, breaker=breaker,
     )
     results["search_telemetry"] = _migrate_search_telemetry(
-        conn, store, batch_log_every, collector=collector,
+        conn, store, batch_log_every, collector=collector, breaker=breaker,
     )
     results["tier_writes"]      = _migrate_tier_writes(
-        conn, store, batch_log_every, collector=collector,
+        conn, store, batch_log_every, collector=collector, breaker=breaker,
     )
     results["nx_answer_runs"]   = _migrate_nx_answer_runs(
-        conn, store, batch_log_every, collector=collector,
+        conn, store, batch_log_every, collector=collector, breaker=breaker,
     )
     results["hook_failures"]    = _migrate_hook_failures(
-        conn, store, batch_log_every, collector=collector,
+        conn, store, batch_log_every, collector=collector, breaker=breaker,
     )
     results["frecency"]         = _migrate_frecency(
-        conn, store, batch_log_every, collector=collector,
+        conn, store, batch_log_every, collector=collector, breaker=breaker,
     )
 
     if collector is not None:
@@ -304,6 +311,7 @@ def _run_batched(
     collector: Any,
     batch_log_every: int,
     total: int = 0,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): shared per-table batch driver.
 
@@ -314,6 +322,7 @@ def _run_batched(
     is recorded at batch granularity; the import is idempotent (DO NOTHING /
     GREATEST) so a re-run lands it.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     bsize = QUOTAS.MAX_RECORDS_PER_WRITE
 
@@ -327,7 +336,7 @@ def _run_batched(
         if not batch:
             return
         try:
-            written_n += _etl_with_retry(store.import_rows_batch, table, batch)
+            written_n += _etl_batch_with_breaker(store.import_rows_batch, table, batch, breaker=breaker)
         except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
             _log.error(f"telemetry_etl.{table}.batch_failed", count=len(batch), error=str(exc))
             if collector is not None:
@@ -471,37 +480,40 @@ def _build_frecency(row: dict[str, Any], _collector: Any) -> tuple[dict[str, Any
 
 def _migrate_relevance_log(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
-    collector: Any = None,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "relevance_log")
     rows = _iter_rows(conn, "relevance_log", _RELEVANCE_LOG_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "relevance_log", rows, _build_relevance,
-                        collector=collector, batch_log_every=batch_log_every, total=total)
+                        collector=collector, batch_log_every=batch_log_every, total=total,
+                        breaker=breaker)
 
 
 def _migrate_search_telemetry(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
-    collector: Any = None,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "search_telemetry")
     rows = _iter_rows(conn, "search_telemetry", _SEARCH_TELEMETRY_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "search_telemetry", rows, _build_search,
-                        collector=collector, batch_log_every=batch_log_every, total=total)
+                        collector=collector, batch_log_every=batch_log_every, total=total,
+                        breaker=breaker)
 
 
 def _migrate_tier_writes(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
-    collector: Any = None,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "tier_writes")
     rows = _iter_rows(conn, "tier_writes", _TIER_WRITES_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "tier_writes", rows, _build_tier,
-                        collector=collector, batch_log_every=batch_log_every, total=total)
+                        collector=collector, batch_log_every=batch_log_every, total=total,
+                        breaker=breaker)
 
 
 def _migrate_nx_answer_runs(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
-    collector: Any = None,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "nx_answer_runs")
     rows = _iter_rows(conn, "nx_answer_runs", _NX_ANSWER_RUNS_COLS, page_size=_READ_PAGE)
@@ -512,7 +524,8 @@ def _migrate_nx_answer_runs(
         pass  # no plans table in source — every plan_id is then a dangler
     return _run_batched(store, "nx_answer_runs", rows,
                         lambda row, c: _build_nx(row, c, valid_plan_ids),
-                        collector=collector, batch_log_every=batch_log_every, total=total)
+                        collector=collector, batch_log_every=batch_log_every, total=total,
+                        breaker=breaker)
 
 
 def _normalize_timestamp(raw: str) -> tuple[str, bool]:
@@ -547,19 +560,21 @@ def _normalize_timestamp(raw: str) -> tuple[str, bool]:
 
 def _migrate_hook_failures(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
-    collector: Any = None,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "hook_failures")
     rows = _iter_rows(conn, "hook_failures", _HOOK_FAILURES_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "hook_failures", rows, _build_hook,
-                        collector=collector, batch_log_every=batch_log_every, total=total)
+                        collector=collector, batch_log_every=batch_log_every, total=total,
+                        breaker=breaker)
 
 
 def _migrate_frecency(
     conn: sqlite3.Connection, store: Any, batch_log_every: int,
-    collector: Any = None,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     total = _count_rows(conn, "frecency")
     rows = _iter_rows(conn, "frecency", _FRECENCY_COLS, page_size=_READ_PAGE)
     return _run_batched(store, "frecency", rows, _build_frecency,
-                        collector=collector, batch_log_every=batch_log_every, total=total)
+                        collector=collector, batch_log_every=batch_log_every, total=total,
+                        breaker=breaker)

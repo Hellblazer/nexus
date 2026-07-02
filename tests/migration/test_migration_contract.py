@@ -202,6 +202,7 @@ def test_vector_etl_surface():
         "page_size",
         "on_result",
         "target_names",
+        "breaker",
     }
     assert _params(v.migrate_cloud) == {
         "vector_client",
@@ -213,6 +214,7 @@ def test_vector_etl_surface():
         "page_size",
         "on_result",
         "target_names",
+        "breaker",
     }
     assert _params(v.rollback_collections) == {
         "read_client",

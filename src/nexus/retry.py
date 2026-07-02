@@ -257,10 +257,20 @@ def _voyage_with_retry(
 # HTTP-client `_post`. A genuinely-forbidden request still surfaces — it just
 # exhausts the (small) attempt bound first, then raises with its remedy.
 
-#: Only transient edge 403 is retried at the status level; 400/404/422 are real
+#: Transient edge statuses retried at the status level; 400/404/422 are real
 #: client errors and fail fast. Connection drops / read-timeouts retry via the
 #: transport-level checks below.
-_RETRYABLE_ETL_HTTP_STATUSES: frozenset[int] = frozenset({403})
+#:
+#: RDR-178 Gap 3 (nexus-ob4vc, 2026-07-01 incident): this set used to be
+#: ``{403}`` only. 429/502/503/504 — the CANONICAL transient class for an
+#: overloaded ingress — fell straight through ``_is_retryable_etl_error`` as
+#: "not retryable", so a batch that hit a 502 raised on the FIRST attempt
+#: with zero backoff. The call sites (``chash_etl``, the ``catalog_etl``
+#: table imports) already routed every batch through ``_etl_with_retry`` —
+#: the bug was this classifier's scope, not a bypassed call site. See
+#: ``EtlCircuitBreaker`` below for the companion fix (pacing a SUSTAINED
+#: outage rather than burning through batches at import speed).
+_RETRYABLE_ETL_HTTP_STATUSES: frozenset[int] = frozenset({403, 429, 502, 503, 504})
 
 _etl_retry_seconds: float = 0.0
 _etl_retry_count: int = 0
@@ -359,3 +369,133 @@ def _etl_with_retry(
             _add_etl_retry(jittered)
             time.sleep(jittered)
             delay = min(delay * 2, 10.0)
+
+
+# ── ETL circuit breaker (RDR-178 Gap 3, nexus-ob4vc) ─────────────────────────
+#
+# 2026-07-01 incident: two concurrent chash-import legs overloaded the
+# ingress; nginx answered 502 for ~10s. Every batch in flight during that
+# window failed PERMANENTLY at ~3 batches/second with zero backoff
+# (structlog ``chash_etl_batch_error``), and 270 catalog manifest
+# (``document_chunks``) rows were lost in the same window. Root cause was
+# TWO bugs, both fixed here:
+#
+#   1. ``_is_retryable_etl_error`` scoped the retryable HTTP-status set to
+#      ``{403}`` only, so a 502/503/504/429 raised on the first attempt with
+#      no backoff at all even though the call site DID route through
+#      ``_etl_with_retry`` (see ``_RETRYABLE_ETL_HTTP_STATUSES`` above).
+#   2. The ``document_chunks`` manifest write in ``catalog_etl.py`` called
+#      ``client._post(...)`` DIRECTLY — it never routed through
+#      ``_etl_with_retry`` at all (a genuine bypassed call site, unlike the
+#      chash leg). Fixed at the call site, not here.
+#
+# ``EtlCircuitBreaker`` is the pacing half of the fix: bug (1) alone means a
+# SUSTAINED outage (longer than one bounded ``_etl_with_retry`` cycle: up to
+# ~3s of backoff across 3 attempts) still burns through every batch in the
+# leg at import speed, each one permanently failed. The breaker instead
+# retries the SAME batch (every migration write is idempotent) and, after
+# ``trip_threshold`` consecutive exhausted cycles, pauses ``pause_seconds``
+# before resuming — "idempotent re-runs recovered everything" (the incident
+# post-mortem) is what this automates inline instead of requiring an
+# operator to notice the failed report and re-run migrate-all by hand. A
+# genuinely non-retryable error (a real 400/404/422/401) still raises
+# immediately on the first attempt — same fail-fast semantics as
+# ``_etl_with_retry`` alone; the breaker never intercepts those.
+
+#: Consecutive exhausted-retry cycles before the breaker pauses the loop.
+_ETL_BREAKER_TRIP_THRESHOLD: int = 3
+
+#: Pause duration (seconds) once the breaker trips.
+_ETL_BREAKER_PAUSE_SECONDS: float = 30.0
+
+#: Outer sanity ceiling on trips per batch — after this many pauses (~100
+#: minutes of pause time at the default 30s) a batch gives up and raises, so
+#: a genuinely DEAD (not transient) endpoint cannot hang an unattended
+#: migration forever. The caller's existing per-batch except/record path
+#: then attributes the failure — never silently swallowed.
+_ETL_BREAKER_MAX_TRIPS: int = 20
+
+
+class EtlCircuitBreaker:
+    """Per-ETL-run state: consecutive exhausted-retry cycles + trip count.
+
+    Share ONE instance across every batch in a single ETL leg/table (pass it
+    into :func:`_etl_batch_with_breaker` at each call) so "N consecutive"
+    reflects the whole leg's health, not just one batch's retries.
+    Not thread-safe — construct one per sequential ETL run; the migration
+    ETLs are single-threaded batch loops.
+    """
+
+    def __init__(
+        self,
+        *,
+        trip_threshold: int = _ETL_BREAKER_TRIP_THRESHOLD,
+        pause_seconds: float = _ETL_BREAKER_PAUSE_SECONDS,
+        max_trips: int = _ETL_BREAKER_MAX_TRIPS,
+    ) -> None:
+        self.trip_threshold = trip_threshold
+        self.pause_seconds = pause_seconds
+        self.max_trips = max_trips
+        self.consecutive_failures = 0
+        self.trip_count = 0
+
+
+def _etl_batch_with_breaker(
+    fn: Callable[..., Any],
+    *args: Any,
+    breaker: EtlCircuitBreaker,
+    max_attempts: int = 3,
+    **kwargs: Any,
+) -> Any:
+    """Call *fn* through :func:`_etl_with_retry`, pausing the batch loop
+    instead of permanently dropping a batch when a SUSTAINED outage outlasts
+    one bounded retry cycle (RDR-178 Gap 3).
+
+    On a retryable-but-exhausted failure the SAME call is retried (every
+    migration write is idempotent) after recording the failure against
+    *breaker*. Every ``breaker.trip_threshold``-th consecutive exhaustion
+    pauses ``breaker.pause_seconds`` (loud WARN structlog events on trip and
+    on resume) before continuing. A non-retryable error (a real
+    400/404/422/401) raises immediately, identical to :func:`_etl_with_retry`
+    alone — the breaker never intercepts those. After
+    ``breaker.max_trips`` pauses the call gives up and re-raises so a
+    genuinely dead endpoint cannot hang forever; the caller's existing
+    per-batch except/record path then attributes the failure.
+    """
+    while True:
+        try:
+            result = _etl_with_retry(fn, *args, max_attempts=max_attempts, **kwargs)
+        except Exception as exc:
+            if not _is_retryable_etl_error(exc):
+                raise
+            breaker.consecutive_failures += 1
+            _log.error(
+                "etl_batch_exhausted_retry",
+                consecutive=breaker.consecutive_failures,
+                trip_threshold=breaker.trip_threshold,
+                error_type=type(exc).__name__,
+                error=str(exc)[:160],
+            )
+            if breaker.consecutive_failures < breaker.trip_threshold:
+                continue
+            if breaker.trip_count >= breaker.max_trips:
+                _log.error(
+                    "etl_circuit_breaker_giving_up",
+                    trip_count=breaker.trip_count,
+                    max_trips=breaker.max_trips,
+                )
+                raise
+            breaker.trip_count += 1
+            _log.warning(
+                "etl_circuit_breaker_tripped",
+                consecutive=breaker.consecutive_failures,
+                pause_seconds=breaker.pause_seconds,
+                trip_count=breaker.trip_count,
+            )
+            time.sleep(breaker.pause_seconds)
+            breaker.consecutive_failures = 0
+            _log.warning("etl_circuit_breaker_resumed", trip_count=breaker.trip_count)
+            continue
+        else:
+            breaker.consecutive_failures = 0
+            return result

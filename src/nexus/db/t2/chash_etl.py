@@ -37,7 +37,7 @@ from typing import Any
 
 import structlog
 
-from nexus.retry import _etl_with_retry
+from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 
 _log = structlog.get_logger(__name__)
 
@@ -53,6 +53,7 @@ def migrate_chash_rows(
     *,
     tenant: str = "default",
     collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """Copy all ``chash_index`` rows from ``sqlite_path`` to the service via ``http_chash``.
 
@@ -61,6 +62,10 @@ def migrate_chash_rows(
         http_chash:  An :class:`~nexus.db.t2.http_chash_index.HttpChashIndex`
                      (or compatible shim).
         tenant:      Tenant for the HTTP headers (default: ``"default"``).
+        breaker:     Shared :class:`~nexus.retry.EtlCircuitBreaker` for this
+                     leg (RDR-178 Gap 3). Defaults to a fresh instance —
+                     inject an explicit one to observe trip state (tests) or
+                     to share breaker state across sibling ETL calls.
 
     Returns:
         A dict with keys:
@@ -68,6 +73,7 @@ def migrate_chash_rows(
             - ``imported``: total rows successfully sent to the service
             - ``errors``: count of rows that caused an exception
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)  # epsilon-allow: ETL source-read; sqlite_path is the migration source SQLite, never T2Database
     conn.row_factory = sqlite3.Row
 
@@ -116,15 +122,17 @@ def migrate_chash_rows(
 
             try:
                 # Use the import endpoint on the underlying HTTP client directly.
-                # RDR-176 Gap 6: bounded retry on a transient edge 403 / drop /
-                # read-timeout (idempotent import). raise_for_status surfaces a
-                # classifiable httpx.HTTPStatusError so the retry classifier can
-                # tell a transient 403 (retry) from a real 4xx (fail fast).
+                # RDR-176 Gap 6 + RDR-178 Gap 3: bounded retry (+ circuit
+                # breaker pause on a sustained outage) on a transient edge
+                # 403/429/502/503/504 / drop / read-timeout (idempotent
+                # import). raise_for_status surfaces a classifiable
+                # httpx.HTTPStatusError so the retry classifier can tell a
+                # transient edge blip (retry) from a real 4xx (fail fast).
                 def _do_post():  # noqa: B023 — called immediately in this loop iteration, before payload advances
                     r = http_chash._client.post("/v1/chash/import", json={"rows": payload})
                     r.raise_for_status()
                     return r
-                resp = _etl_with_retry(_do_post)
+                resp = _etl_batch_with_breaker(_do_post, breaker=breaker)
                 batch_imported = resp.json().get("imported", 0)
                 imported += batch_imported
                 _log.info(

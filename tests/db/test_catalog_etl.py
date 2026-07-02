@@ -802,6 +802,43 @@ class TestMigrateCatalogMocked:
         assert chunk_calls[0]["doc_id"] == "1.1.1"
         assert len(chunk_calls[0]["rows"]) == 3
 
+    def test_document_chunks_import_retries_transient_502(self, monkeypatch):
+        """RDR-178 Gap 3 (nexus-ob4vc): the document_chunks manifest write used
+        to call client._post(...) directly with NO retry wrapper at all — the
+        genuine bypassed call site behind the 270-row catalog manifest loss on
+        2026-07-01. It must now survive a transient 502 exactly like the other
+        table imports."""
+        import httpx
+
+        import nexus.retry as retry
+        from nexus.db.t2.catalog_etl import migrate_catalog
+
+        monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
+
+        db_path = _make_source_catalog(
+            owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
+            documents=[{"tumbler": "1.1.1", "title": "d"}],
+            chunks=[{"doc_id": "1.1.1", "position": 0, "chash": "a" * 32}],
+        )
+
+        attempts = {"n": 0}
+
+        def flaky_post(path: str, payload: dict | None = None):
+            if path != "/import/chunk":
+                return None
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                req = httpx.Request("POST", "http://svc/import/chunk")
+                resp = httpx.Response(502, request=req)
+                raise httpx.HTTPStatusError("HTTP 502", request=req, response=resp)
+            return None
+
+        client = self._make_mock_client()
+        client._post.side_effect = flaky_post
+        migrate_catalog(db_path, client)
+
+        assert attempts["n"] == 3  # retried twice, succeeded on the 3rd
+
     def test_source_sqlite_unchanged_after_etl(self):
         """SQLite source must not be modified (copy-not-move)."""
         from nexus.db.t2.catalog_etl import migrate_catalog

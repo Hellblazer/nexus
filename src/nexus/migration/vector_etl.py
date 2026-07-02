@@ -83,7 +83,7 @@ from typing import Any, Callable, Literal
 import structlog
 
 from nexus.db.chroma_quotas import QUOTAS
-from nexus.retry import _etl_with_retry
+from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 from nexus.migration.chroma_read import (
     iter_collection_chunks,
     list_collection_names,
@@ -324,11 +324,13 @@ def _migrate_one(
     dry_run: bool,
     page: int,
     target_name: str | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> CollectionResult:
     # RDR-162 cross-model migrate: when *target_name* differs from *name*, read
     # the stored chunk text from the SOURCE (*name*) but upsert + verify against
     # the TARGET (the model-remapped name). The service re-embeds the text with
     # the target's model. The pgvector dim is dispatched from the TARGET segment.
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     target = target_name or name
     is_cross_model = target != name
     dim, reason = _dim_for_collection(target)
@@ -468,16 +470,20 @@ def _migrate_one(
                         missing_vectors=missing,
                         provenance_mismatch=mis_provenance,
                     )
-            # RDR-176 Gap 6: bounded retry on a transient edge 403 / connection
-            # drop / read-timeout — the upsert is idempotent on (tenant, target,
-            # chash), so re-sending a batch that may have partially landed is a
-            # no-op on the dupes. A real failure exhausts the bound, then raises.
-            _etl_with_retry(
+            # RDR-176 Gap 6 + RDR-178 Gap 3: bounded retry (+ circuit-breaker
+            # pause on a sustained outage) on a transient edge 403/429/5xx /
+            # connection drop / read-timeout — the upsert is idempotent on
+            # (tenant, target, chash), so re-sending a batch that may have
+            # partially landed is a no-op on the dupes. A genuinely dead
+            # endpoint still exhausts breaker.max_trips and raises, so a bad
+            # collection cannot hang the whole leg forever.
+            _etl_batch_with_breaker(
                 vector_client.upsert_chunks,
                 target,
                 [c["id"] for c in batch],
                 [c["document"] for c in batch],
                 [c["metadata"] for c in batch],
+                breaker=breaker,
                 embeddings=embeddings,
             )
             written += len(batch)
@@ -536,6 +542,7 @@ def migrate_collections(
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
     target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> MigrationReport:
     """Copy every chunk of *collections* (default: ALL source collections)
     from the Chroma *read_client* into pgvector via *vector_client*.
@@ -557,7 +564,11 @@ def migrate_collections(
     inflate the target count and read as a (conservative) failure. Run the
     migration with indexing paused. ``dry_run`` counts via ``col.count()``
     as a pre-flight estimate, not a binding commitment on a later live run.
+
+    *breaker* (RDR-178 Gap 3) is a shared :class:`~nexus.retry.EtlCircuitBreaker`
+    spanning every collection in this leg — defaults to a fresh instance.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
     explicit = collections is not None
     names = collections if explicit else list_collection_names(read_client)
@@ -581,6 +592,7 @@ def migrate_collections(
         result = _migrate_one(
             read_client, vector_client, name, dry_run=dry_run, page=page,
             target_name=(target_names or {}).get(name),
+            breaker=breaker,
         )
         result = dataclasses.replace(
             result, duration_s=round(time.monotonic() - t0, 3),
@@ -609,6 +621,7 @@ def migrate_local(
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
     target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> MigrationReport:
     """LOCAL leg: open the on-disk store the retired daemon served and
     migrate it. The ETL must be the only opener (WAL single-process
@@ -623,6 +636,7 @@ def migrate_local(
         page_size=page_size,
         on_result=on_result,
         target_names=target_names,
+        breaker=breaker,
     )
 
 
@@ -637,6 +651,7 @@ def migrate_cloud(
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
     target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> MigrationReport:
     """CLOUD leg: read via the ChromaCloud REST/auth API (no direct
     psql/pg_restore path exists) and write through the same pgvector
@@ -653,6 +668,7 @@ def migrate_cloud(
         page_size=page_size,
         on_result=on_result,
         target_names=target_names,
+        breaker=breaker,
     )
 
 
