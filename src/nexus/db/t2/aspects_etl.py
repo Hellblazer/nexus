@@ -125,9 +125,22 @@ def _transform_aspect(row: dict[str, Any]) -> dict[str, Any]:
             f"document_aspects row ({row.get('collection')}, "
             f"{row.get('source_path')}) missing extractor_name"
         )
+    # nexus-iiy11: post-RDR-096-P5.2 schemas have no source_path column —
+    # the row's identity is source_uri (URI-based identity, the point of
+    # RDR-096). The server key is UNIQUE(tenant_id, collection, source_path)
+    # with complete-overwrite upsert, so an empty fallback would COLLAPSE all
+    # of a collection's rows onto one key (silent data loss). Fail loud
+    # per-row instead when neither identity exists.
+    source_path = row.get("source_path") or row.get("source_uri")
+    if not source_path:
+        raise ValueError(
+            f"document_aspects row ({row.get('collection')}, doc_id="
+            f"{row.get('doc_id')}) has neither source_path nor source_uri — "
+            f"cannot form the (collection, source_path) identity"
+        )
     return {
         "collection":              _str(row["collection"]),
-        "source_path":             _str(row.get("source_path")),
+        "source_path":             _str(source_path),
         "problem_formulation":     row.get("problem_formulation"),
         "proposed_method":         row.get("proposed_method"),
         "experimental_datasets":   _str(row.get("experimental_datasets") or "[]"),
@@ -255,9 +268,18 @@ def migrate_aspects(
             extra_cols.append("source_uri")
         if "salient_sentences" in cols:
             extra_cols.append("salient_sentences")
+        # nexus-iiy11: RDR-096 P5.2 (eb1ee8c4) DROPPED source_path from the
+        # source schema; hardcoding it in the SELECT crashed migrate_aspects
+        # unconditionally on every fresh post-4.31.0 T2 ('no such column'),
+        # tripping migrate_all's total_failed gate and hard-blocking the
+        # whole guided-upgrade T3 leg. Presence-check it like every other
+        # evolved column; _transform_aspect maps source_uri into the import
+        # body's source_path (the server key) when the column is gone.
+        if "source_path" in cols:
+            extra_cols.append("source_path")
 
         base_cols = [
-            "collection", "source_path", "problem_formulation", "proposed_method",
+            "collection", "problem_formulation", "proposed_method",
             "experimental_datasets", "experimental_baselines", "experimental_results",
             "extras", "confidence", "extracted_at", "model_version", "extractor_name",
         ]
