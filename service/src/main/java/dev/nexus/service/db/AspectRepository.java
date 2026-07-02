@@ -1230,8 +1230,88 @@ public final class AspectRepository {
     public int importQueueBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-te885.3 (completes the nexus-1usso sweep): the queue import
+            // was the last batch method still looping per-row .execute(). Same
+            // uniform invariants as every other converted importer: skip rows
+            // missing conflict-key fields; register DISTINCT collections once;
+            // dedupe intra-batch (last wins — one multi-row INSERT ... ON
+            // CONFLICT cannot affect the same row twice); chunk at
+            // MAX_BATCH_PARAMS binds; ON CONFLICT semantics transcribed
+            // verbatim from doImportQueueRow (never-downgrade STATUS CASE,
+            // GREATEST retry/attempt, LEAST enqueued_at).
+            List<Map<String, Object>> kept = new ArrayList<>();
+            for (var body : rows) {
+                if (body.get("collection") == null || body.get("source_path") == null) continue;
+                kept.add(body);
+            }
+            if (kept.isEmpty()) return 0;
+
+            var collections = new java.util.LinkedHashSet<String>();
+            for (var body : kept) collections.add((String) body.get("collection"));
+            for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+
+            var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
+            for (var body : kept) {
+                unique.put(body.get("collection") + " " + body.get("source_path"), body);
+            }
+            List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+            final int cols = 11;
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             int written = 0;
-            for (Map<String, Object> body : rows) written += doImportQueueRow(ctx, tenant, body);
+            for (int start = 0; start < deduped.size(); start += chunkSize) {
+                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                var insert = ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
+                        ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                        ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                        ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                        ASPECT_EXTRACTION_QUEUE.DOC_ID,
+                        ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
+                        ASPECT_EXTRACTION_QUEUE.CONTENT,
+                        ASPECT_EXTRACTION_QUEUE.STATUS,
+                        ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                        ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
+                        ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
+                        ASPECT_EXTRACTION_QUEUE.LAST_ERROR);
+                for (var body : batch) {
+                    String enqueuedAt = (String) body.get("enqueued_at");
+                    String lastAttemptAt = (String) body.get("last_attempt_at");
+                    OffsetDateTime lastAttemptAtTs = lastAttemptAt != null && !lastAttemptAt.isBlank()
+                        ? parseTs(lastAttemptAt) : null;
+                    int retryCount = body.containsKey("retry_count")
+                        ? ((Number) body.get("retry_count")).intValue() : 0;
+                    insert = insert.values(
+                        tenant,
+                        (String) body.get("collection"),
+                        (String) body.get("source_path"),
+                        nullIfBlank((String) body.get("doc_id")),
+                        (String) body.getOrDefault("content_hash", ""),
+                        (String) body.getOrDefault("content", ""),
+                        (String) body.getOrDefault("status", "pending"),
+                        retryCount,
+                        parseTs(enqueuedAt),
+                        lastAttemptAtTs,
+                        (String) body.get("last_error"));
+                }
+                insert.onConflict(
+                        ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                        ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                        ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
+                    .doUpdate()
+                    // Never downgrade in_progress to pending from a stale ETL import
+                    .set(ASPECT_EXTRACTION_QUEUE.STATUS,          EX_Q_STATUS_CASE)
+                    .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,     EX_Q_RETRY_GREATEST)
+                    // Preserve earliest enqueue time
+                    .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,     EX_Q_ENQUEUED_LEAST)
+                    // Keep latest attempt timestamp
+                    .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, EX_Q_ATTEMPT_GREATEST)
+                    .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,          EX_Q_DOC_ID)
+                    .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
+                    .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
+                    .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      EX_Q_LAST_ERROR_CASE)
+                    .execute();
+                written += batch.size();
+            }
             return written;
         });
     }

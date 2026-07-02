@@ -1249,6 +1249,92 @@ class AspectRepositoryTest {
         assertThat(repo.importPromotionBatch(TENANT_A, null)).isZero();
     }
 
+    // ── Tests 66-69: importQueueBatch multi-row conversion (nexus-te885.3) ────
+    // Completes the nexus-1usso sweep: the queue import was the one batch
+    // method still looping per-row .execute() inside its transaction.
+
+    @Test @Order(66)
+    void importQueueBatch_insertsAll_acrossCollections_oneStatement() {
+        String t = "qbatch-tenant-" + System.nanoTime();
+        var r1 = new java.util.LinkedHashMap<String, Object>();
+        r1.put("collection", "qbatch-coll-a"); r1.put("source_path", "a1.pdf");
+        r1.put("status", "pending"); r1.put("enqueued_at", "2025-05-01T00:00:00.000000Z");
+        var r2 = new java.util.LinkedHashMap<String, Object>();
+        r2.put("collection", "qbatch-coll-a"); r2.put("source_path", "a2.pdf");
+        r2.put("status", "failed"); r2.put("retry_count", 2);
+        r2.put("enqueued_at", "2025-05-02T00:00:00.000000Z");
+        r2.put("last_error", "database is locked");
+        var r3 = new java.util.LinkedHashMap<String, Object>();
+        r3.put("collection", "qbatch-coll-b"); r3.put("source_path", "b1.md");
+        r3.put("status", "pending"); r3.put("enqueued_at", "2025-05-03T00:00:00.000000Z");
+
+        int n = repo.importQueueBatch(t, List.of(r1, r2, r3));
+        assertThat(n).isEqualTo(3);
+        // pending rows visible; failed row is not pending
+        List<Map<String, Object>> pending = repo.listPending(t, 100);
+        assertThat(pending).hasSize(2);
+        assertThat(pending).anyMatch(r -> "a1.pdf".equals(r.get("source_path")));
+        assertThat(pending).anyMatch(r -> "b1.md".equals(r.get("source_path")));
+    }
+
+    @Test @Order(67)
+    void importQueueBatch_intraBatchDuplicate_lastWins_noError() {
+        // One multi-row INSERT ... ON CONFLICT cannot touch the same
+        // (tenant, collection, source_path) twice — repo must dedupe, last wins.
+        String t = "qbatch-tenant2-" + System.nanoTime();
+        var first = new java.util.LinkedHashMap<String, Object>();
+        first.put("collection", "qbatch-dup"); first.put("source_path", "dup.pdf");
+        first.put("status", "pending"); first.put("retry_count", 1);
+        first.put("enqueued_at", "2025-06-01T00:00:00.000000Z");
+        var second = new java.util.LinkedHashMap<String, Object>();
+        second.put("collection", "qbatch-dup"); second.put("source_path", "dup.pdf");
+        second.put("status", "failed"); second.put("retry_count", 4);
+        second.put("enqueued_at", "2025-06-09T00:00:00.000000Z");
+        second.put("last_error", "boom");
+
+        int n = repo.importQueueBatch(t, List.of(first, second));
+        assertThat(n).isEqualTo(1);
+        // last-wins: failed, so not pending
+        assertThat(repo.listPending(t, 100)).isEmpty();
+    }
+
+    @Test @Order(68)
+    void importQueueBatch_fidelity_neverDowngradesInProgress_viaBatchPath() {
+        // The batch path must preserve the single-row ON CONFLICT semantics
+        // verbatim: a stale 'pending' import must not downgrade in_progress.
+        String t = "qbatch-tenant3-" + System.nanoTime();
+        var seed = new java.util.LinkedHashMap<String, Object>();
+        seed.put("collection", "qbatch-fid"); seed.put("source_path", "fid.pdf");
+        repo.enqueue(t, seed);
+        assertThat(repo.claimNext(t)).isPresent(); // now in_progress
+
+        var stale = new java.util.LinkedHashMap<String, Object>();
+        stale.put("collection", "qbatch-fid"); stale.put("source_path", "fid.pdf");
+        stale.put("status", "pending");
+        stale.put("enqueued_at", "2025-01-01T00:00:00.000000Z");
+        int n = repo.importQueueBatch(t, List.of(stale));
+        assertThat(n).isEqualTo(1);
+        assertThat(repo.listPending(t, 100))
+            .as("in_progress must not be downgraded by a stale batch import")
+            .isEmpty();
+    }
+
+    @Test @Order(69)
+    void importQueueBatch_skipsRowsMissingKeys_countsOnlyKept() {
+        String t = "qbatch-tenant4-" + System.nanoTime();
+        var good = new java.util.LinkedHashMap<String, Object>();
+        good.put("collection", "qbatch-skip"); good.put("source_path", "ok.pdf");
+        good.put("status", "pending"); good.put("enqueued_at", "2025-07-01T00:00:00.000000Z");
+        var noColl = new java.util.LinkedHashMap<String, Object>();
+        noColl.put("source_path", "orphan.pdf");
+        var noPath = new java.util.LinkedHashMap<String, Object>();
+        noPath.put("collection", "qbatch-skip");
+
+        int n = repo.importQueueBatch(t, List.of(good, noColl, noPath));
+        assertThat(n).isEqualTo(1);
+        assertThat(repo.listPending(t, 100)).hasSize(1);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {
