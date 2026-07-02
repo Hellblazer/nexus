@@ -31,9 +31,13 @@ truth for what a "row" means per relation; a second copy here would drift.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, Protocol, TypedDict
 
 import structlog
+
+# nexus.retry does not import orchestrator — no cycle risk here (unlike the
+# orchestrator constants, which are deferred to call sites; R2 critique).
+from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 
 if TYPE_CHECKING:
     from nexus.migration.orchestrator import CountSource
@@ -186,4 +190,292 @@ def _verdict(
         "source_count": source_count,
         "target_count": target_count,
         "status": status,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# P3a (nexus-s3dd4.4) — the inner identity-diff + fill loop, EXISTING-surface
+# tables only (chash_index, catalog owners/collections/document_chunks — the
+# 2026-07-01 incident-recovery slice; ZERO new engine dependency).
+#
+# The outer loop above (``verify_store_counts``) marks a table
+# "divergent"/"indeterminate"; the caller then runs the functions below,
+# ONE PER (store, table[, scope]), to fetch the target's identity set and
+# fill only the rows genuinely missing — never a full re-send.
+#
+# Fill is idempotent by construction (wave-1 invariant: every importBatch
+# route is ``ON CONFLICT DO UPDATE`` / ``DO NOTHING``), so a re-run of any
+# function here after a partial failure is always safe.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class IdentitySource(Protocol):
+    """Target-side identity/presence surface for one EXISTING-surface table
+    (already scoped by the caller, e.g. bound to one physical_collection).
+
+    Returns the set of identity keys currently present in the target, or
+    ``None`` when the surface is unreachable. Mirrors
+    :class:`~nexus.migration.orchestrator.CountSource`: ``None`` resolves to
+    an INDETERMINATE fill — never a silent pass and never a blind re-send
+    (nexus-r0esi).
+    """
+
+    def present(self) -> set[str] | None: ...
+
+
+class FillResult(TypedDict):
+    """One table's (or one table+scope's) inner diff + fill result."""
+
+    source_count: int
+    #: ``None`` when the identity source was unreachable (indeterminate).
+    target_count: int | None
+    #: ``None`` when the hole size could not be computed (indeterminate).
+    missing: int | None
+    #: Rows ACTUALLY transmitted through ``import_fn`` — the P6 regression's
+    #: load-bearing assertion is ``filled == hole_size``, never ``table_size``.
+    filled: int
+    status: str  # "parity" | "filled" | "indeterminate"
+
+
+def fill_missing(
+    *,
+    source_rows: list[dict[str, Any]],
+    key_fn: Callable[[dict[str, Any]], str],
+    identity_source: IdentitySource,
+    import_fn: Callable[[list[dict[str, Any]]], Any],
+    batch_size: int,
+    breaker: EtlCircuitBreaker,
+    table: str = "",
+) -> FillResult:
+    """Diff *source_rows* against *identity_source* and re-send only the
+    missing rows through *import_fn* (a batched-array POST), wrapped in the
+    shared *breaker* (RDR-178 Gap 3).
+
+    *identity_source* is probed EXACTLY ONCE (never per-row) — a clean
+    table's fill is one presence fetch + zero import calls. An empty
+    *source_rows* is a trivial parity with NO probe at all (nothing to
+    diff).
+
+    *key_fn* extracts each source row's identity key in the SAME key space
+    as *identity_source* (e.g. ``chash[:32]``, ``tumbler_prefix``, ``name``)
+    — callers own this mapping; this function only diffs.
+
+    An unreachable *identity_source* (``present() is None``) returns
+    ``status="indeterminate"`` with ``filled=0`` and NEVER calls
+    *import_fn* — when the hole size cannot be computed, a blind re-send
+    would defeat the entire point of verify-fill (send only the hole), so
+    the caller must escalate (e.g. retry, or fall back to a full ETL leg)
+    rather than this function guessing.
+    """
+    if not source_rows:
+        return {
+            "source_count": 0,
+            "target_count": None,
+            "missing": 0,
+            "filled": 0,
+            "status": "parity",
+        }
+
+    target = identity_source.present()
+    if target is None:
+        _log.warning("verify_fill.identity_source_unreachable", table=table)
+        return {
+            "source_count": len(source_rows),
+            "target_count": None,
+            "missing": None,
+            "filled": 0,
+            "status": "indeterminate",
+        }
+
+    missing_rows = [r for r in source_rows if key_fn(r) not in target]
+    if not missing_rows:
+        return {
+            "source_count": len(source_rows),
+            "target_count": len(target),
+            "missing": 0,
+            "filled": 0,
+            "status": "parity",
+        }
+
+    filled = _send_batches(
+        missing_rows, import_fn=import_fn, batch_size=batch_size,
+        breaker=breaker, table=table,
+    )
+    return {
+        "source_count": len(source_rows),
+        "target_count": len(target),
+        "missing": len(missing_rows),
+        "filled": filled,
+        "status": "filled",
+    }
+
+
+def _send_batches(
+    rows: list[dict[str, Any]],
+    *,
+    import_fn: Callable[[list[dict[str, Any]]], Any],
+    batch_size: int,
+    breaker: EtlCircuitBreaker,
+    table: str,
+) -> int:
+    """Send *rows* through *import_fn* in ``batch_size`` chunks via the
+    shared circuit breaker. Returns the count actually transmitted."""
+    filled = 0
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i : i + batch_size]
+        _etl_batch_with_breaker(import_fn, batch, breaker=breaker)
+        filled += len(batch)
+        _log.info(
+            "verify_fill.batch_filled",
+            table=table, batch_start=i, batch_size=len(batch),
+        )
+    return filled
+
+
+# ── document_chunks: position-bearing manifest, chash-only identity surface ──
+
+
+class ManifestSource(Protocol):
+    """Precise per-document target-manifest fetch.
+
+    Used ONLY for docs with at least one AMBIGUOUS ("candidate") row — a
+    row whose chash IS present somewhere in the collection's target chash
+    set, so the cheap collection-level pre-filter alone cannot prove the
+    row's specific ``(doc_id, position)`` is present (RDR-108 D1: identical
+    chunk text collapses to ONE chash; multiple manifest rows can share it).
+
+    Returns the target's manifest rows for *doc_id* — each a dict with at
+    least ``position`` and ``chash`` — or ``None`` when unreachable.
+    """
+
+    def manifest_for(self, doc_id: str) -> list[dict[str, Any]] | None: ...
+
+
+class DocFillResult(TypedDict):
+    """``document_chunks``' inner diff + fill result (multi-doc, multi-collection)."""
+
+    source_count: int
+    missing: int
+    #: Rows ACTUALLY transmitted through ``import_fn``.
+    filled: int
+    #: Rows that could not be resolved (unreachable collection pre-filter OR
+    #: unreachable per-doc manifest) — never silently dropped, never
+    #: blind-filled; surfaced here for the caller to escalate.
+    indeterminate: int
+
+
+def fill_missing_document_chunks(
+    *,
+    source_rows: list[dict[str, Any]],
+    collection_for_doc: dict[str, str],
+    identity_source_factory: Callable[[str], IdentitySource],
+    manifest_source: ManifestSource,
+    import_fn: Callable[[str, list[dict[str, Any]]], Any],
+    batch_size: int,
+    breaker: EtlCircuitBreaker,
+) -> DocFillResult:
+    """Diff + fill ``document_chunks`` — the ONE priority table whose only
+    identity surface (``GET /v1/catalog/manifest/chashes?collection=``) is
+    chash-level while the real conflict key is ``(doc_id, position)``.
+
+    Each *source_rows* entry is a dict carrying at least ``doc_id``,
+    ``position``, ``chash`` (plus whatever additional columns *import_fn*
+    needs — this function passes rows through unmodified).
+
+    Two-phase diff per doc:
+
+    1. **Cheap pre-filter** (``identity_source_factory(collection)``, called
+       and cached ONCE per distinct collection): a row whose chash is
+       ABSENT from the collection's target chash set is DEFINITELY missing
+       — no further check needed. A row whose chash IS present is merely
+       AMBIGUOUS (some OTHER (doc_id, position) row may have contributed
+       that chash) and becomes a "candidate".
+    2. **Precise per-doc reconciliation** (``manifest_source.manifest_for``,
+       called ONLY for docs with >=1 candidate row): fetches the target's
+       actual ``(position, chash)`` tuples for that doc; a candidate row is
+       truly missing iff its exact ``(position, chash)`` is absent from
+       that set.
+
+    An unreachable collection pre-filter treats every row in that
+    collection as a candidate (falls through to phase 2 — never silently
+    assumed present). An unreachable per-doc manifest fetch marks that
+    doc's candidate rows ``indeterminate`` (not filled, not silently
+    dropped) rather than blind-refilling them.
+
+    Fill batches are scoped PER DOC_ID (the ``/import/chunk`` envelope is
+    doc-scoped: ``{"doc_id": ..., "rows": [...]}"``), each ``<= batch_size``
+    rows, sent through *import_fn* wrapped in the shared *breaker*.
+    """
+    if not source_rows:
+        return {"source_count": 0, "missing": 0, "filled": 0, "indeterminate": 0}
+
+    rows_by_doc: dict[str, list[dict[str, Any]]] = {}
+    for row in source_rows:
+        rows_by_doc.setdefault(row["doc_id"], []).append(row)
+
+    # Cache one identity-set fetch per distinct collection.
+    prefilter_cache: dict[str, set[str] | None] = {}
+
+    def _prefilter_for(collection: str) -> set[str] | None:
+        if collection not in prefilter_cache:
+            prefilter_cache[collection] = identity_source_factory(collection).present()
+        return prefilter_cache[collection]
+
+    missing = 0
+    filled = 0
+    indeterminate = 0
+
+    for doc_id, doc_rows in rows_by_doc.items():
+        collection = collection_for_doc.get(doc_id, "")
+        target_chashes = _prefilter_for(collection)
+
+        if target_chashes is None:
+            # Pre-filter unreachable for this doc's collection -- every row
+            # is an ambiguous candidate; never assumed present.
+            definite_missing: list[dict[str, Any]] = []
+            candidates = doc_rows
+        else:
+            definite_missing = [
+                r for r in doc_rows if (r.get("chash") or "")[:32] not in target_chashes
+            ]
+            candidates = [
+                r for r in doc_rows if (r.get("chash") or "")[:32] in target_chashes
+            ]
+
+        to_fill: list[dict[str, Any]] = list(definite_missing)
+
+        if candidates:
+            target_manifest = manifest_source.manifest_for(doc_id)
+            if target_manifest is None:
+                _log.warning(
+                    "verify_fill.manifest_source_unreachable",
+                    table="document_chunks", doc_id=doc_id,
+                )
+                indeterminate += len(candidates)
+            else:
+                target_keys = {
+                    (m["position"], (m.get("chash") or "")[:32]) for m in target_manifest
+                }
+                to_fill.extend(
+                    r for r in candidates
+                    if (r["position"], (r.get("chash") or "")[:32]) not in target_keys
+                )
+
+        missing += len(to_fill)
+        if to_fill:
+            for i in range(0, len(to_fill), batch_size):
+                batch = to_fill[i : i + batch_size]
+                _etl_batch_with_breaker(import_fn, doc_id, batch, breaker=breaker)
+                filled += len(batch)
+                _log.info(
+                    "verify_fill.batch_filled",
+                    table="document_chunks", doc_id=doc_id,
+                    batch_start=i, batch_size=len(batch),
+                )
+
+    return {
+        "source_count": len(source_rows),
+        "missing": missing,
+        "filled": filled,
+        "indeterminate": indeterminate,
     }
