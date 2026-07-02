@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -2196,6 +2197,221 @@ ORDER BY tbl.schema_name, tbl.table_name;
     )]
 
 
+# ── RDR-178 Pillar A: migration-report doctor checks ────────────────────────
+#
+# 2026-06-30 ``migrate all`` crashed 6/8 stores (report migration-9141ebaf,
+# summary.total_failed=120, verification=indeterminate). Nothing read the
+# report for a month; it was found only by manually opening the JSON
+# (nexus-aigpt). ``_check_migration_reports`` closes Gap 1 (fail loud on a
+# bad report); ``_check_migration_divergence`` closes Gap 2 (warn when local
+# SQLite kept accepting writes after its store "moved" to a cloud target).
+
+
+def _newest_migration_report_path(reports_dir: Path) -> Path | None:
+    """Most-recently-modified ``migration-*.json`` in *reports_dir*, or
+    ``None`` when the directory is absent or has no report files.
+
+    Migration IDs are random UUIDs (see ``build_report``), not time-ordered,
+    so filename sort cannot establish recency — mtime is the only signal
+    available without parsing every report on disk.
+    """
+    if not reports_dir.exists():
+        return None
+    candidates = sorted(
+        reports_dir.glob("migration-*.json"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    return candidates[-1] if candidates else None
+
+
+def _is_local_service_url(url: str) -> bool:
+    """True when *url* is empty, the pre-lease placeholder, or points at
+    loopback — i.e. NOT a remote/cloud migration target."""
+    url = url.strip()
+    if not url or url == "(lease)":
+        return True
+    from urllib.parse import urlparse  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    host = urlparse(url).hostname or url
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
+def _check_migration_reports(reports_dir: Path | None = None) -> list[HealthResult]:
+    """RDR-178 Gap 1 (nexus-aigpt): read the newest migration report and
+    fail loud when it recorded failures or an unverified run.
+
+    ``verification`` absent or anything other than ``"passed"`` (including
+    ``"indeterminate"``) counts as failure — the nexus-r0esi precedent:
+    never SKIP-then-report-all-passed.
+    """
+    label = "Migration reports"
+    if reports_dir is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        reports_dir = nexus_config_dir() / "migration-reports"
+
+    report_path = _newest_migration_report_path(reports_dir)
+    if report_path is None:
+        return [HealthResult(label=label, ok=True, detail="no migrations recorded")]
+
+    try:
+        from nexus.migration.migration_report import load_report  # noqa: PLC0415 — deferred to avoid circular import
+        report = load_report(report_path)
+    except (OSError, ValueError) as exc:
+        # A report that exists but cannot be read must never be silently
+        # treated as "no migrations recorded" — that recreates the
+        # month-of-silence class with a different failure mode.
+        _log.warning("doctor_migration_report_unreadable", path=str(report_path), error=str(exc))
+        return [HealthResult(
+            label=label,
+            ok=False,
+            fatal=True,
+            detail=f"{report_path}: could not read report ({exc})",
+            fix_suggestions=[f"Inspect: nx storage migration-report show {report_path}"],
+        )]
+
+    summary = report.get("summary") or {}
+    try:
+        total_failed = int(summary.get("total_failed", 0))
+    except (TypeError, ValueError):
+        total_failed = 1  # unparseable -- treat as a failure signal, never silence
+    verification = report.get("verification")
+
+    failed = total_failed > 0
+    unverified = verification != "passed"
+
+    if not failed and not unverified:
+        return [HealthResult(
+            label=label,
+            ok=True,
+            detail=f"clean ({report_path.name}): total_failed=0, verification=passed",
+        )]
+
+    per_store_failures: list[str] = []
+    for store in report.get("stores") or []:
+        store_name = str(store.get("store", "?"))
+        store_failed = sum(
+            int(table.get("failed") or 0) for table in (store.get("tables") or [])
+        )
+        if store_failed:
+            per_store_failures.append(f"{store_name}={store_failed}")
+
+    reasons = []
+    if failed:
+        reasons.append(f"total_failed={total_failed}")
+    if unverified:
+        reasons.append(f"verification={verification!r}")
+
+    detail = f"{report_path}: {', '.join(reasons)}"
+    if per_store_failures:
+        detail += f"; per-store failures: {', '.join(per_store_failures)}"
+
+    fix_suggestions = ["Re-run the failed store migrations:"]
+    if per_store_failures:
+        for entry in per_store_failures:
+            fix_suggestions.append(f"  nx storage migrate {entry.split('=')[0]}")
+    else:
+        fix_suggestions.append("  nx storage migrate all")
+    fix_suggestions.append(f"Inspect: nx storage migration-report show {report_path}")
+
+    return [HealthResult(
+        label=label,
+        ok=False,
+        fatal=True,
+        detail=detail,
+        fix_suggestions=fix_suggestions,
+    )]
+
+
+def _check_migration_divergence(
+    reports_dir: Path | None = None,
+    memory_db_path: Path | None = None,
+) -> list[HealthResult]:
+    """RDR-178 Gap 2 (nexus-14ndm): warn when local SQLite ``memory.db`` kept
+    accepting writes after the newest migration report recorded a cloud
+    target for the memory store.
+
+    Incident: after the 2026-06-30 cloud migration, ``memory.db`` kept
+    receiving writes from old-venv MCP daemons still resolving the local
+    backend — 68 rows accumulated with no warning anywhere. Non-fatal
+    (``warn=True``): a stale local copy is recoverable, not catastrophic.
+    """
+    label = "Migration divergence (memory)"
+    if reports_dir is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        reports_dir = nexus_config_dir() / "migration-reports"
+    if memory_db_path is None:
+        memory_db_path = default_db_path()
+
+    report_path = _newest_migration_report_path(reports_dir)
+    if report_path is None:
+        return [HealthResult(label=label, ok=True, detail="no migrations recorded")]
+
+    try:
+        from nexus.migration.migration_report import load_report  # noqa: PLC0415 — deferred to avoid circular import
+        report = load_report(report_path)
+    except (OSError, ValueError) as exc:
+        # Gap 1's check already fails loud on an unreadable report; this
+        # check degrades quietly rather than double-reporting the same fault.
+        _log.warning("doctor_migration_divergence_report_unreadable", path=str(report_path), error=str(exc))
+        return [HealthResult(label=label, ok=True, detail=f"{report_path.name}: could not read report; skipping")]
+
+    target = report.get("target") or {}
+    service_url = str(target.get("service_url") or "")
+    if _is_local_service_url(service_url):
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"migration target is local ({service_url or '(none)'}); skipping",
+        )]
+
+    completed_at_raw = report.get("completed_at")
+    if not completed_at_raw:
+        return [HealthResult(label=label, ok=True, detail="report missing completed_at; skipping")]
+    try:
+        cutoff = datetime.fromisoformat(str(completed_at_raw).replace("Z", "+00:00"))
+    except ValueError:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"report has unparseable completed_at {completed_at_raw!r}; skipping",
+        )]
+    # memory.db stores timestamps as "%Y-%m-%dT%H:%M:%SZ" (fixed-width UTC,
+    # no fractional seconds) — format the cutoff the same way so a plain SQL
+    # string comparison is valid.
+    cutoff_str = cutoff.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if not memory_db_path.exists():
+        return [HealthResult(label=label, ok=True, detail="memory.db not present; skipping")]
+
+    try:
+        conn = sqlite3.connect(f"file:{memory_db_path}?mode=ro", uri=True)  # epsilon-allow: health divergence check — read-only, must not contend for the WAL writer slot
+        try:
+            divergent_count, max_ts = conn.execute(
+                "SELECT COUNT(*), MAX(timestamp) FROM memory WHERE timestamp > ?",
+                (cutoff_str,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return [HealthResult(label=label, ok=True, detail=f"could not query memory.db: {exc}")]
+
+    if not divergent_count:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"no local writes after migration to {service_url} ({report_path.name})",
+        )]
+
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=(
+            f"{divergent_count} local memory write(s) landed after migration to "
+            f"{service_url} completed at {completed_at_raw} "
+            f"(latest local write {max_ts}); report={report_path}"
+        ),
+        fix_suggestions=["Re-run: nx storage migrate memory"],
+    )]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -2277,5 +2493,25 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_storage_service_health())
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
+
+    # RDR-178 Pillar A (nexus-aigpt, nexus-14ndm): migration-report checks.
+    # Both degrade internally (missing dir / unreadable report / absent
+    # memory.db all resolve to an ok=True HealthResult), but every check in
+    # this function must be crash-proof for `nx doctor` as a whole (see the
+    # doctor_catalog_reader_unavailable precedent above) — guard anyway.
+    try:
+        results.extend(_check_migration_reports())
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_migration_reports_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Migration reports", ok=True, detail="check failed (non-critical)",
+        ))
+    try:
+        results.extend(_check_migration_divergence())
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_migration_divergence_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Migration divergence (memory)", ok=True, detail="check failed (non-critical)",
+        ))
 
     return results, _local
