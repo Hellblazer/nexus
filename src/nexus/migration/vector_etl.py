@@ -1072,7 +1072,18 @@ def _ingest_cloud_poll(
 ) -> dict[str, Any] | None:
     """Poll ``GET /v1/migration/jobs/{job_id}`` until ``state`` is terminal
     (``done``/``failed``) or *timeout_s* elapses. Returns the terminal job
-    body, or ``None`` on timeout — a timeout is NOT treated as a job failure
+    body, or ``None`` on timeout — a timeout is NOT treated as a job failure.
+
+    Timeout semantics (ekk4o review, 2026-07-02): a ``None`` return discards
+    ALL per-collection progress — the caller falls back to the client-mediated
+    leg for the WHOLE batch, including collections the server-side job may
+    already have finished (unlike the granular partial-failure path, which
+    credits per-collection parity). That is a bounded instance of the
+    re-send class this epic fights, accepted because the server job may
+    still be RUNNING: crediting a non-terminal snapshot could false-pass.
+    The eventual double-copy is safe — both legs converge through the same
+    chash-keyed idempotent upsert, so a late-completing delegated job merely
+    overwrites identical rows
     signal (the job may still be running server-side); the caller falls back
     to the client-mediated leg for every collection in the batch rather than
     trust a non-terminal snapshot."""
