@@ -64,9 +64,10 @@ Design (worked out via sequential-thinking before writing this module):
   than exact missing/filled counts, exactly as R5 prescribes.
 
 Out of scope (residual, tracked elsewhere): the 300-row pagination boundary
-of the identity-fetch surfaces (the fakes below answer presence from
-in-memory dicts with no limit/offset walk — same disclosed boundary as
-test_verify_fill_regression.py); the ``existing_ids`` fail-open fix itself
+of the vector/catalog identity-fetch FAKES specifically (they answer presence
+from in-memory dicts with no limit/offset walk — same disclosed boundary as
+test_verify_fill_regression.py; chash's REAL import path batches at 200 and
+IS exercised here, and the vector read path's real 300-cap paging IS crossed); the ``existing_ids`` fail-open fix itself
 (te885.6); the docker/live-service ``tests/e2e/migration-rehearsal`` journey
 (cloud-gated, a different test tier entirely).
 """
