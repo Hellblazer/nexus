@@ -4,6 +4,7 @@ package dev.nexus.service.vectors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.Record;
 import org.jooq.Result;
@@ -380,27 +381,66 @@ public final class PgVectorRepository {
             // Ensure-registered: INSERT stub row for this collection before any chunk write.
             // ON CONFLICT DO NOTHING: a fully-populated row from the catalog ETL is never
             // overwritten; a stub inserted by a prior upsertChunks call is also preserved.
-            ctx.execute(
-                "INSERT INTO nexus.catalog_collections"
-                + " (tenant_id, name, content_type, owner_id, embedding_model, model_version)"
-                + " VALUES (?, ?, ?, ?, ?, ?)"
-                + " ON CONFLICT (tenant_id, name) DO NOTHING",
-                tenant, collection, regContentType, regOwner, regModel, regModelVersion);
-
-            for (int i = 0; i < dedupIds.size(); i++) {
+            //
+            // Bead nexus-h8rf6.2 (contention relief): skip the INSERT entirely once
+            // CollectionRegistry already knows this (tenant, collection) is registered.
+            // ChashRepository.ensureCollectionRegistered and this INSERT race for the
+            // SAME catalog_collections row under concurrent indexing (one collection per
+            // repo, hammered by both chash and vector-upsert batches); PostgreSQL's
+            // ON CONFLICT value lock made every repeat registration attempt block on
+            // whichever transaction got there first, holding a pooled connection idle for
+            // the winner's ENTIRE remaining transaction — exhausting the shared HikariCP
+            // pool under sustained load (reproduced by ChashVectorConcurrencyTest). Once
+            // any writer has registered the collection, every later writer (chash or
+            // vector) skips the redundant INSERT — see CollectionRegistry class doc.
+            if (!CollectionRegistry.isKnown(tenant, collection)) {
                 ctx.execute(
+                    "INSERT INTO nexus.catalog_collections"
+                    + " (tenant_id, name, content_type, owner_id, embedding_model, model_version)"
+                    + " VALUES (?, ?, ?, ?, ?, ?)"
+                    + " ON CONFLICT (tenant_id, name) DO NOTHING",
+                    tenant, collection, regContentType, regOwner, regModel, regModelVersion);
+            }
+
+            // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
+            // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
+            // round trips. The old per-row loop held this transaction's connection
+            // (and, transitively, the catalog_collections row lock any concurrent
+            // registration attempt for this collection was blocked on) open for N
+            // round trips — cheap on a near-zero-RTT localhost DB, but on a real
+            // network hop to Postgres every extra round trip is directly extra
+            // lock-hold time for every OTHER concurrent writer to this collection.
+            // Mirrors ChashRepository.upsertMany / doImportBatch, which already
+            // batch this way. Same ON CONFLICT semantics, same bound values, just
+            // one statement.
+            if (!dedupIds.isEmpty()) {
+                var sql = new StringBuilder(
                     "INSERT INTO " + table
-                    + " (tenant_id, collection, chash, chunk_text, embedding, metadata)"
-                    + " VALUES (?, ?, ?, ?, ?::vector, ?::jsonb)"
-                    + " ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET"
-                    + "   chunk_text = EXCLUDED.chunk_text,"
-                    + "   embedding  = EXCLUDED.embedding,"
-                    + "   metadata   = EXCLUDED.metadata",
-                    tenant, collection, dedupIds.get(i), dedupDocs.get(i),
-                    vectorLiteral(embeddings.get(i)), toJson(dedupMetas.get(i)));
+                    + " (tenant_id, collection, chash, chunk_text, embedding, metadata) VALUES ");
+                Object[] params = new Object[dedupIds.size() * 6];
+                for (int i = 0; i < dedupIds.size(); i++) {
+                    if (i > 0) sql.append(", ");
+                    sql.append("(?, ?, ?, ?, ?::vector, ?::jsonb)");
+                    int base = i * 6;
+                    params[base]     = tenant;
+                    params[base + 1] = collection;
+                    params[base + 2] = dedupIds.get(i);
+                    params[base + 3] = dedupDocs.get(i);
+                    params[base + 4] = vectorLiteral(embeddings.get(i));
+                    params[base + 5] = toJson(dedupMetas.get(i));
+                }
+                sql.append(" ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET")
+                   .append("   chunk_text = EXCLUDED.chunk_text,")
+                   .append("   embedding  = EXCLUDED.embedding,")
+                   .append("   metadata   = EXCLUDED.metadata");
+                ctx.execute(sql.toString(), params);
             }
             return null;
         });
+        // Post-commit (nexus-h8rf6.2): only mark known once the (possibly skipped)
+        // registration above is durably committed — see CollectionRegistry class doc for
+        // why marking must never happen from inside the withTenant lambda.
+        CollectionRegistry.markKnown(tenant, collection);
         log.debug("event=upsert_chunks_done collection={} table={} count={}",
                 collection, table, dedupIds.size());
     }

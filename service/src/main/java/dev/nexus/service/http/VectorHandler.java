@@ -148,6 +148,13 @@ public final class VectorHandler implements HttpHandler {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
         } catch (Exception e) {
+            if (HttpUtil.isPoolExhausted(e)) {
+                // Bead nexus-h8rf6.2: same retryable-pool-exhaustion mapping as ChashHandler —
+                // the SAME shared HikariCP pool backs both handlers, so both need the typed 503.
+                log.warn("event=vector_handler_pool_exhausted op={} error={}", op, e.getMessage());
+                HttpUtil.send(exchange, 503, json(Map.of("error", "database connection pool exhausted, retry")));
+                return;
+            }
             log.error("event=vector_handler_error op={}", op, e);
             HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
         }

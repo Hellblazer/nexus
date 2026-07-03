@@ -72,11 +72,21 @@ public final class ChashRepository {
      * error — fail loud rather than silently skipping the registration step and letting the
      * subsequent INSERT fail with a cryptic FK violation.
      *
+     * <p>Bead nexus-h8rf6.2 (contention relief): skips the INSERT entirely when
+     * {@link CollectionRegistry} already knows this {@code (tenant, collection)} pair is
+     * registered. See {@link CollectionRegistry} class doc for why the repeated
+     * {@code ON CONFLICT DO NOTHING} was a same-row lock-wait convoy under concurrent
+     * indexing, and why callers (not this method) are responsible for marking the cache
+     * only after the enclosing transaction commits.
+     *
      * @throws IllegalArgumentException if collection is null or blank
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("physical_collection must not be blank");
+        }
+        if (CollectionRegistry.isKnown(tenant, collection)) {
+            return;
         }
         ctx.execute(
             "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) " +
@@ -112,6 +122,9 @@ public final class ChashRepository {
                .execute();
             return null;
         });
+        // Post-commit (nexus-h8rf6.2): only mark known once the registration (if any
+        // was actually performed above) is durably committed — see CollectionRegistry.
+        CollectionRegistry.markKnown(tenant, collection);
     }
 
     /**
@@ -146,6 +159,8 @@ public final class ChashRepository {
                 .execute();
             return null;
         });
+        // Post-commit (nexus-h8rf6.2): see upsert()'s comment / CollectionRegistry doc.
+        CollectionRegistry.markKnown(tenant, collection);
     }
 
     // ── lookup ─────────────────────────────────────────────────────────────────
@@ -221,7 +236,7 @@ public final class ChashRepository {
      * via {@code withTenant}.
      */
     public int renameCollection(String tenant, String oldCollection, String newCollection) {
-        return tenantScope.withTenant(tenant, ctx -> {
+        int updated = tenantScope.withTenant(tenant, ctx -> {
             // RDR-156 P0.2: ensure the new collection is registered before renaming.
             ensureCollectionRegistered(ctx, tenant, newCollection);
             // Drop rows in new that would collide with the rename
@@ -239,6 +254,9 @@ public final class ChashRepository {
                       .where(F_COLLECTION.eq(oldCollection))
                       .execute();
         });
+        // Post-commit (nexus-h8rf6.2): see upsert()'s comment / CollectionRegistry doc.
+        CollectionRegistry.markKnown(tenant, newCollection);
+        return updated;
     }
 
     // ── delete_stale ───────────────────────────────────────────────────────────
@@ -363,6 +381,8 @@ public final class ChashRepository {
                .execute();
             return null;
         });
+        // Post-commit (nexus-h8rf6.2): see upsert()'s comment / CollectionRegistry doc.
+        CollectionRegistry.markKnown(tenant, collection);
     }
 
     /** One row of a batched ETL import (see {@link #doImportBatch}). */
@@ -405,9 +425,10 @@ public final class ChashRepository {
         }
         final List<ImportRow> deduped = List.copyOf(unique.values());
 
-        return tenantScope.withTenant(tenant, ctx -> {
-            Set<String> collections = new java.util.LinkedHashSet<>();
-            for (ImportRow r : deduped) collections.add(r.collection());
+        Set<String> collections = new java.util.LinkedHashSet<>();
+        for (ImportRow r : deduped) collections.add(r.collection());
+
+        int landed = tenantScope.withTenant(tenant, ctx -> {
             for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
 
             var insert = ctx.insertInto(CHASH_INDEX,
@@ -429,5 +450,8 @@ public final class ChashRepository {
                   .execute();
             return deduped.size();
         });
+        // Post-commit (nexus-h8rf6.2): see upsert()'s comment / CollectionRegistry doc.
+        for (String c : collections) CollectionRegistry.markKnown(tenant, c);
+        return landed;
     }
 }

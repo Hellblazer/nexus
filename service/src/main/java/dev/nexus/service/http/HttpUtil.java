@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
+import java.sql.SQLTransientConnectionException;
 
 /**
  * Minimal HTTP response helpers. No framework dependency.
@@ -83,5 +84,32 @@ public final class HttpUtil {
             }
         }
         return null;
+    }
+
+    /**
+     * Walk the cause chain for a {@link SQLTransientConnectionException} — HikariCP's
+     * "Connection is not available, request timed out" signal, thrown from
+     * {@code dataSource.getConnection()} when every pooled connection is checked out
+     * (or blocked waiting on a DB-side lock) longer than {@code connectionTimeout}.
+     *
+     * <p>Bead nexus-h8rf6.2: this condition is RETRYABLE (the pool recovers as soon as
+     * a connection frees up) and distinct from a genuine server fault — it deserves a
+     * typed 503, not the opaque 500 catch-all, so callers on the client retry ladder
+     * back off and retry instead of treating it as a hard failure. {@code TenantScope}
+     * wraps the driver exception in a {@code RuntimeException}, so the transient
+     * exception is a cause of the thrown exception, not the top-level throwable —
+     * hence the chain walk (mirrors {@link #sqlState23}).
+     *
+     * @return true if a {@link SQLTransientConnectionException} appears anywhere in
+     *         {@code t}'s cause chain
+     */
+    public static boolean isPoolExhausted(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof SQLTransientConnectionException) {
+                return true;
+            }
+        }
+        return false;
     }
 }
