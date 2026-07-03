@@ -8,6 +8,8 @@ import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.Record;
 import org.jooq.Result;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -377,31 +379,37 @@ public final class PgVectorRepository {
         String regModel        = conformant ? collSegs[2] : "";
         String regModelVersion = conformant ? collSegs[3] : "";
 
-        tenantScope.withTenant(tenant, ctx -> {
-            // Ensure-registered: INSERT stub row for this collection before any chunk write.
-            // ON CONFLICT DO NOTHING: a fully-populated row from the catalog ETL is never
-            // overwritten; a stub inserted by a prior upsertChunks call is also preserved.
-            //
-            // Bead nexus-h8rf6.2 (contention relief): skip the INSERT entirely once
-            // CollectionRegistry already knows this (tenant, collection) is registered.
-            // ChashRepository.ensureCollectionRegistered and this INSERT race for the
-            // SAME catalog_collections row under concurrent indexing (one collection per
-            // repo, hammered by both chash and vector-upsert batches); PostgreSQL's
-            // ON CONFLICT value lock made every repeat registration attempt block on
-            // whichever transaction got there first, holding a pooled connection idle for
-            // the winner's ENTIRE remaining transaction — exhausting the shared HikariCP
-            // pool under sustained load (reproduced by ChashVectorConcurrencyTest). Once
-            // any writer has registered the collection, every later writer (chash or
-            // vector) skips the redundant INSERT — see CollectionRegistry class doc.
-            if (!CollectionRegistry.isKnown(tenant, collection)) {
-                ctx.execute(
-                    "INSERT INTO nexus.catalog_collections"
-                    + " (tenant_id, name, content_type, owner_id, embedding_model, model_version)"
-                    + " VALUES (?, ?, ?, ?, ?, ?)"
-                    + " ON CONFLICT (tenant_id, name) DO NOTHING",
-                    tenant, collection, regContentType, regOwner, regModel, regModelVersion);
-            }
+        // Ensure-registered in its OWN short committed transaction (v0.1.21,
+        // ChashVectorConcurrencyTest full-suite failure). The nexus-h8rf6.2
+        // CollectionRegistry cache bounds convoy COUNT (registration attempts after
+        // the first are skipped process-wide), but registration-inside-the-batch-txn
+        // left convoy DURATION unbounded: the FIRST writer to a brand-new collection
+        // held the catalog_collections ON CONFLICT value lock for its ENTIRE batch
+        // (60x1024-dim inserts + HNSW maintenance — seconds on a loaded host), so
+        // every concurrent racer blew the pool's connectionTimeout and got the typed
+        // 503 the cache was built to prevent. Committing the single-statement
+        // registration BEFORE the batch caps the lock hold at micro-transaction
+        // length. Rollback trade-off: a zero-chunk stub row may persist if the batch
+        // then fails — benign (existence is live-chunk-count-based everywhere;
+        // deleteCollection removes stubs; any retry would recreate it anyway).
+        // Mirrors ChashRepository.registerCollectionShortTxn.
+        if (!CollectionRegistry.isKnown(tenant, collection)) {
+            tenantScope.withTenant(tenant, ctx -> {
+                ctx.insertInto(CATALOG_COLLECTIONS,
+                                CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                   .values(tenant, collection, regContentType, regOwner, regModel, regModelVersion)
+                   .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                   .doNothing()
+                   .execute();
+                return null;
+            });
+            // Post-commit discipline per CollectionRegistry class doc.
+            CollectionRegistry.markKnown(tenant, collection);
+        }
 
+        tenantScope.withTenant(tenant, ctx -> {
             // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
             // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
             // round trips. The old per-row loop held this transaction's connection
@@ -437,10 +445,6 @@ public final class PgVectorRepository {
             }
             return null;
         });
-        // Post-commit (nexus-h8rf6.2): only mark known once the (possibly skipped)
-        // registration above is durably committed — see CollectionRegistry class doc for
-        // why marking must never happen from inside the withTenant lambda.
-        CollectionRegistry.markKnown(tenant, collection);
         log.debug("event=upsert_chunks_done collection={} table={} count={}",
                 collection, table, dedupIds.size());
     }
@@ -582,16 +586,18 @@ public final class PgVectorRepository {
             // (5) Ensure-registered: INSERT stub collection row before any chunk write.
             // Standing rule (RDR-156 P0.2, bead nexus-70r3c.2) — mirrors upsertChunksInternal.
             // ON CONFLICT DO NOTHING: preserves fully-populated rows from the catalog ETL.
-            ctx.execute(
-                "INSERT INTO nexus.catalog_collections"
-                + " (tenant_id, name, content_type, owner_id, embedding_model, model_version)"
-                + " VALUES (?, ?, ?, ?, ?, ?)"
-                + " ON CONFLICT (tenant_id, name) DO NOTHING",
-                tenant, collection,
-                conformant ? collSegs[0] : "",
-                conformant ? collSegs[1] : "",
-                conformant ? collSegs[2] : "",
-                conformant ? collSegs[3] : "");
+            ctx.insertInto(CATALOG_COLLECTIONS,
+                            CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                            CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                            CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+               .values(tenant, collection,
+                       conformant ? collSegs[0] : "",
+                       conformant ? collSegs[1] : "",
+                       conformant ? collSegs[2] : "",
+                       conformant ? collSegs[3] : "")
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
 
             // (6) Reference-only chunk INSERT (Phase B — requires retention column).
             ctx.execute(referenceOnlyInsertSql(table),

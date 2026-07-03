@@ -1,6 +1,8 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import org.jooq.Field;
 import org.jooq.Record3;
 import org.jooq.impl.DSL;
@@ -88,10 +90,55 @@ public final class ChashRepository {
         if (CollectionRegistry.isKnown(tenant, collection)) {
             return;
         }
-        ctx.execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) " +
-            "ON CONFLICT (tenant_id, name) DO NOTHING",
-            tenant, collection);
+        ctx.insertInto(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .values(tenant, collection)
+           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .doNothing()
+           .execute();
+    }
+
+    /**
+     * Register {@code collection} in its OWN short committed transaction, then mark
+     * the {@link CollectionRegistry} cache.
+     *
+     * <p>Bounded first-burst convoy (v0.1.21, ChashVectorConcurrencyTest full-suite
+     * failure): with registration inside the batch transaction, the FIRST writer to
+     * a brand-new collection holds the {@code catalog_collections} ON CONFLICT value
+     * lock for its ENTIRE batch — every concurrent racer blocks for the winner's
+     * whole batch duration, and on a loaded host that exceeds the pool's
+     * connectionTimeout, surfacing typed 503s the cache was built to prevent. The
+     * CollectionRegistry cache bounds convoy COUNT (one per process lifetime);
+     * this bounds convoy DURATION (a single-statement micro-transaction, committed
+     * before the batch begins).
+     *
+     * <p>Trade-off, accepted: if the subsequent batch rolls back, the stub row
+     * persists — a zero-chunk registry stub is benign (collection existence is
+     * live-chunk-count-based everywhere: {@code collection_exists}, {@code /stats};
+     * {@code deleteCollection} removes stubs) and the pre-registration is exactly
+     * what any retry would recreate. Batch paths use this; {@code renameCollection}
+     * keeps in-transaction {@link #ensureCollectionRegistered} because its
+     * registration must be atomic with the re-point.
+     */
+    private void registerCollectionShortTxn(String tenant, String collection) {
+        if (collection == null || collection.isBlank()) {
+            throw new IllegalArgumentException("physical_collection must not be blank");
+        }
+        if (CollectionRegistry.isKnown(tenant, collection)) {
+            return;
+        }
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(CATALOG_COLLECTIONS,
+                            CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, collection)
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
+            return null;
+        });
+        // Post-commit discipline per CollectionRegistry class doc: the registration
+        // transaction above has committed by the time withTenant returns.
+        CollectionRegistry.markKnown(tenant, collection);
     }
 
     // ── upsert ─────────────────────────────────────────────────────────────────
@@ -110,9 +157,10 @@ public final class ChashRepository {
         if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection must not be empty");
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        // Own short committed txn — bounds the first-registration convoy DURATION
+        // (see registerCollectionShortTxn doc); also handles markKnown post-commit.
+        registerCollectionShortTxn(tenant, collection);
         tenantScope.withTenant(tenant, ctx -> {
-            // RDR-156 P0.2: ensure catalog_collections has a stub row before the chash write.
-            ensureCollectionRegistered(ctx, tenant, collection);
             ctx.insertInto(CHASH_INDEX,
                             F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT)
                .values(tenant, chash, collection, now)
@@ -122,9 +170,6 @@ public final class ChashRepository {
                .execute();
             return null;
         });
-        // Post-commit (nexus-h8rf6.2): only mark known once the registration (if any
-        // was actually performed above) is durably committed — see CollectionRegistry.
-        CollectionRegistry.markKnown(tenant, collection);
     }
 
     /**
@@ -144,9 +189,10 @@ public final class ChashRepository {
                 .toList();
         if (valid.isEmpty()) return;
 
+        // Own short committed txn — bounds the first-registration convoy DURATION
+        // (see registerCollectionShortTxn doc); also handles markKnown post-commit.
+        registerCollectionShortTxn(tenant, collection);
         tenantScope.withTenant(tenant, ctx -> {
-            // RDR-156 P0.2: ensure catalog_collections has a stub row before the chash writes.
-            ensureCollectionRegistered(ctx, tenant, collection);
             var insert = ctx.insertInto(CHASH_INDEX,
                                         F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT);
             var step = insert.values(tenant, valid.get(0), collection, now);
@@ -159,8 +205,6 @@ public final class ChashRepository {
                 .execute();
             return null;
         });
-        // Post-commit (nexus-h8rf6.2): see upsert()'s comment / CollectionRegistry doc.
-        CollectionRegistry.markKnown(tenant, collection);
     }
 
     // ── lookup ─────────────────────────────────────────────────────────────────
@@ -369,9 +413,10 @@ public final class ChashRepository {
         }
 
         final OffsetDateTime ts = createdAt;
+        // Own short committed txn — bounds the first-registration convoy DURATION
+        // (see registerCollectionShortTxn doc); also handles markKnown post-commit.
+        registerCollectionShortTxn(tenant, collection);
         tenantScope.withTenant(tenant, ctx -> {
-            // RDR-156 P0.2: ensure catalog_collections has a stub row before the chash write.
-            ensureCollectionRegistered(ctx, tenant, collection);
             ctx.insertInto(CHASH_INDEX,
                             F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT)
                .values(tenant, chash, collection, ts)
@@ -381,8 +426,6 @@ public final class ChashRepository {
                .execute();
             return null;
         });
-        // Post-commit (nexus-h8rf6.2): see upsert()'s comment / CollectionRegistry doc.
-        CollectionRegistry.markKnown(tenant, collection);
     }
 
     /** One row of a batched ETL import (see {@link #doImportBatch}). */
@@ -428,9 +471,10 @@ public final class ChashRepository {
         Set<String> collections = new java.util.LinkedHashSet<>();
         for (ImportRow r : deduped) collections.add(r.collection());
 
+        // Own short committed txns — bounds the first-registration convoy DURATION
+        // (see registerCollectionShortTxn doc); also handles markKnown post-commit.
+        for (String c : collections) registerCollectionShortTxn(tenant, c);
         int landed = tenantScope.withTenant(tenant, ctx -> {
-            for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
-
             var insert = ctx.insertInto(CHASH_INDEX,
                     F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT);
             for (ImportRow r : deduped) {
@@ -450,8 +494,6 @@ public final class ChashRepository {
                   .execute();
             return deduped.size();
         });
-        // Post-commit (nexus-h8rf6.2): see upsert()'s comment / CollectionRegistry doc.
-        for (String c : collections) CollectionRegistry.markKnown(tenant, c);
         return landed;
     }
 }
