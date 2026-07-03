@@ -104,8 +104,13 @@ public final class TelemetryHandler implements HttpHandler {
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
         } catch (Exception e) {
-            log.error("event=telemetry_handler_error op={}", op, e);
-            HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
+            // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
+            if (!HttpUtil.sendTypedDbError(exchange, e, log, "telemetry_handler",
+                    "op=" + op)) {
+                log.error("event=telemetry_handler_error op={}", op, e);
+                HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            }
         }
     }
 

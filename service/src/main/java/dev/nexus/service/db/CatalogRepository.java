@@ -531,8 +531,35 @@ public final class CatalogRepository {
      * Silently strips {@code deleted_at} from the input map — callers must use
      * {@code document_trash} / {@code document_restore} to manage the tombstone column.
      */
+    /**
+     * Settable columns for {@link #updateDocument} (wave review, SQL audit CRITICAL):
+     * request JSON keys become SET targets via {@code DSL.field(DSL.name(...))}, so
+     * WITHOUT this whitelist any body key was an arbitrary-column write from
+     * {@code POST /v1/catalog/update} — including {@code tenant_id} (re-homing a
+     * document across tenants) and lifecycle columns like {@code created_at}.
+     * The set mirrors the local {@code Catalog.update} mutable surface
+     * ({@link #documentFields()} minus the identity/lifecycle columns:
+     * tumbler, tenant_id, deleted_at, created_at). Unknown keys fail loud with
+     * {@code IllegalArgumentException} → 400, never a silent skip.
+     */
+    private static final Set<String> UPDATABLE_DOC_COLUMNS = Set.of(
+        "title", "author", "year", "content_type", "file_path", "corpus",
+        "physical_collection", "chunk_count", "head_hash", "indexed_at",
+        "meta", "metadata", "source_mtime", "alias_of", "source_uri",
+        "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
+        "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi", "bib_enriched_at");
+
     public int updateDocument(String tenant, String tumbler, Map<String, Object> fields) {
         if (fields.isEmpty()) return 0;
+        for (String key : fields.keySet()) {
+            // deleted_at keeps its documented silent-strip contract (callers must use
+            // trash/restore); every OTHER unknown key is a caller error — fail loud.
+            if (!"deleted_at".equals(key) && !UPDATABLE_DOC_COLUMNS.contains(key)) {
+                throw new IllegalArgumentException(
+                    "updateDocument: column not updatable: '" + key
+                    + "' (allowed: " + UPDATABLE_DOC_COLUMNS + ")");
+            }
+        }
         return tenantScope.withTenant(tenant, ctx -> {
             var step = ctx.update(T_DOCS);
             UpdateSetMoreStep<?> more = null;

@@ -91,16 +91,13 @@ public final class ChashHandler implements HttpHandler {
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (Exception e) {
-            if (HttpUtil.isPoolExhausted(e)) {
-                // Bead nexus-h8rf6.2: HikariCP pool exhaustion (SQLTransientConnectionException)
-                // is retryable — a typed 503 ahead of the generic 500 lets the client's retry
-                // ladder back off and retry instead of surfacing an opaque, non-actionable 500.
-                log.warn("event=chash_handler_pool_exhausted op={} tenant={} error={}", op, tenant, e.getMessage());
-                HttpUtil.send(exchange, 503, "{\"error\":\"database connection pool exhausted, retry\"}");
-                return;
+            // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
+            // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
+            if (!HttpUtil.sendTypedDbError(exchange, e, log, "chash_handler",
+                    "op=" + op + " tenant=" + tenant)) {
+                log.error("event=chash_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
+                HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
             }
-            log.error("event=chash_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
-            HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
         }
     }
 

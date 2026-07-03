@@ -307,6 +307,36 @@ class CatalogRepositoryTest {
         assertThat(metaUpdated).isEqualTo(1);
     }
 
+    @Test @Order(13)
+    void document_update_rejectsNonWhitelistedColumns() {
+        // Wave review (SQL audit CRITICAL): request JSON keys become SET targets —
+        // without the whitelist, POST /v1/catalog/update could write ANY column,
+        // including tenant_id (re-homing a document across tenants). Unknown keys
+        // must fail loud (IllegalArgumentException → 400), never silently apply.
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.9",
+            "title", "Guarded",
+            "content_type", "paper",
+            "corpus", "knowledge"
+        ));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                repo.updateDocument(TENANT_A, "2.9", Map.of("tenant_id", "tenant-b")))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("tenant_id");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                repo.updateDocument(TENANT_A, "2.9", Map.of("created_at", "2020-01-01")))
+            .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                repo.updateDocument(TENANT_A, "2.9", Map.of("no_such_column", "x")))
+            .isInstanceOf(IllegalArgumentException.class);
+        // deleted_at keeps its documented silent-strip contract (trash/restore own it):
+        // stripped -> no other field set -> 0 rows, no exception.
+        assertThat(repo.updateDocument(TENANT_A, "2.9", Map.of("deleted_at", "now"))).isZero();
+        // Document unharmed and still updatable through the whitelist.
+        assertThat(repo.updateDocument(TENANT_A, "2.9", Map.of("title", "Still Guarded"))).isEqualTo(1);
+        assertThat(repo.getDocument(TENANT_A, "2.9").get("title")).isEqualTo("Still Guarded");
+    }
+
     @Test @Order(14)
     void document_delete() {
         repo.upsertDocument(TENANT_A, Map.of(

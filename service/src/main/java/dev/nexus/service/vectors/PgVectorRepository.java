@@ -111,12 +111,24 @@ public final class PgVectorRepository {
             "minilm-l6-v2-384",     384);
 
     /**
-     * Test-visibility hook (S1, RDR-169 G5): counts invocations of {@link #sourceUrisByChash}.
-     * Public so cross-package integration tests (e.g. {@code dev.nexus.service.BridgeAddressFieldsTest})
+     * Test-visibility hook (S1, RDR-169 G5): counts invocations of {@link #sourceUrisByChash}
+     * so cross-package integration tests (e.g. {@code dev.nexus.service.BridgeAddressFieldsTest})
      * can assert that the default path (includeSourceUri=false) runs ZERO catalog JOINs and the
-     * opt-in path runs ≥1. Production code never reads this field.
+     * opt-in path runs ≥1. Private with read/reset accessors (wave review: as a public
+     * mutable field, any caller could {@code set()} it and corrupt whatever a concurrent
+     * test asserts). Production code never reads it.
      */
-    public final AtomicInteger sourceUriJoinCalls = new AtomicInteger();
+    private final AtomicInteger sourceUriJoinCalls = new AtomicInteger();
+
+    /** Test-only instrumentation read — see {@link #sourceUriJoinCalls}. */
+    public int sourceUriJoinCallCount() {
+        return sourceUriJoinCalls.get();
+    }
+
+    /** Test-only instrumentation reset — see {@link #sourceUriJoinCalls}. */
+    public void resetSourceUriJoinCallsForTests() {
+        sourceUriJoinCalls.set(0);
+    }
 
     /**
      * Pairs a value with the embedding token count consumed to produce it (bead nexus-ehc4q).
