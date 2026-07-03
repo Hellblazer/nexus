@@ -2,7 +2,8 @@
 title: "Unattended Migration: Industrialize the Store-Migration Path from Babysat to Autonomous"
 id: RDR-178
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-07-03
 accepted_date: 2026-07-02
 priority: high
 author: Hal Hildebrand
