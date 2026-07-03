@@ -1056,8 +1056,8 @@ class TestCatalogEtlIntegration:
         # Links round-tripped exactly through the real service (not just ETL's own count).
         cites = cat_etl_client.links_from("1.1.1", link_type="cites")
         impls = cat_etl_client.links_from("1.1.2", link_type="implements")
-        assert [str(l["to_tumbler"]) for l in cites] == ["1.2.1"]
-        assert [str(l["to_tumbler"]) for l in impls] == ["1.1.1"]
+        assert [str(l.to_tumbler) for l in cites] == ["1.2.1"]
+        assert [str(l.to_tumbler) for l in impls] == ["1.1.1"]
 
     def test_document_field_round_trip(self, cat_etl_client):
         """Spot-check: a document's fields come back correctly from PG after ETL."""
@@ -1137,11 +1137,11 @@ class TestCatalogEtlIntegration:
             f"Expected 1 cites link from 1.4.1, got {len(links)}"
         )
         lnk = links[0]
-        assert lnk["from_tumbler"] == "1.4.1"
-        assert lnk["to_tumbler"]   == "1.4.2"
-        assert lnk["link_type"]    == "cites"
-        assert lnk.get("from_span") == "chash:deadbeef00000000deadbeef00000000"
-        assert lnk.get("created_by") == "developer"
+        assert str(lnk.from_tumbler) == "1.4.1"
+        assert str(lnk.to_tumbler) == "1.4.2"
+        assert lnk.link_type == "cites"
+        assert lnk.from_span == "chash:deadbeef00000000deadbeef00000000"
+        assert lnk.created_by == "developer"
 
     def test_tenant_stamping(self, cat_etl_client):
         """All migrated rows use tenant_id='default' (RLS enforced)."""
@@ -1212,7 +1212,7 @@ class TestCatalogEtlIntegration:
             f"Expected 2 manifest rows for 1.6.1 after 2 ETL runs, got {len(manifest)} — "
             "chunk idempotency broken"
         )
-        assert {r["chash"] for r in manifest} == {"c" * 32, "d" * 32}
+        assert {r.chash for r in manifest} == {"c" * 32, "d" * 32}
 
         # Links visible once
         links = cat_etl_client.links_from("1.6.1", link_type="relates")
@@ -1259,7 +1259,7 @@ class TestCatalogEtlIntegration:
         # Verify link is queryable
         links = cat_etl_client.links_from("1.7.1")
         fk_link = next(
-            (l for l in links if l.get("to_tumbler") == "1.7.2"), None
+            (l for l in links if str(l.to_tumbler) == "1.7.2"), None
         )
         assert fk_link is not None, "FK-ordered link not found in PG after ETL"
 
@@ -1319,7 +1319,7 @@ class TestCatalogEtlIntegration:
         assert len(manifest) == 2, (
             f"Expected 2 manifest rows for doc 1.9.1, got {len(manifest)}"
         )
-        chashes = {r["chash"] for r in manifest}
+        chashes = {r.chash for r in manifest}
         assert "a" * 32 in chashes
         assert "b" * 32 in chashes
 

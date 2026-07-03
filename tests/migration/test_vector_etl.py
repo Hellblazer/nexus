@@ -2189,11 +2189,16 @@ def _make_local_store(root: Path, name: str, n: int) -> tuple[Path, list[str], l
     texts = [f"vec etl chunk {name} {i:04d}" for i in range(n)]
     ids = [_chash(t) for t in texts]
     col = client.get_or_create_collection(name)
+    # 768-dim stubs matching the declared bge model: the nexus-hxry2 same-model
+    # passthrough (04d5a773) carries stored vectors VERBATIM to the service,
+    # whose dim gate 400s anything that mismatches the collection's dispatch
+    # table — degenerate 2-dim stubs stopped being viable when passthrough
+    # replaced server-side re-embedding.
     col.add(
         ids=ids,
         documents=texts,
         metadatas=[{"position": i} for i in range(n)],
-        embeddings=[[float(i), 1.0] for i in range(n)],
+        embeddings=[[float(i)] + [1.0] * 767 for i in range(n)],
     )
     # WAL single-opener discipline (chroma_read.py): release this client
     # deterministically before migrate_local opens its own PersistentClient

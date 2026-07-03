@@ -240,11 +240,34 @@ def aspects_client(java_service):
 
 
 @pytest.fixture(scope="module")
-def other_tenant_client(java_service):
+def other_tenant_token(java_service) -> str:
+    """Tenant-bound token for the cross-tenant RLS probe (tenant='l9hd8-other').
+
+    Phase E (nexus-gmiaf.32.5) binds tenant to the bearer token server-side and
+    IGNORES the X-Nexus-Tenant header, so tenant B needs its own minted token —
+    the operator (root) token provisions it via POST /v1/tenants/create.
+    """
+    import httpx
+
+    base_url, token, _ = java_service
+    resp = httpx.post(
+        f"{base_url}/v1/tenants/create",
+        json={"name": "l9hd8-other"},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30.0,
+    )
+    assert resp.status_code == 200, f"tenant mint failed: {resp.status_code} {resp.text}"
+    return resp.json()["token"]
+
+
+@pytest.fixture(scope="module")
+def other_tenant_client(java_service, other_tenant_token):
     """HttpDocumentAspectsStore for cross-tenant RLS probe (tenant='l9hd8-other')."""
     from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
-    base_url, token, _ = java_service
-    client = HttpDocumentAspectsStore(base_url=base_url, tenant="l9hd8-other", _token=token)
+    base_url, _, _ = java_service
+    client = HttpDocumentAspectsStore(
+        base_url=base_url, tenant="l9hd8-other", _token=other_tenant_token
+    )
     yield client
     client.close()
 
@@ -962,7 +985,7 @@ class TestRLSIsolation:
         aspects_client.upsert(row)
 
     def test_other_tenant_gets_no_matches(
-        self, java_service, monkeypatch, tmp_path
+        self, java_service, other_tenant_token, monkeypatch, tmp_path
     ) -> None:
         """Tenant B operator_filter must return no matches for tenant A's rows."""
         from nexus.operators import aspect_sql
@@ -971,7 +994,9 @@ class TestRLSIsolation:
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
-        monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+        # Phase E: tenant is bound to the TOKEN server-side; the tenant env/header
+        # is advisory only, so tenant B must authenticate with its own token.
+        monkeypatch.setenv("NX_SERVICE_TOKEN", other_tenant_token)
         monkeypatch.setenv("NX_SERVICE_TENANT", "l9hd8-other")  # tenant B
 
         empty_db = tmp_path / "rls_empty.db"

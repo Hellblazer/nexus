@@ -266,11 +266,27 @@ def store(service):
 
 @pytest.fixture(scope="module")
 def other_store(service):
-    """HttpMemoryStore for the cross-tenant RLS probe (tenant='rls-other')."""
+    """HttpMemoryStore for the cross-tenant RLS probe (tenant='rls-other').
+
+    Phase E (nexus-gmiaf.32.5) binds tenant to the bearer token server-side
+    and IGNORES the X-Nexus-Tenant header, so a second tenant needs its own
+    minted token: the operator (root) token provisions the tenant via
+    POST /v1/tenants/create and the probe store authenticates with the
+    returned tenant-bound token.
+    """
+    import httpx
+
     from nexus.db.t2.http_memory_store import HttpMemoryStore
     base_url, token, _ = service
-    os.environ["NX_SERVICE_TOKEN"] = token
-    s = HttpMemoryStore(base_url=base_url, tenant="rls-other")
+    resp = httpx.post(
+        f"{base_url}/v1/tenants/create",
+        json={"name": "rls-other"},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30.0,
+    )
+    assert resp.status_code == 200, f"tenant mint failed: {resp.status_code} {resp.text}"
+    other_token = resp.json()["token"]
+    s = HttpMemoryStore(base_url=base_url, tenant="rls-other", _token=other_token)
     yield s
     s.close()
 

@@ -460,10 +460,17 @@ def cat(service):
     """HttpCatalogClient (tenant='default') against the real Java service."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     base_url, token, _ = service
+    _saved_token = os.environ.get("NX_SERVICE_TOKEN")
     os.environ["NX_SERVICE_TOKEN"] = token
     c = HttpCatalogClient(base_url=base_url, tenant="default", _token=token)
     yield c
     c.close()
+    # Restore: leaking this module's token past its service's lifetime poisons
+    # later modules that resolve the endpoint/token from env.
+    if _saved_token is None:
+        os.environ.pop("NX_SERVICE_TOKEN", None)
+    else:
+        os.environ["NX_SERVICE_TOKEN"] = _saved_token
 
 
 @pytest.fixture(scope="module")
@@ -1049,7 +1056,20 @@ class TestReaderPaths:
         assert m, f"Cannot parse port from {base_url}"
         port = m.group(1)
 
-        # Configure env vars so make_catalog_reader() → HttpCatalogClient
+        # Configure env vars so make_catalog_reader() → HttpCatalogClient.
+        # Save priors: this fixture's service dies at module teardown, and a
+        # leaked NX_SERVICE_HOST/PORT pointing at the dead port poisons every
+        # later module that resolves the service endpoint from env (the
+        # test_indexer_seam_b order-dependent failure class).
+        _saved_env = {
+            k: os.environ.get(k)
+            for k in (
+                "NX_STORAGE_BACKEND_CATALOG",
+                "NX_SERVICE_PORT",
+                "NX_SERVICE_TOKEN",
+                "NX_SERVICE_HOST",
+            )
+        }
         os.environ["NX_STORAGE_BACKEND_CATALOG"] = "service"
         os.environ["NX_SERVICE_PORT"] = port
         os.environ["NX_SERVICE_TOKEN"] = token
@@ -1073,8 +1093,13 @@ class TestReaderPaths:
             source_uri="file:///reader-path/knowledge.md",
         )
         yield
-        # Clean up env after tests
-        os.environ.pop("NX_STORAGE_BACKEND_CATALOG", None)
+        # Restore ALL touched keys to their prior values (not just the backend
+        # selector) so no dead endpoint leaks into later modules.
+        for k, v in _saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     def test_catalog_search_structured_filter_content_type(self, cat) -> None:
         """catalog_search structured-filter branch (content_type, no free text).
