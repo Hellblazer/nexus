@@ -48,6 +48,12 @@ DROP_IN_METHODS = [
     "existing_ids",
     "update_chunks",
     "get_collection",
+    # nexus-umvh2: were missing entirely (AttributeError in service mode) —
+    # implemented + pinned so the drift class cannot silently reopen.
+    "find_ids_by_title",
+    "batch_delete",
+    "list_store",
+    "collection_info",
     # get_or_create_collection is excluded (see EXCLUSIONS below)
 ]
 

@@ -451,6 +451,8 @@ class HttpVectorClient:
     - :meth:`get_by_id`
     - :meth:`delete_by_id`
     - :meth:`list_collections`
+    - :meth:`list_store` / :meth:`collection_info`
+    - :meth:`find_ids_by_title` / :meth:`batch_delete` (nexus-umvh2)
 
     Methods NOT implemented here (not needed for Seam B or stubbed
     as no-ops) will raise ``NotImplementedError`` or return safe defaults.
@@ -1211,6 +1213,136 @@ class HttpVectorClient:
             )
             deleted += int(result.get("deleted", 0))
         return deleted
+
+    def find_ids_by_title(self, collection: str, title: str) -> list[str]:
+        """Return all chunk IDs whose title metadata exactly matches *title*.
+
+        nexus-umvh2: was missing entirely, crashing ``nx store delete
+        --title`` and the MCP ``store_get`` title-fallback with
+        ``AttributeError`` in service mode (the post-P4a2 default). Mirrors
+        :meth:`ids_for_source`'s where-filter pagination pattern
+        (``/v1/vectors/get``) at the 300-record quota; T3Database parity
+        (``collection`` / ``title`` param names match).
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        ids: list[str] = []
+        offset = 0
+        while True:
+            try:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": collection,
+                        "where": {"title": title},
+                        "include": [],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                # Match ids_for_source: a 404 on the first page means "no
+                # such collection" -> no matches. A failure mid-pagination
+                # must NOT be swallowed as "no more matches" -- the caller
+                # (nx store delete --title) would under-delete and report
+                # success.
+                if exc.code == 404 and offset == 0:
+                    return []
+                raise
+            page = result.get("ids", []) or []
+            ids.extend(page)
+            if len(page) < page_limit:
+                break
+            offset += len(page)
+        return ids
+
+    def batch_delete(self, collection: str, ids: list[str]) -> None:
+        """Delete *ids* from *collection* in service-quota-bounded batches.
+
+        nexus-umvh2: was missing entirely -- the second half of the ``nx
+        store delete --title`` crash (after :meth:`find_ids_by_title`
+        resolves the id list). Batches at ``QUOTAS.MAX_RECORDS_PER_WRITE``
+        like :meth:`update_chunks` / :meth:`delete_by_source`.
+        """
+        if not ids:
+            return
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        for start in range(0, len(ids), size):
+            _post(
+                "/v1/vectors/store-delete",
+                {"collection": collection, "ids": ids[start:start + size]},
+                tenant=self._tenant,
+            )
+
+    def list_store(
+        self, collection: str, limit: int = 200, offset: int = 0,
+    ) -> list[dict]:
+        """Return metadata for entries in *collection*, paginated.
+
+        nexus-umvh2 sibling audit: was missing entirely, crashing ``nx
+        store list``, ``nx store list --docs``, and MCP ``store_list`` in
+        service mode -- the same class of bug as :meth:`find_ids_by_title`,
+        just unreported because the CLI test fixtures mock the whole T3
+        client with a bare ``MagicMock`` (no ``spec=``), which cannot
+        surface a missing method.
+
+        Built from the service's plain (no ``where``) ``/v1/vectors/get``
+        listing, matching :meth:`ids_for_source`'s call shape. Returns
+        ``[]`` on a 404 (T3Database parity: "collection does not exist" ->
+        empty list, never an exception).
+        """
+        try:
+            result = _post(
+                "/v1/vectors/get",
+                {
+                    "collection": collection,
+                    "include": ["metadatas"],
+                    "limit": limit,
+                    "offset": offset,
+                },
+                tenant=self._tenant,
+            )
+        except VectorServiceError as exc:
+            if exc.code == 404:
+                return []
+            raise
+        ids = result.get("ids", []) or []
+        metas = result.get("metadatas", []) or []
+        return [
+            {"id": doc_id, **(meta if isinstance(meta, dict) else {})}
+            for doc_id, meta in zip(ids, metas)
+        ]
+
+    def collection_info(self, name: str) -> dict:
+        """Return ``{"count": N, "metadata": {}}`` for *name*.
+
+        nexus-umvh2 sibling audit: was missing entirely, crashing ``nx
+        store list``'s total-count display, ``nx collection info``, and
+        ``nx collection reindex`` in service mode.
+
+        Raises ``KeyError`` when *name* has no live chunks -- T3Database
+        parity ("not found"). On the pgvector path a collection with zero
+        live rows is indistinguishable from an absent one (matches
+        :meth:`collection_exists`'s already-established semantics, RDR-156
+        Decision 6) -- callers (``nx collection reindex``) rely on the
+        ``KeyError`` to detect a genuinely missing collection. No
+        ``metadata`` equivalent exists server-side (Chroma-native collection
+        metadata is not exposed by the service API), so that key is always
+        ``{}``.
+        """
+        try:
+            n = self.count(name)
+        except VectorServiceError as exc:
+            if exc.code == 404:
+                raise KeyError(f"Collection not found: {name!r}") from exc
+            raise
+        if n == 0:
+            raise KeyError(f"Collection not found: {name!r}")
+        return {"count": n, "metadata": {}}
 
 # ── Module-level routing helper ───────────────────────────────────────────────
 

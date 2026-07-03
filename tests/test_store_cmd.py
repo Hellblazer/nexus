@@ -369,6 +369,73 @@ def test_store_delete_by_title(runner, mock_store, ids, exit_ok, expect_text):
     assert expect_text in result.output or "No entries" in result.output
 
 
+# ── nx store delete --title, REAL HttpVectorClient (nexus-umvh2 regression) ──
+#
+# mock_store above is a bare MagicMock() (no spec=): it silently answers
+# ``.find_ids_by_title`` / ``.batch_delete`` even when the real production
+# HttpVectorClient lacks those methods. That gap is exactly why the
+# nexus-umvh2 AttributeError shipped unnoticed. These tests exercise a REAL
+# HttpVectorClient (fake HTTP transport only) end-to-end through the CLI so a
+# missing method surfaces as a real AttributeError/test failure.
+
+@pytest.fixture
+def real_http_vector_client(monkeypatch):
+    from nexus.db.http_vector_client import (
+        HttpVectorClient,
+        reset_http_vector_client_for_tests,
+    )
+    reset_http_vector_client_for_tests()
+    client = HttpVectorClient()
+    monkeypatch.setattr("nexus.commands.store._t3", lambda: client)
+    yield client
+    reset_http_vector_client_for_tests()
+
+
+def test_store_delete_by_title_service_mode_real_client(runner, real_http_vector_client, monkeypatch):
+    """End-to-end: title resolves to 2 chunk ids and both get deleted,
+    routed entirely through the real HttpVectorClient (no mocked T3)."""
+    calls = []
+
+    def fake_post(path, body, **kw):
+        calls.append((path, body))
+        if path == "/v1/vectors/get":
+            return {"ids": ["id1", "id2"]}
+        if path == "/v1/vectors/store-delete":
+            return {"deleted": len(body["ids"])}
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+
+    result = runner.invoke(main, [
+        "store", "delete",
+        "--collection", "knowledge__nexus__voyage-context-3__v1",
+        "--title", "doc.md", "--yes",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Deleted 2" in result.output
+    delete_calls = [c for c in calls if c[0] == "/v1/vectors/store-delete"]
+    assert len(delete_calls) == 1
+    assert delete_calls[0][1]["ids"] == ["id1", "id2"]
+
+
+def test_store_delete_by_title_not_found_service_mode_clean_error(runner, real_http_vector_client, monkeypatch):
+    """Title-not-found must be a clean ClickException, never a traceback."""
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._post",
+        lambda path, body, **kw: {"ids": []},
+    )
+
+    result = runner.invoke(main, [
+        "store", "delete",
+        "--collection", "knowledge__nexus__voyage-context-3__v1",
+        "--title", "missing.md", "--yes",
+    ])
+    assert result.exit_code != 0
+    assert "No entries" in result.output
+    assert "AttributeError" not in result.output
+    assert "Traceback" not in result.output
+
+
 def test_store_delete_missing_collection_rejected(runner, env_creds):
     result = runner.invoke(main, ["store", "delete", "--id", "abc"])
     assert result.exit_code != 0
