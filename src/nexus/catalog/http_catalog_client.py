@@ -55,6 +55,7 @@ bead nexus-gmiaf.24 tracks the service-side equivalents).
 from __future__ import annotations
 
 import os
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -375,11 +376,22 @@ class HttpCatalogClient:
             f"ensure_owner_for_repo: server did not return prefix for {repo!r}"
         )
 
-    def set_owner_head_hash(self, owner: Tumbler | str, head_hash: str) -> None:
-        self._post("/owners/head_hash", {
+    def set_owner_head_hash(self, owner: Tumbler | str, head_hash: str) -> int:
+        """Persist *head_hash* on the owner row. Returns rowcount.
+
+        Return-shape parity with local ``Catalog.set_owner_head_hash``
+        (nexus-h8rf6.3 audit): the server already returns the exact rowcount
+        (``{"updated": N}``, ``CatalogHandler.handleOwnerHeadHash``); the
+        pre-fix client discarded it and returned ``None``, which meant
+        ``indexer.py``'s ``if rowcount == 0: _log.warning(...)``
+        (concurrent-owner-deletion detector) could never fire in service
+        mode — a lost write went unobserved.
+        """
+        result = self._post("/owners/head_hash", {
             "tumbler_prefix": str(owner),
             "head_hash": head_hash,
         })
+        return int(result.get("updated", 0) if result else 0)
 
     def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
         try:
@@ -865,7 +877,15 @@ class HttpCatalogClient:
 
     def lookup_doc_id_by_collection_and_path(
         self, collection: str, source_path: str
-    ) -> str | None:
+    ) -> str:
+        """Return the tumbler/legacy-doc_id for a (collection, path) probe.
+
+        Return-shape parity with local ``Catalog.lookup_doc_id_by_collection_and_path``
+        (nexus-h8rf6.3 audit): local's documented contract is ``""`` (never
+        ``None``) on no-match, so the client normalizes to match — existing
+        callers already treat both as falsy, but a non-Optional ``str``
+        matches the documented caller contract exactly.
+        """
         try:
             result = self._get(
                 "/resolve",
@@ -874,10 +894,10 @@ class HttpCatalogClient:
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
-                return None
+                return ""
             raise
         docs = result.get("documents", []) if result else []
-        return docs[0]["tumbler"] if docs else None
+        return docs[0]["tumbler"] if docs else ""
 
     def doc_count(self) -> int:
         return int(self.stats().get("doc_count", 0))
@@ -1074,13 +1094,23 @@ class HttpCatalogClient:
         from_t: Tumbler | str,
         to_t: Tumbler | str,
         link_type: str,
-    ) -> bool:
+    ) -> int:
+        """Delete one or all link types between *from_t* and *to_t*.
+
+        Return-shape parity with local ``Catalog.unlink`` (nexus-h8rf6.3 audit):
+        the server already returns the exact rowcount (``{"deleted": N}``,
+        ``CatalogHandler.handleUnlink``); the pre-fix client discarded it in
+        favour of a bool, so ``commands/catalog_cmds/links.py``'s
+        ``click.echo(f"Removed {removed} link(s)")`` and ``mcp/catalog.py``'s
+        ``{"removed": removed}`` response printed/returned ``True``/``False``
+        instead of a count.
+        """
         result = self._post("/unlink", {
             "from_tumbler": str(from_t),
             "to_tumbler": str(to_t),
             "link_type": link_type,
         })
-        return bool(result.get("deleted", 0) > 0 if result else False)
+        return int(result.get("deleted", 0) if result else 0)
 
     def links_from(
         self,
@@ -1515,16 +1545,60 @@ class HttpCatalogClient:
         rows = self.get_manifest(doc_id)
         return [row.chash for row in rows if row.chash]
 
-    def docs_for_chashes(self, chashes: list[str]) -> list[str]:
-        """Return the list of document tumblers that contain any of the given chashes.
+    def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
+        """Reverse-lookup: chash -> [doc_id, ...] — dict-shape parity with local
+        ``Catalog.docs_for_chashes`` (nexus-h8rf6.3).
 
-        CatalogRepository.docsForChashes() runs a SELECT DISTINCT on doc_id across
-        all provided chashes.  The handler wraps it as {"tumblers": [tumbler, ...]}.
-        This is a flat list, NOT a per-chash mapping.
+        ``CatalogRepository.docsForChashes()`` runs a single SELECT DISTINCT on
+        doc_id across ALL provided chashes and the handler wraps it as a FLAT
+        ``{"tumblers": [tumbler, ...]}`` — it does not group by chash. Returning
+        that flat list directly (the pre-fix behaviour) crashed every consumer
+        that does ``by_chash.items()`` (``indexer_utils.build_staleness_cache``,
+        ``search_engine._attach_doc_ids_from_catalog``, ``mcp/core.py``,
+        ``db/embed_migrate.py``, ``commands/collection.py``,
+        ``commands/catalog_cmds/doctor.py``) with ``AttributeError: 'list' object
+        has no attribute 'items'`` — silently swallowed to a warning, degrading
+        every service-mode ``nx index repo`` to a full re-chunk + re-embed.
+
+        Reconstructed here CLIENT-SIDE (no engine change): the flat tumbler list
+        names every doc that contains ANY of the requested chashes, so a second
+        batched round-trip via :meth:`get_manifests` fetches each of those docs'
+        manifest rows and the chash -> doc_id edges are rebuilt by intersecting
+        each row's chash against the requested set. Two round-trips total,
+        regardless of how many chashes/docs are involved (no N-per-chash calls).
+
+        Mirrors the local implementation's input-form-preserving contract:
+        matching is normalized to the 32-char chash prefix (``chash[:32]``,
+        RDR-108 D1 natural-id form — matching ``_manifest_row_from_dict``'s
+        defensive truncation), but the RETURNED keys preserve whatever form
+        (32- or 64-char) the caller passed in ``chashes``. Chashes with no
+        manifest entries are omitted from the result, same as local.
         """
+        if not chashes:
+            return {}
+        prefix_to_inputs: dict[str, list[str]] = defaultdict(list)
+        for c in chashes:
+            if c:
+                prefix_to_inputs[c[:32]].append(c)
+        if not prefix_to_inputs:
+            return {}
         result = self._post("/manifest/docs_for_chashes", {"chashes": chashes})
-        # Handler returns {"tumblers": [tumbler_string, ...]}
-        return result.get("tumblers", []) if result else []
+        # Handler returns {"tumblers": [tumbler_string, ...]} — flat, not per-chash.
+        tumblers = result.get("tumblers", []) if result else []
+        if not tumblers:
+            return {}
+        manifests = self.get_manifests(tumblers)  # {doc_id: [ManifestRow, ...]}
+        wanted_prefixes = set(prefix_to_inputs.keys())
+        prefix_to_docs: dict[str, list[str]] = defaultdict(list)
+        for doc_id, rows in manifests.items():
+            for row in rows:
+                if row.chash in wanted_prefixes and doc_id not in prefix_to_docs[row.chash]:
+                    prefix_to_docs[row.chash].append(doc_id)
+        out: dict[str, list[str]] = {}
+        for prefix, doc_ids in prefix_to_docs.items():
+            for input_form in prefix_to_inputs[prefix]:
+                out[input_form] = list(doc_ids)
+        return out
 
     def chashes_for_collection(self, physical_collection: str) -> set[str]:
         result = self._get("/manifest/chashes", collection=physical_collection)

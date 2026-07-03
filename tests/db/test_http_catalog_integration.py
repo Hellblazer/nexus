@@ -753,15 +753,20 @@ class TestManifest:
         assert "chunk_hash_030000000000000000000" in chashes
 
     def test_docs_for_chashes_reverse_lookup(self, cat, doc_with_manifest) -> None:
-        """docs_for_chashes returns a flat list of distinct document tumblers.
+        """docs_for_chashes returns dict[chash, [doc_id, ...]] (nexus-h8rf6.3).
 
-        CatalogRepository.docsForChashes() runs SELECT DISTINCT doc_id WHERE
-        chash IN (?), so the result is a list of tumblers (not a per-chash map).
+        The wire endpoint (``CatalogRepository.docsForChashes``) runs SELECT
+        DISTINCT doc_id WHERE chash IN (?) and returns a flat tumbler list —
+        the client reconstructs the per-chash dict shape (parity with local
+        ``Catalog.docs_for_chashes``) via a second ``get_manifests()`` round
+        trip. Pre-fix, this method returned the flat list directly, which
+        crashed every ``by_chash.items()`` consumer with AttributeError.
         """
         t, _ = doc_with_manifest
         result = cat.docs_for_chashes(["chunk_hash_000000000000000000000", "chunk_hash_010000000000000000000"])
-        assert isinstance(result, list)
-        assert str(t) in result
+        assert isinstance(result, dict)
+        assert "chunk_hash_000000000000000000000" in result
+        assert str(t) in result["chunk_hash_000000000000000000000"]
 
     def test_purge_manifest(self, cat) -> None:
         t = cat.register(

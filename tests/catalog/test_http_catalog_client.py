@@ -608,12 +608,52 @@ class TestHttpCatalogClientRoundTrip:
         with _pytest.raises(ValueError, match="limit must be > 0"):
             client.manifest_orphans(384, limit=0)
 
-    def test_docs_for_chashes_uses_tumblers_key(self, client: HttpCatalogClient) -> None:
-        # Real server returns {"tumblers": [tumbler_string, ...]} — flat list of tumblers,
-        # SELECT DISTINCT doc_id WHERE chash IN (...). Not a per-chash map.
+    def test_docs_for_chashes_returns_dict_shape(self, client: HttpCatalogClient) -> None:
+        # nexus-h8rf6.3: the wire response is {"tumblers": [tumbler_string, ...]}
+        # — a flat list from SELECT DISTINCT doc_id WHERE chash IN (...), NOT a
+        # per-chash map. The client reconstructs the dict shape (matching local
+        # Catalog.docs_for_chashes) via a second get_manifests() round-trip that
+        # intersects each candidate doc's manifest chashes against the request.
+        # Pre-fix this returned the flat list directly, which crashed every
+        # ``by_chash.items()`` consumer (build_staleness_cache et al.) with
+        # AttributeError, silently degrading every service-mode index run to a
+        # full re-chunk + re-embed.
         result = client.docs_for_chashes(["abc123"])
-        assert isinstance(result, list)
-        assert "1.1.1" in result
+        assert isinstance(result, dict)
+        assert result == {"abc123": ["1.1.1"]}
+
+    def test_docs_for_chashes_empty_input_returns_empty_dict(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        assert client.docs_for_chashes([]) == {}
+
+    def test_unlink_returns_int_count(self, client: HttpCatalogClient) -> None:
+        # nexus-h8rf6.3: pre-fix this returned a bool (deleted > 0), so
+        # commands/catalog_cmds/links.py's "Removed {removed} link(s)" echoed
+        # "Removed True link(s)" and mcp/catalog.py's {"removed": removed}
+        # returned a bool instead of a count.
+        removed = client.unlink("1.1.1", "1.1.2", "cites")
+        assert removed == 1
+        assert type(removed) is int
+
+    def test_set_owner_head_hash_returns_int_count(self, client: HttpCatalogClient) -> None:
+        # nexus-h8rf6.3: pre-fix this returned None, so indexer.py's
+        # ``if rowcount == 0: _log.warning(...)`` (lost-write detector) could
+        # never fire in service mode.
+        updated = client.set_owner_head_hash("1.1", "deadbeef")
+        assert updated == 1
+        assert type(updated) is int
+
+    def test_lookup_doc_id_by_collection_and_path_miss_returns_empty_string(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # nexus-h8rf6.3: local Catalog's documented contract is "" (never
+        # None) on no-match; align the service client to match.
+        def _fake_get(path: str, **params: object) -> dict:
+            return {"documents": []}
+        client._get = _fake_get  # type: ignore[method-assign]
+        result = client.lookup_doc_id_by_collection_and_path("code__x", "missing.py")
+        assert result == ""
 
     def test_list_collections(self, client: HttpCatalogClient) -> None:
         colls = client.list_collections()
