@@ -1582,7 +1582,31 @@ class HttpCatalogClient:
                 prefix_to_inputs[c[:32]].append(c)
         if not prefix_to_inputs:
             return {}
-        result = self._post("/manifest/docs_for_chashes", {"chashes": chashes})
+        # nexus-h8rf6.12: the FIRST round-trip must send the 32-char
+        # prefixes, not the raw ``chashes`` input. ``CatalogRepository
+        # .docsForChashes`` (service/src/main/java/dev/nexus/service/db/
+        # CatalogRepository.java:1130-1136) does an EXACT-match
+        # ``F_CHK_CHASH.in(chashes)`` against ``catalog_document_chunks
+        # .chash`` — a 32-char RDR-108 D1 natural-id column — with no
+        # server-side normalization, unlike local ``Catalog
+        # .docs_for_chashes`` (catalog_writes.py:1145-1147) which
+        # normalizes BOTH sides via SQL ``substr(chash,1,32)``. Any
+        # caller passing full 64-char ``chunk_text_hash`` values (e.g.
+        # ``indexer_utils.build_staleness_cache``, which reads chunk
+        # metadata written as ``hashlib.sha256(...).hexdigest()`` —
+        # code_indexer.py:396, doc_indexer.py:1048/1136,
+        # prose_indexer.py:102/166) got zero matches on every call: the
+        # server never raised, it legitimately found no rows, so the
+        # h8rf6.3 shape-conformance test (built on manufactured
+        # pre-normalized 32-char fixtures) passed while every live
+        # service-mode ``nx index repo`` staleness-cache build returned
+        # empty. Sending the already-deduped ``prefix_to_inputs`` keys
+        # mirrors the local contract exactly (also gets the dedup for
+        # free: mixed 32-/64-char input colliding to the same prefix is
+        # now one wire entry, not N).
+        result = self._post(
+            "/manifest/docs_for_chashes", {"chashes": list(prefix_to_inputs.keys())}
+        )
         # Handler returns {"tumblers": [tumbler_string, ...]} — flat, not per-chash.
         tumblers = result.get("tumblers", []) if result else []
         if not tumblers:
