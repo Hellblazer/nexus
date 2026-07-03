@@ -6,6 +6,72 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.2.0] - 2026-07-02
+
+The unattended-migration release (RDR-178). An incident-shaped migration gap
+(a small hole in an otherwise-complete cloud copy) is now a 3-row delta fill,
+not a 158k-row re-send; the cloud vector leg runs server-side at datacenter
+bandwidth; and upgrade-day doctor false positives are gone.
+
+### Added
+
+- **Verify-fill delta re-migration (RDR-178).** `nx storage migrate all
+  --verify-fill` (and every per-store command) runs an identity-diff against
+  the service and fills ONLY the missing rows instead of unconditionally
+  re-sending every store. Covers the T2 stores, telemetry (via a new engine
+  membership-probe endpoint), and the pgvector chunk tables. Reports carry a
+  `verify_fill` per-table breakdown and every report now records a populated
+  `verification` verdict (`verified|mismatch|indeterminate` — indeterminate
+  is never a pass).
+- **`migrate vectors --cloud` delegates server-side.** When the target
+  engine-service supports the async `ingest-cloud` job contract
+  (`release_version >= 0.1.18`), the cloud leg triggers ONE batched
+  server-side job that pulls ChromaCloud directly into pgvector — your
+  uplink never sees a vector (minutes instead of tens of minutes). Any
+  collection the delegated job can't complete transparently falls back to
+  the unchanged client-mediated copy. Credentials appear only in the
+  trigger request body (test-enforced).
+- **ETL circuit breaker.** Sustained 5xx responses trip a breaker that
+  aborts the run loudly instead of hammering a down service; transient
+  bursts (e.g. a 502 blip) are retried and absorbed.
+- **Pre-flight checks for `migrate all`.** An ETL import check aborts
+  before any store runs (no more half-migrated states from a bad
+  environment), and guided-upgrade detects already-migrated T2 stores
+  instead of re-sending them.
+- **`nx doctor` migration-health checks.** The newest migration report is
+  read on every doctor run: failures or a `mismatch`/`indeterminate`
+  verdict are fatal with a `--verify-fill` re-run suggestion; a
+  post-cutover local write to `memory.db` raises a write-divergence
+  warning.
+
+### Fixed
+
+- **Upgrade-day doctor false positives.** The migration-report check
+  accepted only a stale `"passed"` literal (the orchestrator writes
+  `"verified"`), and a zero-failure report written by pre-6.2 tooling
+  (no verification key at all) was treated as fatal — now a non-fatal WARN.
+  The schema-migration check also false-failed on benign Liquibase RERAN
+  changesets.
+- **Aspects ETL crashed on the post-RDR-096 schema** (`source_path` dropped
+  column) — an upgrade blocker for any install carrying document aspects.
+- **Cross-model vector migrations could over-fill renamed collections**:
+  an empty `document_chunks` prefilter is now treated as ambiguous
+  (resolved via the manifest), never as proof-of-absence.
+- **`nx mineru start` ignored a configured fixed port**, silently binding
+  a disconnected server on a random port.
+- `taxonomy__centroids` is classified as derived (rebuildable), not
+  silently skipped.
+- sn plugin: removed the grep-routing PreToolUse hook that silently
+  blocked bash greps on code files.
+
+### Changed
+
+- **Pinned engine-service advances v0.1.17 → v0.1.19** (cloud-gated
+  2026-07-02): batch multi-row INSERT imports (was 600+ sequential
+  round-trips per request), deterministic `id ASC` tiebreak on every
+  `ts_rank` ORDER BY (stable keyword-search ordering), the telemetry
+  membership-probe endpoint, and the async ingest-cloud job contract.
+
 ## [6.1.0] - 2026-07-01
 
 Aspect-extraction now survives short-lived storing processes, the migration
