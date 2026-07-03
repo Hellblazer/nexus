@@ -42,7 +42,7 @@ run_check() {
     ok "$label"
   else
     bad "$label"
-    printf '%s\n' "$out" | sed 's/^/       | /' | head -8
+    printf '%s\n' "$out" | sed 's/^/       | /' | tail -12
   fi
 }
 
@@ -125,7 +125,7 @@ if printf '%s' "$DEL_OUT" | grep -qiE "delet"; then
   ok "store delete --title (umvh2 regression)"
 else
   bad "store delete --title (umvh2 regression)"
-  printf '%s\n' "$DEL_OUT" | sed 's/^/       | /' | head -8
+  printf '%s\n' "$DEL_OUT" | sed 's/^/       | /' | tail -12
 fi
 nx search "amaranthine zeppelin quotient" --corpus knowledge -m 1 2>/dev/null | grep -q "shakeout-probe" \
   && bad "deleted note still searchable" || ok "deleted note gone from search"
@@ -160,9 +160,12 @@ IDX2=/tmp/shakeout-index-2.log
 if nx index repo "$REPO" > "$IDX2" 2>&1; then ok "index run 2 (exit 0)"; else bad "index run 2 failed"; fi
 grep -q "docs_for_chashes_failed" "$IDX2" && bad "staleness-cache failure in run 2" || ok "staleness cache ok in run 2"
 # Incremental assertion: run 2 must process far fewer files than run 1.
-files1=$(grep -cE '^\s+\[[0-9]+/[0-9]+\]' "$IDX1" || true)
-files2=$(grep -cE '^\s+\[[0-9]+/[0-9]+\]' "$IDX2" || true)
-note "run1 processed $files1 files; run2 processed $files2"
+# Skipped files still emit "[n/40] ... skipped" lines — incremental means
+# few NON-skipped (actually re-processed) files, not fewer lines (maiden-run
+# lesson: run 4 proved the skip works while the line-count assertion lied).
+files1=$(grep -E '^\s+\[[0-9]+/[0-9]+\]' "$IDX1" | grep -cv "skipped" || true)
+files2=$(grep -E '^\s+\[[0-9]+/[0-9]+\]' "$IDX2" | grep -cv "skipped" || true)
+note "run1 re-processed $files1 files; run2 re-processed $files2 (skipped lines excluded)"
 if [ "${files2:-0}" -le 6 ] && [ "${files1:-0}" -ge 10 ]; then
   ok "re-index is incremental ($files2 << $files1)"
 else
