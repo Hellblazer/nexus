@@ -788,6 +788,15 @@ def get_t1_database(
     """
     from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-local import (factory-time backend selection)
 
+    # nexus-h8rf6 (shakeout finding 13): explicit isolation WINS over backend
+    # routing. NX_T1_ISOLATED=1 is the documented escape hatch every T1 error
+    # message recommends ("in-process ephemeral scratch"); pre-fix it was only
+    # honored inside T1Database's Chroma-path constructor, which the SERVICE
+    # branch below never reaches — dead code in exactly the installs that
+    # need it (a bare CLI in service mode cannot safely mint a session token).
+    if os.environ.get("NX_T1_ISOLATED") == "1" or os.environ.get("NEXUS_SKIP_T1") == "1":
+        return T1Database(session_id=session_id, client=client)
+
     if storage_backend_for("t1") == StorageBackend.SERVICE:
         from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — rare/branch-local import (SERVICE backend path only)
 

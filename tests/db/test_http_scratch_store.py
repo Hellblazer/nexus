@@ -506,6 +506,8 @@ class TestGetT1DatabaseFactory:
         # fake_server is a URL string like "http://127.0.0.1:<port>"
         port = fake_server.split(":")[-1]
         monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)  # autouse fixture sets it; isolation wins post-h8rf6
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", port)
         monkeypatch.setenv("NX_SERVICE_TOKEN", TOKEN)
