@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import chromadb
@@ -355,6 +356,99 @@ def test_hybrid_without_cache_files_still_works(runner: CliRunner, cloud_env, tm
         result = runner.invoke(main, ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"])
     assert result.exit_code == 0, result.output
     assert "No results" not in result.output
+
+
+# ── reranker (nexus-xbw0f) ──────────────────────────────────────────────────
+#
+# bead nexus-xbw0f: production ``nx search`` in service mode passes
+# ``t3=db`` where ``db`` is an ``HttpVectorClient`` (RDR-155 P4a.2) —
+# no ``_voyage_client`` attribute, so the reranker used to always skip
+# with ``rerank_skipped_no_voyage_client``. The fix sources a Voyage
+# client independently via ``nexus.db.get_voyage_client()``.
+
+
+def test_search_service_mode_invokes_reranker_via_config_client(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """Service-mode search with a configured voyage_api_key invokes the
+    reranker (via the ``nexus.db.get_voyage_client`` fallback, since the
+    CLI's ``t3`` handle carries no ``_voyage_client``) and reorders
+    results per the mocked relevance scores.
+    """
+    r0 = _make_result("r0", "doc 0", collection="knowledge__test", distance=0.1)
+    r1 = _make_result("r1", "doc 1", collection="rdr__nexus", distance=0.2)
+    mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus"])
+    mock_t3._voyage_client = None  # matches the real HttpVectorClient shape
+
+    mock_voyage_client = MagicMock()
+    mock_voyage_client.rerank.return_value = MagicMock(results=[
+        MagicMock(index=1, relevance_score=0.9),
+        MagicMock(index=0, relevance_score=0.2),
+    ])
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[r0, r1]), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
+         patch("nexus.config.is_local_mode", return_value=False), \
+         patch("nexus.db.get_voyage_client", return_value=mock_voyage_client):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "knowledge,rdr", "--json"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mock_voyage_client.rerank.called
+    items = json.loads(result.output)
+    assert [item["id"] for item in items] == ["r1", "r0"]
+
+
+def test_search_service_mode_no_credential_skips_with_warning(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """Service-mode search with NO configured voyage_api_key (genuinely-
+    unconfigured install) still degrades gracefully — no crash, results
+    returned unreranked, the existing warning behavior preserved.
+    """
+    r0 = _make_result("r0", "doc 0", collection="knowledge__test", distance=0.1)
+    r1 = _make_result("r1", "doc 1", collection="rdr__nexus", distance=0.2)
+    mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus"])
+    mock_t3._voyage_client = None
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[r0, r1]), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
+         patch("nexus.config.is_local_mode", return_value=False), \
+         patch("nexus.db.get_voyage_client", return_value=None):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge,rdr"])
+
+    assert result.exit_code == 0, result.output
+    assert "traceback" not in result.output.lower()
+
+
+def test_search_local_mode_never_touches_voyage_client(
+    runner: CliRunner,
+) -> None:
+    """Local-mode search never reaches the reranker at all (existing
+    behavior, unaffected by the nexus-xbw0f fallback) — the CLI's
+    "skipped in local mode" branch short-circuits before
+    ``rerank_results``/``get_voyage_client`` are ever touched.
+    """
+    r0 = _make_result("r0", "doc 0", collection="knowledge__test", distance=0.1)
+    r1 = _make_result("r1", "doc 1", collection="rdr__nexus", distance=0.2)
+    mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus"])
+
+    voyage_factory = MagicMock(side_effect=AssertionError(
+        "get_voyage_client must not be called in local mode"
+    ))
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[r0, r1]), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
+         patch("nexus.config.is_local_mode", return_value=True), \
+         patch("nexus.db.get_voyage_client", voyage_factory):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge,rdr"])
+
+    assert result.exit_code == 0, result.output
+    assert not voyage_factory.called
 
 
 # ── _parse_where ────────────────────────────────────────────────────────────

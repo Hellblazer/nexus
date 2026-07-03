@@ -99,17 +99,49 @@ def test_rerank_degrades_on_error(exc, cloud_mode):
     )
 
 
-def test_rerank_cloud_mode_no_t3_degrades(cloud_mode):
-    """Cloud path with t3=None degrades to input order with a warning log.
+def test_rerank_cloud_mode_no_t3_no_credential_degrades(cloud_mode, monkeypatch):
+    """Cloud path with t3=None AND no configured voyage_api_key degrades
+    to input order with a warning log (genuinely-unconfigured install).
 
-    Documents the intentional behavior change from the _voyage_instance
-    elimination (nexus-12v7c): rerank_results no longer constructs a
-    Voyage client itself. Cloud-mode callers must pass t3; missing t3
-    is not an exception path but a degraded-pass-through.
+    bead nexus-xbw0f: production call sites route through
+    ``make_t3()`` -> ``HttpVectorClient`` (RDR-155 P4a.2), which never
+    carries a ``_voyage_client`` attribute, so ``t3=None``-shaped
+    inputs are now the common case, not an edge case. The reranker
+    falls back to ``nexus.db.get_voyage_client()``; only when THAT also
+    yields ``None`` (credential genuinely absent) does it degrade.
+    Supersedes the older nexus-12v7c contract (t3=None always
+    degrades) — that contract assumed T3Database was still the
+    serving-path handle, which RDR-155 P4a.2 retired.
     """
+    monkeypatch.setattr("nexus.db.get_voyage_client", lambda: None)
     results = [_r(), _r(), _r()]
     out = rerank_results(results, "query", top_k=2, t3=None)
     assert out == results[:2]
+
+
+def test_rerank_cloud_mode_no_t3_falls_back_to_config_client(cloud_mode, monkeypatch):
+    """Cloud path with t3=None but a configured voyage_api_key sources a
+    client independently and reranks (bead nexus-xbw0f fix).
+
+    This is the production shape after RDR-155 P4a.2: ``search_cmd.py``
+    passes ``t3=db`` where ``db`` is an ``HttpVectorClient`` with no
+    ``_voyage_client`` attribute, so the fallback path is what actually
+    runs the reranker in cloud/service mode.
+    """
+    mock_client = MagicMock()
+    mock_client.rerank.return_value = MagicMock(results=[
+        MagicMock(index=2, relevance_score=0.9),
+        MagicMock(index=0, relevance_score=0.1),
+    ])
+    monkeypatch.setattr("nexus.db.get_voyage_client", lambda: mock_client)
+
+    results = [_r(dist=0.1), _r(dist=0.2), _r(dist=0.3)]
+    out = rerank_results(results, "query", top_k=2, t3=None)
+
+    assert mock_client.rerank.called
+    assert out == [results[2], results[0]]
+    assert out[0].hybrid_score == pytest.approx(0.9)
+    assert out[1].hybrid_score == pytest.approx(0.1)
 
 
 # ── round_robin_interleave ───────────────────────────────────────────────────

@@ -383,11 +383,16 @@ def rerank_results(
 
     RDR-109 Phase 3 mode-aware dispatch:
 
-    - Cloud mode: Voyage AI reranker (``rerank-2.5``). Requires *t3*,
-      a T3Database whose ``_voyage_client`` attribute is the
-      constructed ``voyageai.Client`` (set by ``T3Database.__init__``
-      when ``voyage_api_key`` is provided). Cloud-mode call sites
-      MUST pass ``t3``; without it the cloud reranker fails loud.
+    - Cloud mode: Voyage AI reranker (``rerank-2.5``). Prefers *t3*'s
+      ``_voyage_client`` attribute when *t3* carries one (test stubs,
+      the Phase-5 ETL's injected ``T3Database``). Production call
+      sites route through ``make_t3()`` -> ``HttpVectorClient``
+      (RDR-155 P4a.2), which carries no such attribute; in that case
+      the reranker falls back to ``nexus.db.get_voyage_client()``,
+      which constructs a Voyage client independently from configured
+      credentials (bead nexus-xbw0f). Only when NEITHER source yields
+      a client (``voyage_api_key`` genuinely unconfigured) does the
+      reranker skip with a warning.
     - Local mode: ONNX cross-encoder via
       :class:`nexus.cross_encoder.LocalCrossEncoder` (default
       ``cross-encoder/ms-marco-MiniLM-L-6-v2``, ~80MB lazy download).
@@ -423,17 +428,25 @@ def _rerank_cloud(
     """Cloud reranker via Voyage AI. Best-effort: any exception falls
     back to the original order truncated to *top_n*.
 
-    The Voyage client is sourced from ``t3._voyage_client`` (set by
-    ``T3Database.__init__`` when configured in cloud mode). Callers
-    in cloud mode must pass *t3*; without it the reranker logs a
-    warning and returns the input order unchanged.
+    The Voyage client is sourced from ``t3._voyage_client`` when *t3*
+    carries one (test stubs, injected ``T3Database``). Production
+    ``HttpVectorClient`` handles (RDR-155 P4a.2) carry no such
+    attribute, so this falls back to
+    :func:`nexus.db.get_voyage_client`, which constructs a client
+    directly from configured credentials (bead nexus-xbw0f). Only
+    when both sources yield ``None`` (``voyage_api_key`` genuinely
+    unconfigured) does the reranker log a warning and return the
+    input order unchanged.
     """
     client = getattr(t3, "_voyage_client", None) if t3 is not None else None
     if client is None:
+        from nexus.db import get_voyage_client  # noqa: PLC0415 — circular-dep avoidance (nexus.db)
+        client = get_voyage_client()
+    if client is None:
         _log.warning(
             "rerank_skipped_no_voyage_client",
-            reason="cloud reranker requires t3 with a configured _voyage_client; "
-                   "caller did not pass t3 or t3._voyage_client is None",
+            reason="cloud reranker requires either t3._voyage_client or a "
+                   "configured voyage_api_key credential; neither was available",
         )
         return results[:top_n]
     try:

@@ -89,3 +89,34 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClien
         _client=_client,
         _ef_override=_ef_override,
     )
+
+
+def get_voyage_client(*, _api_key: str | None = None) -> object | None:
+    """Construct a standalone Voyage AI client from configured credentials.
+
+    RDR-155 P4a.2 (nexus-1k8s1) retired ``T3Database`` from serving:
+    ``make_t3()`` now returns
+    :class:`~nexus.db.http_vector_client.HttpVectorClient` in both local
+    and cloud mode, which carries no ``_voyage_client`` attribute.
+    Consumers that need a Voyage client independent of the T3 handle's
+    shape (e.g. the cross-corpus reranker in ``nexus.scoring``, bead
+    nexus-xbw0f) call this factory instead of reaching into
+    ``t3._voyage_client``.
+
+    Returns ``None`` when ``voyage_api_key`` is not configured — mirrors
+    ``T3Database``'s graceful-degradation behavior. Callers must treat a
+    ``None`` return as "feature unavailable", never as a hard failure.
+
+    *_api_key* is test-only injection (skips ``get_credential``);
+    production callers omit it.
+    """
+    api_key = _api_key if _api_key is not None else get_credential("voyage_api_key")
+    if not api_key:
+        return None
+
+    from nexus.config import load_config  # noqa: PLC0415 — deferred to avoid circular import (config)
+    import voyageai  # noqa: PLC0415 — optional/heavy dependency deferred (voyageai); allowlisted construction site (src/nexus/db/)
+
+    cfg = load_config()
+    read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)
+    return voyageai.Client(api_key=api_key, timeout=read_timeout_seconds, max_retries=0)
