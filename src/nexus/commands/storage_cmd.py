@@ -1381,6 +1381,8 @@ def migrate_vectors_cmd(
             f"{r.status:<13} {r.collection}: source={r.source_count} "
             f"written={r.written_count} ({r.duration_s:.1f}s)"
         )
+        if getattr(r, "delegated", False):
+            line += " [delegated]"
         if r.reason:
             line += f" — {r.reason}"
         is_err = r.status in ("failed", "skipped")
@@ -1432,6 +1434,8 @@ def _echo_summary_table(report) -> None:
         # scrolling). skipped-empty/skipped-derived included: the operator
         # reviewing a redirected log needs the disposition rationale (for
         # skipped-derived, the "nx taxonomy" regeneration hint) in the table.
+        if getattr(r, "delegated", False):
+            line += "  [delegated]"
         if r.reason and r.status in (
             "failed", "skipped", "skipped-empty", "skipped-derived", "excluded",
         ):

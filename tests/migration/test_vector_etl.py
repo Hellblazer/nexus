@@ -737,6 +737,613 @@ class TestLegRouting:
         assert report.total_written == 3
 
 
+# ── Unit: ingest-cloud delegation (nexus-ekk4o) ──────────────────────────────
+
+
+class TestProbeIngestCloudSupport:
+    """RDR-178 Gap 5: capability probe reused from
+    ``guided_upgrade.verify_service_version`` — GET /version, pin on
+    ``release_version >= floor``. FAIL CLOSED on every ambiguity."""
+
+    def test_true_at_floor(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 200
+            def json(self):  # noqa: ANN001, ANN201 — test double
+                return {"release_version": "0.1.18"}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is True
+
+    def test_true_above_floor(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 200
+            def json(self):  # noqa: ANN001, ANN201
+                return {"release_version": "0.2.0"}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is True
+
+    def test_false_below_floor(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 200
+            def json(self):  # noqa: ANN001, ANN201
+                return {"release_version": "0.1.17"}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is False
+
+    def test_false_on_missing_release_version(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 200
+            def json(self):  # noqa: ANN001, ANN201
+                return {"app_version": "1.0-SNAPSHOT"}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is False
+
+    def test_false_on_non_200(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 500
+            def json(self):  # noqa: ANN001, ANN201
+                return {}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is False
+
+    def test_false_on_transport_error(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        def _boom(url, t):  # noqa: ANN001, ANN202
+            raise ConnectionError("no route to host")
+
+        assert probe_ingest_cloud_support("http://svc", http_get=_boom) is False
+
+
+# A distinctive api-key sentinel: tests assert this string appears ONLY in
+# the trigger POST's JSON body, never in any log event, exception message,
+# or the poll GET.
+_SECRET_API_KEY = "sk-super-secret-do-not-leak-9f3a2b"
+
+
+def _ingest_cloud_transport(
+    *,
+    trigger_status: int = 202,
+    job_id: str = "job-1",
+    trigger_body: dict | None = None,
+    poll_states: list[dict] | None = None,
+    requests: list | None = None,
+) -> "object":
+    """Build an httpx.MockTransport faking POST .../ingest-cloud (trigger)
+    and GET .../jobs/{id} (poll). ``poll_states`` is consumed in order, one
+    per GET; the last entry repeats once exhausted. ``requests`` (optional)
+    collects every ``httpx.Request`` seen, for credential-non-disclosure
+    assertions."""
+    import httpx
+
+    poll_states = poll_states if poll_states is not None else [{"state": "done", "per_collection": {}}]
+    calls = {"poll": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if requests is not None:
+            requests.append(request)
+        if request.url.path.endswith("/ingest-cloud"):
+            if trigger_body is not None:
+                return httpx.Response(trigger_status, json=trigger_body)
+            return httpx.Response(trigger_status, json={"job_id": job_id})
+        if "/jobs/" in request.url.path:
+            idx = min(calls["poll"], len(poll_states) - 1)
+            calls["poll"] += 1
+            body = poll_states[idx]
+            return httpx.Response(200, json={"job_id": job_id, **body})
+        return httpx.Response(404, json={"error": "not found"})
+
+    return httpx.MockTransport(_handler)
+
+
+class TestIngestCloudTrigger:
+    def test_trigger_returns_job_id_and_sends_creds_only_in_body(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_trigger
+
+        seen: list = []
+        transport = _ingest_cloud_transport(job_id="job-abc", requests=seen)
+        client = httpx.Client(transport=transport)
+
+        job_id = _ingest_cloud_trigger(
+            client, "http://svc", "tok", "default",
+            source_tenant="src-t", source_database="src-db",
+            source_api_key=_SECRET_API_KEY, collections=["coll-a", "coll-b"],
+        )
+
+        assert job_id == "job-abc"
+        assert len(seen) == 1
+        req = seen[0]
+        assert req.method == "POST"
+        assert _SECRET_API_KEY not in str(req.url)
+        assert _SECRET_API_KEY not in str(req.headers)
+        body = json.loads(req.content)
+        assert body["source_api_key"] == _SECRET_API_KEY
+        assert body["collections"] == ["coll-a", "coll-b"]
+
+    def test_trigger_raises_on_non_202_without_leaking_body(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_trigger
+
+        transport = _ingest_cloud_transport(
+            trigger_status=400, trigger_body={"error": "collections not present in source"}
+        )
+        client = httpx.Client(transport=transport)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _ingest_cloud_trigger(
+                client, "http://svc", "tok", "default",
+                source_tenant="src-t", source_database="src-db",
+                source_api_key=_SECRET_API_KEY, collections=["coll-a"],
+            )
+
+        msg = str(exc_info.value)
+        assert "400" in msg
+        assert _SECRET_API_KEY not in msg
+
+    def test_trigger_raises_on_202_with_no_job_id(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_trigger
+
+        transport = _ingest_cloud_transport(trigger_body={})
+        client = httpx.Client(transport=transport)
+
+        with pytest.raises(RuntimeError, match="no job_id"):
+            _ingest_cloud_trigger(
+                client, "http://svc", "tok", "default",
+                source_tenant="t", source_database="d",
+                source_api_key=_SECRET_API_KEY, collections=["c"],
+            )
+
+
+class TestIngestCloudPoll:
+    def test_poll_returns_on_terminal_state(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_poll
+
+        transport = _ingest_cloud_transport(
+            poll_states=[
+                {"state": "queued", "per_collection": {}},
+                {"state": "running", "per_collection": {}},
+                {"state": "done", "per_collection": {"c": {"copied": 1, "dest": 1, "expected": 1}}},
+            ]
+        )
+        client = httpx.Client(transport=transport)
+        sleeps: list[float] = []
+
+        body = _ingest_cloud_poll(
+            client, "http://svc", "tok", "default", "job-1",
+            interval_s=0.01, timeout_s=10.0,
+            sleep=sleeps.append, now=_fake_clock(step=0.001),
+        )
+
+        assert body is not None
+        assert body["state"] == "done"
+        assert body["per_collection"]["c"]["dest"] == 1
+        assert len(sleeps) == 2  # two non-terminal polls before the terminal one
+
+    def test_poll_times_out_returns_none(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_poll
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{"state": "running", "per_collection": {}}]
+        )
+        client = httpx.Client(transport=transport)
+        sleeps: list[float] = []
+
+        body = _ingest_cloud_poll(
+            client, "http://svc", "tok", "default", "job-1",
+            interval_s=1.0, timeout_s=3.0,
+            sleep=sleeps.append, now=_fake_clock(step=1.0),
+        )
+
+        assert body is None
+        assert len(sleeps) >= 1
+
+
+def _fake_clock(*, step: float):
+    """A deterministic ``now()`` seam: returns 0.0, then advances by *step*
+    on every subsequent call — avoids real ``time.sleep``/wall-clock
+    dependence in the poll-loop tests."""
+    state = {"t": 0.0}
+
+    def _now() -> float:
+        t = state["t"]
+        state["t"] += step
+        return t
+
+    return _now
+
+
+class TestDelegateIngestCloud:
+    def test_all_collections_delegated_successfully(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            job_id="job-ok",
+            poll_states=[{
+                "state": "done",
+                "per_collection": {
+                    "coll-a": {"copied": 5, "dest": 5, "expected": 5},
+                    "coll-b": {"copied": 3, "dest": 3, "expected": 3},
+                },
+            }],
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+        seen_results = []
+
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a", "coll-b"],
+            tenant="src-t", database="src-db", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            on_result=seen_results.append, http_client=client,
+        )
+
+        assert failed == []
+        assert {r.collection for r in results} == {"coll-a", "coll-b"}
+        by_name = {r.collection: r for r in results}
+        assert by_name["coll-a"].status == "migrated"
+        assert by_name["coll-a"].source_count == 5
+        assert by_name["coll-a"].written_count == 5
+        assert by_name["coll-a"].delegated is True
+        assert by_name["coll-b"].written_count == 3
+        assert len(seen_results) == 2
+
+    def test_collection_missing_from_per_collection_falls_back(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{
+                "state": "failed",
+                "error": "java.lang.RuntimeException",
+                "per_collection": {
+                    "coll-a": {"copied": 5, "dest": 5, "expected": 5},
+                    # coll-b never reached — job died mid-loop.
+                },
+            }],
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a", "coll-b"],
+            tenant="t", database="d", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            http_client=client,
+        )
+
+        assert failed == ["coll-b"]
+        assert [r.collection for r in results] == ["coll-a"]
+        assert results[0].delegated is True
+
+    def test_parity_mismatch_falls_back_for_that_collection(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{
+                "state": "done",
+                "per_collection": {
+                    "coll-a": {"copied": 5, "dest": 3, "expected": 5},  # dropped rows
+                },
+            }],
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a"],
+            tenant="t", database="d", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            http_client=client,
+        )
+
+        assert results == []
+        assert failed == ["coll-a"]
+
+    def test_trigger_failure_falls_back_every_collection(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(trigger_status=500, trigger_body={"error": "boom"})
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a", "coll-b"],
+            tenant="t", database="d", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            http_client=client,
+        )
+
+        assert results == []
+        assert failed == ["coll-a", "coll-b"]
+
+    def test_poll_timeout_falls_back_every_collection(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{"state": "running", "per_collection": {}}]
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        # Inject a fast fake clock + no-op sleep (the poll/timeout seam) so
+        # the test proves the timeout-fallback branch without a real 30-min
+        # wait — the production defaults stay untouched (module constants).
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a"],
+            tenant="t", database="d", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            http_client=client,
+            poll_interval_s=1.0, poll_timeout_s=3.0,
+            sleep=lambda _s: None, now=_fake_clock(step=1.0),
+        )
+
+        assert results == []
+        assert failed == ["coll-a"]
+
+    def test_credential_never_logged(self) -> None:
+        """Every log event emitted by a failing delegation run must be free
+        of the api key — it may appear ONLY in the trigger POST's JSON body
+        (asserted separately in TestIngestCloudTrigger)."""
+        from structlog.testing import capture_logs
+
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{
+                "state": "failed",
+                "error": "java.lang.RuntimeException",
+                "per_collection": {},
+            }],
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        with capture_logs() as logs:
+            _delegate_ingest_cloud(
+                ["coll-a"],
+                tenant="t", database="d", api_key=_SECRET_API_KEY,
+                base_url="http://svc", token="tok", nexus_tenant="default",
+                http_client=client,
+            )
+
+        for entry in logs:
+            assert _SECRET_API_KEY not in repr(entry)
+
+
+# ── Unit: migrate_cloud delegation orchestration (nexus-ekk4o) ──────────────
+
+
+class TestMigrateCloudDelegation:
+    def test_delegates_eligible_collections_and_falls_back_for_the_rest(
+        self, source_client, monkeypatch
+    ) -> None:
+        """A same-model conformant collection delegates; a cross-model
+        remap target is never offered to delegation and lands via the
+        unchanged client-mediated path."""
+        import nexus.migration.vector_etl as etl_mod
+
+        delegatable = _coll("deleg-ok")
+        cross_model = _coll("deleg-xmodel")
+        _seed_source(source_client, delegatable, 2)
+        _seed_source(source_client, cross_model, 2)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint",
+            lambda vc: ("http://svc", "tok", "default"),
+        )
+        monkeypatch.setattr(
+            etl_mod, "probe_ingest_cloud_support", lambda url, **kw: True
+        )
+
+        captured_eligible: list[list[str]] = []
+
+        def _fake_delegate(names, **kwargs):
+            captured_eligible.append(list(names))
+            results = [
+                CollectionResult(n, 2, 2, "migrated", delegated=True) for n in names
+            ]
+            return results, []
+
+        monkeypatch.setattr(etl_mod, "_delegate_ingest_cloud", _fake_delegate)
+
+        xmodel_target = cross_model_target_name(cross_model, _MODEL_768)
+        report = migrate_cloud(
+            fake, target_names={cross_model: xmodel_target},
+        )
+
+        # cross_model was excluded from delegation eligibility (remap target).
+        assert captured_eligible == [[delegatable]]
+        by_name = {r.collection: r for r in report.results}
+        assert by_name[delegatable].delegated is True
+        assert by_name[delegatable].status == "migrated"
+        # the cross-model collection migrated via the unchanged client path.
+        assert by_name[cross_model].delegated is False
+        assert by_name[cross_model].status == "migrated"
+        assert by_name[cross_model].target_collection == xmodel_target
+
+    def test_falls_back_entirely_when_probe_reports_unsupported(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        name = _coll("deleg-oldengine")
+        _seed_source(source_client, name, 2)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint",
+            lambda vc: ("http://svc", "tok", "default"),
+        )
+        monkeypatch.setattr(
+            etl_mod, "probe_ingest_cloud_support", lambda url, **kw: False
+        )
+
+        def _unexpected_delegate(*a, **kw):
+            raise AssertionError("delegation must not be attempted when the probe fails")
+
+        monkeypatch.setattr(etl_mod, "_delegate_ingest_cloud", _unexpected_delegate)
+
+        report = migrate_cloud(fake)
+
+        assert report.results[0].collection == name
+        assert report.results[0].delegated is False
+        assert report.results[0].status == "migrated"
+
+    def test_falls_back_entirely_when_endpoint_unresolvable(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        name = _coll("deleg-noendpoint")
+        _seed_source(source_client, name, 1)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint", lambda vc: None,
+        )
+
+        report = migrate_cloud(fake)
+
+        assert report.results[0].delegated is False
+        assert report.results[0].status == "migrated"
+
+    def test_delegation_partial_failure_falls_back_per_collection(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        ok_name = _coll("deleg-part-ok")
+        fail_name = _coll("deleg-part-fail")
+        _seed_source(source_client, ok_name, 2)
+        _seed_source(source_client, fail_name, 4)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint",
+            lambda vc: ("http://svc", "tok", "default"),
+        )
+        monkeypatch.setattr(
+            etl_mod, "probe_ingest_cloud_support", lambda url, **kw: True
+        )
+
+        def _fake_delegate(names, **kwargs):
+            results = [CollectionResult(ok_name, 2, 2, "migrated", delegated=True)]
+            return results, [fail_name]
+
+        monkeypatch.setattr(etl_mod, "_delegate_ingest_cloud", _fake_delegate)
+
+        report = migrate_cloud(fake)
+
+        by_name = {r.collection: r for r in report.results}
+        assert by_name[ok_name].delegated is True
+        # fail_name fell through to the client-mediated path and still landed.
+        assert by_name[fail_name].delegated is False
+        assert by_name[fail_name].status == "migrated"
+        assert by_name[fail_name].written_count == 4
+
+    def test_ephemeral_collections_never_offered_to_delegation(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        ephemeral = "tuples__deleg-eph__minilm-l6-v2-384__v1"
+        normal = _coll("deleg-eph-normal")
+        _seed_source(source_client, ephemeral, 1)
+        _seed_source(source_client, normal, 1)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint",
+            lambda vc: ("http://svc", "tok", "default"),
+        )
+        monkeypatch.setattr(
+            etl_mod, "probe_ingest_cloud_support", lambda url, **kw: True
+        )
+
+        captured_eligible: list[list[str]] = []
+
+        def _fake_delegate(names, **kwargs):
+            captured_eligible.append(list(names))
+            results = [CollectionResult(n, 1, 1, "migrated", delegated=True) for n in names]
+            return results, []
+
+        monkeypatch.setattr(etl_mod, "_delegate_ingest_cloud", _fake_delegate)
+
+        report = migrate_cloud(fake)
+
+        assert captured_eligible == [[normal]]
+        by_name = {r.collection: r for r in report.results}
+        assert by_name[ephemeral].status == "excluded"
+        assert by_name[ephemeral].delegated is False
+        assert by_name[normal].delegated is True
+
+    def test_dry_run_never_attempts_delegation(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        name = _coll("deleg-dryrun")
+        _seed_source(source_client, name, 3)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+
+        def _unexpected(*a, **kw):
+            raise AssertionError("dry-run must never touch delegation")
+
+        monkeypatch.setattr(etl_mod, "_resolve_delegation_endpoint", _unexpected)
+
+        report = migrate_cloud(fake, dry_run=True)
+
+        assert report.results[0].status == "dry-run"
+        assert report.results[0].source_count == 3
+
+
 # ── Unit: rollback ────────────────────────────────────────────────────────────
 
 
