@@ -104,10 +104,23 @@ nx memory put -p shakeout -t probe-1 "verb matrix probe" --ttl 1d >/dev/null 2>&
 yes | nx memory delete -p shakeout -t probe-1 >/dev/null 2>&1
 nx memory get -p shakeout -t probe-1 >/dev/null 2>&1 && bad "memory delete (row survived)" || ok "memory delete"
 
-# T1 scratch — service-backed T1 requires an explicit session id
-export NX_T1_SESSION="candidate-shakeout"
-run_check "scratch put" "Stored" nx scratch put "shakeout scratch probe" --tags shakeout
-run_check "scratch search" "shakeout" nx scratch search "shakeout scratch probe"
+# T1 scratch — the SANCTIONED bare-CLI path: service-backed T1 requires a
+# MINTED session token (only the nx-mcp lifespan mints; re-minting rotates,
+# so the CLI must not self-mint — nexus-h8rf6 T1-401 finding). Ephemeral
+# isolated mode is the sanctioned standalone posture; the minted-token path
+# is exercised by the --fullstack leg (real MCP). Also assert the unminted
+# path fails CLEANLY (actionable ClickException, not a traceback).
+run_check "scratch put (isolated)"    "Stored"   env NX_T1_ISOLATED=1 nx scratch put "shakeout scratch probe" --tags shakeout
+UNMINTED_OUT="$(NX_T1_SESSION=unminted-probe nx scratch list 2>&1)"
+if printf '%s' "$UNMINTED_OUT" | grep -q "Traceback"; then
+  bad "unminted scratch must fail cleanly (got a traceback)"
+  printf '%s\n' "$UNMINTED_OUT" | sed 's/^/       | /' | tail -6
+elif printf '%s' "$UNMINTED_OUT" | grep -q "NX_T1_ISOLATED=1"; then
+  ok "unminted scratch fails cleanly with actionable guidance"
+else
+  bad "unminted scratch error lacks the sanctioned-path guidance"
+  printf '%s\n' "$UNMINTED_OUT" | sed 's/^/       | /' | tail -6
+fi
 
 # T3 store: put -> search -> delete-by-TITLE (umvh2 regression) -> verify gone
 PROBE_MD=/tmp/shakeout-probe.md
