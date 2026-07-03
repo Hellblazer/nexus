@@ -6,6 +6,61 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.3.0] - 2026-07-03
+
+The service-mode seam-closure release (epic nexus-h8rf6). The first systematic
+post-consolidation shakeout of the 6.2.0 client against the cloud engine found
+a family of Chroma-era client seams never ported to service mode; this release
+closes all of them, plus the engine hardening that came out of a whole-tree
+Java audit. Pins engine-service-v0.1.21 (deployed + cloud-gated 2026-07-03).
+
+### Fixed
+- Service mode: `nx store expire` no longer crashes — `HttpVectorClient.expire`
+  implemented ($ne-based TTL pre-filter; `is_expired` stays authoritative).
+- Service mode: `nx doctor --fix-paths` no longer crashes —
+  `update_source_path` ported (accumulate-before-update pagination).
+- Service mode: `nx t3 gc` / `prune-stale` no longer silently no-op —
+  `delete_by_chunk_ids`, `list_unique_source_paths`,
+  `list_chunks_with_metadata` ported.
+- Service mode: the doctor model-drift probe no longer reports `error` for
+  every collection — `collection_metadata` ported with full T3 parity.
+- Service mode: distance-threshold filtering was silently disabled on every
+  search (retired `t3._voyage_client` gate); the reranker fix's sibling.
+  Thresholds now apply iff not local mode and a Voyage key is configured.
+- Service mode: `nx store delete --title`, `nx store list`, `nx collection
+  info` crashes — `find_ids_by_title`, `batch_delete`, `list_store`,
+  `collection_info` ported.
+- Cross-corpus reranker silently skipped in service mode
+  (`get_voyage_client()` fallback, now memoized).
+- Incremental indexing restored in service mode: `docs_for_chashes` returns
+  the documented dict shape and sends 32-char chash prefixes on the wire
+  (staleness cache was building empty, degrading every run to a full
+  re-embed).
+- Taxonomy assign hook crashed on every document in service mode (numpy
+  array truthiness).
+- `NX_T1_ISOLATED=1` now wins over service-backend T1 routing; bare-CLI
+  `nx scratch` 401s explain the minted-token design with sanctioned paths.
+- `delete_by_chunk_ids` no longer reports 0 after a partially-successful
+  multi-batch delete.
+
+### Added
+- Chash-existence short-circuit before server-side embedding: full/forced
+  re-index runs skip the Voyage embed for chunks whose content-addressed
+  chash already exists (metadata still refreshed) — the dominant cost of
+  full-run service-mode indexing.
+- `HttpVectorClient` signature-parity pin extended to all newly ported
+  methods; real-client CLI tests (faked transport, no mocks) for the
+  service-mode command surface.
+
+### Changed
+- Pinned engine: engine-service-v0.1.21 — carries the catalog-registration
+  convoy fixes (registration in its own micro-transaction +
+  `CollectionRegistry` cache with eviction on delete/rename), per-DataSource
+  admission control (typed 503 on admission timeout), a unified typed
+  DB-error ladder across all HTTP handlers (SQLSTATE-23 -> 409, pool
+  exhaustion -> 503), an `updateDocument` column whitelist, and jOOQ DSL
+  conversions for the plain catalog DML.
+
 ## [6.2.0] - 2026-07-02
 
 The unattended-migration release (RDR-178). An incident-shaped migration gap
