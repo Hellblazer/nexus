@@ -545,6 +545,82 @@ def _embed_with_fallback(
     return all_emb, model
 
 
+def _upsert_skip_reembed(
+    db: Any,
+    collection_name: str,
+    ids: list[str],
+    documents: list[str],
+    embeddings: list,
+    metadatas: list[dict],
+) -> int:
+    """Upsert chunks, short-circuiting server-side re-embedding of known chashes.
+
+    nexus-h8rf6.4: the 6.2.0 shakeout measured full-run service-mode indexing
+    at ~4.7 files/min — every chunk went to ``/v1/vectors/upsert-chunks`` and
+    was embedded via Voyage even when its chash already existed in the
+    collection. Chunks are content-addressed (``chash = sha256(chunk_text)``),
+    so an existing chash means IDENTICAL text and the stored embedding is
+    already correct by construction; only the METADATA may need refreshing
+    (source_path/indexed_at — the pre-optimization upsert's ON CONFLICT DO
+    UPDATE refreshed it, so skipping outright would strand stale metadata).
+
+    Service mode only: the split happens BEFORE any embedding cost is paid
+    (the server embeds). In local mode the embeddings were already computed
+    by the caller, so there is nothing left to save — full upsert unchanged.
+
+    The existence probe is an optimization, never a gate: any probe failure
+    (or a db shape without ``existing_ids``) degrades to the full upsert,
+    i.e. exactly the pre-optimization behavior.
+
+    Returns the number of chunks actually sent down the embed path.
+    """
+    from nexus.db import http_vector_client as _hvc  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+
+    if not ids:
+        return 0
+    if not _hvc.is_vector_service_mode():
+        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+        return len(ids)
+    present: set[str] = set()
+    try:
+        present = set(db.existing_ids(collection_name, ids))
+    except Exception as exc:  # noqa: BLE001 — probe is best-effort; full upsert is the correct fallback
+        _log.warning(
+            "existing_ids_probe_failed_full_upsert",
+            collection=collection_name,
+            error=str(exc),
+        )
+    if not present:
+        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+        return len(ids)
+    new_idx = [i for i, cid in enumerate(ids) if cid not in present]
+    old_idx = [i for i, cid in enumerate(ids) if cid in present]
+    if new_idx:
+        db.upsert_chunks_with_embeddings(
+            collection_name,
+            [ids[i] for i in new_idx],
+            [documents[i] for i in new_idx],
+            [embeddings[i] for i in new_idx],
+            [metadatas[i] for i in new_idx],
+        )
+    if old_idx:
+        # Metadata-only refresh — no embedding cost, preserves the
+        # pre-optimization ON CONFLICT DO UPDATE metadata semantics.
+        db.update_chunks(
+            collection_name,
+            [ids[i] for i in old_idx],
+            [metadatas[i] for i in old_idx],
+        )
+    _log.debug(
+        "upsert_skip_reembed",
+        collection=collection_name,
+        total=len(ids),
+        embedded=len(new_idx),
+        skipped=len(old_idx),
+    )
+    return len(new_idx)
+
+
 def _index_document(
     file_path: Path,
     corpus: str,
@@ -716,7 +792,7 @@ def _index_document(
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
-    db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+    _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas)
 
     # Post-store hook chains (RDR-095). Both single-doc and batch chains
     # fire from every storage event; the per-doc loop covers single-shape
@@ -888,8 +964,8 @@ def _index_pdf_incremental(
             for m in batch_metas:
                 m["embedding_model"] = actual_model
 
-        # Upsert
-        t3.upsert_chunks_with_embeddings(collection_name, batch_ids, batch_docs, embeddings, batch_metas)
+        # Upsert (nexus-h8rf6.4: known chashes skip the server-side embed)
+        _upsert_skip_reembed(t3, collection_name, batch_ids, batch_docs, embeddings, batch_metas)
 
         # RDR-108 Phase 3: inject the global chunk_index per row before
         # firing the batch chain. ``batch_metas`` came from
@@ -1435,7 +1511,8 @@ def index_pdf(
     if actual_model != target_model:
         for m in metadatas_list:
             m["embedding_model"] = actual_model
-    db.upsert_chunks_with_embeddings(col_name, ids, documents, embeddings, metadatas_list)
+    # nexus-h8rf6.4: known chashes skip the server-side embed.
+    _upsert_skip_reembed(db, col_name, ids, documents, embeddings, metadatas_list)
 
     # Post-store hook chains (RDR-095). Both single-doc and batch chains
     # fire from every storage event; the per-doc loop covers single-shape
