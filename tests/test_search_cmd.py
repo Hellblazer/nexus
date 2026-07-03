@@ -397,7 +397,7 @@ def test_search_service_mode_invokes_reranker_via_config_client(
 
     assert result.exit_code == 0, result.output
     assert mock_voyage_client.rerank.called
-    items = json.loads(result.output)
+    items = json.loads(result.stdout)
     assert [item["id"] for item in items] == ["r1", "r0"]
 
 

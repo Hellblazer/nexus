@@ -623,6 +623,13 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # embedder assertion, so the cloud_mode fixture is not applicable.
     "tests/test_issue_1060_collection_name_overflow.py::test_short_known_voyage_name_passes",
     #
+    # nexus-h8rf6.3: shape-conformance regression — a REAL HttpCatalogClient
+    # (faked transport) flows through build_staleness_cache; the voyage token
+    # appears only inside a conformant collection-name string used as data
+    # ("string-literal-as-name" class). No embedder runs; no mode-dependent
+    # path is exercised.
+    "tests/catalog/test_docs_for_chashes_shape_conformance.py::TestBuildStalenessCacheConsumesRealHttpClient::test_no_raise_with_real_http_catalog_client",
+    #
     # RDR-159 P4 (nexus-ue6g7.24): the guided-upgrade driver's two-leg test
     # uses a conformant voyage-named collection STRING to assert the composite
     # read client routes it to the cloud leg + that distinct dims (384, 1024)
