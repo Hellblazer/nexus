@@ -156,6 +156,31 @@ if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ]; then
   [ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
 fi
 
+# ── Pre-flight Docker disk-pressure check (nexus-h8rf6.13) ────────────────────
+# The recurring barf is Docker Desktop's capped VM disk, not the host:
+# iteration-heavy sessions accumulate build cache + dangling rehearsal-image
+# generations until builds crawl (~80GB observed across 4 shakeout iterations).
+# When reclaimable build cache exceeds the threshold, prune — with headroom
+# generous enough to KEEP the hot layers (v0.1.21 lesson: an aggressive
+# --reserved-space 6GB evicted the freshly-unreferenced 692MB bge model layer
+# and forced a full re-download on the next build; 12GB spares it). Old
+# dangling image generations are pruned by age so the current lineage stays.
+# Prune only touches unused entries, so this is safe even with other builds up.
+preflight_docker_prune() {
+  local reclaimable_gb
+  reclaimable_gb="$(docker system df --format '{{.Type}} {{.Reclaimable}}' 2>/dev/null \
+    | awk '/^Build Cache/ {v=$3+0; if ($3 ~ /TB/) v=v*1024; else if ($3 !~ /GB/) v=0; print int(v)}')"
+  reclaimable_gb="${reclaimable_gb:-0}"
+  if [ "${reclaimable_gb:-0}" -gt 10 ] 2>/dev/null; then
+    echo "[preflight] Docker build cache reclaimable ~${reclaimable_gb}GB (>10GB) — pruning (reserved-space 12GB keeps hot layers incl. the bge model)…"
+    docker builder prune -f --reserved-space 12GB 2>/dev/null | tail -1 || true
+    # Belt: drop dangling (untagged) image generations older than a day —
+    # this is what actually releases superseded rehearsal-image layers.
+    docker image prune -f --filter 'until=24h' 2>/dev/null | tail -1 || true
+  fi
+}
+preflight_docker_prune
+
 echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_PUNCH=$HOLE_PUNCH WITH_CLOUD=$WITH_CLOUD)…"
 # Flatten wheel + JAR + driver to fixed names in a tiny throwaway context. The
 # repo .dockerignore excludes dist/, and the inputs live in three different
