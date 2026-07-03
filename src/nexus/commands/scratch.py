@@ -26,8 +26,10 @@ def _clean_service_errors(fn):
         try:
             return fn(*args, **kwargs)
         except RuntimeError as exc:
+            from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER  # noqa: PLC0415 — deferred import (http store must not load on every CLI start)
+
             msg = str(exc)
-            if "401" in msg and "HttpScratchStore" in msg:
+            if SESSION_UNAUTHORIZED_MARKER in msg:
                 raise click.ClickException(
                     f"{msg}\n\n"
                     "Service-backed T1 scratch is session-scoped and requires a "

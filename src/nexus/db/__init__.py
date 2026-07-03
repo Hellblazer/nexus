@@ -107,10 +107,35 @@ def get_voyage_client(*, _api_key: str | None = None) -> object | None:
     ``T3Database``'s graceful-degradation behavior. Callers must treat a
     ``None`` return as "feature unavailable", never as a hard failure.
 
-    *_api_key* is test-only injection (skips ``get_credential``);
-    production callers omit it.
+    *_api_key* is test-only injection (skips ``get_credential`` AND the
+    process-local cache); production callers omit it.
+
+    The production (no-injection) path memoizes its result — including a
+    ``None`` "unconfigured" outcome — for the process lifetime (wave
+    review: ``get_credential`` re-reads config.yml and ``voyageai.Client``
+    is re-constructed per rerank call otherwise; the retired T3Database
+    built its client once at handle init). Credential changes therefore
+    require a process restart, same as the T3Database-era behavior.
     """
-    api_key = _api_key if _api_key is not None else get_credential("voyage_api_key")
+    global _voyage_client_cache
+    if _api_key is not None:
+        return _build_voyage_client(_api_key)
+    if _voyage_client_cache is _VOYAGE_CACHE_UNSET:
+        _voyage_client_cache = _build_voyage_client(get_credential("voyage_api_key"))
+    return _voyage_client_cache
+
+
+_VOYAGE_CACHE_UNSET: object = object()
+_voyage_client_cache: object | None = _VOYAGE_CACHE_UNSET
+
+
+def reset_voyage_client_cache_for_tests() -> None:
+    """Clear the :func:`get_voyage_client` memo (test isolation)."""
+    global _voyage_client_cache
+    _voyage_client_cache = _VOYAGE_CACHE_UNSET
+
+
+def _build_voyage_client(api_key: str) -> object | None:
     if not api_key:
         return None
 

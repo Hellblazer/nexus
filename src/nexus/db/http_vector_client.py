@@ -1387,13 +1387,29 @@ class HttpVectorClient:
         """
         if not chunk_ids:
             return 0
-        try:
-            self.batch_delete(collection_name, chunk_ids)
-        except VectorServiceError as exc:
-            if exc.code == 404:
-                return 0
-            raise
-        return len(chunk_ids)
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        deleted = 0
+        for start in range(0, len(chunk_ids), size):
+            batch = chunk_ids[start:start + size]
+            try:
+                _post(
+                    "/v1/vectors/store-delete",
+                    {"collection": collection_name, "ids": batch},
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                # 404 before anything was deleted = missing collection (T3
+                # parity: 0). A failure AFTER a successful batch must NOT be
+                # reported as 0 — the caller (nx t3 gc) would log "deleted 0"
+                # despite partial deletion (wave review, sibling convention:
+                # mid-pagination failures are never swallowed).
+                if exc.code == 404 and deleted == 0:
+                    return 0
+                raise
+            deleted += len(batch)
+        return deleted
 
     def list_unique_source_paths(self, collection_name: str) -> list[str]:
         """Return every distinct ``source_path`` value in *collection_name*.
@@ -1561,6 +1577,19 @@ class HttpVectorClient:
         metadata is not exposed by the service API), so that key is always
         ``{}``.
         """
+        return {"count": self._count_or_key_error(name), "metadata": {}}
+
+    def _count_or_key_error(self, name: str) -> int:
+        """Return the live chunk count for *name*, raising ``KeyError`` on absent.
+
+        Shared by :meth:`collection_info` and :meth:`collection_metadata`
+        (wave review: the block was duplicated verbatim). On the pgvector
+        path a collection with zero live rows is indistinguishable from an
+        absent one (RDR-156 Decision 6), so ``count == 0`` also raises.
+        NOTE: callers that enumerate via :meth:`list_collections` can never
+        hit the zero-count branch — that listing only returns collections
+        with live chunks — so the doctor probes iterating it are unaffected.
+        """
         try:
             n = self.count(name)
         except VectorServiceError as exc:
@@ -1569,7 +1598,7 @@ class HttpVectorClient:
             raise
         if n == 0:
             raise KeyError(f"Collection not found: {name!r}")
-        return {"count": n, "metadata": {}}
+        return n
 
     def collection_metadata(self, collection_name: str) -> dict:
         """Return metadata dict for a collection.
@@ -1595,14 +1624,7 @@ class HttpVectorClient:
             index_model_for_collection,
         )
 
-        try:
-            n = self.count(collection_name)
-        except VectorServiceError as exc:
-            if exc.code == 404:
-                raise KeyError(f"Collection not found: {collection_name!r}") from exc
-            raise
-        if n == 0:
-            raise KeyError(f"Collection not found: {collection_name!r}")
+        n = self._count_or_key_error(collection_name)
         parsed = embedding_model_for_collection_name(collection_name)
         return {
             "name": collection_name,

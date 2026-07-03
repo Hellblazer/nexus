@@ -1172,3 +1172,76 @@ class TestCollectionMetadata:
         monkeypatch.setattr(HttpVectorClient, "count", fake_count)
         with pytest.raises(VectorServiceError):
             HttpVectorClient().collection_metadata(self._CONFORMANT)
+
+
+class TestDeleteByChunkIdsPartialFailure:
+    """Wave review #2: a failure AFTER a successful batch must not be
+    reported as 0 — nx t3 gc would log 'deleted 0' despite partial deletion.
+    """
+
+    def test_failure_after_first_batch_reraises(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        calls = []
+
+        def fake_post(path, body, **kw):
+            calls.append(body)
+            if len(calls) > 1:
+                raise VectorServiceError("gone mid-run", code=404)
+            return {}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        ids = [f"id{i}" for i in range(301)]  # 2 batches at the 300 quota
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().delete_by_chunk_ids("c", ids)
+        assert len(calls) == 2  # first batch succeeded, second raised
+
+    def test_404_on_first_batch_still_returns_zero(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        assert HttpVectorClient().delete_by_chunk_ids("gone", ["a"]) == 0
+
+
+class TestVoyageClientCache:
+    """Wave review #5: get_voyage_client() memoizes the production path —
+    the retired T3Database built its client once at handle init; per-call
+    construction (credential file read + voyageai.Client) regressed that.
+    """
+
+    def test_production_path_memoizes(self, monkeypatch):
+        import nexus.db as db
+
+        db.reset_voyage_client_cache_for_tests()
+        built = []
+
+        def fake_build(api_key):
+            built.append(api_key)
+            return object()
+
+        monkeypatch.setattr(db, "_build_voyage_client", fake_build)
+        monkeypatch.setattr(db, "get_credential", lambda name: "sk-x")
+        a = db.get_voyage_client()
+        b = db.get_voyage_client()
+        assert a is b
+        assert built == ["sk-x"]
+        db.reset_voyage_client_cache_for_tests()
+
+    def test_injected_key_bypasses_cache(self, monkeypatch):
+        import nexus.db as db
+
+        db.reset_voyage_client_cache_for_tests()
+        built = []
+
+        def fake_build(api_key):
+            built.append(api_key)
+            return object()
+
+        monkeypatch.setattr(db, "_build_voyage_client", fake_build)
+        db.get_voyage_client(_api_key="k1")
+        db.get_voyage_client(_api_key="k2")
+        assert built == ["k1", "k2"]  # no memoization on the test-injection path
+        db.reset_voyage_client_cache_for_tests()

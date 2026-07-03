@@ -317,9 +317,27 @@ def _voyage_thresholds_active(t3: Any) -> bool:
         return True
     if not isinstance(t3, HttpVectorClient):
         return False
-    from nexus.config import get_credential, is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
+    global _service_thresholds_memo
+    if _service_thresholds_memo is None:
+        # Memoized for the process lifetime (wave review): is_local_mode +
+        # get_credential each re-read config.yml, a per-search file-IO cost.
+        # Mode/credential changes require a process restart — same lifetime
+        # the retired T3Database gave its _voyage_client.
+        from nexus.config import get_credential, is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
 
-    return not is_local_mode() and bool(get_credential("voyage_api_key"))
+        _service_thresholds_memo = (
+            not is_local_mode() and bool(get_credential("voyage_api_key"))
+        )
+    return _service_thresholds_memo
+
+
+_service_thresholds_memo: bool | None = None
+
+
+def reset_threshold_gate_cache_for_tests() -> None:
+    """Clear the service-mode threshold-gate memo (test isolation)."""
+    global _service_thresholds_memo
+    _service_thresholds_memo = None
 
 
 def _overfetch_multiplier(collection_name: str) -> int:

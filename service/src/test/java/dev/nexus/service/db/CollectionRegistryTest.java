@@ -306,4 +306,23 @@ class CollectionRegistryTest {
         // Same tenant, distinct collection — must NOT be known.
         assertThat(CollectionRegistry.isKnown("t1", "c2")).isFalse();
     }
+
+    @Test
+    void evict_forgetsOnlyTheEvictedPair() {
+        // nexus-h8rf6 wave review: deleteCollection / renameCollection remove the
+        // catalog_collections row post-commit; a stale cache entry would make
+        // later writers silently skip re-registration for a reused name.
+        CollectionRegistry.markKnown("t1", "c1");
+        CollectionRegistry.markKnown("t1", "c2");
+        CollectionRegistry.markKnown("t2", "c1");
+
+        CollectionRegistry.evict("t1", "c1");
+
+        assertThat(CollectionRegistry.isKnown("t1", "c1")).isFalse();
+        // Sibling collection and other tenant untouched.
+        assertThat(CollectionRegistry.isKnown("t1", "c2")).isTrue();
+        assertThat(CollectionRegistry.isKnown("t2", "c1")).isTrue();
+        // Evicting an unknown pair is a harmless no-op.
+        CollectionRegistry.evict("t1", "never-known");
+    }
 }

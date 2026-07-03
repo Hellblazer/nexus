@@ -1281,6 +1281,16 @@ class TestThresholdGateServiceMode:
         ],
     }
 
+    @pytest.fixture(autouse=True)
+    def _reset_gate_memo(self):
+        # The gate memoizes its config lookup for the process lifetime
+        # (wave review #6) — clear it around each test so the per-test
+        # monkeypatched config functions are actually consulted.
+        from nexus.search_engine import reset_threshold_gate_cache_for_tests
+        reset_threshold_gate_cache_for_tests()
+        yield
+        reset_threshold_gate_cache_for_tests()
+
     def _service_t3(self, monkeypatch):
         from nexus.db.http_vector_client import HttpVectorClient
         client = HttpVectorClient()

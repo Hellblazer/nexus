@@ -96,7 +96,13 @@ class CatalogDeleteCollectionCascadeTest {
 
     @Test @Order(10)
     void deleteCollection_returnsExactPerTableCounts() {
+        // nexus-h8rf6 wave review: a pre-delete CollectionRegistry entry must be
+        // evicted by the delete — a stale entry would make later writers skip
+        // re-registration if the collection name is reused.
+        dev.nexus.service.db.CollectionRegistry.markKnown(TENANT_A, COLL);
         Map<String, Integer> counts = repo.deleteCollection(TENANT_A, COLL);
+        assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(TENANT_A, COLL))
+            .as("registry cache evicted post-delete").isFalse();
         assertThat(counts.get("chunks_384")).as("chunks_384").isEqualTo(2);
         assertThat(counts.get("chunks_768")).as("chunks_768").isEqualTo(1);
         assertThat(counts.get("chunks_1024")).as("chunks_1024").isEqualTo(1);

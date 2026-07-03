@@ -1420,6 +1420,16 @@ public final class CatalogRepository {
      * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name) {
+        Map<String, Integer> counts = deleteCollectionTxn(tenant, name);
+        // Post-commit (nexus-h8rf6 wave review): the registry row is gone; a stale
+        // CollectionRegistry entry would make later writers silently skip
+        // re-registration if the name is reused. Same post-commit discipline as
+        // markKnown — see CollectionRegistry.evict.
+        CollectionRegistry.evict(tenant, name);
+        return counts;
+    }
+
+    private Map<String, Integer> deleteCollectionTxn(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
             // 1. T3 chunk vectors (registry children, fk-002 RESTRICT).
@@ -1516,6 +1526,19 @@ public final class CatalogRepository {
      * rows untouched — preserving pre-RDR-164 RDR-162 behavior.
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
+        Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName);
+        // Post-commit (nexus-h8rf6 wave review): the canonical branch DELETEs the
+        // old registry row — evict it so a later same-named collection re-registers.
+        // The cross-model COPY branch leaves both registry rows untouched (no key
+        // in counts), so nothing is evicted there.
+        if (counts.containsKey("catalog_collections_deleted")) {
+            CollectionRegistry.evict(tenant, oldName);
+            CollectionRegistry.markKnown(tenant, newName);
+        }
+        return counts;
+    }
+
+    private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName) {
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
             boolean targetExists = ctx.fetchExists(

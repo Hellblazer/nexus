@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from nexus.commands.scratch import scratch
+from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER, HttpScratchStore
 
 
 def _t1_raising(exc: Exception) -> MagicMock:
@@ -26,7 +28,7 @@ def _t1_raising(exc: Exception) -> MagicMock:
 
 def test_call_time_401_is_clean_actionable_error() -> None:
     err = RuntimeError(
-        'HttpScratchStore: /v1/t1/put returned HTTP 401: {"error":"unauthorized"}'
+        f'{SESSION_UNAUTHORIZED_MARKER} on /v1/t1/put: {{"error":"unauthorized"}}'
     )
     with patch("nexus.commands.scratch._t1", return_value=_t1_raising(err)):
         result = CliRunner().invoke(scratch, ["put", "hello"])
@@ -36,6 +38,28 @@ def test_call_time_401_is_clean_actionable_error() -> None:
     assert not isinstance(result.exception, RuntimeError)
     assert "minted" in result.output
     assert "NX_T1_ISOLATED=1" in result.output
+
+
+def test_http_401_raise_site_carries_the_marker() -> None:
+    """Coupling tripwire (wave review #7): the store's actual 401 raise must
+    contain SESSION_UNAUTHORIZED_MARKER — the detection in
+    _clean_service_errors keys on it, so a wording drift at the raise site
+    would silently lose the actionable guidance."""
+    store = HttpScratchStore.__new__(HttpScratchStore)  # skip env-dependent __init__
+    resp = MagicMock()
+    resp.is_success = False
+    resp.status_code = 401
+    resp.text = '{"error":"unauthorized"}'
+    store._client = MagicMock()
+    store._client.post.return_value = resp
+
+    with pytest.raises(RuntimeError) as exc_info:
+        store._post("/v1/t1/put", {})
+    assert SESSION_UNAUTHORIZED_MARKER in str(exc_info.value)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        store._post_raw("/v1/t1/get", {})
+    assert SESSION_UNAUTHORIZED_MARKER in str(exc_info.value)
 
 
 def test_call_time_generic_service_error_is_clean() -> None:
