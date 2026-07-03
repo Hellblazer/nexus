@@ -545,6 +545,200 @@ class TestNotImplementedMethods:
     # get_embeddings was here until nexus-pebfx.7 implemented it via
     # /v1/vectors/get-embeddings — see TestGetEmbeddings.
 
+    # find_ids_by_title / batch_delete / list_store / collection_info were
+    # here until nexus-umvh2 implemented them — see TestFindIdsByTitle,
+    # TestBatchDelete, TestListStore, TestCollectionInfo below.
+
+
+class TestFindIdsByTitle:
+    """nexus-umvh2: find_ids_by_title was missing entirely, crashing
+    `nx store delete --title` and the MCP store_get title-fallback with
+    AttributeError in service mode. Mirrors ids_for_source's where-filter
+    pagination pattern (nexus-vhyua)."""
+
+    def test_paginates_and_collects(self, monkeypatch):
+        # Two pages (300 then 2) -> single flat id list; second short page ends it.
+        pages = [
+            {"ids": [f"id{i}" for i in range(300)]},
+            {"ids": ["id300", "id301"]},
+        ]
+        calls = []
+
+        def fake_post(path, body, **kw):
+            page = pages[len(calls)]
+            calls.append((path, body))
+            return page
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client = HttpVectorClient()
+        ids = client.find_ids_by_title("knowledge__nexus__model__v1", "doc.md")
+        assert len(ids) == 302
+        assert calls[0][1]["where"] == {"title": "doc.md"}
+        assert all(c[0] == "/v1/vectors/get" for c in calls)
+
+    def test_no_matches_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda p, b, **kw: {"ids": []},
+        )
+        client = HttpVectorClient()
+        assert client.find_ids_by_title("col", "missing.md") == []
+
+    def test_404_first_page_returns_empty(self, monkeypatch):
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client = HttpVectorClient()
+        assert client.find_ids_by_title("missing-col", "doc.md") == []
+
+    def test_mid_pagination_error_reraises(self, monkeypatch):
+        # A 500 on page 2 (after ids collected) must NOT be masked as "no more
+        # matches" — else `nx store delete --title` would under-delete and
+        # report success.
+        def fake_post(path, body, **kw):
+            if body["offset"] == 0:
+                return {"ids": [f"id{i}" for i in range(300)]}
+            raise VectorServiceError("server error", code=500)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client = HttpVectorClient()
+        with pytest.raises(VectorServiceError):
+            client.find_ids_by_title("col", "doc.md")
+
+
+class TestBatchDelete:
+    """nexus-umvh2: batch_delete was missing — the second AttributeError on
+    `nx store delete --title`'s happy path (after find_ids_by_title resolves
+    ids). Batches at the service write quota like update_chunks."""
+
+    def test_empty_ids_is_noop(self, monkeypatch):
+        posted = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: posted.append((path, body)),
+        )
+        HttpVectorClient().batch_delete("col", [])
+        assert posted == []
+
+    def test_deletes_via_store_delete(self, monkeypatch):
+        calls = []
+
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"deleted": len(body["ids"])}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        HttpVectorClient().batch_delete("col", ["id1", "id2"])
+        assert len(calls) == 1
+        assert calls[0][0] == "/v1/vectors/store-delete"
+        assert calls[0][1]["ids"] == ["id1", "id2"]
+        assert calls[0][1]["collection"] == "col"
+
+    def test_batches_at_300(self, monkeypatch):
+        calls = []
+
+        def fake_post(path, body, **kw):
+            calls.append(body["ids"])
+            return {"deleted": len(body["ids"])}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        ids = [f"id{i:04d}" for i in range(350)]
+        HttpVectorClient().batch_delete("col", ids)
+        assert len(calls) == 2
+        assert len(calls[0]) == 300
+        assert len(calls[1]) == 50
+        assert sorted(x for batch in calls for x in batch) == sorted(ids)
+
+
+class TestListStore:
+    """nexus-umvh2 sibling audit: list_store was missing, crashing `nx store
+    list` / `nx store list --docs` / `nx collection info --docs` / MCP
+    store_list in service mode — the same class of bug as
+    find_ids_by_title, just unreported because the CLI test fixtures mock
+    the whole T3 client (bare MagicMock, no spec=)."""
+
+    def test_returns_flat_entries(self, monkeypatch):
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda p, b, **kw: {
+                "ids": ["id1", "id2"],
+                "metadatas": [{"title": "a.md"}, {"title": "b.md"}],
+            },
+        )
+        entries = HttpVectorClient().list_store("col", limit=200, offset=0)
+        assert entries == [
+            {"id": "id1", "title": "a.md"},
+            {"id": "id2", "title": "b.md"},
+        ]
+
+    def test_passes_limit_and_offset(self, monkeypatch):
+        calls = []
+
+        def fake_post(path, body, **kw):
+            calls.append(body)
+            return {"ids": [], "metadatas": []}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        HttpVectorClient().list_store("col", limit=50, offset=100)
+        assert calls[0]["limit"] == 50
+        assert calls[0]["offset"] == 100
+        assert calls[0]["collection"] == "col"
+
+    def test_404_returns_empty(self, monkeypatch):
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("nf", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        assert HttpVectorClient().list_store("missing-col") == []
+
+    def test_non_404_error_reraises(self, monkeypatch):
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("server error", code=500)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().list_store("col")
+
+
+class TestCollectionInfo:
+    """nexus-umvh2 sibling audit: collection_info was missing, crashing
+    `nx store list`'s total-count display, `nx collection info`, and
+    `nx collection reindex` in service mode."""
+
+    def test_returns_count_for_existing_collection(self, monkeypatch):
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._get",
+            lambda p, **kw: {"count": 42},
+        )
+        info = HttpVectorClient().collection_info("col")
+        assert info["count"] == 42
+        assert info["metadata"] == {}
+
+    def test_raises_keyerror_when_zero_count(self, monkeypatch):
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._get",
+            lambda p, **kw: {"count": 0},
+        )
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_info("missing-col")
+
+    def test_raises_keyerror_on_404(self, monkeypatch):
+        def raise_err(p, **kw):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", raise_err)
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_info("missing-col")
+
+    def test_reraises_non_404_service_error(self, monkeypatch):
+        def raise_err(p, **kw):
+            raise VectorServiceError("server error", code=500)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", raise_err)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().collection_info("col")
+
 
 # ── get_t3() routing (integration with mcp_infra) ────────────────────────────
 

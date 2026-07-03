@@ -110,8 +110,13 @@ public final class MemoryHandler implements HttpHandler {
             log.debug("event=memory_conflict tenant={} op={} error={}", tenant, op, e.getMessage());
             HttpUtil.send(exchange, 409, json(Map.of("error", e.getMessage())));
         } catch (Exception e) {
-            log.error("event=memory_handler_error tenant={} op={}", tenant, op, e);
-            HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
+            // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
+            if (!HttpUtil.sendTypedDbError(exchange, e, log, "memory_handler",
+                    "op=" + op + " tenant=" + tenant)) {
+                log.error("event=memory_handler_error tenant={} op={}", tenant, op, e);
+                HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            }
         }
     }
 

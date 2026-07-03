@@ -199,7 +199,11 @@ def test_scratch_put_service_mode_no_endpoint_clean_error(
     (exit 1, no raw RuntimeError traceback) with NX_T1_ISOLATED guidance."""
     monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
     for var in ("NX_SERVICE_URL", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN",
-                "NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
+                "NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
+                # The suite-wide autouse fixture sets NEXUS_SKIP_T1=1; since the
+                # nexus-h8rf6 fix, isolation WINS over service routing, so this
+                # service-path test must clear it too.
+                "NEXUS_SKIP_T1"):
         monkeypatch.delenv(var, raising=False)
 
     result = runner.invoke(main, ["scratch", "put", "hello"])

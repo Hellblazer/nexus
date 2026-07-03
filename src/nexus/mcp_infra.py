@@ -640,6 +640,26 @@ def resolve_tumbler_mcp(cat, value):
 # the legacy chash-before-taxonomy invariant).
 
 
+def _embedding_is_empty(embedding: object) -> bool:
+    """True when *embedding* carries no vector data.
+
+    Never evaluates the truthiness of an array-like directly: ``bool(arr)``
+    raises ``ValueError('truth value of an array with more than one
+    element is ambiguous')`` for numpy arrays with more than one element
+    (nexus-h8rf6.11 — hit on every service-mode index when the local
+    fastembed embedder's numpy-array output reached ``any(svc_embeddings)``
+    inside :func:`taxonomy_assign_batch_hook`). Prefers ``.size`` (numpy
+    ndarrays) over ``len()`` since ``len()`` raises ``TypeError`` on 0-d
+    arrays; ``.size`` is defined for both 0-d (``1``) and N-d arrays.
+    """
+    if embedding is None:
+        return True
+    size = getattr(embedding, "size", None)
+    if size is not None:
+        return size == 0
+    return len(embedding) == 0
+
+
 def taxonomy_assign_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -696,9 +716,13 @@ def taxonomy_assign_batch_hook(
         # ``[[], [], ...]`` placeholders — a non-empty OUTER list, so the old
         # ``if not svc_embeddings`` was False and zero-dim vectors reached
         # compute_assignments, silently producing no taxonomy assignments.
-        # ``not any(...)`` catches the all-empty-inner case; the ``not
-        # svc_embeddings`` short-circuit guards None / [] (any(None) raises).
-        if not svc_embeddings or not any(svc_embeddings):
+        # nexus-h8rf6.11: the follow-on ``not any(svc_embeddings)`` fix
+        # itself broke every service-mode index — ``any()`` evaluates
+        # ``bool()`` on each element, and the local fastembed embedder
+        # (bge-768 tier) returns numpy arrays, whose truthiness is
+        # ambiguous for >1-element vectors. Use an element-wise emptiness
+        # check that never calls ``bool()``/``len()`` on an array directly.
+        if not svc_embeddings or all(_embedding_is_empty(e) for e in svc_embeddings):
             try:
                 arr = get_t3().get_embeddings(collection, doc_ids)
             except Exception:  # noqa: BLE001 — embedding fetch best-effort; None triggers safe skip on count skew

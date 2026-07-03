@@ -98,8 +98,13 @@ public final class PlanHandler implements HttpHandler {
             log.debug("event=plans_bad_request tenant={} op={} error={}", tenant, op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
         } catch (Exception e) {
-            log.error("event=plans_handler_error tenant={} op={}", tenant, op, e);
-            HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
+            // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
+            if (!HttpUtil.sendTypedDbError(exchange, e, log, "plans_handler",
+                    "op=" + op + " tenant=" + tenant)) {
+                log.error("event=plans_handler_error tenant={} op={}", tenant, op, e);
+                HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            }
         }
     }
 

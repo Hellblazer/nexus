@@ -91,8 +91,13 @@ public final class ChashHandler implements HttpHandler {
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (Exception e) {
-            log.error("event=chash_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
-            HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
+            // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
+            // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
+            if (!HttpUtil.sendTypedDbError(exchange, e, log, "chash_handler",
+                    "op=" + op + " tenant=" + tenant)) {
+                log.error("event=chash_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
+                HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
+            }
         }
     }
 

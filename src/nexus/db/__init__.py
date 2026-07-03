@@ -89,3 +89,59 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClien
         _client=_client,
         _ef_override=_ef_override,
     )
+
+
+def get_voyage_client(*, _api_key: str | None = None) -> object | None:
+    """Construct a standalone Voyage AI client from configured credentials.
+
+    RDR-155 P4a.2 (nexus-1k8s1) retired ``T3Database`` from serving:
+    ``make_t3()`` now returns
+    :class:`~nexus.db.http_vector_client.HttpVectorClient` in both local
+    and cloud mode, which carries no ``_voyage_client`` attribute.
+    Consumers that need a Voyage client independent of the T3 handle's
+    shape (e.g. the cross-corpus reranker in ``nexus.scoring``, bead
+    nexus-xbw0f) call this factory instead of reaching into
+    ``t3._voyage_client``.
+
+    Returns ``None`` when ``voyage_api_key`` is not configured — mirrors
+    ``T3Database``'s graceful-degradation behavior. Callers must treat a
+    ``None`` return as "feature unavailable", never as a hard failure.
+
+    *_api_key* is test-only injection (skips ``get_credential`` AND the
+    process-local cache); production callers omit it.
+
+    The production (no-injection) path memoizes its result — including a
+    ``None`` "unconfigured" outcome — for the process lifetime (wave
+    review: ``get_credential`` re-reads config.yml and ``voyageai.Client``
+    is re-constructed per rerank call otherwise; the retired T3Database
+    built its client once at handle init). Credential changes therefore
+    require a process restart, same as the T3Database-era behavior.
+    """
+    global _voyage_client_cache
+    if _api_key is not None:
+        return _build_voyage_client(_api_key)
+    if _voyage_client_cache is _VOYAGE_CACHE_UNSET:
+        _voyage_client_cache = _build_voyage_client(get_credential("voyage_api_key"))
+    return _voyage_client_cache
+
+
+_VOYAGE_CACHE_UNSET: object = object()
+_voyage_client_cache: object | None = _VOYAGE_CACHE_UNSET
+
+
+def reset_voyage_client_cache_for_tests() -> None:
+    """Clear the :func:`get_voyage_client` memo (test isolation)."""
+    global _voyage_client_cache
+    _voyage_client_cache = _VOYAGE_CACHE_UNSET
+
+
+def _build_voyage_client(api_key: str) -> object | None:
+    if not api_key:
+        return None
+
+    from nexus.config import load_config  # noqa: PLC0415 — deferred to avoid circular import (config)
+    import voyageai  # noqa: PLC0415 — optional/heavy dependency deferred (voyageai); allowlisted construction site (src/nexus/db/)
+
+    cfg = load_config()
+    read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)
+    return voyageai.Client(api_key=api_key, timeout=read_timeout_seconds, max_retries=0)

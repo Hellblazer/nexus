@@ -753,15 +753,53 @@ class TestManifest:
         assert "chunk_hash_030000000000000000000" in chashes
 
     def test_docs_for_chashes_reverse_lookup(self, cat, doc_with_manifest) -> None:
-        """docs_for_chashes returns a flat list of distinct document tumblers.
+        """docs_for_chashes returns dict[chash, [doc_id, ...]] (nexus-h8rf6.3).
 
-        CatalogRepository.docsForChashes() runs SELECT DISTINCT doc_id WHERE
-        chash IN (?), so the result is a list of tumblers (not a per-chash map).
+        The wire endpoint (``CatalogRepository.docsForChashes``) runs SELECT
+        DISTINCT doc_id WHERE chash IN (?) and returns a flat tumbler list —
+        the client reconstructs the per-chash dict shape (parity with local
+        ``Catalog.docs_for_chashes``) via a second ``get_manifests()`` round
+        trip. Pre-fix, this method returned the flat list directly, which
+        crashed every ``by_chash.items()`` consumer with AttributeError.
         """
         t, _ = doc_with_manifest
         result = cat.docs_for_chashes(["chunk_hash_000000000000000000000", "chunk_hash_010000000000000000000"])
-        assert isinstance(result, list)
-        assert str(t) in result
+        assert isinstance(result, dict)
+        assert "chunk_hash_000000000000000000000" in result
+        assert str(t) in result["chunk_hash_000000000000000000000"]
+
+    def test_docs_for_chashes_resolves_full_64char_chunk_text_hash(
+        self, cat, doc_with_manifest,
+    ) -> None:
+        """nexus-h8rf6.12: LIVE, real-Java-service proof that a genuine
+        64-char ``chunk_text_hash`` (what code_indexer.py / doc_indexer.py /
+        prose_indexer.py actually write into chunk metadata via
+        ``hashlib.sha256(...).hexdigest()``) resolves against a manifest
+        row stored with the 32-char RDR-108 D1 natural id.
+
+        Root cause this guards: ``CatalogRepository.docsForChashes``
+        (service/.../CatalogRepository.java) does an EXACT-match
+        ``chash IN (?)`` against the stored 32-char column — no
+        server-side substr/normalization. Pre-fix, ``HttpCatalogClient
+        .docs_for_chashes`` forwarded the caller's raw (64-char) input
+        straight into that exact-match query, so every real
+        ``build_staleness_cache`` call against this real service returned
+        zero matches despite the manifest genuinely containing the chunk
+        — reproducing the shakeout's "code: 0 docs, docs: 0 docs (0.0s)"
+        symptom against a real Postgres-backed catalog, not a fixture.
+        The existing ``test_docs_for_chashes_reverse_lookup`` above could
+        not catch this: it queries with the SAME 32-char form the fixture
+        wrote, so client-side truncation is a no-op there.
+        """
+        t, _ = doc_with_manifest
+        stored_chash = "chunk_hash_000000000000000000000"
+        assert len(stored_chash) == 32
+        # A full 64-char form whose 32-char prefix matches the stored
+        # chash exactly, mirroring real chunk_text_hash -> chash[:32].
+        full_form = stored_chash + "0" * 32
+        assert len(full_form) == 64
+        result = cat.docs_for_chashes([full_form])
+        assert result == {full_form: [str(t)]}
 
     def test_purge_manifest(self, cat) -> None:
         t = cat.register(

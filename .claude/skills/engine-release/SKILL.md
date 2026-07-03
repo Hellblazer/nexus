@@ -51,7 +51,15 @@ The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge 
 tests/e2e/migration-rehearsal/run.sh --guided      # local -Ob native build → nx guided-upgrade MVV
 ```
 
-Must end `GUIDED-UPGRADE MVV PASSED`. This proves the candidate `service/` tree
+Must end `GUIDED-UPGRADE MVV PASSED`.
+
+**Optional but recommended when the cut carries CLI-visible or concurrency-relevant service changes**: also run the candidate shakeout — the full CLI-verb matrix + incremental-index + concurrent-load journey against the SAME locally-built candidate (nexus-h8rf6; born from the 2026-07-03 post-release shakeout, whose findings were all locally discoverable):
+
+```bash
+tests/e2e/migration-rehearsal/run.sh --shakeout   # verb matrix + staleness + zero-5xx-under-load
+```
+
+Must end `CANDIDATE SHAKEOUT PASSED`. A FAIL here is a product finding, not a harness formality — its maiden runs caught two production bugs the unit suites missed. This proves the candidate `service/` tree
 compiles + serves under GraalVM native-image (the `-Ob` build has the **same**
 reachability requirements as the full release build, so it catches a broken
 native build before the tag burns a release-workflow run). It is a *proxy* for

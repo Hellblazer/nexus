@@ -623,6 +623,25 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # embedder assertion, so the cloud_mode fixture is not applicable.
     "tests/test_issue_1060_collection_name_overflow.py::test_short_known_voyage_name_passes",
     #
+    # nexus-h8rf6.3: shape-conformance regression — a REAL HttpCatalogClient
+    # (faked transport) flows through build_staleness_cache; the voyage token
+    # appears only inside a conformant collection-name string used as data
+    # ("string-literal-as-name" class). No embedder runs; no mode-dependent
+    # path is exercised.
+    "tests/catalog/test_docs_for_chashes_shape_conformance.py::TestBuildStalenessCacheConsumesRealHttpClient::test_no_raise_with_real_http_catalog_client",
+    #
+    # nexus-h8rf6 wave (expire/update_source_path/collection_metadata ports +
+    # the 49523e16 live-content regression): all "string-literal-as-name" —
+    # a REAL HttpVectorClient/HttpCatalogClient over a FAKED transport, with
+    # the voyage token appearing only inside conformant collection-name
+    # strings used as opaque data (or, for collection_metadata, asserting the
+    # NAME-derived model parse). No embedder runs; no mode-dependent path.
+    "tests/catalog/test_docs_for_chashes_live_content.py::TestBuildStalenessCacheLiveContent::test_nonzero_docs_after_index_like_write",
+    "tests/test_http_vector_client_parity.py::TestExpire::test_expire_deletes_only_expired_knowledge_rows",
+    "tests/test_http_vector_client_parity.py::TestExpire::test_expire_no_knowledge_collections_returns_zero",
+    "tests/test_http_vector_client_parity.py::TestUpdateSourcePath::test_rewrites_matching_rows_and_returns_count",
+    "tests/test_http_vector_client_parity.py::TestCollectionMetadata::test_returns_t3_parity_keys",
+    #
     # RDR-159 P4 (nexus-ue6g7.24): the guided-upgrade driver's two-leg test
     # uses a conformant voyage-named collection STRING to assert the composite
     # read client routes it to the cloud leg + that distinct dims (384, 1024)

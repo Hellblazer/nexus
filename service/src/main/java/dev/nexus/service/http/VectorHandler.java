@@ -148,8 +148,13 @@ public final class VectorHandler implements HttpHandler {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
         } catch (Exception e) {
-            log.error("event=vector_handler_error op={}", op, e);
-            HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
+            // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
+            if (!HttpUtil.sendTypedDbError(exchange, e, log, "vector_handler",
+                    "op=" + op)) {
+                log.error("event=vector_handler_error op={}", op, e);
+                HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+            }
         }
     }
 

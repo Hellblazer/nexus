@@ -26,6 +26,17 @@ import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db.service_endpoint import resolve_service_config as _resolve_config
+
+# Wave review (the h8rf6.3 -> 49523e16 lesson): fixture chashes must be
+# REPRESENTATIVE -- 32-char catalog prefixes of real 64-char sha256 digests.
+# The original short literals ("abc123") made [:32] truncation a structural
+# no-op, so a wrong-length wire payload was invisible to every test here.
+# CHUNK_SHA_* are the full 64-char forms for fixtures standing in for T3
+# chunk_text_hash metadata; CHASH_* are their catalog-side 32-char prefixes.
+CHUNK_SHA_A = "2ccea837b4713a233eea0914ad7adda8bcbbbeccd9ac45e217cab14843229eb2"  # sha256("fake-chunk-A")
+CHUNK_SHA_B = "6756d390c50dd95257ad481c8ab3669f93838ed7e8f3cf334a8bbf1281d8e3b2"  # sha256("fake-chunk-B")
+CHASH_A = CHUNK_SHA_A[:32]
+CHASH_B = CHUNK_SHA_B[:32]
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 
 
@@ -144,9 +155,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"links": [{"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}], "count": 1})
         elif op == "/manifest/get":
-            self._send_json({"rows": [{"position": 0, "chash": "abc123"}], "count": 1})
+            self._send_json({"rows": [{"position": 0, "chash": CHASH_A}], "count": 1})
         elif op == "/manifest/chashes":
-            self._send_json({"chashes": ["abc123", "def456"]})
+            self._send_json({"chashes": [CHASH_A, CHASH_B]})
         elif op == "/manifest/orphans":
             params = self._query_params()
             dim = int(params.get("dim", "0"))
@@ -154,9 +165,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "dim": dim,
                 "count": 2,
                 "orphans": [
-                    {"doc_id": "1.1.1", "position": 0, "chash": "abc",
+                    {"doc_id": "1.1.1", "position": 0, "chash": CHASH_A,
                      "collection": "knowledge__o__minilm-l6-v2-384__v1"},
-                    {"doc_id": "1.1.1", "position": 1, "chash": "def",
+                    {"doc_id": "1.1.1", "position": 1, "chash": CHASH_B,
                      "collection": "knowledge__o__minilm-l6-v2-384__v1"},
                 ],
             })
@@ -241,7 +252,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"deleted": 1})
         elif op == "/manifest/get_many":
             self._send_json({"manifests": {
-                "1.1.1": [{"position": 0, "chash": "abc123", "line_start": 1, "line_end": 9}],
+                "1.1.1": [{"position": 0, "chash": CHASH_A, "line_start": 1, "line_end": 9}],
             }})
         elif op == "/manifest/docs_for_chashes":
             # Real server: {"tumblers": [tumbler_string, ...]} (flat list, SELECT DISTINCT)
@@ -524,7 +535,7 @@ class TestHttpCatalogClientRoundTrip:
         # (search_engine.py prefers this over the per-doc loop in service mode).
         by_doc = client.get_manifests(["1.1.1"])
         assert "1.1.1" in by_doc
-        assert by_doc["1.1.1"][0].chash == "abc123"
+        assert by_doc["1.1.1"][0].chash == CHASH_A
         assert by_doc["1.1.1"][0].position == 0
 
     def test_graph_post_traverse(self, client: HttpCatalogClient) -> None:
@@ -546,24 +557,24 @@ class TestHttpCatalogClientRoundTrip:
 
     def test_write_manifest_uses_rows_key(self, client: HttpCatalogClient) -> None:
         # Must send 'rows' key not 'chunks'
-        client.write_manifest("1.1.1", [{"position": 0, "chash": "abc"}])
+        client.write_manifest("1.1.1", [{"position": 0, "chash": CHASH_A}])
 
     def test_get_manifest_returns_rows(self, client: HttpCatalogClient) -> None:
         # GET /manifest/get?doc_id=X → response key 'rows'
         rows = client.get_manifest("1.1.1")
         assert len(rows) == 1
         # Return-type parity: typed ManifestRow (attribute access), like local Catalog.
-        assert rows[0].chash == "abc123"
+        assert rows[0].chash == CHASH_A
         assert rows[0].position == 0
 
     def test_get_chunk_chashes_from_manifest(self, client: HttpCatalogClient) -> None:
         # Pulls chashes from manifest rows (not a separate endpoint)
         chashes = client.get_chunk_chashes("1.1.1")
-        assert "abc123" in chashes
+        assert CHASH_A in chashes
 
     def test_chashes_for_collection(self, client: HttpCatalogClient) -> None:
         chashes = client.chashes_for_collection("code__test__v1")
-        assert "abc123" in chashes
+        assert CHASH_A in chashes
 
     def test_relation_counts_unwraps_counts_and_casts_int(
         self, client: HttpCatalogClient,
@@ -608,12 +619,52 @@ class TestHttpCatalogClientRoundTrip:
         with _pytest.raises(ValueError, match="limit must be > 0"):
             client.manifest_orphans(384, limit=0)
 
-    def test_docs_for_chashes_uses_tumblers_key(self, client: HttpCatalogClient) -> None:
-        # Real server returns {"tumblers": [tumbler_string, ...]} — flat list of tumblers,
-        # SELECT DISTINCT doc_id WHERE chash IN (...). Not a per-chash map.
-        result = client.docs_for_chashes(["abc123"])
-        assert isinstance(result, list)
-        assert "1.1.1" in result
+    def test_docs_for_chashes_returns_dict_shape(self, client: HttpCatalogClient) -> None:
+        # nexus-h8rf6.3: the wire response is {"tumblers": [tumbler_string, ...]}
+        # — a flat list from SELECT DISTINCT doc_id WHERE chash IN (...), NOT a
+        # per-chash map. The client reconstructs the dict shape (matching local
+        # Catalog.docs_for_chashes) via a second get_manifests() round-trip that
+        # intersects each candidate doc's manifest chashes against the request.
+        # Pre-fix this returned the flat list directly, which crashed every
+        # ``by_chash.items()`` consumer (build_staleness_cache et al.) with
+        # AttributeError, silently degrading every service-mode index run to a
+        # full re-chunk + re-embed.
+        result = client.docs_for_chashes([CHASH_A])
+        assert isinstance(result, dict)
+        assert result == {CHASH_A: ["1.1.1"]}
+
+    def test_docs_for_chashes_empty_input_returns_empty_dict(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        assert client.docs_for_chashes([]) == {}
+
+    def test_unlink_returns_int_count(self, client: HttpCatalogClient) -> None:
+        # nexus-h8rf6.3: pre-fix this returned a bool (deleted > 0), so
+        # commands/catalog_cmds/links.py's "Removed {removed} link(s)" echoed
+        # "Removed True link(s)" and mcp/catalog.py's {"removed": removed}
+        # returned a bool instead of a count.
+        removed = client.unlink("1.1.1", "1.1.2", "cites")
+        assert removed == 1
+        assert type(removed) is int
+
+    def test_set_owner_head_hash_returns_int_count(self, client: HttpCatalogClient) -> None:
+        # nexus-h8rf6.3: pre-fix this returned None, so indexer.py's
+        # ``if rowcount == 0: _log.warning(...)`` (lost-write detector) could
+        # never fire in service mode.
+        updated = client.set_owner_head_hash("1.1", "deadbeef")
+        assert updated == 1
+        assert type(updated) is int
+
+    def test_lookup_doc_id_by_collection_and_path_miss_returns_empty_string(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # nexus-h8rf6.3: local Catalog's documented contract is "" (never
+        # None) on no-match; align the service client to match.
+        def _fake_get(path: str, **params: object) -> dict:
+            return {"documents": []}
+        client._get = _fake_get  # type: ignore[method-assign]
+        result = client.lookup_doc_id_by_collection_and_path("code__x", "missing.py")
+        assert result == ""
 
     def test_list_collections(self, client: HttpCatalogClient) -> None:
         colls = client.list_collections()

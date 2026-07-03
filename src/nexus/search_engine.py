@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 
 from nexus.config import get_telemetry_config, load_config
-from nexus.db.http_vector_client import VectorServiceError
+from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.types import SearchResult
 
 _log = structlog.get_logger(__name__)
@@ -296,6 +296,50 @@ def _threshold_for_collection(name: str, cfg: dict) -> float | None:
     return thresholds.get("default")
 
 
+def _voyage_thresholds_active(t3: Any) -> bool:
+    """True when distance thresholds should apply for this T3 handle.
+
+    Thresholds are calibrated for Voyage AI embeddings. The historical gate
+    was ``t3._voyage_client is not None`` — a shape only the retired
+    T3Database serving handle carried (non-None only in cloud mode with a
+    Voyage key). nexus-h8rf6.9: since RDR-155 P4a.2 production serves
+    :class:`~nexus.db.http_vector_client.HttpVectorClient`, which never has
+    that attribute, so filtering silently disabled on every service-mode
+    search — the same bug class as the reranker (nexus-xbw0f).
+
+    The fallback preserves the original semantics for HttpVectorClient:
+    Voyage is in use iff NOT local mode (local embeds with bge/MiniLM —
+    Voyage-calibrated thresholds must stay off) AND a Voyage key is
+    configured. Other handles (test fakes, injected stubs) keep the
+    attribute-only gate.
+    """
+    if getattr(t3, "_voyage_client", None) is not None:
+        return True
+    if not isinstance(t3, HttpVectorClient):
+        return False
+    global _service_thresholds_memo
+    if _service_thresholds_memo is None:
+        # Memoized for the process lifetime (wave review): is_local_mode +
+        # get_credential each re-read config.yml, a per-search file-IO cost.
+        # Mode/credential changes require a process restart — same lifetime
+        # the retired T3Database gave its _voyage_client.
+        from nexus.config import get_credential, is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
+
+        _service_thresholds_memo = (
+            not is_local_mode() and bool(get_credential("voyage_api_key"))
+        )
+    return _service_thresholds_memo
+
+
+_service_thresholds_memo: bool | None = None
+
+
+def reset_threshold_gate_cache_for_tests() -> None:
+    """Clear the service-mode threshold-gate memo (test isolation)."""
+    global _service_thresholds_memo
+    _service_thresholds_memo = None
+
+
 def _overfetch_multiplier(collection_name: str) -> int:
     """Return the over-fetch multiplier for *collection_name*.
 
@@ -502,8 +546,7 @@ def search_cross_corpus(
     # Skip filtering when Voyage is not in use (local mode, test injection).
     # Explicit threshold_override bypasses this gate — caller intent wins.
     apply_thresholds = (
-        threshold_override is not None
-        or getattr(t3, "_voyage_client", None) is not None
+        threshold_override is not None or _voyage_thresholds_active(t3)
     )
 
     # Catalog pre-filter: for high-selectivity predicates, narrow the search

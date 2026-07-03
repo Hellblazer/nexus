@@ -48,6 +48,28 @@ DROP_IN_METHODS = [
     "existing_ids",
     "update_chunks",
     "get_collection",
+    # nexus-umvh2: were missing entirely (AttributeError in service mode) —
+    # implemented + pinned so the drift class cannot silently reopen.
+    "find_ids_by_title",
+    "batch_delete",
+    "list_store",
+    "collection_info",
+    # nexus-h8rf6.5: was missing entirely (AttributeError on `nx store expire`
+    # in service mode) — implemented client-side with the supported $ne
+    # operator (the T3 $gt-0 pre-filter's only job is excluding the
+    # permanent ttl_days=0 sentinel; TTLs are never negative).
+    "expire",
+    # nexus-h8rf6.6: nx doctor fix-paths crashed (unguarded per-row call).
+    "update_source_path",
+    # nexus-h8rf6.7: nx t3 gc / prune-stale silently no-oped (call sites
+    # try/except-wrapped, so the missing methods degraded instead of crashing).
+    "delete_by_chunk_ids",
+    "list_unique_source_paths",
+    "list_chunks_with_metadata",
+    # nexus-h8rf6.8: doctor's model-drift probe degraded to outcome='error'
+    # for every collection. Full parity is client-side derivable: the model
+    # fields come from the collection NAME, only count needs the server.
+    "collection_metadata",
     # get_or_create_collection is excluded (see EXCLUSIONS below)
 ]
 
@@ -77,6 +99,24 @@ EXCLUSIONS: dict[str, str] = {
         "(its list_collections fans out N col.count() calls). list_collections() "
         "itself IS pinned above; its return shape {name, count} is asserted in "
         "tests/test_http_vector_client_stats.py."
+    ),
+    "ids_for_doc_id": (
+        "NOT ported to HttpVectorClient — dead code (wave review, substantive-"
+        "critic): no caller outside T3Database itself. Documented here so the "
+        "'every live T3 method is ported or excluded-with-reason' claim stays "
+        "auditable. If a caller ever appears, port it (ids_for_source pattern) "
+        "and move it into DROP_IN_METHODS."
+    ),
+    "delete_by_doc_id": (
+        "NOT ported to HttpVectorClient — dead code (wave review, substantive-"
+        "critic): no caller outside T3Database itself. Same disposition as "
+        "ids_for_doc_id above."
+    ),
+    "rename_collection": (
+        "NOT ported to HttpVectorClient — not live in service mode: "
+        "collection_rename.py short-circuits to catalog.rename_collection_"
+        "cascade() (one atomic server transaction) before ever reaching "
+        "t3_db.rename_collection() (wave review, substantive-critic)."
     ),
 }
 
@@ -799,3 +839,427 @@ class TestDeleteBySource:
             collection_name="code__nexus__minilm-l6-v2-384__v1",
             source_path="/src/foo.py",
         ) == 0
+
+
+class TestExpire:
+    """nexus-h8rf6.5: expire() was missing entirely — `nx store expire`
+    crashed with AttributeError in service mode. Implemented client-side:
+    the server's where-translator supports $eq/$ne/$in/$nin only (no $gt),
+    but T3Database.expire's `{"ttl_days": {"$gt": 0}}` pre-filter exists
+    solely to exclude the permanent ttl_days=0 sentinel, so the supported
+    NULL-inclusive `{"ttl_days": {"$ne": 0}}` is equivalent (TTLs are never
+    negative; rows with absent ttl_days are kept by the server but rejected
+    by is_expired Python-side, which is the authoritative check either way).
+    """
+
+    _KNOWLEDGE = "knowledge__nexus-1-1__voyage-context-3__v1"
+
+    @staticmethod
+    def _meta(ttl_days: int, indexed_at: str) -> dict:
+        return {"ttl_days": ttl_days, "indexed_at": indexed_at}
+
+    def _patch(self, monkeypatch, collections, fake_post):
+        monkeypatch.setattr(
+            HttpVectorClient, "list_collections",
+            lambda self: [{"name": n, "count": 1} for n in collections],
+        )
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+
+    def test_expire_deletes_only_expired_knowledge_rows(self, monkeypatch):
+        posted = []
+
+        def fake_post(path, body, **kw):
+            posted.append((path, body))
+            if path == "/v1/vectors/get":
+                if body["offset"] > 0:
+                    return {"ids": [], "metadatas": []}
+                return {
+                    "ids": ["expired1", "permanent", "fresh", "no-ttl"],
+                    "metadatas": [
+                        self._meta(1, "2020-01-01T00:00:00+00:00"),   # expired
+                        self._meta(0, "2020-01-01T00:00:00+00:00"),   # permanent
+                        self._meta(36500, "2026-01-01T00:00:00+00:00"),  # not yet
+                        {},                                            # NULL-inclusive $ne row
+                    ],
+                }
+            return {"deleted": len(body["ids"])}
+
+        self._patch(
+            monkeypatch,
+            [self._KNOWLEDGE, "code__nexus-1-1__voyage-code-3__v1"],
+            fake_post,
+        )
+        n = HttpVectorClient().expire()
+        assert n == 1
+        gets = [b for p, b in posted if p == "/v1/vectors/get"]
+        # only the knowledge__ collection is queried, with the $ne pre-filter
+        assert all(b["collection"] == self._KNOWLEDGE for b in gets)
+        assert gets[0]["where"] == {"ttl_days": {"$ne": 0}}
+        deletes = [b for p, b in posted if p == "/v1/vectors/store-delete"]
+        assert deletes == [{"collection": self._KNOWLEDGE, "ids": ["expired1"]}]
+
+    def test_expire_paginates_and_accumulates_before_deleting(self, monkeypatch):
+        posted = []
+
+        def fake_post(path, body, **kw):
+            posted.append((path, body))
+            if path == "/v1/vectors/get":
+                if body["offset"] == 0:
+                    page_ids = [f"id{i}" for i in range(300)]
+                    return {
+                        "ids": page_ids,
+                        "metadatas": [
+                            self._meta(1, "2020-01-01T00:00:00+00:00")
+                        ] * 300,
+                    }
+                return {
+                    "ids": ["last"],
+                    "metadatas": [self._meta(1, "2020-01-01T00:00:00+00:00")],
+                }
+            return {"deleted": len(body["ids"])}
+
+        self._patch(monkeypatch, [self._KNOWLEDGE], fake_post)
+        n = HttpVectorClient().expire()
+        assert n == 301
+        # all gets precede the first delete (accumulate-then-delete: deleting
+        # mid-pagination would shift offsets and skip rows)
+        paths = [p for p, _ in posted]
+        assert paths.index("/v1/vectors/store-delete") > max(
+            i for i, p in enumerate(paths) if p == "/v1/vectors/get"
+        )
+        # deletes are batched at the 300-record write quota
+        deletes = [b for p, b in posted if p == "/v1/vectors/store-delete"]
+        assert [len(b["ids"]) for b in deletes] == [300, 1]
+
+    def test_expire_no_knowledge_collections_returns_zero(self, monkeypatch):
+        def fake_post(path, body, **kw):  # pragma: no cover — must not be called
+            raise AssertionError("no HTTP call expected")
+
+        self._patch(monkeypatch, ["code__nexus-1-1__voyage-code-3__v1"], fake_post)
+        assert HttpVectorClient().expire() == 0
+
+    def test_expire_server_error_reraises(self, monkeypatch):
+        # A failure must NOT be swallowed as "0 expired" — the CLI would
+        # report success while expired rows survive.
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("server error", code=500)
+
+        self._patch(monkeypatch, [self._KNOWLEDGE], fake_post)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().expire()
+
+
+class TestUpdateSourcePath:
+    """nexus-h8rf6.6: update_source_path was missing entirely — `nx doctor
+    fix-paths` (non-dry-run) crashed with AttributeError on the first row in
+    service mode (doctor.py calls it per-row with no guard). Built from the
+    where-filter get (ids_for_source shape) + update_chunks, per the bead.
+    """
+
+    def test_rewrites_matching_rows_and_returns_count(self, monkeypatch):
+        posted = []
+
+        def fake_post(path, body, **kw):
+            posted.append((path, body))
+            if path == "/v1/vectors/get":
+                if body["offset"] > 0:
+                    return {"ids": [], "metadatas": []}
+                return {
+                    "ids": ["a", "b"],
+                    "metadatas": [
+                        {"source_path": "/old.py", "title": "keep-me"},
+                        {"source_path": "/old.py"},
+                    ],
+                }
+            return {}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        n = HttpVectorClient().update_source_path(
+            collection_name="code__nexus-1-1__voyage-code-3__v1",
+            old_path="/old.py",
+            new_path="/new.py",
+        )
+        assert n == 2
+        gets = [b for p, b in posted if p == "/v1/vectors/get"]
+        assert gets[0]["where"] == {"source_path": "/old.py"}
+        updates = [b for p, b in posted if p == "/v1/vectors/update-metadata"]
+        assert updates and updates[0]["ids"] == ["a", "b"]
+        # other metadata keys survive; only source_path is rewritten
+        assert updates[0]["metadatas"][0] == {
+            "source_path": "/new.py", "title": "keep-me",
+        }
+        assert updates[0]["metadatas"][1] == {"source_path": "/new.py"}
+
+    def test_no_matches_returns_zero_without_update(self, monkeypatch):
+        posted = []
+
+        def fake_post(path, body, **kw):
+            posted.append(path)
+            return {"ids": [], "metadatas": []}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        n = HttpVectorClient().update_source_path("c", "/old.py", "/new.py")
+        assert n == 0
+        assert "/v1/vectors/update-metadata" not in posted
+
+    def test_missing_collection_returns_zero(self, monkeypatch):
+        # T3Database parity: _ChromaNotFoundError -> 0. Service: 404 -> 0.
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        assert HttpVectorClient().update_source_path("gone", "/o", "/n") == 0
+
+    def test_mid_pagination_error_reraises(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            if body["offset"] == 0:
+                return {
+                    "ids": [f"id{i}" for i in range(300)],
+                    "metadatas": [{"source_path": "/old.py"}] * 300,
+                }
+            raise VectorServiceError("server error", code=500)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().update_source_path("c", "/old.py", "/new.py")
+
+
+class TestT3GcPrimitives:
+    """nexus-h8rf6.7: delete_by_chunk_ids / list_unique_source_paths /
+    list_chunks_with_metadata were missing — `nx t3 gc` and `nx t3
+    prune-stale` degrade to silent no-ops in service mode (call sites are
+    try/except-wrapped, so no traceback, just zero effect).
+    """
+
+    def test_delete_by_chunk_ids_deletes_and_counts(self, monkeypatch):
+        posted = []
+
+        def fake_post(path, body, **kw):
+            posted.append((path, body))
+            return {}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        n = HttpVectorClient().delete_by_chunk_ids(
+            collection_name="c", chunk_ids=["a", "b", "c"],
+        )
+        assert n == 3
+        assert posted == [
+            ("/v1/vectors/store-delete", {"collection": "c", "ids": ["a", "b", "c"]}),
+        ]
+
+    def test_delete_by_chunk_ids_empty_is_noop(self, monkeypatch):
+        def fake_post(path, body, **kw):  # pragma: no cover — must not be called
+            raise AssertionError("no HTTP call expected")
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        assert HttpVectorClient().delete_by_chunk_ids("c", []) == 0
+
+    def test_delete_by_chunk_ids_missing_collection_returns_zero(self, monkeypatch):
+        # T3Database parity: missing collection -> 0 without raising.
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        assert HttpVectorClient().delete_by_chunk_ids("gone", ["a"]) == 0
+
+    def test_list_unique_source_paths_dedupes_sorts_skips_empty(self, monkeypatch):
+        def fake_post(path, body, **kw):
+            if body["offset"] > 0:
+                return {"ids": [], "metadatas": []}
+            return {
+                "ids": ["1", "2", "3", "4"],
+                "metadatas": [
+                    {"source_path": "/b.py"},
+                    {"source_path": "/a.py"},
+                    {"source_path": "/b.py"},   # duplicate
+                    {"title": "mcp-note"},       # no source_path -> skipped
+                ],
+            }
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        paths = HttpVectorClient().list_unique_source_paths("c")
+        assert paths == ["/a.py", "/b.py"]
+
+    def test_list_unique_source_paths_missing_collection_empty(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        assert HttpVectorClient().list_unique_source_paths("gone") == []
+
+    def test_list_chunks_with_metadata_yields_field_subset(self, monkeypatch):
+        def fake_post(path, body, **kw):
+            if body["offset"] > 0:
+                return {"ids": [], "metadatas": []}
+            return {
+                "ids": ["x", "y"],
+                "metadatas": [
+                    {"doc_id": "1.2", "indexed_at": "2026-01-01", "extra": "drop"},
+                    {},  # all fields missing -> empty strings
+                ],
+            }
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        rows = list(HttpVectorClient().list_chunks_with_metadata("c"))
+        assert rows == [
+            ("x", {"doc_id": "1.2", "indexed_at": "2026-01-01"}),
+            ("y", {"doc_id": "", "indexed_at": ""}),
+        ]
+
+    def test_list_chunks_with_metadata_paginates(self, monkeypatch):
+        def fake_post(path, body, **kw):
+            if body["offset"] == 0:
+                return {
+                    "ids": [f"id{i}" for i in range(300)],
+                    "metadatas": [{"doc_id": "d"}] * 300,
+                }
+            return {"ids": ["last"], "metadatas": [{"doc_id": "d"}]}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        rows = list(
+            HttpVectorClient().list_chunks_with_metadata("c", fields=("doc_id",))
+        )
+        assert len(rows) == 301
+        assert rows[-1] == ("last", {"doc_id": "d"})
+
+    def test_list_chunks_with_metadata_missing_collection_empty(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        assert list(HttpVectorClient().list_chunks_with_metadata("gone")) == []
+
+
+class TestCollectionMetadata:
+    """nexus-h8rf6.8: collection_metadata was missing — doctor's model-drift
+    probe reported ProbeResult(outcome='error') for EVERY collection in
+    service mode. Full T3 parity turns out to be achievable client-side:
+    T3Database derives embedding_model / index_model from the collection
+    NAME (conformant names embed the model; index_model_for_collection is
+    an alias of embedding_model_for_collection) — only `count` needs the
+    server. KeyError semantics match collection_info (RDR-156 Decision 6:
+    zero live rows is indistinguishable from absent on pgvector).
+    """
+
+    _CONFORMANT = "code__nexus-1-1__voyage-code-3__v1"
+
+    def test_returns_t3_parity_keys(self, monkeypatch):
+        monkeypatch.setattr(HttpVectorClient, "count", lambda self, c: 42)
+        meta = HttpVectorClient().collection_metadata(self._CONFORMANT)
+        assert meta == {
+            "name": self._CONFORMANT,
+            "count": 42,
+            "embedding_model": "voyage-code-3",
+            "index_model": "voyage-code-3",
+        }
+
+    def test_missing_collection_raises_keyerror(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_count(self, c):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr(HttpVectorClient, "count", fake_count)
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_metadata("gone__x__y__v1")
+
+    def test_zero_rows_raises_keyerror(self, monkeypatch):
+        # pgvector: zero live rows == absent (collection_info semantics).
+        monkeypatch.setattr(HttpVectorClient, "count", lambda self, c: 0)
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_metadata(self._CONFORMANT)
+
+    def test_non_404_error_reraises(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_count(self, c):
+            raise VectorServiceError("server error", code=500)
+
+        monkeypatch.setattr(HttpVectorClient, "count", fake_count)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().collection_metadata(self._CONFORMANT)
+
+
+class TestDeleteByChunkIdsPartialFailure:
+    """Wave review #2: a failure AFTER a successful batch must not be
+    reported as 0 — nx t3 gc would log 'deleted 0' despite partial deletion.
+    """
+
+    def test_failure_after_first_batch_reraises(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        calls = []
+
+        def fake_post(path, body, **kw):
+            calls.append(body)
+            if len(calls) > 1:
+                raise VectorServiceError("gone mid-run", code=404)
+            return {}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        ids = [f"id{i}" for i in range(301)]  # 2 batches at the 300 quota
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().delete_by_chunk_ids("c", ids)
+        assert len(calls) == 2  # first batch succeeded, second raised
+
+    def test_404_on_first_batch_still_returns_zero(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        assert HttpVectorClient().delete_by_chunk_ids("gone", ["a"]) == 0
+
+
+class TestVoyageClientCache:
+    """Wave review #5: get_voyage_client() memoizes the production path —
+    the retired T3Database built its client once at handle init; per-call
+    construction (credential file read + voyageai.Client) regressed that.
+    """
+
+    def test_production_path_memoizes(self, monkeypatch):
+        import nexus.db as db
+
+        db.reset_voyage_client_cache_for_tests()
+        built = []
+
+        def fake_build(api_key):
+            built.append(api_key)
+            return object()
+
+        monkeypatch.setattr(db, "_build_voyage_client", fake_build)
+        monkeypatch.setattr(db, "get_credential", lambda name: "sk-x")
+        a = db.get_voyage_client()
+        b = db.get_voyage_client()
+        assert a is b
+        assert built == ["sk-x"]
+        db.reset_voyage_client_cache_for_tests()
+
+    def test_injected_key_bypasses_cache(self, monkeypatch):
+        import nexus.db as db
+
+        db.reset_voyage_client_cache_for_tests()
+        built = []
+
+        def fake_build(api_key):
+            built.append(api_key)
+            return object()
+
+        monkeypatch.setattr(db, "_build_voyage_client", fake_build)
+        db.get_voyage_client(_api_key="k1")
+        db.get_voyage_client(_api_key="k2")
+        assert built == ["k1", "k2"]  # no memoization on the test-injection path
+        db.reset_voyage_client_cache_for_tests()

@@ -199,22 +199,10 @@ public final class CatalogHandler implements HttpHandler {
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (Exception e) {
-            // nexus-7e057 (RDR-172 follow-up): a client-supplied doc_id that is
-            // non-blank but UNREGISTERED violates fk_catalog_chunks_catalog_doc
-            // on the manifest write/append path — same bug class as nexus-ov0sw
-            // (AspectHandler's aspect_extraction_queue.doc_id FK). Map class-23
-            // integrity violations to a typed 409 ahead of the generic 500. The
-            // full driver message goes to the server log; the client body is
-            // sanitised to a fixed message + the sqlstate (never the raw jOOQ
-            // SQL, which would leak schema/constraint shape to any caller).
-            String sqlState = HttpUtil.sqlState23(e);
-            if (sqlState != null) {
-                log.warn("event=catalog_handler_integrity_violation op={} tenant={} sqlstate={} error={}",
-                    op, tenant, sqlState, e.getMessage());
-                HttpUtil.send(exchange, 409,
-                    "{\"error\":\"integrity constraint violation\",\"sqlstate\":"
-                    + HttpUtil.jsonString(sqlState) + "}");
-            } else {
+            // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
+            // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
+            if (!HttpUtil.sendTypedDbError(exchange, e, log, "catalog_handler",
+                    "op=" + op + " tenant=" + tenant)) {
                 log.error("event=catalog_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
                 HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
             }

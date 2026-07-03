@@ -144,28 +144,15 @@ public final class AspectHandler implements HttpHandler {
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + HttpUtil.jsonString(e.getMessage()) + "}");
         } catch (Exception e) {
-            String sqlState = sqlState23(e);
-            if (sqlState != null) {
-                // RDR-172 P3.1 (nexus-gfl3y): a SQLSTATE class-23 integrity violation —
-                // e.g. the aspect_extraction_queue.doc_id FK rejecting a non-blank but
-                // UNREGISTERED doc_id (bug nexus-ov0sw) — is a CLIENT error, not a server
-                // fault. Map it to a typed 409 AHEAD of the generic 500 so the caller sees
-                // a loud, actionable failure instead of an opaque 500 (and never a silent
-                // 200). jOOQ wraps the driver PSQLException in a DataAccessException, so the
-                // violation surfaces as a cause, not the top-level throwable. RF-5 / RF-8.
-                // Full driver message (the parameterised SQL + PG detail) goes to the
-                // server log for operators; the client body is sanitised to a fixed
-                // message + the sqlstate. The 409 is client-triggerable (a bad doc_id),
-                // so echoing the raw jOOQ SQL would leak schema/constraint shape to any
-                // caller — return only the programmatic signal (sqlstate).
-                log.warn("event=aspects_handler_integrity_violation op={} sqlstate={} error={}",
-                    op, sqlState, e.getMessage());
-                HttpUtil.send(exchange, 409,
-                    "{\"error\":\"integrity constraint violation\",\"sqlstate\":"
-                    + HttpUtil.jsonString(sqlState) + "}");
-            } else {
+            // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
+            // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
+            // (RDR-172 P3.1 / nexus-gfl3y history preserved on HttpUtil.sendTypedDbError.)
+            if (!HttpUtil.sendTypedDbError(exchange, e, log, "aspects_handler",
+                    "op=" + op)) {
                 log.error("event=aspects_handler_error op={} error={}", op, e.getMessage(), e);
-                HttpUtil.send(exchange, 500, "{\"error\":" + HttpUtil.jsonString(e.getMessage()) + "}");
+                // Wave review: fixed 500 body — the previous body echoed e.getMessage(),
+                // which can carry jOOQ SQL / schema shape to any caller.
+                HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
             }
         }
     }

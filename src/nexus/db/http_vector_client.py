@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -451,6 +452,8 @@ class HttpVectorClient:
     - :meth:`get_by_id`
     - :meth:`delete_by_id`
     - :meth:`list_collections`
+    - :meth:`list_store` / :meth:`collection_info`
+    - :meth:`find_ids_by_title` / :meth:`batch_delete` (nexus-umvh2)
 
     Methods NOT implemented here (not needed for Seam B or stubbed
     as no-ops) will raise ``NotImplementedError`` or return safe defaults.
@@ -1211,6 +1214,424 @@ class HttpVectorClient:
             )
             deleted += int(result.get("deleted", 0))
         return deleted
+
+    def find_ids_by_title(self, collection: str, title: str) -> list[str]:
+        """Return all chunk IDs whose title metadata exactly matches *title*.
+
+        nexus-umvh2: was missing entirely, crashing ``nx store delete
+        --title`` and the MCP ``store_get`` title-fallback with
+        ``AttributeError`` in service mode (the post-P4a2 default). Mirrors
+        :meth:`ids_for_source`'s where-filter pagination pattern
+        (``/v1/vectors/get``) at the 300-record quota; T3Database parity
+        (``collection`` / ``title`` param names match).
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        ids: list[str] = []
+        offset = 0
+        while True:
+            try:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": collection,
+                        "where": {"title": title},
+                        "include": [],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                # Match ids_for_source: a 404 on the first page means "no
+                # such collection" -> no matches. A failure mid-pagination
+                # must NOT be swallowed as "no more matches" -- the caller
+                # (nx store delete --title) would under-delete and report
+                # success.
+                if exc.code == 404 and offset == 0:
+                    return []
+                raise
+            page = result.get("ids", []) or []
+            ids.extend(page)
+            if len(page) < page_limit:
+                break
+            offset += len(page)
+        return ids
+
+    def batch_delete(self, collection: str, ids: list[str]) -> None:
+        """Delete *ids* from *collection* in service-quota-bounded batches.
+
+        nexus-umvh2: was missing entirely -- the second half of the ``nx
+        store delete --title`` crash (after :meth:`find_ids_by_title`
+        resolves the id list). Batches at ``QUOTAS.MAX_RECORDS_PER_WRITE``
+        like :meth:`update_chunks` / :meth:`delete_by_source`.
+        """
+        if not ids:
+            return
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        for start in range(0, len(ids), size):
+            _post(
+                "/v1/vectors/store-delete",
+                {"collection": collection, "ids": ids[start:start + size]},
+                tenant=self._tenant,
+            )
+
+    def list_store(
+        self, collection: str, limit: int = 200, offset: int = 0,
+    ) -> list[dict]:
+        """Return metadata for entries in *collection*, paginated.
+
+        nexus-umvh2 sibling audit: was missing entirely, crashing ``nx
+        store list``, ``nx store list --docs``, and MCP ``store_list`` in
+        service mode -- the same class of bug as :meth:`find_ids_by_title`,
+        just unreported because the CLI test fixtures mock the whole T3
+        client with a bare ``MagicMock`` (no ``spec=``), which cannot
+        surface a missing method.
+
+        Built from the service's plain (no ``where``) ``/v1/vectors/get``
+        listing, matching :meth:`ids_for_source`'s call shape. Returns
+        ``[]`` on a 404 (T3Database parity: "collection does not exist" ->
+        empty list, never an exception).
+        """
+        try:
+            result = _post(
+                "/v1/vectors/get",
+                {
+                    "collection": collection,
+                    "include": ["metadatas"],
+                    "limit": limit,
+                    "offset": offset,
+                },
+                tenant=self._tenant,
+            )
+        except VectorServiceError as exc:
+            if exc.code == 404:
+                return []
+            raise
+        ids = result.get("ids", []) or []
+        metas = result.get("metadatas", []) or []
+        return [
+            {"id": doc_id, **(meta if isinstance(meta, dict) else {})}
+            for doc_id, meta in zip(ids, metas)
+        ]
+
+    def update_source_path(
+        self, collection_name: str, old_path: str, new_path: str
+    ) -> int:
+        """Rewrite source_path metadata for all chunks matching *old_path*.
+
+        nexus-h8rf6.6: was missing entirely — ``nx doctor fix-paths``
+        (non-dry-run) crashed with ``AttributeError`` on the first row in
+        service mode (doctor.py calls it per-row with no guard). Built from
+        the where-filter get (:meth:`ids_for_source` shape) +
+        :meth:`update_chunks`; T3Database parity (returns count updated,
+        missing collection -> 0, idempotent). Matching rows are accumulated
+        across all pages BEFORE updating — updating mid-pagination would
+        shrink the where-match set and shift offsets.
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        ids: list[str] = []
+        metadatas: list[dict] = []
+        offset = 0
+        while True:
+            try:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": collection_name,
+                        "where": {"source_path": old_path},
+                        "include": ["metadatas"],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                # 404 on the first page = no such collection (T3 parity: 0).
+                # Mid-pagination failures must NOT be swallowed — the caller
+                # would under-update and report success.
+                if exc.code == 404 and offset == 0:
+                    return 0
+                raise
+            page_ids = result.get("ids", []) or []
+            page_metas = result.get("metadatas", []) or []
+            for doc_id, meta in zip(page_ids, page_metas):
+                ids.append(doc_id)
+                updated = dict(meta) if isinstance(meta, dict) else {}
+                updated["source_path"] = new_path
+                metadatas.append(updated)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+        if not ids:
+            return 0
+        self.update_chunks(collection_name, ids, metadatas)
+        return len(ids)
+
+    def delete_by_chunk_ids(
+        self, collection_name: str, chunk_ids: list[str],
+    ) -> int:
+        """Delete chunks by explicit id. Returns count deleted.
+
+        nexus-h8rf6.7: was missing — ``nx t3 gc``'s orphan deletion silently
+        no-oped in service mode (the call site is try/except-wrapped, so the
+        AttributeError degraded instead of crashing). T3Database parity:
+        empty ``chunk_ids`` is a no-op (0), missing collection returns 0
+        without raising. Delegates to :meth:`batch_delete` for the
+        quota-bounded batching.
+        """
+        if not chunk_ids:
+            return 0
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        deleted = 0
+        for start in range(0, len(chunk_ids), size):
+            batch = chunk_ids[start:start + size]
+            try:
+                _post(
+                    "/v1/vectors/store-delete",
+                    {"collection": collection_name, "ids": batch},
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                # 404 before anything was deleted = missing collection (T3
+                # parity: 0). A failure AFTER a successful batch must NOT be
+                # reported as 0 — the caller (nx t3 gc) would log "deleted 0"
+                # despite partial deletion (wave review, sibling convention:
+                # mid-pagination failures are never swallowed).
+                if exc.code == 404 and deleted == 0:
+                    return 0
+                raise
+            deleted += len(batch)
+        return deleted
+
+    def list_unique_source_paths(self, collection_name: str) -> list[str]:
+        """Return every distinct ``source_path`` value in *collection_name*.
+
+        nexus-h8rf6.7: was missing — ``nx t3 prune-stale``'s staleness sweep
+        silently skipped every collection in service mode. Pages the plain
+        (no ``where``) ``/v1/vectors/get`` listing and dedupes locally, same
+        as T3Database. Empty/missing source_path values are skipped (MCP-put
+        chunks have no on-disk source by design). Missing collection -> [].
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        seen: set[str] = set()
+        offset = 0
+        while True:
+            try:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": collection_name,
+                        "include": ["metadatas"],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                if exc.code == 404 and offset == 0:
+                    return []
+                raise
+            page_ids = result.get("ids", []) or []
+            page_metas = result.get("metadatas", []) or []
+            if not page_ids:
+                break
+            for meta in page_metas:
+                if not isinstance(meta, dict):
+                    continue
+                src = meta.get("source_path") or ""
+                if src:
+                    seen.add(src)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+        return sorted(seen)
+
+    def list_chunks_with_metadata(
+        self,
+        collection_name: str,
+        *,
+        fields: tuple[str, ...] = ("doc_id", "indexed_at"),
+    ) -> Iterator[tuple[str, dict[str, str]]]:
+        """Yield ``(chunk_id, metadata_subset)`` for every chunk in a collection.
+
+        nexus-h8rf6.7: was missing — ``nx t3 gc``'s orphan scan silently
+        skipped every collection in service mode. T3Database parity:
+        ``metadata_subset`` contains only the requested ``fields`` with
+        empty strings for missing keys; missing collection yields nothing.
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        offset = 0
+        while True:
+            try:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": collection_name,
+                        "include": ["metadatas"],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                if exc.code == 404 and offset == 0:
+                    return
+                raise
+            page_ids = result.get("ids", []) or []
+            page_metas = result.get("metadatas", []) or []
+            if not page_ids:
+                break
+            for cid, meta in zip(page_ids, page_metas):
+                if not isinstance(meta, dict):
+                    meta = {}
+                yield cid, {f: str(meta.get(f, "")) for f in fields}
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+
+    def expire(self) -> int:
+        """Delete all expired entries from ``knowledge__*`` collections.
+
+        nexus-h8rf6.5: was missing entirely — ``nx store expire`` crashed
+        with ``AttributeError`` in service mode. T3Database parity, with one
+        translation: the service's where-filter supports ``$eq/$ne/$in/$nin``
+        only (``PgVectorRepository.appendWherePredicate``, no range
+        operators), so T3's ``{"ttl_days": {"$gt": 0}}`` pre-filter becomes
+        ``{"ttl_days": {"$ne": 0}}`` — equivalent for its only purpose,
+        excluding the permanent ``ttl_days == 0`` sentinel (TTLs are never
+        negative). The server's ``$ne`` is NULL-inclusive, so rows with
+        absent ``ttl_days`` come back too; ``is_expired`` (the authoritative
+        Python-side check, same as T3) rejects them.
+
+        Expired IDs are accumulated per collection BEFORE deleting —
+        deleting mid-pagination would shift offsets and skip rows. Server
+        errors propagate (a swallowed failure would report "0 expired"
+        while expired rows survive).
+
+        Returns the total number of deleted documents.
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
+
+        now_iso = datetime.now(UTC).isoformat()
+        ttl_where = {"ttl_days": {"$ne": 0}}
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        total = 0
+        for entry in self.list_collections():
+            name = entry.get("name", "")
+            if not name.startswith("knowledge__"):
+                continue
+            expired_ids: list[str] = []
+            offset = 0
+            while True:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": name,
+                        "where": ttl_where,
+                        "include": ["metadatas"],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+                page_ids = result.get("ids", []) or []
+                metas = result.get("metadatas", []) or []
+                for doc_id, meta in zip(page_ids, metas):
+                    if isinstance(meta, dict) and is_expired(meta, now_iso=now_iso):
+                        expired_ids.append(doc_id)
+                offset += len(page_ids)
+                if len(page_ids) < page_limit:
+                    break  # last page (short or empty)
+            if expired_ids:
+                self.batch_delete(name, expired_ids)
+            total += len(expired_ids)
+        return total
+
+    def collection_info(self, name: str) -> dict:
+        """Return ``{"count": N, "metadata": {}}`` for *name*.
+
+        nexus-umvh2 sibling audit: was missing entirely, crashing ``nx
+        store list``'s total-count display, ``nx collection info``, and
+        ``nx collection reindex`` in service mode.
+
+        Raises ``KeyError`` when *name* has no live chunks -- T3Database
+        parity ("not found"). On the pgvector path a collection with zero
+        live rows is indistinguishable from an absent one (matches
+        :meth:`collection_exists`'s already-established semantics, RDR-156
+        Decision 6) -- callers (``nx collection reindex``) rely on the
+        ``KeyError`` to detect a genuinely missing collection. No
+        ``metadata`` equivalent exists server-side (Chroma-native collection
+        metadata is not exposed by the service API), so that key is always
+        ``{}``.
+        """
+        return {"count": self._count_or_key_error(name), "metadata": {}}
+
+    def _count_or_key_error(self, name: str) -> int:
+        """Return the live chunk count for *name*, raising ``KeyError`` on absent.
+
+        Shared by :meth:`collection_info` and :meth:`collection_metadata`
+        (wave review: the block was duplicated verbatim). On the pgvector
+        path a collection with zero live rows is indistinguishable from an
+        absent one (RDR-156 Decision 6), so ``count == 0`` also raises.
+        NOTE: callers that enumerate via :meth:`list_collections` can never
+        hit the zero-count branch — that listing only returns collections
+        with live chunks — so the doctor probes iterating it are unaffected.
+        """
+        try:
+            n = self.count(name)
+        except VectorServiceError as exc:
+            if exc.code == 404:
+                raise KeyError(f"Collection not found: {name!r}") from exc
+            raise
+        if n == 0:
+            raise KeyError(f"Collection not found: {name!r}")
+        return n
+
+    def collection_metadata(self, collection_name: str) -> dict:
+        """Return metadata dict for a collection.
+
+        nexus-h8rf6.8: was missing — doctor's model-drift probe
+        (``doctor_search._collection_metadata``) degraded to
+        ``ProbeResult(outcome='error')`` for every collection in service
+        mode. Full T3Database parity is achievable client-side: T3 derives
+        ``embedding_model`` / ``index_model`` from the collection NAME
+        (conformant names embed the model; ``index_model_for_collection``
+        is an alias of ``embedding_model_for_collection``) — only ``count``
+        needs the server.
+
+        Keys returned: ``name``, ``count``, ``embedding_model`` (query-time
+        model), ``index_model`` (index-time model, may differ for CCE
+        collections). Raises ``KeyError`` if the collection does not exist
+        — on pgvector, zero live rows is indistinguishable from absent
+        (:meth:`collection_info` semantics, RDR-156 Decision 6).
+        """
+        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus imports config)
+            embedding_model_for_collection,
+            embedding_model_for_collection_name,
+            index_model_for_collection,
+        )
+
+        n = self._count_or_key_error(collection_name)
+        parsed = embedding_model_for_collection_name(collection_name)
+        return {
+            "name": collection_name,
+            "count": n,
+            "embedding_model": parsed or embedding_model_for_collection(collection_name),
+            "index_model": parsed or index_model_for_collection(collection_name),
+        }
 
 # ── Module-level routing helper ───────────────────────────────────────────────
 

@@ -269,6 +269,79 @@ def test_assign_batch_hook_refetches_on_empty_placeholder_embeddings(monkeypatch
     assert all(len(v) == 3 for v in seen_embeddings[0])
 
 
+def test_assign_batch_hook_numpy_array_embeddings_does_not_raise_and_assigns(monkeypatch):
+    """nexus-h8rf6.11: local fastembed (bge-768 tier) hands the hook a list of
+    numpy arrays as ``embeddings`` — ``LocalEmbeddingFunction.__call__``
+    returns ``list(self._ef.embed(input))`` verbatim (db/local_ef.py:215),
+    i.e. a Python list whose ELEMENTS are numpy arrays, not lists. In service
+    mode the old ``not any(svc_embeddings)`` guard called ``bool()`` on each
+    element, which raises ``ValueError: truth value of an array with more
+    than one element is ambiguous`` for any >1-dim vector — crashing on
+    EVERY indexed document and (via hook_registry's warning-only catch)
+    silently dropping all topic assignment. Must not raise, and must
+    actually reach persist_assignments (the swallowed-warning class needs a
+    positive assertion, not just absence of an exception)."""
+    import numpy as np
+
+    import nexus.mcp_infra as mi
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    ids = [f"c{i}" for i in range(4)]
+    # Exactly what LocalEmbeddingFunction.__call__ returns for the fastembed
+    # (bge-768) tier: a list of numpy arrays, each with > 1 element.
+    embs = [np.array([float(i), 1.0, 2.0], dtype=np.float32) for i in range(4)]
+
+    class _SvcT3(HttpVectorClient):
+        def __init__(self):  # noqa: D107
+            pass
+
+        def get_embeddings(self, collection, doc_ids):  # noqa: ANN001
+            raise AssertionError("must not re-fetch — caller-supplied embeddings were non-empty")
+
+    persisted: list[list[dict]] = []
+
+    class _SvcTax:
+        def compute_assignments(self, collection, doc_ids, embeddings, *, cross_collection=False):  # noqa: ANN001
+            return [] if cross_collection else [{"doc_id": d, "topic_id": 1} for d in doc_ids]
+
+        def persist_assignments(self, assignments):  # noqa: ANN001
+            persisted.append(assignments)
+            return len(assignments)
+
+    class _DB:
+        taxonomy = _SvcTax()
+
+    monkeypatch.setattr(mi, "get_t3", lambda: _SvcT3())
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+
+    # Must not raise ValueError('truth value of an array ... is ambiguous').
+    mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 4, embs, None)
+
+    # Positive assertion: the assignment call actually happened and reached
+    # persist_assignments with real per-doc assignments (not a swallowed
+    # no-op).
+    assert persisted, "numpy-array embeddings did not reach persist_assignments (hook bailed silently)"
+    assert len(persisted[0]) == 4
+
+
+def test_embedding_is_empty_handles_numpy_scalars_lists_and_none():
+    """Unit coverage for the extracted emptiness predicate (nexus-h8rf6.11):
+    never evaluate array truthiness, handle 0-d arrays (where ``len()``
+    raises ``TypeError``), plain lists, and ``None``."""
+    import numpy as np
+
+    from nexus.mcp_infra import _embedding_is_empty
+
+    assert _embedding_is_empty(None) is True
+    assert _embedding_is_empty([]) is True
+    assert _embedding_is_empty([1.0, 2.0]) is False
+    assert _embedding_is_empty(np.array([])) is True
+    assert _embedding_is_empty(np.array([1.0, 2.0, 3.0])) is False
+    # 0-d array: len() raises TypeError, .size is 1 — must not crash.
+    assert _embedding_is_empty(np.array(1.0)) is False
+
+
 # ── split/project service fetch helpers (nexus-9pqoj) ───────────────────────
 
 

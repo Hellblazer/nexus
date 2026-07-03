@@ -125,8 +125,18 @@ public final class TokenCache {
             return Optional.empty();  // expired — do not cache
         }
         if (map.size() >= maxEntries) {
-            log.warn("event=token_cache_overflow max={} action=clear", maxEntries);
-            map.clear();
+            // Wave review: was map.clear() — evicting EVERY cached principal at once
+            // meant the next request from every active tenant paid a synchronous
+            // TokenStore round-trip simultaneously (a self-inflicted thundering herd
+            // right when the system is busiest). Evict ~25% instead: the flood
+            // backstop still bounds memory, but hot tokens survive the trim.
+            int toEvict = Math.max(1, maxEntries / 4);
+            log.warn("event=token_cache_overflow max={} action=evict count={}", maxEntries, toEvict);
+            var it = map.keySet().iterator();
+            for (int i = 0; i < toEvict && it.hasNext(); i++) {
+                it.next();
+                it.remove();
+            }
         }
         map.put(tokenHash, new Entry(st.tenantId(), st.isRoot(), st.expiresAt(), now));
         return Optional.of(new Resolved(st.tenantId(), st.isRoot()));

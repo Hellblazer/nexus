@@ -9,7 +9,13 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.SQLTransientConnectionException;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
@@ -63,10 +69,61 @@ public final class TenantScope {
      */
     private static final Set<String> PERMITTED_GUCS = Set.of(DEFAULT_TENANT_GUC, T1_TENANT_GUC);
 
+    /**
+     * Per-DataSource admission semaphores (wave review, Java-tree audit High-1).
+     *
+     * <p>The HTTP layer is virtual-thread-per-request with NO inherent bound on how
+     * many requests concurrently attempt DB work against the fixed HikariCP pool.
+     * Every convoy fix so far (batched INSERTs, embed-before-borrow,
+     * registration-in-own-txn) is per-call-site; this is the SYSTEMIC backpressure:
+     * at most {@code 2 * maximumPoolSize} callers may be inside {@link #withTenant}
+     * at once (poolSize active + poolSize queued), everyone else gets the same
+     * typed retryable pool-exhaustion signal HikariCP's connectionTimeout produces
+     * ({@link SQLTransientConnectionException} in the cause chain →
+     * {@code HttpUtil.isPoolExhausted} → 503) — without first burning a
+     * connectionTimeout wait per surplus caller.
+     *
+     * <p>Identity-keyed and static because production constructs MULTIPLE
+     * TenantScope instances over the SAME DataSource (NexusService + Main's
+     * PgVectorRepository) — a per-instance semaphore would multiply the bound.
+     * Fair, so a burst cannot starve early arrivals.
+     */
+    private static final Map<DataSource, Semaphore> ADMISSION =
+        Collections.synchronizedMap(new IdentityHashMap<>());
+
+    private static final int DEFAULT_POOL_SIZE = 10;
+    private static final long DEFAULT_TIMEOUT_MS = 30_000L;
+
     private final DataSource dataSource;
+    private final Semaphore admission;
+    private final long admissionTimeoutMs;
 
     public TenantScope(DataSource dataSource) {
         this.dataSource = dataSource;
+        int poolSize = DEFAULT_POOL_SIZE;
+        long timeoutMs = DEFAULT_TIMEOUT_MS;
+        if (dataSource instanceof com.zaxxer.hikari.HikariDataSource hikari) {
+            int configured = hikari.getMaximumPoolSize();
+            if (configured > 0) {
+                poolSize = configured;
+            }
+            long ct = hikari.getConnectionTimeout();
+            if (ct > 0) {
+                timeoutMs = ct;
+            }
+        }
+        this.admissionTimeoutMs = timeoutMs;
+        final int permits = poolSize * 2;
+        this.admission = ADMISSION.computeIfAbsent(
+            dataSource, ds -> new Semaphore(permits, true));
+    }
+
+    /** Test-only: admission bound + timeout injected directly (stub DataSource path). */
+    TenantScope(DataSource dataSource, int admissionPermits, long admissionTimeoutMs) {
+        this.dataSource = dataSource;
+        this.admissionTimeoutMs = admissionTimeoutMs;
+        this.admission = ADMISSION.computeIfAbsent(
+            dataSource, ds -> new Semaphore(admissionPermits, true));
     }
 
     /**
@@ -124,6 +181,34 @@ public final class TenantScope {
                     "gucName not permitted: " + gucName + " (allowed: " + PERMITTED_GUCS + ")");
         }
 
+        // Admission control (see ADMISSION doc): bound concurrent DB work BEFORE
+        // borrowing a connection. Rejection surfaces as the SAME typed retryable
+        // signal as HikariCP connectionTimeout (SQLTransientConnectionException in
+        // the cause chain), so every handler's sendTypedDbError ladder maps it to
+        // a 503 with zero new error-mapping surface.
+        boolean admitted;
+        try {
+            admitted = admission.tryAcquire(admissionTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("interrupted awaiting DB admission for tenant: " + tenant, ie);
+        }
+        if (!admitted) {
+            log.warn("event=tenant_scope_admission_timeout tenant={} guc={} timeout_ms={}",
+                tenant, gucName, admissionTimeoutMs);
+            throw new RuntimeException(
+                "DB admission queue full for tenant: " + tenant,
+                new SQLTransientConnectionException(
+                    "admission queue full after " + admissionTimeoutMs + "ms (retryable)"));
+        }
+        try {
+            return stampAndRun(tenant, gucName, work);
+        } finally {
+            admission.release();
+        }
+    }
+
+    private <T> T stampAndRun(String tenant, String gucName, Function<DSLContext, T> work) {
         Connection conn = null;
         try {
             conn = dataSource.getConnection();

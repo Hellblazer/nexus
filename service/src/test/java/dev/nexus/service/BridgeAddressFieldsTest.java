@@ -419,12 +419,12 @@ class BridgeAddressFieldsTest {
     @Test
     void defaultPath_producesNoSourceUri_optInProducesSourceUri() {
         // Reset counter to isolate this test from any prior calls in @BeforeAll setup
-        pgRepo.sourceUriJoinCalls.set(0);
+        pgRepo.resetSourceUriJoinCallsForTests();
 
         // Default path: sourceUrisByChash must NOT be called
         var defaultRows = pgRepo.searchWithTokens(TENANT, QUERY, List.of(COL), 10, null, false).value();
         assertThat(defaultRows).as("search must return rows").isNotEmpty();
-        assertThat(pgRepo.sourceUriJoinCalls.get())
+        assertThat(pgRepo.sourceUriJoinCallCount())
             .as("default path (includeSourceUri=false): ZERO catalog JOIN calls")
             .isEqualTo(0);
         for (var row : defaultRows) {
@@ -435,9 +435,9 @@ class BridgeAddressFieldsTest {
         }
 
         // Opt-in path: sourceUrisByChash must be called ≥1 time
-        int callsBefore = pgRepo.sourceUriJoinCalls.get();
+        int callsBefore = pgRepo.sourceUriJoinCallCount();
         var optInRows = pgRepo.searchWithTokens(TENANT, QUERY, List.of(COL), 10, null, true).value();
-        assertThat(pgRepo.sourceUriJoinCalls.get())
+        assertThat(pgRepo.sourceUriJoinCallCount())
             .as("opt-in path (includeSourceUri=true): ≥1 catalog JOIN call")
             .isGreaterThan(callsBefore);
         Map<String, Object> withUri = optInRows.stream()

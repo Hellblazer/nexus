@@ -62,6 +62,15 @@ _SESSION_ID_ENV: str = "NX_T1_SESSION_ID"
 #: Header carrying the per-session token; the service hashes it to resolve (tenant, session).
 _HEADER_T1_SESSION: str = "X-Nexus-T1-Session"
 
+#: Sentinel prefix raised for HTTP 401 (the require-minted-session gate,
+#: nexus-h8rf6 T1-401 finding). ``nexus.commands.scratch._clean_service_errors``
+#: keys its actionable minted-token guidance on THIS marker — never on ad-hoc
+#: substring matching (wave review: a wording change would silently degrade the
+#: guidance to the generic branch). Change the marker, the raise sites below,
+#: and the detection together; tests/test_scratch_cmd_service_errors.py pins
+#: the coupling end-to-end.
+SESSION_UNAUTHORIZED_MARKER: str = "HttpScratchStore: unauthorized T1 session (HTTP 401)"
+
 
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
@@ -438,6 +447,10 @@ class HttpScratchStore:
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
         if not resp.is_success:
+            if resp.status_code == 401:
+                raise RuntimeError(
+                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}: {resp.text[:200]}"
+                )
             raise RuntimeError(
                 f"HttpScratchStore: {path} returned HTTP {resp.status_code}: {resp.text[:200]}"
             )
@@ -461,6 +474,10 @@ class HttpScratchStore:
         if resp.status_code == 404:
             return {"found": False}
         if not resp.is_success:
+            if resp.status_code == 401:
+                raise RuntimeError(
+                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}: {resp.text[:200]}"
+                )
             raise RuntimeError(
                 f"HttpScratchStore: {path} returned HTTP {resp.status_code}: {resp.text[:200]}"
             )

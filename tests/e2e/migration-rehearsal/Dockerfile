@@ -49,6 +49,18 @@ RUN pip3 install --no-cache-dir --break-system-packages uv
 USER nexus
 WORKDIR /home/nexus
 
+# Pre-bake the service bge-768 ONNX (RDR-160 standard export, ~416MB) as an
+# image layer so `nx init --service --embedder bge-768` finds it and skips the
+# per-run download (it re-fetched on EVERY container run before this — the
+# single biggest avoidable cost in the rehearsal legs). Placed BEFORE the wheel
+# COPY so the layer survives wheel rebuilds. fetch_service_bge_onnx() checks
+# ~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/{model.onnx,tokenizer.json}.
+RUN mkdir -p /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx \
+ && curl -fsSL -o /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx \
+      https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx \
+ && curl -fsSL -o /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/tokenizer.json \
+      https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json
+
 # The build context is a STAGING dir assembled by run.sh (the repo .dockerignore
 # excludes dist/, and the wheel + JAR live in different trees). run.sh flattens
 # them to fixed names at the context root so COPY needs no globs.
@@ -80,6 +92,7 @@ COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
 # multi-minute wheel install above.
 COPY rehearse.sh /home/nexus/rehearse.sh
 COPY rehearse_guided.sh /home/nexus/rehearse_guided.sh
+COPY rehearse_shakeout.sh /home/nexus/rehearse_shakeout.sh
 COPY seed_legacy.py /home/nexus/seed_legacy.py
 
 # Default: the full manual rehearsal. run.sh --guided overrides the command to

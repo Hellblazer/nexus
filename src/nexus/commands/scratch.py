@@ -1,10 +1,48 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import functools
 import sys
 from typing import Any
 
 import click
 
 from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
+
+
+def _clean_service_errors(fn):
+    """Convert CALL-time T1 service errors into clean ClickExceptions.
+
+    ``_t1()`` already converts constructor-time failures; operation calls
+    (put/search/...) can still raise ``HttpScratchStore`` RuntimeErrors —
+    most importantly the 401 from the require-minted session gate
+    (nexus-h8rf6 T1-401 finding). The 401 is BY DESIGN: service-backed T1
+    needs a MINTED session token (a live ``session_tokens`` row), and
+    re-minting ROTATES the token (``TokenStore.issueSessionToken`` is
+    ``ON CONFLICT DO UPDATE``), so the bare CLI must never self-mint for a
+    session an MCP server may own — the only correct CLI behavior is a
+    crisp explanation of the sanctioned paths.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except RuntimeError as exc:
+            from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER  # noqa: PLC0415 — deferred import (http store must not load on every CLI start)
+
+            msg = str(exc)
+            if SESSION_UNAUTHORIZED_MARKER in msg:
+                raise click.ClickException(
+                    f"{msg}\n\n"
+                    "Service-backed T1 scratch is session-scoped and requires a "
+                    "MINTED session token (the nx-mcp server mints one at session "
+                    "start and exports NX_T1_SESSION). A bare CLI cannot safely "
+                    "self-mint: re-minting rotates the token and would break the "
+                    "session's MCP server.\n\n"
+                    "Sanctioned paths:\n"
+                    "  * run inside a Claude session (inherits the minted token), or\n"
+                    "  * prefix with NX_T1_ISOLATED=1 for in-process ephemeral scratch."
+                ) from exc
+            raise click.ClickException(msg) from exc
+    return wrapper
 
 
 def _t1():
@@ -58,6 +96,7 @@ def scratch() -> None:
 @click.option("--persist", is_flag=True, help="Flag for auto-flush to T2 on SessionEnd")
 @click.option("--project", "-p", default="", help="Explicit T2 destination project")
 @click.option("--title", "-t", default="", help="Explicit T2 destination title")
+@_clean_service_errors
 def put_cmd(content: str, tags: str, persist: bool, project: str, title: str) -> None:
     """Store content in T1 session scratch.
 
@@ -90,6 +129,7 @@ def _resolve_entry_id(t1: Any, entry_id: str) -> str:
 
 @scratch.command("get")
 @click.argument("entry_id", metavar="ID")
+@_clean_service_errors
 def get_cmd(entry_id: str) -> None:
     """Retrieve a scratch entry by ID prefix (as shown by 'nx scratch list')."""
     t1 = _t1()
@@ -103,6 +143,7 @@ def get_cmd(entry_id: str) -> None:
 @scratch.command("search")
 @click.argument("query")
 @click.option("--n", default=10, show_default=True, help="Max results")
+@_clean_service_errors
 def search_cmd(query: str, n: int) -> None:
     """Semantic search over T1 scratch entries."""
     results = _t1().search(query, n_results=n)
@@ -116,6 +157,7 @@ def search_cmd(query: str, n: int) -> None:
 
 
 @scratch.command("list")
+@_clean_service_errors
 def list_cmd() -> None:
     """List all T1 scratch entries for the current session."""
     entries = _t1().list_entries()
@@ -131,6 +173,7 @@ def list_cmd() -> None:
 @click.argument("entry_id", metavar="ID")
 @click.option("--project", "-p", default="", help="Explicit T2 destination project")
 @click.option("--title", "-t", default="", help="Explicit T2 destination title")
+@_clean_service_errors
 def flag_cmd(entry_id: str, project: str, title: str) -> None:
     """Mark a scratch entry for SessionEnd flush to T2."""
     t1 = _t1()
@@ -143,6 +186,7 @@ def flag_cmd(entry_id: str, project: str, title: str) -> None:
 
 @scratch.command("unflag")
 @click.argument("entry_id", metavar="ID")
+@_clean_service_errors
 def unflag_cmd(entry_id: str) -> None:
     """Remove the SessionEnd flush marking from a scratch entry."""
     t1 = _t1()
@@ -157,6 +201,7 @@ def unflag_cmd(entry_id: str) -> None:
 @click.argument("entry_id", metavar="ID")
 @click.option("--project", "-p", required=True, help="Target T2 project")
 @click.option("--title", "-t", required=True, help="Target T2 title")
+@_clean_service_errors
 def promote_cmd(entry_id: str, project: str, title: str) -> None:
     """Copy a scratch entry to T2 immediately."""
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -178,6 +223,7 @@ def promote_cmd(entry_id: str, project: str, title: str) -> None:
 
 @scratch.command("delete")
 @click.argument("entry_id", metavar="ID")
+@_clean_service_errors
 def delete_cmd(entry_id: str) -> None:
     """Delete a scratch entry by ID prefix (as shown by 'nx scratch list')."""
     t1 = _t1()
@@ -198,6 +244,7 @@ def delete_cmd(entry_id: str) -> None:
     click.echo(f"Deleted: {entry_id}")
 
 @scratch.command("clear")
+@_clean_service_errors
 def clear_cmd() -> None:
     """Remove all T1 scratch entries for the current session."""
     count = _t1().clear()

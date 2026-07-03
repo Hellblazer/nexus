@@ -102,7 +102,14 @@ class CatalogRenameCollectionTest {
     void renameCollection_returnsExactPerTableCounts_chunksPresent() {
         // The chunks-present case: the pre-P3 bare UPDATE catalog_collections.name was blocked
         // by NO-ACTION children; the coherent re-home must succeed and report every table.
+        // nexus-h8rf6 wave review: the canonical branch deletes registry row X — the
+        // CollectionRegistry cache must evict OLD and mark NEW known.
+        dev.nexus.service.db.CollectionRegistry.markKnown(TENANT_A, OLD);
         Map<String, Integer> c = repo.renameCollection(TENANT_A, OLD, NEW);
+        assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(TENANT_A, OLD))
+            .as("registry cache evicted for old name").isFalse();
+        assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(TENANT_A, NEW))
+            .as("registry cache marked for new name").isTrue();
         assertThat(c.get("catalog_collections_inserted")).as("registry Y inserted").isEqualTo(1);
         assertThat(c.get("chunks_384")).as("chunks_384").isEqualTo(2);
         assertThat(c.get("chunks_768")).as("chunks_768").isEqualTo(1);
