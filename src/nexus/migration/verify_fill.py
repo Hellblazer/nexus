@@ -421,7 +421,18 @@ def fill_missing_document_chunks(
 
     def _prefilter_for(collection: str) -> set[str] | None:
         if collection not in prefilter_cache:
-            prefilter_cache[collection] = identity_source_factory(collection).present()
+            present = identity_source_factory(collection).present()
+            # Normalize to the 32-char Chroma-natural-ID prefix on OUR side:
+            # the catalog manifest stores FULL 64-hex chashes and the server's
+            # /manifest/chashes returns them raw, while source rows are diffed
+            # by chash[:32]. Comparing [:32] against a 64-hex set matches
+            # NOTHING — every row reads "definitely missing" and the whole
+            # doc re-sends (the --hole-punch journey caught exactly this:
+            # filled=12 for a 3-row hole, 2026-07-02). Normalizing here keeps
+            # both 32- and 64-hex identity surfaces correct.
+            prefilter_cache[collection] = (
+                {(c or "")[:32] for c in present} if present is not None else None
+            )
         return prefilter_cache[collection]
 
     missing = 0
@@ -432,9 +443,21 @@ def fill_missing_document_chunks(
         collection = collection_for_doc.get(doc_id, "")
         target_chashes = _prefilter_for(collection)
 
-        if target_chashes is None:
+        if target_chashes is None or not target_chashes:
             # Pre-filter unreachable for this doc's collection -- every row
             # is an ambiguous candidate; never assumed present.
+            #
+            # An EMPTY set is deliberately treated the same way (hole-punch
+            # journey, 2026-07-02): the prefilter is queried by the SOURCE
+            # doc's physical_collection, but a cross-model migration RENAMES
+            # collections (e.g. minilm-384 -> bge-768, RDR-160), so the
+            # source name can match nothing target-side even though every
+            # chunk landed. Treating empty as "all definitely missing"
+            # re-sent whole documents (filled=12 for a 3-row hole). Empty is
+            # exactly the signal the collection-name assumption may be wrong
+            # -- resolve per-doc via manifest_for (collection-independent):
+            # a renamed collection fills exactly the hole; a genuinely new
+            # collection has an empty manifest and still fills everything.
             definite_missing: list[dict[str, Any]] = []
             candidates = doc_rows
         else:

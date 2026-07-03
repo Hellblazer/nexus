@@ -313,7 +313,9 @@ class TestFillMissingDocumentChunks:
             {"doc_id": "doc-A", "position": 0, "chash": "a" * 32},
         ]
         collection_for_doc = {"doc-A": "coll-1"}
-        identity_factory = _FakeIdentitySourceFactory({"coll-1": set()})  # nothing present
+        # NON-empty target set proving absence (empty now means ambiguous —
+        # the renamed-collection fix, 2026-07-02)
+        identity_factory = _FakeIdentitySourceFactory({"coll-1": {"z" * 32}})
         manifest_source = _FakeManifestSource({})
         spy = _SpyChunkImportFn()
 
@@ -416,10 +418,90 @@ class TestFillMissingDocumentChunks:
             (2, chash_present), (3, chash_missing),
         }
 
+
+    def test_prefilter_accepts_full_64hex_chashes_from_the_real_manifest(self) -> None:
+        # --hole-punch journey regression (2026-07-02): the catalog manifest
+        # stores FULL 64-hex chashes and /manifest/chashes returns them raw,
+        # while source rows diff on chash[:32]. An unnormalized prefilter set
+        # matches NOTHING -> every row "definitely missing" -> the WHOLE doc
+        # re-sends (observed: filled=12 for a 3-row hole). Fixture uses real
+        # 64-hex shape on the TARGET side, 64-hex source rows diffed by [:32].
+        full = lambda ch: ch * 2  # 32-hex -> 64-hex
+        present_32 = ["a" * 32, "b" * 32]
+        holed_32 = ["c" * 32]
+        source_rows = [
+            {"doc_id": "doc-A", "position": i, "chash": full(ch)}
+            for i, ch in enumerate(present_32 + holed_32)
+        ]
+        identity_factory = _FakeIdentitySourceFactory(
+            {"coll-1": {full(ch) for ch in present_32}}  # RAW 64-hex, as the server returns
+        )
+        manifest_source = _FakeManifestSource({
+            "doc-A": [
+                {"position": i, "chash": full(ch)} for i, ch in enumerate(present_32)
+            ],
+        })
+        spy = _SpyChunkImportFn()
+
+        result = vf.fill_missing_document_chunks(
+            source_rows=source_rows,
+            collection_for_doc={"doc-A": "coll-1"},
+            identity_source_factory=identity_factory,
+            manifest_source=manifest_source,
+            import_fn=spy,
+            batch_size=300,
+            breaker=EtlCircuitBreaker(),
+        )
+
+        assert result["missing"] == 1
+        assert result["filled"] == 1
+        sent = [row for _, batch in spy.calls for row in batch]
+        assert [(r["position"], r["chash"]) for r in sent] == [(2, full("c" * 32))]
+
+
+    def test_renamed_collection_empty_prefilter_resolves_via_manifest_not_full_resend(self) -> None:
+        # Hole-punch journey (2026-07-02): cross-model migration RENAMES the
+        # physical_collection (minilm-384 -> bge-768, RDR-160), but the
+        # prefilter is queried by the SOURCE name -> EMPTY set. Empty must be
+        # treated as AMBIGUOUS (resolve per-doc via the collection-independent
+        # manifest), never as all-definitely-missing -- that re-sent whole
+        # docs (observed filled=12 for a 3-row hole).
+        present = ["a" * 32, "b" * 32]
+        holed = ["c" * 32]
+        source_rows = [
+            {"doc_id": "doc-A", "position": i, "chash": ch}
+            for i, ch in enumerate(present + holed)
+        ]
+        # source-named collection matches NOTHING target-side (renamed)
+        identity_factory = _FakeIdentitySourceFactory({"coll-minilm": set()})
+        manifest_source = _FakeManifestSource({
+            "doc-A": [{"position": i, "chash": ch} for i, ch in enumerate(present)],
+        })
+        spy = _SpyChunkImportFn()
+
+        result = vf.fill_missing_document_chunks(
+            source_rows=source_rows,
+            collection_for_doc={"doc-A": "coll-minilm"},
+            identity_source_factory=identity_factory,
+            manifest_source=manifest_source,
+            import_fn=spy,
+            batch_size=300,
+            breaker=EtlCircuitBreaker(),
+        )
+
+        assert result["missing"] == 1
+        assert result["filled"] == 1
+        sent = [row for _, batch in spy.calls for row in batch]
+        assert [(r["position"], r["chash"]) for r in sent] == [(2, "c" * 32)]
+        # the ambiguity was resolved precisely: one manifest fetch, per doc
+        assert manifest_source.calls == ["doc-A"]
+
     def test_docs_with_all_chashes_present_never_trigger_manifest_fetch(self) -> None:
         source_rows = [{"doc_id": "doc-A", "position": 0, "chash": "c" * 32}]
         collection_for_doc = {"doc-A": "coll-1"}
-        identity_factory = _FakeIdentitySourceFactory({"coll-1": set()})  # definite-missing path
+        # non-empty set not containing the chash: provable absence, no
+        # manifest fetch needed (empty would mean ambiguous -> fetch)
+        identity_factory = _FakeIdentitySourceFactory({"coll-1": {"z" * 32}})
         manifest_source = _FakeManifestSource({})
         spy = _SpyChunkImportFn()
 
@@ -489,8 +571,10 @@ class TestFillMissingDocumentChunks:
             {"doc_id": "doc-A", "position": i, "chash": f"{i:032d}"} for i in range(25)
         ]
         collection_for_doc = {"doc-A": "coll-1"}
+        # empty prefilter -> ambiguous (renamed-collection fix); the doc's
+        # REACHABLE empty manifest proves everything missing -> 25 fill
         identity_factory = _FakeIdentitySourceFactory({"coll-1": set()})
-        manifest_source = _FakeManifestSource({})
+        manifest_source = _FakeManifestSource({"doc-A": []})
         spy = _SpyChunkImportFn()
 
         result = vf.fill_missing_document_chunks(

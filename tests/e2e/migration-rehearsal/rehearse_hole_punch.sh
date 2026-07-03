@@ -105,7 +105,14 @@ fi
 # psql lives ONLY in the cold-acquired PG bundle — Dockerfile.cold ships no
 # postgresql-client package (the whole point of the cold box: the bundle IS
 # the PG distribution, nothing pre-staged).
-PSQL="$HOME/.config/nexus/pg-bundle/bundle/bin/psql"
+PSQL_BIN="$HOME/.config/nexus/pg-bundle/bundle/bin/psql"
+# The bundled psql links against the bundle's OWN libpq (libpq.so.5 is NOT on
+# the box's system paths — Dockerfile.cold ships no PG client). Without the
+# bundle lib dir on LD_LIBRARY_PATH every psql call fails at loader time and
+# the punch silently never happens (first --hole-punch run, 2026-07-02: all 6
+# check failures cascaded from exactly this).
+PSQL() { LD_LIBRARY_PATH="$HOME/.config/nexus/pg-bundle/bundle/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$PSQL_BIN" "$@"; }
+PSQL="$PSQL_BIN"
 test -x "$PSQL" && ok "psql resolved from the cold-acquired PG bundle" \
   || { bad "psql not found in the cold-acquired bundle at $PSQL"; say "ABORT"; exit 1; }
 
@@ -202,7 +209,7 @@ hostport="$(printf '%s' "$ADMIN" | sed -E 's#^jdbc:postgresql://##; s#/.*$##')"
 export PGHOST="${hostport%%:*}" PGPORT="${hostport##*:}"
 export PGDATABASE="$(printf '%s' "$ADMIN" | sed -E 's#^[^/]*//[^/]+/##; s#\?.*$##')"
 export PGUSER="${NX_DB_ADMIN_USER:-}" PGPASSWORD="${NX_DB_ADMIN_PASS:-}"
-q() { "$PSQL" -v ON_ERROR_STOP=1 -tAqc "set nexus.tenant='default'; $1" 2>&1 | tr -d '[:space:]'; }
+q() { PSQL -v ON_ERROR_STOP=1 -tAqc "set nexus.tenant='default'; $1" 2>&1 | tr -d '[:space:]'; }
 
 PRE_CHUNKS="$(q "select count(*) from nexus.catalog_document_chunks where tenant_id='default' and doc_id='$DOC_ID'")"
 PRE_HOOKS="$(q "select count(*) from nexus.hook_failures where tenant_id='default' and doc_id like 'holepunch-%'")"
@@ -217,10 +224,10 @@ for ((i = 0; i < HOOK_K; i++)); do
   hook_ids="${hook_ids}${hook_ids:+,}'holepunch-$i'"
 done
 
-"$PSQL" -v ON_ERROR_STOP=1 -c \
+PSQL -v ON_ERROR_STOP=1 -c \
   "set nexus.tenant='default'; delete from nexus.catalog_document_chunks where tenant_id='default' and doc_id='$DOC_ID' and position < $CHUNK_K;" \
   >/dev/null 2>&1
-"$PSQL" -v ON_ERROR_STOP=1 -c \
+PSQL -v ON_ERROR_STOP=1 -c \
   "set nexus.tenant='default'; delete from nexus.hook_failures where tenant_id='default' and doc_id in ($hook_ids);" \
   >/dev/null 2>&1
 
@@ -291,8 +298,12 @@ import json, sys
 report = json.load(open(sys.argv[1]))
 vf = report.get("verify_fill", {})
 results = vf.get("results", {})
-chunks_filled = results.get("catalog", {}).get("fill", {}).get("document_chunks", {}).get("filled", -1)
-hooks_filled = results.get("telemetry", {}).get("fill", {}).get("hook_failures", {}).get("filled", -1)
+# A table at count-parity on pass 2 never enters the fill loop, so its
+# per-table "fill" entry is legitimately ABSENT from the report — absent
+# means 0 fills here, not a parse failure (first-run false negative:
+# filled=-1 sentinels flunked a genuinely clean no-op pass).
+chunks_filled = results.get("catalog", {}).get("fill", {}).get("document_chunks", {}).get("filled", 0)
+hooks_filled = results.get("telemetry", {}).get("fill", {}).get("hook_failures", {}).get("filled", 0)
 total_filled = vf.get("total_filled", -1)
 print(f"       document_chunks filled={chunks_filled} hook_failures filled={hooks_filled} total_filled={total_filled}")
 sys.exit(0 if (chunks_filled == 0 and hooks_filled == 0 and total_filled == 0) else 1)
