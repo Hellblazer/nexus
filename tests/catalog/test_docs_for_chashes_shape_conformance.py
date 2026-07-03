@@ -40,7 +40,12 @@ import pytest
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.indexer_utils import build_staleness_cache
-from tests.catalog.test_http_catalog_client import FakeCatalogHandler, start_fake_server
+from tests.catalog.test_http_catalog_client import (
+    CHASH_A,
+    CHUNK_SHA_A,
+    FakeCatalogHandler,
+    start_fake_server,
+)
 
 # ── local Catalog fixture (mirrors tests/test_catalog_manifest_read_api.py) ─
 
@@ -75,14 +80,14 @@ def _make_chunk(chash: str, position: int) -> dict[str, Any]:
 def local_catalog(tmp_path: Path) -> Catalog:
     cat = _make_local_catalog(tmp_path)
     _insert_doc(cat, "1.1.1", "code__shape__voyage-code-3__v1")
-    cat.write_manifest("1.1.1", [_make_chunk("abc123", 0)])
+    cat.write_manifest("1.1.1", [_make_chunk(CHASH_A, 0)])
     return cat
 
 
 # ── HttpCatalogClient fixture — real fake-server round trip ────────────────
 # Reuses the FakeCatalogHandler wire fixtures from test_http_catalog_client.py:
 #   POST /manifest/docs_for_chashes -> {"tumblers": ["1.1.1"]}   (flat, real shape)
-#   POST /manifest/get_many         -> {"manifests": {"1.1.1": [{"chash": "abc123", ...}]}}
+#   POST /manifest/get_many         -> {"manifests": {"1.1.1": [{"chash": CHASH_A, ...}]}}
 # so docs_for_chashes's client-side reshape has real per-doc manifest data to
 # intersect against, exactly like the real Java service.
 
@@ -104,14 +109,14 @@ def http_client(fake_server: str):
 
 class TestDocsForChashesReturnShapeParity:
     def test_local_returns_dict_of_lists(self, local_catalog: Catalog) -> None:
-        result = local_catalog.docs_for_chashes(["abc123"])
+        result = local_catalog.docs_for_chashes([CHASH_A])
         assert isinstance(result, dict)
-        assert result == {"abc123": ["1.1.1"]}
+        assert result == {CHASH_A: ["1.1.1"]}
 
     def test_http_returns_dict_of_lists(self, http_client: HttpCatalogClient) -> None:
-        result = http_client.docs_for_chashes(["abc123"])
+        result = http_client.docs_for_chashes([CHASH_A])
         assert isinstance(result, dict)
-        assert result == {"abc123": ["1.1.1"]}
+        assert result == {CHASH_A: ["1.1.1"]}
 
     def test_both_implementations_agree_on_container_type(
         self, local_catalog: Catalog, http_client: HttpCatalogClient,
@@ -122,8 +127,8 @@ class TestDocsForChashesReturnShapeParity:
         returned dict, service returned list, and no test compared them
         side by side.
         """
-        local_result = local_catalog.docs_for_chashes(["abc123"])
-        http_result = http_client.docs_for_chashes(["abc123"])
+        local_result = local_catalog.docs_for_chashes([CHASH_A])
+        http_result = http_client.docs_for_chashes([CHASH_A])
         assert type(local_result) is type(http_result) is dict
         assert set(local_result.keys()) == set(http_result.keys())
 
@@ -159,7 +164,7 @@ class TestBuildStalenessCacheConsumesRealHttpClient:
         col.get.return_value = {
             "ids": ["c1"],
             "metadatas": [{
-                "chunk_text_hash": "abc123",
+                "chunk_text_hash": CHUNK_SHA_A,  # full 64-char form: exercises the [:32] wire normalization
                 "content_hash": "hash-a",
                 "embedding_model": "voyage-code-3",
             }],

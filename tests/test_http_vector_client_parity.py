@@ -100,6 +100,24 @@ EXCLUSIONS: dict[str, str] = {
         "itself IS pinned above; its return shape {name, count} is asserted in "
         "tests/test_http_vector_client_stats.py."
     ),
+    "ids_for_doc_id": (
+        "NOT ported to HttpVectorClient — dead code (wave review, substantive-"
+        "critic): no caller outside T3Database itself. Documented here so the "
+        "'every live T3 method is ported or excluded-with-reason' claim stays "
+        "auditable. If a caller ever appears, port it (ids_for_source pattern) "
+        "and move it into DROP_IN_METHODS."
+    ),
+    "delete_by_doc_id": (
+        "NOT ported to HttpVectorClient — dead code (wave review, substantive-"
+        "critic): no caller outside T3Database itself. Same disposition as "
+        "ids_for_doc_id above."
+    ),
+    "rename_collection": (
+        "NOT ported to HttpVectorClient — not live in service mode: "
+        "collection_rename.py short-circuits to catalog.rename_collection_"
+        "cascade() (one atomic server transaction) before ever reaching "
+        "t3_db.rename_collection() (wave review, substantive-critic)."
+    ),
 }
 
 
