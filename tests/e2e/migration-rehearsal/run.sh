@@ -28,6 +28,7 @@ COMPREHENSIVE=0
 STRESS=0
 FULLSTACK=0
 HOLE_PUNCH=0
+SHAKEOUT=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= the guided-upgrade version-pin floor and PASSES.
 # Derived from the product constant (REQUIRED_RELEASE_VERSION) so this stamp can
@@ -61,6 +62,7 @@ for a in "$@"; do
     --stress)     STRESS=1 ;;            # Phase E: concurrency + queue-drain stress on the default rehearse.sh
     --fullstack)  FULLSTACK=1 ;;         # standalone: full topology (service + nx-mcp + claude) MCP-driven enqueue + worker drain
     --hole-punch) HOLE_PUNCH=1 ;;        # standalone: verify-fill delta-fill proof against a real fault-injected PG target (nexus-s3dd4.7)
+    --shakeout)   SHAKEOUT=1 ;;          # standalone: CANDIDATE shakeout — CLI verb matrix + incremental index + concurrent load against the locally-built -Ob binary (nexus-h8rf6)
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -99,6 +101,10 @@ trap '_guided_restore' EXIT
 # another flow flag.
 [ "$HOLE_PUNCH" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ]; } && { echo "--hole-punch is a standalone verify-fill delta-fill journey (its own cold-acquire entrypoint); do not combine with other legs" >&2; exit 2; }
 [ "$HOLE_PUNCH" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--hole-punch always rebuilds the wheel + cold-acquires the binary; --no-build is irrelevant" >&2; exit 2; }
+# --shakeout is a standalone candidate-validation journey: it builds the current
+# service/ tree natively (like --guided) and drives its own entrypoint
+# (rehearse_shakeout.sh, nexus-h8rf6) — never combined with another flow flag.
+[ "$SHAKEOUT" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; } && { echo "--shakeout is a standalone candidate shakeout (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 
 if [ "$GUIDED" = 1 ]; then
   # --guided force-rebuilds the native binary with the stamp baked in, so it is
@@ -185,7 +191,7 @@ else
   if compgen -G "service/target/*.so" > /dev/null; then
     cp service/target/*.so "$STAGE/native/"
   fi
-  cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_guided.sh" "$HERE/seed_legacy.py" "$STAGE/"
+  cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_guided.sh" "$HERE/rehearse_shakeout.sh" "$HERE/seed_legacy.py" "$STAGE/"
 fi
 
 # Docker Desktop's credsStore=desktop helper can't reach a locked login keychain
@@ -246,6 +252,11 @@ elif [ "$HOLE_PUNCH" = 1 ]; then
 elif [ "$COLD" = 1 ]; then
   # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"
+elif [ "$SHAKEOUT" = 1 ]; then
+  # nexus-h8rf6: candidate shakeout — verb matrix + incremental-index +
+  # concurrent-load assertions against the locally-built candidate binary.
+  docker run --rm "${run_env[@]}" --entrypoint /bin/bash "$IMAGE" \
+    /home/nexus/rehearse_shakeout.sh
 elif [ "$GUIDED" = 1 ]; then
   # RDR-002 ez5.13: override the default entrypoint to drive the one-command
   # guided-upgrade MVV instead of the full manual rehearsal.

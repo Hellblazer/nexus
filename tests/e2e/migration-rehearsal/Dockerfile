@@ -80,6 +80,7 @@ COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
 # multi-minute wheel install above.
 COPY rehearse.sh /home/nexus/rehearse.sh
 COPY rehearse_guided.sh /home/nexus/rehearse_guided.sh
+COPY rehearse_shakeout.sh /home/nexus/rehearse_shakeout.sh
 COPY seed_legacy.py /home/nexus/seed_legacy.py
 
 # Default: the full manual rehearsal. run.sh --guided overrides the command to
