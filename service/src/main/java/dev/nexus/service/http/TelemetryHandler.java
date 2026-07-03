@@ -40,6 +40,8 @@ import java.util.Map;
  *   POST /v1/telemetry/frecency/upsert         upsert frecency record
  *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
  *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
+ *   POST /v1/telemetry/import_batch             bulk fidelity ETL for one table
+ *   POST /v1/telemetry/ids/probe                membership probe (verify-fill inner loop)
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (via {@link AuthFilter})
@@ -56,6 +58,9 @@ public final class TelemetryHandler implements HttpHandler {
             .setSerializationInclusion(JsonInclude.Include.ALWAYS);
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+
+    /** RDR-178 wave-2 (nexus-s3dd4.3): max candidate keys per /ids/probe request. */
+    private static final int MAX_PROBE_KEYS = 300;
 
     private final TelemetryRepository repo;
 
@@ -93,6 +98,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
                 case "/import"                 -> handleImport(exchange, tenant, method);
                 case "/import_batch"           -> handleImportBatch(exchange, tenant, method);
+                case "/ids/probe"               -> handleIdsProbe(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -411,6 +417,45 @@ public final class TelemetryHandler implements HttpHandler {
         }
         int imported = repo.importBatch(tenant, table, rows);
         HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
+    }
+
+    /**
+     * POST /v1/telemetry/ids/probe — RDR-178 wave-2 P1 (bead nexus-s3dd4.3).
+     *
+     * <p>Membership-probe identity endpoint for the verify-fill inner loop: the
+     * caller sends up to {@link #MAX_PROBE_KEYS} candidate conflict-key tuples
+     * for one of the six telemetry tables; the response is the subset already
+     * present, echoed back verbatim (never reconstructed from the stored
+     * values — see {@link TelemetryRepository#probeIds}).
+     *
+     * <p>Body {@code {"table": "<one of the six>", "keys": [[...], ...]}}.
+     * Response 200 {@code {"present": [[...], ...]}}. A batch larger than
+     * {@value #MAX_PROBE_KEYS} is rejected with HTTP 400 rather than silently
+     * truncated (chroma_quotas-style batch discipline).
+     */
+    private void handleIdsProbe(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String table = requireString(body, "table");
+        Object keysObj = body.get("keys");
+        if (!(keysObj instanceof List<?> rawKeys)) {
+            throw new IllegalArgumentException("field 'keys' must be a JSON array");
+        }
+        if (rawKeys.size() > MAX_PROBE_KEYS) {
+            throw new IllegalArgumentException(
+                "field 'keys' exceeds max batch size of " + MAX_PROBE_KEYS + " (got " + rawKeys.size() + ")");
+        }
+        List<List<Object>> keys = new ArrayList<>(rawKeys.size());
+        for (Object o : rawKeys) {
+            if (!(o instanceof List<?> keyList)) {
+                throw new IllegalArgumentException("each element of 'keys' must be a JSON array");
+            }
+            @SuppressWarnings("unchecked")
+            List<Object> key = (List<Object>) keyList;
+            keys.add(key);
+        }
+        List<List<Object>> present = repo.probeIds(tenant, table, keys);
+        HttpUtil.send(ex, 200, json(Map.of("present", present)));
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

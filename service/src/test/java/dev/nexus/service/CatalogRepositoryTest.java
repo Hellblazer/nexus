@@ -2328,4 +2328,184 @@ class CatalogRepositoryTest {
         var result = repo.resolveChash(TENANT_B, SPAN_CHASH, null);
         assertThat(result).isNull();
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // importXBatch: ONE multi-row INSERT per method (nexus-1usso)
+    // ══════════════════════════════════════════════════════════════════════════
+    // Plan-audit correction: these endpoints already existed but their repository
+    // implementations still looped per-row .execute() inside one tenant transaction
+    // (N round-trips). These tests exercise the multi-row conversion.
+
+    @Test @Order(220)
+    void importOwnersBatch_multiRow_insertsAll_greatestSeq_intraBatchDedupe() throws Exception {
+        String tenant = "etl-batch-owner-tenant";
+        int n = repo.importOwnersBatch(tenant, List.of(
+            Map.of("tumbler_prefix", "bo1", "name", "batch-owner-1", "owner_type", "repo",
+                   "next_seq", 5),
+            Map.of("tumbler_prefix", "bo2", "name", "batch-owner-2", "owner_type", "repo",
+                   "next_seq", 7),
+            // Intra-batch duplicate on tumbler_prefix "bo1" — last occurrence wins.
+            Map.of("tumbler_prefix", "bo1", "name", "batch-owner-1-updated", "owner_type", "repo",
+                   "next_seq", 1)));
+        assertThat(n).as("rows submitted (contract unchanged), not rows landed").isEqualTo(3);
+
+        var bo1 = repo.ownerByPrefix(tenant, "bo1");
+        assertThat(bo1).isNotNull();
+        assertThat(bo1.get("name")).isEqualTo("batch-owner-1-updated");
+        var bo2 = repo.ownerByPrefix(tenant, "bo2");
+        assertThat(bo2).isNotNull();
+        assertThat(bo2.get("name")).isEqualTo("batch-owner-2");
+
+        // Seed a higher live seq, then re-import a lower one — GREATEST must not downgrade.
+        // ownerByPrefix() does not expose next_seq — verify via raw SQL (superuser conn).
+        repo.importOwnersBatch(tenant, List.of(
+            Map.of("tumbler_prefix", "bo1", "name", "batch-owner-1-updated", "owner_type", "repo",
+                   "next_seq", 50)));
+        repo.importOwnersBatch(tenant, List.of(
+            Map.of("tumbler_prefix", "bo1", "name", "batch-owner-1-updated", "owner_type", "repo",
+                   "next_seq", 3)));
+        try (Connection su = pg.createConnection("")) {
+            var rs = su.createStatement().executeQuery(
+                "SELECT next_seq FROM nexus.catalog_owners WHERE tenant_id='" + tenant
+                + "' AND tumbler_prefix='bo1'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getLong("next_seq"))
+                .as("GREATEST: next_seq must never downgrade").isEqualTo(50L);
+        }
+    }
+
+    @Test @Order(221)
+    void importOwnersBatch_emptyAndNull_returnZero() {
+        assertThat(repo.importOwnersBatch("etl-batch-owner-tenant", List.of())).isZero();
+        assertThat(repo.importOwnersBatch("etl-batch-owner-tenant", null)).isZero();
+    }
+
+    @Test @Order(222)
+    void importDocumentsBatch_multiRow_insertsAll_excludedAndGreatest_intraBatchDedupe() {
+        String tenant = "etl-batch-doc-tenant";
+        int n = repo.importDocumentsBatch(tenant, List.of(
+            Map.of("tumbler", "bd.1", "title", "Batch Doc 1", "content_type", "paper",
+                   "corpus", "knowledge", "source_mtime", 1000.0),
+            Map.of("tumbler", "bd.2", "title", "Batch Doc 2", "content_type", "paper",
+                   "corpus", "knowledge", "source_mtime", 500.0),
+            // Intra-batch duplicate on tumbler "bd.1" — last occurrence wins.
+            Map.of("tumbler", "bd.1", "title", "Batch Doc 1 v2", "content_type", "paper",
+                   "corpus", "knowledge", "source_mtime", 1500.0)));
+        assertThat(n).isEqualTo(3);
+
+        var bd1 = repo.getDocument(tenant, "bd.1");
+        assertThat(bd1.get("title")).isEqualTo("Batch Doc 1 v2");
+        Double mtime1 = (Double) bd1.get("source_mtime");
+        assertThat(mtime1).isEqualTo(1500.0);
+        var bd2 = repo.getDocument(tenant, "bd.2");
+        assertThat(bd2.get("title")).isEqualTo("Batch Doc 2");
+
+        // Re-import bd.1 with a LOWER source_mtime — GREATEST must not downgrade.
+        repo.importDocumentsBatch(tenant, List.of(
+            Map.of("tumbler", "bd.1", "title", "Batch Doc 1 stale", "content_type", "paper",
+                   "corpus", "knowledge", "source_mtime", 10.0)));
+        var afterStale = repo.getDocument(tenant, "bd.1");
+        assertThat(afterStale.get("title")).as("EXCLUDED: title still updates verbatim").isEqualTo("Batch Doc 1 stale");
+        Double mtimeAfter = (Double) afterStale.get("source_mtime");
+        assertThat(mtimeAfter).as("GREATEST: source_mtime must never downgrade").isEqualTo(1500.0);
+    }
+
+    @Test @Order(223)
+    void importLinksBatch_multiRow_doNothingOnReimport_noError() {
+        String tenant = "etl-batch-link-tenant";
+        repo.importDocument(tenant, Map.of("tumbler", "bl-a", "title", "Batch Link A",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.importDocument(tenant, Map.of("tumbler", "bl-b", "title", "Batch Link B",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.importDocument(tenant, Map.of("tumbler", "bl-c", "title", "Batch Link C",
+            "content_type", "paper", "corpus", "knowledge"));
+
+        int n = repo.importLinksBatch(tenant, List.of(
+            Map.of("from_tumbler", "bl-a", "to_tumbler", "bl-b", "link_type", "cites"),
+            Map.of("from_tumbler", "bl-a", "to_tumbler", "bl-c", "link_type", "cites")));
+        assertThat(n).isEqualTo(2);
+        assertThat(repo.linksFrom(tenant, "bl-a", List.of("cites"))).hasSize(2);
+
+        // Re-import the same batch — ON CONFLICT DO NOTHING must not error or duplicate.
+        repo.importLinksBatch(tenant, List.of(
+            Map.of("from_tumbler", "bl-a", "to_tumbler", "bl-b", "link_type", "cites"),
+            Map.of("from_tumbler", "bl-a", "to_tumbler", "bl-b", "link_type", "cites")));
+        assertThat(repo.linksFrom(tenant, "bl-a", List.of("cites"))).hasSize(2);
+    }
+
+    @Test @Order(224)
+    void importChunksBatch_multiRow_convergentUpdate_intraBatchDedupe() {
+        String tenant = "etl-batch-chunk-tenant";
+        String docId  = "bch.1";
+        repo.importDocument(tenant, Map.of("tumbler", docId, "title", "Batch Chunk Doc",
+            "content_type", "paper", "corpus", "knowledge"));
+
+        String chashV1 = "aaa1aaa1aaa1aaa1aaa1aaa1aaa1aaa1"; // 32 hex chars
+        String chashV2 = "bbb2bbb2bbb2bbb2bbb2bbb2bbb2bbb2"; // 32 hex chars
+        String chashV3 = "ccc3ccc3ccc3ccc3ccc3ccc3ccc3ccc3"; // 32 hex chars
+
+        int n = repo.importChunksBatch(tenant, docId, List.of(
+            Map.of("position", 0, "chash", chashV1, "chunk_index", 0,
+                   "line_start", 1, "line_end", 5, "char_start", 0, "char_end", 100),
+            Map.of("position", 1, "chash", chashV2, "chunk_index", 1,
+                   "line_start", 6, "line_end", 10, "char_start", 100, "char_end", 200),
+            // Intra-batch duplicate on position 0 — last occurrence wins.
+            Map.of("position", 0, "chash", chashV3, "chunk_index", 0,
+                   "line_start", 1, "line_end", 5, "char_start", 0, "char_end", 100)));
+        assertThat(n).isEqualTo(3);
+
+        var manifest = repo.getManifest(tenant, docId);
+        assertThat(manifest).hasSize(2);
+        var pos0 = manifest.stream().filter(m -> ((Number) m.get("position")).intValue() == 0).findFirst();
+        assertThat(pos0).isPresent();
+        assertThat(pos0.get().get("chash")).as("intra-batch dedupe: last wins").isEqualTo(chashV3);
+
+        // Re-import position 0 with yet another chash — convergent DO UPDATE.
+        repo.importChunksBatch(tenant, docId, List.of(
+            Map.of("position", 0, "chash", chashV2, "chunk_index", 0,
+                   "line_start", 1, "line_end", 5, "char_start", 0, "char_end", 100)));
+        var afterReimport = repo.getManifest(tenant, docId).stream()
+            .filter(m -> ((Number) m.get("position")).intValue() == 0).findFirst();
+        assertThat(afterReimport.get().get("chash")).isEqualTo(chashV2);
+    }
+
+    @Test @Order(225)
+    void importCollectionsBatch_multiRow_stubUpgrade_intraBatchDedupe() {
+        String tenant = "etl-batch-coll-tenant";
+        String name   = "code__batch__voyage-code-3__v1";
+
+        // Seed a stub (all three discriminators empty).
+        repo.importCollectionsBatch(tenant, List.of(
+            Map.of("name", name, "content_type", "", "owner_id", "", "embedding_model", "",
+                   "model_version", "")));
+        var before = repo.getCollection(tenant, name);
+        assertThat(before).isNotNull();
+        assertThat(before.get("content_type")).isEqualTo("");
+
+        // Batch of 2 rows for the SAME name — intra-batch dedupe, last wins — plus
+        // the DO UPDATE WHERE-stub predicate must fire (upgrading the stub).
+        int n = repo.importCollectionsBatch(tenant, List.of(
+            Map.of("name", name, "content_type", "code", "owner_id", "nexus-1-1",
+                   "embedding_model", "voyage-code-3", "model_version", "v0"),
+            Map.of("name", name, "content_type", "code", "owner_id", "nexus-1-1",
+                   "embedding_model", "voyage-code-3", "model_version", "v1")));
+        assertThat(n).isEqualTo(2);
+
+        var after = repo.getCollection(tenant, name);
+        assertThat(after.get("content_type")).isEqualTo("code");
+        assertThat(after.get("model_version")).as("intra-batch dedupe: last wins").isEqualTo("v1");
+
+        // A second batch call must NOT overwrite the now-live row (WHERE-stub predicate).
+        repo.importCollectionsBatch(tenant, List.of(
+            Map.of("name", name, "content_type", "docs", "owner_id", "nexus-x",
+                   "embedding_model", "voyage-context-3", "model_version", "v9")));
+        var stillLive = repo.getCollection(tenant, name);
+        assertThat(stillLive.get("content_type")).as("live row must not be overwritten").isEqualTo("code");
+    }
+
+    @Test @Order(226)
+    void importChunksBatch_emptyAndNull_returnZero() {
+        assertThat(repo.importChunksBatch("etl-batch-chunk-tenant", "bch.1", List.of())).isZero();
+        assertThat(repo.importChunksBatch("etl-batch-chunk-tenant", "bch.1", null)).isZero();
+    }
 }

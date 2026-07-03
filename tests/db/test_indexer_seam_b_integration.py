@@ -271,6 +271,12 @@ def test_indexer_seam_b_index_search_round_trip(
     # Reset the singleton so new env vars are picked up
     from nexus.db.http_vector_client import reset_http_vector_client_for_tests
     reset_http_vector_client_for_tests()
+    # Also drop the mcp_infra T3 singleton: a prior module (e.g. the catalog
+    # integration suite) may have cached a local-chroma T3 under ITS env,
+    # which would silently absorb this test's writes instead of the seam
+    # service (order-dependent get_by_id-returns-None class).
+    from nexus.mcp_infra import reset_singletons
+    reset_singletons()
 
     # Create a tiny document corpus
     corpus_dir = tmp_path / "corpus"
@@ -282,7 +288,7 @@ def test_indexer_seam_b_index_search_round_trip(
         "It contains the unique phrase: quantum_flux_capacitor_seam_b_gmiaf22.\n"
     )
 
-    collection = "knowledge__seam-b-test__minilm-l6-v2-384__v1"
+    collection = "knowledge__seam-b-test__bge-base-en-v15-768__v1"
 
     # NON-VACUITY PROOF: patch _make_local_embed_fn and _embed_with_fallback
     # to raise AssertionError.  If either fires, the service-mode guard is
@@ -399,10 +405,13 @@ def test_store_put_get_roundtrip_ij9hg(
         reset_http_vector_client_for_tests,
     )
     reset_http_vector_client_for_tests()
+    # Drop the mcp_infra T3 singleton too — see the sibling test's comment.
+    from nexus.mcp_infra import reset_singletons
+    reset_singletons()
 
     from nexus.mcp.core import store_get, store_put
 
-    collection = "knowledge__ij9hg-roundtrip__minilm-l6-v2-384__v1"
+    collection = "knowledge__ij9hg-roundtrip__bge-base-en-v15-768__v1"
     marker = "ij9hg_roundtrip_marker_unique_phrase_7zuzz"
     content = (
         "This document pins the store_put round-trip in service mode.\n"

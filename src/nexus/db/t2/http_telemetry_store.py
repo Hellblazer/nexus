@@ -33,6 +33,8 @@ Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/search/trim      — trim_search_telemetry
     POST /v1/telemetry/rename_collection — rename_collection
     POST /v1/telemetry/import           — import_* methods (ETL)
+    POST /v1/telemetry/import_batch     — import_rows_batch (bulk ETL)
+    POST /v1/telemetry/ids/probe        — probe_ids (verify-fill inner loop, RDR-178 wave-2 P1)
 """
 
 from __future__ import annotations
@@ -42,6 +44,8 @@ from typing import Any
 
 import httpx
 import structlog
+
+from nexus.db.chroma_quotas import QUOTAS
 
 _log = structlog.get_logger(__name__)
 
@@ -523,6 +527,60 @@ class HttpTelemetryStore(RawHandleGuardMixin):
             return 0
         resp = self._post("/v1/telemetry/import_batch", {"table": table, "rows": rows})
         return int(resp.get("imported", 0))
+
+    # ── ids probe (RDR-178 wave-2 P1, bead nexus-s3dd4.3) ──────────────────────
+
+    def probe_ids(self, table: str, keys: list[list[Any]]) -> list[list[Any]]:
+        """Membership-probe for the verify-fill inner loop: given candidate
+        conflict-key tuples for one of the six telemetry tables, return the
+        subset already present in the target.
+
+        Each element of *keys* is the table's conflict-key tuple IN COLUMN
+        ORDER (``tenant_id`` is implicit via RLS; see
+        ``TelemetryRepository.probeIds`` for the authoritative per-table
+        column order, transcribed verbatim from the UNIQUE indexes / PK in
+        ``telemetry-001-baseline.xml``):
+
+        - ``relevance_log``:    ``[query, chunk_id, action, session_id, timestamp]``
+        - ``search_telemetry``: ``[ts, query_hash, collection]``
+        - ``tier_writes``:      ``[session_id, ts, tool, tier]``
+        - ``nx_answer_runs``:   ``[question, created_at]``
+        - ``hook_failures``:    ``[doc_id, hook_name, occurred_at]``
+        - ``frecency``:         ``[chunk_id]``
+
+        Paged transparently at ``QUOTAS.MAX_RECORDS_PER_WRITE`` (300)
+        candidates per request — mirrors the batch discipline of
+        ``HttpVectorClient.existing_ids``. Calls
+        ``POST /v1/telemetry/ids/probe`` once per page.
+
+        Returned tuples are echoed back VERBATIM from *keys* (the service
+        never reconstructs them from stored values — see
+        ``TelemetryRepository.probeIds``), so a caller computing
+        ``set(map(tuple, source_keys)) - set(map(tuple, present))`` cannot
+        false-negative on timestamp string-formatting drift (e.g. a stored
+        ``+00:00`` offset vs. a source ``Z`` suffix).
+
+        FAIL-CLOSED CONTRACT (nexus-te885.6): unlike
+        ``HttpVectorClient.existing_ids`` — which swallows transport errors
+        and degrades to ``set()`` — this method does NOT catch exceptions.
+        An unreachable/erroring service propagates as an ``httpx`` exception
+        (via :meth:`_post`'s ``_raise_for_status``) rather than silently
+        reading as "nothing exists", which would otherwise make a
+        verify-fill caller believe every candidate is missing and trigger a
+        needless (if harmless, since ``importBatch`` is idempotent) full
+        re-send. Callers building ``IdentitySource``-style tri-state
+        semantics should catch at the call site, not expect this method to
+        degrade quietly.
+        """
+        if not keys:
+            return []
+        page = QUOTAS.MAX_RECORDS_PER_WRITE
+        present: list[list[Any]] = []
+        for start in range(0, len(keys), page):
+            batch = keys[start : start + page]
+            resp = self._post("/v1/telemetry/ids/probe", {"table": table, "keys": batch})
+            present.extend(resp.get("present") or [])
+        return present
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 

@@ -1980,10 +1980,15 @@ public final class CatalogRepository {
     }
 
     /**
-     * RDR-176 P3 (Gap 1, bead nexus-t9rmg.18 / nexus-1qpni): GUC-once bulk owner
-     * import. ONE {@link TenantScope#withTenant} (RLS GUC set once per batch)
-     * wrapping the per-row {@link #doImportOwner} the single-row path uses — so a
-     * client array POST is one transaction with one GUC set, not one per row.
+     * nexus-1usso: GUC-once bulk owner import — ONE multi-row
+     * {@code INSERT ... ON CONFLICT} statement (chunked at {@link
+     * #MAX_BATCH_PARAMS} bind params), mirroring {@code
+     * ChashRepository.doImportBatch} (f0ab406f). The RDR-176 P3 endpoint
+     * already existed but still looped the per-row {@link #doImportOwner}
+     * (N round-trips) — the plan-audit finding on nexus-1usso ("has the
+     * endpoint" != "batches at the DB") applies to every Catalog import
+     * method. Rows are deduped on {@code tumbler_prefix} (the conflict key)
+     * within a chunk, last occurrence wins.
      */
     public int importOwnersBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
@@ -1992,10 +1997,39 @@ public final class CatalogRepository {
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
         return tenantScope.withTenant(tenant, ctx -> {
-            for (Map<String, Object> o : rows) doImportOwner(ctx, tenant, o);
+            var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
+            for (var o : rows) unique.put(s(o, "tumbler_prefix"), o);
+            List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
+            for (int start = 0; start < deduped.size(); start += chunkSize) {
+                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                var insert = ctx.insertInto(T_OWNERS,
+                        F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
+                        F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD, F_OWN_SEQ);
+                for (var o : batch) {
+                    insert = insert.values(tenant,
+                            s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
+                            s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
+                            s(o,"head_hash"), lng(o,"next_seq", 0L));
+                }
+                insert.onConflict(F_OWN_TENANT, F_OWN_PREFIX)
+                      .doUpdate()
+                      .set(F_OWN_NAME, EX_OWN_NAME)
+                      .set(F_OWN_TYPE, EX_OWN_TYPE)
+                      .set(F_OWN_REPO, EX_OWN_REPO)
+                      .set(F_OWN_DESC, EX_OWN_DESC)
+                      .set(F_OWN_ROOT, EX_OWN_ROOT)
+                      .set(F_OWN_HEAD, EX_OWN_HEAD)
+                      .set(F_OWN_SEQ,  EX_OWN_SEQ_GREATEST)
+                      .execute();
+            }
             return rows.size();
         });
     }
+
+    /** PG Int16 bind-count limit is 32767; keep a safety margin (nexus-1usso). */
+    private static final int MAX_BATCH_PARAMS = 30_000;
 
     private void doImportOwner(DSLContext ctx, String tenant, Map<String, Object> o) {
         ctx.insertInto(T_OWNERS,
@@ -2025,11 +2059,69 @@ public final class CatalogRepository {
         });
     }
 
-    /** RDR-176 P3 (Gap 1): GUC-once bulk document import (one withTenant per batch). */
+    /**
+     * nexus-1usso: GUC-once bulk document import — ONE multi-row
+     * {@code INSERT ... ON CONFLICT} statement per chunk. Rows are deduped
+     * on {@code tumbler} (the conflict key) within a chunk, last occurrence
+     * wins.
+     */
     public int importDocumentsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            for (Map<String, Object> d : rows) doImportDocument(ctx, tenant, d);
+            var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
+            for (var d : rows) unique.put(s(d, "tumbler"), d);
+            List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+            final int cols = 24;
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+            for (int start = 0; start < deduped.size(); start += chunkSize) {
+                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                var insert = ctx.insertInto(T_DOCS,
+                        F_DOC_TENANT, F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_AUTHOR, F_DOC_YEAR,
+                        F_DOC_CTYPE, F_DOC_FPATH, F_DOC_CORPUS, F_DOC_PCOLL, F_DOC_CHUNKS,
+                        F_DOC_HEAD, F_DOC_IDXAT, F_DOC_META, F_DOC_SMTIME, F_DOC_ALIAS, F_DOC_URI,
+                        F_DOC_BIBY, F_DOC_BIAU, F_DOC_BIVE, F_DOC_BICC,
+                        F_DOC_BIS2, F_DOC_BIOA, F_DOC_BIDOI, F_DOC_BIAT);
+                for (var d : batch) {
+                    String metaJson = jsonOrNull(d.get("metadata"));
+                    insert = insert.values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
+                            nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
+                            nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
+                            nne(s(d,"head_hash")), nne(s(d,"indexed_at")),
+                            jsonbVal(metaJson),
+                            nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
+                            ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
+                            nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
+                            nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
+                            nne(s(d,"bib_doi")), nne(s(d,"bib_enriched_at")));
+                }
+                insert.onConflict(F_DOC_TENANT, F_DOC_TUMBLER)
+                      .doUpdate()
+                      .set(F_DOC_TITLE,  EX_DOC_TITLE)
+                      .set(F_DOC_AUTHOR, EX_DOC_AUTHOR)
+                      .set(F_DOC_YEAR,   EX_DOC_YEAR)
+                      .set(F_DOC_CTYPE,  EX_DOC_CTYPE)
+                      .set(F_DOC_FPATH,  EX_DOC_FPATH)
+                      .set(F_DOC_CORPUS, EX_DOC_CORPUS)
+                      .set(F_DOC_PCOLL,  EX_DOC_PCOLL)
+                      .set(F_DOC_CHUNKS, EX_DOC_CHUNKS)
+                      .set(F_DOC_HEAD,   EX_DOC_HEAD)
+                      .set(F_DOC_IDXAT,  EX_DOC_IDXAT)
+                      .set(F_DOC_META,   EX_DOC_META)
+                      // GREATEST: never downgrade source_mtime on re-import
+                      .set(F_DOC_SMTIME, EX_DOC_SMTIME_GREATEST)
+                      .set(F_DOC_ALIAS,  EX_DOC_ALIAS)
+                      .set(F_DOC_URI,    EX_DOC_URI)
+                      .set(F_DOC_BIBY,   EX_DOC_BIBY)
+                      .set(F_DOC_BIAU,   EX_DOC_BIAU)
+                      .set(F_DOC_BIVE,   EX_DOC_BIVE)
+                      .set(F_DOC_BICC,   EX_DOC_BICC)
+                      .set(F_DOC_BIS2,   EX_DOC_BIS2)
+                      .set(F_DOC_BIOA,   EX_DOC_BIOA)
+                      .set(F_DOC_BIDOI,  EX_DOC_BIDOI)
+                      .set(F_DOC_BIAT,   EX_DOC_BIAT)
+                      .execute();
+            }
             return rows.size();
         });
     }
@@ -2099,11 +2191,34 @@ public final class CatalogRepository {
         });
     }
 
-    /** RDR-176 P3 (Gap 1): GUC-once bulk link import (one withTenant per batch). */
+    /**
+     * nexus-1usso: GUC-once bulk link import — ONE multi-row {@code INSERT
+     * ... ON CONFLICT DO NOTHING} statement per chunk. No dedup needed:
+     * intra-statement conflicts against {@code DO NOTHING} are a documented
+     * no-op (unlike {@code DO UPDATE}, which cannot affect the same row
+     * twice).
+     */
     public int importLinksBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            for (Map<String, Object> lnk : rows) doImportLink(ctx, tenant, lnk);
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
+            for (int start = 0; start < rows.size(); start += chunkSize) {
+                var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
+                var insert = ctx.insertInto(T_LINKS,
+                        F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
+                        F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META);
+                for (var lnk : batch) {
+                    String metaJson = jsonOrNull(lnk.get("metadata"));
+                    insert = insert.values(DSL.val(tenant),
+                            DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
+                            DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
+                            DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
+                            jsonbVal(metaJson));
+                }
+                insert.onConflict(F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE)
+                      .doNothing()
+                      .execute();
+            }
             return rows.size();
         });
     }
@@ -2146,7 +2261,32 @@ public final class CatalogRepository {
     public int importChunksBatch(String tenant, String docId, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            for (Map<String, Object> row : rows) doImportChunk(ctx, tenant, docId, row);
+            // Conflict key: (tenant_id, doc_id, position). doc_id is constant for
+            // this call (the {doc_id, rows} import envelope is per-document).
+            var unique = new java.util.LinkedHashMap<Integer, Map<String, Object>>(rows.size());
+            for (var row : rows) unique.put(i(row, "position"), row);
+            List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
+            for (int start = 0; start < deduped.size(); start += chunkSize) {
+                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                var insert = ctx.insertInto(T_CHUNKS,
+                        F_CHK_TENANT, F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
+                        F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN);
+                for (var row : batch) {
+                    insert = insert.values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
+                            i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"));
+                }
+                insert.onConflict(F_CHK_TENANT, F_CHK_DOC, F_CHK_POS)
+                      .doUpdate()
+                      .set(F_CHK_CHASH, EX_CHK_CHASH)
+                      .set(F_CHK_IDX,   EX_CHK_IDX)
+                      .set(F_CHK_LST,   EX_CHK_LST)
+                      .set(F_CHK_LEN,   EX_CHK_LEN)
+                      .set(F_CHK_CST,   EX_CHK_CST)
+                      .set(F_CHK_CEN,   EX_CHK_CEN)
+                      .execute();
+            }
             return rows.size();
         });
     }
@@ -2187,11 +2327,62 @@ public final class CatalogRepository {
         });
     }
 
-    /** RDR-176 P3 (Gap 1): GUC-once bulk collection import (one withTenant per batch). */
+    /**
+     * nexus-1usso: GUC-once bulk collection import — ONE multi-row
+     * {@code INSERT ... ON CONFLICT DO UPDATE ... WHERE} statement per
+     * chunk. Dynamic multi-row VALUES with variable count + the {@code
+     * ::timestamptz} casts on nullable timestamp columns are the reason
+     * this stays raw-SQL string building (same rationale as {@code
+     * TaxonomyRepository.batchInsertAssignments}) rather than jOOQ's typed
+     * multi-row insert — jOOQ's typed API requires a statically-known row
+     * count per statement. Rows are deduped on {@code name} (the conflict
+     * key) within a chunk, last occurrence wins.
+     */
     public int importCollectionsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            for (Map<String, Object> coll : rows) doImportCollection(ctx, tenant, coll);
+            var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
+            for (var coll : rows) unique.put(s(coll, "name"), coll);
+            List<Map<String, Object>> deduped = List.copyOf(unique.values());
+
+            final int cols = 11;
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+            for (int start = 0; start < deduped.size(); start += chunkSize) {
+                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                StringBuilder sql = new StringBuilder(
+                    "INSERT INTO nexus.catalog_collections"
+                    + " (tenant_id, name, content_type, owner_id, embedding_model, model_version,"
+                    + "  display_name, legacy_grandfathered, superseded_by, superseded_at, created_at)"
+                    + " VALUES ");
+                List<Object> params = new java.util.ArrayList<>(batch.size() * cols);
+                for (int i = 0; i < batch.size(); i++) {
+                    sql.append(i == 0 ? "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz)"
+                                       : ", (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz)");
+                    Map<String, Object> coll = batch.get(i);
+                    params.add(tenant);
+                    params.add(s(coll, "name"));
+                    params.add(nne(s(coll, "content_type")));
+                    params.add(nne(s(coll, "owner_id")));
+                    params.add(nne(s(coll, "embedding_model")));
+                    params.add(nne(s(coll, "model_version")));
+                    params.add(nne(s(coll, "display_name")));
+                    params.add(ni(i(coll, "legacy_grandfathered"), 0));
+                    params.add(nne(s(coll, "superseded_by")));
+                    params.add(nz(s(coll, "superseded_at")));
+                    params.add(nz(s(coll, "created_at")));
+                }
+                sql.append(
+                    " ON CONFLICT (tenant_id, name) DO UPDATE SET"
+                    + "  content_type=EXCLUDED.content_type, owner_id=EXCLUDED.owner_id,"
+                    + "  embedding_model=EXCLUDED.embedding_model, model_version=EXCLUDED.model_version,"
+                    + "  display_name=EXCLUDED.display_name, legacy_grandfathered=EXCLUDED.legacy_grandfathered,"
+                    + "  superseded_by=EXCLUDED.superseded_by,"
+                    + "  superseded_at=EXCLUDED.superseded_at,"
+                    + "  created_at=EXCLUDED.created_at"
+                    + " WHERE catalog_collections.embedding_model='' AND catalog_collections.content_type=''"
+                    + "  AND catalog_collections.owner_id=''");
+                ctx.execute(sql.toString(), params.toArray());
+            }
             return rows.size();
         });
     }

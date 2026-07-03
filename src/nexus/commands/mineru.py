@@ -173,7 +173,16 @@ def _resolve_mineru_api_bin() -> str | None:
 def start(port: int) -> None:
     """Start the MinerU API server."""
     if port == 0:
-        port = _find_free_port()
+        # nexus incident 2026-07-01: auto-assign used to ignore config
+        # outright, so an operator with a fixed non-default local port in
+        # pdf.mineru_server_url got a live server on a DIFFERENT random
+        # port than get_mineru_server_url() would ever look for — success
+        # message, invisible server. Honor the same "explicit operator
+        # intent wins" precedence get_mineru_server_url() already applies
+        # on the read side (RDR-148 Gap 1) on this write side too.
+        from nexus.config import get_mineru_configured_fixed_port  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        configured_port = get_mineru_configured_fixed_port()
+        port = configured_port if configured_port is not None else _find_free_port()
 
     # Check if already running
     info = _read_pid_file()

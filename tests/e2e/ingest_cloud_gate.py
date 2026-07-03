@@ -97,6 +97,10 @@ def main() -> int:
                 "source_database": src_db,
                 "source_api_key": src_key,
                 "collections": [COLLECTION],
+                # RDR-178 Gap 5 made async (202 + job_id) the endpoint default;
+                # this gate asserts the RDR-176 P4 synchronous contract, which
+                # {"sync": true} preserves byte-for-byte.
+                "sync": True,
             },
             timeout=120.0,
         )

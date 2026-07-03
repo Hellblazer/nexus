@@ -638,6 +638,165 @@ class TelemetryRepositoryTest {
         }
     }
 
+    // ── probeIds (RDR-178 wave-2 P1, bead nexus-s3dd4.3) ──────────────────────
+    // Membership-probe identity endpoint for the verify-fill inner loop:
+    // given candidate conflict-key tuples, return the subset already present.
+    // Conflict-key column order/arity here mirrors telemetry-001-baseline.xml
+    // verbatim (see per-table UNIQUE indexes / PK definitions).
+
+    @Test @Order(26)
+    void probeIds_relevanceLog_returnsPresentSubsetVerbatim() {
+        repo.importRelevanceRow(TENANT_A,
+            "probe-query", "probe-chunk-1", "code__nexus", "store_put", "probe-sess",
+            "2025-05-01T00:00:00Z");
+
+        var presentKey = List.<Object>of(
+            "probe-query", "probe-chunk-1", "store_put", "probe-sess", "2025-05-01T00:00:00Z");
+        var missingKey = List.<Object>of(
+            "probe-query", "probe-chunk-NEVER", "store_put", "probe-sess", "2025-05-01T00:00:00Z");
+
+        var present = repo.probeIds(TENANT_A, "relevance_log", List.of(presentKey, missingKey));
+
+        assertThat(present)
+            .as("probeIds must echo back exactly the present key, verbatim")
+            .hasSize(1)
+            .containsExactly(presentKey);
+    }
+
+    @Test @Order(27)
+    void probeIds_searchTelemetry_returnsPresentSubset() {
+        repo.importSearchRow(TENANT_A,
+            "2025-05-02T00:00:00Z", "probe-hash-01", "probe-coll", 10, 5, 0.4, 0.5);
+
+        var presentKey = List.<Object>of("2025-05-02T00:00:00Z", "probe-hash-01", "probe-coll");
+        var missingKey = List.<Object>of("2025-05-02T00:00:00Z", "probe-hash-NEVER", "probe-coll");
+
+        var present = repo.probeIds(TENANT_A, "search_telemetry", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(28)
+    void probeIds_tierWrites_returnsPresentSubset() {
+        repo.importTierWriteRow(TENANT_A,
+            "probe-sess-tier", "2025-05-03T00:00:00Z", "memory_put", "T2", null, null, null);
+
+        var presentKey = List.<Object>of("probe-sess-tier", "2025-05-03T00:00:00Z", "memory_put", "T2");
+        var missingKey = List.<Object>of("probe-sess-tier", "2025-05-03T00:00:00Z", "memory_put", "T3");
+
+        var present = repo.probeIds(TENANT_A, "tier_writes", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(29)
+    void probeIds_nxAnswerRuns_returnsPresentSubset() {
+        repo.importNxAnswerRunRow(TENANT_A,
+            "probe question?", null, null, 1, "", 0.0, 0L, "2025-05-04T00:00:00Z");
+
+        var presentKey = List.<Object>of("probe question?", "2025-05-04T00:00:00Z");
+        var missingKey = List.<Object>of("probe question NEVER ASKED?", "2025-05-04T00:00:00Z");
+
+        var present = repo.probeIds(TENANT_A, "nx_answer_runs", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(32)
+    void probeIds_hookFailures_returnsPresentSubset() {
+        repo.importHookFailureRow(TENANT_A,
+            "probe-doc-1", "code__nexus", "probe-hook", "boom", "2025-05-05T00:00:00Z",
+            null, false, "single");
+
+        var presentKey = List.<Object>of("probe-doc-1", "probe-hook", "2025-05-05T00:00:00Z");
+        var missingKey = List.<Object>of("probe-doc-NEVER", "probe-hook", "2025-05-05T00:00:00Z");
+
+        var present = repo.probeIds(TENANT_A, "hook_failures", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(33)
+    void probeIds_frecency_returnsPresentSubset() {
+        repo.upsertFrecency(TENANT_A,
+            "probe-chunk-frecency", "2025-05-06T00:00:00Z", 30, 1.5, 2, "2025-05-06T00:00:00Z");
+
+        var presentKey = List.<Object>of("probe-chunk-frecency");
+        var missingKey = List.<Object>of("probe-chunk-frecency-NEVER");
+
+        var present = repo.probeIds(TENANT_A, "frecency", List.of(presentKey, missingKey));
+
+        assertThat(present).hasSize(1).containsExactly(presentKey);
+    }
+
+    @Test @Order(34)
+    void probeIds_tenantScoped_secondTenantSeesNothing() {
+        repo.importRelevanceRow(TENANT_A,
+            "tenant-scoped-query", "tenant-scoped-chunk", "code__nexus", "store_put", "sess-scoped",
+            "2025-05-07T00:00:00Z");
+
+        var key = List.<Object>of(
+            "tenant-scoped-query", "tenant-scoped-chunk", "store_put", "sess-scoped",
+            "2025-05-07T00:00:00Z");
+
+        var presentForOwner = repo.probeIds(TENANT_A, "relevance_log", List.of(key));
+        assertThat(presentForOwner)
+            .as("owning tenant must see its own row as present")
+            .hasSize(1);
+
+        var presentForOther = repo.probeIds(TENANT_B, "relevance_log", List.of(key));
+        assertThat(presentForOther)
+            .as("RLS: a second tenant must see NOTHING for the first tenant's row")
+            .isEmpty();
+    }
+
+    @Test @Order(34)
+    void probeIds_timestampInstantEquivalence_offsetFormMatchesZuluImport() {
+        // R1 substantive-critic (2026-07-02): the VERBATIM-ECHO design's
+        // central claim — parseTsStrict compares INSTANTS, so a row imported
+        // with a "...Z" timestamp must probe as present when the candidate
+        // key renders the same instant as "...+00:00" (and the echoed tuple
+        // is the CALLER's form, never the stored rendering). This is the
+        // exact drift class the design exists to defuse; pin it.
+        repo.importRelevanceRow(TENANT_A,
+            "instant-eq-query", "instant-eq-chunk", "code__nexus", "store_put", "sess-eq",
+            "2025-05-08T12:30:00Z");
+
+        var offsetFormKey = List.<Object>of(
+            "instant-eq-query", "instant-eq-chunk", "store_put", "sess-eq",
+            "2025-05-08T12:30:00+00:00");
+
+        var present = repo.probeIds(TENANT_A, "relevance_log", List.of(offsetFormKey));
+
+        assertThat(present)
+            .as("+00:00 candidate must match the Z-imported instant, echoed in the CALLER's form")
+            .hasSize(1)
+            .containsExactly(offsetFormKey);
+    }
+
+    @Test @Order(35)
+    void probeIds_unknownTable_throwsIllegalArgument() {
+        assertThatThrownBy(() ->
+            repo.probeIds(TENANT_A, "not_a_real_table", List.of(List.of("x"))))
+            .as("probeIds with an unknown table must throw")
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(36)
+    void probeIds_wrongArity_throwsIllegalArgument() {
+        // frecency's conflict key is 1-tuple [chunk_id]; feed it 2 elements.
+        assertThatThrownBy(() ->
+            repo.probeIds(TENANT_A, "frecency", List.of(List.of("chunk-a", "extra"))))
+            .as("probeIds with a mis-sized key tuple must throw")
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(37)
+    void probeIds_emptyKeys_returnsEmptyList() {
+        var present = repo.probeIds(TENANT_A, "relevance_log", List.of());
+        assertThat(present).isEmpty();
+    }
+
     // ── RLS ────────────────────────────────────────────────────────────────────
 
     @Test @Order(24)
@@ -655,6 +814,72 @@ class TelemetryRepositoryTest {
             }
         }).as("RLS WITH CHECK must reject INSERT with wrong tenant_id")
           .isInstanceOfAny(PSQLException.class, SQLException.class);
+    }
+
+    // ── importBatch: ONE multi-row INSERT per table (nexus-1usso) ───────────────
+    // Plan-audit correction: importBatch HAD the endpoint but looped per-row
+    // .execute() inside its single tenant transaction (N round-trips). These
+    // tests exercise the multi-row conversion for all six tables.
+
+    @Test @Order(40)
+    void importBatch_relevanceLog_multiRow_insertsAll_doNothingOnReimport() {
+        int n = repo.importBatch(TENANT_A, "relevance_log", List.of(
+            Map.of("query", "batch-rl-q0", "chunk_id", "batch-rl-c0", "collection", "knowledge__nexus",
+                   "action", "store_put", "session_id", "sess-0", "timestamp", PAST_TS),
+            Map.of("query", "batch-rl-q1", "chunk_id", "batch-rl-c1", "collection", "knowledge__nexus",
+                   "action", "store_put", "session_id", "sess-1", "timestamp", PAST_TS)));
+        assertThat(n).isEqualTo(2);
+        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q0", "batch-rl-c0", "", "", 5)).hasSize(1);
+        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q1", "batch-rl-c1", "", "", 5)).hasSize(1);
+
+        // Re-import (same rows) — DO NOTHING must not duplicate.
+        repo.importBatch(TENANT_A, "relevance_log", List.of(
+            Map.of("query", "batch-rl-q0", "chunk_id", "batch-rl-c0", "collection", "knowledge__nexus",
+                   "action", "store_put", "session_id", "sess-0", "timestamp", PAST_TS)));
+        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q0", "batch-rl-c0", "", "", 5)).hasSize(1);
+    }
+
+    @Test @Order(41)
+    void importBatch_frecency_multiRow_greatestMerge_intraBatchDedupeLastWins() {
+        // Two rows for the SAME chunk_id in ONE batch — must dedupe (last wins),
+        // since a single multi-row ON CONFLICT DO UPDATE cannot affect the same
+        // row twice.
+        int n = repo.importBatch(TENANT_A, "frecency", List.of(
+            Map.of("chunk_id", "batch-frec-1", "embedded_at", "2024-01-01T00:00:00Z",
+                   "ttl_days", 30, "frecency_score", 0.3, "miss_count", 2,
+                   "last_hit_at", "2024-02-01T00:00:00Z"),
+            Map.of("chunk_id", "batch-frec-1", "embedded_at", "2024-01-01T00:00:00Z",
+                   "ttl_days", 30, "frecency_score", 0.8, "miss_count", 9,
+                   "last_hit_at", "2024-03-01T00:00:00Z")));
+        assertThat(n).as("rows submitted (contract unchanged), not rows landed").isEqualTo(2);
+
+        var got = repo.getFrecency(TENANT_A, "batch-frec-1");
+        assertThat(got).isPresent();
+        assertThat(((Number) got.get().get("frecency_score")).doubleValue()).isEqualTo(0.8);
+        assertThat(((Number) got.get().get("miss_count")).intValue()).isEqualTo(9);
+
+        // Re-import with STALE (lower) values — GREATEST must not roll back live values.
+        repo.importBatch(TENANT_A, "frecency", List.of(
+            Map.of("chunk_id", "batch-frec-1", "embedded_at", "2024-01-01T00:00:00Z",
+                   "ttl_days", 30, "frecency_score", 0.1, "miss_count", 1,
+                   "last_hit_at", "2024-01-15T00:00:00Z")));
+        var afterStale = repo.getFrecency(TENANT_A, "batch-frec-1");
+        assertThat(((Number) afterStale.get().get("frecency_score")).doubleValue())
+            .as("GREATEST: must not roll back to stale 0.1").isEqualTo(0.8);
+        assertThat(((Number) afterStale.get().get("miss_count")).intValue())
+            .as("GREATEST: must not roll back to stale 1").isEqualTo(9);
+    }
+
+    @Test @Order(42)
+    void importBatch_unknownTable_throws() {
+        assertThatThrownBy(() -> repo.importBatch(TENANT_A, "bogus-table", List.of(Map.of())))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(43)
+    void importBatch_emptyAndNull_returnZero() {
+        assertThat(repo.importBatch(TENANT_A, "relevance_log", List.of())).isZero();
+        assertThat(repo.importBatch(TENANT_A, "relevance_log", null)).isZero();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

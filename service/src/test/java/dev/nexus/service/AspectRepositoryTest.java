@@ -136,7 +136,9 @@ class AspectRepositoryTest {
                     "highlight-1", "by-uri-doc", "list-hl-0", "list-hl-1",
                     "del-highlight", "import-hl-1", "rls-hl-private",
                     "hl-rename-doc-1", "hl-rename-doc-2", "hl-rls-doc",
-                    "q-doc-1", "done-doc-id-unique", "etl-q-doc")) {
+                    "q-doc-1", "done-doc-id-unique", "etl-q-doc",
+                    // nexus-1usso importHighlightsBatch multi-row conversion tests
+                    "batch-hl-1", "batch-hl-2")) {
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
                     "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
@@ -1140,6 +1142,197 @@ class AspectRepositoryTest {
         boolean stillUnderSrc = rows.stream().anyMatch(r ->
             "hl-rls-src".equals(r.get("collection")) && "hl-rls-doc".equals(r.get("doc_id")));
         assertThat(stillUnderSrc).as("TENANT_A row must remain under hl-rls-src").isTrue();
+    }
+
+    // ── importXBatch: ONE multi-row INSERT per method (nexus-1usso) ─────────────
+    // Plan-audit correction: these endpoints already existed (RDR-176 P3) but
+    // their repository implementations still looped per-row .execute() inside
+    // one tenant transaction (N round-trips). These tests exercise the
+    // multi-row conversion.
+
+    @Test @Order(60)
+    void importAspectsBatch_multiRow_insertsAll_lowConfidenceSkipped_intraBatchDedupe() {
+        var kept1 = makeAspect("batch-asp-coll", "batch1.pdf", 0.75, "v1", "ext-1");
+        var kept2 = makeAspect("batch-asp-coll", "batch2.pdf", 0.80, "v1", "ext-1");
+        var lowConf = makeAspect("batch-asp-coll", "lowconf.pdf", 0.05, "v1", "ext-1");
+        // Intra-batch duplicate on (collection, source_path) — last wins.
+        var dup = makeAspect("batch-asp-coll", "batch1.pdf", 0.95, "v2", "ext-2");
+
+        int n = repo.importAspectsBatch(TENANT_A, List.of(kept1, kept2, lowConf, dup));
+        assertThat(n).as("low-confidence row must count 0; 3 rows written").isEqualTo(3);
+
+        var got1 = repo.getAspect(TENANT_A, "batch-asp-coll", "batch1.pdf");
+        assertThat(got1).isPresent();
+        assertThat(got1.get().get("model_version")).as("intra-batch dedupe: last wins").isEqualTo("v2");
+        assertThat(repo.getAspect(TENANT_A, "batch-asp-coll", "batch2.pdf")).isPresent();
+        assertThat(repo.getAspect(TENANT_A, "batch-asp-coll", "lowconf.pdf"))
+            .as("sub-confidence row must not land").isEmpty();
+    }
+
+    @Test @Order(61)
+    void importAspectsBatch_emptyAndNull_returnZero() {
+        assertThat(repo.importAspectsBatch(TENANT_A, List.of())).isZero();
+        assertThat(repo.importAspectsBatch(TENANT_A, null)).isZero();
+    }
+
+    @Test @Order(62)
+    void importHighlightsBatch_multiRow_insertsAll_blankDocIdSkipped_intraBatchDedupe() {
+        var h1 = new java.util.LinkedHashMap<String, Object>();
+        h1.put("doc_id", "batch-hl-1");
+        h1.put("highlights_md", "v1 content");
+        h1.put("ingested_at", "2025-01-01T00:00:00.000000Z");
+
+        var h2 = new java.util.LinkedHashMap<String, Object>();
+        h2.put("doc_id", "batch-hl-2");
+        h2.put("highlights_md", "other content");
+        h2.put("ingested_at", "2025-01-01T00:00:00.000000Z");
+
+        var blank = new java.util.LinkedHashMap<String, Object>();
+        blank.put("doc_id", "");
+        blank.put("highlights_md", "must not land");
+        blank.put("ingested_at", "2025-01-01T00:00:00.000000Z");
+
+        // Intra-batch duplicate on doc_id "batch-hl-1" — last wins.
+        var dup = new java.util.LinkedHashMap<String, Object>();
+        dup.put("doc_id", "batch-hl-1");
+        dup.put("highlights_md", "v2 content updated");
+        dup.put("ingested_at", "2026-01-01T00:00:00.000000Z");
+
+        int n = repo.importHighlightsBatch(TENANT_A, List.of(h1, h2, blank, dup));
+        assertThat(n).as("blank doc_id row must count 0; 3 rows written").isEqualTo(3);
+
+        var got1 = repo.getHighlight(TENANT_A, "batch-hl-1");
+        assertThat(got1).isPresent();
+        assertThat(got1.get().get("highlights_md")).asString()
+            .as("intra-batch dedupe: last wins").contains("v2 content updated");
+        assertThat(repo.getHighlight(TENANT_A, "batch-hl-2")).isPresent();
+    }
+
+    @Test @Order(63)
+    void importHighlightsBatch_emptyAndNull_returnZero() {
+        assertThat(repo.importHighlightsBatch(TENANT_A, List.of())).isZero();
+        assertThat(repo.importHighlightsBatch(TENANT_A, null)).isZero();
+    }
+
+    @Test @Order(64)
+    void importPromotionBatch_multiRow_doNothingOnReimport_invalidRowsSkipped() {
+        var p1 = new java.util.LinkedHashMap<String, Object>();
+        p1.put("field_name",  "batch_field_1");
+        p1.put("sql_type",    "TEXT");
+        p1.put("promoted_at", "2026-06-02T10:00:00.000000Z");
+
+        var p2 = new java.util.LinkedHashMap<String, Object>();
+        p2.put("field_name",  "batch_field_2");
+        p2.put("sql_type",    "TEXT");
+        p2.put("promoted_at", "2026-06-02T11:00:00.000000Z");
+
+        var invalid = new java.util.LinkedHashMap<String, Object>();
+        invalid.put("sql_type", "TEXT"); // missing field_name — must be skipped
+
+        int n = repo.importPromotionBatch(TENANT_A, List.of(p1, p2, invalid));
+        assertThat(n).as("invalid row skipped; 2 rows newly inserted").isEqualTo(2);
+
+        // Re-import the same 2 valid rows — DO NOTHING must report 0 newly written.
+        int n2 = repo.importPromotionBatch(TENANT_A, List.of(p1, p2));
+        assertThat(n2).as("re-import: DO NOTHING reports 0 newly inserted").isZero();
+
+        List<Map<String, Object>> all = repo.listPromotions(TENANT_A);
+        long count1 = all.stream().filter(p -> "batch_field_1".equals(p.get("field_name"))).count();
+        long count2 = all.stream().filter(p -> "batch_field_2".equals(p.get("field_name"))).count();
+        assertThat(count1).as("exactly 1 row for batch_field_1 (no duplicate)").isEqualTo(1);
+        assertThat(count2).as("exactly 1 row for batch_field_2 (no duplicate)").isEqualTo(1);
+    }
+
+    @Test @Order(65)
+    void importPromotionBatch_emptyAndNull_returnZero() {
+        assertThat(repo.importPromotionBatch(TENANT_A, List.of())).isZero();
+        assertThat(repo.importPromotionBatch(TENANT_A, null)).isZero();
+    }
+
+    // ── Tests 66-69: importQueueBatch multi-row conversion (nexus-te885.3) ────
+    // Completes the nexus-1usso sweep: the queue import was the one batch
+    // method still looping per-row .execute() inside its transaction.
+
+    @Test @Order(66)
+    void importQueueBatch_insertsAll_acrossCollections_oneStatement() {
+        String t = "qbatch-tenant-" + System.nanoTime();
+        var r1 = new java.util.LinkedHashMap<String, Object>();
+        r1.put("collection", "qbatch-coll-a"); r1.put("source_path", "a1.pdf");
+        r1.put("status", "pending"); r1.put("enqueued_at", "2025-05-01T00:00:00.000000Z");
+        var r2 = new java.util.LinkedHashMap<String, Object>();
+        r2.put("collection", "qbatch-coll-a"); r2.put("source_path", "a2.pdf");
+        r2.put("status", "failed"); r2.put("retry_count", 2);
+        r2.put("enqueued_at", "2025-05-02T00:00:00.000000Z");
+        r2.put("last_error", "database is locked");
+        var r3 = new java.util.LinkedHashMap<String, Object>();
+        r3.put("collection", "qbatch-coll-b"); r3.put("source_path", "b1.md");
+        r3.put("status", "pending"); r3.put("enqueued_at", "2025-05-03T00:00:00.000000Z");
+
+        int n = repo.importQueueBatch(t, List.of(r1, r2, r3));
+        assertThat(n).isEqualTo(3);
+        // pending rows visible; failed row is not pending
+        List<Map<String, Object>> pending = repo.listPending(t, 100);
+        assertThat(pending).hasSize(2);
+        assertThat(pending).anyMatch(r -> "a1.pdf".equals(r.get("source_path")));
+        assertThat(pending).anyMatch(r -> "b1.md".equals(r.get("source_path")));
+    }
+
+    @Test @Order(67)
+    void importQueueBatch_intraBatchDuplicate_lastWins_noError() {
+        // One multi-row INSERT ... ON CONFLICT cannot touch the same
+        // (tenant, collection, source_path) twice — repo must dedupe, last wins.
+        String t = "qbatch-tenant2-" + System.nanoTime();
+        var first = new java.util.LinkedHashMap<String, Object>();
+        first.put("collection", "qbatch-dup"); first.put("source_path", "dup.pdf");
+        first.put("status", "pending"); first.put("retry_count", 1);
+        first.put("enqueued_at", "2025-06-01T00:00:00.000000Z");
+        var second = new java.util.LinkedHashMap<String, Object>();
+        second.put("collection", "qbatch-dup"); second.put("source_path", "dup.pdf");
+        second.put("status", "failed"); second.put("retry_count", 4);
+        second.put("enqueued_at", "2025-06-09T00:00:00.000000Z");
+        second.put("last_error", "boom");
+
+        int n = repo.importQueueBatch(t, List.of(first, second));
+        assertThat(n).isEqualTo(1);
+        // last-wins: failed, so not pending
+        assertThat(repo.listPending(t, 100)).isEmpty();
+    }
+
+    @Test @Order(68)
+    void importQueueBatch_fidelity_neverDowngradesInProgress_viaBatchPath() {
+        // The batch path must preserve the single-row ON CONFLICT semantics
+        // verbatim: a stale 'pending' import must not downgrade in_progress.
+        String t = "qbatch-tenant3-" + System.nanoTime();
+        var seed = new java.util.LinkedHashMap<String, Object>();
+        seed.put("collection", "qbatch-fid"); seed.put("source_path", "fid.pdf");
+        repo.enqueue(t, seed);
+        assertThat(repo.claimNext(t)).isPresent(); // now in_progress
+
+        var stale = new java.util.LinkedHashMap<String, Object>();
+        stale.put("collection", "qbatch-fid"); stale.put("source_path", "fid.pdf");
+        stale.put("status", "pending");
+        stale.put("enqueued_at", "2025-01-01T00:00:00.000000Z");
+        int n = repo.importQueueBatch(t, List.of(stale));
+        assertThat(n).isEqualTo(1);
+        assertThat(repo.listPending(t, 100))
+            .as("in_progress must not be downgraded by a stale batch import")
+            .isEmpty();
+    }
+
+    @Test @Order(69)
+    void importQueueBatch_skipsRowsMissingKeys_countsOnlyKept() {
+        String t = "qbatch-tenant4-" + System.nanoTime();
+        var good = new java.util.LinkedHashMap<String, Object>();
+        good.put("collection", "qbatch-skip"); good.put("source_path", "ok.pdf");
+        good.put("status", "pending"); good.put("enqueued_at", "2025-07-01T00:00:00.000000Z");
+        var noColl = new java.util.LinkedHashMap<String, Object>();
+        noColl.put("source_path", "orphan.pdf");
+        var noPath = new java.util.LinkedHashMap<String, Object>();
+        noPath.put("collection", "qbatch-skip");
+
+        int n = repo.importQueueBatch(t, List.of(good, noColl, noPath));
+        assertThat(n).isEqualTo(1);
+        assertThat(repo.listPending(t, 100)).hasSize(1);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

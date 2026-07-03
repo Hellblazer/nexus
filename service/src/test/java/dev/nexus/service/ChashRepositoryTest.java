@@ -328,6 +328,72 @@ class ChashRepositoryTest {
         assertThat(repo.countForCollection(importTenant, importColl)).isEqualTo(1);
     }
 
+    // ── Tests 19-23: doImportBatch — ONE multi-row INSERT per request ─────────
+    // nexus-1usso: handleImport looped repo.doImport per row (200 rows = 600+
+    // sequential PG round-trips per HTTP request ≈ 0.9s server-side = the
+    // measured 1-batch/s (~34KB/s) migration ceiling). The batch method lands
+    // the whole request in one multi-row INSERT ... ON CONFLICT.
+
+    @Test
+    @Order(19)
+    void doImportBatch_insertsAll_acrossCollections() {
+        String t = "chash-batch-tenant";
+        int n = repo.doImportBatch(t, List.of(
+                new ChashRepository.ImportRow("batch_c1", "code__batch_a", "2025-01-01T00:00:00Z"),
+                new ChashRepository.ImportRow("batch_c2", "code__batch_a", "2025-01-02T00:00:00Z"),
+                new ChashRepository.ImportRow("batch_c3", "docs__batch_b", "2025-01-03T00:00:00Z")));
+        assertThat(n).isEqualTo(3);
+        assertThat(repo.countForCollection(t, "code__batch_a")).isEqualTo(2);
+        assertThat(repo.countForCollection(t, "docs__batch_b")).isEqualTo(1);
+        // created_at fidelity preserved (not clobbered to now)
+        assertThat((String) repo.lookup(t, "batch_c1").get(0).get("created_at"))
+                .contains("2025-01-01");
+    }
+
+    @Test
+    @Order(20)
+    void doImportBatch_idempotentRerun_noDuplicates() {
+        String t = "chash-batch-tenant2";
+        var rows = List.of(new ChashRepository.ImportRow(
+                "bat2_c1", "code__batch2", "2025-02-01T00:00:00Z"));
+        repo.doImportBatch(t, rows);
+        repo.doImportBatch(t, rows);
+        assertThat(repo.countForCollection(t, "code__batch2")).isEqualTo(1);
+    }
+
+    @Test
+    @Order(21)
+    void doImportBatch_intraBatchDuplicate_lastWins_noError() {
+        // A single multi-row INSERT ... ON CONFLICT cannot touch the same row
+        // twice (PG: "cannot affect row a second time") — the repo must dedupe
+        // within the batch, last occurrence winning.
+        String t = "chash-batch-tenant3";
+        int n = repo.doImportBatch(t, List.of(
+                new ChashRepository.ImportRow("dup_c", "code__dup", "2025-03-01T00:00:00Z"),
+                new ChashRepository.ImportRow("dup_c", "code__dup", "2025-03-09T00:00:00Z")));
+        assertThat(n).isEqualTo(1);
+        var got = repo.lookup(t, "dup_c");
+        assertThat(got).hasSize(1);
+        assertThat((String) got.get(0).get("created_at")).contains("2025-03-09");
+    }
+
+    @Test
+    @Order(22)
+    void doImportBatch_badCreatedAt_fallsBackToNow_rowStillLands() {
+        String t = "chash-batch-tenant4";
+        int n = repo.doImportBatch(t, List.of(
+                new ChashRepository.ImportRow("badts_c", "code__badts", "not-a-timestamp")));
+        assertThat(n).isEqualTo(1);
+        assertThat(repo.lookup(t, "badts_c")).hasSize(1);
+    }
+
+    @Test
+    @Order(23)
+    void doImportBatch_emptyAndNull_returnZero() {
+        assertThat(repo.doImportBatch("chash-batch-tenant5", List.of())).isZero();
+        assertThat(repo.doImportBatch("chash-batch-tenant5", null)).isZero();
+    }
+
     // ── Test 18: ensureCollectionRegistered rejects blank collection ─────────────
 
     @Test

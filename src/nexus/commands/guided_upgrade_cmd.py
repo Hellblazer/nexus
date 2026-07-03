@@ -14,15 +14,21 @@ no-ops WITHOUT provisioning. A not-ready / wrong-version service hard-fails
 with a remedy and NEVER migrates. Named ``guided-upgrade`` to avoid colliding
 with the existing schema-migration ``nx upgrade``.
 
-RE-RUN SEMANTICS (honest scope): re-running is SAFE — every reused step is
-idempotent (provision short-circuits on a live lease; the migrate ETL upserts;
-a blocked run leaves ``migrated-failed`` and is correctly retried). It is NOT a
-no-op after a SUCCESSFUL migration: copy-not-move leaves the Chroma source
-intact, the success path clears the migration-state sentinel, and there is no
-persistent "migrated" marker to short-circuit on — so a re-run re-detects the
-Chroma data and re-copies it (idempotent, but full-cost, with reads briefly
-degraded during the redo). Detecting an already-migrated state (e.g. via a
-pgvector count probe) is tracked separately, not part of this wiring.
+RE-RUN SEMANTICS (honest scope, updated by RDR-178 Gap 7 / nexus-1sx01):
+re-running is SAFE — every reused step is idempotent (provision short-circuits
+on a live lease; the migrate ETL upserts; a blocked run leaves
+``migrated-failed`` and is correctly retried). The T2 (SQLite) half is now a
+TRUE no-op on re-run: ``guided_upgrade.detect_already_migrated`` consults the
+newest ``<config>/migration-reports/`` artifacts + a local-SQLite freshness
+probe and skips any store already covered by a clean report with no newer
+local writes (``--force`` bypasses this). The T3 (Chroma → pgvector) half is
+NOT yet a no-op: copy-not-move leaves the Chroma source intact, the success
+path clears the migration-state sentinel, and there is no persistent
+"migrated" marker for the Chroma legs — so ``pre.needs_migration`` stays True
+forever post-success and the command still provisions + re-verifies the T3
+legs at full cost. Already-migrated detection for the T3 legs (the
+migrate-leg delta-shipping mode) is nexus-s3dd4 (RDR-178 Wave 2), not part of
+this wiring.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ import structlog
 
 from nexus.migration.guided_upgrade import (
     ProvisionResult,
+    detect_already_migrated,
     detect_pending_migration,
     establish_verified_service,
     footprint_has_voyage_collections,
@@ -97,6 +104,9 @@ def _provision_thunk_for_url(service_url: str):  # noqa: ANN202
               help="Seconds to wait for the service to become healthy.")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, default=False,
               help="Proceed without the confirmation prompt.")
+@click.option("--force", "force", is_flag=True, default=False,
+              help="Skip already-migrated detection (RDR-178 Gap 7) and "
+                   "re-migrate every T2 store unconditionally.")
 def guided_upgrade_cmd(
     local_path: str | None,
     db_path: str | None,
@@ -104,6 +114,7 @@ def guided_upgrade_cmd(
     service_url: str | None,
     timeout_s: float,
     assume_yes: bool,
+    force: bool,
 ) -> None:
     """Stand up the service stack and migrate Chroma → pgvector in one command."""
     # 1. PRE-FLIGHT — is there anything to migrate? A fresh user no-ops here,
@@ -116,8 +127,30 @@ def guided_upgrade_cmd(
         )
         return
 
+    # 1a. ALREADY-MIGRATED DETECTION (RDR-178 Gap 7, nexus-1sx01) — cheap,
+    #     local-only: consults the newest <config>/migration-reports/
+    #     artifacts + a SQLite freshness probe to identify T2 stores that
+    #     need NOT be re-shipped. This does NOT change `pre.needs_migration`
+    #     (Chroma is copy-not-move and retained forever, so the T3 leg keeps
+    #     reporting data present — the migrate-leg already-migrated detection
+    #     is nexus-s3dd4, Wave 2, and out of scope here); it only spares the
+    #     T2 stores this pre-flight can positively confirm are covered.
+    from nexus.commands.migrate_cmd import _resolve_db_path  # noqa: PLC0415  — command-local import (nexus.commands.migrate_cmd)
+
+    already = detect_already_migrated(
+        sqlite_path=_resolve_db_path(db_path), force=force,
+    )
+    if already.skip_stores:
+        click.echo(
+            f"\nT2 stores: {len(already.skip_stores)} of "
+            f"{len(already.statuses)} already migrated — will not be "
+            "re-shipped:"
+        )
+        for line in already.summary_lines():
+            click.echo(f"  {line}")
+
     click.echo(
-        f"Detected {pre.data_bearing_count} data-bearing Chroma collection(s) "
+        f"\nDetected {pre.data_bearing_count} data-bearing Chroma collection(s) "
         f"to migrate ({pre.classified_unsupported_count} classified unsupported "
         "— legacy-model collections are auto-remapped, not blocked)."
     )
@@ -256,8 +289,16 @@ def guided_upgrade_cmd(
         os.environ["NX_SERVICE_HOST"] = _verified.hostname
     if _verified.port is not None:
         os.environ["NX_SERVICE_PORT"] = str(_verified.port)
+    # RDR-178 Gap 7: only pass skip_t2_stores when non-empty, so the common
+    # (nothing-covered) case reproduces the exact prior call shape.
+    _extra_kwargs: dict[str, frozenset[str]] = {}
+    if already.skip_stores:
+        _extra_kwargs["skip_t2_stores"] = already.skip_stores
     try:
-        _run_migration(local_path, db_path, catalog_db_path, readiness.service_url)
+        _run_migration(
+            local_path, db_path, catalog_db_path, readiness.service_url,
+            **_extra_kwargs,
+        )
     finally:
         for _var, _prev in (
             ("NX_SERVICE_URL", _prev_url),

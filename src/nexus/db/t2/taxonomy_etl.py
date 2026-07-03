@@ -85,7 +85,7 @@ from typing import Any
 
 import structlog
 
-from nexus.retry import _etl_with_retry
+from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 
 #: SQLite read-page size (RDR-176 / nexus-lbolo). assignment/link/meta are read
 #: in LIMIT/OFFSET pages so the 190k-row topic_assignments table never
@@ -303,6 +303,7 @@ def migrate_taxonomy_rows(
     batch_log_every: int = 100,
     collector: Any = None,
     read_page: int = _READ_PAGE,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, Any]:
     """Copy all rows from the four SQLite taxonomy tables into Postgres via *store*.
 
@@ -321,6 +322,7 @@ def migrate_taxonomy_rows(
 
     Copy-not-move guarantee: opens the SQLite source in ``?mode=ro``.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     uri = f"file:{source_db_path}?mode=ro"
     try:
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
@@ -377,7 +379,7 @@ def migrate_taxonomy_rows(
         results["topics"] = _migrate_table(
             rows=topic_rows, transform_fn=_transform_topic, store=store,
             kind="topic", table="topics", batch_log_every=batch_log_every,
-            collector=collector, total=len(topic_rows),
+            collector=collector, total=len(topic_rows), breaker=breaker,
         )
 
         # ── RDR-153 §Decision 2 orphan policy, now STREAMED page-by-page
@@ -451,6 +453,7 @@ def migrate_taxonomy_rows(
             rows=_valid_assignments(), transform_fn=_transform_assignment,
             store=store, kind="assignment", table="topic_assignments",
             batch_log_every=batch_log_every, collector=collector, total=assign_total,
+            breaker=breaker,
         )
         # The orphan count is final once _migrate_table has drained the filter
         # generator. Record it into the collector so the reported read ==
@@ -463,7 +466,7 @@ def migrate_taxonomy_rows(
         results["links"] = _migrate_table(
             rows=_valid_links(), transform_fn=_transform_link, store=store,
             kind="link", table="topic_links", batch_log_every=batch_log_every,
-            collector=collector, total=link_total,
+            collector=collector, total=link_total, breaker=breaker,
         )
         if collector is not None and orphans["links"]:
             collector.count_read("taxonomy", "topic_links", orphans["links"])
@@ -473,7 +476,7 @@ def migrate_taxonomy_rows(
             rows=_iter_table(conn, "taxonomy_meta", _META_COLUMNS, read_page),
             transform_fn=_transform_meta, store=store, kind="meta",
             table="taxonomy_meta", batch_log_every=batch_log_every,
-            collector=collector, total=meta_total,
+            collector=collector, total=meta_total, breaker=breaker,
         )
 
         if collector is None and (orphans["assignments"] or orphans["links"]):
@@ -506,6 +509,7 @@ def _migrate_table(
     batch_log_every: int,
     collector: Any = None,
     total: int = 0,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """Generic per-table migration loop. Returns ``{"read": N, "written": M, "skipped": K}``.
 
@@ -519,6 +523,7 @@ def _migrate_table(
     (no current taxonomy import returns a skip now that fk_ta_catalog_doc is gone,
     nexus-sa14p).
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     bsize = QUOTAS.MAX_RECORDS_PER_WRITE
 
@@ -532,7 +537,7 @@ def _migrate_table(
         if not batch:
             return
         try:
-            written_count += _etl_with_retry(store.import_rows_batch, kind, batch)
+            written_count += _etl_batch_with_breaker(store.import_rows_batch, kind, batch, breaker=breaker)
         except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
             _log.error("taxonomy_etl.batch_failed", table=table, count=len(batch), error=str(exc))
             if collector is not None:

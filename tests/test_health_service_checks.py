@@ -165,13 +165,13 @@ class TestCheckStorageServiceHealth:
 
 
 def _psql_runner_ok(n: int):
-    """Return a psql runner that reports N EXECUTED rows, 0 drift, 0 null-md5sum."""
+    """Return a psql runner that reports N EXECUTED rows, 0 FAILED, 0 RERAN, 0 null-md5sum."""
     def runner(cmd: list[str], *, capture_output: bool, text: bool,
                check: bool) -> subprocess.CompletedProcess:
         sql = " ".join(cmd)
-        if "exectype != 'EXECUTED'" in sql:
-            # Drift query: 0 non-EXECUTED rows = all good
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+        if "FILTER (WHERE exectype='FAILED')" in sql:
+            # Drift query: 0 FAILED, 0 RERAN/other = all good
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|0\n", stderr="")
         if "md5sum IS NULL" in sql:
             # Checksum gap query: 0 null md5sums = all good
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
@@ -185,16 +185,31 @@ def _psql_runner_ok(n: int):
 
 
 def _psql_runner_with_failed():
-    """Return a psql runner that reports non-EXECUTED rows exist (1 failed changeset)."""
+    """Return a psql runner that reports 1 genuinely FAILED changeset."""
     def runner(cmd: list[str], *, capture_output: bool, text: bool,
                check: bool) -> subprocess.CompletedProcess:
         sql = " ".join(cmd)
-        if "exectype != 'EXECUTED'" in sql:
-            # Drift query: 1 non-EXECUTED row
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="1\n", stderr="")
+        if "FILTER (WHERE exectype='FAILED')" in sql:
+            # Drift query: 1 FAILED, 0 RERAN
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="1|0\n", stderr="")
         if "md5sum IS NULL" in sql:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
         # Total count query: 5 rows total
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="5\n", stderr="")
+    return runner
+
+
+def _psql_runner_with_reran_only():
+    """Return a psql runner that reports 2 benign RERAN changesets, 0 FAILED
+    (e.g. runOnChange grant changesets reapplied after a checksum change)."""
+    def runner(cmd: list[str], *, capture_output: bool, text: bool,
+               check: bool) -> subprocess.CompletedProcess:
+        sql = " ".join(cmd)
+        if "FILTER (WHERE exectype='FAILED')" in sql:
+            # Drift query: 0 FAILED, 2 RERAN
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|2\n", stderr="")
+        if "md5sum IS NULL" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="5\n", stderr="")
     return runner
 
@@ -207,8 +222,8 @@ def _psql_runner_with_null_md5():
         if "md5sum IS NULL" in sql:
             # 1 row has null md5sum
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="1\n", stderr="")
-        if "exectype != 'EXECUTED'" in sql:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+        if "FILTER (WHERE exectype='FAILED')" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|0\n", stderr="")
         # Total count
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="5\n", stderr="")
     return runner
@@ -219,7 +234,7 @@ def _psql_runner_unparseable_drift():
     def runner(cmd: list[str], *, capture_output: bool, text: bool,
                check: bool) -> subprocess.CompletedProcess:
         sql = " ".join(cmd)
-        if "exectype != 'EXECUTED'" in sql:
+        if "FILTER (WHERE exectype='FAILED')" in sql:
             # Unparseable output
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0, stdout="not-a-number\n", stderr="",
@@ -277,7 +292,7 @@ class TestCheckMigrationState:
         assert r.fatal is True
 
     def test_failed_row_returns_fatal(self, tmp_path):
-        """Non-EXECUTED row -> fatal migration drift."""
+        """A genuinely FAILED changeset -> fatal migration drift."""
         creds = _make_creds_file(tmp_path)
         psql = Path("/fake/psql")
 
@@ -290,6 +305,26 @@ class TestCheckMigrationState:
         r = results[0]
         assert r.ok is False
         assert r.fatal is True
+        assert "FAILED" in r.detail
+
+    def test_reran_only_returns_ok_not_fatal(self, tmp_path):
+        """nexus incident 2026-07-01: benign RERAN changesets (e.g. a
+        runOnChange grant reapplied after a checksum change) with 0 FAILED
+        must pass, not be reported as a hard fail indistinguishable from
+        real corruption."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=_psql_runner_with_reran_only(),
+        )
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is True
+        assert r.fatal is False
+        assert "RERAN" in r.detail
 
     def test_missing_table_returns_fatal(self, tmp_path):
         """databasechangelog table missing -> fatal."""
@@ -377,6 +412,7 @@ _ALL_TENANT_TABLES = [
     "nexus.frecency",
     "nexus.hook_failures",
     "nexus.memory",
+    "nexus.migration_jobs",
     "nexus.nx_answer_runs",
     "nexus.plans",
     "nexus.relevance_log",

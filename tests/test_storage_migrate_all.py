@@ -352,6 +352,48 @@ class TestPerStoreReport:
         assert report["summary"]["total_read"] == 2  # partial data preserved
 
 
+# ── nexus-5drgy: pre-flight ETL import check aborts the whole run ────────────
+
+
+class TestPreflightImportCheck:
+    """RDR-178 Gap 1: a version-skewed ETL module must abort the ENTIRE run
+    before any store executes — never a partial migration."""
+
+    def test_missing_module_aborts_before_any_store_and_names_it(
+        self, runner, tmp_path: Path,
+    ) -> None:
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "memory.db").touch()
+        (config_dir / ".catalog.db").touch()
+
+        order: list[str] = []
+
+        def _bad_etls(_sources):
+            def run(sources, collector):
+                from nexus.migration._nexus_5drgy_missing_module import Thing  # noqa: F401,PLC0415
+
+                order.append("memory")
+                return {}
+
+            return [StoreEtl("memory", run)]
+
+        with patch(
+            "nexus.migration.orchestrator.build_store_etls", _bad_etls,
+        ), patch.dict(
+            "os.environ", {"NEXUS_CONFIG_DIR": str(config_dir)},
+        ):
+            result = runner.invoke(main, ["storage", "migrate", "all"])
+        assert result.exit_code != 0
+        assert order == [], "no store may execute once the preflight import check fails"
+        assert "nexus.migration._nexus_5drgy_missing_module" in result.output
+        # no report artifact — a preflight-failed run must not read as a
+        # partial or completed migration
+        assert not (config_dir / "migration-reports").exists() or not list(
+            (config_dir / "migration-reports").glob("migration-*.json")
+        )
+
+
 # ── nexus-iy5se: aspects_queue ladder order ───────────────────────────────────
 
 

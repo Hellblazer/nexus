@@ -31,6 +31,7 @@ import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import click
 import structlog
@@ -141,6 +142,26 @@ def migration_report_show_cmd(report_file: Path) -> None:
         for _, line in sorted(issues, key=lambda t: t[0], reverse=True):
             click.echo(line)
 
+    # RDR-178 P4: filled_rows per table, for runs that used --verify-fill.
+    # Additive report field (report["verify_fill"]) — absent on a normal
+    # full-ETL run, so this section is skipped entirely then.
+    verify_fill_report = report.get("verify_fill")
+    if verify_fill_report:
+        click.echo(f"verify-fill: total_filled={verify_fill_report.get('total_filled', 0)}")
+        for store, result in sorted(verify_fill_report.get("results", {}).items()):
+            fill = result.get("fill") or {}
+            for table, table_result in sorted(fill.items()):
+                click.echo(
+                    f"  {store}.{table}: filled={table_result.get('filled', 0)} "
+                    f"status={table_result.get('status', '?')}"
+                )
+            for note in result.get("convergence_notes", []):
+                click.echo(f"  convergence: {note}")
+    if report.get("skipped_stores"):
+        click.echo(
+            "skipped (already at parity): " + ", ".join(report["skipped_stores"])
+        )
+
     if gate_total_failed == 0:
         click.echo("GATE: PASS (total_failed=0)")
     else:
@@ -193,11 +214,23 @@ def migrate_group() -> None:
          "(default when omitted: <config>/migration-reports/"
          "migration-<id>.json).",
 )
+@click.option(
+    "--verify-fill",
+    "verify_fill",
+    is_flag=True,
+    default=False,
+    help=(
+        "Delta mode (RDR-178): verify the row count against the target "
+        "first; skip the write entirely on parity. memory has no delta-fill "
+        "surface yet, so a divergent count falls back to the full ETL."
+    ),
+)
 def migrate_memory_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
     report_path: Path | None,
+    verify_fill: bool,
 ) -> None:
     """Migrate the SQLite memory store to Postgres via the nexus-service.
 
@@ -230,9 +263,9 @@ def migrate_memory_cmd(
             "Set NX_DB_PATH or pass --db."
         )
 
-    if dry_run:
-        from nexus.db.t2.memory_etl import count_source_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.db.t2.memory_etl import count_source_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
+    if dry_run:
         try:
             count = count_source_rows(resolved_db)
         except RuntimeError as exc:
@@ -257,17 +290,29 @@ def migrate_memory_cmd(
     collector = IssueCollector()
     click.echo(f"Migrating memory store from {resolved_db} ...")
     try:
-        result = migrate_memory_rows(resolved_db, store, collector=collector)
+        if verify_fill:
+            source_count = count_source_rows(resolved_db)
+            result = _apply_generic_verify_fill(
+                "memory", {"memory": source_count},
+                lambda: migrate_memory_rows(resolved_db, store, collector=collector),
+            )
+        else:
+            result = migrate_memory_rows(resolved_db, store, collector=collector)
     except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2): the report is
         # written even on a mid-run crash, so the operator always has a
         # triage artifact covering everything the run recorded.
-        _emit_store_report(collector, resolved_db, report_path)
+        _emit_store_report(collector, resolved_db, report_path, service_url=base_url)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
 
-    _emit_store_report(collector, resolved_db, report_path)
+    _emit_store_report(collector, resolved_db, report_path, service_url=base_url)
+
+    if result is None:  # verify-fill: already at parity, nothing ran
+        click.echo("Done. read=0, written=0 (already at parity)")
+        _log.info("storage.migrate.memory.complete", db=str(resolved_db), read=0, written=0)
+        return
 
     read_n = result["read"]
     written_m = result["written"]
@@ -321,11 +366,23 @@ def migrate_memory_cmd(
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write a single-store RDR-153 migration report to PATH.",
 )
+@click.option(
+    "--verify-fill",
+    "verify_fill",
+    is_flag=True,
+    default=False,
+    help=(
+        "Delta mode (RDR-178): verify the row count against the target "
+        "first; skip the write entirely on parity. plans has no delta-fill "
+        "surface yet, so a divergent count falls back to the full ETL."
+    ),
+)
 def migrate_plans_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
     report_path: Path | None,
+    verify_fill: bool,
 ) -> None:
     """Migrate the SQLite plans store to Postgres via the nexus-service.
 
@@ -361,9 +418,9 @@ def migrate_plans_cmd(
             "Set NX_DB_PATH or pass --db."
         )
 
-    if dry_run:
-        from nexus.db.t2.plan_etl import count_source_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.db.t2.plan_etl import count_source_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
+    if dry_run:
         try:
             count = count_source_rows(resolved_db)
         except RuntimeError as exc:
@@ -386,15 +443,27 @@ def migrate_plans_cmd(
     _collector = IssueCollector()
     click.echo(f"Migrating plans store from {resolved_db} ...")
     try:
-        result = migrate_plan_rows(resolved_db, store, collector=_collector)
+        if verify_fill:
+            source_count = count_source_rows(resolved_db)
+            result = _apply_generic_verify_fill(
+                "plans", {"plans": source_count},
+                lambda: migrate_plan_rows(resolved_db, store, collector=_collector),
+            )
+        else:
+            result = migrate_plan_rows(resolved_db, store, collector=_collector)
     except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
-        _emit_store_report(_collector, resolved_db, report_path)
+        _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
 
-    _emit_store_report(_collector, resolved_db, report_path)
+    _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
+
+    if result is None:  # verify-fill: already at parity, nothing ran
+        click.echo("Done. read=0, written=0 (already at parity)")
+        _log.info("storage.migrate.plans.complete", db=str(resolved_db), read=0, written=0)
+        return
 
     read_n = result["read"]
     written_m = result["written"]
@@ -448,11 +517,24 @@ def migrate_plans_cmd(
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write a single-store RDR-153 migration report to PATH.",
 )
+@click.option(
+    "--verify-fill",
+    "verify_fill",
+    is_flag=True,
+    default=False,
+    help=(
+        "Delta mode (RDR-178): verify per-table counts against the target "
+        "first; skip the write entirely when every mappable table is at "
+        "parity. telemetry has no delta-fill surface yet, so a divergent "
+        "table falls back to the full ETL."
+    ),
+)
 def migrate_telemetry_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
     report_path: Path | None,
+    verify_fill: bool,
 ) -> None:
     """Migrate the SQLite telemetry stores to Postgres via the nexus-service.
 
@@ -514,22 +596,35 @@ def migrate_telemetry_cmd(
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
-    from nexus.db.t2.telemetry_etl import migrate_telemetry_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.db.t2.telemetry_etl import count_source_rows, migrate_telemetry_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     _collector = IssueCollector()
     click.echo(f"Migrating telemetry stores from {resolved_db} ...")
     try:
-        results = migrate_telemetry_rows(resolved_db, store, collector=_collector)
+        if verify_fill:
+            source_counts = count_source_rows(resolved_db)
+            # only hook_failures + nx_answer_runs carry a PG relation mapping
+            # (_VERIFY_TABLES) -- the other 4 tables are unchecked either way.
+            mapped_counts = {
+                k: v for k, v in source_counts.items()
+                if k in ("hook_failures", "nx_answer_runs")
+            }
+            results = _apply_generic_verify_fill(
+                "telemetry", mapped_counts,
+                lambda: migrate_telemetry_rows(resolved_db, store, collector=_collector),
+            ) or {}
+        else:
+            results = migrate_telemetry_rows(resolved_db, store, collector=_collector)
     except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
-        _emit_store_report(_collector, resolved_db, report_path)
+        _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
 
-    _emit_store_report(_collector, resolved_db, report_path)
+    _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
 
     total_read    = sum(v["read"]    for v in results.values())
     total_written = sum(v["written"] for v in results.values())
@@ -587,11 +682,24 @@ def migrate_telemetry_cmd(
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write a single-store RDR-153 migration report to PATH.",
 )
+@click.option(
+    "--verify-fill",
+    "verify_fill",
+    is_flag=True,
+    default=False,
+    help=(
+        "Delta mode (RDR-178): verify per-table counts against the target "
+        "first; skip the write entirely when every mappable table is at "
+        "parity. taxonomy has no delta-fill surface yet, so a divergent "
+        "table falls back to the full ETL."
+    ),
+)
 def migrate_taxonomy_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
     report_path: Path | None,
+    verify_fill: bool,
 ) -> None:
     """Migrate the SQLite taxonomy tables to Postgres via the nexus-service.
 
@@ -665,22 +773,37 @@ def migrate_taxonomy_cmd(
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
-    from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.db.t2.taxonomy_etl import count_source_rows, migrate_taxonomy_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     _collector = IssueCollector()
     click.echo(f"Migrating taxonomy stores from {resolved_db} ...")
     try:
-        results = migrate_taxonomy_rows(resolved_db, store, collector=_collector)
+        if verify_fill:
+            dry_counts = count_source_rows(resolved_db)
+            # dry-run keys are shorthand (topics/assignments/links/meta);
+            # _VERIFY_TABLES keys on the real table names, and taxonomy_meta
+            # has no PG relation mapping (unchecked either way).
+            mapped_counts = {
+                "topics": dry_counts.get("topics", 0),
+                "topic_assignments": dry_counts.get("assignments", 0),
+                "topic_links": dry_counts.get("links", 0),
+            }
+            results = _apply_generic_verify_fill(
+                "taxonomy", mapped_counts,
+                lambda: migrate_taxonomy_rows(resolved_db, store, collector=_collector),
+            ) or {}
+        else:
+            results = migrate_taxonomy_rows(resolved_db, store, collector=_collector)
     except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
-        _emit_store_report(_collector, resolved_db, report_path)
+        _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
 
-    _emit_store_report(_collector, resolved_db, report_path)
+    _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
 
     total_read    = sum(v["read"]    for v in results.values())
     total_written = sum(v["written"] for v in results.values())
@@ -753,11 +876,23 @@ def migrate_taxonomy_cmd(
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write a single-store RDR-153 migration report to PATH.",
 )
+@click.option(
+    "--verify-fill",
+    "verify_fill",
+    is_flag=True,
+    default=False,
+    help=(
+        "Delta mode (RDR-178): verify per-table counts against the target "
+        "first; on parity nothing is sent, on divergence only the rows "
+        "genuinely missing are sent — never the whole table."
+    ),
+)
 def migrate_chash_cmd(
     db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
     report_path: Path | None,
+    verify_fill: bool,
 ) -> None:
     """Migrate the SQLite chash_index store to Postgres via the nexus-service.
 
@@ -775,6 +910,11 @@ def migrate_chash_cmd(
     supervisor lease. --service-url overrides only the URL. No env var is
     required if config.yml carries the credentials.
 
+    ``--verify-fill`` (RDR-178 wave-2): re-runs to patch a small hole no
+    longer re-send the whole table — the outer count-diff decides parity
+    (no writes) vs. divergent/indeterminate (send only the rows missing
+    from the target, per physical_collection).
+
     Examples::
 
         # Auto-detect DB, service from env:
@@ -785,6 +925,9 @@ def migrate_chash_cmd(
 
         # Dry run (count only, no writes):
         nx storage migrate chash --dry-run
+
+        # Delta mode: only send rows genuinely missing from the target:
+        nx storage migrate chash --verify-fill
     """
     import sqlite3  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
@@ -822,20 +965,51 @@ def migrate_chash_cmd(
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
-    from nexus.db.t2.chash_etl import migrate_chash_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     _collector = IssueCollector()
+
+    if verify_fill:
+        from nexus.migration.orchestrator import verify_fill_chash  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+        try:
+            vf_result = verify_fill_chash(resolved_db, store, collector=_collector)
+        except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
+            _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
+            raise click.ClickException(f"verify-fill failed: {exc}")
+        finally:
+            store.close()
+
+        _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
+
+        outer = vf_result["outer"].get("chash_index", {})
+        click.echo(
+            f"verify-fill done. outer_status={outer.get('status', '?')} "
+            f"filled={vf_result['total_filled']}"
+        )
+        for note in vf_result.get("convergence_notes", []):
+            click.echo(f"  convergence: {note}")
+
+        _log.info(
+            "storage.migrate.chash.verify_fill_complete",
+            db=str(resolved_db),
+            outer_status=outer.get("status"),
+            filled=vf_result["total_filled"],
+        )
+        return
+
+    from nexus.db.t2.chash_etl import migrate_chash_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
     try:
         results = migrate_chash_rows(resolved_db, store, collector=_collector)
     except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
-        _emit_store_report(_collector, resolved_db, report_path)
+        _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()
 
-    _emit_store_report(_collector, resolved_db, report_path)
+    _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
 
     total    = results["total"]
     imported = results["imported"]
@@ -888,11 +1062,24 @@ def migrate_chash_cmd(
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write a single-store RDR-153 migration report to PATH.",
 )
+@click.option(
+    "--verify-fill",
+    "verify_fill",
+    is_flag=True,
+    default=False,
+    help=(
+        "Delta mode (RDR-178): verify per-table counts first. owners/"
+        "collections/document_chunks send only rows genuinely missing from "
+        "the target; documents/links have no delta-fill surface yet, so a "
+        "divergence there falls back to the full ETL for the whole store."
+    ),
+)
 def migrate_catalog_cmd(
     catalog_db_path: Path | None,
     service_url: str | None,
     dry_run: bool,
     report_path: Path | None,
+    verify_fill: bool,
 ) -> None:
     """Migrate the SQLite catalog to Postgres via the nexus-service.
 
@@ -956,22 +1143,59 @@ def migrate_catalog_cmd(
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
-    from nexus.db.t2.catalog_etl import migrate_catalog  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-
     from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     _collector = IssueCollector()
     click.echo(f"Migrating catalog from {resolved_catalog} ...")
+
+    if verify_fill:
+        from nexus.migration.orchestrator import verify_fill_catalog  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+        try:
+            vf_result = verify_fill_catalog(resolved_catalog, client, collector=_collector)
+        except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
+            _emit_store_report(_collector, resolved_catalog, report_path, service_url=base_url)
+            raise click.ClickException(f"verify-fill failed: {exc}")
+        finally:
+            client.close()
+
+        _emit_store_report(_collector, resolved_catalog, report_path, service_url=base_url)
+
+        if vf_result.get("fallback") == "full_etl":
+            click.echo(
+                f"verify-fill: documents/links diverged — ran full catalog "
+                f"ETL. total_filled={vf_result['total_filled']}"
+            )
+        else:
+            click.echo(f"verify-fill done. filled={vf_result['total_filled']}")
+            for table, table_result in sorted(vf_result.get("fill", {}).items()):
+                click.echo(
+                    f"  {table}: filled={table_result.get('filled', 0)} "
+                    f"status={table_result.get('status', '?')}"
+                )
+        for note in vf_result.get("convergence_notes", []):
+            click.echo(f"  convergence: {note}")
+
+        _log.info(
+            "storage.migrate.catalog.verify_fill_complete",
+            catalog_db=str(resolved_catalog),
+            total_filled=vf_result["total_filled"],
+            fallback=vf_result.get("fallback"),
+        )
+        return
+
+    from nexus.db.t2.catalog_etl import migrate_catalog  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
     try:
         results = migrate_catalog(resolved_catalog, client, collector=_collector)
     except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
         # Partial data beats no data (P3 critique S2).
-        _emit_store_report(_collector, resolved_catalog, report_path)
+        _emit_store_report(_collector, resolved_catalog, report_path, service_url=base_url)
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         client.close()
 
-    _emit_store_report(_collector, resolved_catalog, report_path)
+    _emit_store_report(_collector, resolved_catalog, report_path, service_url=base_url)
 
     from nexus.db.t2.catalog_etl import IMPORT_TABLE_KEYS  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
@@ -1157,6 +1381,8 @@ def migrate_vectors_cmd(
             f"{r.status:<13} {r.collection}: source={r.source_count} "
             f"written={r.written_count} ({r.duration_s:.1f}s)"
         )
+        if getattr(r, "delegated", False):
+            line += " [delegated]"
         if r.reason:
             line += f" — {r.reason}"
         is_err = r.status in ("failed", "skipped")
@@ -1190,8 +1416,8 @@ def _echo_summary_table(report) -> None:
     (nexus-pebfx.3 item 4). Sorted failures-first so the actionable rows
     are adjacent to the verdict line."""
     rank = {
-        "failed": 0, "skipped": 1, "skipped-empty": 2, "excluded": 3,
-        "dry-run": 4, "migrated": 5,
+        "failed": 0, "skipped": 1, "skipped-derived": 2, "skipped-empty": 3,
+        "excluded": 4, "dry-run": 5, "migrated": 6,
     }
     rows = sorted(report.results, key=lambda r: (rank.get(r.status, 9), r.collection))
     name_w = max([len(r.collection) for r in rows] + [10])
@@ -1205,9 +1431,14 @@ def _echo_summary_table(report) -> None:
         )
         # Rows with a reason carry it — the table is the permanent
         # scrollback record and must be sufficient on its own (no structlog
-        # scrolling). skipped-empty included: the operator reviewing a
-        # redirected log needs the disposition rationale in the table.
-        if r.reason and r.status in ("failed", "skipped", "skipped-empty", "excluded"):
+        # scrolling). skipped-empty/skipped-derived included: the operator
+        # reviewing a redirected log needs the disposition rationale (for
+        # skipped-derived, the "nx taxonomy" regeneration hint) in the table.
+        if getattr(r, "delegated", False):
+            line += "  [delegated]"
+        if r.reason and r.status in (
+            "failed", "skipped", "skipped-empty", "skipped-derived", "excluded",
+        ):
             line += f"  — {r.reason}"
         click.echo(line)
     click.echo("-" * (13 + 1 + name_w + 27))
@@ -1215,6 +1446,11 @@ def _echo_summary_table(report) -> None:
         f"{'TOTAL':<13} {report.leg + ' leg':<{name_w}} {report.total_source:>8} "
         f"{report.total_written:>8}   ok={report.ok}"
     )
+    if report.derived_skipped_count:
+        click.echo(
+            f"({report.derived_skipped_count} derived collection(s) skipped "
+            "clean — regenerate on the target via nx taxonomy)"
+        )
     sys.stdout.flush()
 # ── RDR-153 Phase 3: migrate-all orchestration ───────────────────────────────
 
@@ -1250,28 +1486,77 @@ def _write_report(report: dict, path: Path) -> None:
 #: impossible).  written=0 is a trivial pass for idempotent re-runs.
 #: Relations that need the convergence-aware check are listed in
 #: :data:`_VERIFY_TABLES_DEDUP`.
+def _apply_generic_verify_fill(
+    store: str, source_counts: dict[str, int], run_full: Any,
+) -> Any | None:
+    """RDR-178 P4: the CLI-facing verify-fill gate for a store with NO
+    delta-fill surface yet (memory/plans/telemetry/taxonomy). Prints the
+    outer-verify decision, then either skips *run_full* entirely (parity)
+    or calls it (divergent/indeterminate — unchanged full ETL). Returns
+    *run_full*'s result, or ``None`` when skipped.
+    """
+    from nexus.migration.orchestrator import verify_fill_generic_or_full  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    _verdicts, result, notes = verify_fill_generic_or_full(store, source_counts, run_full)
+    if result is None:
+        click.echo(f"verify-fill: {store} already at parity — nothing to do.")
+    else:
+        click.echo(f"verify-fill: {store} diverged (or unverifiable) — ran full ETL.")
+    for note in notes:
+        click.echo(f"  convergence: {note}")
+    return result
+
+
 def _emit_store_report(
     collector, sqlite_path: Path, report_path: Path | None,
-) -> None:
+    *, count_source: Any = None, service_url: str | None = None,
+) -> dict:
     """Write the single-store RDR-153 report (per-store ``--report``).
 
     A report is ALWAYS written (default path when the flag is omitted) —
-    the run must leave a triage artifact.
+    the run must leave a triage artifact. Returns the report dict so
+    callers (e.g. the ``--verify-fill`` paths) can inspect the verdict.
+
+    RDR-178 P4 report-writer follow-up (epic te885 comment 2026-07-02
+    04:19):
+    (a) per-store runs must ALWAYS populate ``report["verification"]`` —
+        previously only ``migrate all`` verified; a single-store run left
+        the field entirely absent.
+    (b) ``target.service_url`` is the RESOLVED service URL, never the
+        literal ``"(lease)"`` placeholder (which blinded any downstream
+        divergence check reading the artifact).
     """
     import uuid as _uuid  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
     from nexus.migration.migration_report import build_report  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.migration.orchestrator import (  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        ServiceCountSource,
+        _written_by_table,
+        resolve_target_service_url,
+        verify_counts,
+    )
 
     migration_id = str(_uuid.uuid4())
     report = build_report(
         collector,
         source={"sqlite": str(sqlite_path)},
-        target={"service_url": os.environ.get("NX_SERVICE_URL", "(lease)")},
+        target={"service_url": resolve_target_service_url(service_url)},
         migration_id=migration_id,
     )
+    verification, convergence_notes, dest_counts = verify_counts(
+        report, count_source or ServiceCountSource(),
+    )
+    report["verification"] = verification
+    report["dest_counts"] = dest_counts
+    report["relations_checked"] = len(_written_by_table(report))
+    if convergence_notes:
+        report["verification_convergence_notes"] = convergence_notes
+
     out_path = report_path or _default_report_path(migration_id)
     _write_report(report, out_path)
     click.echo(f"report: {out_path}")
+    _echo_verification(report)
+    return report
 
 
 @migrate_group.command(name="all")
@@ -1301,11 +1586,25 @@ def _emit_store_report(
     help="Base URL of the nexus-service. Config-first override: env "
          "NX_SERVICE_URL > config.yml. Token resolves the same chain.",
 )
+@click.option(
+    "--verify-fill",
+    "verify_fill",
+    is_flag=True,
+    default=False,
+    help=(
+        "Delta mode (RDR-178): verify per-table counts before writing. "
+        "chash/catalog send only the rows genuinely missing from the "
+        "target; memory/plans/telemetry/taxonomy skip entirely when "
+        "already at parity, falling back to the full ETL otherwise. "
+        "aspects/aspects_queue are unaffected (no delta surface yet)."
+    ),
+)
 def migrate_all_cmd(
     report_path: Path | None,
     db_path: Path | None,
     catalog_db_path: Path | None,
     service_url: str | None,
+    verify_fill: bool,
 ) -> None:
     """Run ALL eight store migrations in the RDR-152 ladder order and emit
     ONE migration report (RDR-153 Phase 3).
@@ -1316,9 +1615,17 @@ def migrate_all_cmd(
     artifact and the Phase-4 gate input (``summary.total_failed == 0``).
     Post-run count verification is LOUD when it cannot run (nexus-r0esi:
     never SKIP-then-'all passed').
+
+    ``--verify-fill`` (RDR-178 wave-2): a re-run to patch a small hole no
+    longer re-sends the whole store. See ``nx storage migrate chash
+    --help`` for the delta semantics; ``migrate all --verify-fill`` applies
+    the same outer-verify-first decision per store in the ladder.
     """
     from nexus.migration.etl_registry import EtlSources  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    from nexus.migration.orchestrator import migrate_all  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.migration.orchestrator import (  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        EtlPreflightFailed,
+        migrate_all,
+    )
 
     sources = EtlSources(
         sqlite_path=_resolve_db_path(db_path),
@@ -1352,12 +1659,22 @@ def migrate_all_cmd(
     # and catalog clients the orchestrator builds then resolve URL+token via
     # the unified env>config chain.
     with _service_url_override(service_url):
-        report = migrate_all(
-            sources, on_store=_on_store, on_store_failed=_on_store_failed,
-            on_progress=_on_progress,
-        )
+        try:
+            report = migrate_all(
+                sources, on_store=_on_store, on_store_failed=_on_store_failed,
+                on_progress=_on_progress, verify_fill=verify_fill,
+            )
+        except EtlPreflightFailed as exc:
+            # nexus-5drgy: preflight aborted before any store ran — no report
+            # was built, nothing was written. Surface the exact module(s) so
+            # the operator can reinstall a consistent build.
+            raise click.ClickException(str(exc)) from exc
 
     _echo_verification(report)
+    if verify_fill and "verify_fill" in report:
+        click.echo(f"verify-fill: total_filled={report['verify_fill']['total_filled']}")
+        if report.get("skipped_stores"):
+            click.echo(f"  skipped (already at parity): {', '.join(report['skipped_stores'])}")
 
     out_path = report_path or _default_report_path(report["migration_id"])
     _write_report(report, out_path)

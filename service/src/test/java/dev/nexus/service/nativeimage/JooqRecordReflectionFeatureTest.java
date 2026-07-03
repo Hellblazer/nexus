@@ -25,8 +25,13 @@ import org.junit.jupiter.api.Test;
  */
 class JooqRecordReflectionFeatureTest {
 
-    /** Generated record count under dev.nexus.service.jooq.nexus.tables.records.* */
-    private static final int EXPECTED_RECORD_TYPES = 50;
+    /**
+     * Generated record count under dev.nexus.service.jooq.nexus.tables.records.*
+     *
+     * <p>50 -&gt; 51 (bead nexus-melvx, RDR-178 Gap 5): added {@code MigrationJobsRecord}
+     * for the new {@code nexus.migration_jobs} table (async ingest-cloud job tracking).
+     */
+    private static final int EXPECTED_RECORD_TYPES = 51;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

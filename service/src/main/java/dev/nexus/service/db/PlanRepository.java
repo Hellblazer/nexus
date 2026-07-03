@@ -454,30 +454,91 @@ public final class PlanRepository {
                             double matchConfSum, int successCount, int failureCount, String scopeTags,
                             String matchText, OffsetDateTime disabledAt) {}
 
+    /** PG Int16 bind-count limit is 32767; keep a safety margin (nexus-1usso). */
+    private static final int MAX_BATCH_PARAMS = 30_000;
+
     /**
-     * RDR-176 P3 (Gap 1, bead nexus-t9rmg.18): fidelity-preserving BULK import.
+     * nexus-1usso: fidelity-preserving BULK import — ONE multi-row
+     * {@code INSERT ... ON CONFLICT} statement per chunk, mirroring
+     * {@code ChashRepository.doImportBatch} (f0ab406f). Previously this
+     * looped the per-row {@link #doImport} inside one transaction (GUC set
+     * once, but still N round-trips) — the plan-audit finding on nexus-1usso
+     * ("has the endpoint" != "batches at the DB") applies here too.
      *
-     * <p>Collapses a batch to ONE round-trip and ONE tenant transaction: a single
-     * {@link TenantScope#withTenant} (RLS GUC {@code nexus.tenant} set ONCE per
-     * batch, not per row) wrapping the per-row {@link #doImport}. Unlike memory's
-     * 11-column store, plans has 22 columns and a delicate conflict clause
-     * ({@code coalesce(disabled_at)}, {@code greatest(last_used)}, EXCLUDED
-     * counters), so reusing the TESTED {@code doImport} per row inside one
-     * transaction is safer than hand-transcribing a 22-column multi-row statement
-     * — and still satisfies the contract (one HTTP round-trip per batch, GUC once,
-     * atomic commit/rollback, idempotent re-run). Empty batch is a no-op.
+     * <p>Collapses a batch to ONE round-trip: a single {@link
+     * TenantScope#withTenant} (RLS GUC {@code nexus.tenant} set ONCE per
+     * batch) wrapping ONE multi-row statement per chunk (chunked at {@link
+     * #MAX_BATCH_PARAMS} bind params — 22 columns keeps chunks well under
+     * PG's Int16 bind-count limit). The ON CONFLICT clause is transcribed
+     * verbatim from {@link #doImport} ({@code coalesce(disabled_at)},
+     * {@code greatest(last_used)}, EXCLUDED counters) — same fidelity
+     * semantics, atomic commit/rollback, idempotent re-run. Rows are deduped
+     * on {@code (project, query)} — the conflict key — within a chunk, last
+     * occurrence wins, since a single multi-row {@code ON CONFLICT DO
+     * UPDATE} cannot affect the same row twice. Empty batch is a no-op.
      *
      * @return the number of rows submitted.
      */
     public int importBatch(String tenant, java.util.List<ImportRow> rows) {
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
+            var unique = new java.util.LinkedHashMap<String, ImportRow>(rows.size());
             for (ImportRow r : rows) {
-                doImport(ctx, tenant, r.project(), r.query(), r.planJson(), r.outcome(), r.tags(),
-                        r.createdAt(), r.ttlDays(), r.name(), r.verb(), r.scope(), r.dimensions(),
-                        r.defaultBindings(), r.parentDims(), r.useCount(), r.lastUsed(), r.matchCount(),
-                        r.matchConfSum(), r.successCount(), r.failureCount(), r.scopeTags(),
-                        r.matchText(), r.disabledAt());
+                String proj = r.project() != null ? r.project() : "";
+                unique.put(proj + " " + r.query(), r);
+            }
+            List<ImportRow> deduped = List.copyOf(unique.values());
+
+            final int cols = 22;
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
+            for (int start = 0; start < deduped.size(); start += chunkSize) {
+                List<ImportRow> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                var insert = ctx.insertInto(PLANS,
+                        PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON, PLANS.OUTCOME,
+                        PLANS.TAGS, PLANS.CREATED_AT, PLANS.TTL, PLANS.NAME, PLANS.VERB, PLANS.SCOPE,
+                        PLANS.DIMENSIONS, PLANS.DEFAULT_BINDINGS, PLANS.PARENT_DIMS, PLANS.USE_COUNT,
+                        PLANS.LAST_USED, PLANS.MATCH_COUNT, PLANS.MATCH_CONF_SUM, PLANS.SUCCESS_COUNT,
+                        PLANS.FAILURE_COUNT, PLANS.SCOPE_TAGS, PLANS.MATCH_TEXT, PLANS.DISABLED_AT);
+                for (ImportRow r : batch) {
+                    String normTags  = r.tags()      != null ? r.tags()      : "";
+                    String normScope = r.scopeTags() != null ? r.scopeTags() : "";
+                    String normMatch = r.matchText() != null ? r.matchText() : "";
+                    String normOut   = r.outcome()   != null ? r.outcome()   : "success";
+                    insert = insert.values(tenant, r.project() != null ? r.project() : "", r.query(),
+                            r.planJson(), normOut, normTags, r.createdAt(), r.ttlDays(), r.name(),
+                            r.verb(), r.scope(), r.dimensions(), r.defaultBindings(), r.parentDims(),
+                            r.useCount(), r.lastUsed(), r.matchCount(), r.matchConfSum(), r.successCount(),
+                            r.failureCount(), normScope, normMatch, r.disabledAt());
+                }
+                insert.onConflict(PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY)
+                      .doUpdate()
+                      .set(PLANS.PLAN_JSON,        excluded(PLANS.PLAN_JSON))
+                      .set(PLANS.OUTCOME,          excluded(PLANS.OUTCOME))
+                      .set(PLANS.TAGS,             excluded(PLANS.TAGS))
+                      .set(PLANS.TTL,              excluded(PLANS.TTL))
+                      .set(PLANS.NAME,             excluded(PLANS.NAME))
+                      .set(PLANS.VERB,             excluded(PLANS.VERB))
+                      .set(PLANS.SCOPE,            excluded(PLANS.SCOPE))
+                      .set(PLANS.DIMENSIONS,       excluded(PLANS.DIMENSIONS))
+                      .set(PLANS.DEFAULT_BINDINGS, excluded(PLANS.DEFAULT_BINDINGS))
+                      .set(PLANS.PARENT_DIMS,      excluded(PLANS.PARENT_DIMS))
+                      .set(PLANS.SCOPE_TAGS,       excluded(PLANS.SCOPE_TAGS))
+                      .set(PLANS.MATCH_TEXT,       excluded(PLANS.MATCH_TEXT))
+                      // created_at: immutable once set, keep source value
+                      .set(PLANS.CREATED_AT,       excluded(PLANS.CREATED_AT))
+                      // disabled_at: live-mutable — keep whichever is non-null (PG-side wins)
+                      .set(PLANS.DISABLED_AT,
+                           coalesce(PLANS.DISABLED_AT, excluded(PLANS.DISABLED_AT)))
+                      // Additive event-tally counters: EXCLUDED (source wins) — see doImport javadoc.
+                      .set(PLANS.USE_COUNT,     excluded(PLANS.USE_COUNT))
+                      .set(PLANS.MATCH_COUNT,   excluded(PLANS.MATCH_COUNT))
+                      .set(PLANS.MATCH_CONF_SUM, excluded(PLANS.MATCH_CONF_SUM))
+                      .set(PLANS.SUCCESS_COUNT, excluded(PLANS.SUCCESS_COUNT))
+                      .set(PLANS.FAILURE_COUNT, excluded(PLANS.FAILURE_COUNT))
+                      // last_used: keep the later timestamp — null-safe high-water mark.
+                      .set(PLANS.LAST_USED,
+                           greatest(excluded(PLANS.LAST_USED), PLANS.LAST_USED))
+                      .execute();
             }
             log.debug("event=plan_import_batch tenant={} rows={}", tenant, rows.size());
             return rows.size();

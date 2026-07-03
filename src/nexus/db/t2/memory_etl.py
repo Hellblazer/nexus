@@ -52,7 +52,7 @@ from typing import Any
 
 import structlog
 
-from nexus.retry import _etl_with_retry
+from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 
 _log = structlog.get_logger(__name__)
 
@@ -138,6 +138,7 @@ def migrate_memory_rows(
     *,
     batch_log_every: int = 100,
     collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """Copy all rows from a SQLite memory table into Postgres via *store*.
 
@@ -163,6 +164,7 @@ def migrate_memory_rows(
     ``uri=True`` mode with ``?mode=ro`` so the file is opened read-only
     at the OS level; even a bug in this function cannot modify the source.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     read_count = 0
     written_count = 0
 
@@ -208,8 +210,10 @@ def migrate_memory_rows(
         if not batch:
             return
         try:
-            # RDR-176 Gap 6: bounded transient-edge retry (idempotent upsert).
-            written_count += _etl_with_retry(store.import_entries_batch, batch)
+            # RDR-176 Gap 6 + RDR-178 Gap 3: bounded transient-edge retry
+            # with a circuit-breaker pause on a sustained outage (idempotent
+            # upsert).
+            written_count += _etl_batch_with_breaker(store.import_entries_batch, batch, breaker=breaker)
         except Exception as exc:  # noqa: BLE001 - batch ETL failure logged + recorded; migration continues (idempotent re-run)
             _log.error("memory_etl.batch_failed", count=len(batch), error=str(exc))
             if collector is not None:

@@ -36,10 +36,13 @@ def _batched_row(store: MagicMock, table: str, index: int = 0) -> dict:
 import pytest
 
 from nexus.db.t2.telemetry_etl import (
+    CONFLICT_KEY_COLUMNS,
     _nullable_str,
     _str_or_empty,
+    conflict_key,
     count_source_rows,
     migrate_telemetry_rows,
+    read_rows_for_fill,
 )
 
 
@@ -375,3 +378,245 @@ class TestMissingTableTolerance:
         for table in ("search_telemetry", "tier_writes",
                       "nx_answer_runs", "hook_failures", "frecency"):
             assert counts[table] == 0
+
+
+# ── Unit tests: verify-fill P3b (nexus-s3dd4.14) — CONFLICT_KEY_COLUMNS /
+#    conflict_key / read_rows_for_fill ─────────────────────────────────────────
+
+def _seed_full_telemetry_db(
+    db_path: Path,
+    *,
+    relevance: list[dict] | None = None,
+    search: list[dict] | None = None,
+    tier: list[dict] | None = None,
+    nx: list[dict] | None = None,
+    hooks: list[dict] | None = None,
+    frecency: list[dict] | None = None,
+    plans: list[int] | None = None,
+) -> None:
+    """Seed all six telemetry tables (+ an optional `plans` FK table for
+    nx_answer_runs' soft-dangler check) in one SQLite file."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE relevance_log (id INTEGER PRIMARY KEY, query TEXT, "
+        "chunk_id TEXT, collection TEXT, action TEXT, session_id TEXT, timestamp TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE search_telemetry (ts TEXT, query_hash TEXT, collection TEXT, "
+        "raw_count INTEGER, kept_count INTEGER, top_distance REAL, threshold REAL)"
+    )
+    conn.execute(
+        "CREATE TABLE tier_writes (id INTEGER PRIMARY KEY, session_id TEXT, ts TEXT, "
+        "tool TEXT, tier TEXT, agent TEXT, project TEXT, target_title TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE nx_answer_runs (id INTEGER PRIMARY KEY, question TEXT, "
+        "plan_id INTEGER, matched_confidence REAL, step_count INTEGER, "
+        "final_text TEXT, cost_usd REAL, duration_ms INTEGER, created_at TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE hook_failures (id INTEGER PRIMARY KEY, doc_id TEXT, "
+        "collection TEXT, hook_name TEXT, error TEXT, occurred_at TEXT, "
+        "batch_doc_ids TEXT, is_batch INTEGER, chain TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE frecency (chunk_id TEXT, embedded_at TEXT, ttl_days INTEGER, "
+        "frecency_score REAL, miss_count INTEGER, last_hit_at TEXT)"
+    )
+    if plans is not None:
+        conn.execute("CREATE TABLE plans (id INTEGER PRIMARY KEY)")
+        conn.executemany("INSERT INTO plans (id) VALUES (?)", [(p,) for p in plans])
+
+    for i, r in enumerate(relevance or []):
+        conn.execute(
+            "INSERT INTO relevance_log (id, query, chunk_id, collection, action, "
+            "session_id, timestamp) VALUES (?,?,?,?,?,?,?)",
+            (i + 1, r["query"], r["chunk_id"], r.get("collection", ""), r["action"],
+             r.get("session_id", ""), r["timestamp"]),
+        )
+    for r in search or []:
+        conn.execute(
+            "INSERT INTO search_telemetry (ts, query_hash, collection, raw_count, "
+            "kept_count, top_distance, threshold) VALUES (?,?,?,?,?,?,?)",
+            (r["ts"], r["query_hash"], r["collection"], r.get("raw_count", 0),
+             r.get("kept_count", 0), r.get("top_distance"), r.get("threshold")),
+        )
+    for i, r in enumerate(tier or []):
+        conn.execute(
+            "INSERT INTO tier_writes (id, session_id, ts, tool, tier, agent, "
+            "project, target_title) VALUES (?,?,?,?,?,?,?,?)",
+            (i + 1, r["session_id"], r["ts"], r["tool"], r["tier"], r.get("agent"),
+             r.get("project"), r.get("target_title")),
+        )
+    for i, r in enumerate(nx or []):
+        conn.execute(
+            "INSERT INTO nx_answer_runs (id, question, plan_id, matched_confidence, "
+            "step_count, final_text, cost_usd, duration_ms, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (i + 1, r["question"], r.get("plan_id"), r.get("matched_confidence"),
+             r.get("step_count", 0), r.get("final_text", ""), r.get("cost_usd"),
+             r.get("duration_ms", 0), r["created_at"]),
+        )
+    for i, r in enumerate(hooks or []):
+        conn.execute(
+            "INSERT INTO hook_failures (id, doc_id, collection, hook_name, error, "
+            "occurred_at, batch_doc_ids, is_batch, chain) VALUES (?,?,?,?,?,?,?,?,?)",
+            (i + 1, r.get("doc_id", ""), r.get("collection", ""), r["hook_name"],
+             r.get("error", ""), r["occurred_at"], r.get("batch_doc_ids"),
+             int(r.get("is_batch", False)), r.get("chain")),
+        )
+    for r in frecency or []:
+        conn.execute(
+            "INSERT INTO frecency (chunk_id, embedded_at, ttl_days, frecency_score, "
+            "miss_count, last_hit_at) VALUES (?,?,?,?,?,?)",
+            (r["chunk_id"], r.get("embedded_at"), r.get("ttl_days", 30),
+             r.get("frecency_score", 0.0), r.get("miss_count", 0), r.get("last_hit_at")),
+        )
+    conn.commit()
+    conn.close()
+
+
+class TestConflictKeyColumns:
+    """Transcription check: CONFLICT_KEY_COLUMNS must match
+    HttpTelemetryStore.probe_ids' docstring verbatim (itself transcribed
+    from TelemetryRepository.probeIds' javadoc / the UNIQUE indexes in
+    telemetry-001-baseline.xml — nexus-s3dd4.14 R1 note 1). A drift here
+    would silently corrupt every verify-fill diff for that table."""
+
+    def test_matches_probe_ids_docstring_exactly(self) -> None:
+        assert CONFLICT_KEY_COLUMNS == {
+            "relevance_log":    ("query", "chunk_id", "action", "session_id", "timestamp"),
+            "search_telemetry": ("ts", "query_hash", "collection"),
+            "tier_writes":      ("session_id", "ts", "tool", "tier"),
+            "nx_answer_runs":   ("question", "created_at"),
+            "hook_failures":    ("doc_id", "hook_name", "occurred_at"),
+            "frecency":         ("chunk_id",),
+        }
+
+    def test_relevance_log_key_excludes_collection(self) -> None:
+        # R1 note 1: relevance_log rows carry 'collection' but it is NOT
+        # part of the conflict key.
+        assert "collection" not in CONFLICT_KEY_COLUMNS["relevance_log"]
+
+
+class TestConflictKey:
+    def test_relevance_log_extracts_key_columns_only(self) -> None:
+        row = {
+            "query": "q1", "chunk_id": "c1", "collection": "code__x",
+            "action": "store_put", "session_id": "s1", "timestamp": "2024-01-01T00:00:00Z",
+        }
+        assert conflict_key("relevance_log", row) == (
+            "q1", "c1", "store_put", "s1", "2024-01-01T00:00:00Z",
+        )
+
+    def test_frecency_single_column_key(self) -> None:
+        row = {"chunk_id": "chunk-42", "embedded_at": None, "ttl_days": 30,
+               "frecency_score": 0.5, "miss_count": 0, "last_hit_at": None}
+        assert conflict_key("frecency", row) == ("chunk-42",)
+
+
+class TestReadRowsForFill:
+    """verify-fill P3b (nexus-s3dd4.14): read_rows_for_fill must return the
+    SAME transformed shape _run_batched sends through import_rows_batch —
+    the conflict-key diff and the eventual fill payload must agree."""
+
+    def test_relevance_log_rows_match_build_shape(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "t2.db"
+        _seed_full_telemetry_db(db_path, relevance=[
+            {"query": "q1", "chunk_id": "c1", "action": "store_put",
+             "session_id": "", "timestamp": "2024-01-01T00:00:00Z"},
+        ])
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = read_rows_for_fill(conn, "relevance_log")
+        finally:
+            conn.close()
+
+        assert rows == [{
+            "query": "q1", "chunk_id": "c1", "collection": "",
+            "action": "store_put", "session_id": "", "timestamp": "2024-01-01T00:00:00Z",
+        }]
+        assert conflict_key("relevance_log", rows[0]) == (
+            "q1", "c1", "store_put", "", "2024-01-01T00:00:00Z",
+        )
+
+    def test_nx_answer_runs_plan_id_is_int_and_dangler_still_included(
+        self, tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "t2.db"
+        _seed_full_telemetry_db(
+            db_path,
+            nx=[
+                {"question": "q-live", "plan_id": 1, "created_at": "2024-01-01T00:00:00Z"},
+                {"question": "q-dangling", "plan_id": 999, "created_at": "2024-01-02T00:00:00Z"},
+            ],
+            plans=[1],  # plan_id=999 has no matching plans row -> soft dangler
+        )
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = read_rows_for_fill(conn, "nx_answer_runs")
+        finally:
+            conn.close()
+
+        assert len(rows) == 2  # the dangler is NOT dropped, only flagged
+        assert rows[0]["plan_id"] == 1
+        assert isinstance(rows[0]["plan_id"], int)
+        assert rows[1]["plan_id"] == 999
+        assert conflict_key("nx_answer_runs", rows[1]) == (
+            "q-dangling", "2024-01-02T00:00:00Z",
+        )
+
+    def test_hook_failures_unparseable_timestamp_is_skipped_not_crashed(
+        self, tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "t2.db"
+        _seed_full_telemetry_db(db_path, hooks=[
+            {"doc_id": "d1", "hook_name": "h1", "occurred_at": "2024-01-01T00:00:00Z"},
+            {"doc_id": "d2", "hook_name": "h2", "occurred_at": "not-a-timestamp"},
+        ])
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = read_rows_for_fill(conn, "hook_failures")
+        finally:
+            conn.close()
+
+        # the corrupt row is skipped, not raised -- the good row still lands
+        assert len(rows) == 1
+        assert rows[0]["doc_id"] == "d1"
+
+    def test_hook_failures_space_form_timestamp_normalized(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "t2.db"
+        _seed_full_telemetry_db(db_path, hooks=[
+            {"doc_id": "d1", "hook_name": "h1", "occurred_at": "2026-04-23 10:47:54"},
+        ])
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = read_rows_for_fill(conn, "hook_failures")
+        finally:
+            conn.close()
+
+        assert rows[0]["occurred_at"] == "2026-04-23T10:47:54+00:00"
+
+    def test_frecency_rows_and_key(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "t2.db"
+        _seed_full_telemetry_db(db_path, frecency=[
+            {"chunk_id": "chunk-1", "frecency_score": 1.5, "miss_count": 2},
+        ])
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = read_rows_for_fill(conn, "frecency")
+        finally:
+            conn.close()
+
+        assert len(rows) == 1
+        assert conflict_key("frecency", rows[0]) == ("chunk-1",)
+
+    def test_empty_table_returns_empty_list(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "t2.db"
+        _seed_full_telemetry_db(db_path)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = read_rows_for_fill(conn, "search_telemetry")
+        finally:
+            conn.close()
+        assert rows == []

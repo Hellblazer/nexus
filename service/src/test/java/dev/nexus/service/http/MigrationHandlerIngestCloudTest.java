@@ -13,6 +13,7 @@ import com.sun.net.httpserver.HttpPrincipal;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.db.MigrationJobRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -43,34 +44,44 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * RDR-176 Phase 4 (bead nexus-t9rmg.23 P4.T / .24 P4) — cloud→cloud server-side
- * ingest contract.
+ * RDR-176 Phase 4 (bead nexus-t9rmg.23 P4.T / .24 P4) / RDR-178 Gap 5 (bead
+ * nexus-melvx) — cloud→cloud server-side ingest contract, sync AND async modes.
  *
  * <p>Assertions:
  * <ol>
- *   <li><b>Server-side copy, zero client vectors + parity signal.</b> {@code POST
- *       /v1/migration/ingest-cloud} pulls pre-embedded chunks from a
- *       {@link MigrationHandler.CloudSource} (fake — no ChromaCloud/network) and
- *       lands them in pgvector; the response echoes both {@code copied} (source
- *       reads) and {@code dest_counts} (pgvector rows).</li>
- *   <li><b>Ephemeral credentials (Pillar 1b).</b> The api key appears in NO log
- *       line, NOT the response body, and NOT any persisted chunk metadata — on
- *       BOTH the happy and the mid-copy-failure paths.</li>
- *   <li><b>Pagination.</b> A &gt;PAGE collection is copied across multiple pages
- *       with a correctly advancing offset.</li>
- *   <li><b>Fail loud.</b> Missing api key or an unknown source collection → 400;
- *       a mid-copy failure → 500 carrying the partial progress.</li>
+ *   <li><b>Sync mode (back-compat, {@code "sync": true}).</b> Server-side copy,
+ *       zero client vectors, parity signal ({@code copied}/{@code dest_counts});
+ *       pagination across pages; mid-copy failure → 500 with partial progress;
+ *       unknown source collection → 400. Byte-for-byte the original RDR-176 P4
+ *       contract.</li>
+ *   <li><b>Async mode (default).</b> {@code POST} returns {@code 202 {job_id}}
+ *       immediately; {@code GET /v1/migration/jobs/{id}} polls to a terminal
+ *       state with per-collection {@code copied}/{@code dest}/{@code expected}
+ *       counts. A re-POST naming the same (tenant, collection-set) as an
+ *       active job is idempotent: same job id, source opened only once.</li>
+ *   <li><b>Ephemeral credentials (Pillar 1b + 2026-07-02 gate-critique BINDING
+ *       jobs-table constraint).</b> The api key appears in NO log line, NOT the
+ *       response body, NOT any persisted chunk metadata, and — new — the
+ *       {@code migration_jobs} table schema itself carries NO credential-shaped
+ *       column.</li>
+ *   <li><b>Fail loud.</b> Missing api key → 400 synchronously (mode-agnostic,
+ *       validated before the sync/async branch).</li>
  * </ol>
  *
  * <p>Integration over mocks: real Testcontainers pgvector + real
- * {@link PgVectorRepository} upsert; only the external ChromaCloud boundary is
- * faked (via the {@link MigrationHandler.CloudSourceFactory} seam).
+ * {@link PgVectorRepository} upsert + real {@link MigrationJobRepository}; only
+ * the external ChromaCloud boundary is faked (via the
+ * {@link MigrationHandler.CloudSourceFactory} seam).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class MigrationHandlerIngestCloudTest {
@@ -93,6 +104,7 @@ class MigrationHandlerIngestCloudTest {
     HikariDataSource svcDs;
     TenantScope tenantScope;
     PgVectorRepository pgVectors;
+    MigrationJobRepository jobRepo;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -127,6 +139,8 @@ class MigrationHandlerIngestCloudTest {
             su.createStatement().execute(
                 "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.migration_jobs TO " + SVC_ROLE);
+            su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
 
@@ -140,6 +154,7 @@ class MigrationHandlerIngestCloudTest {
         tenantScope = new TenantScope(svcDs);
         Embedder embedder = new NoopEmbedder(384);  // upsertChunksWithVectors skips it
         pgVectors = new PgVectorRepository(tenantScope, embedder, embedder);
+        jobRepo = new MigrationJobRepository(tenantScope);
     }
 
     @AfterAll
@@ -151,14 +166,17 @@ class MigrationHandlerIngestCloudTest {
     @org.junit.jupiter.api.BeforeEach
     void clearChunks() throws SQLException {
         // PER_CLASS shares one DB across tests; isolate each test's parity/count
-        // assertions by truncating the chunk tables (superuser bypasses RLS).
+        // assertions by truncating the chunk + jobs tables (superuser bypasses RLS).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (int dim : new int[] {384, 768, 1024}) {
                 su.createStatement().execute("TRUNCATE nexus.chunks_" + dim);
             }
+            su.createStatement().execute("TRUNCATE nexus.migration_jobs");
         }
     }
+
+    // ── sync mode (back-compat, "sync": true) ───────────────────────────────────
 
     @Test
     void ingestCloud_copiesServerSide_reportsParity_andNeverLeaksCredentials() throws Exception {
@@ -174,7 +192,7 @@ class MigrationHandlerIngestCloudTest {
         root.addAppender(logs);
         try {
             CapturingExchange ex = post(reqBody(SECRET_API_KEY, List.of(COLL_A, COLL_B)));
-            handleWithTenant(new MigrationHandler(pgVectors, fake), ex);
+            handleWithTenant(new MigrationHandler(pgVectors, fake, jobRepo), ex);
 
             assertThat(ex.status).as("ingest-cloud returns 200").isEqualTo(200);
             @SuppressWarnings("unchecked")
@@ -209,7 +227,7 @@ class MigrationHandlerIngestCloudTest {
         for (int i = 0; i < count; i++) fake.put(COLL_BIG, chash("big", i), "doc " + i);
 
         CapturingExchange ex = post(reqBody(SECRET_API_KEY, List.of(COLL_BIG)));
-        handleWithTenant(new MigrationHandler(pgVectors, fake), ex);
+        handleWithTenant(new MigrationHandler(pgVectors, fake, jobRepo), ex);
 
         assertThat(ex.status).isEqualTo(200);
         assertThat(superuserCount(384, COLL_BIG))
@@ -231,7 +249,7 @@ class MigrationHandlerIngestCloudTest {
         root.addAppender(logs);
         try {
             CapturingExchange ex = post(reqBody(SECRET_API_KEY, List.of(COLL_A, COLL_B)));
-            handleWithTenant(new MigrationHandler(pgVectors, fake), ex);
+            handleWithTenant(new MigrationHandler(pgVectors, fake, jobRepo), ex);
 
             assertThat(ex.status).as("mid-copy failure → 500").isEqualTo(500);
             @SuppressWarnings("unchecked")
@@ -252,7 +270,7 @@ class MigrationHandlerIngestCloudTest {
         FakeCloud fake = new FakeCloud(new AtomicReference<>());
         fake.put(COLL_A, chash("u", 1), "present");
         CapturingExchange ex = post(reqBody(SECRET_API_KEY, List.of("knowledge__typo__minilm-l6-v2-384__v1")));
-        handleWithTenant(new MigrationHandler(pgVectors, fake), ex);
+        handleWithTenant(new MigrationHandler(pgVectors, fake, jobRepo), ex);
         assertThat(ex.status).as("a requested collection absent from source → 400").isEqualTo(400);
         assertThat(ex.bodyString()).contains("not present in source");
     }
@@ -260,13 +278,133 @@ class MigrationHandlerIngestCloudTest {
     @Test
     void ingestCloud_missingApiKey_returns400() throws Exception {
         MigrationHandler handler = new MigrationHandler(pgVectors,
-            (t, d, k) -> { throw new AssertionError("source must not be opened on a bad request"); });
+            (t, d, k) -> { throw new AssertionError("source must not be opened on a bad request"); },
+            jobRepo);
         String body = MAPPER.writeValueAsString(Map.of(
             "source_tenant", "src-tenant", "source_database", "src-db"));  // no api key
         CapturingExchange ex = post(body);
         handleWithTenant(handler, ex);
         assertThat(ex.status).isEqualTo(400);
         assertThat(ex.bodyString()).contains("source_api_key");
+    }
+
+    // ── async mode (default) ─────────────────────────────────────────────────────
+
+    @Test
+    void ingestCloudAsync_returns202_andJobCompletesWithCounts() throws Exception {
+        FakeCloud fake = new FakeCloud(new AtomicReference<>());
+        fake.put(COLL_A, chash("async", 1), "alpha one");
+        fake.put(COLL_A, chash("async", 2), "alpha two");
+        MigrationHandler handler = new MigrationHandler(pgVectors, fake, jobRepo);
+
+        CapturingExchange ex = post(reqBody(SECRET_API_KEY, List.of(COLL_A), false));
+        handleWithTenant(handler, ex);
+
+        assertThat(ex.status).as("async ingest-cloud returns 202").isEqualTo(202);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> resp = MAPPER.readValue(ex.bodyString(), Map.class);
+        String jobId = (String) resp.get("job_id");
+        assertThat(jobId).as("job_id present in 202 response").isNotBlank();
+
+        Map<String, Object> job = pollJobUntilTerminal(handler, jobId, 5000);
+        assertThat(job.get("state")).as("job completes").isEqualTo("done");
+        assertThat(job.get("error")).isNull();
+        assertThat(job.get("started_at")).isNotNull();
+        assertThat(job.get("finished_at")).isNotNull();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> perCollection = (Map<String, Object>) job.get("per_collection");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> collA = (Map<String, Object>) perCollection.get(COLL_A);
+        assertThat(collA.get("copied")).isEqualTo(2);
+        assertThat(collA.get("dest")).isEqualTo(2);
+        assertThat(collA.get("expected")).isEqualTo(2);
+
+        // The copy actually landed server-side.
+        assertThat(superuserCount(384, COLL_A)).isEqualTo(2L);
+    }
+
+    @Test
+    void ingestCloudAsync_idempotentRePost_returnsSameJobId_opensSourceOnce() throws Exception {
+        FakeCloud fake = new FakeCloud(new AtomicReference<>());
+        fake.put(COLL_A, chash("idem", 1), "one");
+        fake.put(COLL_B, chash("idem", 2), "two");
+        CountDownLatch gate = new CountDownLatch(1);
+        fake.pauseCollectionsCallUntil(gate);  // keeps job1 "running" for the test window
+        MigrationHandler handler = new MigrationHandler(pgVectors, fake, jobRepo);
+
+        CapturingExchange ex1 = post(reqBody(SECRET_API_KEY, List.of(COLL_A, COLL_B), false));
+        handleWithTenant(handler, ex1);
+        assertThat(ex1.status).isEqualTo(202);
+        @SuppressWarnings("unchecked")
+        String jobId1 = (String) MAPPER.readValue(ex1.bodyString(), Map.class).get("job_id");
+
+        // Second POST names the SAME collection set in a DIFFERENT order — must
+        // dedupe on the order-independent canonical key while job1 is still active.
+        CapturingExchange ex2 = post(reqBody(SECRET_API_KEY, List.of(COLL_B, COLL_A), false));
+        handleWithTenant(handler, ex2);
+        assertThat(ex2.status).isEqualTo(202);
+        @SuppressWarnings("unchecked")
+        String jobId2 = (String) MAPPER.readValue(ex2.bodyString(), Map.class).get("job_id");
+
+        assertThat(jobId2).as("idempotent re-POST returns the SAME job id").isEqualTo(jobId1);
+
+        gate.countDown();
+        Map<String, Object> job = pollJobUntilTerminal(handler, jobId1, 5000);
+        assertThat(job.get("state")).isEqualTo("done");
+
+        // Only ONE copy actually ran: the fake source was opened exactly once.
+        assertThat(fake.openCount()).as("idempotent re-POST must not trigger a second copy").isEqualTo(1);
+    }
+
+    @Test
+    void ingestCloudAsync_missingCollections_returns400_synchronously() throws Exception {
+        MigrationHandler handler = new MigrationHandler(pgVectors,
+            (t, d, k) -> { throw new AssertionError("source must not be opened when collections is empty"); },
+            jobRepo);
+        String body = MAPPER.writeValueAsString(Map.of(
+            "source_tenant", "src-tenant", "source_database", "src-db", "source_api_key", SECRET_API_KEY));
+        CapturingExchange ex = post(body);
+        handleWithTenant(handler, ex);
+        assertThat(ex.status).as("async mode requires a non-empty collections list").isEqualTo(400);
+    }
+
+    @Test
+    void getJob_unknownId_returns404() throws Exception {
+        MigrationHandler handler = new MigrationHandler(pgVectors,
+            (t, d, k) -> { throw new AssertionError("source must not be opened for a GET"); },
+            jobRepo);
+        CapturingExchange ex = get("/v1/migration/jobs/does-not-exist");
+        handleWithTenant(handler, ex);
+        assertThat(ex.status).isEqualTo(404);
+    }
+
+    // ── credential non-persistence schema gate (2026-07-02 gate-critique BINDING) ─
+
+    @Test
+    void migrationJobsTable_hasNoCredentialColumns() throws SQLException {
+        List<String> columns = new ArrayList<>();
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "SELECT column_name FROM information_schema.columns "
+                 + "WHERE table_schema = 'nexus' AND table_name = 'migration_jobs'")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) columns.add(rs.getString(1).toLowerCase(Locale.ROOT));
+            }
+        }
+        assertThat(columns).as("migration_jobs table exists with columns").isNotEmpty();
+
+        // Extends RDR-176's test-enforced credential non-persistence decision to the
+        // jobs table (bead nexus-melvx, 2026-07-02 gate-critique BINDING constraint).
+        List<String> credentialShapedTokens = List.of(
+            "api_key", "apikey", "credential", "secret", "password", "passwd",
+            "token", "source_tenant", "source_database");
+        for (String col : columns) {
+            for (String bad : credentialShapedTokens) {
+                assertThat(col)
+                    .as("migration_jobs column '%s' must not be credential-shaped (matched '%s')", col, bad)
+                    .doesNotContain(bad);
+            }
+        }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -277,17 +415,27 @@ class MigrationHandlerIngestCloudTest {
         return t + String.format("%028d", i);  // exactly 32 chars, unique per i
     }
 
+    /** Legacy 2-arg form: defaults sync=true, preserving every pre-nexus-melvx test's contract. */
     private static String reqBody(String apiKey, List<String> collections) throws Exception {
+        return reqBody(apiKey, collections, true);
+    }
+
+    private static String reqBody(String apiKey, List<String> collections, boolean sync) throws Exception {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("source_tenant", "src-tenant");
         m.put("source_database", "src-db");
         m.put("source_api_key", apiKey);
         m.put("collections", collections);
+        if (sync) m.put("sync", true);
         return MAPPER.writeValueAsString(m);
     }
 
     private static CapturingExchange post(String body) {
         return new CapturingExchange("POST", URI.create("/v1/migration/ingest-cloud"), body);
+    }
+
+    private static CapturingExchange get(String path) {
+        return new CapturingExchange("GET", URI.create(path), "");
     }
 
     private void handleWithTenant(MigrationHandler handler, CapturingExchange ex) throws Exception {
@@ -297,6 +445,25 @@ class MigrationHandlerIngestCloudTest {
         } finally {
             RequestContext.clear();
         }
+    }
+
+    /** Poll {@code GET /v1/migration/jobs/{id}} until state is done/failed or the timeout elapses. */
+    private Map<String, Object> pollJobUntilTerminal(MigrationHandler handler, String jobId, long timeoutMs)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            CapturingExchange ex = get("/v1/migration/jobs/" + jobId);
+            handleWithTenant(handler, ex);
+            assertThat(ex.status).as("GET job status").isEqualTo(200);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> job = MAPPER.readValue(ex.bodyString(), Map.class);
+            String state = (String) job.get("state");
+            if ("done".equals(state) || "failed".equals(state)) {
+                return job;
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("job " + jobId + " did not reach a terminal state within " + timeoutMs + "ms");
     }
 
     private void assertNoKeyLeak(CapturingExchange ex, ListAppender<ILoggingEvent> logs) throws SQLException {
@@ -330,13 +497,15 @@ class MigrationHandlerIngestCloudTest {
         return sb.toString();
     }
 
-    /** Fake in-memory cloud source: records opened creds + read offsets; can fail. */
+    /** Fake in-memory cloud source: records opened creds + read offsets; can fail or block. */
     private static final class FakeCloud implements MigrationHandler.CloudSourceFactory {
         private final Map<String, List<String>> ids = new LinkedHashMap<>();
         private final Map<String, List<String>> docs = new LinkedHashMap<>();
         private final Map<String, List<float[]>> vecs = new LinkedHashMap<>();
         private final Map<String, List<Integer>> offsets = new LinkedHashMap<>();
         private String failReadOn;
+        private volatile CountDownLatch pauseLatch;
+        private final AtomicInteger opens = new AtomicInteger();
         private final AtomicReference<String[]> openedWith;
 
         FakeCloud(AtomicReference<String[]> openedWith) { this.openedWith = openedWith; }
@@ -351,14 +520,28 @@ class MigrationHandlerIngestCloudTest {
 
         void failReadOn(String coll) { this.failReadOn = coll; }
 
+        /** The first (and, under correct idempotency, only) {@code collections()} call blocks on {@code latch}. */
+        void pauseCollectionsCallUntil(CountDownLatch latch) { this.pauseLatch = latch; }
+
+        int openCount() { return opens.get(); }
+
         List<Integer> offsetsFor(String coll) { return offsets.getOrDefault(coll, List.of()); }
 
         @Override
         public MigrationHandler.CloudSource open(String tenant, String database, String apiKey) {
+            opens.incrementAndGet();
             openedWith.set(new String[] {tenant, database, apiKey});
             return new MigrationHandler.CloudSource() {
                 @Override
                 public List<String> collections() {
+                    CountDownLatch latch = pauseLatch;
+                    if (latch != null) {
+                        try {
+                            latch.await(5, TimeUnit.SECONDS);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
                     return new ArrayList<>(ids.keySet());
                 }
 

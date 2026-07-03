@@ -238,7 +238,12 @@ class TestStorageServiceHealthIntegration:
 class TestMigrationStateIntegration:
 
     def test_migration_state_ok(self, service, creds_file):
-        """After JAR start (Liquibase ran) -> all EXECUTED."""
+        """After JAR start (Liquibase ran) -> all applied, none FAILED.
+
+        59c68a78 reworded the ok-detail from per-state EXECUTED counts to
+        "N applied (0 FAILED, checksums present)" so benign RERAN changesets
+        stop false-failing; pin the applied/0-FAILED shape instead.
+        """
         from nexus.health import _check_migration_state
         results = _check_migration_state(
             creds_path=creds_file,
@@ -247,7 +252,8 @@ class TestMigrationStateIntegration:
         assert len(results) == 1
         r = results[0]
         assert r.ok is True
-        assert "EXECUTED" in r.detail
+        assert "applied" in r.detail
+        assert "0 FAILED" in r.detail
 
 
 class TestRlsPresentIntegration:

@@ -364,4 +364,70 @@ public final class ChashRepository {
             return null;
         });
     }
+
+    /** One row of a batched ETL import (see {@link #doImportBatch}). */
+    public record ImportRow(String chash, String collection, String createdAtIso) {}
+
+    /**
+     * Batched ETL import: land the WHOLE batch in ONE multi-row
+     * {@code INSERT ... ON CONFLICT} statement (nexus-1usso).
+     *
+     * <p>The pre-fix path looped {@link #doImport} per row — for a 200-row
+     * client batch that meant 200 × (collection-stub check + INSERT) ≈ 600
+     * sequential Postgres round-trips per HTTP request, ~0.9s server-side,
+     * which was the measured 1-request/s (~34 KB/s) migration throughput
+     * ceiling. Here each DISTINCT collection is registered once and all rows
+     * ride a single statement: two-ish round-trips per request instead of 600.
+     *
+     * <p>Rows are deduped on {@code (chash, collection)} within the batch —
+     * last occurrence wins — because a single multi-row INSERT cannot touch
+     * the same conflict target twice (PG: "cannot affect row a second time").
+     * The ETL source's PK makes intra-batch duplicates impossible in
+     * practice; the dedupe is defensive.
+     *
+     * <p>Same fidelity semantics as {@link #doImport}: {@code created_at}
+     * transfers verbatim (EXCLUDED on conflict), unparseable timestamps fall
+     * back to now with a warning. Idempotent re-runs are safe.
+     *
+     * @return the number of unique rows landed
+     */
+    public int doImportBatch(String tenant, List<ImportRow> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+
+        // Dedupe on (chash, collection), last wins. LinkedHashMap keeps batch order.
+        var unique = new java.util.LinkedHashMap<String, ImportRow>(rows.size());
+        for (ImportRow r : rows) {
+            if (r.chash() == null || r.chash().isBlank()
+                    || r.collection() == null || r.collection().isBlank()) {
+                throw new IllegalArgumentException("chash and collection must not be empty");
+            }
+            unique.put(r.chash() + "::" + r.collection(), r);
+        }
+        final List<ImportRow> deduped = List.copyOf(unique.values());
+
+        return tenantScope.withTenant(tenant, ctx -> {
+            Set<String> collections = new java.util.LinkedHashSet<>();
+            for (ImportRow r : deduped) collections.add(r.collection());
+            for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+
+            var insert = ctx.insertInto(CHASH_INDEX,
+                    F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT);
+            for (ImportRow r : deduped) {
+                OffsetDateTime ts;
+                try {
+                    ts = OffsetDateTime.parse(r.createdAtIso());
+                } catch (Exception e) {
+                    ts = OffsetDateTime.now(ZoneOffset.UTC);
+                    log.warn("event=chash_import_bad_created_at chash={} raw={} fallback=now",
+                             r.chash(), r.createdAtIso());
+                }
+                insert = insert.values(tenant, r.chash(), r.collection(), ts);
+            }
+            insert.onConflict(F_TENANT, F_CHASH, F_COLLECTION)
+                  .doUpdate()
+                  .set(F_CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
+                  .execute();
+            return deduped.size();
+        });
+    }
 }

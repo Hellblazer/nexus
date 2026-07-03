@@ -83,7 +83,7 @@ from typing import Any, Callable, Literal
 import structlog
 
 from nexus.db.chroma_quotas import QUOTAS
-from nexus.retry import _etl_with_retry
+from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 from nexus.migration.chroma_read import (
     iter_collection_chunks,
     list_collection_names,
@@ -103,13 +103,49 @@ _log = structlog.get_logger(__name__)
 # is never migrated. They are excluded from DEFAULT enumeration (reported,
 # never silent) so accumulating tuples data cannot fail the straggler
 # sweep; naming one explicitly via --collections still migrates/refuses it.
+# "skipped-derived" (RDR-178 Gap 6, nexus-t0p7o): a nonconformant collection
+# on the EXPLICIT :data:`_DERIVED_COLLECTIONS` allowlist — DERIVED data
+# recomputable from a durable source (taxonomy centroids from T2 topics via
+# `nx taxonomy discover`), never the migration's source of truth. A
+# real-content run must report clean even though this collection cannot
+# dim-dispatch. Distinct from "skipped-empty": the exemption is about WHY
+# the collection is exempt (derived, not lost data), not its row count —
+# unlike an empty nonconformant collection, a non-empty derived one is
+# reported here too and still does not redden the run. This is an
+# EXPLICIT opt-in registry, never a blanket allow: any nonconformant name
+# NOT on the registry still falls through to "skipped" and stays red (the
+# guard `test_nonconformant_collection_skipped_loud` protects).
+# "verified" / "filled" / "indeterminate" (RDR-178 wave-2, nexus-s3dd4.6):
+# the verify-fill (delta) counterpart's terminal states, generalizing
+# te885.1's operator-driven pg->pg reconciliation. "verified" is the
+# no-op path (target already holds every source chash — zero upsert
+# calls). "filled" means a genuine (possibly partial) hole was found and
+# ONLY the missing chashes crossed the wire. "indeterminate" is the
+# nexus-r0esi never-blind-fill guard: the target-presence probe looked
+# unreliable (mirrors rollback_collections' own "swallowed error"
+# signature — see :func:`_verify_fill_one`), so the collection needs
+# operator attention even though the writes that DID happen are safe
+# (every upsert is idempotent on (tenant, target, chash)).
 MigrationStatus = Literal[
-    "migrated", "failed", "skipped", "skipped-empty", "excluded", "dry-run",
+    "migrated", "failed", "skipped", "skipped-empty", "skipped-derived",
+    "excluded", "dry-run", "verified", "filled", "indeterminate",
 ]
 
 #: Collection-name prefixes excluded from DEFAULT enumeration (explicit
 #: --collections naming overrides). Session-ephemeral, die-with-Chroma data.
 EPHEMERAL_EXCLUDE_PREFIXES: tuple[str, ...] = ("tuples__",)
+
+#: Nonconformant collection names known to hold DERIVED data — recomputable
+#: from a durable source, so their absence from pgvector is not data loss.
+#: ``taxonomy__centroids`` (447 rows in the 2026-07-01 production dry-run)
+#: is regenerated on the target post-cutover via ``nx taxonomy discover``
+#: (source of truth: T2 ``topics``/``topic_assignments``). Adding a name
+#: here is a deliberate, reviewed claim that the collection is safely
+#: regenerable — it is NOT a general nonconformant-name allowlist.
+_DERIVED_COLLECTIONS: frozenset[str] = frozenset({"taxonomy__centroids"})
+
+#: Human-readable regeneration hint appended to every derived-skip reason.
+_DERIVED_SKIP_HINT = "skipped (derived — regenerate on target via nx taxonomy)"
 
 #: Model-segment → pgvector table dimension. MIRRORS the Java authority
 #: ``PgVectorRepository.MODEL_DIMS`` (service/src/main/java/dev/nexus/
@@ -183,6 +219,24 @@ class CollectionResult:
     #: same-model path (target == source). The orchestrator keys the
     #: catalog/topic ``source_collection`` ref-remap on (collection -> target).
     target_collection: str | None = None
+    #: verify-fill only (nexus-s3dd4.6): source chashes NOT found present in
+    #: the target by the :meth:`HttpVectorClient.existing_ids` probe. ``0``
+    #: for a full (non-delta) migrate result — there is no "missing" concept
+    #: on that path (every chunk is unconditionally sent).
+    missing_count: int = 0
+    #: verify-fill only: chashes ACTUALLY transmitted this run — the P6
+    #: regression's load-bearing assertion is ``filled_count == hole size``,
+    #: never ``source_count``. ``0`` for a full migrate result (that path's
+    #: "everything sent" cost is already captured by ``written_count``).
+    filled_count: int = 0
+    #: nexus-ekk4o (RDR-176 P4 / RDR-178 Gap 5): True when this collection's
+    #: chunks were copied SERVER-SIDE via the ``/v1/migration/ingest-cloud``
+    #: delegation (the engine pulls ChromaCloud directly at datacenter
+    #: bandwidth) rather than the client-mediated leg (every chunk trombones
+    #: ChromaCloud -> laptop -> engine). ``False`` for every non-delegated
+    #: result, including the client-mediated fallback for a collection the
+    #: delegated job could not complete.
+    delegated: bool = False
 
 
 @dataclass(frozen=True)
@@ -201,7 +255,10 @@ class MigrationReport:
     @property
     def ok(self) -> bool:
         return all(
-            r.status in ("migrated", "dry-run", "skipped-empty", "excluded")
+            r.status in (
+                "migrated", "dry-run", "skipped-empty", "skipped-derived",
+                "excluded", "verified", "filled",
+            )
             for r in self.results
         )
 
@@ -212,6 +269,20 @@ class MigrationReport:
     @property
     def total_written(self) -> int:
         return sum(r.written_count for r in self.results)
+
+    @property
+    def derived_skipped_count(self) -> int:
+        """Count of collections skipped as known-derived (RDR-178 Gap 6) —
+        reported separately from ``failed``/``skipped`` in the run summary
+        so an operator can see "regenerate these" apart from "fix these"."""
+        return sum(1 for r in self.results if r.status == "skipped-derived")
+
+    @property
+    def failed_or_skipped_count(self) -> int:
+        """Count of collections in a red terminal state (``failed`` or
+        ``skipped``) — the ones that actually need operator attention,
+        as opposed to :attr:`derived_skipped_count` (informational only)."""
+        return sum(1 for r in self.results if r.status in ("failed", "skipped"))
 
 
 def _dim_for_collection(name: str) -> tuple[int | None, str]:
@@ -276,6 +347,79 @@ def _iter_id_pages(
         yield batch
 
 
+def _skip_result_for_nonconformant(
+    read_client: Any, name: str, target: str,
+) -> tuple[int | None, CollectionResult | None]:
+    """Resolve *target*'s pgvector dim, or a terminal skip verdict.
+
+    Shared by :func:`_migrate_one` and :func:`_verify_fill_one` (nexus-s3dd4.6)
+    so the derived/nonconformant classification cannot drift between the full
+    and delta entry points — a pure extraction of the original ``_migrate_one``
+    logic, no behaviour change.
+
+    Returns ``(dim, None)`` when *target* dim-dispatches (the caller proceeds),
+    or ``(None, CollectionResult)`` with a terminal ``skipped*`` verdict when it
+    cannot.
+    """
+    dim, reason = _dim_for_collection(target)
+    if dim is not None:
+        return dim, None
+    # RDR-178 Gap 6 (nexus-t0p7o): an EXPLICIT derived-data exemption,
+    # checked before the empty/nonempty disposition below — a derived
+    # collection is exempt regardless of row count (its data is not
+    # lost, it is recomputed on the target), unlike the generic
+    # nonconformant path where only an EMPTY collection is safe.
+    if name in _DERIVED_COLLECTIONS:
+        try:
+            derived_count = int(read_client.get_collection(name).count())
+        except Exception:  # noqa: BLE001 - best-effort count probe; degrades to -1 sentinel
+            derived_count = -1
+        _log.info(
+            "vector_etl_skip_derived",
+            collection=name,
+            count=derived_count,
+        )
+        return None, CollectionResult(
+            name, max(derived_count, 0), 0, "skipped-derived", _DERIVED_SKIP_HINT,
+        )
+    # nexus-pebfx.3 disposition rule: probe the source count. Empty +
+    # non-conformant cannot lose data — report "skipped-empty" (clean).
+    # Unreadable counts as data (conservative: stays red).
+    try:
+        nc_count = int(read_client.get_collection(name).count())
+    except Exception:  # noqa: BLE001 - best-effort count probe; degrades to -1 sentinel
+        nc_count = -1
+    if nc_count == 0:
+        _log.info(
+            "vector_etl_skip_empty_nonconformant",
+            collection=name,
+            reason=reason,
+        )
+        return None, CollectionResult(
+            name, 0, 0, "skipped-empty",
+            reason + " (source has 0 chunks — nothing to lose)",
+        )
+    _log.warning("vector_etl_skip_nonconformant", collection=name, reason=reason)
+    return None, CollectionResult(name, max(nc_count, 0), 0, "skipped", reason)
+
+
+def _excluded_ephemeral_result(read_client: Any, name: str) -> CollectionResult:
+    """Terminal ``excluded`` verdict for a ``tuples__*`` (session-ephemeral)
+    collection under DEFAULT (non-explicit) enumeration. Shared by
+    :func:`migrate_collections` and the ingest-cloud delegation pre-pass
+    (:func:`migrate_cloud`, nexus-ekk4o) so the two entry points cannot
+    drift on the exclusion disposition."""
+    try:
+        eph_count = int(read_client.get_collection(name).count())
+    except Exception:  # noqa: BLE001 — count is informational here
+        eph_count = 0
+    return CollectionResult(
+        name, eph_count, 0, "excluded",
+        "session-ephemeral (dies with Chroma at P4b) — excluded from "
+        "default enumeration; pass --collections to act on it",
+    )
+
+
 def _migrate_one(
     read_client: Any,
     vector_client: Any,
@@ -284,34 +428,18 @@ def _migrate_one(
     dry_run: bool,
     page: int,
     target_name: str | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> CollectionResult:
     # RDR-162 cross-model migrate: when *target_name* differs from *name*, read
     # the stored chunk text from the SOURCE (*name*) but upsert + verify against
     # the TARGET (the model-remapped name). The service re-embeds the text with
     # the target's model. The pgvector dim is dispatched from the TARGET segment.
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     target = target_name or name
     is_cross_model = target != name
-    dim, reason = _dim_for_collection(target)
-    if dim is None:
-        # nexus-pebfx.3 disposition rule: probe the source count. Empty +
-        # non-conformant cannot lose data — report "skipped-empty" (clean).
-        # Unreadable counts as data (conservative: stays red).
-        try:
-            nc_count = int(read_client.get_collection(name).count())
-        except Exception:  # noqa: BLE001 - best-effort count probe; degrades to -1 sentinel
-            nc_count = -1
-        if nc_count == 0:
-            _log.info(
-                "vector_etl_skip_empty_nonconformant",
-                collection=name,
-                reason=reason,
-            )
-            return CollectionResult(
-                name, 0, 0, "skipped-empty",
-                reason + " (source has 0 chunks — nothing to lose)",
-            )
-        _log.warning("vector_etl_skip_nonconformant", collection=name, reason=reason)
-        return CollectionResult(name, max(nc_count, 0), 0, "skipped", reason)
+    _dim, skip_result = _skip_result_for_nonconformant(read_client, name, target)
+    if skip_result is not None:
+        return skip_result
 
     try:
         source_col = read_client.get_collection(name)
@@ -410,16 +538,20 @@ def _migrate_one(
                         missing_vectors=missing,
                         provenance_mismatch=mis_provenance,
                     )
-            # RDR-176 Gap 6: bounded retry on a transient edge 403 / connection
-            # drop / read-timeout — the upsert is idempotent on (tenant, target,
-            # chash), so re-sending a batch that may have partially landed is a
-            # no-op on the dupes. A real failure exhausts the bound, then raises.
-            _etl_with_retry(
+            # RDR-176 Gap 6 + RDR-178 Gap 3: bounded retry (+ circuit-breaker
+            # pause on a sustained outage) on a transient edge 403/429/5xx /
+            # connection drop / read-timeout — the upsert is idempotent on
+            # (tenant, target, chash), so re-sending a batch that may have
+            # partially landed is a no-op on the dupes. A genuinely dead
+            # endpoint still exhausts breaker.max_trips and raises, so a bad
+            # collection cannot hang the whole leg forever.
+            _etl_batch_with_breaker(
                 vector_client.upsert_chunks,
                 target,
                 [c["id"] for c in batch],
                 [c["document"] for c in batch],
                 [c["metadata"] for c in batch],
+                breaker=breaker,
                 embeddings=embeddings,
             )
             written += len(batch)
@@ -468,6 +600,219 @@ def _migrate_one(
     )
 
 
+def _verify_fill_one(
+    read_client: Any,
+    vector_client: Any,
+    name: str,
+    *,
+    page: int,
+    target_name: str | None = None,
+    breaker: EtlCircuitBreaker | None = None,
+) -> CollectionResult:
+    """Delta counterpart to :func:`_migrate_one` (RDR-178 wave-2,
+    nexus-s3dd4.6): rather than re-sending every source chunk, diff each
+    read-page batch of source ids against the TARGET's presence
+    (:meth:`HttpVectorClient.existing_ids` — a membership probe scoped to the
+    candidates already in hand, mirroring :func:`rollback_collections`'s own
+    id-presence intersection idiom) and upsert ONLY the missing subset.
+    Same-model PASSTHROUGH embeddings (nexus-hxry2) still apply, scoped to
+    the missing subset — zero re-embed cost, same as a full migrate.
+
+    Generalizes te885.1's operator-driven pg->pg reconciliation (per-
+    collection chash set-difference, embeddings-verbatim upsert, zero
+    Voyage cost) as the vectors leg's verify-fill consumer. Gap 8
+    cross-substrate scope: the source may be the LOCAL or CLOUD Chroma read
+    leg — unchanged from :func:`_migrate_one`, no new source type
+    introduced (te885.1's own local-pgvector-as-source case was operator
+    ad hoc; this module's source abstraction stays Chroma-only by design).
+
+    Never-blind-fill (nexus-r0esi): ``existing_ids`` degrades to the EMPTY
+    set on a transport failure (its own contract — see
+    ``HttpVectorClient.existing_ids``), which is INDISTINGUISHABLE, from a
+    single probe call alone, from "the target genuinely holds none of these
+    ids". Mirroring :func:`rollback_collections`'s reachability-probe +
+    post-hoc consistency check: a whole-collection count is taken BEFORE the
+    loop (``count()`` propagates service errors — unlike the presence
+    lookup, it does not swallow them), and if EVERY source id across the
+    WHOLE collection reads back "missing" despite the target demonstrably
+    holding >0 rows overall, that is the exact "not a single lookup
+    resolved despite target holding data" signature — reported
+    ``indeterminate`` rather than a silently-successful ``filled``, even
+    though the sends that DID happen are safe (idempotent upsert). This
+    check is COLLECTION-LEVEL ONLY (same granularity as
+    ``rollback_collections``'s own guard): a probe that degrades on only
+    ONE read-page mid-run (not the whole collection) is not caught by this
+    heuristic — that page's chunks are still safely re-sent (idempotent),
+    just without the anomaly being surfaced. Achieving per-page detection
+    would need ``existing_ids`` itself to distinguish "empty" from
+    "unreachable" (``None``, like ``verify_fill.IdentitySource.present()``
+    does) — out of this bead's scope (``http_vector_client.py`` untouched).
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    target = target_name or name
+    is_cross_model = target != name
+    _dim, skip_result = _skip_result_for_nonconformant(read_client, name, target)
+    if skip_result is not None:
+        return skip_result
+
+    try:
+        read_client.get_collection(name)
+    except Exception as exc:  # noqa: BLE001 — every per-collection failure is reported, not raised
+        reason = f"source collection unreadable: {exc}"
+        _log.error("vector_etl_verify_fill_source_unreadable", collection=name, error=str(exc))
+        return CollectionResult(name, 0, 0, "failed", reason)
+
+    # Reachability probe BEFORE any per-page lookup (mirrors
+    # rollback_collections): count() propagates service errors, unlike the
+    # presence lookup below, which swallows them — an unreachable target
+    # fails this collection outright rather than reading as a false "target
+    # is empty, everything is missing".
+    try:
+        target_count_before = int(vector_client.count(target))
+    except Exception as exc:  # noqa: BLE001 — reported per-collection, not raised
+        reason = f"target unreachable: {exc}"
+        _log.error("vector_etl_verify_fill_target_unreachable", collection=name, target=target, error=str(exc))
+        return CollectionResult(name, 0, 0, "failed", reason, target_collection=target if is_cross_model else None)
+
+    passthrough = _is_same_model_passthrough(name, target)
+    declared_model = name.split("__")[2] if passthrough else None
+
+    def _provenance_ok(c: dict) -> bool:
+        # Mirrors _migrate_one's MISMATCH-ONLY provenance check (nexus-bfdri)
+        # — see that function's docstring for the full rationale.
+        if declared_model is None:
+            return False
+        prov = (c.get("metadata") or {}).get("embedding_model")
+        if not prov:
+            return True
+        return prov == declared_model
+
+    source_count = 0
+    missing_count = 0
+    filled_count = 0
+    try:
+        for batch in _iter_id_pages(read_client, name, page, include_embeddings=passthrough):
+            source_count += len(batch)
+            ids = [c["id"] for c in batch]
+            present = vector_client.existing_ids(target, ids)
+            missing_idx = [i for i, _id in enumerate(ids) if _id not in present]
+            if not missing_idx:
+                continue
+            missing_batch = [batch[i] for i in missing_idx]
+            missing_count += len(missing_batch)
+
+            embeddings = None
+            if passthrough:
+                if all(
+                    c.get("embedding") is not None and _provenance_ok(c)
+                    for c in missing_batch
+                ):
+                    embeddings = [c["embedding"] for c in missing_batch]
+                else:
+                    missing_vecs = sum(1 for c in missing_batch if c.get("embedding") is None)
+                    mis_prov = sum(
+                        1 for c in missing_batch
+                        if c.get("embedding") is not None and not _provenance_ok(c)
+                    )
+                    _log.warning(
+                        "vector_etl_verify_fill_passthrough_fallback_reembed",
+                        collection=name, target=target, batch_size=len(missing_batch),
+                        missing_vectors=missing_vecs, provenance_mismatch=mis_prov,
+                    )
+
+            _etl_batch_with_breaker(
+                vector_client.upsert_chunks,
+                target,
+                [c["id"] for c in missing_batch],
+                [c["document"] for c in missing_batch],
+                [c["metadata"] for c in missing_batch],
+                breaker=breaker,
+                embeddings=embeddings,
+            )
+            filled_count += len(missing_batch)
+    except Exception as exc:  # noqa: BLE001 — report and continue with the next collection
+        reason = f"verify-fill upsert failed after {filled_count} chunks: {exc}"
+        _log.error(
+            "vector_etl_verify_fill_upsert_failed",
+            collection=name, target=target, filled=filled_count, error=str(exc),
+        )
+        return CollectionResult(
+            name, source_count, filled_count, "failed", reason,
+            target_collection=target if is_cross_model else None,
+            missing_count=missing_count, filled_count=filled_count,
+        )
+
+    # Post-write verification: exact TARGET count or it did not happen —
+    # the same non-negotiable gate as _migrate_one's post-write check.
+    target_count_after = int(vector_client.count(target))
+    if target_count_after != source_count:
+        reason = (
+            f"post-write count mismatch: source={source_count} "
+            f"target={target_count_after}"
+        )
+        _log.error(
+            "vector_etl_verify_fill_count_mismatch",
+            collection=name, source=source_count, target=target_count_after,
+        )
+        return CollectionResult(
+            name, source_count, filled_count, "failed", reason,
+            target_collection=target if is_cross_model else None,
+            missing_count=missing_count, filled_count=filled_count,
+        )
+
+    # Suspicious-probe heuristic (see docstring): the target demonstrably
+    # held data BEFORE this run, yet EVERY source id read back "missing" —
+    # the rollback_collections "swallowed error" signature. Flag it even
+    # though the writes landed correctly (idempotent, verified above).
+    suspicious = (
+        target_count_before > 0
+        and source_count > 0
+        and missing_count == source_count
+    )
+    if suspicious:
+        reason = (
+            f"existing_ids probe reported ALL {source_count} source id(s) "
+            f"missing despite the target already holding {target_count_before} "
+            "row(s) — the rollback_collections 'swallowed error' signature; "
+            "treating as indeterminate rather than a trusted delta (writes "
+            "already landed and were verified, but the probe signal itself "
+            "is not trustworthy — investigate before relying on future "
+            "verify-fill runs against this collection)"
+        )
+        _log.warning(
+            "vector_etl_verify_fill_indeterminate",
+            collection=name, target=target,
+            target_count_before=target_count_before, source_count=source_count,
+        )
+        return CollectionResult(
+            name, source_count, filled_count, "indeterminate", reason,
+            target_collection=target if is_cross_model else None,
+            missing_count=missing_count, filled_count=filled_count,
+        )
+
+    if missing_count == 0:
+        _log.info(
+            "vector_etl_verify_fill_verified",
+            collection=name, target=target, source_count=source_count,
+        )
+        return CollectionResult(
+            name, source_count, 0, "verified",
+            target_collection=target if is_cross_model else None,
+            missing_count=0, filled_count=0,
+        )
+
+    _log.info(
+        "vector_etl_verify_fill_filled",
+        collection=name, target=target, source_count=source_count,
+        missing=missing_count, filled=filled_count,
+    )
+    return CollectionResult(
+        name, source_count, filled_count, "filled",
+        target_collection=target if is_cross_model else None,
+        missing_count=missing_count, filled_count=filled_count,
+    )
+
+
 def migrate_collections(
     read_client: Any,
     vector_client: Any,
@@ -478,6 +823,7 @@ def migrate_collections(
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
     target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> MigrationReport:
     """Copy every chunk of *collections* (default: ALL source collections)
     from the Chroma *read_client* into pgvector via *vector_client*.
@@ -499,22 +845,18 @@ def migrate_collections(
     inflate the target count and read as a (conservative) failure. Run the
     migration with indexing paused. ``dry_run`` counts via ``col.count()``
     as a pre-flight estimate, not a binding commitment on a later live run.
+
+    *breaker* (RDR-178 Gap 3) is a shared :class:`~nexus.retry.EtlCircuitBreaker`
+    spanning every collection in this leg — defaults to a fresh instance.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
     explicit = collections is not None
     names = collections if explicit else list_collection_names(read_client)
     results: list[CollectionResult] = []
     for name in names:
         if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
-            try:
-                eph_count = int(read_client.get_collection(name).count())
-            except Exception:  # noqa: BLE001 — count is informational here
-                eph_count = 0
-            result = CollectionResult(
-                name, eph_count, 0, "excluded",
-                "session-ephemeral (dies with Chroma at P4b) — excluded from "
-                "default enumeration; pass --collections to act on it",
-            )
+            result = _excluded_ephemeral_result(read_client, name)
             results.append(result)
             if on_result is not None:
                 on_result(result)
@@ -523,6 +865,7 @@ def migrate_collections(
         result = _migrate_one(
             read_client, vector_client, name, dry_run=dry_run, page=page,
             target_name=(target_names or {}).get(name),
+            breaker=breaker,
         )
         result = dataclasses.replace(
             result, duration_s=round(time.monotonic() - t0, 3),
@@ -551,6 +894,7 @@ def migrate_local(
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
     target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> MigrationReport:
     """LOCAL leg: open the on-disk store the retired daemon served and
     migrate it. The ETL must be the only opener (WAL single-process
@@ -565,7 +909,307 @@ def migrate_local(
         page_size=page_size,
         on_result=on_result,
         target_names=target_names,
+        breaker=breaker,
     )
+
+
+#: Minimum engine-service release carrying the async ingest-cloud job
+#: contract (RDR-178 Gap 5, bead nexus-melvx) that ``migrate_cloud``
+#: delegates to (nexus-ekk4o). ``POST /v1/migration/ingest-cloud`` itself
+#: existed earlier (RDR-176 P4, sync-only), but the SYNCHRONOUS request
+#: outlives the nginx proxy timeout on any collection past a few thousand
+#: chunks (production 2026-07-01: 5 of 52 detached, no completion signal) —
+#: delegation therefore requires the ASYNC contract specifically, not just
+#: "the endpoint responds". Deployed + cloud-gated on engine-service-v0.1.18
+#: (plan-audit gate note on nexus-ekk4o; relay 2026-07-02).
+_INGEST_CLOUD_DELEGATION_MIN_VERSION: tuple[int, int, int] = (0, 1, 18)
+
+#: Poll cadence + budget for a delegated ingest-cloud job (nexus-ekk4o).
+#: 124,330 chunks at the production-observed ~105-150 chunks/s server-side
+#: rate lands in single-digit minutes; 30 minutes is a generous ceiling
+#: before falling back to the (slower but proven) client-mediated leg — a
+#: timeout does not abort the migration, it just stops waiting.
+_INGEST_CLOUD_POLL_INTERVAL_S: float = 3.0
+_INGEST_CLOUD_POLL_TIMEOUT_S: float = 1800.0
+
+#: Trigger-request timeout: the async POST is validated synchronously and
+#: returns 202 immediately (the copy itself runs on the service's worker
+#: pool) — this is a control-plane call, not the transfer itself.
+_INGEST_CLOUD_TRIGGER_TIMEOUT_S: float = 30.0
+
+
+def probe_ingest_cloud_support(
+    service_url: str,
+    *,
+    http_get: "Callable[[str, float], Any] | None" = None,
+    timeout_s: float = 5.0,
+) -> bool:
+    """True iff *service_url* runs an engine-service new enough to delegate
+    ``migrate_cloud`` to server-side ``POST /v1/migration/ingest-cloud``
+    (async job contract, RDR-178 Gap 5).
+
+    Reuses :func:`nexus.migration.guided_upgrade.verify_service_version` —
+    ONE lightweight, unauthenticated ``GET {service_url}/version`` read and a
+    ``release_version >= floor`` compare — rather than inventing a bespoke
+    ingest-cloud capability probe. This is the cheapest reliable signal
+    available: ``/version`` is already the established engine-capability
+    handshake in this codebase (``REQUIRED_RELEASE_VERSION``, the
+    ``/v1/telemetry/ids/probe`` mixed-fleet precedent in ``orchestrator.py``
+    used the target ENDPOINT itself as the 404-tolerant probe, which is not
+    available here — ``POST /v1/migration/ingest-cloud`` already existed
+    pre-async as a SYNC-only endpoint, so a bare "does it respond" probe
+    cannot distinguish sync-only from async-capable; the version floor can).
+
+    FAIL CLOSED (returns ``False``) on ANY ambiguity — transport error,
+    non-200, missing/dev/unparseable ``release_version``, or a version below
+    the floor — mirroring :func:`verify_service_version`'s own contract. The
+    caller (:func:`migrate_cloud`) treats a ``False`` as "use the
+    client-mediated leg", never as a reason to abort.
+    """
+    from nexus.migration.guided_upgrade import verify_service_version  # noqa: PLC0415 — deferred to avoid CLI startup cost / import cycle
+
+    outcome = verify_service_version(
+        service_url,
+        required=_INGEST_CLOUD_DELEGATION_MIN_VERSION,
+        http_get=http_get,
+        timeout_s=timeout_s,
+    )
+    if not outcome.ok:
+        _log.info(
+            "vector_etl_ingest_cloud_delegation_unavailable",
+            service_url=service_url,
+            reason=outcome.reason,
+        )
+    return outcome.ok
+
+
+def _resolve_delegation_endpoint(vector_client: Any) -> tuple[str, str, str] | None:
+    """``(base_url, token, tenant)`` for the ingest-cloud delegation HTTP
+    calls, or ``None`` when the service endpoint cannot be resolved.
+
+    Reuses :mod:`nexus.db.http_vector_client`'s ``_resolve_endpoint`` — the
+    SAME lease/env resolution every other Seam B call goes through — so
+    delegation never invents a second discovery path. Resolution failure
+    (no supervisor lease, no configured managed endpoint) is NOT a migration
+    abort: it just means delegation is skipped in favor of the
+    client-mediated leg, which is how every environment worked before this
+    bead landed.
+    """
+    try:
+        from nexus.db.http_vector_client import _resolve_endpoint  # noqa: PLC0415 — deferred to avoid import cycle
+
+        base_url, token = _resolve_endpoint()
+    except Exception as exc:  # noqa: BLE001 — unresolvable endpoint => fall back, never abort
+        _log.info(
+            "vector_etl_ingest_cloud_endpoint_unresolvable",
+            error_type=type(exc).__name__,
+        )
+        return None
+    tenant = getattr(vector_client, "_tenant", "default") or "default"
+    return base_url, token, tenant
+
+
+def _ingest_cloud_trigger(
+    http_client: Any,
+    base_url: str,
+    token: str,
+    tenant: str,
+    *,
+    source_tenant: str,
+    source_database: str,
+    source_api_key: str,
+    collections: list[str],
+) -> str:
+    """POST ``/v1/migration/ingest-cloud`` (async mode — no ``"sync"`` key).
+    Returns the ``job_id``. Raises ``RuntimeError`` on any non-202 response.
+
+    ``source_api_key`` is placed ONLY in this request's JSON body (the
+    contract every ``ingest-cloud`` caller — the RDR-176 P4 gate script
+    included — follows: never a header, never a log line, never echoed back
+    by a caught exception). The failure message below carries the response
+    STATUS + TEXT only (server-controlled, no credential ever appears in a
+    response body per ``MigrationHandler``'s own credential-non-disclosure
+    contract) — never the request.
+    """
+    resp = http_client.post(
+        base_url.rstrip("/") + "/v1/migration/ingest-cloud",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Nexus-Tenant": tenant,
+            "Content-Type": "application/json",
+        },
+        json={
+            "source_tenant": source_tenant,
+            "source_database": source_database,
+            "source_api_key": source_api_key,
+            "collections": collections,
+        },
+        timeout=_INGEST_CLOUD_TRIGGER_TIMEOUT_S,
+    )
+    if resp.status_code != 202:
+        raise RuntimeError(
+            f"ingest-cloud trigger failed: HTTP {resp.status_code}: "
+            f"{resp.text[:500]}"
+        )
+    body = resp.json()
+    job_id = body.get("job_id")
+    if not job_id:
+        raise RuntimeError("ingest-cloud trigger returned 202 with no job_id")
+    return job_id
+
+
+def _ingest_cloud_poll(
+    http_client: Any,
+    base_url: str,
+    token: str,
+    tenant: str,
+    job_id: str,
+    *,
+    interval_s: float = _INGEST_CLOUD_POLL_INTERVAL_S,
+    timeout_s: float = _INGEST_CLOUD_POLL_TIMEOUT_S,
+    sleep: "Callable[[float], None]" = time.sleep,
+    now: "Callable[[], float]" = time.monotonic,
+) -> dict[str, Any] | None:
+    """Poll ``GET /v1/migration/jobs/{job_id}`` until ``state`` is terminal
+    (``done``/``failed``) or *timeout_s* elapses. Returns the terminal job
+    body, or ``None`` on timeout — a timeout is NOT treated as a job failure.
+
+    Timeout semantics (ekk4o review, 2026-07-02): a ``None`` return discards
+    ALL per-collection progress — the caller falls back to the client-mediated
+    leg for the WHOLE batch, including collections the server-side job may
+    already have finished (unlike the granular partial-failure path, which
+    credits per-collection parity). That is a bounded instance of the
+    re-send class this epic fights, accepted because the server job may
+    still be RUNNING: crediting a non-terminal snapshot could false-pass.
+    The eventual double-copy is safe — both legs converge through the same
+    chash-keyed idempotent upsert, so a late-completing delegated job merely
+    overwrites identical rows
+    signal (the job may still be running server-side); the caller falls back
+    to the client-mediated leg for every collection in the batch rather than
+    trust a non-terminal snapshot."""
+    deadline = now() + timeout_s
+    while True:
+        resp = http_client.get(
+            base_url.rstrip("/") + f"/v1/migration/jobs/{job_id}",
+            headers={"Authorization": f"Bearer {token}", "X-Nexus-Tenant": tenant},
+        )
+        if resp.status_code == 200:
+            body = resp.json()
+            if body.get("state") in ("done", "failed"):
+                return body
+        if now() >= deadline:
+            return None
+        sleep(interval_s)
+
+
+def _delegate_ingest_cloud(
+    names: list[str],
+    *,
+    tenant: str,
+    database: str,
+    api_key: str,
+    base_url: str,
+    token: str,
+    nexus_tenant: str,
+    on_result: "Callable[[CollectionResult], None] | None" = None,
+    http_client: Any = None,
+    poll_interval_s: float = _INGEST_CLOUD_POLL_INTERVAL_S,
+    poll_timeout_s: float = _INGEST_CLOUD_POLL_TIMEOUT_S,
+    sleep: "Callable[[float], None]" = time.sleep,
+    now: "Callable[[], float]" = time.monotonic,
+) -> tuple[list[CollectionResult], list[str]]:
+    """Trigger + poll ONE server-side ``ingest-cloud`` job covering *names*
+    (nexus-ekk4o). Returns ``(delegated_results, fallback_names)`` —
+    *fallback_names* is disjoint from the collections in *delegated_results*
+    and MUST be re-attempted via the client-mediated leg by the caller; a
+    collection never appears in both.
+
+    Batches every eligible collection into ONE job (rather than one job per
+    collection): the async contract already tracks per-collection progress
+    in ``per_collection`` and dedups on the job's (tenant, collection-set)
+    idempotency key, so one round-trip covers the whole eligible set.
+
+    Credential non-disclosure: ``source_api_key`` reaches exactly ONE call
+    (:func:`_ingest_cloud_trigger`'s request body) and is never captured by
+    any variable that a log statement below touches.
+    """
+    import httpx  # noqa: PLC0415 — deferred; only needed on the delegation path
+
+    owns_client = http_client is None
+    client = http_client if http_client is not None else httpx.Client()
+    t0 = time.monotonic()
+    try:
+        try:
+            job_id = _ingest_cloud_trigger(
+                client, base_url, token, nexus_tenant,
+                source_tenant=tenant, source_database=database,
+                source_api_key=api_key, collections=names,
+            )
+        except Exception as exc:  # noqa: BLE001 — any trigger failure => full fallback, never abort
+            _log.warning(
+                "vector_etl_ingest_cloud_trigger_failed",
+                collections=names, error_type=type(exc).__name__,
+            )
+            return [], list(names)
+
+        _log.info(
+            "vector_etl_ingest_cloud_job_started", job_id=job_id, collections=names,
+        )
+        job = _ingest_cloud_poll(
+            client, base_url, token, nexus_tenant, job_id,
+            interval_s=poll_interval_s, timeout_s=poll_timeout_s,
+            sleep=sleep, now=now,
+        )
+    finally:
+        if owns_client:
+            client.close()
+
+    if job is None:
+        _log.warning(
+            "vector_etl_ingest_cloud_poll_timeout",
+            job_id=job_id, collections=names,
+            reason=(
+                "job did not reach a terminal state within the poll timeout "
+                "-- falling back to the client-mediated leg for all requested "
+                f"collections (the server-side job may still be running; "
+                f"poll GET /v1/migration/jobs/{job_id} to check)"
+            ),
+        )
+        return [], list(names)
+
+    per_collection = job.get("per_collection") or {}
+    results: list[CollectionResult] = []
+    failed: list[str] = []
+    for name in names:
+        entry = per_collection.get(name)
+        if entry is None:
+            failed.append(name)
+            continue
+        copied = int(entry.get("copied", 0))
+        dest = int(entry.get("dest", 0))
+        if dest != copied:
+            _log.warning(
+                "vector_etl_ingest_cloud_collection_parity_mismatch",
+                collection=name, copied=copied, dest=dest, job_id=job_id,
+            )
+            failed.append(name)
+            continue
+        result = CollectionResult(
+            name, copied, dest, "migrated",
+            duration_s=round(time.monotonic() - t0, 3),
+            delegated=True,
+        )
+        results.append(result)
+        if on_result is not None:
+            on_result(result)
+
+    if failed:
+        _log.warning(
+            "vector_etl_ingest_cloud_partial_fallback",
+            job_id=job_id, job_state=job.get("state"),
+            failed_collections=failed, job_error=job.get("error"),
+        )
+    return results, failed
 
 
 def migrate_cloud(
@@ -579,22 +1223,218 @@ def migrate_cloud(
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
     target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> MigrationReport:
     """CLOUD leg: read via the ChromaCloud REST/auth API (no direct
     psql/pg_restore path exists) and write through the same pgvector
-    upsert. Credentials fall back to the configured ``chroma_*`` values."""
+    upsert. Credentials fall back to the configured ``chroma_*`` values.
+
+    DELEGATION (nexus-ekk4o, RDR-176 P4 / RDR-178 Gap 5): before falling
+    back to the client-mediated leg (every chunk trombones ChromaCloud ->
+    laptop -> engine over the operator's uplink), this probes whether the
+    target engine-service supports server-side ``ingest-cloud`` delegation
+    (:func:`probe_ingest_cloud_support`) and, when it does, triggers ONE
+    batched async job for every ELIGIBLE collection — same-name (no
+    :data:`target_names` remap; the delegated endpoint has no cross-model
+    remap capability, it copies stored vectors verbatim) and dim-dispatchable
+    (:func:`_dim_for_collection`). A collection the delegated job could not
+    complete (or that was never eligible — cross-model, non-conformant,
+    ephemeral-excluded, or the whole probe/trigger/poll path failing) falls
+    back to the UNCHANGED client-mediated :func:`migrate_collections` path —
+    delegation is a pure optimization layered in front of it, never a
+    replacement that can drop a collection.
+
+    ``dry_run`` skips delegation entirely (it is a source-count-only
+    pre-flight; there is nothing to delegate).
+    """
     read_client = open_cloud_read_client(
         tenant=tenant, database=database, api_key=api_key
     )
-    return migrate_collections(
+    if dry_run:
+        return migrate_collections(
+            read_client, vector_client, leg="cloud", collections=collections,
+            dry_run=True, page_size=page_size, on_result=on_result,
+            target_names=target_names, breaker=breaker,
+        )
+
+    explicit = collections is not None
+    names = collections if explicit else list_collection_names(read_client)
+    tmap = target_names or {}
+
+    excluded: list[CollectionResult] = []
+    candidates: list[str] = []
+    for name in names:
+        if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
+            result = _excluded_ephemeral_result(read_client, name)
+            excluded.append(result)
+            if on_result is not None:
+                on_result(result)
+        else:
+            candidates.append(name)
+
+    delegated_results: list[CollectionResult] = []
+    remaining = candidates
+    endpoint = _resolve_delegation_endpoint(vector_client)
+    if endpoint is not None:
+        base_url, token, nexus_tenant = endpoint
+        if probe_ingest_cloud_support(base_url):
+            eligible = [
+                n for n in candidates
+                if tmap.get(n, n) == n and _dim_for_collection(n)[0] is not None
+            ]
+            if eligible:
+                delegated_results, _fallback = _delegate_ingest_cloud(
+                    eligible, tenant=tenant, database=database, api_key=api_key,
+                    base_url=base_url, token=token, nexus_tenant=nexus_tenant,
+                    on_result=on_result,
+                )
+                delegated_ok = {r.collection for r in delegated_results}
+                remaining = [n for n in candidates if n not in delegated_ok]
+
+    rest = migrate_collections(
+        read_client, vector_client, leg="cloud", collections=remaining,
+        dry_run=False, page_size=page_size, on_result=on_result,
+        target_names=target_names, breaker=breaker,
+    )
+    combined = tuple(excluded) + tuple(delegated_results) + rest.results
+    report = MigrationReport(leg="cloud", results=combined)
+    _log.info(
+        "vector_etl_leg_complete",
+        leg="cloud",
+        collections=len(combined),
+        total_source=report.total_source,
+        total_written=report.total_written,
+        ok=report.ok,
+        delegated=len(delegated_results),
+    )
+    return report
+
+
+def verify_fill_collections(
+    read_client: Any,
+    vector_client: Any,
+    *,
+    leg: Literal["local", "cloud"],
+    collections: list[str] | None = None,
+    page_size: int | None = None,
+    on_result: "Callable[[CollectionResult], None] | None" = None,
+    target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
+) -> MigrationReport:
+    """Delta (verify-fill) counterpart to :func:`migrate_collections`
+    (RDR-178 wave-2, nexus-s3dd4.6): per collection, diff the source's
+    chashes against the target's presence and upsert ONLY the missing
+    subset — never a full re-send. See :func:`_verify_fill_one` for the
+    diff/fill mechanics and the never-blind-fill (``indeterminate``)
+    safeguard.
+
+    Mirrors :func:`migrate_collections`'s enumeration semantics exactly
+    (default-vs-explicit collection scope, the ``EPHEMERAL_EXCLUDE_PREFIXES``
+    disposition, live ``on_result`` progress, a leg-shared
+    :class:`~nexus.retry.EtlCircuitBreaker`) — only the per-collection
+    WORKER differs (:func:`_verify_fill_one` instead of :func:`_migrate_one`;
+    there is no ``dry_run`` concept here, the diff itself IS the cheap
+    preview).
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    page = page_size or QUOTAS.MAX_QUERY_RESULTS
+    explicit = collections is not None
+    names = collections if explicit else list_collection_names(read_client)
+    results: list[CollectionResult] = []
+    for name in names:
+        if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
+            try:
+                eph_count = int(read_client.get_collection(name).count())
+            except Exception:  # noqa: BLE001 — count is informational here
+                eph_count = 0
+            result = CollectionResult(
+                name, eph_count, 0, "excluded",
+                "session-ephemeral (dies with Chroma at P4b) — excluded from "
+                "default enumeration; pass --collections to act on it",
+            )
+            results.append(result)
+            if on_result is not None:
+                on_result(result)
+            continue
+        t0 = time.monotonic()
+        result = _verify_fill_one(
+            read_client, vector_client, name, page=page,
+            target_name=(target_names or {}).get(name),
+            breaker=breaker,
+        )
+        result = dataclasses.replace(
+            result, duration_s=round(time.monotonic() - t0, 3),
+        )
+        results.append(result)
+        if on_result is not None:
+            on_result(result)
+    report = MigrationReport(leg=leg, results=tuple(results))
+    _log.info(
+        "vector_etl_verify_fill_leg_complete",
+        leg=leg,
+        collections=len(results),
+        total_source=report.total_source,
+        total_written=report.total_written,
+        missing_total=sum(r.missing_count for r in results),
+        filled_total=sum(r.filled_count for r in results),
+        ok=report.ok,
+    )
+    return report
+
+
+def verify_fill_local(
+    local_path: str | Path,
+    vector_client: Any,
+    *,
+    collections: list[str] | None = None,
+    page_size: int | None = None,
+    on_result: "Callable[[CollectionResult], None] | None" = None,
+    target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
+) -> MigrationReport:
+    """LOCAL leg verify-fill: open the on-disk store (same single-opener
+    discipline as :func:`migrate_local`) and diff+fill the delta only."""
+    read_client = open_local_read_client(local_path)
+    return verify_fill_collections(
+        read_client,
+        vector_client,
+        leg="local",
+        collections=collections,
+        page_size=page_size,
+        on_result=on_result,
+        target_names=target_names,
+        breaker=breaker,
+    )
+
+
+def verify_fill_cloud(
+    vector_client: Any,
+    *,
+    tenant: str = "",
+    database: str = "",
+    api_key: str = "",
+    collections: list[str] | None = None,
+    page_size: int | None = None,
+    on_result: "Callable[[CollectionResult], None] | None" = None,
+    target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
+) -> MigrationReport:
+    """CLOUD leg verify-fill: read via the ChromaCloud REST/auth API (same
+    credential fallback as :func:`migrate_cloud`) and diff+fill the delta
+    only — Gap 8 cross-substrate scope (the source may be local OR cloud,
+    unchanged from the full-migrate legs)."""
+    read_client = open_cloud_read_client(
+        tenant=tenant, database=database, api_key=api_key
+    )
+    return verify_fill_collections(
         read_client,
         vector_client,
         leg="cloud",
         collections=collections,
-        dry_run=dry_run,
         page_size=page_size,
         on_result=on_result,
         target_names=target_names,
+        breaker=breaker,
     )
 
 

@@ -1400,6 +1400,8 @@ nx doctor
 
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and the legacy on-disk Chroma store (reported as awaiting the migration ETL, not as the live backend). Then: Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention). The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The ChromaDB Cloud credential lines (`CHROMA_API_KEY` / `CHROMA_TENANT` / `CHROMA_DATABASE`) are still surfaced, but as of 6.0 they describe migration-source / pre-6.0 cloud config — the live T3 health surface is the vector-service probe above and `nx daemon service status`. A fresh local install with no Chroma keys is healthy.
 
+Migration-health checks (RDR-178): the newest `<config>/migration-reports/migration-*.json` is read and doctor fails loud (fatal) when `summary.total_failed > 0` or the recorded verification verdict is `mismatch`/`indeterminate` — with the report path, per-store failure counts, and a re-run suggestion (`nx storage migrate all --verify-fill`). A legacy report written by pre-6.2 tooling (no verification key at all) with zero failures is a non-fatal WARN, not a failure. Once the newest report records a cloud `target.service_url`, a write-divergence check warns (non-fatal) when `memory.db`'s freshest local write postdates the report's `completed_at` — local writes have landed after the cloud cutover and are not in the cloud tier.
+
 ```
 nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files
 nx doctor --clean-pipelines     # Delete orphaned pipeline buffer entries
@@ -2046,7 +2048,7 @@ List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revo
 ## nx guided-upgrade
 
 ```
-nx guided-upgrade [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--timeout SECS] [--yes]
+nx guided-upgrade [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--timeout SECS] [--yes] [--force]
 ```
 
 The **one-command upgrade from a pre-6.0 (ChromaDB) install to the service
@@ -2070,12 +2072,22 @@ service must be able to serve them — fail loud before migrating) → drive
   provisioning a local one; requires `NX_SERVICE_TOKEN` to be set.
 - `--timeout SECS` bounds the wait for the service to become healthy (default 120).
 - `--yes` / `-y` skips the confirmation prompt.
+- `--force` (RDR-178 Gap 7) skips already-migrated detection and re-migrates
+  every T2 store unconditionally.
 
 A not-ready or wrong-version service **hard-fails before any migration**.
-Idempotent and safe to re-run, but **not a no-op after success** — a re-run
-re-copies at full cost (the ChromaDB source is intact, so it is re-detected). On
-a validation block it leaves the `migrated-failed` sentinel and offers a rollback
-command (copy-not-move; never auto-reverts). Operational narrative:
+Idempotent and safe to re-run. The **T2 (SQLite) side is a true no-op on
+re-run** (RDR-178 Gap 7): before migrating, the command consults the newest
+`<config>/migration-reports/` artifacts plus a local-SQLite freshness probe
+and skips any T2 store already covered by a clean report with no newer local
+writes — printing an `already migrated <date>, no newer local writes` line
+per skipped store. `--force` bypasses this and re-migrates every T2 store
+unconditionally. The **T3 (ChromaDB → pgvector) side is NOT yet a no-op** —
+copy-not-move leaves the ChromaDB source intact, so it is always re-detected
+and re-verified at full cost (already-migrated detection for the T3 legs is
+tracked separately, RDR-178 Wave 2). On a validation block it leaves the
+`migrated-failed` sentinel and offers a rollback command (copy-not-move;
+never auto-reverts). Operational narrative:
 [`docs/migration-runbook.md`](migration-runbook.md).
 
 ## nx migrate-to-service
@@ -2150,7 +2162,7 @@ recover).
 ### nx storage migrate all
 
 ```
-nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH] [--service-url URL]
+nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--verify-fill]
 ```
 
 Run ALL eight T2 store migrations in the RDR-152 ladder order (memory →
@@ -2177,6 +2189,28 @@ artifact is written even when the flag is omitted, including on a
 mid-run crash — partial data beats no data). Note: `aspects` has no
 standalone command; it runs only via `migrate all`.
 
+`--verify-fill` (RDR-178 wave-2): a re-run to patch a small hole no
+longer re-sends the whole run. Per store:
+
+- `chash` / `catalog` — the outer count-diff decides parity (zero writes)
+  vs. divergent (send ONLY the rows genuinely missing from the target,
+  per `physical_collection` for chash; owners/collections/document_chunks
+  independently for catalog). Catalog's `documents`/`links` tables have
+  no delta-fill surface yet — if either diverges, the whole catalog store
+  falls back to the full ETL (never a partial/incoherent write).
+- `memory` / `plans` / `telemetry` / `taxonomy` — outer-verify only (no
+  delta-fill surface yet): a store already at parity is **skipped
+  entirely** (folded into `report["skipped_stores"]`, same signal as an
+  already-migrated pre-flight); a non-parity store falls back to the
+  unchanged full ETL.
+- `aspects` / `aspects_queue` — always the full ETL; unaffected by the flag.
+
+The report gains an additive `"verify_fill"` key (`{"outer": {...},
+"results": {...}, "total_filled": N}`) — absent on a normal run. A dedup
+relation (`nexus.plans`) that parities below its source count due to
+`ON CONFLICT DO UPDATE` convergence is surfaced as a
+`verification_convergence_notes` entry, never mistaken for a hole.
+
 ### nx storage migration-report show
 
 ```
@@ -2191,17 +2225,21 @@ class/action/count/sample), and the gate verdict — **GATE: PASS** when
 `summary.total_failed == 0`, otherwise **GATE: FAIL** with a non-zero
 exit (scriptable; this is the RDR-152 Phase-4 SQLite-deletion gate
 predicate). The reader lives in `nexus.migration` and survives the
-`src/nexus/db/t2` deletion.
+`src/nexus/db/t2` deletion. When the artifact carries the additive
+`"verify_fill"` key (a `--verify-fill` run), also prints a
+`verify-fill: total_filled=N` line, one `<store>.<table>: filled=N
+status=...` line per table that was actually diffed, any convergence
+notes, and the list of stores skipped entirely (already at parity).
 
 Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-not-move (the source is never modified) and idempotent (server-side upsert; re-runs produce no duplicates). All require `NX_SERVICE_TOKEN`.
 
 ### nx storage migrate
 
 ```
-nx storage migrate memory|plans|telemetry|taxonomy|chash|catalog [--db PATH] [--service-url URL] [--dry-run]
+nx storage migrate memory|plans|telemetry|taxonomy|chash|catalog [--db PATH] [--service-url URL] [--dry-run] [--verify-fill]
 ```
 
-Migrate a T2 SQLite store into the Postgres service tier through the validated HTTP seam.
+Migrate a T2 SQLite store into the Postgres service tier through the validated HTTP seam. `--verify-fill` (RDR-178 wave-2) runs the delta path instead of the unconditional full re-send — see `nx storage migrate all` above for the per-store semantics (a single-store invocation applies the same store's rule in isolation). Every per-store command's report always carries a populated `"verification"` verdict now (not just `migrate all`'s), and `target.service_url` records the RESOLVED endpoint, never a `"(lease)"` placeholder.
 
 ### nx storage migrate vectors
 
@@ -2210,6 +2248,8 @@ nx storage migrate vectors [--local-path PATH | --cloud] [--collections A,B] [--
 ```
 
 Migrate Chroma vector collections into pgvector (RDR-155 Phase 5). Two legs, run separately: the default local leg reads the on-disk store the retired T3 daemon served (`--local-path`, default `~/.config/nexus/chroma`); `--cloud` reads via the ChromaCloud REST/auth API using the configured `chroma_*` credentials. Chunk text, chash, and metadata transfer verbatim and the service re-embeds server-side; collection names are preserved verbatim so `topic_assignments.source_collection` references stay valid. `--rollback` deletes from pgvector exactly the chashes present in the source collections, leaving the source untouched. Exits non-zero when any collection failed or was skipped (non-conformant name with data present). Non-conformant collections with **zero** chunks receive status `skipped-empty` and do not redden the run — nothing can be lost by definition, so empty legacy collections (e.g. `tuples__*`) no longer force `--collections` hand-pinning.
+
+**`--cloud` server-side delegation (RDR-176 P4 / RDR-178 Gap 5, nexus-ekk4o).** Before falling back to the client-mediated copy (every chunk round-trips ChromaCloud → your machine → the engine, ~57 chunks/s over your uplink), `--cloud` probes whether the target engine-service supports the async `ingest-cloud` job contract (`GET /version`, `release_version >= 0.1.18`) and, when it does, triggers ONE batched server-side job that pulls ChromaCloud directly into pgvector at datacenter bandwidth (minutes instead of tens of minutes for a large corpus) — your uplink never sees a vector. Delegation applies only to same-name, dim-dispatchable collections (no `--collections` cross-model remap target); anything else, and any collection the delegated job could not complete, transparently falls back to the unchanged client-mediated path — no data is ever dropped, and no new flag is needed. Progress lines and the final summary table mark delegated collections `[delegated]`; a probe or trigger failure is logged and never aborts the run.
 
 Run the ETL with indexing paused (the post-write count verification assumes a quiescent window). Cutover validation sequence after both legs complete: run `manifest_backfill_sql()` then `manifest_orphan_sql(dim)` for each of 384/768/1024 (from `nexus.migration.vector_etl`) via psql as a superuser/admin role — zero orphan rows per dim is the pass condition. See the module docstring for the rationale (direct SQL, never the repository read API).
 

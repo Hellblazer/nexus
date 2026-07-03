@@ -226,7 +226,11 @@ public final class ChashHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"'rows' must be a JSON array\"}");
             return;
         }
-        int imported = 0;
+        // nexus-1usso: collect the whole batch and land it in ONE multi-row
+        // INSERT via doImportBatch. The old shape looped repo.doImport per row
+        // (200 rows ≈ 600 sequential PG round-trips ≈ 0.9s per request — the
+        // measured 1-request/s migration throughput ceiling).
+        List<ChashRepository.ImportRow> rows = new ArrayList<>(((List<?>) rawRows).size());
         for (Object item : (List<?>) rawRows) {
             if (!(item instanceof Map)) continue;
             Map<String, Object> row = (Map<String, Object>) item;
@@ -235,9 +239,9 @@ public final class ChashHandler implements HttpHandler {
             String createdAt  = (String) row.get("created_at");
             if (chash == null || chash.isBlank() || collection == null || collection.isBlank()) continue;
             if (createdAt == null || createdAt.isBlank()) createdAt = "1970-01-01T00:00:00Z";
-            repo.doImport(tenant, chash, collection, createdAt);
-            imported++;
+            rows.add(new ChashRepository.ImportRow(chash, collection, createdAt));
         }
+        int imported = repo.doImportBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + imported + "}");
     }
 

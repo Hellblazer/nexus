@@ -11,6 +11,8 @@ this one callable — there is no second orchestration code path.
 """
 from __future__ import annotations
 
+import pytest
+
 from nexus.migration import orchestrator as orch
 from nexus.migration.etl_registry import EtlSources, StoreEtl
 
@@ -160,6 +162,59 @@ class TestMigrateAll:
         assert report["relations_checked"] == 2
 
 
+class TestSkipStores:
+    """RDR-178 Gap 7 (nexus-1sx01): the already-migrated skip seam."""
+
+    def test_skipped_store_is_not_run(self, tmp_path, monkeypatch) -> None:
+        order: list[str] = []
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls(order))
+        orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+            skip_stores=frozenset({"catalog"}),
+        )
+        assert "catalog" not in order
+        assert order == [
+            "memory", "plans", "telemetry", "taxonomy",
+            "aspects", "chash", "aspects_queue",
+        ]
+
+    def test_skipped_store_gets_no_callbacks(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls([]))
+        on_store_seen: list[str] = []
+        on_progress_seen: list[str] = []
+        orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+            skip_stores=frozenset({"memory"}),
+            on_store=on_store_seen.append,
+            on_progress=lambda store, w, r: on_progress_seen.append(store),
+        )
+        assert "memory" not in on_store_seen
+        assert "memory" not in on_progress_seen
+
+    def test_skipped_stores_recorded_in_report_not_counted(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls([]))
+        report = orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+            skip_stores=frozenset({"memory", "plans"}),
+        )
+        assert report["skipped_stores"] == ["memory", "plans"]
+        # 6 remaining stores x 10 read/written each (see _fake_etls)
+        assert report["summary"]["total_read"] == 60
+        assert report["summary"]["total_written"] == 60
+        assert report["summary"]["total_failed"] == 0
+
+    def test_no_skip_stores_key_when_nothing_skipped(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls([]))
+        report = orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+        )
+        assert "skipped_stores" not in report
+
+
 # ── Count verification through the injected source ───────────────────────────
 
 
@@ -250,6 +305,124 @@ class TestBuildStoreEtls:
         # store names does not touch the service.
         etls = orch.build_store_etls(EtlSources(sqlite_path=None, catalog_db_path=None))  # type: ignore[arg-type]
         assert [e.store for e in etls] == list(LADDER_ORDER)
+
+
+# ── nexus-5drgy: pre-flight ETL import check (RDR-178 Gap 1) ─────────────────
+#
+# Jun-30 production run: `build_store_etls` defers each store's imports
+# (PLC0415) to when that store's turn comes up, so a version-skewed wheel
+# (orchestrator referencing an ETL module the installed wheel lacked) only
+# surfaced AFTER earlier stores had already written. `migrate_all` must
+# import every ladder step's ETL module up front and abort the ENTIRE run —
+# before any store executes — on the first missing module.
+
+
+class TestEtlImportModules:
+    def test_derives_module_names_from_runner_bytecode(self) -> None:
+        # Not a hand-maintained copy: parsed straight off the real
+        # build_store_etls closures, so it cannot drift from what each
+        # store's runner actually imports at call time.
+        etls = orch.build_store_etls(
+            EtlSources(sqlite_path=None, catalog_db_path=None)  # type: ignore[arg-type]
+        )
+        by_store = {e.store: orch._etl_import_modules(e.run) for e in etls}
+        assert set(by_store["memory"]) == {
+            "nexus.db.t2.http_memory_store", "nexus.db.t2.memory_etl",
+        }
+        assert set(by_store["aspects"]) == {
+            "nexus.db.t2.aspects_etl",
+            "nexus.db.t2.http_document_aspects_store",
+            "nexus.db.t2.http_document_highlights_store",
+        }
+        assert set(by_store["catalog"]) == {
+            "nexus.catalog.factory", "nexus.db.t2.catalog_etl",
+        }
+
+    def test_runner_with_no_imports_yields_empty_tuple(self) -> None:
+        def run(sources: EtlSources, collector) -> dict:
+            return {}
+
+        assert orch._etl_import_modules(run) == ()
+
+
+class TestAssertEtlsImportable:
+    def test_green_path_all_real_etl_modules_import_cleanly(self) -> None:
+        etls = orch.build_store_etls(
+            EtlSources(sqlite_path=None, catalog_db_path=None)  # type: ignore[arg-type]
+        )
+        orch.assert_etls_importable(etls)  # must not raise
+
+    def test_missing_module_raises_before_returning(self) -> None:
+        def run(sources: EtlSources, collector) -> dict:
+            from nexus.migration._nexus_5drgy_missing_module import Thing  # noqa: F401,PLC0415
+
+            return {}
+
+        with pytest.raises(orch.EtlPreflightFailed) as excinfo:
+            orch.assert_etls_importable([StoreEtl("memory", run)])
+        assert "nexus.migration._nexus_5drgy_missing_module" in str(excinfo.value)
+        assert "memory" in str(excinfo.value)
+
+
+class TestMigrateAllPreflight:
+    def test_aborts_before_any_store_executes(self, tmp_path, monkeypatch) -> None:
+        executed: list[str] = []
+
+        def _bad_etls(_s):
+            def run(sources: EtlSources, collector) -> dict:
+                from nexus.migration._nexus_5drgy_missing_module import Thing  # noqa: F401,PLC0415
+
+                executed.append("memory")  # would only run if preflight failed to gate
+                return {}
+
+            return [StoreEtl("memory", run)]
+
+        monkeypatch.setattr(orch, "build_store_etls", _bad_etls)
+        with pytest.raises(orch.EtlPreflightFailed) as excinfo:
+            orch.migrate_all(_sources(tmp_path), count_source=_FakeCountSource({}))
+        assert executed == []
+        assert "nexus.migration._nexus_5drgy_missing_module" in str(excinfo.value)
+
+    def test_skipped_store_import_breakage_does_not_block_pending_stores(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Wave-1 composed review (2026-07-02): pre-flight (Gap 1) must not
+        run against stores excluded via skip_stores (Gap 7) — an import
+        breakage in an already-migrated store never executes, so it must not
+        abort genuinely-pending stores."""
+        executed: list[str] = []
+
+        def _etls(_s):
+            def bad_run(sources: EtlSources, collector) -> dict:
+                from nexus.migration._nexus_5drgy_missing_module import Thing  # noqa: F401,PLC0415
+
+                return {}
+
+            def good_run(sources: EtlSources, collector) -> dict:
+                executed.append("plans")
+                return {}
+
+            return [StoreEtl("memory", bad_run), StoreEtl("plans", good_run)]
+
+        monkeypatch.setattr(orch, "build_store_etls", _etls)
+        report = orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+            skip_stores=frozenset({"memory"}),
+        )
+        assert executed == ["plans"]
+        assert report["skipped_stores"] == ["memory"]
+
+    def test_green_path_proceeds_through_the_ladder(self, tmp_path, monkeypatch) -> None:
+        order: list[str] = []
+        monkeypatch.setattr(orch, "build_store_etls", lambda s: _fake_etls(order))
+        report = orch.migrate_all(
+            _sources(tmp_path), count_source=_FakeCountSource({}),
+        )
+        assert order == [
+            "memory", "plans", "telemetry", "taxonomy",
+            "aspects", "chash", "catalog", "aspects_queue",
+        ]
+        assert report["summary"]["total_failed"] == 0
 
 
 class TestVerifyTables:

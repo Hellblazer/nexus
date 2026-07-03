@@ -230,12 +230,12 @@ public final class MemoryRepository {
             if (project != null && !project.isBlank()) {
                 rows = ctx.selectFrom(MEMORY)
                           .where(condition(ftsWhere, val(query), val(project)))
-                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc())
+                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc(), MEMORY.ID.asc())
                           .fetch();
             } else {
                 rows = ctx.selectFrom(MEMORY)
                           .where(condition(ftsWhere, val(query)))
-                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc())
+                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc(), MEMORY.ID.asc())
                           .fetch();
             }
             if (trackAccess && !rows.isEmpty()) {
@@ -328,7 +328,7 @@ public final class MemoryRepository {
                       .where(condition(
                           "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0})) AND project LIKE {1} ESCAPE '\\'",
                           val(query), val(likePattern)))
-                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc())
+                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc(), MEMORY.ID.asc())
                       .fetch();
         });
     }
@@ -351,7 +351,7 @@ public final class MemoryRepository {
                       .where(condition(
                           "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0})) AND (',' || tags || ',') LIKE {1} ESCAPE '\\'",
                           val(query), val(likePattern)))
-                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc())
+                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc(), MEMORY.ID.asc())
                       .fetch();
         });
     }

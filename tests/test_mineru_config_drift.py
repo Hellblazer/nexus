@@ -165,3 +165,109 @@ def test_restart_mineru_server_does_not_set_config(monkeypatch) -> None:
         "_restart_mineru_server re-introduced the config write; "
         "the PID file is canonical (nexus-oa7r)."
     )
+
+
+# ── get_mineru_configured_fixed_port (start-path/read-path seam) ──────
+
+
+def test_configured_fixed_port_returns_port_for_nondefault_local_url(monkeypatch) -> None:
+    with patch(
+        "nexus.config.get_pdf_config",
+        return_value=type("X", (), {
+            "mineru_server_url": "http://127.0.0.1:53947",
+        })(),
+    ):
+        from nexus.config import get_mineru_configured_fixed_port
+        assert get_mineru_configured_fixed_port() == 53947
+
+
+def test_configured_fixed_port_none_for_default_url(monkeypatch) -> None:
+    with patch(
+        "nexus.config.get_pdf_config",
+        return_value=type("X", (), {
+            "mineru_server_url": "http://127.0.0.1:8010",
+        })(),
+    ):
+        from nexus.config import get_mineru_configured_fixed_port
+        assert get_mineru_configured_fixed_port() is None
+
+
+def test_configured_fixed_port_none_for_remote_host(monkeypatch) -> None:
+    """A remote/out-of-band URL (e.g. launchctl, another host) has
+    nothing local to bind — must not be treated as a local port."""
+    with patch(
+        "nexus.config.get_pdf_config",
+        return_value=type("X", (), {
+            "mineru_server_url": "http://mineru.internal:9999",
+        })(),
+    ):
+        from nexus.config import get_mineru_configured_fixed_port
+        assert get_mineru_configured_fixed_port() is None
+
+
+def test_configured_fixed_port_accepts_localhost_hostname(monkeypatch) -> None:
+    with patch(
+        "nexus.config.get_pdf_config",
+        return_value=type("X", (), {
+            "mineru_server_url": "http://localhost:53947",
+        })(),
+    ):
+        from nexus.config import get_mineru_configured_fixed_port
+        assert get_mineru_configured_fixed_port() == 53947
+
+
+def test_mineru_start_binds_configured_port_not_random_free_port(monkeypatch) -> None:
+    """The actual regression (nexus incident 2026-07-01): a bare `nx
+    mineru start` (--port 0, i.e. auto-assign) with a non-default fixed
+    port in config must bind THAT port, not a random one — otherwise
+    the live server and get_mineru_server_url() disagree, and the
+    server is invisible to `nx doctor` / the PDF pipeline despite
+    reporting a successful start.
+
+    Exercises start()'s actual port-selection branch (not just the
+    config helper in isolation) by monkeypatching the subprocess spawn
+    and health poll so no real mineru-api binary is needed.
+    """
+    import nexus.commands.mineru as mineru_mod
+    from click.testing import CliRunner
+
+    # start()'s import of get_mineru_configured_fixed_port is deferred
+    # (inside the function body), so patch the source in nexus.config —
+    # matching the module's own deferred-import style, not a
+    # module-level attribute on mineru.py that doesn't exist pre-call.
+    monkeypatch.setattr(
+        "nexus.config.get_mineru_configured_fixed_port",
+        lambda: 53947,
+    )
+    monkeypatch.setattr(mineru_mod, "_read_pid_file", lambda: None)
+    monkeypatch.setattr(mineru_mod, "_resolve_mineru_api_bin", lambda: "/bin/true")
+    monkeypatch.setattr(mineru_mod, "_mineru_output_root", lambda: Path("/tmp"))
+    monkeypatch.setattr(mineru_mod, "_server_env", lambda output_root: {})
+
+    captured_cmd = {}
+
+    class _FakeProc:
+        pid = 12345
+        def poll(self):
+            return None
+
+    def _fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(mineru_mod.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(mineru_mod, "_write_pid_file", lambda *a, **kw: None)
+
+    class _FakeResp:
+        status_code = 200
+
+    monkeypatch.setattr(mineru_mod.httpx, "get", lambda *a, **kw: _FakeResp())
+
+    runner = CliRunner()
+    result = runner.invoke(mineru_mod.start, [])
+
+    assert result.exit_code == 0, result.output
+    assert "port 53947" in result.output
+    assert "53947" in captured_cmd["cmd"], (
+        f"start() must bind the configured fixed port, not a random one; got argv {captured_cmd['cmd']}"
+    )

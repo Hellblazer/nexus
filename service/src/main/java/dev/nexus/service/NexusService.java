@@ -5,6 +5,7 @@ import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.MemoryRepository;
+import dev.nexus.service.db.MigrationJobRepository;
 import dev.nexus.service.db.PlanRepository;
 import dev.nexus.service.db.ScratchRepository;
 import dev.nexus.service.db.TaxonomyRepository;
@@ -221,6 +222,7 @@ public final class NexusService {
         var aspectRepo    = new AspectRepository(tenantScope);
         var chashRepo     = new ChashRepository(tenantScope);
         var catalogRepo   = new CatalogRepository(tenantScope);
+        var migrationJobRepo = new MigrationJobRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress(resolveBindHost(), port), /* backlog */ 10);
@@ -270,12 +272,13 @@ public final class NexusService {
         var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));
         catalogCtx.getFilters().addAll(authFilter);
 
-        // /v1/migration/* — cloud→cloud server-side ingest (RDR-176 P4, nexus-t9rmg.24).
-        // Only wired when a PgVectorRepository is present (the serving substrate);
-        // absent = the route 404s rather than NPEs.
+        // /v1/migration/* — cloud→cloud server-side ingest (RDR-176 P4, nexus-t9rmg.24;
+        // async job contract, RDR-178 Gap 5, nexus-melvx). Only wired when a
+        // PgVectorRepository is present (the serving substrate); absent = the route
+        // 404s rather than NPEs.
         if (pgVectorRepository != null) {
             var migrationCtx = server.createContext(
-                    "/v1/migration", new MigrationHandler(pgVectorRepository));
+                    "/v1/migration", new MigrationHandler(pgVectorRepository, migrationJobRepo));
             migrationCtx.getFilters().addAll(authFilter);
         }
 

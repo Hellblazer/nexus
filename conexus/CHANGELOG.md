@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.2.0] - 2026-07-02
+
+Plugin version aligned with conexus 6.2.0. No conexus-plugin-side changes —
+this release's work (verify-fill delta migration, server-side cloud vector
+ingest, doctor migration-health checks) is in the `nx` CLI/engine. The
+sibling sn plugin drops its grep-routing PreToolUse hook, which silently
+blocked bash greps on code files.
+
 ## [6.1.0] - 2026-07-01
 
 Plugin version aligned with conexus 6.1.0. No plugin-side changes — this

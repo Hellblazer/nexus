@@ -303,7 +303,11 @@ class TestCollectionHealthMetaLiveService:
         result = cat.collection_health_meta(_COLL)
         assert "last_indexed" in result
         assert "orphan_count" in result
-        assert "stale_source_ratio" in result  # nexus-agsq7
+        # nexus-agsq7 CLOSED: the DB-only stale_source_ratio wiring was
+        # structurally vacuous (source_mtime <= indexed_at always) and was
+        # reverted — collection_health_meta no longer emits the key; the
+        # report layer renders the '—' placeholder via its None default.
+        assert "stale_source_ratio" not in result
 
     def test_unknown_collection_returns_safe_defaults(self, cat, seeded_catalog) -> None:
         """B) Unknown collection -> last_indexed=None, orphan_count=0."""

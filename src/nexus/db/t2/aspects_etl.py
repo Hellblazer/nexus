@@ -65,7 +65,7 @@ from typing import Any
 import structlog
 
 from nexus.db.chroma_quotas import QUOTAS
-from nexus.retry import _etl_with_retry
+from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 
 _log = structlog.get_logger(__name__)
 
@@ -125,9 +125,22 @@ def _transform_aspect(row: dict[str, Any]) -> dict[str, Any]:
             f"document_aspects row ({row.get('collection')}, "
             f"{row.get('source_path')}) missing extractor_name"
         )
+    # nexus-iiy11: post-RDR-096-P5.2 schemas have no source_path column —
+    # the row's identity is source_uri (URI-based identity, the point of
+    # RDR-096). The server key is UNIQUE(tenant_id, collection, source_path)
+    # with complete-overwrite upsert, so an empty fallback would COLLAPSE all
+    # of a collection's rows onto one key (silent data loss). Fail loud
+    # per-row instead when neither identity exists.
+    source_path = row.get("source_path") or row.get("source_uri")
+    if not source_path:
+        raise ValueError(
+            f"document_aspects row ({row.get('collection')}, doc_id="
+            f"{row.get('doc_id')}) has neither source_path nor source_uri — "
+            f"cannot form the (collection, source_path) identity"
+        )
     return {
         "collection":              _str(row["collection"]),
-        "source_path":             _str(row.get("source_path")),
+        "source_path":             _str(source_path),
         "problem_formulation":     row.get("problem_formulation"),
         "proposed_method":         row.get("proposed_method"),
         "experimental_datasets":   _str(row.get("experimental_datasets") or "[]"),
@@ -225,6 +238,7 @@ def migrate_aspects(
     batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """Migrate document_aspects from SQLite to Postgres via the HTTP service.
 
@@ -236,6 +250,7 @@ def migrate_aspects(
 
     Returns a summary dict: {imported, skipped, errors}.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     live_tumblers: set[str] | None = (
         _load_live_tumblers(catalog_db_path) if catalog_db_path else None
     )
@@ -253,9 +268,18 @@ def migrate_aspects(
             extra_cols.append("source_uri")
         if "salient_sentences" in cols:
             extra_cols.append("salient_sentences")
+        # nexus-iiy11: RDR-096 P5.2 (eb1ee8c4) DROPPED source_path from the
+        # source schema; hardcoding it in the SELECT crashed migrate_aspects
+        # unconditionally on every fresh post-4.31.0 T2 ('no such column'),
+        # tripping migrate_all's total_failed gate and hard-blocking the
+        # whole guided-upgrade T3 leg. Presence-check it like every other
+        # evolved column; _transform_aspect maps source_uri into the import
+        # body's source_path (the server key) when the column is gone.
+        if "source_path" in cols:
+            extra_cols.append("source_path")
 
         base_cols = [
-            "collection", "source_path", "problem_formulation", "proposed_method",
+            "collection", "problem_formulation", "proposed_method",
             "experimental_datasets", "experimental_baselines", "experimental_results",
             "extras", "confidence", "extracted_at", "model_version", "extractor_name",
         ]
@@ -320,7 +344,7 @@ def migrate_aspects(
                 keys.append(doc_id or f"row#{read}")
             if batch:
                 try:
-                    n = _etl_with_retry(http_aspects.import_aspects_batch, batch)
+                    n = _etl_batch_with_breaker(http_aspects.import_aspects_batch, batch, breaker=breaker)
                     imported += n
                     skipped += len(batch) - n
                 except Exception as exc:  # noqa: BLE001 — batch failure logged + recorded; migration continues (idempotent re-run)
@@ -356,8 +380,10 @@ def migrate_highlights(
     *,
     batch_size: int = _BATCH,
     collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """Migrate document_highlights from SQLite to Postgres via the HTTP service."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     imported = skipped = errors = 0
@@ -397,7 +423,7 @@ def migrate_highlights(
                 keys.append(str(row_dict.get("doc_id") or f"row#{read}"))
             if batch:
                 try:
-                    n = _etl_with_retry(http_highlights.import_highlights_batch, batch)
+                    n = _etl_batch_with_breaker(http_highlights.import_highlights_batch, batch, breaker=breaker)
                     imported += n
                     skipped += len(batch) - n
                 except Exception as exc:  # noqa: BLE001 — batch failure recorded; continue (idempotent re-run)
@@ -434,6 +460,7 @@ def migrate_queue(
     batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """Migrate aspect_extraction_queue from SQLite to Postgres via the HTTP service.
 
@@ -441,6 +468,7 @@ def migrate_queue(
     rows whose ``doc_id`` references no live catalog document are
     SKIP-AND-RECORDED; the valid rows migrate.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     live_tumblers: set[str] | None = (
         _load_live_tumblers(catalog_db_path) if catalog_db_path else None
     )
@@ -515,7 +543,7 @@ def migrate_queue(
                 keys.append(q_doc_id or f"row#{read}")
             if batch:
                 try:
-                    n = _etl_with_retry(http_queue.import_queue_batch, batch)
+                    n = _etl_batch_with_breaker(http_queue.import_queue_batch, batch, breaker=breaker)
                     imported += n
                     skipped += len(batch) - n
                 except Exception as exc:  # noqa: BLE001 — batch failure recorded; continue (idempotent re-run)
@@ -551,10 +579,12 @@ def migrate_promotion_log(
     *,
     batch_size: int = _BATCH,
     collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, int]:
     """Migrate aspect_promotion_log from SQLite to Postgres via the HTTP service."""
     import json  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     imported = skipped = errors = 0
@@ -603,7 +633,7 @@ def migrate_promotion_log(
                 keys.append(str(row_dict.get("field_name") or ""))
             if batch:
                 try:
-                    n = _etl_with_retry(http_aspects.import_promotion_batch, batch)
+                    n = _etl_batch_with_breaker(http_aspects.import_promotion_batch, batch, breaker=breaker)
                     imported += n
                     skipped += len(batch) - n
                 except Exception as exc:  # noqa: BLE001 — batch failure recorded; continue (idempotent re-run)
@@ -638,6 +668,7 @@ def migrate_without_queue(
     batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, dict[str, int]]:
     """Migrate document_aspects, highlights, and promotion_log — NOT the queue.
 
@@ -657,18 +688,20 @@ def migrate_without_queue(
     Returns a summary dict with keys: aspects, highlights, promotion_log,
     each containing {imported, skipped, errors}.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     return {
         "aspects": migrate_aspects(
             sqlite_path, http_aspects, batch_size=batch_size,
             collector=collector, catalog_db_path=catalog_db_path,
+            breaker=breaker,
         ),
         "highlights": migrate_highlights(
             sqlite_path, http_highlights, batch_size=batch_size,
-            collector=collector,
+            collector=collector, breaker=breaker,
         ),
         "promotion_log": migrate_promotion_log(
             sqlite_path, http_aspects, batch_size=batch_size,
-            collector=collector,
+            collector=collector, breaker=breaker,
         ),
     }
 
@@ -682,6 +715,7 @@ def migrate_all(
     batch_size: int = _BATCH,
     collector: Any = None,
     catalog_db_path: Path | None = None,
+    breaker: EtlCircuitBreaker | None = None,
 ) -> dict[str, dict[str, int]]:
     """Run all four table migrations in order.
 
@@ -696,14 +730,17 @@ def migrate_all(
         aspects, highlights, queue, promotion_log
     each containing {imported, skipped, errors}.
     """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
     result = migrate_without_queue(
         sqlite_path, http_aspects, http_highlights,
         batch_size=batch_size,
         collector=collector,
         catalog_db_path=catalog_db_path,
+        breaker=breaker,
     )
     result["queue"] = migrate_queue(
         sqlite_path, http_queue, batch_size=batch_size,
         collector=collector, catalog_db_path=catalog_db_path,
+        breaker=breaker,
     )
     return result

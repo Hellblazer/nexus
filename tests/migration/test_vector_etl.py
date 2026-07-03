@@ -84,6 +84,9 @@ from nexus.migration.vector_etl import (
     migrate_local,
     rollback_collections,
     verify_counts,
+    verify_fill_cloud,
+    verify_fill_collections,
+    verify_fill_local,
     verify_taxonomy_consistency,
 )
 
@@ -177,6 +180,12 @@ class FakeVectorClient:
         return len(self.store.get(collection, {})) + self._count_delta.get(
             collection, 0
         )
+
+    def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
+        """Membership probe (mirrors ``HttpVectorClient.existing_ids``):
+        the subset of *ids* actually present in *collection*."""
+        col = self.store.get(collection, {})
+        return {i for i in ids if i in col}
 
     def list_collections(self) -> list[dict]:
         return [
@@ -501,6 +510,68 @@ class TestMigrateCollectionsUnit:
         assert all(c != legacy for c, _ in fake.upsert_calls)
         assert report.ok is False
 
+    def test_derived_collection_skipped_clean(self, source_client) -> None:
+        """nexus-t0p7o (RDR-178 Gap 6): ``taxonomy__centroids`` is DERIVED
+        data (recomputable via ``nx taxonomy discover``) — a non-empty,
+        non-conformant derived collection must NOT redden the run. It is
+        reported as its own status, distinct from a genuinely-unknown
+        nonconformant name, and never attempted as an upsert."""
+        derived = "taxonomy__centroids"
+        good = _coll("etlunit-derived-good")
+        _seed_source(source_client, derived, 447)
+        _seed_source(source_client, good, 3)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        by_name = {r.collection: r for r in report.results}
+        assert by_name[derived].status == "skipped-derived"
+        assert by_name[derived].source_count == 447
+        assert by_name[derived].written_count == 0
+        assert "derived" in by_name[derived].reason
+        assert "regenerate" in by_name[derived].reason
+        assert "nx taxonomy" in by_name[derived].reason
+        assert by_name[good].status == "migrated"
+        # No upsert was even attempted for the derived collection.
+        assert all(c != derived for c, _ in fake.upsert_calls)
+        # A known-derived skip must not fail the run.
+        assert report.ok is True
+        assert report.derived_skipped_count == 1
+
+    def test_derived_collection_empty_still_reported_derived(self, source_client) -> None:
+        """An empty derived collection stays classified 'skipped-derived'
+        (not 'skipped-empty') — the classification is about WHY the
+        collection is exempt, not about its current row count."""
+        derived = "taxonomy__centroids"
+        _seed_source(source_client, derived, 0)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "skipped-derived"
+        assert result.source_count == 0
+        assert report.ok is True
+
+    def test_unknown_nonconformant_collection_still_fails_the_run(
+        self, source_client
+    ) -> None:
+        """A genuinely-unknown nonconformant name (not in the derived
+        registry) must STILL redden the run — the derived carve-out is
+        explicit-opt-in only, never a blanket allow for any nonconformant
+        name (nexus-t0p7o constraint 2)."""
+        unknown = "knowledge__legacy-unknown"
+        _seed_source(source_client, unknown, 5)
+        fake = FakeVectorClient()
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "skipped"
+        assert result.status != "skipped-derived"
+        assert report.ok is False
+        assert report.derived_skipped_count == 0
+
     def test_failed_collection_does_not_abort_run(self, source_client) -> None:
         """A service-rejected collection is reported failed; the remaining
         collections still migrate (no abort-all, no silent loss)."""
@@ -666,6 +737,613 @@ class TestLegRouting:
         assert report.total_written == 3
 
 
+# ── Unit: ingest-cloud delegation (nexus-ekk4o) ──────────────────────────────
+
+
+class TestProbeIngestCloudSupport:
+    """RDR-178 Gap 5: capability probe reused from
+    ``guided_upgrade.verify_service_version`` — GET /version, pin on
+    ``release_version >= floor``. FAIL CLOSED on every ambiguity."""
+
+    def test_true_at_floor(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 200
+            def json(self):  # noqa: ANN001, ANN201 — test double
+                return {"release_version": "0.1.18"}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is True
+
+    def test_true_above_floor(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 200
+            def json(self):  # noqa: ANN001, ANN201
+                return {"release_version": "0.2.0"}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is True
+
+    def test_false_below_floor(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 200
+            def json(self):  # noqa: ANN001, ANN201
+                return {"release_version": "0.1.17"}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is False
+
+    def test_false_on_missing_release_version(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 200
+            def json(self):  # noqa: ANN001, ANN201
+                return {"app_version": "1.0-SNAPSHOT"}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is False
+
+    def test_false_on_non_200(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        class _Resp:
+            status_code = 500
+            def json(self):  # noqa: ANN001, ANN201
+                return {}
+
+        assert probe_ingest_cloud_support(
+            "http://svc", http_get=lambda url, t: _Resp()
+        ) is False
+
+    def test_false_on_transport_error(self) -> None:
+        from nexus.migration.vector_etl import probe_ingest_cloud_support
+
+        def _boom(url, t):  # noqa: ANN001, ANN202
+            raise ConnectionError("no route to host")
+
+        assert probe_ingest_cloud_support("http://svc", http_get=_boom) is False
+
+
+# A distinctive api-key sentinel: tests assert this string appears ONLY in
+# the trigger POST's JSON body, never in any log event, exception message,
+# or the poll GET.
+_SECRET_API_KEY = "sk-super-secret-do-not-leak-9f3a2b"
+
+
+def _ingest_cloud_transport(
+    *,
+    trigger_status: int = 202,
+    job_id: str = "job-1",
+    trigger_body: dict | None = None,
+    poll_states: list[dict] | None = None,
+    requests: list | None = None,
+) -> "object":
+    """Build an httpx.MockTransport faking POST .../ingest-cloud (trigger)
+    and GET .../jobs/{id} (poll). ``poll_states`` is consumed in order, one
+    per GET; the last entry repeats once exhausted. ``requests`` (optional)
+    collects every ``httpx.Request`` seen, for credential-non-disclosure
+    assertions."""
+    import httpx
+
+    poll_states = poll_states if poll_states is not None else [{"state": "done", "per_collection": {}}]
+    calls = {"poll": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if requests is not None:
+            requests.append(request)
+        if request.url.path.endswith("/ingest-cloud"):
+            if trigger_body is not None:
+                return httpx.Response(trigger_status, json=trigger_body)
+            return httpx.Response(trigger_status, json={"job_id": job_id})
+        if "/jobs/" in request.url.path:
+            idx = min(calls["poll"], len(poll_states) - 1)
+            calls["poll"] += 1
+            body = poll_states[idx]
+            return httpx.Response(200, json={"job_id": job_id, **body})
+        return httpx.Response(404, json={"error": "not found"})
+
+    return httpx.MockTransport(_handler)
+
+
+class TestIngestCloudTrigger:
+    def test_trigger_returns_job_id_and_sends_creds_only_in_body(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_trigger
+
+        seen: list = []
+        transport = _ingest_cloud_transport(job_id="job-abc", requests=seen)
+        client = httpx.Client(transport=transport)
+
+        job_id = _ingest_cloud_trigger(
+            client, "http://svc", "tok", "default",
+            source_tenant="src-t", source_database="src-db",
+            source_api_key=_SECRET_API_KEY, collections=["coll-a", "coll-b"],
+        )
+
+        assert job_id == "job-abc"
+        assert len(seen) == 1
+        req = seen[0]
+        assert req.method == "POST"
+        assert _SECRET_API_KEY not in str(req.url)
+        assert _SECRET_API_KEY not in str(req.headers)
+        body = json.loads(req.content)
+        assert body["source_api_key"] == _SECRET_API_KEY
+        assert body["collections"] == ["coll-a", "coll-b"]
+
+    def test_trigger_raises_on_non_202_without_leaking_body(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_trigger
+
+        transport = _ingest_cloud_transport(
+            trigger_status=400, trigger_body={"error": "collections not present in source"}
+        )
+        client = httpx.Client(transport=transport)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _ingest_cloud_trigger(
+                client, "http://svc", "tok", "default",
+                source_tenant="src-t", source_database="src-db",
+                source_api_key=_SECRET_API_KEY, collections=["coll-a"],
+            )
+
+        msg = str(exc_info.value)
+        assert "400" in msg
+        assert _SECRET_API_KEY not in msg
+
+    def test_trigger_raises_on_202_with_no_job_id(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_trigger
+
+        transport = _ingest_cloud_transport(trigger_body={})
+        client = httpx.Client(transport=transport)
+
+        with pytest.raises(RuntimeError, match="no job_id"):
+            _ingest_cloud_trigger(
+                client, "http://svc", "tok", "default",
+                source_tenant="t", source_database="d",
+                source_api_key=_SECRET_API_KEY, collections=["c"],
+            )
+
+
+class TestIngestCloudPoll:
+    def test_poll_returns_on_terminal_state(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_poll
+
+        transport = _ingest_cloud_transport(
+            poll_states=[
+                {"state": "queued", "per_collection": {}},
+                {"state": "running", "per_collection": {}},
+                {"state": "done", "per_collection": {"c": {"copied": 1, "dest": 1, "expected": 1}}},
+            ]
+        )
+        client = httpx.Client(transport=transport)
+        sleeps: list[float] = []
+
+        body = _ingest_cloud_poll(
+            client, "http://svc", "tok", "default", "job-1",
+            interval_s=0.01, timeout_s=10.0,
+            sleep=sleeps.append, now=_fake_clock(step=0.001),
+        )
+
+        assert body is not None
+        assert body["state"] == "done"
+        assert body["per_collection"]["c"]["dest"] == 1
+        assert len(sleeps) == 2  # two non-terminal polls before the terminal one
+
+    def test_poll_times_out_returns_none(self) -> None:
+        import httpx
+
+        from nexus.migration.vector_etl import _ingest_cloud_poll
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{"state": "running", "per_collection": {}}]
+        )
+        client = httpx.Client(transport=transport)
+        sleeps: list[float] = []
+
+        body = _ingest_cloud_poll(
+            client, "http://svc", "tok", "default", "job-1",
+            interval_s=1.0, timeout_s=3.0,
+            sleep=sleeps.append, now=_fake_clock(step=1.0),
+        )
+
+        assert body is None
+        assert len(sleeps) >= 1
+
+
+def _fake_clock(*, step: float):
+    """A deterministic ``now()`` seam: returns 0.0, then advances by *step*
+    on every subsequent call — avoids real ``time.sleep``/wall-clock
+    dependence in the poll-loop tests."""
+    state = {"t": 0.0}
+
+    def _now() -> float:
+        t = state["t"]
+        state["t"] += step
+        return t
+
+    return _now
+
+
+class TestDelegateIngestCloud:
+    def test_all_collections_delegated_successfully(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            job_id="job-ok",
+            poll_states=[{
+                "state": "done",
+                "per_collection": {
+                    "coll-a": {"copied": 5, "dest": 5, "expected": 5},
+                    "coll-b": {"copied": 3, "dest": 3, "expected": 3},
+                },
+            }],
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+        seen_results = []
+
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a", "coll-b"],
+            tenant="src-t", database="src-db", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            on_result=seen_results.append, http_client=client,
+        )
+
+        assert failed == []
+        assert {r.collection for r in results} == {"coll-a", "coll-b"}
+        by_name = {r.collection: r for r in results}
+        assert by_name["coll-a"].status == "migrated"
+        assert by_name["coll-a"].source_count == 5
+        assert by_name["coll-a"].written_count == 5
+        assert by_name["coll-a"].delegated is True
+        assert by_name["coll-b"].written_count == 3
+        assert len(seen_results) == 2
+
+    def test_collection_missing_from_per_collection_falls_back(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{
+                "state": "failed",
+                "error": "java.lang.RuntimeException",
+                "per_collection": {
+                    "coll-a": {"copied": 5, "dest": 5, "expected": 5},
+                    # coll-b never reached — job died mid-loop.
+                },
+            }],
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a", "coll-b"],
+            tenant="t", database="d", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            http_client=client,
+        )
+
+        assert failed == ["coll-b"]
+        assert [r.collection for r in results] == ["coll-a"]
+        assert results[0].delegated is True
+
+    def test_parity_mismatch_falls_back_for_that_collection(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{
+                "state": "done",
+                "per_collection": {
+                    "coll-a": {"copied": 5, "dest": 3, "expected": 5},  # dropped rows
+                },
+            }],
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a"],
+            tenant="t", database="d", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            http_client=client,
+        )
+
+        assert results == []
+        assert failed == ["coll-a"]
+
+    def test_trigger_failure_falls_back_every_collection(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(trigger_status=500, trigger_body={"error": "boom"})
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a", "coll-b"],
+            tenant="t", database="d", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            http_client=client,
+        )
+
+        assert results == []
+        assert failed == ["coll-a", "coll-b"]
+
+    def test_poll_timeout_falls_back_every_collection(self) -> None:
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{"state": "running", "per_collection": {}}]
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        # Inject a fast fake clock + no-op sleep (the poll/timeout seam) so
+        # the test proves the timeout-fallback branch without a real 30-min
+        # wait — the production defaults stay untouched (module constants).
+        results, failed = _delegate_ingest_cloud(
+            ["coll-a"],
+            tenant="t", database="d", api_key=_SECRET_API_KEY,
+            base_url="http://svc", token="tok", nexus_tenant="default",
+            http_client=client,
+            poll_interval_s=1.0, poll_timeout_s=3.0,
+            sleep=lambda _s: None, now=_fake_clock(step=1.0),
+        )
+
+        assert results == []
+        assert failed == ["coll-a"]
+
+    def test_credential_never_logged(self) -> None:
+        """Every log event emitted by a failing delegation run must be free
+        of the api key — it may appear ONLY in the trigger POST's JSON body
+        (asserted separately in TestIngestCloudTrigger)."""
+        from structlog.testing import capture_logs
+
+        from nexus.migration.vector_etl import _delegate_ingest_cloud
+
+        transport = _ingest_cloud_transport(
+            poll_states=[{
+                "state": "failed",
+                "error": "java.lang.RuntimeException",
+                "per_collection": {},
+            }],
+        )
+        import httpx
+        client = httpx.Client(transport=transport)
+
+        with capture_logs() as logs:
+            _delegate_ingest_cloud(
+                ["coll-a"],
+                tenant="t", database="d", api_key=_SECRET_API_KEY,
+                base_url="http://svc", token="tok", nexus_tenant="default",
+                http_client=client,
+            )
+
+        for entry in logs:
+            assert _SECRET_API_KEY not in repr(entry)
+
+
+# ── Unit: migrate_cloud delegation orchestration (nexus-ekk4o) ──────────────
+
+
+class TestMigrateCloudDelegation:
+    def test_delegates_eligible_collections_and_falls_back_for_the_rest(
+        self, source_client, monkeypatch
+    ) -> None:
+        """A same-model conformant collection delegates; a cross-model
+        remap target is never offered to delegation and lands via the
+        unchanged client-mediated path."""
+        import nexus.migration.vector_etl as etl_mod
+
+        delegatable = _coll("deleg-ok")
+        cross_model = _coll("deleg-xmodel")
+        _seed_source(source_client, delegatable, 2)
+        _seed_source(source_client, cross_model, 2)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint",
+            lambda vc: ("http://svc", "tok", "default"),
+        )
+        monkeypatch.setattr(
+            etl_mod, "probe_ingest_cloud_support", lambda url, **kw: True
+        )
+
+        captured_eligible: list[list[str]] = []
+
+        def _fake_delegate(names, **kwargs):
+            captured_eligible.append(list(names))
+            results = [
+                CollectionResult(n, 2, 2, "migrated", delegated=True) for n in names
+            ]
+            return results, []
+
+        monkeypatch.setattr(etl_mod, "_delegate_ingest_cloud", _fake_delegate)
+
+        xmodel_target = cross_model_target_name(cross_model, _MODEL_768)
+        report = migrate_cloud(
+            fake, target_names={cross_model: xmodel_target},
+        )
+
+        # cross_model was excluded from delegation eligibility (remap target).
+        assert captured_eligible == [[delegatable]]
+        by_name = {r.collection: r for r in report.results}
+        assert by_name[delegatable].delegated is True
+        assert by_name[delegatable].status == "migrated"
+        # the cross-model collection migrated via the unchanged client path.
+        assert by_name[cross_model].delegated is False
+        assert by_name[cross_model].status == "migrated"
+        assert by_name[cross_model].target_collection == xmodel_target
+
+    def test_falls_back_entirely_when_probe_reports_unsupported(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        name = _coll("deleg-oldengine")
+        _seed_source(source_client, name, 2)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint",
+            lambda vc: ("http://svc", "tok", "default"),
+        )
+        monkeypatch.setattr(
+            etl_mod, "probe_ingest_cloud_support", lambda url, **kw: False
+        )
+
+        def _unexpected_delegate(*a, **kw):
+            raise AssertionError("delegation must not be attempted when the probe fails")
+
+        monkeypatch.setattr(etl_mod, "_delegate_ingest_cloud", _unexpected_delegate)
+
+        report = migrate_cloud(fake)
+
+        assert report.results[0].collection == name
+        assert report.results[0].delegated is False
+        assert report.results[0].status == "migrated"
+
+    def test_falls_back_entirely_when_endpoint_unresolvable(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        name = _coll("deleg-noendpoint")
+        _seed_source(source_client, name, 1)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint", lambda vc: None,
+        )
+
+        report = migrate_cloud(fake)
+
+        assert report.results[0].delegated is False
+        assert report.results[0].status == "migrated"
+
+    def test_delegation_partial_failure_falls_back_per_collection(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        ok_name = _coll("deleg-part-ok")
+        fail_name = _coll("deleg-part-fail")
+        _seed_source(source_client, ok_name, 2)
+        _seed_source(source_client, fail_name, 4)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint",
+            lambda vc: ("http://svc", "tok", "default"),
+        )
+        monkeypatch.setattr(
+            etl_mod, "probe_ingest_cloud_support", lambda url, **kw: True
+        )
+
+        def _fake_delegate(names, **kwargs):
+            results = [CollectionResult(ok_name, 2, 2, "migrated", delegated=True)]
+            return results, [fail_name]
+
+        monkeypatch.setattr(etl_mod, "_delegate_ingest_cloud", _fake_delegate)
+
+        report = migrate_cloud(fake)
+
+        by_name = {r.collection: r for r in report.results}
+        assert by_name[ok_name].delegated is True
+        # fail_name fell through to the client-mediated path and still landed.
+        assert by_name[fail_name].delegated is False
+        assert by_name[fail_name].status == "migrated"
+        assert by_name[fail_name].written_count == 4
+
+    def test_ephemeral_collections_never_offered_to_delegation(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        ephemeral = "tuples__deleg-eph__minilm-l6-v2-384__v1"
+        normal = _coll("deleg-eph-normal")
+        _seed_source(source_client, ephemeral, 1)
+        _seed_source(source_client, normal, 1)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+        monkeypatch.setattr(
+            etl_mod, "_resolve_delegation_endpoint",
+            lambda vc: ("http://svc", "tok", "default"),
+        )
+        monkeypatch.setattr(
+            etl_mod, "probe_ingest_cloud_support", lambda url, **kw: True
+        )
+
+        captured_eligible: list[list[str]] = []
+
+        def _fake_delegate(names, **kwargs):
+            captured_eligible.append(list(names))
+            results = [CollectionResult(n, 1, 1, "migrated", delegated=True) for n in names]
+            return results, []
+
+        monkeypatch.setattr(etl_mod, "_delegate_ingest_cloud", _fake_delegate)
+
+        report = migrate_cloud(fake)
+
+        assert captured_eligible == [[normal]]
+        by_name = {r.collection: r for r in report.results}
+        assert by_name[ephemeral].status == "excluded"
+        assert by_name[ephemeral].delegated is False
+        assert by_name[normal].delegated is True
+
+    def test_dry_run_never_attempts_delegation(
+        self, source_client, monkeypatch
+    ) -> None:
+        import nexus.migration.vector_etl as etl_mod
+
+        name = _coll("deleg-dryrun")
+        _seed_source(source_client, name, 3)
+        fake = FakeVectorClient()
+
+        monkeypatch.setattr(
+            etl_mod, "open_cloud_read_client", lambda **kw: source_client
+        )
+
+        def _unexpected(*a, **kw):
+            raise AssertionError("dry-run must never touch delegation")
+
+        monkeypatch.setattr(etl_mod, "_resolve_delegation_endpoint", _unexpected)
+
+        report = migrate_cloud(fake, dry_run=True)
+
+        assert report.results[0].status == "dry-run"
+        assert report.results[0].source_count == 3
+
+
 # ── Unit: rollback ────────────────────────────────────────────────────────────
 
 
@@ -746,6 +1424,279 @@ class TestRollbackUnit:
 
         with pytest.raises(RuntimeError, match="deletes may have been swallowed"):
             rollback_collections(source_client, fake, collections=[name])
+
+
+# ── Unit: verify-fill (delta) — RDR-178 wave-2, nexus-s3dd4.6 ───────────────
+#
+# Generalizes te885.1's operator-driven pg->pg reconciliation (per-collection
+# chash set-difference, embeddings-verbatim upsert, zero Voyage cost) as the
+# vectors leg's first verify-fill consumer. Mirrors rollback_collections' own
+# id-presence intersection idiom (including its "swallowed error" guard).
+
+
+class TestVerifyFillCollectionsUnit:
+    def test_parity_target_sends_nothing(self, source_client) -> None:
+        """A target already holding every source chash is 'verified' — zero
+        upsert calls, zero cost (the entire point of verify-fill)."""
+        name = _coll("vf-parity")
+        _seed_source(source_client, name, 5)
+        fake = FakeVectorClient()
+        migrate_collections(source_client, fake, leg="local")  # pre-populate target
+        fake.upsert_calls.clear()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        assert isinstance(report, MigrationReport)
+        result = report.results[0]
+        assert isinstance(result, CollectionResult)
+        assert result.status == "verified"
+        assert result.source_count == 5
+        assert result.missing_count == 0
+        assert result.filled_count == 0
+        assert result.written_count == 0
+        assert fake.upsert_calls == []
+        assert report.ok is True
+        assert report.total_written == 0
+
+    def test_partial_delta_fills_only_missing(self, source_client) -> None:
+        """A target holding SOME of the source's chashes only receives the
+        missing subset on the wire — the 270-row-hole-in-158k-row-store
+        scenario this whole wave exists to fix."""
+        name = _coll("vf-delta")
+        ids = _seed_source(source_client, name, 10)
+        fake = FakeVectorClient()
+        migrate_collections(source_client, fake, leg="local")
+        for missing_id in ids[:3]:
+            fake.store[name].pop(missing_id, None)
+        fake.upsert_calls.clear()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "filled"
+        assert result.source_count == 10
+        assert result.missing_count == 3
+        assert result.filled_count == 3
+        assert result.written_count == 3
+        sent_ids = {i for _, batch in fake.upsert_calls for i in batch}
+        assert sent_ids == set(ids[:3])
+        assert fake.count(name) == 10
+        assert report.ok is True
+        assert report.total_written == 3
+
+    def test_fresh_empty_target_fills_everything(self, source_client) -> None:
+        """A NEVER-migrated (empty) target is a legitimate 100% delta
+        (te885.1's post-cutover-collections case) — not indeterminate."""
+        name = _coll("vf-fresh")
+        ids = _seed_source(source_client, name, 4)
+        fake = FakeVectorClient()  # target never touched
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "filled"
+        assert result.missing_count == 4
+        assert result.filled_count == 4
+        assert sorted(fake.store[name]) == sorted(ids)
+        assert report.ok is True
+
+    def test_suspicious_all_absent_probe_flags_indeterminate(
+        self, source_client
+    ) -> None:
+        """A target that demonstrably holds every source row (count() > 0,
+        and post-write count still matches — the writes are genuinely
+        idempotent no-ops) yet whose existing_ids probe reported NONE of
+        the source's ids present is the rollback_collections
+        'swallowed-error' signature — verify-fill must surface this as
+        indeterminate, never a silently-successful 'filled' (nexus-r0esi:
+        never blind-fill), even though the resend itself was harmless."""
+        name = _coll("vf-suspicious")
+        _seed_source(source_client, name, 4)
+
+        class _ProbeDegradedClient(FakeVectorClient):
+            """existing_ids ALWAYS reports empty — mirrors HttpVectorClient's
+            documented fail-open-to-empty-set contract on a probe failure."""
+
+            def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
+                return set()
+
+        fake = _ProbeDegradedClient()
+        migrate_collections(source_client, fake, leg="local")  # target genuinely holds all 4
+        fake.upsert_calls.clear()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "indeterminate"
+        assert result.missing_count == 4
+        assert report.ok is False
+        # The resend itself was a harmless idempotent no-op: still 4 rows.
+        assert fake.count(name) == 4
+
+    def test_passthrough_embeddings_scoped_to_missing_subset_only(
+        self, source_client
+    ) -> None:
+        """nexus-hxry2 same-model passthrough still applies to a verify-fill
+        run, but ONLY the missing rows' vectors are forwarded — present rows
+        never appear in an upsert call at all."""
+        name = _coll("vf-passthrough", model=_MODEL_768)
+        ids = _seed_source(source_client, name, 4, embedding_model=_MODEL_768)
+        fake = FakeVectorClient()
+        migrate_collections(source_client, fake, leg="local")
+        for missing_id in ids[:1]:
+            fake.store[name].pop(missing_id, None)
+        fake.upsert_calls.clear()
+        fake.upsert_embeddings.clear()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "filled"
+        assert result.filled_count == 1
+        assert len(fake.upsert_calls) == 1
+        _collection, sent_ids = fake.upsert_calls[0]
+        assert sent_ids == ids[:1]
+        assert fake.upsert_embeddings[0] is not None
+        assert len(fake.upsert_embeddings[0]) == 1
+
+    def test_upsert_failure_reports_failed_with_partial_filled_count(
+        self, source_client
+    ) -> None:
+        name = _coll("vf-fail")
+        _seed_source(source_client, name, 3)
+        fake = FailingUpsertClient(fail_for=name)
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "failed"
+        assert result.filled_count == 0
+        assert report.ok is False
+
+    def test_nonconformant_collection_reuses_skip_classification(
+        self, source_client
+    ) -> None:
+        """verify-fill shares the EXACT same skip/derived classification as
+        migrate (:func:`_skip_result_for_nonconformant`) — a non-conformant
+        collection is never silently probed."""
+        legacy = "knowledge__legacy"
+        _seed_source(source_client, legacy, 2)
+        fake = FakeVectorClient()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "skipped"
+        assert all(c != legacy for c, _ in fake.upsert_calls)
+
+    def test_derived_collection_skipped_clean(self, source_client) -> None:
+        derived = "taxonomy__centroids"
+        _seed_source(source_client, derived, 5)
+        fake = FakeVectorClient()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "skipped-derived"
+        assert report.ok is True
+
+    def test_post_write_count_mismatch_still_fails_verify_fill(
+        self, source_client
+    ) -> None:
+        """The exact post-write count gate (_migrate_one's contract) also
+        holds for verify-fill: a lossy target is a failed collection, never
+        a green 'filled'."""
+        name = _coll("vf-mismatch")
+        _seed_source(source_client, name, 5)
+        fake = FakeVectorClient(count_delta={name: -2})  # under-reports
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "failed"
+        assert "count mismatch" in result.reason
+        assert report.ok is False
+
+    def test_empty_collection_verifies_cleanly(self, source_client) -> None:
+        name = _coll("vf-empty")
+        _seed_source(source_client, name, 0)
+        fake = FakeVectorClient()
+
+        report = verify_fill_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "verified"
+        assert result.source_count == 0
+        assert result.missing_count == 0
+        assert report.ok is True
+
+    def test_cross_model_target_diffed_not_source(self, source_client) -> None:
+        """RDR-162 cross-model verify-fill: the presence probe runs against
+        the TARGET (model-remapped) collection, never the source name."""
+        source = _coll("vf-xm", model=_MODEL_384)
+        target = _coll("vf-xm", model="voyage-context-3")
+        ids = _seed_source(source_client, source, 3)
+        fake = FakeVectorClient()
+        fake.store[target] = {ids[0]: ("chunk text 0000", {"position": 0})}
+
+        report = verify_fill_collections(
+            source_client, fake, leg="local", target_names={source: target}
+        )
+
+        result = report.results[0]
+        assert result.status == "filled"
+        assert result.missing_count == 2
+        assert result.target_collection == target
+        sent_ids = {i for coll, batch in fake.upsert_calls for i in batch if coll == target}
+        assert sent_ids == set(ids[1:])
+
+
+class TestVerifyFillLegRouting:
+    def test_local_leg_routes_through_local_opener(
+        self, source_client, monkeypatch, tmp_path
+    ) -> None:
+        name = _coll("vfleg-local")
+        _seed_source(source_client, name, 3)
+        opened: list[Path] = []
+
+        def fake_open(path):
+            opened.append(Path(path))
+            return source_client
+
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.open_local_read_client", fake_open
+        )
+        fake = FakeVectorClient()
+
+        report = verify_fill_local(tmp_path / "chroma", fake)
+
+        assert opened == [tmp_path / "chroma"]
+        assert report.leg == "local"
+        assert report.results[0].collection == name
+        assert report.results[0].missing_count == 3
+
+    def test_cloud_leg_routes_through_cloud_opener(
+        self, source_client, monkeypatch
+    ) -> None:
+        name = _coll("vfleg-cloud")
+        _seed_source(source_client, name, 2)
+        opened: list[bool] = []
+
+        def fake_open(**kwargs):
+            opened.append(True)
+            return source_client
+
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.open_cloud_read_client", fake_open
+        )
+        fake = FakeVectorClient()
+
+        report = verify_fill_cloud(fake)
+
+        assert opened == [True]
+        assert report.leg == "cloud"
+        assert report.results[0].collection == name
+        assert report.results[0].missing_count == 2
 
 
 # ── Unit: count verification ──────────────────────────────────────────────────
@@ -1238,11 +2189,16 @@ def _make_local_store(root: Path, name: str, n: int) -> tuple[Path, list[str], l
     texts = [f"vec etl chunk {name} {i:04d}" for i in range(n)]
     ids = [_chash(t) for t in texts]
     col = client.get_or_create_collection(name)
+    # 768-dim stubs matching the declared bge model: the nexus-hxry2 same-model
+    # passthrough (04d5a773) carries stored vectors VERBATIM to the service,
+    # whose dim gate 400s anything that mismatches the collection's dispatch
+    # table — degenerate 2-dim stubs stopped being viable when passthrough
+    # replaced server-side re-embedding.
     col.add(
         ids=ids,
         documents=texts,
         metadatas=[{"position": i} for i in range(n)],
-        embeddings=[[float(i), 1.0] for i in range(n)],
+        embeddings=[[float(i)] + [1.0] * 767 for i in range(n)],
     )
     # WAL single-opener discipline (chroma_read.py): release this client
     # deterministically before migrate_local opens its own PersistentClient
@@ -1591,10 +2547,13 @@ class TestSkippedEmptyDisposition:
     def test_empty_nonconformant_is_skipped_empty_and_green(
         self, source_client,
     ) -> None:
-        # taxonomy__centroids: the OTHER real empty non-conformant from the
-        # production run (tuples__* now route to "excluded" before the
-        # disposition probe runs).
-        empty_legacy = "taxonomy__centroids"
+        # A generic empty non-conformant collection NOT on the derived
+        # registry (tuples__* now route to "excluded" before the
+        # disposition probe runs; taxonomy__centroids is now covered by the
+        # more specific "skipped-derived" class — see
+        # test_derived_collection_empty_still_reported_derived in
+        # TestMigrateCollectionsUnit, nexus-t0p7o / RDR-178 Gap 6).
+        empty_legacy = "knowledge__legacy-empty"
         good = _coll("etlop-good")
         source_client.create_collection(empty_legacy)  # 0 chunks
         _seed_source(source_client, good, 2)

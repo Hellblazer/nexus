@@ -546,6 +546,18 @@ def _run_check_plan_library() -> None:
     import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    # Match --check-schema's service-mode honesty (nexus-p0clh): in service
+    # mode the plan library lives in Postgres; the local-SQLite dimensional
+    # census below is N/A, not a failure. Without this branch a fresh
+    # service-mode install exits non-zero from the release-sandbox smoke.
+    if storage_backend_for("plans") == StorageBackend.SERVICE:
+        click.echo(
+            "Plan library is service-backed (Postgres) — local SQLite "
+            "dimensional census N/A in service mode."
+        )
+        return
 
     db_path = default_db_path()
     if not db_path.exists():

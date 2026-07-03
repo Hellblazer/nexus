@@ -907,3 +907,107 @@ CREATE TABLE relevance_log (
             i.count for i in collector.issues_for("memory", "memory")
             if i.action == "failed"
         ) == 3
+
+
+class TestAspectsPostP52Schema:
+    """nexus-iiy11: RDR-096 P5.2 dropped document_aspects.source_path, but
+    migrate_aspects hardcoded it in the SELECT list — crashing UNCONDITIONALLY
+    ('no such column: source_path') on any fresh post-4.31.0 T2, which trips
+    migrate_all's total_failed gate and hard-blocks the entire guided-upgrade
+    T3 leg (found by the --hole-punch e2e journey, 2026-07-02).
+
+    Fix contract: source_path is presence-checked like every other evolved
+    column; on the modern schema the row identity is source_uri (RDR-096's
+    URI-based identity), mapped into the import body's source_path field —
+    the server key stays UNIQUE(tenant_id, collection, source_path) with
+    complete-overwrite upsert, so an empty fallback would COLLAPSE all of a
+    collection's rows onto one key (silent data loss). A row with neither
+    identity fails loud per-row (recorded), never collapses.
+    """
+
+    _MODERN_SCHEMA = """
+CREATE TABLE document_aspects (
+    collection            TEXT,
+    doc_id                TEXT,
+    source_uri            TEXT,
+    problem_formulation   TEXT,
+    proposed_method       TEXT,
+    experimental_datasets TEXT,
+    experimental_baselines TEXT,
+    experimental_results  TEXT,
+    extras                TEXT,
+    confidence            REAL,
+    extracted_at          TEXT,
+    model_version         TEXT,
+    extractor_name        TEXT,
+    salient_sentences     TEXT
+);
+CREATE TABLE aspect_extraction_queue (
+    id              INTEGER PRIMARY KEY,
+    doc_id          TEXT,
+    collection      TEXT,
+    source_path     TEXT,
+    content_hash    TEXT,
+    status          TEXT,
+    retry_count     INTEGER DEFAULT 0,
+    enqueued_at     TEXT,
+    last_attempt_at TEXT,
+    last_error      TEXT
+);
+"""
+
+    def test_modern_schema_without_source_path_migrates_via_source_uri(
+        self, tmp_path: Path,
+    ) -> None:
+        from nexus.db.t2.aspects_etl import migrate_aspects
+
+        db = _make_db(tmp_path, self._MODERN_SCHEMA, name="memory.db")
+        _insert(
+            db,
+            "INSERT INTO document_aspects "
+            "(collection, doc_id, source_uri, extracted_at, model_version, extractor_name) "
+            "VALUES (?,?,?,?,?,?)",
+            [
+                ("knowledge__x", "1.1.1", "file:///a.md", "2026-01-01", "v2", "claude"),
+                ("knowledge__x", "1.1.2", "file:///b.md", "2026-01-01", "v2", "claude"),
+            ],
+        )
+        store = _CaptureAspectsStore()
+        collector = IssueCollector()
+
+        result = migrate_aspects(db, store, collector=collector)
+
+        assert result["errors"] == 0
+        assert len(store.imported) == 2
+        # URI identity fills the server's source_path key — DISTINCT per row,
+        # never a collapsing "" fallback.
+        assert {r["source_path"] for r in store.imported} == {
+            "file:///a.md", "file:///b.md",
+        }
+
+    def test_modern_schema_row_with_no_identity_fails_loud_per_row(
+        self, tmp_path: Path,
+    ) -> None:
+        from nexus.db.t2.aspects_etl import migrate_aspects
+
+        db = _make_db(tmp_path, self._MODERN_SCHEMA, name="memory.db")
+        _insert(
+            db,
+            "INSERT INTO document_aspects "
+            "(collection, doc_id, source_uri, extracted_at, model_version, extractor_name) "
+            "VALUES (?,?,?,?,?,?)",
+            [
+                ("knowledge__x", "1.1.1", "file:///a.md", "2026-01-01", "v2", "claude"),
+                ("knowledge__x", "1.1.2", None, "2026-01-01", "v2", "claude"),  # no identity
+            ],
+        )
+        store = _CaptureAspectsStore()
+        collector = IssueCollector()
+
+        result = migrate_aspects(db, store, collector=collector)
+
+        # the identity-less row is a recorded per-row error, never a silent
+        # ""-collapse and never a store-level crash
+        assert len(store.imported) == 1
+        assert store.imported[0]["source_path"] == "file:///a.md"
+        assert result["errors"] == 1
