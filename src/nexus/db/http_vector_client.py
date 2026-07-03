@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -1316,6 +1317,173 @@ class HttpVectorClient:
             {"id": doc_id, **(meta if isinstance(meta, dict) else {})}
             for doc_id, meta in zip(ids, metas)
         ]
+
+    def update_source_path(
+        self, collection_name: str, old_path: str, new_path: str
+    ) -> int:
+        """Rewrite source_path metadata for all chunks matching *old_path*.
+
+        nexus-h8rf6.6: was missing entirely — ``nx doctor fix-paths``
+        (non-dry-run) crashed with ``AttributeError`` on the first row in
+        service mode (doctor.py calls it per-row with no guard). Built from
+        the where-filter get (:meth:`ids_for_source` shape) +
+        :meth:`update_chunks`; T3Database parity (returns count updated,
+        missing collection -> 0, idempotent). Matching rows are accumulated
+        across all pages BEFORE updating — updating mid-pagination would
+        shrink the where-match set and shift offsets.
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        ids: list[str] = []
+        metadatas: list[dict] = []
+        offset = 0
+        while True:
+            try:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": collection_name,
+                        "where": {"source_path": old_path},
+                        "include": ["metadatas"],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                # 404 on the first page = no such collection (T3 parity: 0).
+                # Mid-pagination failures must NOT be swallowed — the caller
+                # would under-update and report success.
+                if exc.code == 404 and offset == 0:
+                    return 0
+                raise
+            page_ids = result.get("ids", []) or []
+            page_metas = result.get("metadatas", []) or []
+            for doc_id, meta in zip(page_ids, page_metas):
+                ids.append(doc_id)
+                updated = dict(meta) if isinstance(meta, dict) else {}
+                updated["source_path"] = new_path
+                metadatas.append(updated)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+        if not ids:
+            return 0
+        self.update_chunks(collection_name, ids, metadatas)
+        return len(ids)
+
+    def delete_by_chunk_ids(
+        self, collection_name: str, chunk_ids: list[str],
+    ) -> int:
+        """Delete chunks by explicit id. Returns count deleted.
+
+        nexus-h8rf6.7: was missing — ``nx t3 gc``'s orphan deletion silently
+        no-oped in service mode (the call site is try/except-wrapped, so the
+        AttributeError degraded instead of crashing). T3Database parity:
+        empty ``chunk_ids`` is a no-op (0), missing collection returns 0
+        without raising. Delegates to :meth:`batch_delete` for the
+        quota-bounded batching.
+        """
+        if not chunk_ids:
+            return 0
+        try:
+            self.batch_delete(collection_name, chunk_ids)
+        except VectorServiceError as exc:
+            if exc.code == 404:
+                return 0
+            raise
+        return len(chunk_ids)
+
+    def list_unique_source_paths(self, collection_name: str) -> list[str]:
+        """Return every distinct ``source_path`` value in *collection_name*.
+
+        nexus-h8rf6.7: was missing — ``nx t3 prune-stale``'s staleness sweep
+        silently skipped every collection in service mode. Pages the plain
+        (no ``where``) ``/v1/vectors/get`` listing and dedupes locally, same
+        as T3Database. Empty/missing source_path values are skipped (MCP-put
+        chunks have no on-disk source by design). Missing collection -> [].
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        seen: set[str] = set()
+        offset = 0
+        while True:
+            try:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": collection_name,
+                        "include": ["metadatas"],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                if exc.code == 404 and offset == 0:
+                    return []
+                raise
+            page_ids = result.get("ids", []) or []
+            page_metas = result.get("metadatas", []) or []
+            if not page_ids:
+                break
+            for meta in page_metas:
+                if not isinstance(meta, dict):
+                    continue
+                src = meta.get("source_path") or ""
+                if src:
+                    seen.add(src)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+        return sorted(seen)
+
+    def list_chunks_with_metadata(
+        self,
+        collection_name: str,
+        *,
+        fields: tuple[str, ...] = ("doc_id", "indexed_at"),
+    ) -> Iterator[tuple[str, dict[str, str]]]:
+        """Yield ``(chunk_id, metadata_subset)`` for every chunk in a collection.
+
+        nexus-h8rf6.7: was missing — ``nx t3 gc``'s orphan scan silently
+        skipped every collection in service mode. T3Database parity:
+        ``metadata_subset`` contains only the requested ``fields`` with
+        empty strings for missing keys; missing collection yields nothing.
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        offset = 0
+        while True:
+            try:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": collection_name,
+                        "include": ["metadatas"],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+            except VectorServiceError as exc:
+                if exc.code == 404 and offset == 0:
+                    return
+                raise
+            page_ids = result.get("ids", []) or []
+            page_metas = result.get("metadatas", []) or []
+            if not page_ids:
+                break
+            for cid, meta in zip(page_ids, page_metas):
+                if not isinstance(meta, dict):
+                    meta = {}
+                yield cid, {f: str(meta.get(f, "")) for f in fields}
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
 
     def expire(self) -> int:
         """Delete all expired entries from ``knowledge__*`` collections.
