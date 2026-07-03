@@ -54,6 +54,11 @@ DROP_IN_METHODS = [
     "batch_delete",
     "list_store",
     "collection_info",
+    # nexus-h8rf6.5: was missing entirely (AttributeError on `nx store expire`
+    # in service mode) — implemented client-side with the supported $ne
+    # operator (the T3 $gt-0 pre-filter's only job is excluding the
+    # permanent ttl_days=0 sentinel; TTLs are never negative).
+    "expire",
     # get_or_create_collection is excluded (see EXCLUSIONS below)
 ]
 
@@ -805,3 +810,113 @@ class TestDeleteBySource:
             collection_name="code__nexus__minilm-l6-v2-384__v1",
             source_path="/src/foo.py",
         ) == 0
+
+
+class TestExpire:
+    """nexus-h8rf6.5: expire() was missing entirely — `nx store expire`
+    crashed with AttributeError in service mode. Implemented client-side:
+    the server's where-translator supports $eq/$ne/$in/$nin only (no $gt),
+    but T3Database.expire's `{"ttl_days": {"$gt": 0}}` pre-filter exists
+    solely to exclude the permanent ttl_days=0 sentinel, so the supported
+    NULL-inclusive `{"ttl_days": {"$ne": 0}}` is equivalent (TTLs are never
+    negative; rows with absent ttl_days are kept by the server but rejected
+    by is_expired Python-side, which is the authoritative check either way).
+    """
+
+    _KNOWLEDGE = "knowledge__nexus-1-1__voyage-context-3__v1"
+
+    @staticmethod
+    def _meta(ttl_days: int, indexed_at: str) -> dict:
+        return {"ttl_days": ttl_days, "indexed_at": indexed_at}
+
+    def _patch(self, monkeypatch, collections, fake_post):
+        monkeypatch.setattr(
+            HttpVectorClient, "list_collections",
+            lambda self: [{"name": n, "count": 1} for n in collections],
+        )
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+
+    def test_expire_deletes_only_expired_knowledge_rows(self, monkeypatch):
+        posted = []
+
+        def fake_post(path, body, **kw):
+            posted.append((path, body))
+            if path == "/v1/vectors/get":
+                if body["offset"] > 0:
+                    return {"ids": [], "metadatas": []}
+                return {
+                    "ids": ["expired1", "permanent", "fresh", "no-ttl"],
+                    "metadatas": [
+                        self._meta(1, "2020-01-01T00:00:00+00:00"),   # expired
+                        self._meta(0, "2020-01-01T00:00:00+00:00"),   # permanent
+                        self._meta(36500, "2026-01-01T00:00:00+00:00"),  # not yet
+                        {},                                            # NULL-inclusive $ne row
+                    ],
+                }
+            return {"deleted": len(body["ids"])}
+
+        self._patch(
+            monkeypatch,
+            [self._KNOWLEDGE, "code__nexus-1-1__voyage-code-3__v1"],
+            fake_post,
+        )
+        n = HttpVectorClient().expire()
+        assert n == 1
+        gets = [b for p, b in posted if p == "/v1/vectors/get"]
+        # only the knowledge__ collection is queried, with the $ne pre-filter
+        assert all(b["collection"] == self._KNOWLEDGE for b in gets)
+        assert gets[0]["where"] == {"ttl_days": {"$ne": 0}}
+        deletes = [b for p, b in posted if p == "/v1/vectors/store-delete"]
+        assert deletes == [{"collection": self._KNOWLEDGE, "ids": ["expired1"]}]
+
+    def test_expire_paginates_and_accumulates_before_deleting(self, monkeypatch):
+        posted = []
+
+        def fake_post(path, body, **kw):
+            posted.append((path, body))
+            if path == "/v1/vectors/get":
+                if body["offset"] == 0:
+                    page_ids = [f"id{i}" for i in range(300)]
+                    return {
+                        "ids": page_ids,
+                        "metadatas": [
+                            self._meta(1, "2020-01-01T00:00:00+00:00")
+                        ] * 300,
+                    }
+                return {
+                    "ids": ["last"],
+                    "metadatas": [self._meta(1, "2020-01-01T00:00:00+00:00")],
+                }
+            return {"deleted": len(body["ids"])}
+
+        self._patch(monkeypatch, [self._KNOWLEDGE], fake_post)
+        n = HttpVectorClient().expire()
+        assert n == 301
+        # all gets precede the first delete (accumulate-then-delete: deleting
+        # mid-pagination would shift offsets and skip rows)
+        paths = [p for p, _ in posted]
+        assert paths.index("/v1/vectors/store-delete") > max(
+            i for i, p in enumerate(paths) if p == "/v1/vectors/get"
+        )
+        # deletes are batched at the 300-record write quota
+        deletes = [b for p, b in posted if p == "/v1/vectors/store-delete"]
+        assert [len(b["ids"]) for b in deletes] == [300, 1]
+
+    def test_expire_no_knowledge_collections_returns_zero(self, monkeypatch):
+        def fake_post(path, body, **kw):  # pragma: no cover — must not be called
+            raise AssertionError("no HTTP call expected")
+
+        self._patch(monkeypatch, ["code__nexus-1-1__voyage-code-3__v1"], fake_post)
+        assert HttpVectorClient().expire() == 0
+
+    def test_expire_server_error_reraises(self, monkeypatch):
+        # A failure must NOT be swallowed as "0 expired" — the CLI would
+        # report success while expired rows survive.
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_post(path, body, **kw):
+            raise VectorServiceError("server error", code=500)
+
+        self._patch(monkeypatch, [self._KNOWLEDGE], fake_post)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().expire()

@@ -1317,6 +1317,65 @@ class HttpVectorClient:
             for doc_id, meta in zip(ids, metas)
         ]
 
+    def expire(self) -> int:
+        """Delete all expired entries from ``knowledge__*`` collections.
+
+        nexus-h8rf6.5: was missing entirely — ``nx store expire`` crashed
+        with ``AttributeError`` in service mode. T3Database parity, with one
+        translation: the service's where-filter supports ``$eq/$ne/$in/$nin``
+        only (``PgVectorRepository.appendWherePredicate``, no range
+        operators), so T3's ``{"ttl_days": {"$gt": 0}}`` pre-filter becomes
+        ``{"ttl_days": {"$ne": 0}}`` — equivalent for its only purpose,
+        excluding the permanent ``ttl_days == 0`` sentinel (TTLs are never
+        negative). The server's ``$ne`` is NULL-inclusive, so rows with
+        absent ``ttl_days`` come back too; ``is_expired`` (the authoritative
+        Python-side check, same as T3) rejects them.
+
+        Expired IDs are accumulated per collection BEFORE deleting —
+        deleting mid-pagination would shift offsets and skip rows. Server
+        errors propagate (a swallowed failure would report "0 expired"
+        while expired rows survive).
+
+        Returns the total number of deleted documents.
+        """
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
+
+        now_iso = datetime.now(UTC).isoformat()
+        ttl_where = {"ttl_days": {"$ne": 0}}
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        total = 0
+        for entry in self.list_collections():
+            name = entry.get("name", "")
+            if not name.startswith("knowledge__"):
+                continue
+            expired_ids: list[str] = []
+            offset = 0
+            while True:
+                result = _post(
+                    "/v1/vectors/get",
+                    {
+                        "collection": name,
+                        "where": ttl_where,
+                        "include": ["metadatas"],
+                        "limit": page_limit,
+                        "offset": offset,
+                    },
+                    tenant=self._tenant,
+                )
+                page_ids = result.get("ids", []) or []
+                metas = result.get("metadatas", []) or []
+                for doc_id, meta in zip(page_ids, metas):
+                    if isinstance(meta, dict) and is_expired(meta, now_iso=now_iso):
+                        expired_ids.append(doc_id)
+                offset += len(page_ids)
+                if len(page_ids) < page_limit:
+                    break  # last page (short or empty)
+            if expired_ids:
+                self.batch_delete(name, expired_ids)
+            total += len(expired_ids)
+        return total
+
     def collection_info(self, name: str) -> dict:
         """Return ``{"count": N, "metadata": {}}`` for *name*.
 
