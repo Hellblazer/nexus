@@ -197,11 +197,31 @@ def pg_instance():
             f"pgvector container never became ready:\n{logs.stdout}\n{logs.stderr}"
         )
 
-    # Give PG a moment for the initial superuser setup to finish
-    time.sleep(1.0)
-
-    # Create nexus_svc role (required by Liquibase grants-nexus-svc.xml, runAlways=true)
-    _run_psql_in_container(pg_user, pg_db, SERVICE_ROLES_SQL)
+    # Create nexus_svc role (required by Liquibase grants-nexus-svc.xml,
+    # runAlways=true). RETRY LOOP, not a fixed sleep: the postgres image's
+    # entrypoint boots a TEMPORARY server for initdb, shuts it down
+    # ("FATAL: the database system is shutting down"), then starts the real
+    # one — and pg_isready can succeed against the temporary server, so a
+    # psql issued in that window dies with exactly that FATAL. The prior
+    # `time.sleep(1.0)` band-aid lost on a loaded machine (4/4 module setups
+    # failed during the 6.3.0 release gate, reproducibly).
+    psql_deadline = time.monotonic() + 60.0
+    while True:
+        try:
+            _run_psql_in_container(pg_user, pg_db, SERVICE_ROLES_SQL)
+            break
+        except RuntimeError:
+            if time.monotonic() >= psql_deadline:
+                logs = subprocess.run(
+                    ["docker", "logs", _CONTAINER_NAME],
+                    capture_output=True, text=True,
+                )
+                subprocess.run(["docker", "rm", "-f", _CONTAINER_NAME], capture_output=True)
+                raise RuntimeError(
+                    "role-creation psql never succeeded (PG init-restart window "
+                    f"did not close within 60s):\n{logs.stdout[-2000:]}\n{logs.stderr[-2000:]}"
+                ) from None
+            time.sleep(1.0)
 
     pg = {
         "host": "127.0.0.1",
