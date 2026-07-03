@@ -1257,3 +1257,72 @@ class TestAttachDisplayPathsBatch:
         catalog.resolve_many.assert_called_once()
         for r in results:
             assert r.metadata["_display_path"] == "/shared.py"
+
+
+# ── nexus-h8rf6.9: threshold gate in service mode ────────────────────────────
+
+
+class TestThresholdGateServiceMode:
+    """nexus-h8rf6.9: the ``apply_thresholds`` gate checked
+    ``t3._voyage_client``, a shape only the retired T3Database serving
+    handle carried — so distance-threshold filtering silently disabled in
+    service mode (HttpVectorClient), the same bug class as the reranker
+    (nexus-xbw0f). The fallback must preserve the original semantics:
+    thresholds are calibrated for Voyage embeddings, so cloud mode with a
+    configured key -> on; local mode (bge/MiniLM) -> off; no key -> off.
+    Non-HttpVectorClient handles (test fakes, injected stubs) keep the
+    attribute-only gate.
+    """
+
+    _ROWS = {
+        "code__nexus": [
+            {"id": "a", "content": "keep", "distance": 0.30},
+            {"id": "b", "content": "drop", "distance": 0.50},
+        ],
+    }
+
+    def _service_t3(self, monkeypatch):
+        from nexus.db.http_vector_client import HttpVectorClient
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            client.__class__, "search",
+            lambda self, query, collection_names, n_results=10, where=None:
+                TestThresholdGateServiceMode._ROWS.get(collection_names[0], []),
+        )
+        return client
+
+    def test_service_mode_cloud_with_key_filters(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        monkeypatch.setattr(
+            "nexus.config.get_credential",
+            lambda name: "sk-voyage" if name == "voyage_api_key" else "",
+        )
+        t3 = self._service_t3(monkeypatch)
+        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
+        assert {r.id for r in results} == {"a"}  # 0.50 > code threshold 0.45
+
+    def test_service_mode_local_mode_skips_filtering(self, monkeypatch):
+        # Local mode embeds with bge/MiniLM — Voyage-calibrated thresholds
+        # must stay off even when a voyage key happens to be configured.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.config.get_credential",
+            lambda name: "sk-voyage" if name == "voyage_api_key" else "",
+        )
+        t3 = self._service_t3(monkeypatch)
+        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
+        assert {r.id for r in results} == {"a", "b"}
+
+    def test_service_mode_no_key_skips_filtering(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
+        t3 = self._service_t3(monkeypatch)
+        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
+        assert {r.id for r in results} == {"a", "b"}
+
+    def test_non_service_fake_keeps_attribute_gate(self):
+        # Regression guard for the existing unit-test contract: a fake t3
+        # without _voyage_client (and not an HttpVectorClient) stays unfiltered.
+        t3 = _ThresholdFakeT3(self._ROWS, voyage=False)
+        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
+        assert {r.id for r in results} == {"a", "b"}

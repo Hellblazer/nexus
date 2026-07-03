@@ -66,6 +66,10 @@ DROP_IN_METHODS = [
     "delete_by_chunk_ids",
     "list_unique_source_paths",
     "list_chunks_with_metadata",
+    # nexus-h8rf6.8: doctor's model-drift probe degraded to outcome='error'
+    # for every collection. Full parity is client-side derivable: the model
+    # fields come from the collection NAME, only count needs the server.
+    "collection_metadata",
     # get_or_create_collection is excluded (see EXCLUSIONS below)
 ]
 
@@ -1118,3 +1122,53 @@ class TestT3GcPrimitives:
 
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         assert list(HttpVectorClient().list_chunks_with_metadata("gone")) == []
+
+
+class TestCollectionMetadata:
+    """nexus-h8rf6.8: collection_metadata was missing — doctor's model-drift
+    probe reported ProbeResult(outcome='error') for EVERY collection in
+    service mode. Full T3 parity turns out to be achievable client-side:
+    T3Database derives embedding_model / index_model from the collection
+    NAME (conformant names embed the model; index_model_for_collection is
+    an alias of embedding_model_for_collection) — only `count` needs the
+    server. KeyError semantics match collection_info (RDR-156 Decision 6:
+    zero live rows is indistinguishable from absent on pgvector).
+    """
+
+    _CONFORMANT = "code__nexus-1-1__voyage-code-3__v1"
+
+    def test_returns_t3_parity_keys(self, monkeypatch):
+        monkeypatch.setattr(HttpVectorClient, "count", lambda self, c: 42)
+        meta = HttpVectorClient().collection_metadata(self._CONFORMANT)
+        assert meta == {
+            "name": self._CONFORMANT,
+            "count": 42,
+            "embedding_model": "voyage-code-3",
+            "index_model": "voyage-code-3",
+        }
+
+    def test_missing_collection_raises_keyerror(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_count(self, c):
+            raise VectorServiceError("not found", code=404)
+
+        monkeypatch.setattr(HttpVectorClient, "count", fake_count)
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_metadata("gone__x__y__v1")
+
+    def test_zero_rows_raises_keyerror(self, monkeypatch):
+        # pgvector: zero live rows == absent (collection_info semantics).
+        monkeypatch.setattr(HttpVectorClient, "count", lambda self, c: 0)
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_metadata(self._CONFORMANT)
+
+    def test_non_404_error_reraises(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_count(self, c):
+            raise VectorServiceError("server error", code=500)
+
+        monkeypatch.setattr(HttpVectorClient, "count", fake_count)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().collection_metadata(self._CONFORMANT)

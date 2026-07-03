@@ -1571,6 +1571,46 @@ class HttpVectorClient:
             raise KeyError(f"Collection not found: {name!r}")
         return {"count": n, "metadata": {}}
 
+    def collection_metadata(self, collection_name: str) -> dict:
+        """Return metadata dict for a collection.
+
+        nexus-h8rf6.8: was missing — doctor's model-drift probe
+        (``doctor_search._collection_metadata``) degraded to
+        ``ProbeResult(outcome='error')`` for every collection in service
+        mode. Full T3Database parity is achievable client-side: T3 derives
+        ``embedding_model`` / ``index_model`` from the collection NAME
+        (conformant names embed the model; ``index_model_for_collection``
+        is an alias of ``embedding_model_for_collection``) — only ``count``
+        needs the server.
+
+        Keys returned: ``name``, ``count``, ``embedding_model`` (query-time
+        model), ``index_model`` (index-time model, may differ for CCE
+        collections). Raises ``KeyError`` if the collection does not exist
+        — on pgvector, zero live rows is indistinguishable from absent
+        (:meth:`collection_info` semantics, RDR-156 Decision 6).
+        """
+        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus imports config)
+            embedding_model_for_collection,
+            embedding_model_for_collection_name,
+            index_model_for_collection,
+        )
+
+        try:
+            n = self.count(collection_name)
+        except VectorServiceError as exc:
+            if exc.code == 404:
+                raise KeyError(f"Collection not found: {collection_name!r}") from exc
+            raise
+        if n == 0:
+            raise KeyError(f"Collection not found: {collection_name!r}")
+        parsed = embedding_model_for_collection_name(collection_name)
+        return {
+            "name": collection_name,
+            "count": n,
+            "embedding_model": parsed or embedding_model_for_collection(collection_name),
+            "index_model": parsed or index_model_for_collection(collection_name),
+        }
+
 # ── Module-level routing helper ───────────────────────────────────────────────
 
 _vector_client_lock = threading.Lock()
