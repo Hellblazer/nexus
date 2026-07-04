@@ -1637,11 +1637,10 @@ public final class TaxonomyRepository {
      * for duplicate doc_ids within a single batch (a self-conflict is skipped, not
      * an error — DO NOTHING, not DO UPDATE).
      *
-     * <p>Dynamic multi-row VALUES with variable count is the sole reason this
-     * method uses raw SQL string building — jOOQ's typed multi-row INSERT requires
-     * a statically-known row count and would require a separate parameter object
-     * per row (losing the batch-statement benefit). This is the minimal irreducible
-     * plain-SQL fragment per spec.
+     * <p>nexus-xtmtf: jOOQ's chained {@code .values()} supports a dynamic row
+     * count per statement, so the batch stays ONE multi-row INSERT per chunk
+     * (one trigger firing per chunk preserved) with zero raw SQL. The earlier
+     * "jOOQ requires a statically-known row count" rationale was incorrect.
      */
     private static void batchInsertAssignments(org.jooq.DSLContext ctx, String tenant,
                                                long topicId, List<String> docIds,
@@ -1654,18 +1653,16 @@ public final class TaxonomyRepository {
         final int MAX_ROWS = 5000;
         for (int start = 0; start < docIds.size(); start += MAX_ROWS) {
             List<String> batch = docIds.subList(start, Math.min(start + MAX_ROWS, docIds.size()));
-            StringBuilder sql = new StringBuilder(
-                "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) VALUES ");
-            List<Object> params = new ArrayList<>(batch.size() * 4);
-            for (int i = 0; i < batch.size(); i++) {
-                sql.append(i == 0 ? "(?, ?, ?, ?)" : ", (?, ?, ?, ?)");
-                params.add(tenant);
-                params.add(batch.get(i));
-                params.add(topicId);
-                params.add(assignedBy);
+            var insert = ctx.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY);
+            for (String docId : batch) {
+                insert = insert.values(tenant, docId, topicId, assignedBy);
             }
-            sql.append(" ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
-            ctx.execute(sql.toString(), params.toArray());
+            insert.onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                              TOPIC_ASSIGNMENTS.TOPIC_ID)
+                  .doNothing()
+                  .execute();
         }
     }
 }

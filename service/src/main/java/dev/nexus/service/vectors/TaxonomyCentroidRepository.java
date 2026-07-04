@@ -2,8 +2,11 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.PgSession;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.Record;
+import org.jooq.impl.DSL;
 import org.jooq.Result;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,17 +84,18 @@ public final class TaxonomyCentroidRepository {
         }
         tenantScope.withTenant(tenant, ctx -> {
             for (CentroidRecord r : records) {
-                String table = centroidTable(r.embedding().length);
-                ctx.execute(
-                    "INSERT INTO " + table
-                    + " (tenant_id, collection, topic_id, embedding, label, doc_count)"
-                    + " VALUES (?, ?, ?, ?::vector, ?, ?)"
-                    + " ON CONFLICT (tenant_id, collection, topic_id) DO UPDATE SET"
-                    + "   embedding = EXCLUDED.embedding,"
-                    + "   label     = EXCLUDED.label,"
-                    + "   doc_count = EXCLUDED.doc_count",
-                    tenant, r.collection(), r.topicId(), vectorLiteral(r.embedding()),
-                    r.label(), r.docCount());
+                DimTables.CentroidTable ct = DimTables.CENTROIDS.get(r.embedding().length);
+                ctx.insertInto(ct.table())
+                   .columns(ct.tenantId(), ct.collection(), ct.topicId(),
+                            ct.embedding(), ct.label(), ct.docCount())
+                   .values(tenant, r.collection(), r.topicId(),
+                           Vector.of(r.embedding()), r.label(), r.docCount())
+                   .onConflict(ct.tenantId(), ct.collection(), ct.topicId())
+                   .doUpdate()
+                   .set(ct.embedding(), DSL.excluded(ct.embedding()))
+                   .set(ct.label(),     DSL.excluded(ct.label()))
+                   .set(ct.docCount(),  DSL.excluded(ct.docCount()))
+                   .execute();
             }
             return null;
         });
@@ -126,7 +130,7 @@ public final class TaxonomyCentroidRepository {
             // keep HNSW scanning past ef_search so a narrow collection returns its full set
             // (RDR-156 — without this, filtered HNSW silently under-returns). SET LOCAL is
             // txn-scoped, same pool discipline as the TenantScope GUC stamp.
-            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             return ctx.fetch(
                 "SELECT topic_id, (embedding <=> ?::vector) AS distance FROM " + centroidTable(dim)
                 + " WHERE collection " + op + " ?"
@@ -253,13 +257,11 @@ public final class TaxonomyCentroidRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             int deleted = 0;
             for (int dim : DIMS) {
-                List<Object> binds = new ArrayList<>();
-                binds.add(collection);
-                binds.addAll(topicIds);
-                deleted += ctx.execute(
-                    "DELETE FROM " + centroidTable(dim)
-                    + " WHERE collection = ? AND topic_id IN (" + placeholders(topicIds.size()) + ")",
-                    binds.toArray());
+                DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
+                deleted += ctx.deleteFrom(ct.table())
+                              .where(ct.collection().eq(collection)
+                                  .and(ct.topicId().in(topicIds)))
+                              .execute();
             }
             return deleted;
         });
@@ -274,8 +276,10 @@ public final class TaxonomyCentroidRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             int deleted = 0;
             for (int dim : DIMS) {
-                deleted += ctx.execute(
-                    "DELETE FROM " + centroidTable(dim) + " WHERE collection = ?", collection);
+                DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
+                deleted += ctx.deleteFrom(ct.table())
+                              .where(ct.collection().eq(collection))
+                              .execute();
             }
             return deleted;
         });

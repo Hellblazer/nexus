@@ -5,9 +5,13 @@ package dev.nexus.service.vectors;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.PgSession;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.JSONB;
 import org.jooq.Record;
 import org.jooq.Result;
+import org.jooq.impl.DSL;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import org.slf4j.Logger;
@@ -434,26 +438,25 @@ public final class PgVectorRepository {
             // batch this way. Same ON CONFLICT semantics, same bound values, just
             // one statement.
             if (!dedupIds.isEmpty()) {
-                var sql = new StringBuilder(
-                    "INSERT INTO " + table
-                    + " (tenant_id, collection, chash, chunk_text, embedding, metadata) VALUES ");
-                Object[] params = new Object[dedupIds.size() * 6];
+                // nexus-xtmtf: chained .values() keeps this ONE multi-row
+                // statement (the h8rf6.2 lock-hold rationale); float[] (VectorBinding) +
+                // JSONB typed binds retire the ?::vector / ?::jsonb casts.
+                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+                var insert = ctx.insertInto(ch.table())
+                    .columns(ch.tenantId(), ch.collection(), ch.chash(),
+                             ch.chunkText(), ch.embedding(), ch.metadata());
                 for (int i = 0; i < dedupIds.size(); i++) {
-                    if (i > 0) sql.append(", ");
-                    sql.append("(?, ?, ?, ?, ?::vector, ?::jsonb)");
-                    int base = i * 6;
-                    params[base]     = tenant;
-                    params[base + 1] = collection;
-                    params[base + 2] = dedupIds.get(i);
-                    params[base + 3] = dedupDocs.get(i);
-                    params[base + 4] = vectorLiteral(embeddings.get(i));
-                    params[base + 5] = toJson(dedupMetas.get(i));
+                    insert = insert.values(tenant, collection, dedupIds.get(i),
+                            dedupDocs.get(i),
+                            Vector.of(embeddings.get(i)),
+                            JSONB.jsonb(toJson(dedupMetas.get(i))));
                 }
-                sql.append(" ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET")
-                   .append("   chunk_text = EXCLUDED.chunk_text,")
-                   .append("   embedding  = EXCLUDED.embedding,")
-                   .append("   metadata   = EXCLUDED.metadata");
-                ctx.execute(sql.toString(), params);
+                insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+                      .doUpdate()
+                      .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
+                      .set(ch.embedding(), DSL.excluded(ch.embedding()))
+                      .set(ch.metadata(),  DSL.excluded(ch.metadata()))
+                      .execute();
             }
             return null;
         });
@@ -487,18 +490,34 @@ public final class PgVectorRepository {
      * present) without executing it against the live schema (the {@code retention} column
      * does not exist until Phase B / nexus-dtnpu).
      */
-    static String referenceOnlyInsertSql(String table) {
-        return "INSERT INTO " + table
-             + " (tenant_id, collection, chash, chunk_text, embedding, metadata, retention)"
-             + " VALUES (?, ?, ?, NULL, ?::vector, ?::jsonb, 'reference-only')"
-             + " ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET"
-             + "   embedding  = EXCLUDED.embedding,"
-             + "   metadata   = EXCLUDED.metadata,"
-             + "   retention  = EXCLUDED.retention";
-        // NOTE: chunk_text is intentionally EXCLUDED from the DO UPDATE clause —
-        // reference-only→reference-only rewrites refresh embedding+metadata but must
-        // never overwrite a non-NULL chunk_text (the guard below catches the full→ref
-        // transition before SQL runs; this omission is defense-in-depth).
+    /**
+     * Build the reference-only upsert as a jOOQ query (nexus-xtmtf: DSL form of
+     * the retired {@code referenceOnlyInsertSql} string). ``retention`` is a
+     * Phase-B column absent from the generated schema (the caller is gated OFF
+     * in Phase A, unreachable); the ad-hoc field reference fails at runtime on
+     * the missing column exactly like the raw SQL did, and Phase B's regen
+     * replaces it with the generated field. chunk_text is intentionally
+     * EXCLUDED from the DO UPDATE — reference-only rewrites refresh
+     * embedding+metadata but must never overwrite a non-NULL chunk_text (the
+     * caller's guard catches full→ref before SQL; this omission is
+     * defense-in-depth). Package-private so the SQL-shape test renders it.
+     */
+    static org.jooq.Query referenceOnlyInsertQuery(
+            org.jooq.DSLContext ctx, int dim, String tenant, String collection,
+            String chash, float[] embedding, String metadataJson) {
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        var retention = DSL.field(DSL.name("retention"), String.class);
+        return ctx.insertInto(ch.table())
+                  .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(),
+                           ch.embedding(), ch.metadata(), retention)
+                  .values(tenant, collection, chash, null,
+                          Vector.of(embedding),
+                          JSONB.jsonb(metadataJson), "reference-only")
+                  .onConflict(ch.tenantId(), ch.collection(), ch.chash())
+                  .doUpdate()
+                  .set(ch.embedding(), DSL.excluded(ch.embedding()))
+                  .set(ch.metadata(),  DSL.excluded(ch.metadata()))
+                  .set(retention,      DSL.excluded(retention));
     }
 
     /**
@@ -611,10 +630,11 @@ public final class PgVectorRepository {
                .doNothing()
                .execute();
 
-            // (6) Reference-only chunk INSERT (Phase B — requires retention column).
-            ctx.execute(referenceOnlyInsertSql(table),
-                tenant, collection, chash,
-                vectorLiteral(embedding), toJson(sanitizeNulDeep(metadata)));
+            // (6) Reference-only chunk INSERT (Phase B — requires retention column;
+            // see referenceOnlyInsertQuery for the Phase-A/B contract).
+            referenceOnlyInsertQuery(ctx, dimForCollection(collection), tenant,
+                    collection, chash, embedding,
+                    toJson(sanitizeNulDeep(metadata))).execute();
             return null;
         });
         log.debug("event=upsert_reference_only_done collection={} chash={}", collection, chash);
@@ -708,7 +728,7 @@ public final class PgVectorRepository {
             // Filtered-ANN recall: keep HNSW scanning past ef_search when the RLS +
             // collection + metadata predicates narrow the candidate set. SET LOCAL is
             // txn-scoped (same pool discipline as the TenantScope GUC stamp).
-            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             return ctx.fetch(sql.toString(), binds.toArray());
         });
 
@@ -981,7 +1001,7 @@ public final class PgVectorRepository {
             // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
             // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
             // do not. Pinned per-transaction so the gate is independent of cluster config.
-            ctx.execute("SET LOCAL pg_trgm.word_similarity_threshold = 0.6");
+            PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
 
             List<String> gateChashes = ctx.fetch(
                 "SELECT chash FROM " + table + gateSql + " LIMIT ?", probeBinds.toArray())
@@ -1020,7 +1040,7 @@ public final class PgVectorRepository {
                 return ctx.fetch(sql, b.toArray());
             }
             // HNSW-first for a dense gate: keep HNSW scanning past ef_search.
-            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             String sql = "SELECT chash, chunk_text, collection, metadata::text AS metadata_json,"
                 + " (embedding <=> ?::vector) AS distance FROM " + table + gateSql
                 + " ORDER BY distance ASC, chash ASC LIMIT ?";
@@ -1534,7 +1554,7 @@ public final class PgVectorRepository {
     private List<Map<String, Object>> runCombinedQuery(
             String tenant, String sql, List<Object> binds) {
         Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             return ctx.fetch(sql, binds.toArray());
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -1557,7 +1577,7 @@ public final class PgVectorRepository {
     private List<Map<String, Object>> runCombinedQueryWithChash(
             String tenant, String sql, List<Object> binds) {
         Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
-            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             return ctx.fetch(sql, binds.toArray());
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -1651,13 +1671,11 @@ public final class PgVectorRepository {
     public int delete(String tenant, String collection, List<String> ids) {
         int dim = dimForCollection(collection);
         if (ids == null || ids.isEmpty()) return 0;
-        List<Object> binds = new ArrayList<>();
-        binds.add(collection);
-        binds.addAll(ids);
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.execute("DELETE FROM " + chunksTable(dim)
-                        + " WHERE collection = ? AND chash IN (" + placeholders(ids.size()) + ")",
-                        binds.toArray()));
+            ctx.deleteFrom(ch.table())
+               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
+               .execute());
     }
 
     /**
@@ -1693,13 +1711,15 @@ public final class PgVectorRepository {
                 "ids (" + ids.size() + ") and metadatas (" + metadatas.size()
                 + ") must be aligned");
         }
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         tenantScope.withTenant(tenant, ctx -> {
             for (int i = 0; i < ids.size(); i++) {
-                ctx.execute("UPDATE " + chunksTable(dim)
-                            + " SET metadata = ?::jsonb WHERE collection = ? AND chash = ?",
-                            // Same NUL defense as upsertChunks: jsonb rejects NUL just
-                            // like text does (nexus-rvfwj, dual-review M2).
-                            toJson(sanitizeNulDeep(metadatas.get(i))), collection, ids.get(i));
+                ctx.update(ch.table())
+                   // Same NUL defense as upsertChunks: jsonb rejects NUL just
+                   // like text does (nexus-rvfwj, dual-review M2).
+                   .set(ch.metadata(), JSONB.jsonb(toJson(sanitizeNulDeep(metadatas.get(i)))))
+                   .where(ch.collection().eq(collection).and(ch.chash().eq(ids.get(i))))
+                   .execute();
             }
             return null;
         });
