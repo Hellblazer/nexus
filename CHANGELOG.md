@@ -6,6 +6,59 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.3.1] - 2026-07-04
+
+The shakeout-follow-ups release (epic nexus-c0twp). Everything the 6.3.0 live
+shakeout deferred, plus everything the new safety nets caught while building
+them. Pins engine-service-v0.1.22 (cloud-gated 2026-07-04).
+
+### Fixed
+- `nx t3 gc` no longer crashes in service mode — local event-log emission is
+  skipped when the catalog is service-backed (live-shakeout finding #4).
+- `nx store put` no longer loses aspect extraction on fresh notes: the document
+  hook chain carries the catalog doc_id, not the T3 chunk id, so the engine's
+  FK accepts the enqueue (nexus-w8lg1); the enqueue-failure warning is one line
+  (traceback at debug).
+- `nx collection re-embed` and the chash backfill no longer crash on
+  `db._client` (absent from every production handle post-RDR-155); service-mode
+  re-embed is same-model-only via the verbatim vector passthrough, and a
+  cross-model `--to` fails loud with correct guidance instead of silently
+  re-embedding with the wrong model (nexus-c9xr2, nexus-u37lw, nexus-tcvpn).
+- `nx collection rename` rejects same-prefix renames whose embedding-model
+  segment differs — rename never re-embeds, so the vectors would silently stay
+  in the old model space (nexus-tcvpn).
+- HttpCatalogClient shape drifts vs the local catalog fixed across 9 methods:
+  `graph`/`graph_many` return typed entries/links (the service-mode links CLI
+  was silently broken), `collection_health_meta` no longer drops
+  `stale_source_ratio`, `validate_link` returns error lists,
+  `legacy_grandfathered` is a bool, `descendants` rows are normalized, and
+  chunk-address `resolve_chunk` works against the new engine route
+  (nexus-u26b4, nexus-gc2ze).
+
+### Added
+- Bounded per-file indexing concurrency: 2 workers by default when both the
+  vectors and catalog backends are the HTTP service; `NX_INDEX_CONCURRENCY`
+  overrides; hook chains and progress callbacks are serialized;
+  `--debug-timing` gains a `hooks_s` bucket (nexus-cfc72).
+- Mechanized runtime return-shape tripwire across the shared
+  Catalog/HttpCatalogClient surface (72 registered parity entries + audited
+  exclusions + a completeness gate), with a T3-backed leg for span/chash
+  resolution (nexus-8y1tm, nexus-oq0tk).
+
+### Changed
+- Warm `nx index repo` no longer pays ~1,400–2,800 serial catalog round-trips
+  per run: one owner-scoped list + local join in both the registration hook
+  and the frecency map, and unchanged files skip their per-file catalog
+  update entirely (nexus-dst5h).
+- Pinned engine advances to engine-service-v0.1.22: aspect-queue linkage
+  preserved across doc_id-less re-enqueues, `/resolve_chunk`, metadata
+  updates MERGE like the local catalog (previously a silent-replace data-loss
+  class in service mode), and full raw-SQL elimination in the engine
+  (nexus-nyout, nexus-gc2ze, nexus-ke45f, nexus-xtmtf, nexus-mzuj9).
+- Engine release workflow caches the compiled PG bundle across tags
+  (nexus-m8au7).
+
+
 ## [6.3.0] - 2026-07-03
 
 The service-mode seam-closure release (epic nexus-h8rf6). The first systematic

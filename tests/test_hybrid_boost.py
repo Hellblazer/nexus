@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+from nexus.db.http_vector_client import HttpVectorClient
 from nexus.types import SearchResult
 
 
@@ -68,7 +69,8 @@ def cli_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 @pytest.fixture()
 def mock_t3():
-    t3 = MagicMock()
+    # cli_env sets cloud creds -> real _t3() would be HttpVectorClient.
+    t3 = MagicMock(spec=HttpVectorClient)
     t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
     return t3
 

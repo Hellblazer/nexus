@@ -671,14 +671,16 @@ class TestLinkAndTraversal:
         result = cat.graph(a, depth=1)
         assert "nodes" in result
         assert "edges" in result
-        node_tumblers = [n.get("tumbler") for n in result["nodes"]]
+        # nexus-u26b4: nodes are typed CatalogEntry objects (return-type
+        # parity), not raw wire dicts — attribute access, not .get().
+        node_tumblers = [str(n.tumbler) for n in result["nodes"]]
         assert str(b) in node_tumblers
 
     def test_graph_depth_2_reaches_c(self, cat, linked_docs) -> None:
         """graph() with depth=2 follows the chain A->B->C."""
         a, b, c = linked_docs
         result = cat.graph(a, depth=2)
-        node_tumblers = [n.get("tumbler") for n in result["nodes"]]
+        node_tumblers = [str(n.tumbler) for n in result["nodes"]]
         assert str(c) in node_tumblers, (
             f"Expected {c} in depth-2 BFS from {a}; got nodes={node_tumblers}"
         )
@@ -1345,7 +1347,8 @@ class TestCrossTenantGraphRLS:
         nodes = result.get("nodes", [])
         edges = result.get("edges", [])
         a_tumblers = {str(x), str(y)}
-        visible_a_nodes = [n for n in nodes if n.get("tumbler") in a_tumblers]
+        # nexus-u26b4: nodes are typed CatalogEntry objects — attribute access.
+        visible_a_nodes = [n for n in nodes if str(n.tumbler) in a_tumblers]
         assert visible_a_nodes == [], (
             f"RLS BREACH via graph(): tenant B can see tenant A's nodes: {visible_a_nodes}"
         )

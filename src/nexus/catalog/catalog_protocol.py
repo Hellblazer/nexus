@@ -164,6 +164,9 @@ class CatalogReader(Protocol):
     def resolve_many(self, doc_ids) -> object:  # canonical
         ...
 
+    def resolve_path(self, tumbler) -> object:  # canonical
+        ...
+
     def resolve_span(self, span, physical_collection, t3) -> object:  # canonical DIVERGENT
         ...
 

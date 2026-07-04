@@ -47,12 +47,37 @@ def _fake_tumbler() -> str:
 
 
 def _entry_dict(**kwargs: Any) -> dict:
-    """Minimal server response dict that _to_entry accepts."""
+    """Minimal server response dict that _to_entry accepts.
+
+    nexus-8y1tm: ``file_path``/``source_uri`` defaults are the literal
+    values ``tests/catalog/test_shape_parity_tripwire.py`` seeds onto its
+    local ``doc_a`` fixture — this lets client-side exact-match filters
+    (``by_file_path``, ``by_source_uri``, ``find_by_file_path``,
+    ``resolve_path``) find a match against the fake server too, without a
+    stateful fake.
+
+    nexus-u26b4: ``metadata``/``source_mtime``/``bib_*`` added so the
+    ``/list``-backed ``descendants()`` parity entry (which does NOT go
+    through ``_to_entry()`` — it forwards the raw wire dict) sees the same
+    Java-normalized document-row shape (metadata as a parsed nested dict,
+    the full ``bib_*`` field set) as local ``Catalog.descendants()``'s now
+    -normalized rows. Harmless to every other ``_entry_dict()`` consumer:
+    they all go through ``_to_entry()``, which collapses to a
+    ``CatalogEntry`` dataclass regardless of which wire keys were present.
+    """
     base = {
         "tumbler": _fake_tumbler(),
         "title": "Test Doc",
         "content_type": "paper",
         "chunk_count": 0,
+        "file_path": "src/alpha.py",
+        "source_uri": "file:///tmp/nexus-test/alpha.py",
+        "metadata": {"key": "value"},
+        "source_mtime": 0.0,
+        "bib_year": 0,
+        "bib_authors": "",
+        "bib_venue": "",
+        "bib_citation_count": 0,
     }
     base.update(kwargs)
     return base
@@ -115,7 +140,17 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         FakeCatalogHandler.get_ops.append(op)
 
         if op == "/stats":
-            self._send_json({"doc_count": 7, "link_count": 3, "owner_count": 2})
+            # nexus-8y1tm: full CatalogRepository.stats() shape (7 keys) —
+            # doc_count/link_count/owner_count were the only 3 pre-existing
+            # keys here; collection_count/chunk_count/links_by_type/
+            # by_content_type added so HttpCatalogClient.stats() (a pure
+            # passthrough of this response) shape-matches Catalog.stats().
+            self._send_json({
+                "doc_count": 7, "link_count": 3, "owner_count": 2,
+                "collection_count": 2, "chunk_count": 5,
+                "links_by_type": {"cites": 1, "relates": 1},
+                "by_content_type": {"code": 5, "prose": 2},
+            })
         elif op == "/show":
             self._send_json(_entry_dict())
         elif op == "/list":
@@ -126,7 +161,20 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 n = FakeCatalogHandler.list_content_type_count
                 self._send_json({"documents": [_entry_dict() for _ in range(n)], "count": n})
             else:
-                self._send_json({"documents": [_entry_dict(), _entry_dict(title="Second")], "count": 2})
+                # nexus-u26b4: second doc has EMPTY metadata (vs the first's
+                # populated dict) — descendants() parity needs this
+                # heterogeneity to mirror local Catalog.descendants()'s
+                # seeded mix (doc_a has a real ``meta=``, every other seeded
+                # descendant does not); _to_entry()-based consumers
+                # (by_content_type, all_documents, ...) are unaffected since
+                # they collapse to a CatalogEntry dataclass regardless.
+                self._send_json({
+                    "documents": [
+                        _entry_dict(),
+                        _entry_dict(title="Second", metadata={}),
+                    ],
+                    "count": 2,
+                })
         elif op == "/search":
             self._send_json({"documents": [_entry_dict()], "count": 1})
         elif op == "/resolve":
@@ -140,14 +188,22 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 requested = {t for t in params["link_types"].split(",") if t}
             elif params.get("link_type"):
                 requested = {params["link_type"]}
-            row = {"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}
+            out_row = {"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}
+            # nexus-u26b4: the in-direction row was previously hardcoded empty
+            # (see the links_to EXCLUSIONS/REGISTRY history in
+            # test_shape_parity_tripwire.py) — a real inbound-link row so
+            # direction=in|both are wire-faithful like direction=out already was.
+            in_row = {"from_tumbler": "1.1.3", "to_tumbler": "1.1.2", "link_type": "cites"}
             match = requested is None or "cites" in requested
             if direction == "out":
-                self._send_json({"links_from": [row] if match else [], "links_to": []})
+                self._send_json({"links_from": [out_row] if match else [], "links_to": []})
             elif direction == "in":
-                self._send_json({"links_from": [], "links_to": []})
+                self._send_json({"links_from": [], "links_to": [in_row] if match else []})
             else:
-                self._send_json({"links_from": [], "links_to": []})
+                self._send_json({
+                    "links_from": [out_row] if match else [],
+                    "links_to": [in_row] if match else [],
+                })
         elif op == "/link_query":
             params = self._query_params()
             if params.get("from_tumbler") == FakeCatalogHandler.link_absent_from:
@@ -172,17 +228,109 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 ],
             })
         elif op == "/collections/list":
-            self._send_json({"collections": [{"name": "code__test__voyage-code-3__v1"}]})
+            # nexus-8y1tm: full CatalogRepository.collRow() shape (10 keys) —
+            # owner_id added so collections_by_owner's client-side filter
+            # (c.get("owner_id") == owner_id) has something to match ("1.1" is
+            # the tumbler_prefix every fixture owner in this file uses).
+            # legacy_grandfathered is an int (0/1) on the wire (collRow's
+            # ``legcy`` param is a boxed Integer column, not a boolean) —
+            # deliberately NOT coerced to a Python bool here (see
+            # nexus-8y1tm KNOWN DRIFT note on get_collection/list_collections).
+            self._send_json({"collections": [{
+                "name": "code__test__voyage-code-3__v1", "content_type": "code",
+                "owner_id": "1.1", "embedding_model": "voyage-code-3",
+                "model_version": "1", "display_name": "code__test__voyage-code-3__v1",
+                "legacy_grandfathered": 0, "superseded_by": "", "superseded_at": "",
+                "created_at": "2026-07-01T00:00:00+00:00",
+            }]})
         elif op == "/collections/get":
-            self._send_json({"name": "code__test__voyage-code-3__v1"})
+            # nexus-8y1tm: echo the requested name; full collRow shape.
+            params = self._query_params()
+            name = params.get("name")
+            if not name:
+                self._send_json({"error": "name required"}, 400)
+            else:
+                self._send_json({
+                    "name": name,
+                    "owner_id": "1.1",
+                    "content_type": "code",
+                    "embedding_model": "voyage-code-3",
+                    "model_version": "1",
+                    "display_name": name,
+                    # legacy_grandfathered: int (0/1) on the wire, matching
+                    # CatalogRepository.collRow's boxed-Integer column — see
+                    # the KNOWN DRIFT note where this is registered/excluded.
+                    "legacy_grandfathered": 0 if "__" in name else 1,
+                    "superseded_by": "", "superseded_at": "",
+                    "created_at": "2026-07-01T00:00:00+00:00",
+                })
         elif op == "/collections/for_tuple":
             self._send_json({"name": "code__test__voyage-code-3__v1"})
+        elif op == "/collections/owner-root":
+            params = self._query_params()
+            name = params.get("name")
+            if not name:
+                self._send_json({"error": "name query param required"}, 400)
+            else:
+                self._send_json({"owner_id": "1.1", "repo_root": "/tmp/nexus-test"})
+        elif op == "/collections/health":
+            params = self._query_params()
+            coll = params.get("collection")
+            if not coll:
+                self._send_json({"error": "collection query param required"}, 400)
+            else:
+                self._send_json({
+                    "last_indexed": "2026-07-01T00:00:00+00:00",
+                    "orphan_count": 1,
+                    "stale_source_ratio": 0.0,
+                })
+        elif op == "/coverage":
+            self._send_json({"coverage": [{"content_type": "code", "total": 1, "linked": 1}]})
+        elif op == "/docs/distinct-collections":
+            self._send_json({"collections": ["code__test__voyage-code-3__v1"]})
+        elif op == "/docs/collection-counts":
+            self._send_json({"counts": {"code__test__voyage-code-3__v1": 2}})
+        elif op == "/docs/orphaned":
+            # nexus-8y1tm: CatalogRepository.orphanedDocs() narrow 4-key shape
+            # (tumbler/title/content_type/file_path, all str) — NOT the full
+            # doc-row shape _entry_dict() produces.
+            self._send_json({"documents": [{
+                "tumbler": "1.1.9", "title": "Orphan",
+                "content_type": "code", "file_path": "src/orphan.py",
+            }]})
+        elif op == "/docs/absolute-paths":
+            self._send_json({"documents": [{
+                "tumbler": "1.1.8",
+                "file_path": "/abs/path/doc.txt",
+                "physical_collection": "code__test__voyage-code-3__v1",
+            }]})
+        elif op == "/owners/all-with-roots":
+            self._send_json({"owners": [{
+                "tumbler_prefix": "1.1", "name": "myrepo", "owner_type": "repo",
+                "repo_hash": "fakehash", "description": "", "repo_root": "/tmp/nexus-test",
+                "head_hash": "",
+            }]})
         elif op == "/owners/list":
             self._send_json({"owners": [{"tumbler_prefix": "1.1", "name": "myrepo"}]})
         elif op == "/owners/by_repo":
             self._send_json({"tumbler_prefix": "1.1", "name": "myrepo"})
         elif op == "/owners/by_name":
-            self._send_json({"owners": [{"tumbler_prefix": "1.1", "name": "myrepo"}]})
+            # nexus-8y1tm: owner_type "curator" so curator_owner_tumbler_by_name's
+            # client-side filter (o.get("owner_type") == "curator") has a match.
+            self._send_json({"owners": [
+                {"tumbler_prefix": "1.1", "name": "myrepo", "owner_type": "curator"},
+            ]})
+        elif op == "/owners/show":
+            params = self._query_params()
+            prefix = params.get("tumbler_prefix")
+            if not prefix:
+                self._send_json({"error": "tumbler_prefix required"}, 400)
+            else:
+                self._send_json({
+                    "tumbler_prefix": prefix, "name": "myrepo", "owner_type": "repo",
+                    "repo_hash": "fakehash", "description": "", "repo_root": "/tmp/nexus-test",
+                    "head_hash": "",
+                })
         elif op == "/resolve_span":
             params = self._query_params()
             chash = params.get("span_chash", "")
@@ -217,6 +365,37 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "chunk_text":          "resolved chunk body",
                     "metadata":            {"source": "test"},
                 })
+        elif op == "/resolve_chunk":
+            # nexus-gc2ze: mirrors CatalogHandler.handleResolveChunk exactly —
+            # split on ".", >= 4 segments required, 4th segment must parse as
+            # an int, doc prefix = first 3 segments. Stateless fake: any
+            # well-formed chunk address "resolves" (real 404/400 semantics
+            # depend on a live Postgres document row, exercised by the Java
+            # integration tests instead); "9.9.999.0" stands in for a missing
+            # document so client-side 404-handling has something to hit.
+            params = self._query_params()
+            tumbler = params.get("tumbler", "")
+            segments = tumbler.split(".")
+            if len(segments) < 4:
+                self._send_json({"error": "tumbler is not a chunk address (need >= 4 segments)"}, 400)
+            else:
+                try:
+                    chunk_index = int(segments[3])
+                except ValueError:
+                    self._send_json({"error": "invalid chunk segment"}, 400)
+                else:
+                    doc_tumbler = ".".join(segments[:3])
+                    if doc_tumbler == "9.9.999":
+                        self.send_response(404)
+                        self.end_headers()
+                    else:
+                        self._send_json({
+                            "document_tumbler": doc_tumbler,
+                            "chunk_index": chunk_index,
+                            "physical_collection": "code__test__voyage-code-3__v1",
+                            "title": "Test Doc",
+                            "content_type": "code",
+                        })
         else:
             self._send_json({"error": f"unknown GET op: {op}"}, 404)
 
@@ -287,6 +466,29 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # echo a count for each requested whitelisted relation
             rels = body.get("relations", [])
             self._send_json({"counts": {r: 42 for r in rels}})
+        elif op == "/docs/chunk-counts":
+            ids = body.get("doc_ids", [])
+            self._send_json({i: 3 for i in ids} if ids else {})
+        elif op == "/links/from-batch":
+            tumblers = body.get("tumblers", [])
+            self._send_json(
+                {t: [{"from_tumbler": t, "link_type": "cites"}] for t in tumblers}
+                if tumblers else {}
+            )
+        elif op == "/resolve_many":
+            ids = body.get("doc_ids", [])
+            if not ids:
+                self._send_json({"entries": {}})
+            else:
+                self._send_json({"entries": {i: _entry_dict(tumbler=i) for i in ids}})
+        elif op == "/owners/by_type":
+            owner_type = body.get("owner_type")
+            if not owner_type:
+                self._send_json({"error": "owner_type required"}, 400)
+            else:
+                self._send_json({"owners": [
+                    {"tumbler_prefix": "1.1", "name": "myrepo", "owner_type": owner_type},
+                ]})
         else:
             self._send_json({"ok": True})
 
@@ -523,7 +725,10 @@ class TestHttpCatalogClientRoundTrip:
     def test_links_to_uses_direction_in(self, client: HttpCatalogClient) -> None:
         # GET /links?tumbler=X&direction=in
         links = client.links_to("1.1.2")
-        assert links == []
+        assert len(links) == 1
+        # Return-type parity: typed CatalogLink (attribute access), like local Catalog.
+        assert links[0].link_type == "cites"
+        assert str(links[0].from_tumbler) == "1.1.3"
 
     def test_link_query(self, client: HttpCatalogClient) -> None:
         links = client.link_query(link_type="cites")
@@ -1100,6 +1305,70 @@ class TestResolveChash:
         try:
             client = HttpCatalogClient(base_url=base_url, _token="tok")
             result = client.resolve_chash("chash:not-a-valid-hex")
+            assert result is None
+        finally:
+            server.shutdown()
+
+
+class TestResolveChunk:
+    """nexus-gc2ze: HttpCatalogClient.resolve_chunk() real service-mode
+    chunk-address resolution (replaces the ``resolve(tumbler).__dict__``
+    placeholder that treated any tumbler as a document)."""
+
+    def test_resolve_chunk_returns_full_dict(self) -> None:
+        """Happy path: a real 4-segment chunk tumbler resolves to the
+        document + chunk metadata dict."""
+        from nexus.catalog.catalog import Tumbler
+
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            t = Tumbler(segments=(1, 1, 1, 2))
+            result = client.resolve_chunk(t)
+            assert result is not None
+            assert result["document_tumbler"] == "1.1.1"
+            assert result["chunk_index"] == 2
+            assert result["physical_collection"] == "code__test__voyage-code-3__v1"
+            assert result["title"] == "Test Doc"
+            assert result["content_type"] == "code"
+        finally:
+            server.shutdown()
+
+    def test_resolve_chunk_accepts_string_tumbler(self) -> None:
+        """String tumblers are parsed before the chunk-address check."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chunk("1.1.1.0")
+            assert result is not None
+            assert result["chunk_index"] == 0
+        finally:
+            server.shutdown()
+
+    def test_resolve_chunk_non_chunk_tumbler_returns_none_without_wire_call(self) -> None:
+        """A plain 3-segment document tumbler short-circuits to None locally
+        with no wire round-trip — mirroring the local
+        ``Catalog.resolve_chunk``'s ``if tumbler.chunk is None: return None``."""
+        from nexus.catalog.catalog import Tumbler
+
+        server, base_url = start_fake_server()
+        try:
+            FakeCatalogHandler.reset_log()
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chunk(Tumbler(segments=(1, 1, 1)))
+            assert result is None
+            assert "/resolve_chunk" not in FakeCatalogHandler.get_ops
+        finally:
+            server.shutdown()
+
+    def test_resolve_chunk_missing_document_returns_none(self) -> None:
+        """A 404 from the server (document not found) maps to None."""
+        from nexus.catalog.catalog import Tumbler
+
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chunk(Tumbler(segments=(9, 9, 999, 0)))
             assert result is None
         finally:
             server.shutdown()

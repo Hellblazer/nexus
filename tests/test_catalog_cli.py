@@ -10,6 +10,8 @@ from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
+from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
+from nexus.db.http_vector_client import HttpVectorClient
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -920,7 +922,9 @@ class TestVerifyCommand:
         """Patch _make_t3 in commands.catalog so existing_ids returns the seeded set."""
         from unittest.mock import MagicMock
 
-        fake = MagicMock()
+        # Module-wide cloud_mode fixture forces is_local_mode() False, so
+        # the real _make_t3()/make_t3() hands back an HttpVectorClient here.
+        fake = MagicMock(spec=HttpVectorClient)
 
         def _existing_ids(coll, ids):
             present = set(present_ids_by_collection.get(coll, []))
@@ -1672,7 +1676,9 @@ class TestSeam3OwnersCarve:
 
         from nexus.cli import main
 
-        fake = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        fake = MagicMock(spec=Catalog)
         fake.list_owners.return_value = [
             {"tumbler_prefix": "1.1", "owner_type": "repo", "name": "sentinel-owner"},
         ]
@@ -1760,7 +1766,9 @@ class TestKgyozLinksCarve:
 
         from nexus.cli import main
 
-        fake = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        fake = MagicMock(spec=Catalog)
         fake.link_audit.return_value = {
             "total": 7, "orphaned_count": 0, "duplicate_count": 0,
             "by_type": {}, "by_creator": {}, "orphaned": [],
@@ -1781,7 +1789,9 @@ class TestKgyozLinksCarve:
 
         edge = MagicMock()
         edge.to_dict.return_value = {"from": "1.1.1", "to": "1.2.1", "link_type": "cites"}
-        fake = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        fake = MagicMock(spec=Catalog)
         fake.link_query.return_value = [edge]
         with patch("nexus.commands.catalog._get_catalog", return_value=fake):
             result = CliRunner().invoke(
@@ -1837,7 +1847,9 @@ class TestWhh61BackupsCarve:
 
         from nexus.cli import main
 
-        fake = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        fake = MagicMock(spec=Catalog)
         with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
                 patch("nexus.catalog.catalog_backup.list_backups", return_value=[]) as lb:
             result = CliRunner().invoke(main, ["catalog", "list-backups"])
@@ -1852,7 +1864,9 @@ class TestWhh61BackupsCarve:
 
         from nexus.cli import main
 
-        fake = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        fake = MagicMock(spec=Catalog)
         with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
                 patch(
                     "nexus.catalog.catalog_backup.vacuum_old_backups",
@@ -1914,13 +1928,20 @@ class TestWhh61CollectionsCarve:
 
         from nexus.cli import main
 
-        cat = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        cat = MagicMock(spec=Catalog)
         cat.distinct_doc_collections.return_value = []
         cat.list_collections.return_value = []
-        t3 = MagicMock()
+        # cloud_mode (module-wide) forces is_local_mode() False -> real
+        # make_t3() would hand back an HttpVectorClient here.
+        t3 = MagicMock(spec=HttpVectorClient)
         t3.list_collections.return_value = []
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
-                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()), \
+                patch(
+                    "nexus.commands.catalog._get_catalog_writer",
+                    return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
+                ), \
                 patch("nexus.db.make_t3", return_value=t3):
             result = CliRunner().invoke(main, ["catalog", "backfill-collections", "--dry-run"])
         assert result.exit_code == 0, result.output
@@ -1953,10 +1974,15 @@ class TestWhh61MigrationCarve:
 
         from nexus.cli import main
 
-        cat = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        cat = MagicMock(spec=Catalog)
         cat.get_collection.return_value = None  # -> ClickException before any write
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
-                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+                patch(
+                    "nexus.commands.catalog._get_catalog_writer",
+                    return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
+                ):
             result = CliRunner().invoke(main, ["catalog", "migrate-fallback", "docs__default"])
         assert result.exit_code != 0
         assert "not registered in the collections" in result.output
@@ -1972,11 +1998,16 @@ class TestWhh61MigrationCarve:
 
         entry = MagicMock()
         entry.tumbler = "1.1.1"
-        cat = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        cat = MagicMock(spec=Catalog)
         cat.get_collection.return_value = {"name": "docs__default"}  # non-None
         cat.list_by_collection.return_value = [entry]
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
-                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+                patch(
+                    "nexus.commands.catalog._get_catalog_writer",
+                    return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
+                ):
             result = CliRunner().invoke(
                 main, ["catalog", "migrate-fallback", "docs__default", "--dry-run"],
             )
@@ -2016,10 +2047,15 @@ class TestWhh61MaintenanceCarve:
 
         from nexus.cli import main
 
-        cat = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        cat = MagicMock(spec=Catalog)
         cat.all_documents.return_value = []
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
-                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+                patch(
+                    "nexus.commands.catalog._get_catalog_writer",
+                    return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
+                ):
             result = CliRunner().invoke(main, ["catalog", "gc"])
         assert result.exit_code == 0, result.output
         assert "No orphan entries found." in result.output
@@ -2073,11 +2109,16 @@ class TestWhh61RemediationCarve:
 
         from nexus.cli import main
 
-        cat = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        cat = MagicMock(spec=Catalog)
         cat.all_documents.return_value = []
         cat.owners_with_roots.return_value = {}
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
-                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+                patch(
+                    "nexus.commands.catalog._get_catalog_writer",
+                    return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
+                ):
             result = CliRunner().invoke(main, ["catalog", "prune-stale"])
         assert result.exit_code == 0, result.output
         assert "0 stale" in result.output
@@ -2121,7 +2162,9 @@ class TestWhh61ReportCarve:
 
         from nexus.cli import main
 
-        cat = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        cat = MagicMock(spec=Catalog)
         cat.stats.return_value = {
             "owner_count": 3, "doc_count": 9, "link_count": 4, "chunk_count": 0,
             "by_content_type": {}, "links_by_type": {},
@@ -2185,10 +2228,15 @@ class TestWhh61IntegrityCarve:
 
         from nexus.cli import main
 
-        cat = MagicMock()
+        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
+        # _get_catalog() really returns a local Catalog reader here.
+        cat = MagicMock(spec=Catalog)
         cat.all_documents.return_value = []  # empty → clean early return
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
-                patch("nexus.commands.catalog._get_catalog_writer", return_value=MagicMock()):
+                patch(
+                    "nexus.commands.catalog._get_catalog_writer",
+                    return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
+                ):
             result = CliRunner().invoke(main, ["catalog", "verify"])
         assert result.exit_code == 0, result.output
         cat.all_documents.assert_called()

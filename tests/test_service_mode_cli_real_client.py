@@ -183,9 +183,14 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
             return {"deleted": len(body["ids"])}
         raise AssertionError(f"unexpected path {path}")
 
-    fake_cat = MagicMock()
+    # Spec'd against the REAL service-mode catalog client so attributes it
+    # doesn't have (like the local catalog's _dir) raise instead of
+    # auto-materializing. Live-shakeout finding #4: the original bare mock
+    # set fake_cat._dir = tmp_path, masking that gc's EventLog(cat._dir)
+    # crashed with AttributeError on every real service-mode --no-dry-run.
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    fake_cat = MagicMock(spec=HttpCatalogClient)
     fake_cat.chashes_for_collection.return_value = set()
-    fake_cat._dir = tmp_path  # EventLog(cat._dir) needs a real directory
 
     monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
     with (
@@ -273,3 +278,127 @@ def test_model_drift_probe_service_mode_real_client(real_client, monkeypatch):
     # 'error' is the pre-fix service-mode symptom; 'model_drift' would mean
     # collection_metadata resolved the wrong model for a conformant name.
     assert results[0].outcome == "matched", (results[0].outcome, results[0].error)
+
+
+# ── nx collection re-embed (get_collection + stub.count, nexus-c9xr2) ────────
+
+
+def test_collection_reembed_dry_run_service_mode_real_client(
+    runner, real_client, monkeypatch,
+):
+    """nexus-c9xr2: re-embed reached db._client.get_collection — an attr NO
+    production handle has post-RDR-155 — so every real invocation crashed
+    with a raw AttributeError. The command now uses db.get_collection();
+    this drives the dry-run end-to-end through the REAL HttpVectorClient
+    (the _ServiceCollectionStub's new count() included) so the seam can
+    never be mock-masked again."""
+    coll = _KNOWLEDGE
+
+    def fake_get(path, tenant="default"):
+        if path.startswith("/v1/vectors/count"):
+            return {"count": 7}
+        if path.startswith("/v1/vectors/stats"):
+            # list_collections' primary path: /stats returns a BARE LIST of
+            # per-collection stat rows (collection_stats docstring).
+            return [{"name": coll, "dim": 1024, "count": 7}]
+        raise AssertionError(f"unexpected GET {path}")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+    with patch("nexus.commands.collection._t3", return_value=real_client):
+        result = runner.invoke(
+            main, ["collection", "re-embed", coll, "--to", "voyage-code-3"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "dry-run" in result.output
+    assert "7" in result.output
+
+
+def test_collection_reembed_cross_model_rejected_service_mode(
+    runner, real_client, monkeypatch,
+):
+    """nexus-u37lw: server-side embedding routes by the COLLECTION NAME's
+    model segment, so a cross-model --to can never take effect in service
+    mode — pre-fix it silently no-opped with the old model, stamped the new
+    model into metadata, and printed success. Must fail loud, post nothing."""
+    posted = []
+
+    def fake_post(path, body, **kw):
+        posted.append(path)
+        if path == "/v1/vectors/collections":
+            return {"collections": [{"name": _KNOWLEDGE}]}
+        raise AssertionError(f"unexpected POST {path}")
+
+    def fake_get(path, tenant="default"):
+        if path.startswith("/v1/vectors/stats"):
+            return [{"name": _KNOWLEDGE, "dim": 1024, "count": 3}]
+        if path.startswith("/v1/vectors/count"):
+            return {"count": 3}
+        raise AssertionError(f"unexpected GET {path}")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+    monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+    with patch("nexus.commands.collection._t3", return_value=real_client):
+        # _KNOWLEDGE encodes voyage-context-3; ask for voyage-code-3.
+        result = runner.invoke(
+            main, ["collection", "re-embed", _KNOWLEDGE,
+                   "--to", "voyage-code-3", "--no-dry-run", "--yes"],
+        )
+    assert result.exit_code != 0
+    assert "cannot take effect" in result.output
+    assert "rename" in result.output
+    # Nothing written: no upsert route was ever posted.
+    assert not any("upsert" in p for p in posted)
+
+
+def test_collection_reembed_same_model_uses_verbatim_passthrough(
+    runner, real_client, monkeypatch,
+):
+    """nexus-u37lw: same-model service re-embed stores the client-computed
+    vectors via the nexus-hxry2 verbatim passthrough (embeddings present in
+    the upsert body) — NOT upsert_chunks_with_embeddings, which discards
+    them and re-bills a server-side embed."""
+    coll = _CODE  # encodes voyage-code-3
+    upserts = []
+
+    def fake_post(path, body, **kw):
+        if path == "/v1/vectors/get":
+            if body.get("offset", 0) > 0:
+                return {"ids": [], "documents": [], "metadatas": []}
+            return {
+                "ids": ["c1"],
+                "documents": ["def f(): pass"],
+                "metadatas": [{"embedding_model": "voyage-code-3"}],
+            }
+        if path == "/v1/vectors/upsert-chunks":
+            upserts.append(body)
+            return {"upserted": 1}
+        raise AssertionError(f"unexpected POST {path}")
+
+    def fake_get(path, tenant="default"):
+        if path.startswith("/v1/vectors/stats"):
+            return [{"name": coll, "dim": 1024, "count": 1}]
+        if path.startswith("/v1/vectors/count"):
+            return {"count": 1}
+        raise AssertionError(f"unexpected GET {path}")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+    monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+    fake_embed_result = MagicMock()
+    fake_embed_result.embeddings = [[0.25] * 1024]
+    fake_voyage = MagicMock()
+    fake_voyage.embed.return_value = fake_embed_result
+
+    with patch("nexus.commands.collection._t3", return_value=real_client), \
+            patch("voyageai.Client", return_value=fake_voyage), \
+            patch("nexus.config.get_credential", return_value="fake-key"):
+        result = runner.invoke(
+            main, ["collection", "re-embed", coll,
+                   "--to", "voyage-code-3", "--no-dry-run", "--yes"],
+        )
+    assert result.exit_code == 0, result.output
+    assert len(upserts) == 1
+    # The verbatim passthrough: our vectors ride the wire.
+    assert upserts[0].get("embeddings") == [[0.25] * 1024]

@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.http_vector_client import HttpVectorClient
 
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 
@@ -467,7 +468,13 @@ class TestFixPaths:
             ("repo", "abc12345", str(tmp_path / "repo"),
              str(tmp_path / "repo" / "src" / "foo.py"), "code__test"),
         ])
-        mock_t3 = MagicMock()
+        # make_t3() returns the service-backed HttpVectorClient
+        # UNCONDITIONALLY in production since RDR-155 P4a.2 -- cloud
+        # creds / is_local_mode() no longer affect the handle type, and
+        # --fix-paths has no isinstance/is_service_backed branch that
+        # would care either way. spec= it so a missing-method bug can't
+        # hide behind an unspec'd stub.
+        mock_t3 = MagicMock(spec=HttpVectorClient)
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
             patch("nexus.db.make_t3", return_value=mock_t3),
@@ -487,7 +494,7 @@ class TestFixPaths:
             ("repo", "abc12345", str(repo_dir),
              str(repo_dir / "src" / "foo.py"), "code__test"),
         ])
-        mock_t3 = MagicMock()
+        mock_t3 = MagicMock(spec=HttpVectorClient)
         mock_t3.update_source_path.return_value = 5
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
@@ -504,7 +511,7 @@ class TestFixPaths:
         cat, cat_dir = self._make_catalog_with_entries(tmp_path, [
             ("curator", "", "", "/abs/path/paper.pdf", "docs__papers"),
         ])
-        mock_t3 = MagicMock()
+        mock_t3 = MagicMock(spec=HttpVectorClient)
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
             patch("nexus.db.make_t3", return_value=mock_t3),
@@ -518,7 +525,7 @@ class TestFixPaths:
             ("repo", "abc12345", str(tmp_path / "repo"),
              "src/foo.py", "code__test"),  # already relative
         ])
-        mock_t3 = MagicMock()
+        mock_t3 = MagicMock(spec=HttpVectorClient)
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
             patch("nexus.db.make_t3", return_value=mock_t3),
@@ -553,7 +560,7 @@ class TestCheckQuotas:
     ) -> None:
         with (
             patch("nexus.config.is_local_mode", return_value=False),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.db.make_t3", return_value=MagicMock(spec=HttpVectorClient)),
             patch("nexus.config.get_credential", return_value="sk-voyage-key"),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
@@ -608,7 +615,7 @@ class TestCheckQuotas:
         glance, even though cloud itself may be reachable."""
         with (
             patch("nexus.config.is_local_mode", return_value=False),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.db.make_t3", return_value=MagicMock(spec=HttpVectorClient)),
             patch("nexus.config.get_credential", return_value=""),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
@@ -628,7 +635,7 @@ class TestCheckQuotas:
 
         with (
             patch("nexus.config.is_local_mode", return_value=False),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.db.make_t3", return_value=MagicMock(spec=HttpVectorClient)),
             patch("nexus.config.get_credential", return_value="sk-voyage-key"),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
@@ -652,7 +659,7 @@ class TestCheckQuotas:
 
         with (
             patch("nexus.config.is_local_mode", return_value=False),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.db.make_t3", return_value=MagicMock(spec=HttpVectorClient)),
             patch("nexus.config.get_credential", return_value="sk-voyage-key"),
         ):
             result = runner.invoke(

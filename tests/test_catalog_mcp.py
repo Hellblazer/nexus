@@ -324,23 +324,44 @@ def test_resolve(cat, resolve_kw) -> None:
     assert "code__test" in catalog_resolve(**resolve_kw)
 
 
-def test_catalog_links_service_mode_plain_dicts_and_link_types(monkeypatch):
-    """nexus-qtj24: catalog_links must (1) pass ``link_types`` (plural) — the
-    only kwarg HttpCatalogClient.graph accepts (it has no singular link_type and
-    is keyword-only) — and (2) handle plain-dict nodes/edges from the service
-    /traverse path instead of calling .to_dict() unconditionally."""
+def test_catalog_links_service_mode_typed_objects_and_link_types(monkeypatch):
+    """nexus-qtj24: catalog_links must pass ``link_types`` (plural) — the only
+    kwarg HttpCatalogClient.graph accepts (it has no singular link_type and is
+    keyword-only).
+
+    nexus-u26b4: HttpCatalogClient.graph()/graph_many() now convert wire dicts
+    to typed CatalogEntry/CatalogLink objects (return-type parity, same fix
+    class as h8rf6.3), so every real backend returns typed nodes/edges here —
+    the isinstance(n, dict) plain-dict fallback this test used to exercise is
+    no longer reachable and was removed from catalog_links(); this fixture now
+    models the real (typed) contract instead of the pre-fix drifted one.
+    """
     import nexus.mcp.catalog as mc
 
     captured: dict = {}
+
+    class _FakeEntry:
+        def __init__(self, tumbler: str) -> None:
+            self.tumbler = tumbler
+
+        def to_dict(self) -> dict:
+            return {"tumbler": self.tumbler}
+
+    class _FakeLink:
+        def __init__(self, from_t: str, to_t: str) -> None:
+            self.from_tumbler = from_t
+            self.to_tumbler = to_t
+
+        def to_dict(self) -> dict:
+            return {"from_tumbler": self.from_tumbler, "to_tumbler": self.to_tumbler}
 
     class _FakeServiceCat:
         def graph(self, tumbler, *, link_types=None, direction="both", depth=1):
             captured["link_types"] = link_types
             captured["depth"] = depth
-            # The service /traverse path returns plain dicts (no .to_dict()).
             return {
-                "nodes": [{"tumbler": "1.1"}],
-                "edges": [{"from_tumbler": "1.1", "to_tumbler": "1.2"}],
+                "nodes": [_FakeEntry("1.1")],
+                "edges": [_FakeLink("1.1", "1.2")],
             }
 
     monkeypatch.setattr(mc, "_require_catalog", lambda: (_FakeServiceCat(), None))
@@ -350,7 +371,7 @@ def test_catalog_links_service_mode_plain_dicts_and_link_types(monkeypatch):
 
     assert "error" not in result, result
     assert captured["link_types"] == ["cites"], "singular link_type not normalized to plural"
-    assert result["nodes"] == [{"tumbler": "1.1"}], "plain-dict node did not survive (.to_dict crash)"
+    assert result["nodes"] == [{"tumbler": "1.1"}]
     assert result["edges"][0]["from_tumbler"] == "1.1"
 
 

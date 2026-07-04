@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
 from nexus.commands.enrich import enrich
+from nexus.db.http_vector_client import HttpVectorClient
 
 
 @patch("nexus.db.make_t3")
@@ -15,7 +16,13 @@ def test_enrich_empty_collection(mock_bib: MagicMock, mock_t3_factory: MagicMock
     """Empty collection prints message and exits cleanly."""
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 
@@ -38,7 +45,13 @@ def test_enrich_skips_already_enriched(mock_bib: MagicMock, mock_t3_factory: Mag
             {"title": "Paper A", "bib_semantic_scholar_id": "abc123"},
         ],
     }
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 
@@ -82,7 +95,13 @@ def test_enrich_updates_metadata(
         # Third call: col.update
         None,
     ]
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 
@@ -103,7 +122,13 @@ def test_enrich_no_match_increments_skipped(mock_bib: MagicMock, mock_t3_factory
         "ids": ["c1"],
         "metadatas": [{"title": "Unknown Paper"}],
     }
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 
@@ -128,7 +153,13 @@ def test_enrich_limit_option(mock_bib: MagicMock, mock_t3_factory: MagicMock) ->
             {"title": "Paper C"},
         ],
     }
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 
@@ -159,7 +190,13 @@ def test_enrich_source_openalex_routes_to_openalex_backend(
         "ids": ["c1"],
         "metadatas": [{"title": "Paper Z"}],
     }
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 
@@ -198,7 +235,13 @@ def test_enrich_source_auto_falls_back_to_openalex_without_s2_key(
         "ids": ["c1"],
         "metadatas": [{"title": "Paper Auto"}],
     }
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 
@@ -244,7 +287,13 @@ def test_enrich_openalex_prefers_doi_over_title_search(
             "title": "mfaz", "source_path": "/papers/mfaz.pdf",
         }]},
     ]
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 
@@ -290,7 +339,13 @@ def test_enrich_openalex_falls_back_to_arxiv_when_no_doi(
             "title": "Attention", "source_path": "/papers/1706.03762.pdf",
         }]},
     ]
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 
@@ -324,7 +379,13 @@ def test_enrich_source_auto_uses_s2_when_key_present(
         "ids": ["c1"],
         "metadatas": [{"title": "Paper S2"}],
     }
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles, and
+    # _chroma_with_retry (patched where used) or the collection mock
+    # itself absorbs the rest, so spec=HttpVectorClient pins the real
+    # return type without changing behavior.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = mock_col
     mock_t3_factory.return_value = mock_db
 

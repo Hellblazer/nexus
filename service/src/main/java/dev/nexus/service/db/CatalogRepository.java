@@ -5,13 +5,23 @@ package dev.nexus.service.db;
 import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_INDEX;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_DOC_COUNTS;
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_HEALTH_META;
+import static dev.nexus.service.jooq.nexus.Tables.COVERAGE_BY_CONTENT_TYPE;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
+import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_1024;
@@ -84,100 +94,26 @@ public final class CatalogRepository {
         .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
-    // ── Table references ───────────────────────────────────────────────────────
+    // ── Retained hand-built fields (type-skew vs generated jOOQ Tables) ────────
+    // nexus-xtmtf: every OTHER plain table/column reference in this class was
+    // deduped onto dev.nexus.service.jooq.nexus.Tables.* (CATALOG_OWNERS,
+    // CATALOG_DOCUMENTS, CATALOG_LINKS, CATALOG_DOCUMENT_CHUNKS,
+    // CATALOG_COLLECTIONS, CATALOG_META — see the static imports above). These
+    // four remain hand-built because the generated column type differs from
+    // the wire-response value type this class already returns, and switching
+    // would either change the JSON shape callers see or force a matching
+    // change to the paired EXCLUDED.* fragment (out of scope: EXCLUDED
+    // fragments are not plain column references). Wire shapes must not change
+    // in this commit — see nexus-xtmtf dedup report.
 
-    static final Table<?> T_OWNERS  = DSL.table(DSL.name("nexus", "catalog_owners"));
-    static final Table<?> T_DOCS    = DSL.table(DSL.name("nexus", "catalog_documents"));
-    static final Table<?> T_LINKS   = DSL.table(DSL.name("nexus", "catalog_links"));
-    static final Table<?> T_CHUNKS  = DSL.table(DSL.name("nexus", "catalog_document_chunks"));
-    static final Table<?> T_COLLS   = DSL.table(DSL.name("nexus", "catalog_collections"));
-    static final Table<?> T_META    = DSL.table(DSL.name("nexus", "catalog_meta"));
-
-    // ── Owners fields ──────────────────────────────────────────────────────────
-
-    static final Field<String> F_OWN_TENANT = DSL.field(DSL.name("catalog_owners","tenant_id"), String.class);
-    static final Field<String> F_OWN_PREFIX = DSL.field(DSL.name("catalog_owners","tumbler_prefix"), String.class);
-    static final Field<String> F_OWN_NAME   = DSL.field(DSL.name("catalog_owners","name"), String.class);
-    static final Field<String> F_OWN_TYPE   = DSL.field(DSL.name("catalog_owners","owner_type"), String.class);
-    static final Field<String> F_OWN_REPO   = DSL.field(DSL.name("catalog_owners","repo_hash"), String.class);
-    static final Field<String> F_OWN_DESC   = DSL.field(DSL.name("catalog_owners","description"), String.class);
-    static final Field<String> F_OWN_ROOT   = DSL.field(DSL.name("catalog_owners","repo_root"), String.class);
-    static final Field<String> F_OWN_HEAD   = DSL.field(DSL.name("catalog_owners","head_hash"), String.class);
-    static final Field<Long>   F_OWN_SEQ    = DSL.field(DSL.name("catalog_owners","next_seq"), Long.class);
-
-    // ── Documents fields ───────────────────────────────────────────────────────
-
-    static final Field<String>  F_DOC_TENANT  = DSL.field(DSL.name("catalog_documents","tenant_id"), String.class);
-    static final Field<String>  F_DOC_TUMBLER = DSL.field(DSL.name("catalog_documents","tumbler"), String.class);
-    static final Field<String>  F_DOC_TITLE   = DSL.field(DSL.name("catalog_documents","title"), String.class);
-    static final Field<String>  F_DOC_AUTHOR  = DSL.field(DSL.name("catalog_documents","author"), String.class);
-    static final Field<Integer> F_DOC_YEAR    = DSL.field(DSL.name("catalog_documents","year"), Integer.class);
-    static final Field<String>  F_DOC_CTYPE   = DSL.field(DSL.name("catalog_documents","content_type"), String.class);
-    static final Field<String>  F_DOC_FPATH   = DSL.field(DSL.name("catalog_documents","file_path"), String.class);
-    static final Field<String>  F_DOC_CORPUS  = DSL.field(DSL.name("catalog_documents","corpus"), String.class);
-    static final Field<String>  F_DOC_PCOLL   = DSL.field(DSL.name("catalog_documents","physical_collection"), String.class);
-    static final Field<Integer> F_DOC_CHUNKS  = DSL.field(DSL.name("catalog_documents","chunk_count"), Integer.class);
-    static final Field<String>  F_DOC_HEAD    = DSL.field(DSL.name("catalog_documents","head_hash"), String.class);
-    static final Field<String>  F_DOC_IDXAT   = DSL.field(DSL.name("catalog_documents","indexed_at"), String.class);
+    // type-skew vs generated (String vs JSONB) — wire shape pinned, see nexus-xtmtf report
     static final Field<String>  F_DOC_META    = DSL.field(DSL.name("catalog_documents","metadata"), String.class);
-    static final Field<Double>  F_DOC_SMTIME  = DSL.field(DSL.name("catalog_documents","source_mtime"), Double.class);
-    static final Field<String>  F_DOC_ALIAS   = DSL.field(DSL.name("catalog_documents","alias_of"), String.class);
-    static final Field<String>  F_DOC_URI     = DSL.field(DSL.name("catalog_documents","source_uri"), String.class);
-    static final Field<Integer> F_DOC_BIBY    = DSL.field(DSL.name("catalog_documents","bib_year"), Integer.class);
-    static final Field<String>  F_DOC_BIAU    = DSL.field(DSL.name("catalog_documents","bib_authors"), String.class);
-    static final Field<String>  F_DOC_BIVE    = DSL.field(DSL.name("catalog_documents","bib_venue"), String.class);
-    static final Field<Integer> F_DOC_BICC    = DSL.field(DSL.name("catalog_documents","bib_citation_count"), Integer.class);
-    static final Field<String>  F_DOC_BIS2    = DSL.field(DSL.name("catalog_documents","bib_semantic_scholar_id"), String.class);
-    static final Field<String>  F_DOC_BIOA    = DSL.field(DSL.name("catalog_documents","bib_openalex_id"), String.class);
-    static final Field<String>  F_DOC_BIDOI   = DSL.field(DSL.name("catalog_documents","bib_doi"), String.class);
-    static final Field<String>  F_DOC_BIAT    = DSL.field(DSL.name("catalog_documents","bib_enriched_at"), String.class);
-    static final Field<java.time.OffsetDateTime> F_DOC_DELETED_AT =
-        DSL.field(DSL.name("catalog_documents","deleted_at"), java.time.OffsetDateTime.class);
-
-    // ── Links fields ───────────────────────────────────────────────────────────
-
-    static final Field<String> F_LNK_TENANT = DSL.field(DSL.name("catalog_links","tenant_id"), String.class);
-    static final Field<Long>   F_LNK_ID     = DSL.field(DSL.name("catalog_links","id"), Long.class);
-    static final Field<String> F_LNK_FROM   = DSL.field(DSL.name("catalog_links","from_tumbler"), String.class);
-    static final Field<String> F_LNK_TO     = DSL.field(DSL.name("catalog_links","to_tumbler"), String.class);
-    static final Field<String> F_LNK_TYPE   = DSL.field(DSL.name("catalog_links","link_type"), String.class);
-    static final Field<String> F_LNK_FSPAN  = DSL.field(DSL.name("catalog_links","from_span"), String.class);
-    static final Field<String> F_LNK_TSPAN  = DSL.field(DSL.name("catalog_links","to_span"), String.class);
-    static final Field<String> F_LNK_CRTBY  = DSL.field(DSL.name("catalog_links","created_by"), String.class);
-    static final Field<String> F_LNK_CRTAT  = DSL.field(DSL.name("catalog_links","created_at"), String.class);
+    // type-skew vs generated (String vs JSONB) — wire shape pinned, see nexus-xtmtf report
     static final Field<String> F_LNK_META   = DSL.field(DSL.name("catalog_links","metadata"), String.class);
-
-    // ── Chunks fields ──────────────────────────────────────────────────────────
-
-    static final Field<String>  F_CHK_TENANT = DSL.field(DSL.name("catalog_document_chunks","tenant_id"), String.class);
-    static final Field<String>  F_CHK_DOC    = DSL.field(DSL.name("catalog_document_chunks","doc_id"), String.class);
-    static final Field<Integer> F_CHK_POS    = DSL.field(DSL.name("catalog_document_chunks","position"), Integer.class);
-    static final Field<String>  F_CHK_CHASH  = DSL.field(DSL.name("catalog_document_chunks","chash"), String.class);
-    static final Field<Integer> F_CHK_IDX    = DSL.field(DSL.name("catalog_document_chunks","chunk_index"), Integer.class);
-    static final Field<Integer> F_CHK_LST    = DSL.field(DSL.name("catalog_document_chunks","line_start"), Integer.class);
-    static final Field<Integer> F_CHK_LEN    = DSL.field(DSL.name("catalog_document_chunks","line_end"), Integer.class);
-    static final Field<Integer> F_CHK_CST    = DSL.field(DSL.name("catalog_document_chunks","char_start"), Integer.class);
-    static final Field<Integer> F_CHK_CEN    = DSL.field(DSL.name("catalog_document_chunks","char_end"), Integer.class);
-
-    // ── Collections fields ─────────────────────────────────────────────────────
-
-    static final Field<String>  F_COL_TENANT = DSL.field(DSL.name("catalog_collections","tenant_id"), String.class);
-    static final Field<String>  F_COL_NAME   = DSL.field(DSL.name("catalog_collections","name"), String.class);
-    static final Field<String>  F_COL_CTYPE  = DSL.field(DSL.name("catalog_collections","content_type"), String.class);
-    static final Field<String>  F_COL_OWNER  = DSL.field(DSL.name("catalog_collections","owner_id"), String.class);
-    static final Field<String>  F_COL_EMBD   = DSL.field(DSL.name("catalog_collections","embedding_model"), String.class);
-    static final Field<String>  F_COL_MVER   = DSL.field(DSL.name("catalog_collections","model_version"), String.class);
-    static final Field<String>  F_COL_DNAME  = DSL.field(DSL.name("catalog_collections","display_name"), String.class);
-    static final Field<Integer> F_COL_LEGCY  = DSL.field(DSL.name("catalog_collections","legacy_grandfathered"), Integer.class);
-    static final Field<String>  F_COL_SUPBY  = DSL.field(DSL.name("catalog_collections","superseded_by"), String.class);
+    // type-skew vs generated (String vs OffsetDateTime) — wire shape pinned, see nexus-xtmtf report
     static final Field<String>  F_COL_SUPAT  = DSL.field(DSL.name("catalog_collections","superseded_at"), String.class);
+    // type-skew vs generated (String vs OffsetDateTime) — wire shape pinned, see nexus-xtmtf report
     static final Field<String>  F_COL_CRTAT  = DSL.field(DSL.name("catalog_collections","created_at"), String.class);
-
-    // ── Meta fields ────────────────────────────────────────────────────────────
-
-    static final Field<String> F_META_TENANT = DSL.field(DSL.name("catalog_meta","tenant_id"), String.class);
-    static final Field<String> F_META_KEY    = DSL.field(DSL.name("catalog_meta","key"), String.class);
-    static final Field<String> F_META_VAL    = DSL.field(DSL.name("catalog_meta","value"), String.class);
 
     // ── EXCLUDED field helpers (avoids the set() overload ambiguity) ───────────
 
@@ -273,11 +209,11 @@ public final class CatalogRepository {
             if (prefix == null || prefix.isBlank()) {
                 String repoHash = s(o, "repo_hash");
                 if (repoHash != null && !repoHash.isBlank()) {
-                    prefix = ctx.select(F_OWN_PREFIX)
-                                .from(T_OWNERS)
-                                .where(F_OWN_REPO.eq(repoHash))
+                    prefix = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX)
+                                .from(CATALOG_OWNERS)
+                                .where(CATALOG_OWNERS.REPO_HASH.eq(repoHash))
                                 .limit(1)
-                                .fetchOne(F_OWN_PREFIX);
+                                .fetchOne(CATALOG_OWNERS.TUMBLER_PREFIX);
                 }
                 if (prefix == null || prefix.isBlank()) {
                     // Next owner number: MAX(int after the first dot) + 1 over
@@ -288,27 +224,27 @@ public final class CatalogRepository {
                                     "CAST(split_part(tumbler_prefix, '.', 2) AS INTEGER)",
                                     Integer.class)),
                                 DSL.inline(0)))
-                        .from(T_OWNERS)
-                        .where(F_OWN_PREFIX.like("1.%"))
+                        .from(CATALOG_OWNERS)
+                        .where(CATALOG_OWNERS.TUMBLER_PREFIX.like("1.%"))
                         .fetchOne(0, Integer.class);
                     prefix = "1." + ((maxNum == null ? 0 : maxNum) + 1);
                 }
             }
-            ctx.insertInto(T_OWNERS,
-                    F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
-                    F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
+            ctx.insertInto(CATALOG_OWNERS,
+                    CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
+                    CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
                .values(tenant,
                        prefix, s(o,"name"), s(o,"owner_type"),
                        s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
                        s(o,"head_hash"))
-               .onConflict(F_OWN_TENANT, F_OWN_PREFIX)
+               .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
                .doUpdate()
-               .set(F_OWN_NAME, EX_OWN_NAME)
-               .set(F_OWN_TYPE, EX_OWN_TYPE)
-               .set(F_OWN_REPO, EX_OWN_REPO)
-               .set(F_OWN_DESC, EX_OWN_DESC)
-               .set(F_OWN_ROOT, EX_OWN_ROOT)
-               .set(F_OWN_HEAD, EX_OWN_HEAD)
+               .set(CATALOG_OWNERS.NAME, EX_OWN_NAME)
+               .set(CATALOG_OWNERS.OWNER_TYPE, EX_OWN_TYPE)
+               .set(CATALOG_OWNERS.REPO_HASH, EX_OWN_REPO)
+               .set(CATALOG_OWNERS.DESCRIPTION, EX_OWN_DESC)
+               .set(CATALOG_OWNERS.REPO_ROOT, EX_OWN_ROOT)
+               .set(CATALOG_OWNERS.HEAD_HASH, EX_OWN_HEAD)
                .execute();
             return null;
         });
@@ -317,9 +253,9 @@ public final class CatalogRepository {
     /** Return all owners for tenant as list of maps. */
     public List<Map<String, Object>> listOwners(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE, F_OWN_REPO,
-                       F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
-               .from(T_OWNERS)
+            ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+               .from(CATALOG_OWNERS)
                .fetch()
                .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7()))
         );
@@ -328,10 +264,10 @@ public final class CatalogRepository {
     /** Find owner by repo_hash. Returns null if not found. */
     public Map<String, Object> ownerByRepoHash(String tenant, String repoHash) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var r = ctx.select(F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE, F_OWN_REPO,
-                               F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
-                       .from(T_OWNERS)
-                       .where(F_OWN_REPO.eq(repoHash))
+            var r = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+                               CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+                       .from(CATALOG_OWNERS)
+                       .where(CATALOG_OWNERS.REPO_HASH.eq(repoHash))
                        .fetchOne();
             return r != null ? ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7()) : null;
         });
@@ -340,10 +276,10 @@ public final class CatalogRepository {
     /** Find owners by name. */
     public List<Map<String, Object>> ownersByName(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE, F_OWN_REPO,
-                       F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
-               .from(T_OWNERS)
-               .where(F_OWN_NAME.eq(name))
+            ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+               .from(CATALOG_OWNERS)
+               .where(CATALOG_OWNERS.NAME.eq(name))
                .fetch()
                .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7()))
         );
@@ -352,9 +288,9 @@ public final class CatalogRepository {
     /** Update head_hash for an owner. */
     public int setOwnerHeadHash(String tenant, String tumblerPrefix, String headHash) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(T_OWNERS)
-               .set(F_OWN_HEAD, headHash)
-               .where(F_OWN_PREFIX.eq(tumblerPrefix))
+            ctx.update(CATALOG_OWNERS)
+               .set(CATALOG_OWNERS.HEAD_HASH, headHash)
+               .where(CATALOG_OWNERS.TUMBLER_PREFIX.eq(tumblerPrefix))
                .execute()
         );
     }
@@ -367,12 +303,12 @@ public final class CatalogRepository {
     public void upsertDocument(String tenant, Map<String, Object> d) {
         String metaJson = jsonOrNull(d.get("metadata"));
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(T_DOCS,
-                    F_DOC_TENANT, F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_AUTHOR, F_DOC_YEAR,
-                    F_DOC_CTYPE, F_DOC_FPATH, F_DOC_CORPUS, F_DOC_PCOLL, F_DOC_CHUNKS,
-                    F_DOC_HEAD, F_DOC_IDXAT, F_DOC_META, F_DOC_SMTIME, F_DOC_ALIAS, F_DOC_URI,
-                    F_DOC_BIBY, F_DOC_BIAU, F_DOC_BIVE, F_DOC_BICC,
-                    F_DOC_BIS2, F_DOC_BIOA, F_DOC_BIDOI, F_DOC_BIAT)
+            ctx.insertInto(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
+                    CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
+                    CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
+                    CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
+                    CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT)
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
@@ -383,30 +319,30 @@ public final class CatalogRepository {
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
                        nne(s(d,"bib_doi")), nne(s(d,"bib_enriched_at")))
-               .onConflict(F_DOC_TENANT, F_DOC_TUMBLER)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doUpdate()
-               .set(F_DOC_TITLE,  EX_DOC_TITLE)
-               .set(F_DOC_AUTHOR, EX_DOC_AUTHOR)
-               .set(F_DOC_YEAR,   EX_DOC_YEAR)
-               .set(F_DOC_CTYPE,  EX_DOC_CTYPE)
-               .set(F_DOC_FPATH,  EX_DOC_FPATH)
-               .set(F_DOC_CORPUS, EX_DOC_CORPUS)
-               .set(F_DOC_PCOLL,  EX_DOC_PCOLL)
-               .set(F_DOC_CHUNKS, EX_DOC_CHUNKS)
-               .set(F_DOC_HEAD,   EX_DOC_HEAD)
-               .set(F_DOC_IDXAT,  EX_DOC_IDXAT)
+               .set(CATALOG_DOCUMENTS.TITLE,  EX_DOC_TITLE)
+               .set(CATALOG_DOCUMENTS.AUTHOR, EX_DOC_AUTHOR)
+               .set(CATALOG_DOCUMENTS.YEAR,   EX_DOC_YEAR)
+               .set(CATALOG_DOCUMENTS.CONTENT_TYPE,  EX_DOC_CTYPE)
+               .set(CATALOG_DOCUMENTS.FILE_PATH,  EX_DOC_FPATH)
+               .set(CATALOG_DOCUMENTS.CORPUS, EX_DOC_CORPUS)
+               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,  EX_DOC_PCOLL)
+               .set(CATALOG_DOCUMENTS.CHUNK_COUNT, EX_DOC_CHUNKS)
+               .set(CATALOG_DOCUMENTS.HEAD_HASH,   EX_DOC_HEAD)
+               .set(CATALOG_DOCUMENTS.INDEXED_AT,  EX_DOC_IDXAT)
                .set(F_DOC_META,   EX_DOC_META)
-               .set(F_DOC_SMTIME, EX_DOC_SMTIME)
-               .set(F_DOC_ALIAS,  EX_DOC_ALIAS)
-               .set(F_DOC_URI,    EX_DOC_URI)
-               .set(F_DOC_BIBY,   EX_DOC_BIBY)
-               .set(F_DOC_BIAU,   EX_DOC_BIAU)
-               .set(F_DOC_BIVE,   EX_DOC_BIVE)
-               .set(F_DOC_BICC,   EX_DOC_BICC)
-               .set(F_DOC_BIS2,   EX_DOC_BIS2)
-               .set(F_DOC_BIOA,   EX_DOC_BIOA)
-               .set(F_DOC_BIDOI,  EX_DOC_BIDOI)
-               .set(F_DOC_BIAT,   EX_DOC_BIAT)
+               .set(CATALOG_DOCUMENTS.SOURCE_MTIME, EX_DOC_SMTIME)
+               .set(CATALOG_DOCUMENTS.ALIAS_OF,  EX_DOC_ALIAS)
+               .set(CATALOG_DOCUMENTS.SOURCE_URI,    EX_DOC_URI)
+               .set(CATALOG_DOCUMENTS.BIB_YEAR,   EX_DOC_BIBY)
+               .set(CATALOG_DOCUMENTS.BIB_AUTHORS,   EX_DOC_BIAU)
+               .set(CATALOG_DOCUMENTS.BIB_VENUE,   EX_DOC_BIVE)
+               .set(CATALOG_DOCUMENTS.BIB_CITATION_COUNT,   EX_DOC_BICC)
+               .set(CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID,   EX_DOC_BIS2)
+               .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
+               .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
+               .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   EX_DOC_BIAT)
                .execute();
             return null;
         });
@@ -429,13 +365,13 @@ public final class CatalogRepository {
         }
         return tenantScope.withTenant(tenant, ctx -> {
             // Ensure owner row exists (idempotent upsert with minimal fields)
-            ctx.insertInto(T_OWNERS, F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
-                           F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD, F_OWN_SEQ)
+            ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
+                           CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
                .values(tenant, ownerPrefix,
                        s(fields, "owner_name", ownerPrefix),
                        s(fields, "owner_type", "repo"),
                        null, null, "", null, 0L)
-               .onConflict(F_OWN_TENANT, F_OWN_PREFIX)
+               .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
                .doNothing()
                .execute();
 
@@ -446,45 +382,45 @@ public final class CatalogRepository {
             // the trash entry is left untouched (users can restore or purge it separately).
             String srcUri = s(fields, "source_uri", "");
             if (!srcUri.isEmpty()) {
-                var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
-                                  .where(F_DOC_TENANT.eq(tenant)
-                                         .and(F_DOC_URI.eq(srcUri))
-                                         .and(F_DOC_DELETED_AT.isNull()))
+                var existing = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+                                  .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                                         .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(srcUri))
+                                         .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
                 if (existing != null) return existing.value1();
             }
             String filePath = s(fields, "file_path", "");
             if (!filePath.isEmpty()) {
-                var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
-                                  .where(F_DOC_TENANT.eq(tenant)
-                                         .and(F_DOC_FPATH.eq(filePath))
-                                         .and(F_DOC_TUMBLER.startsWith(ownerPrefix + "."))
-                                         .and(F_DOC_DELETED_AT.isNull()))
+                var existing = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+                                  .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                                         .and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath))
+                                         .and(CATALOG_DOCUMENTS.TUMBLER.startsWith(ownerPrefix + "."))
+                                         .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
                 if (existing != null) return existing.value1();
             }
 
             // No existing document — atomically claim the next sequence number
-            long seq = ctx.select(F_OWN_SEQ).from(T_OWNERS)
-                          .where(F_OWN_TENANT.eq(tenant).and(F_OWN_PREFIX.eq(ownerPrefix)))
+            long seq = ctx.select(CATALOG_OWNERS.NEXT_SEQ).from(CATALOG_OWNERS)
+                          .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
                           .forUpdate()
-                          .fetchOne(F_OWN_SEQ);
+                          .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
 
-            ctx.update(T_OWNERS)
-               .set(F_OWN_SEQ, seq + 1)
-               .where(F_OWN_TENANT.eq(tenant).and(F_OWN_PREFIX.eq(ownerPrefix)))
+            ctx.update(CATALOG_OWNERS)
+               .set(CATALOG_OWNERS.NEXT_SEQ, seq + 1)
+               .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
                .execute();
 
             String tumbler = ownerPrefix + "." + (seq + 1);
 
             // Insert document
             String metaJson = jsonOrNull(fields.get("meta"));
-            ctx.insertInto(T_DOCS,
-                    F_DOC_TENANT, F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_AUTHOR, F_DOC_YEAR,
-                    F_DOC_CTYPE, F_DOC_FPATH, F_DOC_CORPUS, F_DOC_PCOLL, F_DOC_CHUNKS,
-                    F_DOC_HEAD, F_DOC_IDXAT, F_DOC_META, F_DOC_SMTIME, F_DOC_ALIAS, F_DOC_URI,
-                    F_DOC_BIBY, F_DOC_BIAU, F_DOC_BIVE, F_DOC_BICC,
-                    F_DOC_BIS2, F_DOC_BIOA, F_DOC_BIDOI, F_DOC_BIAT)
+            ctx.insertInto(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
+                    CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
+                    CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
+                    CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
+                    CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT)
                .values(tenant, tumbler,
                        s(fields, "title", ""),
                        nne(s(fields, "author", null)),
@@ -518,11 +454,47 @@ public final class CatalogRepository {
     public Map<String, Object> getDocument(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(documentFields())
-                       .from(T_DOCS)
-                       .where(F_DOC_TUMBLER.eq(tumbler).and(F_DOC_DELETED_AT.isNull()))
+                       .from(CATALOG_DOCUMENTS)
+                       .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                        .fetchOne();
             return r != null ? docRowFromRecord(r.intoMap()) : null;
         });
+    }
+
+    /**
+     * Resolve a 4-segment chunk address to its document + chunk metadata
+     * (nexus-gc2ze). Mirrors the local {@code Catalog._DocumentOps.resolve_chunk}
+     * contract (catalog_docs.py): chunks are implicit addresses — the catalog
+     * tracks document-level rows only, and chunk sub-addresses are resolved on
+     * demand from the document's {@code chunk_count}. This is a pure lookup +
+     * range-check over an existing document row: it delegates entirely to
+     * {@link #getDocument}, so there is no new SQL to audit here.
+     *
+     * <p>{@code chunkCount} of 0 (or absent) means the count is not yet known
+     * — the bounds check is skipped in that case, mirroring the local
+     * Python's {@code if entry.chunk_count and chunk_idx >= entry.chunk_count}.
+     *
+     * @param tenant      tenant identifier
+     * @param docTumbler  the document tumbler (chunk segment already stripped
+     *                    by the caller — {@link dev.nexus.service.http.CatalogHandler})
+     * @param chunkIndex  the chunk's position within the document
+     * @return {@code {document_tumbler, chunk_index, physical_collection,
+     *         title, content_type}} or {@code null} if the document is
+     *         missing or {@code chunkIndex} is out of range
+     */
+    public Map<String, Object> resolveChunk(String tenant, String docTumbler, int chunkIndex) {
+        var doc = getDocument(tenant, docTumbler);
+        if (doc == null) return null;
+        Object rawCount = doc.get("chunk_count");
+        long chunkCount = rawCount instanceof Number ? ((Number) rawCount).longValue() : 0L;
+        if (chunkCount > 0 && chunkIndex >= chunkCount) return null;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("document_tumbler",    docTumbler);
+        m.put("chunk_index",         chunkIndex);
+        m.put("physical_collection", doc.getOrDefault("physical_collection", ""));
+        m.put("title",               doc.getOrDefault("title", ""));
+        m.put("content_type",        doc.getOrDefault("content_type", ""));
+        return m;
     }
 
     /**
@@ -561,7 +533,7 @@ public final class CatalogRepository {
             }
         }
         return tenantScope.withTenant(tenant, ctx -> {
-            var step = ctx.update(T_DOCS);
+            var step = ctx.update(CATALOG_DOCUMENTS);
             UpdateSetMoreStep<?> more = null;
             for (var e : fields.entrySet()) {
                 if (e.getValue() == null) continue;
@@ -571,10 +543,19 @@ public final class CatalogRepository {
                 // string) under "meta"/"metadata". A bare set() of a Map fails with
                 // "LinkedHashMap is not supported in dialect POSTGRES"; JSON-encode and
                 // bind as jsonb, mirroring upsertDocument (RDR-168 nexus-njrcn.7).
+                // nexus-ke45f: MERGE, not replace — local Catalog.update() does
+                // dict.update (add/overwrite keys, never remove), and every
+                // writer.update(meta=...) caller (enrich write-back, catalog
+                // hook, dt stamp, remediation) is written against that
+                // contract; the bare SET silently dropped pre-existing keys
+                // in service mode. jsonb_concat == the || operator.
                 if ("meta".equals(e.getKey()) || "metadata".equals(e.getKey())) {
+                    Field<String> merged = DSL.function("jsonb_concat", String.class,
+                        DSL.coalesce(F_DOC_META, jsonbVal("{}")),
+                        jsonbVal(jsonOrNull(e.getValue())));
                     more = (more == null)
-                        ? step.set(F_DOC_META, jsonbVal(jsonOrNull(e.getValue())))
-                        : more.set(F_DOC_META, jsonbVal(jsonOrNull(e.getValue())));
+                        ? step.set(F_DOC_META, merged)
+                        : more.set(F_DOC_META, merged);
                     continue;
                 }
                 @SuppressWarnings("unchecked")
@@ -583,9 +564,9 @@ public final class CatalogRepository {
             }
             if (more == null) return 0;
             // AND deleted_at IS NULL: refuse to update tombstoned documents
-            return more.where(F_DOC_TENANT.eq(tenant)
-                              .and(F_DOC_TUMBLER.eq(tumbler))
-                              .and(F_DOC_DELETED_AT.isNull()))
+            return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                              .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                              .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                        .execute();
         });
     }
@@ -600,9 +581,9 @@ public final class CatalogRepository {
      */
     public int deleteDocument(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(T_DOCS)
-               .set(F_DOC_DELETED_AT, DSL.currentOffsetDateTime())
-               .where(F_DOC_TUMBLER.eq(tumbler).and(F_DOC_DELETED_AT.isNull()))
+            ctx.update(CATALOG_DOCUMENTS)
+               .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .execute()
         );
     }
@@ -620,10 +601,10 @@ public final class CatalogRepository {
                 DSL.val(query));
             Condition where = ftsMatch;
             if (contentType != null && !contentType.isBlank()) {
-                where = where.and(F_DOC_CTYPE.eq(contentType));
+                where = where.and(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType));
             }
             return ctx.select(documentFields())
-                      .from(T_DOCS)
+                      .from(CATALOG_DOCUMENTS)
                       .where(where)
                       .limit(limit <= 0 ? 200 : limit)
                       .fetch()
@@ -635,8 +616,8 @@ public final class CatalogRepository {
     public List<Map<String, Object>> listDocuments(String tenant, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields())
-               .from(T_DOCS)
-               .orderBy(F_DOC_TUMBLER)
+               .from(CATALOG_DOCUMENTS)
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .limit(limit <= 0 ? 200 : limit)
                .offset(offset)
                .fetch()
@@ -647,7 +628,7 @@ public final class CatalogRepository {
     /** Count all documents for this tenant. */
     public long countDocuments(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectCount().from(T_DOCS).fetchOne(0, Long.class)
+            ctx.selectCount().from(CATALOG_DOCUMENTS).fetchOne(0, Long.class)
         );
     }
 
@@ -699,8 +680,8 @@ public final class CatalogRepository {
      */
     public long manifestBackfill(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rec = ctx.fetchOne("select nexus.manifest_backfill()");
-            return rec != null ? rec.get(0, Long.class) : 0L;
+            Long count = dev.nexus.service.jooq.nexus.Routines.manifestBackfill(ctx.configuration());
+            return count != null ? count : 0L;
         });
     }
 
@@ -734,14 +715,13 @@ public final class CatalogRepository {
                 "limit must be > 0 (the sample is bounded; use count for the gate)");
         }
         return tenantScope.withTenant(tenant, ctx -> {
-            Long count = ctx.fetchOne(
-                "select count(*) from nexus.manifest_orphans(?)", dim
-            ).get(0, Long.class);
-            var sample = ctx.fetch(
-                "select * from nexus.manifest_orphans(?) limit ?", dim, limit
-            ).map(org.jooq.Record::intoMap);
+            long count = ctx.fetchCount(MANIFEST_ORPHANS.call(dim));
+            var sample = ctx.selectFrom(MANIFEST_ORPHANS.call(dim))
+                             .limit(limit)
+                             .fetch()
+                             .map(org.jooq.Record::intoMap);
             Map<String, Object> out = new LinkedHashMap<>();
-            out.put("count", count != null ? count : 0L);
+            out.put("count", count);
             out.put("orphans", sample);
             return out;
         });
@@ -755,11 +735,8 @@ public final class CatalogRepository {
      */
     public long manifestOrphanCount(String tenant, int dim) {
         requireSupportedDim(dim);
-        return tenantScope.withTenant(tenant, ctx -> {
-            var rec = ctx.fetchOne(
-                "select count(*) from nexus.manifest_orphans(?)", dim);
-            return rec != null ? rec.get(0, Long.class) : 0L;
-        });
+        return tenantScope.withTenant(tenant, ctx ->
+            (long) ctx.fetchCount(MANIFEST_ORPHANS.call(dim)));
     }
 
     private static void requireSupportedDim(int dim) {
@@ -772,8 +749,8 @@ public final class CatalogRepository {
     /** Documents by physical_collection. */
     public List<Map<String, Object>> documentsByCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(T_DOCS)
-               .where(F_DOC_PCOLL.eq(collection)).orderBy(F_DOC_TUMBLER)
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)).orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -781,8 +758,8 @@ public final class CatalogRepository {
     /** Documents by file_path (exact). */
     public List<Map<String, Object>> documentsByFilePath(String tenant, String filePath) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(T_DOCS)
-               .where(F_DOC_FPATH.eq(filePath))
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath))
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -790,8 +767,8 @@ public final class CatalogRepository {
     /** Documents by source_uri (exact). */
     public List<Map<String, Object>> documentsBySourceUri(String tenant, String uri) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(T_DOCS)
-               .where(F_DOC_URI.eq(uri))
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri))
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -799,9 +776,9 @@ public final class CatalogRepository {
     /** Documents by owner tumbler prefix. */
     public List<Map<String, Object>> documentsByOwner(String tenant, String ownerPrefix) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(T_DOCS)
-               .where(F_DOC_TUMBLER.like(ownerPrefix + ".%"))
-               .orderBy(F_DOC_TUMBLER)
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%"))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -817,9 +794,9 @@ public final class CatalogRepository {
     public List<Map<String, Object>> documentsByOwnerAndFilePath(
             String tenant, String ownerPrefix, String filePath) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(T_DOCS)
-               .where(F_DOC_TUMBLER.like(ownerPrefix + ".%").and(F_DOC_FPATH.eq(filePath)))
-               .orderBy(F_DOC_TUMBLER)
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%").and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath)))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -827,9 +804,9 @@ public final class CatalogRepository {
     /** Documents by content_type. */
     public List<Map<String, Object>> documentsByContentType(String tenant, String contentType) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(T_DOCS)
-               .where(F_DOC_CTYPE.eq(contentType))
-               .orderBy(F_DOC_TUMBLER)
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -837,9 +814,9 @@ public final class CatalogRepository {
     /** Documents by corpus. */
     public List<Map<String, Object>> documentsByCorpus(String tenant, String corpus) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(T_DOCS)
-               .where(F_DOC_CORPUS.eq(corpus))
-               .orderBy(F_DOC_TUMBLER)
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.CORPUS.eq(corpus))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -847,9 +824,9 @@ public final class CatalogRepository {
     /** Descendants: all documents with tumbler starting with prefix + "." */
     public List<Map<String, Object>> descendants(String tenant, String prefix) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(T_DOCS)
-               .where(F_DOC_TUMBLER.like(prefix + ".%"))
-               .orderBy(F_DOC_TUMBLER)
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TUMBLER.like(prefix + ".%"))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -857,7 +834,7 @@ public final class CatalogRepository {
     /** Update physical_collection for one document. */
     public int updateDocumentCollection(String tenant, String tumbler, String newCollection) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(T_DOCS).set(F_DOC_PCOLL, newCollection).where(F_DOC_TUMBLER.eq(tumbler)).execute()
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection).where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)).execute()
         );
     }
 
@@ -865,22 +842,22 @@ public final class CatalogRepository {
     public int updateDocumentsCollectionBatch(String tenant, List<String> tumblers, String newCollection) {
         if (tumblers.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(T_DOCS).set(F_DOC_PCOLL, newCollection).where(F_DOC_TUMBLER.in(tumblers)).execute()
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection).where(CATALOG_DOCUMENTS.TUMBLER.in(tumblers)).execute()
         );
     }
 
     /** Set alias_of for a document. */
     public int setAlias(String tenant, String tumbler, String aliasOf) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(T_DOCS).set(F_DOC_ALIAS, nne(aliasOf)).where(F_DOC_TUMBLER.eq(tumbler)).execute()
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf)).where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)).execute()
         );
     }
 
     /** Look up tumbler by (physical_collection, file_path). Returns null if not found. */
     public String lookupDocByCollectionAndPath(String tenant, String collection, String filePath) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var r = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
-                       .where(F_DOC_PCOLL.eq(collection).and(F_DOC_FPATH.eq(filePath)))
+            var r = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection).and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath)))
                        .fetchOne();
             return r != null ? r.value1() : null;
         });
@@ -900,31 +877,38 @@ public final class CatalogRepository {
     public boolean upsertLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
         return tenantScope.withTenant(tenant, ctx -> {
-            var rec = ctx.insertInto(T_LINKS,
-                    F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
-                    F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
+            var rec = ctx.insertInto(CATALOG_LINKS,
+                    CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                    CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
                .values(DSL.val(tenant),
                        DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
                        DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
                        DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
                        jsonbVal(metaJson))
-               .onConflict(F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE)
+               .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
                .doUpdate()
-               .set(F_LNK_FSPAN, EX_LNK_FSPAN)
-               .set(F_LNK_TSPAN, EX_LNK_TSPAN)
-               .set(F_LNK_CRTBY, EX_LNK_CRTBY)
+               .set(CATALOG_LINKS.FROM_SPAN, EX_LNK_FSPAN)
+               .set(CATALOG_LINKS.TO_SPAN, EX_LNK_TSPAN)
+               .set(CATALOG_LINKS.CREATED_BY, EX_LNK_CRTBY)
                .set(F_LNK_META,  EX_LNK_META)
-               .returning(DSL.field("(xmax = 0)", Boolean.class))
+               // nexus-xtmtf: CATALOG_LINKS (generated) carries a real CatalogLinksRecord
+               // shape, unlike the old hand-built Table<?>. .returning(Field...) on a
+               // recognized table returns the table's OWN record shape with the extra
+               // expression appended, so position 0 is no longer our boolean expression
+               // (jOOQ logs "API misuse ... not present in table" and get(0,...) silently
+               // reads the wrong column). .returningResult(...) requests EXACTLY this
+               // field and nothing else, independent of the table's real column list.
+               .returningResult(DSL.field("(xmax = 0)", Boolean.class))
                .fetchOne();
-            return rec != null && Boolean.TRUE.equals(rec.get(0, Boolean.class));
+            return rec != null && Boolean.TRUE.equals(rec.value1());
         });
     }
 
     /** Delete a link by (from, to, type). Returns deleted count. */
     public int deleteLink(String tenant, String fromT, String toT, String linkType) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(T_LINKS)
-               .where(F_LNK_FROM.eq(fromT).and(F_LNK_TO.eq(toT)).and(F_LNK_TYPE.eq(linkType)))
+            ctx.deleteFrom(CATALOG_LINKS)
+               .where(CATALOG_LINKS.FROM_TUMBLER.eq(fromT).and(CATALOG_LINKS.TO_TUMBLER.eq(toT)).and(CATALOG_LINKS.LINK_TYPE.eq(linkType)))
                .execute()
         );
     }
@@ -938,11 +922,11 @@ public final class CatalogRepository {
      */
     public List<Map<String, Object>> linksFrom(String tenant, String fromTumbler, List<String> linkTypes) {
         return tenantScope.withTenant(tenant, ctx -> {
-            Condition where = F_LNK_FROM.eq(fromTumbler);
-            if (linkTypes != null && !linkTypes.isEmpty()) where = where.and(F_LNK_TYPE.in(linkTypes));
-            return ctx.select(F_LNK_ID, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
-                               F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
-                      .from(T_LINKS).where(where).fetch()
+            Condition where = CATALOG_LINKS.FROM_TUMBLER.eq(fromTumbler);
+            if (linkTypes != null && !linkTypes.isEmpty()) where = where.and(CATALOG_LINKS.LINK_TYPE.in(linkTypes));
+            return ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                               CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+                      .from(CATALOG_LINKS).where(where).fetch()
                       .map(r -> linkRow(r.value1(), r.value2(), r.value3(), r.value4(),
                                         r.value5(), r.value6(), r.value7(), r.value8(), r.value9()));
         });
@@ -951,11 +935,11 @@ public final class CatalogRepository {
     /** Links to a tumbler, optionally filtered by a SET of link types (RDR-168 njrcn.5). */
     public List<Map<String, Object>> linksTo(String tenant, String toTumbler, List<String> linkTypes) {
         return tenantScope.withTenant(tenant, ctx -> {
-            Condition where = F_LNK_TO.eq(toTumbler);
-            if (linkTypes != null && !linkTypes.isEmpty()) where = where.and(F_LNK_TYPE.in(linkTypes));
-            return ctx.select(F_LNK_ID, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
-                               F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
-                      .from(T_LINKS).where(where).fetch()
+            Condition where = CATALOG_LINKS.TO_TUMBLER.eq(toTumbler);
+            if (linkTypes != null && !linkTypes.isEmpty()) where = where.and(CATALOG_LINKS.LINK_TYPE.in(linkTypes));
+            return ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                               CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+                      .from(CATALOG_LINKS).where(where).fetch()
                       .map(r -> linkRow(r.value1(), r.value2(), r.value3(), r.value4(),
                                         r.value5(), r.value6(), r.value7(), r.value8(), r.value9()));
         });
@@ -968,28 +952,28 @@ public final class CatalogRepository {
                                                  String direction, String tumbler) {
         return tenantScope.withTenant(tenant, ctx -> {
             Condition cond = DSL.trueCondition();
-            if (fromT != null && !fromT.isBlank())         cond = cond.and(F_LNK_FROM.eq(fromT));
-            if (toT != null && !toT.isBlank())             cond = cond.and(F_LNK_TO.eq(toT));
-            if (linkType != null && !linkType.isBlank())   cond = cond.and(F_LNK_TYPE.eq(linkType));
-            if (createdBy != null && !createdBy.isBlank()) cond = cond.and(F_LNK_CRTBY.eq(createdBy));
+            if (fromT != null && !fromT.isBlank())         cond = cond.and(CATALOG_LINKS.FROM_TUMBLER.eq(fromT));
+            if (toT != null && !toT.isBlank())             cond = cond.and(CATALOG_LINKS.TO_TUMBLER.eq(toT));
+            if (linkType != null && !linkType.isBlank())   cond = cond.and(CATALOG_LINKS.LINK_TYPE.eq(linkType));
+            if (createdBy != null && !createdBy.isBlank()) cond = cond.and(CATALOG_LINKS.CREATED_BY.eq(createdBy));
             if (createdAtBefore != null && !createdAtBefore.isBlank())
-                cond = cond.and(F_LNK_CRTAT.lessThan(createdAtBefore));
+                cond = cond.and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
             // direction + tumbler: filter by tumbler in the appropriate column(s)
             if (tumbler != null && !tumbler.isBlank()) {
                 String dir = direction != null ? direction : "both";
                 Condition tCond;
                 if ("out".equals(dir)) {
-                    tCond = F_LNK_FROM.eq(tumbler);
+                    tCond = CATALOG_LINKS.FROM_TUMBLER.eq(tumbler);
                 } else if ("in".equals(dir)) {
-                    tCond = F_LNK_TO.eq(tumbler);
+                    tCond = CATALOG_LINKS.TO_TUMBLER.eq(tumbler);
                 } else {
-                    tCond = F_LNK_FROM.eq(tumbler).or(F_LNK_TO.eq(tumbler));
+                    tCond = CATALOG_LINKS.FROM_TUMBLER.eq(tumbler).or(CATALOG_LINKS.TO_TUMBLER.eq(tumbler));
                 }
                 cond = cond.and(tCond);
             }
-            return ctx.select(F_LNK_ID, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
-                               F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
-                      .from(T_LINKS).where(cond).orderBy(F_LNK_ID)
+            return ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                               CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+                      .from(CATALOG_LINKS).where(cond).orderBy(CATALOG_LINKS.ID)
                       .limit(limit <= 0 ? 200 : limit).offset(offset).fetch()
                       .map(r -> linkRow(r.value1(), r.value2(), r.value3(), r.value4(),
                                         r.value5(), r.value6(), r.value7(), r.value8(), r.value9()));
@@ -1001,13 +985,13 @@ public final class CatalogRepository {
                                 String linkType, String createdBy, String createdAtBefore) {
         return tenantScope.withTenant(tenant, ctx -> {
             Condition cond = DSL.trueCondition();
-            if (fromT != null && !fromT.isBlank())         cond = cond.and(F_LNK_FROM.eq(fromT));
-            if (toT != null && !toT.isBlank())             cond = cond.and(F_LNK_TO.eq(toT));
-            if (linkType != null && !linkType.isBlank())   cond = cond.and(F_LNK_TYPE.eq(linkType));
-            if (createdBy != null && !createdBy.isBlank()) cond = cond.and(F_LNK_CRTBY.eq(createdBy));
+            if (fromT != null && !fromT.isBlank())         cond = cond.and(CATALOG_LINKS.FROM_TUMBLER.eq(fromT));
+            if (toT != null && !toT.isBlank())             cond = cond.and(CATALOG_LINKS.TO_TUMBLER.eq(toT));
+            if (linkType != null && !linkType.isBlank())   cond = cond.and(CATALOG_LINKS.LINK_TYPE.eq(linkType));
+            if (createdBy != null && !createdBy.isBlank()) cond = cond.and(CATALOG_LINKS.CREATED_BY.eq(createdBy));
             if (createdAtBefore != null && !createdAtBefore.isBlank())
-                cond = cond.and(F_LNK_CRTAT.lessThan(createdAtBefore));
-            return ctx.deleteFrom(T_LINKS).where(cond).execute();
+                cond = cond.and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
+            return ctx.deleteFrom(CATALOG_LINKS).where(cond).execute();
         });
     }
 
@@ -1037,19 +1021,19 @@ public final class CatalogRepository {
 
                 Condition dirCond;
                 if ("out".equals(direction)) {
-                    dirCond = F_LNK_FROM.in(fl);
+                    dirCond = CATALOG_LINKS.FROM_TUMBLER.in(fl);
                 } else if ("in".equals(direction)) {
-                    dirCond = F_LNK_TO.in(fl);
+                    dirCond = CATALOG_LINKS.TO_TUMBLER.in(fl);
                 } else {
-                    dirCond = F_LNK_FROM.in(fl).or(F_LNK_TO.in(fl));
+                    dirCond = CATALOG_LINKS.FROM_TUMBLER.in(fl).or(CATALOG_LINKS.TO_TUMBLER.in(fl));
                 }
                 if (!linkTypes.isEmpty()) {
-                    dirCond = dirCond.and(F_LNK_TYPE.in(linkTypes));
+                    dirCond = dirCond.and(CATALOG_LINKS.LINK_TYPE.in(linkTypes));
                 }
 
-                var rows = ctx.select(F_LNK_ID, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
-                                       F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
-                              .from(T_LINKS).where(dirCond).fetch();
+                var rows = ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                                       CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+                              .from(CATALOG_LINKS).where(dirCond).fetch();
                 for (var r : rows) {
                     Map<String, Object> lm = linkRow(r.value1(), r.value2(), r.value3(), r.value4(),
                                                       r.value5(), r.value6(), r.value7(), r.value8(), r.value9());
@@ -1064,8 +1048,8 @@ public final class CatalogRepository {
 
             List<Map<String, Object>> nodes = new ArrayList<>();
             if (!visited.isEmpty()) {
-                nodes = ctx.select(documentFields()).from(T_DOCS)
-                           .where(F_DOC_TUMBLER.in(new ArrayList<>(visited)))
+                nodes = ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+                           .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(visited)))
                            .fetch().map(r -> docRowFromRecord(r.intoMap()));
             }
             return Map.of("nodes", nodes, "edges", edges);
@@ -1079,11 +1063,11 @@ public final class CatalogRepository {
     /** Replace manifest for docId with the provided rows (atomic delete + insert). */
     public void writeManifest(String tenant, String docId, List<Map<String, Object>> rows) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.deleteFrom(T_CHUNKS).where(F_CHK_DOC.eq(docId)).execute();
+            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
             for (var row : rows) {
-                ctx.insertInto(T_CHUNKS,
-                        F_CHK_TENANT, F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
-                        F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN)
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
                    .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
                            i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
                    .execute();
@@ -1096,14 +1080,14 @@ public final class CatalogRepository {
     public void appendManifestChunks(String tenant, String docId, List<Map<String, Object>> rows) {
         tenantScope.withTenant(tenant, ctx -> {
             for (var row : rows) {
-                ctx.insertInto(T_CHUNKS,
-                        F_CHK_TENANT, F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
-                        F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN)
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
                    .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
                            i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
-                   .onConflict(F_CHK_TENANT, F_CHK_DOC, F_CHK_POS)
+                   .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                    .doUpdate()
-                   .set(F_CHK_CHASH, EX_CHK_CHASH)
+                   .set(CATALOG_DOCUMENT_CHUNKS.CHASH, EX_CHK_CHASH)
                    .execute();
             }
             return null;
@@ -1113,9 +1097,9 @@ public final class CatalogRepository {
     /** Get manifest rows for docId, ordered by position. */
     public List<Map<String, Object>> getManifest(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
-                       F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN)
-               .from(T_CHUNKS).where(F_CHK_DOC.eq(docId)).orderBy(F_CHK_POS)
+            ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                       CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+               .from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
                .fetch().map(r -> {
                    Map<String, Object> m = new LinkedHashMap<>();
                    m.put("doc_id",      r.value1());
@@ -1134,18 +1118,18 @@ public final class CatalogRepository {
     /** Purge all manifest rows for a document. */
     public int purgeManifest(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(T_CHUNKS).where(F_CHK_DOC.eq(docId)).execute()
+            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute()
         );
     }
 
     /** Get chashes for a physical_collection via manifest join. */
     public Set<String> chashesForCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.selectDistinct(F_CHK_CHASH)
-                          .from(T_CHUNKS)
-                          .join(T_DOCS).on(F_CHK_TENANT.eq(F_DOC_TENANT)
-                                           .and(F_CHK_DOC.eq(F_DOC_TUMBLER)))
-                          .where(F_DOC_PCOLL.eq(collection))
+            var rows = ctx.selectDistinct(CATALOG_DOCUMENT_CHUNKS.CHASH)
+                          .from(CATALOG_DOCUMENT_CHUNKS)
+                          .join(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENTS.TENANT_ID)
+                                           .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(CATALOG_DOCUMENTS.TUMBLER)))
+                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
                           .fetch();
             Set<String> result = new LinkedHashSet<>();
             for (var r : rows) result.add(r.value1());
@@ -1157,8 +1141,8 @@ public final class CatalogRepository {
     public List<String> docsForChashes(String tenant, List<String> chashes) {
         if (chashes.isEmpty()) return List.of();
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectDistinct(F_CHK_DOC).from(T_CHUNKS)
-               .where(F_CHK_CHASH.in(chashes)).fetch().map(r -> r.value1())
+            ctx.selectDistinct(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
+               .where(CATALOG_DOCUMENT_CHUNKS.CHASH.in(chashes)).fetch().map(r -> r.value1())
         );
     }
 
@@ -1175,11 +1159,11 @@ public final class CatalogRepository {
     public Map<String, List<Map<String, Object>>> getManifestMany(String tenant, List<String> docIds) {
         if (docIds == null || docIds.isEmpty()) return Map.of();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
-                                  F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN)
-                          .from(T_CHUNKS)
-                          .where(F_CHK_DOC.in(docIds))
-                          .orderBy(F_CHK_DOC, F_CHK_POS)
+            var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                                  CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                          .from(CATALOG_DOCUMENT_CHUNKS)
+                          .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.in(docIds))
+                          .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                           .fetch();
             Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
             for (var r : rows) {
@@ -1213,8 +1197,8 @@ public final class CatalogRepository {
         if (docIds == null || docIds.isEmpty()) return Map.of();
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(documentFields())
-                          .from(T_DOCS)
-                          .where(F_DOC_TUMBLER.in(docIds).and(F_DOC_DELETED_AT.isNull()))
+                          .from(CATALOG_DOCUMENTS)
+                          .where(CATALOG_DOCUMENTS.TUMBLER.in(docIds).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                           .fetch();
             Map<String, Map<String, Object>> result = new LinkedHashMap<>();
             for (var r : rows) {
@@ -1229,9 +1213,9 @@ public final class CatalogRepository {
     /** Resync chunk_count on catalog_documents from manifest row count. */
     public int resyncChunkCount(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx -> {
-            int count = ctx.selectCount().from(T_CHUNKS).where(F_CHK_DOC.eq(docId))
+            int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
                            .fetchOne(0, Integer.class);
-            return ctx.update(T_DOCS).set(F_DOC_CHUNKS, count).where(F_DOC_TUMBLER.eq(docId)).execute();
+            return ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, count).where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)).execute();
         });
     }
 
@@ -1298,50 +1282,56 @@ public final class CatalogRepository {
      */
     public Map<String, Object> resolveChash(String tenant, String chash, String preferCollection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // Raw SQL: UNION ALL wrapped in a subquery so the outer ORDER BY can
-            // use expressions (PostgreSQL rejects expressions in UNION ORDER BY;
-            // wrapping in FROM avoids that restriction).
-            // prefer_collection is a bind parameter — never inlined into SQL.
+            // UNION ALL across the three dim tables, wrapped as a derived table so the
+            // outer ORDER BY can reference expressions (PostgreSQL rejects expressions
+            // in a bare UNION's ORDER BY; a derived-table FROM avoids that restriction).
+            // prefer_collection is a bind parameter via the typed .eq(pref) predicate below.
             String pref = preferCollection != null ? preferCollection : "";
-            String sql =
-                "SELECT collection, chunk_text, metadata, created_at FROM ("
-                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_768"
-                + "  WHERE chash = ?"
-                + " UNION ALL"
-                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_384"
-                + "  WHERE chash = ?"
-                + " UNION ALL"
-                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_1024"
-                + "  WHERE chash = ?"
-                + ") sub"
-                // Third key `collection ASC` matches the canonical _sort_key
-                // (preferred, newest created_at, deterministic name) so a chash in two
-                // collections with equal created_at resolves stably (njrcn.4 review).
-                + " ORDER BY (collection = ?) DESC, created_at DESC, collection ASC LIMIT 1";
 
-            var result = ctx.fetch(sql, chash, chash, chash, pref);
-            if (result.isEmpty()) return null;
+            var sub = ctx.select(CHUNKS_768.COLLECTION, CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA, CHUNKS_768.CREATED_AT)
+                          .from(CHUNKS_768).where(CHUNKS_768.CHASH.eq(chash))
+                       .unionAll(
+                          ctx.select(CHUNKS_384.COLLECTION, CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA, CHUNKS_384.CREATED_AT)
+                             .from(CHUNKS_384).where(CHUNKS_384.CHASH.eq(chash)))
+                       .unionAll(
+                          ctx.select(CHUNKS_1024.COLLECTION, CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA, CHUNKS_1024.CREATED_AT)
+                             .from(CHUNKS_1024).where(CHUNKS_1024.CHASH.eq(chash)))
+                       .asTable("sub");
 
-            var row     = result.get(0);
-            String col  = row.get("collection", String.class);
-            String text = row.get("chunk_text",  String.class);
-            String metaJson = row.get("metadata", String.class);
+            Field<String>         col       = sub.field("collection", String.class);
+            Field<String>         text      = sub.field("chunk_text", String.class);
+            Field<org.jooq.JSONB> meta      = sub.field("metadata", org.jooq.JSONB.class);
+            Field<java.time.OffsetDateTime> createdAt = sub.field("created_at", java.time.OffsetDateTime.class);
+
+            var row = ctx.select(col, text, meta, createdAt)
+                          .from(sub)
+                          // Third key `collection ASC` matches the canonical _sort_key
+                          // (preferred, newest created_at, deterministic name) so a chash in two
+                          // collections with equal created_at resolves stably (njrcn.4 review).
+                          .orderBy(col.eq(pref).desc(), createdAt.desc(), col.asc())
+                          .limit(1)
+                          .fetchOne();
+            if (row == null) return null;
+
+            String colVal      = row.value1();
+            String textVal     = row.value2();
+            org.jooq.JSONB metaVal = row.value3();
 
             // Lookup doc_id from catalog_document_chunks. ORDER BY doc_id for a
             // deterministic winner when a chash is referenced by multiple docs (dedup).
             String docId = "";
-            var docRow = ctx.select(F_CHK_DOC).from(T_CHUNKS)
-                            .where(F_CHK_CHASH.eq(chash))
-                            .orderBy(F_CHK_DOC.asc()).limit(1).fetchOne();
+            var docRow = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
+                            .where(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(chash))
+                            .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID.asc()).limit(1).fetchOne();
             if (docRow != null) docId = docRow.value1();
 
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("chash",               chash);
             m.put("chunk_hash",          chash);
-            m.put("physical_collection", col);
+            m.put("physical_collection", colVal);
             m.put("doc_id",              docId);
-            m.put("chunk_text",          text);
-            m.put("metadata",            metaJson != null ? parseMetaJson(metaJson) : Map.of());
+            m.put("chunk_text",          textVal);
+            m.put("metadata",            metaVal != null ? parseMetaJson(metaVal.data()) : Map.of());
             return m;
         });
     }
@@ -1373,25 +1363,33 @@ public final class CatalogRepository {
     /** Upsert a collection. */
     public void upsertCollection(String tenant, Map<String, Object> coll) {
         tenantScope.withTenant(tenant, ctx -> {
-            // Raw SQL for superseded_at / created_at: these are timestamptz NULL columns after
-            // catalog-002-1-temporal-typing (RDR-156 P0.2).  jOOQ Field<String> would bind as
-            // varchar which PostgreSQL rejects; ?::timestamptz accepts ISO-8601 strings or NULL.
-            ctx.execute(
-                "INSERT INTO nexus.catalog_collections"
-                + " (tenant_id, name, content_type, owner_id, embedding_model, model_version,"
-                + "  display_name, legacy_grandfathered, superseded_by, superseded_at, created_at)"
-                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz)"
-                + " ON CONFLICT (tenant_id, name) DO UPDATE SET"
-                + "  content_type=EXCLUDED.content_type, owner_id=EXCLUDED.owner_id,"
-                + "  embedding_model=EXCLUDED.embedding_model, model_version=EXCLUDED.model_version,"
-                + "  display_name=EXCLUDED.display_name, legacy_grandfathered=EXCLUDED.legacy_grandfathered",
-                tenant,
-                s(coll, "name"), nne(s(coll, "content_type")),
-                nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
-                nne(s(coll, "model_version")), nne(s(coll, "display_name")),
-                ni(i(coll, "legacy_grandfathered"), 0),
-                nne(s(coll, "superseded_by")), nz(s(coll, "superseded_at")),
-                nz(s(coll, "created_at")));
+            // nexus-xtmtf: superseded_at / created_at are timestamptz NULL columns after
+            // catalog-002-1-temporal-typing (RDR-156 P0.2). Parse the ISO-8601-or-empty
+            // strings to OffsetDateTime in Java (blank -> NULL) and bind the generated
+            // typed fields — no ?::timestamptz cast, no raw SQL.
+            ctx.insertInto(CATALOG_COLLECTIONS,
+                    CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                    CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                    CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                    CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                    CATALOG_COLLECTIONS.CREATED_AT)
+               .values(tenant,
+                       s(coll, "name"), nne(s(coll, "content_type")),
+                       nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
+                       nne(s(coll, "model_version")), nne(s(coll, "display_name")),
+                       ni(i(coll, "legacy_grandfathered"), 0),
+                       nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
+                       tsOrNull(s(coll, "created_at")))
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doUpdate()
+               .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
+               .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
+               .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+               .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
+               .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
+               .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
+               .execute();
             return null;
         });
     }
@@ -1399,9 +1397,9 @@ public final class CatalogRepository {
     /** Get a collection by name. Returns null if not found. */
     public Map<String, Object> getCollection(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var r = ctx.select(F_COL_NAME, F_COL_CTYPE, F_COL_OWNER, F_COL_EMBD, F_COL_MVER,
-                               F_COL_DNAME, F_COL_LEGCY, F_COL_SUPBY, F_COL_SUPAT, F_COL_CRTAT)
-                       .from(T_COLLS).where(F_COL_NAME.eq(name)).fetchOne();
+            var r = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                               CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT)
+                       .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                         r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
         });
@@ -1410,9 +1408,9 @@ public final class CatalogRepository {
     /** List all collections. */
     public List<Map<String, Object>> listCollections(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(F_COL_NAME, F_COL_CTYPE, F_COL_OWNER, F_COL_EMBD, F_COL_MVER,
-                       F_COL_DNAME, F_COL_LEGCY, F_COL_SUPBY, F_COL_SUPAT, F_COL_CRTAT)
-               .from(T_COLLS).orderBy(F_COL_NAME).fetch()
+            ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                       CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT)
+               .from(CATALOG_COLLECTIONS).orderBy(CATALOG_COLLECTIONS.NAME).fetch()
                .map(r -> collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                   r.value6(), r.value7(), r.value8(), r.value9(), r.value10()))
         );
@@ -1497,11 +1495,14 @@ public final class CatalogRepository {
      */
     public int supersedeCollection(String tenant, String name, String supersededBy, String supersededAt) {
         return tenantScope.withTenant(tenant, ctx ->
-            // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing; use ?::timestamptz cast.
-            ctx.execute(
-                "UPDATE nexus.catalog_collections SET superseded_by=?, superseded_at=?::timestamptz"
-                + " WHERE tenant_id=? AND name=?",
-                supersededBy, nz(supersededAt), tenant, name)
+            // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing;
+            // nexus-xtmtf: typed OffsetDateTime bind (blank -> NULL), no cast.
+            ctx.update(CATALOG_COLLECTIONS)
+               .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
+               .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, tsOrNull(supersededAt))
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_COLLECTIONS.NAME.eq(name)))
+               .execute()
         );
     }
 
@@ -1509,15 +1510,15 @@ public final class CatalogRepository {
     public Map<String, Object> collectionForTuple(String tenant, String contentType,
                                                     String ownerId, String embeddingModel) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var r = ctx.select(F_COL_NAME, F_COL_CTYPE, F_COL_OWNER, F_COL_EMBD, F_COL_MVER,
-                               F_COL_DNAME, F_COL_LEGCY, F_COL_SUPBY, F_COL_SUPAT, F_COL_CRTAT)
-                       .from(T_COLLS)
-                       .where(F_COL_CTYPE.eq(contentType)
-                              .and(F_COL_OWNER.eq(ownerId))
-                              .and(F_COL_EMBD.eq(embeddingModel))
-                              .and(F_COL_LEGCY.eq(0))
-                              .and(F_COL_SUPBY.eq("")))
-                       .orderBy(F_COL_NAME.desc()).limit(1).fetchOne();
+            var r = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                               CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT)
+                       .from(CATALOG_COLLECTIONS)
+                       .where(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType)
+                              .and(CATALOG_COLLECTIONS.OWNER_ID.eq(ownerId))
+                              .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(embeddingModel))
+                              .and(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED.eq(0))
+                              .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
+                       .orderBy(CATALOG_COLLECTIONS.NAME.desc()).limit(1).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                         r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
         });
@@ -1639,11 +1640,11 @@ public final class CatalogRepository {
 
     public void setMeta(String tenant, String key, String value) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(T_META, F_META_TENANT, F_META_KEY, F_META_VAL)
+            ctx.insertInto(CATALOG_META, CATALOG_META.TENANT_ID, CATALOG_META.KEY, CATALOG_META.VALUE)
                .values(tenant, key, value)
-               .onConflict(F_META_TENANT, F_META_KEY)
+               .onConflict(CATALOG_META.TENANT_ID, CATALOG_META.KEY)
                .doUpdate()
-               .set(F_META_VAL, EX_META_VAL)
+               .set(CATALOG_META.VALUE, EX_META_VAL)
                .execute();
             return null;
         });
@@ -1651,7 +1652,7 @@ public final class CatalogRepository {
 
     public String getMeta(String tenant, String key) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var r = ctx.select(F_META_VAL).from(T_META).where(F_META_KEY.eq(key)).fetchOne();
+            var r = ctx.select(CATALOG_META.VALUE).from(CATALOG_META).where(CATALOG_META.KEY.eq(key)).fetchOne();
             return r != null ? r.value1() : null;
         });
     }
@@ -1659,10 +1660,10 @@ public final class CatalogRepository {
     /** Return owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */
     public List<Map<String, Object>> ownersByType(String tenant, String ownerType) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE, F_OWN_REPO,
-                       F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
-               .from(T_OWNERS)
-               .where(F_OWN_TYPE.eq(ownerType))
+            ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+               .from(CATALOG_OWNERS)
+               .where(CATALOG_OWNERS.OWNER_TYPE.eq(ownerType))
                .fetch()
                .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7()))
         );
@@ -1671,10 +1672,10 @@ public final class CatalogRepository {
     /** Return a single owner by tumbler_prefix. Returns null if not found. */
     public Map<String, Object> ownerByPrefix(String tenant, String tumblerPrefix) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var r = ctx.select(F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE, F_OWN_REPO,
-                               F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
-                       .from(T_OWNERS)
-                       .where(F_OWN_PREFIX.eq(tumblerPrefix))
+            var r = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+                               CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+                       .from(CATALOG_OWNERS)
+                       .where(CATALOG_OWNERS.TUMBLER_PREFIX.eq(tumblerPrefix))
                        .fetchOne();
             return r != null
                 ? ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7())
@@ -1690,9 +1691,9 @@ public final class CatalogRepository {
     public Map<String, Integer> chunkCountsForDocs(String tenant, List<String> docIds) {
         if (docIds == null || docIds.isEmpty()) return Map.of();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(F_DOC_TUMBLER, F_DOC_CHUNKS)
-                          .from(T_DOCS)
-                          .where(F_DOC_TUMBLER.in(docIds))
+            var rows = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.CHUNK_COUNT)
+                          .from(CATALOG_DOCUMENTS)
+                          .where(CATALOG_DOCUMENTS.TUMBLER.in(docIds))
                           .fetch();
             Map<String, Integer> result = new LinkedHashMap<>();
             for (var r : rows) {
@@ -1710,9 +1711,9 @@ public final class CatalogRepository {
     public Map<String, List<Map<String, Object>>> linksFromBatch(String tenant, List<String> tumblers) {
         if (tumblers == null || tumblers.isEmpty()) return Map.of();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(F_LNK_FROM, F_LNK_TYPE)
-                          .from(T_LINKS)
-                          .where(F_LNK_FROM.in(tumblers))
+            var rows = ctx.select(CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+                          .from(CATALOG_LINKS)
+                          .where(CATALOG_LINKS.FROM_TUMBLER.in(tumblers))
                           .fetch();
             Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
             for (var r : rows) {
@@ -1735,31 +1736,27 @@ public final class CatalogRepository {
             // catalog_stats security_invoker view (per-subquery RLS scopes each to
             // the GUC tenant), replacing five separate selectCount calls and the
             // Java-side hand-assembly that the Python path duplicated.
-            var s = ctx.fetchOne(
-                "SELECT doc_count, link_count, owner_count, collection_count, chunk_count "
-                + "FROM nexus.catalog_stats");
-            long docCount  = s.get("doc_count", Long.class);
-            long lnkCount  = s.get("link_count", Long.class);
-            long ownCount  = s.get("owner_count", Long.class);
-            long collCount = s.get("collection_count", Long.class);
-            long chkCount  = s.get("chunk_count", Long.class);
+            var s = ctx.selectFrom(CATALOG_STATS).fetchOne();
+            long docCount  = s.get(CATALOG_STATS.DOC_COUNT);
+            long lnkCount  = s.get(CATALOG_STATS.LINK_COUNT);
+            long ownCount  = s.get(CATALOG_STATS.OWNER_COUNT);
+            long collCount = s.get(CATALOG_STATS.COLLECTION_COUNT);
+            long chkCount  = s.get(CATALOG_STATS.CHUNK_COUNT);
             // RDR-154 P1.2: the two GROUP-BY breakdowns also read views (completing
             // the "5+2" collapse, Gap 3). links_by_type ← links_by_type_counts;
             // by_content_type reuses coverage_by_content_type.total (same per-type
             // document count — eliminates the duplicate aggregate the critic flagged).
-            var ltypes = ctx.fetch(
-                "SELECT link_type, link_count FROM nexus.links_by_type_counts");
+            var ltypes = ctx.selectFrom(LINKS_BY_TYPE_COUNTS).fetch();
             Map<String, Long> byType = new LinkedHashMap<>();
-            for (var r : ltypes) byType.put(r.get("link_type", String.class),
-                                            r.get("link_count", Long.class));
+            for (var r : ltypes) byType.put(r.get(LINKS_BY_TYPE_COUNTS.LINK_TYPE),
+                                            r.get(LINKS_BY_TYPE_COUNTS.LINK_COUNT));
             // by_content_type: key is "" for null/empty content_type (the view already
             // COALESCEs to ''), matching SQLite Catalog.stats().
-            var ctypes = ctx.fetch(
-                "SELECT content_type, total FROM nexus.coverage_by_content_type");
+            var ctypes = ctx.select(COVERAGE_BY_CONTENT_TYPE.CONTENT_TYPE, COVERAGE_BY_CONTENT_TYPE.TOTAL)
+                            .from(COVERAGE_BY_CONTENT_TYPE).fetch();
             Map<String, Long> byContentType = new LinkedHashMap<>();
             for (var r : ctypes) {
-                byContentType.put(r.get("content_type", String.class),
-                                  r.get("total", Long.class));
+                byContentType.put(r.value1(), r.value2());
             }
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("doc_count", docCount);
@@ -1790,16 +1787,18 @@ public final class CatalogRepository {
             // The view GROUP BYs collection, so it emits NO row for a collection
             // with zero documents — default to {last_indexed:null, orphan_count:0}
             // to preserve the prior contract.
-            var r = ctx.fetchOne(
-                "SELECT last_indexed, orphan_count, stale_source_ratio "
-                + "FROM nexus.collection_health_meta WHERE collection = ?", collection);
+            var r = ctx.select(COLLECTION_HEALTH_META.LAST_INDEXED,
+                               COLLECTION_HEALTH_META.ORPHAN_COUNT,
+                               COLLECTION_HEALTH_META.STALE_SOURCE_RATIO)
+                       .from(COLLECTION_HEALTH_META)
+                       .where(COLLECTION_HEALTH_META.COLLECTION.eq(collection))
+                       .fetchOne();
 
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("last_indexed", r == null ? null : r.get("last_indexed", String.class));
-            result.put("orphan_count", r == null ? 0L : r.get("orphan_count", Long.class));
+            result.put("last_indexed", r == null ? null : r.value1());
+            result.put("orphan_count", r == null ? 0L : r.value2());
             // nexus-agsq7: index-age staleness; null when no dated doc qualifies.
-            result.put("stale_source_ratio",
-                       r == null ? null : r.get("stale_source_ratio", Double.class));
+            result.put("stale_source_ratio", r == null ? null : r.value3());
             return result;
         });
     }
@@ -1817,11 +1816,11 @@ public final class CatalogRepository {
      */
     public List<String> distinctDocCollections(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectDistinct(F_DOC_PCOLL)
-               .from(T_DOCS)
-               .where(F_DOC_PCOLL.ne(""))
-               .orderBy(F_DOC_PCOLL)
-               .fetch(F_DOC_PCOLL)
+            ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne(""))
+               .orderBy(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
         );
     }
 
@@ -1835,10 +1834,10 @@ public final class CatalogRepository {
      */
     public List<Map<String, Object>> ownersWithRoots(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE, F_OWN_REPO,
-                       F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
-               .from(T_OWNERS)
-               .where(F_OWN_ROOT.ne(""))
+            ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+               .from(CATALOG_OWNERS)
+               .where(CATALOG_OWNERS.REPO_ROOT.ne(""))
                .fetch()
                .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(),
                                   r.value5(), r.value6(), r.value7()))
@@ -1858,15 +1857,15 @@ public final class CatalogRepository {
             // AND no incoming links (to_tumbler not in links).
             // Use NOT EXISTS subqueries for cross-tenant RLS safety.
             var noOut = DSL.notExists(
-                ctx.selectOne().from(T_LINKS).where(F_LNK_FROM.eq(F_DOC_TUMBLER))
+                ctx.selectOne().from(CATALOG_LINKS).where(CATALOG_LINKS.FROM_TUMBLER.eq(CATALOG_DOCUMENTS.TUMBLER))
             );
             var noIn = DSL.notExists(
-                ctx.selectOne().from(T_LINKS).where(F_LNK_TO.eq(F_DOC_TUMBLER))
+                ctx.selectOne().from(CATALOG_LINKS).where(CATALOG_LINKS.TO_TUMBLER.eq(CATALOG_DOCUMENTS.TUMBLER))
             );
-            return ctx.select(F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_CTYPE, F_DOC_FPATH)
-                      .from(T_DOCS)
+            return ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH)
+                      .from(CATALOG_DOCUMENTS)
                       .where(noOut.and(noIn))
-                      .orderBy(F_DOC_TUMBLER)
+                      .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                       .fetch()
                       .map(r -> {
                           Map<String, Object> m = new LinkedHashMap<>();
@@ -1888,10 +1887,10 @@ public final class CatalogRepository {
      */
     public List<Map<String, Object>> docsWithAbsolutePaths(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(F_DOC_TUMBLER, F_DOC_FPATH, F_DOC_PCOLL)
-               .from(T_DOCS)
-               .where(F_DOC_FPATH.startsWith("/"))
-               .orderBy(F_DOC_TUMBLER)
+            ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.FILE_PATH.startsWith("/"))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch()
                .map(r -> {
                    Map<String, Object> m = new LinkedHashMap<>();
@@ -1914,11 +1913,11 @@ public final class CatalogRepository {
      */
     public Map<String, Object> collectionOwnerRoot(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var r = ctx.select(F_COL_OWNER, F_OWN_ROOT)
-                       .from(T_COLLS)
-                       .leftJoin(T_OWNERS)
-                       .on(F_COL_OWNER.eq(F_OWN_PREFIX))
-                       .where(F_COL_NAME.eq(name))
+            var r = ctx.select(CATALOG_COLLECTIONS.OWNER_ID, CATALOG_OWNERS.REPO_ROOT)
+                       .from(CATALOG_COLLECTIONS)
+                       .leftJoin(CATALOG_OWNERS)
+                       .on(CATALOG_COLLECTIONS.OWNER_ID.eq(CATALOG_OWNERS.TUMBLER_PREFIX))
+                       .where(CATALOG_COLLECTIONS.NAME.eq(name))
                        .fetchOne();
             if (r == null) return null;
             Map<String, Object> m = new LinkedHashMap<>();
@@ -1933,12 +1932,12 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-154 P1.2 (nexus-h9qyp): read the collection_doc_counts
             // security_invoker view (replaces the hand-written GROUP BY).
-            var rows = ctx.fetch(
-                "SELECT physical_collection, doc_count FROM nexus.collection_doc_counts");
+            var rows = ctx.select(COLLECTION_DOC_COUNTS.PHYSICAL_COLLECTION, COLLECTION_DOC_COUNTS.DOC_COUNT)
+                          .from(COLLECTION_DOC_COUNTS)
+                          .fetch();
             Map<String, Long> result = new LinkedHashMap<>();
             for (var r : rows) {
-                result.put(r.get("physical_collection", String.class),
-                           r.get("doc_count", Long.class));
+                result.put(r.value1(), r.value2());
             }
             return result;
         });
@@ -1975,32 +1974,49 @@ public final class CatalogRepository {
             // security_invoker view; the owner-prefix case runs the same aggregation
             // with the prefix applied BEFORE the GROUP BY (a view cannot be
             // parameterized, but the N+1 is eliminated either way).
-            org.jooq.Result<?> rows;
+            List<Map<String, Object>> result = new ArrayList<>();
             if (ownerPrefix == null || ownerPrefix.isBlank()) {
-                rows = ctx.fetch(
-                    "SELECT content_type, total, linked FROM nexus.coverage_by_content_type");
+                var rows = ctx.select(COVERAGE_BY_CONTENT_TYPE.CONTENT_TYPE,
+                                      COVERAGE_BY_CONTENT_TYPE.TOTAL,
+                                      COVERAGE_BY_CONTENT_TYPE.LINKED)
+                              .from(COVERAGE_BY_CONTENT_TYPE)
+                              .fetch();
+                for (var r : rows) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("content_type", r.value1());
+                    row.put("total",        r.value2());
+                    row.put("linked",       r.value3());
+                    result.add(row);
+                }
             } else {
                 String likePat = ownerPrefix.replaceAll("\\.$", "") + ".%";
-                rows = ctx.fetch(
-                    "SELECT COALESCE(d.content_type, '') AS content_type, "
-                    + "count(*) AS total, "
-                    + "count(*) FILTER (WHERE EXISTS ("
-                    + "  SELECT 1 FROM nexus.catalog_links l "
-                    + "   WHERE l.from_tumbler = d.tumbler OR l.to_tumbler = d.tumbler"
-                    + ")) AS linked "
-                    + "FROM nexus.catalog_documents d "
-                    + "WHERE d.tumbler LIKE ? OR d.tumbler = ? "
-                    + "GROUP BY COALESCE(d.content_type, '')",
-                    likePat, ownerPrefix);
-            }
-
-            List<Map<String, Object>> result = new ArrayList<>();
-            for (var r : rows) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("content_type", r.get("content_type", String.class));
-                row.put("total",        r.get("total", Long.class));
-                row.put("linked",       r.get("linked", Long.class));
-                result.add(row);
+                // DSL.inline("") (a constant, not a bind param) — reusing the SAME Field
+                // object in both the SELECT list and GROUP BY only reads as the same
+                // expression to Postgres's GROUP BY validity check when the fallback is an
+                // inlined literal; a bound "?" parameter renders as a DIFFERENT placeholder
+                // ($N vs $M) at each occurrence, so Postgres sees two distinct expressions
+                // and rejects the query with "must appear in the GROUP BY clause" even
+                // though both bind to "" at runtime (caught by CatalogRepositoryTest
+                // coverageByContentType_ownerPrefixFilter).
+                Field<String> contentType = DSL.coalesce(CATALOG_DOCUMENTS.CONTENT_TYPE, DSL.inline(""));
+                Field<Long> linkedCount = DSL.count().filterWhere(
+                    DSL.exists(DSL.selectOne().from(CATALOG_LINKS)
+                        .where(CATALOG_LINKS.FROM_TUMBLER.eq(CATALOG_DOCUMENTS.TUMBLER)
+                            .or(CATALOG_LINKS.TO_TUMBLER.eq(CATALOG_DOCUMENTS.TUMBLER)))))
+                    .cast(Long.class);
+                var rows = ctx.select(contentType, DSL.count().cast(Long.class), linkedCount)
+                              .from(CATALOG_DOCUMENTS)
+                              .where(CATALOG_DOCUMENTS.TUMBLER.like(likePat)
+                                  .or(CATALOG_DOCUMENTS.TUMBLER.eq(ownerPrefix)))
+                              .groupBy(contentType)
+                              .fetch();
+                for (var r : rows) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("content_type", r.value1());
+                    row.put("total",        r.value2());
+                    row.put("linked",       r.value3());
+                    result.add(row);
+                }
             }
             return result;
         });
@@ -2054,24 +2070,24 @@ public final class CatalogRepository {
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
-                var insert = ctx.insertInto(T_OWNERS,
-                        F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
-                        F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD, F_OWN_SEQ);
+                var insert = ctx.insertInto(CATALOG_OWNERS,
+                        CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
+                        CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ);
                 for (var o : batch) {
                     insert = insert.values(tenant,
                             s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
                             s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
                             s(o,"head_hash"), lng(o,"next_seq", 0L));
                 }
-                insert.onConflict(F_OWN_TENANT, F_OWN_PREFIX)
+                insert.onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
                       .doUpdate()
-                      .set(F_OWN_NAME, EX_OWN_NAME)
-                      .set(F_OWN_TYPE, EX_OWN_TYPE)
-                      .set(F_OWN_REPO, EX_OWN_REPO)
-                      .set(F_OWN_DESC, EX_OWN_DESC)
-                      .set(F_OWN_ROOT, EX_OWN_ROOT)
-                      .set(F_OWN_HEAD, EX_OWN_HEAD)
-                      .set(F_OWN_SEQ,  EX_OWN_SEQ_GREATEST)
+                      .set(CATALOG_OWNERS.NAME, EX_OWN_NAME)
+                      .set(CATALOG_OWNERS.OWNER_TYPE, EX_OWN_TYPE)
+                      .set(CATALOG_OWNERS.REPO_HASH, EX_OWN_REPO)
+                      .set(CATALOG_OWNERS.DESCRIPTION, EX_OWN_DESC)
+                      .set(CATALOG_OWNERS.REPO_ROOT, EX_OWN_ROOT)
+                      .set(CATALOG_OWNERS.HEAD_HASH, EX_OWN_HEAD)
+                      .set(CATALOG_OWNERS.NEXT_SEQ,  EX_OWN_SEQ_GREATEST)
                       .execute();
             }
             return rows.size();
@@ -2082,22 +2098,22 @@ public final class CatalogRepository {
     private static final int MAX_BATCH_PARAMS = 30_000;
 
     private void doImportOwner(DSLContext ctx, String tenant, Map<String, Object> o) {
-        ctx.insertInto(T_OWNERS,
-                F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
-                F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD, F_OWN_SEQ)
+        ctx.insertInto(CATALOG_OWNERS,
+                CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
+                CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
            .values(tenant,
                    s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
                    s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
                    s(o,"head_hash"), lng(o,"next_seq", 0L))
-           .onConflict(F_OWN_TENANT, F_OWN_PREFIX)
+           .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
            .doUpdate()
-           .set(F_OWN_NAME, EX_OWN_NAME)
-           .set(F_OWN_TYPE, EX_OWN_TYPE)
-           .set(F_OWN_REPO, EX_OWN_REPO)
-           .set(F_OWN_DESC, EX_OWN_DESC)
-           .set(F_OWN_ROOT, EX_OWN_ROOT)
-           .set(F_OWN_HEAD, EX_OWN_HEAD)
-           .set(F_OWN_SEQ,  EX_OWN_SEQ_GREATEST)
+           .set(CATALOG_OWNERS.NAME, EX_OWN_NAME)
+           .set(CATALOG_OWNERS.OWNER_TYPE, EX_OWN_TYPE)
+           .set(CATALOG_OWNERS.REPO_HASH, EX_OWN_REPO)
+           .set(CATALOG_OWNERS.DESCRIPTION, EX_OWN_DESC)
+           .set(CATALOG_OWNERS.REPO_ROOT, EX_OWN_ROOT)
+           .set(CATALOG_OWNERS.HEAD_HASH, EX_OWN_HEAD)
+           .set(CATALOG_OWNERS.NEXT_SEQ,  EX_OWN_SEQ_GREATEST)
            .execute();
     }
 
@@ -2126,12 +2142,12 @@ public final class CatalogRepository {
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
-                var insert = ctx.insertInto(T_DOCS,
-                        F_DOC_TENANT, F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_AUTHOR, F_DOC_YEAR,
-                        F_DOC_CTYPE, F_DOC_FPATH, F_DOC_CORPUS, F_DOC_PCOLL, F_DOC_CHUNKS,
-                        F_DOC_HEAD, F_DOC_IDXAT, F_DOC_META, F_DOC_SMTIME, F_DOC_ALIAS, F_DOC_URI,
-                        F_DOC_BIBY, F_DOC_BIAU, F_DOC_BIVE, F_DOC_BICC,
-                        F_DOC_BIS2, F_DOC_BIOA, F_DOC_BIDOI, F_DOC_BIAT);
+                var insert = ctx.insertInto(CATALOG_DOCUMENTS,
+                        CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
+                        CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
+                        CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
+                        CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
+                        CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT);
                 for (var d : batch) {
                     String metaJson = jsonOrNull(d.get("metadata"));
                     insert = insert.values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
@@ -2145,31 +2161,31 @@ public final class CatalogRepository {
                             nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
                             nne(s(d,"bib_doi")), nne(s(d,"bib_enriched_at")));
                 }
-                insert.onConflict(F_DOC_TENANT, F_DOC_TUMBLER)
+                insert.onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                       .doUpdate()
-                      .set(F_DOC_TITLE,  EX_DOC_TITLE)
-                      .set(F_DOC_AUTHOR, EX_DOC_AUTHOR)
-                      .set(F_DOC_YEAR,   EX_DOC_YEAR)
-                      .set(F_DOC_CTYPE,  EX_DOC_CTYPE)
-                      .set(F_DOC_FPATH,  EX_DOC_FPATH)
-                      .set(F_DOC_CORPUS, EX_DOC_CORPUS)
-                      .set(F_DOC_PCOLL,  EX_DOC_PCOLL)
-                      .set(F_DOC_CHUNKS, EX_DOC_CHUNKS)
-                      .set(F_DOC_HEAD,   EX_DOC_HEAD)
-                      .set(F_DOC_IDXAT,  EX_DOC_IDXAT)
+                      .set(CATALOG_DOCUMENTS.TITLE,  EX_DOC_TITLE)
+                      .set(CATALOG_DOCUMENTS.AUTHOR, EX_DOC_AUTHOR)
+                      .set(CATALOG_DOCUMENTS.YEAR,   EX_DOC_YEAR)
+                      .set(CATALOG_DOCUMENTS.CONTENT_TYPE,  EX_DOC_CTYPE)
+                      .set(CATALOG_DOCUMENTS.FILE_PATH,  EX_DOC_FPATH)
+                      .set(CATALOG_DOCUMENTS.CORPUS, EX_DOC_CORPUS)
+                      .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,  EX_DOC_PCOLL)
+                      .set(CATALOG_DOCUMENTS.CHUNK_COUNT, EX_DOC_CHUNKS)
+                      .set(CATALOG_DOCUMENTS.HEAD_HASH,   EX_DOC_HEAD)
+                      .set(CATALOG_DOCUMENTS.INDEXED_AT,  EX_DOC_IDXAT)
                       .set(F_DOC_META,   EX_DOC_META)
                       // GREATEST: never downgrade source_mtime on re-import
-                      .set(F_DOC_SMTIME, EX_DOC_SMTIME_GREATEST)
-                      .set(F_DOC_ALIAS,  EX_DOC_ALIAS)
-                      .set(F_DOC_URI,    EX_DOC_URI)
-                      .set(F_DOC_BIBY,   EX_DOC_BIBY)
-                      .set(F_DOC_BIAU,   EX_DOC_BIAU)
-                      .set(F_DOC_BIVE,   EX_DOC_BIVE)
-                      .set(F_DOC_BICC,   EX_DOC_BICC)
-                      .set(F_DOC_BIS2,   EX_DOC_BIS2)
-                      .set(F_DOC_BIOA,   EX_DOC_BIOA)
-                      .set(F_DOC_BIDOI,  EX_DOC_BIDOI)
-                      .set(F_DOC_BIAT,   EX_DOC_BIAT)
+                      .set(CATALOG_DOCUMENTS.SOURCE_MTIME, EX_DOC_SMTIME_GREATEST)
+                      .set(CATALOG_DOCUMENTS.ALIAS_OF,  EX_DOC_ALIAS)
+                      .set(CATALOG_DOCUMENTS.SOURCE_URI,    EX_DOC_URI)
+                      .set(CATALOG_DOCUMENTS.BIB_YEAR,   EX_DOC_BIBY)
+                      .set(CATALOG_DOCUMENTS.BIB_AUTHORS,   EX_DOC_BIAU)
+                      .set(CATALOG_DOCUMENTS.BIB_VENUE,   EX_DOC_BIVE)
+                      .set(CATALOG_DOCUMENTS.BIB_CITATION_COUNT,   EX_DOC_BICC)
+                      .set(CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID,   EX_DOC_BIS2)
+                      .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
+                      .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
+                      .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   EX_DOC_BIAT)
                       .execute();
             }
             return rows.size();
@@ -2179,12 +2195,12 @@ public final class CatalogRepository {
     private void doImportDocument(DSLContext ctx, String tenant, Map<String, Object> d) {
         String metaJson = jsonOrNull(d.get("metadata"));
         {
-            ctx.insertInto(T_DOCS,
-                    F_DOC_TENANT, F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_AUTHOR, F_DOC_YEAR,
-                    F_DOC_CTYPE, F_DOC_FPATH, F_DOC_CORPUS, F_DOC_PCOLL, F_DOC_CHUNKS,
-                    F_DOC_HEAD, F_DOC_IDXAT, F_DOC_META, F_DOC_SMTIME, F_DOC_ALIAS, F_DOC_URI,
-                    F_DOC_BIBY, F_DOC_BIAU, F_DOC_BIVE, F_DOC_BICC,
-                    F_DOC_BIS2, F_DOC_BIOA, F_DOC_BIDOI, F_DOC_BIAT)
+            ctx.insertInto(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
+                    CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
+                    CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
+                    CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
+                    CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT)
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
@@ -2195,31 +2211,31 @@ public final class CatalogRepository {
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
                        nne(s(d,"bib_doi")), nne(s(d,"bib_enriched_at")))
-               .onConflict(F_DOC_TENANT, F_DOC_TUMBLER)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doUpdate()
-               .set(F_DOC_TITLE,  EX_DOC_TITLE)
-               .set(F_DOC_AUTHOR, EX_DOC_AUTHOR)
-               .set(F_DOC_YEAR,   EX_DOC_YEAR)
-               .set(F_DOC_CTYPE,  EX_DOC_CTYPE)
-               .set(F_DOC_FPATH,  EX_DOC_FPATH)
-               .set(F_DOC_CORPUS, EX_DOC_CORPUS)
-               .set(F_DOC_PCOLL,  EX_DOC_PCOLL)
-               .set(F_DOC_CHUNKS, EX_DOC_CHUNKS)
-               .set(F_DOC_HEAD,   EX_DOC_HEAD)
-               .set(F_DOC_IDXAT,  EX_DOC_IDXAT)
+               .set(CATALOG_DOCUMENTS.TITLE,  EX_DOC_TITLE)
+               .set(CATALOG_DOCUMENTS.AUTHOR, EX_DOC_AUTHOR)
+               .set(CATALOG_DOCUMENTS.YEAR,   EX_DOC_YEAR)
+               .set(CATALOG_DOCUMENTS.CONTENT_TYPE,  EX_DOC_CTYPE)
+               .set(CATALOG_DOCUMENTS.FILE_PATH,  EX_DOC_FPATH)
+               .set(CATALOG_DOCUMENTS.CORPUS, EX_DOC_CORPUS)
+               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,  EX_DOC_PCOLL)
+               .set(CATALOG_DOCUMENTS.CHUNK_COUNT, EX_DOC_CHUNKS)
+               .set(CATALOG_DOCUMENTS.HEAD_HASH,   EX_DOC_HEAD)
+               .set(CATALOG_DOCUMENTS.INDEXED_AT,  EX_DOC_IDXAT)
                .set(F_DOC_META,   EX_DOC_META)
                // GREATEST: never downgrade source_mtime on re-import
-               .set(F_DOC_SMTIME, EX_DOC_SMTIME_GREATEST)
-               .set(F_DOC_ALIAS,  EX_DOC_ALIAS)
-               .set(F_DOC_URI,    EX_DOC_URI)
-               .set(F_DOC_BIBY,   EX_DOC_BIBY)
-               .set(F_DOC_BIAU,   EX_DOC_BIAU)
-               .set(F_DOC_BIVE,   EX_DOC_BIVE)
-               .set(F_DOC_BICC,   EX_DOC_BICC)
-               .set(F_DOC_BIS2,   EX_DOC_BIS2)
-               .set(F_DOC_BIOA,   EX_DOC_BIOA)
-               .set(F_DOC_BIDOI,  EX_DOC_BIDOI)
-               .set(F_DOC_BIAT,   EX_DOC_BIAT)
+               .set(CATALOG_DOCUMENTS.SOURCE_MTIME, EX_DOC_SMTIME_GREATEST)
+               .set(CATALOG_DOCUMENTS.ALIAS_OF,  EX_DOC_ALIAS)
+               .set(CATALOG_DOCUMENTS.SOURCE_URI,    EX_DOC_URI)
+               .set(CATALOG_DOCUMENTS.BIB_YEAR,   EX_DOC_BIBY)
+               .set(CATALOG_DOCUMENTS.BIB_AUTHORS,   EX_DOC_BIAU)
+               .set(CATALOG_DOCUMENTS.BIB_VENUE,   EX_DOC_BIVE)
+               .set(CATALOG_DOCUMENTS.BIB_CITATION_COUNT,   EX_DOC_BICC)
+               .set(CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID,   EX_DOC_BIS2)
+               .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
+               .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
+               .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   EX_DOC_BIAT)
                .execute();
         }
     }
@@ -2254,9 +2270,9 @@ public final class CatalogRepository {
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
             for (int start = 0; start < rows.size(); start += chunkSize) {
                 var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
-                var insert = ctx.insertInto(T_LINKS,
-                        F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
-                        F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META);
+                var insert = ctx.insertInto(CATALOG_LINKS,
+                        CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                        CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META);
                 for (var lnk : batch) {
                     String metaJson = jsonOrNull(lnk.get("metadata"));
                     insert = insert.values(DSL.val(tenant),
@@ -2265,7 +2281,7 @@ public final class CatalogRepository {
                             DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
                             jsonbVal(metaJson));
                 }
-                insert.onConflict(F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE)
+                insert.onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
                       .doNothing()
                       .execute();
             }
@@ -2275,15 +2291,15 @@ public final class CatalogRepository {
 
     private void doImportLink(DSLContext ctx, String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
-        ctx.insertInto(T_LINKS,
-                F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
-                F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
+        ctx.insertInto(CATALOG_LINKS,
+                CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
            .values(DSL.val(tenant),
                    DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
                    DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
                    DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
                    jsonbVal(metaJson))
-           .onConflict(F_LNK_TENANT, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE)
+           .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
            .doNothing()
            .execute();
     }
@@ -2320,21 +2336,21 @@ public final class CatalogRepository {
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
-                var insert = ctx.insertInto(T_CHUNKS,
-                        F_CHK_TENANT, F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
-                        F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN);
+                var insert = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END);
                 for (var row : batch) {
                     insert = insert.values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
                             i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"));
                 }
-                insert.onConflict(F_CHK_TENANT, F_CHK_DOC, F_CHK_POS)
+                insert.onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                       .doUpdate()
-                      .set(F_CHK_CHASH, EX_CHK_CHASH)
-                      .set(F_CHK_IDX,   EX_CHK_IDX)
-                      .set(F_CHK_LST,   EX_CHK_LST)
-                      .set(F_CHK_LEN,   EX_CHK_LEN)
-                      .set(F_CHK_CST,   EX_CHK_CST)
-                      .set(F_CHK_CEN,   EX_CHK_CEN)
+                      .set(CATALOG_DOCUMENT_CHUNKS.CHASH, EX_CHK_CHASH)
+                      .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,   EX_CHK_IDX)
+                      .set(CATALOG_DOCUMENT_CHUNKS.LINE_START,   EX_CHK_LST)
+                      .set(CATALOG_DOCUMENT_CHUNKS.LINE_END,   EX_CHK_LEN)
+                      .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START,   EX_CHK_CST)
+                      .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END,   EX_CHK_CEN)
                       .execute();
             }
             return rows.size();
@@ -2342,19 +2358,19 @@ public final class CatalogRepository {
     }
 
     private void doImportChunk(DSLContext ctx, String tenant, String docId, Map<String, Object> row) {
-        ctx.insertInto(T_CHUNKS,
-                F_CHK_TENANT, F_CHK_DOC, F_CHK_POS, F_CHK_CHASH, F_CHK_IDX,
-                F_CHK_LST, F_CHK_LEN, F_CHK_CST, F_CHK_CEN)
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
            .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
                    i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
-           .onConflict(F_CHK_TENANT, F_CHK_DOC, F_CHK_POS)
+           .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
            .doUpdate()
-           .set(F_CHK_CHASH, EX_CHK_CHASH)
-           .set(F_CHK_IDX,   EX_CHK_IDX)
-           .set(F_CHK_LST,   EX_CHK_LST)
-           .set(F_CHK_LEN,   EX_CHK_LEN)
-           .set(F_CHK_CST,   EX_CHK_CST)
-           .set(F_CHK_CEN,   EX_CHK_CEN)
+           .set(CATALOG_DOCUMENT_CHUNKS.CHASH, EX_CHK_CHASH)
+           .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,   EX_CHK_IDX)
+           .set(CATALOG_DOCUMENT_CHUNKS.LINE_START,   EX_CHK_LST)
+           .set(CATALOG_DOCUMENT_CHUNKS.LINE_END,   EX_CHK_LEN)
+           .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START,   EX_CHK_CST)
+           .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END,   EX_CHK_CEN)
            .execute();
     }
 
@@ -2380,12 +2396,10 @@ public final class CatalogRepository {
     /**
      * nexus-1usso: GUC-once bulk collection import — ONE multi-row
      * {@code INSERT ... ON CONFLICT DO UPDATE ... WHERE} statement per
-     * chunk. Dynamic multi-row VALUES with variable count + the {@code
-     * ::timestamptz} casts on nullable timestamp columns are the reason
-     * this stays raw-SQL string building (same rationale as {@code
-     * TaxonomyRepository.batchInsertAssignments}) rather than jOOQ's typed
-     * multi-row insert — jOOQ's typed API requires a statically-known row
-     * count per statement. Rows are deduped on {@code name} (the conflict
+     * chunk. nexus-xtmtf: jOOQ's chained {@code .values()} supports a
+     * dynamic row count, and the nullable timestamptz columns bind as
+     * OffsetDateTime (blank -> NULL) — zero raw SQL, one statement per
+     * chunk preserved. Rows are deduped on {@code name} (the conflict
      * key) within a chunk, last occurrence wins.
      */
     public int importCollectionsBatch(String tenant, List<Map<String, Object>> rows) {
@@ -2399,71 +2413,75 @@ public final class CatalogRepository {
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
-                StringBuilder sql = new StringBuilder(
-                    "INSERT INTO nexus.catalog_collections"
-                    + " (tenant_id, name, content_type, owner_id, embedding_model, model_version,"
-                    + "  display_name, legacy_grandfathered, superseded_by, superseded_at, created_at)"
-                    + " VALUES ");
-                List<Object> params = new java.util.ArrayList<>(batch.size() * cols);
-                for (int i = 0; i < batch.size(); i++) {
-                    sql.append(i == 0 ? "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz)"
-                                       : ", (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz)");
-                    Map<String, Object> coll = batch.get(i);
-                    params.add(tenant);
-                    params.add(s(coll, "name"));
-                    params.add(nne(s(coll, "content_type")));
-                    params.add(nne(s(coll, "owner_id")));
-                    params.add(nne(s(coll, "embedding_model")));
-                    params.add(nne(s(coll, "model_version")));
-                    params.add(nne(s(coll, "display_name")));
-                    params.add(ni(i(coll, "legacy_grandfathered"), 0));
-                    params.add(nne(s(coll, "superseded_by")));
-                    params.add(nz(s(coll, "superseded_at")));
-                    params.add(nz(s(coll, "created_at")));
+                var insert = ctx.insertInto(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                        CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                        CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                        CATALOG_COLLECTIONS.CREATED_AT);
+                for (Map<String, Object> coll : batch) {
+                    insert = insert.values(tenant,
+                            s(coll, "name"), nne(s(coll, "content_type")),
+                            nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
+                            nne(s(coll, "model_version")), nne(s(coll, "display_name")),
+                            ni(i(coll, "legacy_grandfathered"), 0),
+                            nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
+                            tsOrNull(s(coll, "created_at")));
                 }
-                sql.append(
-                    " ON CONFLICT (tenant_id, name) DO UPDATE SET"
-                    + "  content_type=EXCLUDED.content_type, owner_id=EXCLUDED.owner_id,"
-                    + "  embedding_model=EXCLUDED.embedding_model, model_version=EXCLUDED.model_version,"
-                    + "  display_name=EXCLUDED.display_name, legacy_grandfathered=EXCLUDED.legacy_grandfathered,"
-                    + "  superseded_by=EXCLUDED.superseded_by,"
-                    + "  superseded_at=EXCLUDED.superseded_at,"
-                    + "  created_at=EXCLUDED.created_at"
-                    + " WHERE catalog_collections.embedding_model='' AND catalog_collections.content_type=''"
-                    + "  AND catalog_collections.owner_id=''");
-                ctx.execute(sql.toString(), params.toArray());
+                insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                      .doUpdate()
+                      .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
+                      .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
+                      .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+                      .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
+                      .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
+                      .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
+                      .set(CATALOG_COLLECTIONS.SUPERSEDED_BY,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_BY))
+                      .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_AT))
+                      .set(CATALOG_COLLECTIONS.CREATED_AT,           DSL.excluded(CATALOG_COLLECTIONS.CREATED_AT))
+                      .where(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("")
+                          .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(""))
+                          .and(CATALOG_COLLECTIONS.OWNER_ID.eq("")))
+                      .execute();
             }
             return rows.size();
         });
     }
 
     private void doImportCollection(DSLContext ctx, String tenant, Map<String, Object> coll) {
-        {
-            // Raw SQL for superseded_at / created_at: timestamptz NULL after catalog-002-1-temporal-typing.
-            // DO UPDATE WHERE stub: only upgrades rows where all three discriminator columns are empty
-            // (i.e. auto-registered stubs from RDR-156 P0.2 ensure-registration steps).
-            ctx.execute(
-                "INSERT INTO nexus.catalog_collections"
-                + " (tenant_id, name, content_type, owner_id, embedding_model, model_version,"
-                + "  display_name, legacy_grandfathered, superseded_by, superseded_at, created_at)"
-                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz)"
-                + " ON CONFLICT (tenant_id, name) DO UPDATE SET"
-                + "  content_type=EXCLUDED.content_type, owner_id=EXCLUDED.owner_id,"
-                + "  embedding_model=EXCLUDED.embedding_model, model_version=EXCLUDED.model_version,"
-                + "  display_name=EXCLUDED.display_name, legacy_grandfathered=EXCLUDED.legacy_grandfathered,"
-                + "  superseded_by=EXCLUDED.superseded_by,"
-                + "  superseded_at=EXCLUDED.superseded_at,"
-                + "  created_at=EXCLUDED.created_at"
-                + " WHERE catalog_collections.embedding_model='' AND catalog_collections.content_type=''"
-                + "  AND catalog_collections.owner_id=''",
-                tenant,
-                s(coll, "name"), nne(s(coll, "content_type")),
-                nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
-                nne(s(coll, "model_version")), nne(s(coll, "display_name")),
-                ni(i(coll, "legacy_grandfathered"), 0),
-                nne(s(coll, "superseded_by")), nz(s(coll, "superseded_at")),
-                nz(s(coll, "created_at")));
-        }
+        // DO UPDATE WHERE stub-guard: only upgrades rows where all three discriminator
+        // columns are empty (auto-registered stubs from RDR-156 P0.2 ensure-registration).
+        // nexus-xtmtf: single-row delegate of the importCollectionsBatch DSL shape.
+        var insert = ctx.insertInto(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                CATALOG_COLLECTIONS.CREATED_AT)
+           .values(tenant,
+                   s(coll, "name"), nne(s(coll, "content_type")),
+                   nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
+                   nne(s(coll, "model_version")), nne(s(coll, "display_name")),
+                   ni(i(coll, "legacy_grandfathered"), 0),
+                   nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
+                   tsOrNull(s(coll, "created_at")));
+        insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+              .doUpdate()
+              .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
+              .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
+              .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+              .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
+              .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
+              .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
+              .set(CATALOG_COLLECTIONS.SUPERSEDED_BY,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_BY))
+              .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_AT))
+              .set(CATALOG_COLLECTIONS.CREATED_AT,           DSL.excluded(CATALOG_COLLECTIONS.CREATED_AT))
+              .where(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("")
+                  .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(""))
+                  .and(CATALOG_COLLECTIONS.OWNER_ID.eq("")))
+              .execute();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -2473,11 +2491,11 @@ public final class CatalogRepository {
     @SuppressWarnings("unchecked")
     private static SelectField<?>[] documentFields() {
         return new SelectField<?>[]{
-            F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_AUTHOR, F_DOC_YEAR,
-            F_DOC_CTYPE, F_DOC_FPATH, F_DOC_CORPUS, F_DOC_PCOLL, F_DOC_CHUNKS,
-            F_DOC_HEAD, F_DOC_IDXAT, F_DOC_META, F_DOC_SMTIME, F_DOC_ALIAS, F_DOC_URI,
-            F_DOC_BIBY, F_DOC_BIAU, F_DOC_BIVE, F_DOC_BICC,
-            F_DOC_BIS2, F_DOC_BIOA, F_DOC_BIDOI, F_DOC_BIAT
+            CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
+            CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
+            CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
+            CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
+            CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT
         };
     }
 
@@ -2605,6 +2623,38 @@ public final class CatalogRepository {
      * catalog-002-1-temporal-typing (RDR-156 P0.2) converts these columns to timestamptz NULL.
      */
     private static String nz(String v) { return (v != null && !v.isEmpty()) ? v : null; }
+
+    /**
+     * ISO-8601-or-blank to a typed timestamptz bind (nexus-xtmtf): blank/null
+     * -> NULL (the nullable temporal columns' "unset" state after
+     * catalog-002-1-temporal-typing). Accepts the same lenient shapes the
+     * retired {@code ?::timestamptz} cast did — space-separated
+     * ("2026-05-01 12:00:00") and offsetless forms from legacy-SQLite
+     * fidelity imports parse as UTC. Genuinely unparseable input fails loud
+     * (as the cast did) — these are fidelity-preserving import/supersede
+     * timestamps, not event stamps, so never substitute now().
+     */
+    // Package-private for direct unit testing (CatalogTsOrNullTest).
+    static java.time.OffsetDateTime tsOrNull(String iso) {
+        if (iso == null || iso.isBlank()) return null;
+        String normalized = iso.trim().replace(' ', 'T');
+        try {
+            return java.time.OffsetDateTime.parse(normalized);
+        } catch (java.time.format.DateTimeParseException e) {
+            // Offsetless (legacy SQLite catalog rows) — timestamptz text input
+            // without a zone resolves in the session TZ; the service runs UTC.
+            try {
+                return java.time.LocalDateTime.parse(normalized)
+                           .atOffset(java.time.ZoneOffset.UTC);
+            } catch (java.time.format.DateTimeParseException e2) {
+                // Date-only ("2026-05-01") — the retired ?::timestamptz cast
+                // accepted bare dates as midnight; preserve that (review
+                // finding: this branch was missing and threw uncaught).
+                return java.time.LocalDate.parse(normalized)
+                           .atStartOfDay().atOffset(java.time.ZoneOffset.UTC);
+            }
+        }
+    }
 
     /** Non-null integer: returns def if null. */
     private static int ni(Integer v, int def) { return v != null ? v : def; }

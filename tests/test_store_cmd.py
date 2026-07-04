@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.http_vector_client import HttpVectorClient
 
 
 @pytest.fixture
@@ -25,21 +26,26 @@ def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def mock_store(env_creds):
-    db = MagicMock()
+    # env_creds sets both CHROMA_API_KEY and VOYAGE_API_KEY, so
+    # is_local_mode()'s legacy heuristic resolves to cloud/service mode
+    # here — the real _t3() would hand back an HttpVectorClient, not a
+    # T3Database. spec= it so a method missing from HttpVectorClient
+    # (e.g. the gc/_dir class of bug) fails the mocked test too.
+    db = MagicMock(spec=HttpVectorClient)
     with patch("nexus.commands.store._t3", return_value=db):
         yield db
 
 
 @pytest.fixture
 def mock_collection(env_creds):
-    db = MagicMock()
+    db = MagicMock(spec=HttpVectorClient)
     with patch("nexus.commands.collection._t3", return_value=db):
         yield db
 
 
 @pytest.fixture
 def mock_search(env_creds):
-    db = MagicMock()
+    db = MagicMock(spec=HttpVectorClient)
     with patch("nexus.commands.search_cmd._t3", return_value=db):
         yield db
 
@@ -94,7 +100,7 @@ def test_store_put_tenant_optional(runner, monkeypatch, tmp_path):
     src = tmp_path / "f.txt"
     src.write_text("content")
     with patch("nexus.commands.store._t3") as mt3:
-        db = MagicMock()
+        db = MagicMock(spec=HttpVectorClient)
         db.__enter__ = MagicMock(return_value=db)
         db.__exit__ = MagicMock(return_value=False)
         db.put.return_value = "doc-id-1"

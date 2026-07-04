@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from nexus.db.t2 import T2Database
+from nexus.db.t3 import T3Database
 from nexus.taxonomy import (
     assign_topic,
     get_topic_docs,
@@ -1842,7 +1843,7 @@ def test_discover_cli_invocation() -> None:
     runner = CliRunner()
     with (
         patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=3) as mock_fn,
-        patch("nexus.db.make_t3", return_value=MagicMock()),
+        patch("nexus.db.make_t3", return_value=MagicMock(spec=T3Database)),
     ):
         result = runner.invoke(taxonomy, ["discover", "--collection", "test__coll"])
 
@@ -1864,7 +1865,7 @@ def test_rebuild_cli_is_discover_force_alias() -> None:
     runner = CliRunner()
     with (
         patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=2) as mock_fn,
-        patch("nexus.db.make_t3", return_value=MagicMock()),
+        patch("nexus.db.make_t3", return_value=MagicMock(spec=T3Database)),
     ):
         result = runner.invoke(taxonomy, ["rebuild", "--collection", "test__coll"])
 
@@ -3229,7 +3230,7 @@ class TestSplitTopic:
         from nexus.commands.taxonomy_cmd import taxonomy as taxonomy_grp
         from nexus.db.local_ef import LocalEmbeddingFunction
         from click.testing import CliRunner
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
 
         routed = {"calls": 0}
 
@@ -3266,6 +3267,10 @@ class TestSplitTopic:
         with patch(
             "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
         ), patch("nexus.db.make_t3") as mock_t3:
+            # Raw-path exception (see test_split_cli): db.taxonomy here is
+            # real raw SQLite, so t3 must stay raw-backed or
+            # _require_supported_taxonomy_backend refuses.
+            mock_t3.return_value = MagicMock(spec=T3Database)
             mock_t3.return_value._client = chroma
             result = CliRunner().invoke(
                 taxonomy_grp,
@@ -3537,12 +3542,28 @@ class TestManualOpsCLI:
             ],
         }
 
-        mock_t3 = MagicMock()
+        # nx taxonomy split's raw path (taxonomy_cmd.py:1081-1083,
+        # `chroma_client = t3._client`) only runs when db.taxonomy has
+        # raw access (_has_raw_access) -- true here since this test uses
+        # a real T2Database/SQLite taxonomy store. spec=T3Database (not
+        # HttpVectorClient) is deliberate: is_service_backed(t3) must be
+        # False or _require_supported_taxonomy_backend raises "not
+        # supported" against the real raw-SQLite taxonomy.
+        mock_t3 = MagicMock(spec=T3Database)
         mock_coll = MagicMock()
         mock_coll.get.return_value = {
             "ids": [f"doc-{i}" for i in range(30)],
             "documents": [f"text {i}" for i in range(30)],
         }
+        # _client is an instance-only attribute of T3Database (assigned in
+        # __init__), so it is invisible to dir(T3Database) and thus to
+        # MagicMock's spec introspection. Set it explicitly (a plain
+        # attribute set, unrestricted even under spec=) before chaining
+        # into it, so the subsequent GET resolves against the mock's own
+        # __dict__ rather than the spec-restricted __getattr__. spec= the
+        # child too (chromadb.api.ClientAPI) so a method that real Chroma
+        # clients don't have can't hide behind a bare MagicMock.
+        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
         mock_t3._client.get_collection.return_value = mock_coll
         mock_t3._client.get_or_create_collection.return_value = MagicMock()
 
@@ -3637,12 +3658,17 @@ class TestManualOpsCLI:
                 },
             ],
         }
-        mock_t3 = MagicMock()
+        # Same raw-path rationale as test_split_cli above: this test's
+        # T2Database taxonomy store is real raw SQLite, so t3 must stay
+        # raw-backed (spec=T3Database) or _require_supported_taxonomy_backend
+        # raises against is_service_backed(t3)=True + _has_raw_access=True.
+        mock_t3 = MagicMock(spec=T3Database)
         mock_coll = MagicMock()
         mock_coll.get.return_value = {
             "ids": [f"doc-{i}" for i in range(10)],
             "documents": [f"text {i}" for i in range(10)],
         }
+        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
         mock_t3._client.get_collection.return_value = mock_coll
         mock_t3._client.get_or_create_collection.return_value = MagicMock()
         fake_persist = MagicMock(return_value=[201, 202, 203])
@@ -3699,12 +3725,14 @@ class TestManualOpsCLI:
             "collection_name": "test__noop",
             "child_specs": [],
         }
-        mock_t3 = MagicMock()
+        # Same raw-path rationale as test_split_cli above.
+        mock_t3 = MagicMock(spec=T3Database)
         mock_coll = MagicMock()
         mock_coll.get.return_value = {
             "ids": [f"doc-{i}" for i in range(5)],
             "documents": [f"text {i}" for i in range(5)],
         }
+        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
         mock_t3._client.get_collection.return_value = mock_coll
         import numpy as _np
 
@@ -4598,7 +4626,7 @@ class TestProjectCmd:
         self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
     ) -> None:
         """project command shows matched topics and novel chunks."""
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
 
         from click.testing import CliRunner
 
@@ -4632,6 +4660,10 @@ class TestProjectCmd:
             patch("nexus.commands.taxonomy_cmd._T2Database", return_value=db),
             patch("nexus.db.make_t3") as mock_t3,
         ):
+            # Raw-path exception (see test_split_cli): db.taxonomy here is
+            # real raw SQLite, so t3 must stay raw-backed or
+            # _require_supported_taxonomy_backend refuses.
+            mock_t3.return_value = MagicMock(spec=T3Database)
             mock_t3.return_value._client = chroma_client
             result = runner.invoke(taxonomy, [
                 "project", "src__coll", "--against", "tgt__coll", "--threshold", "0.5",
@@ -4644,7 +4676,7 @@ class TestProjectCmd:
         self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
     ) -> None:
         """--persist writes assignments with assigned_by='projection'."""
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
 
         from click.testing import CliRunner
 
@@ -4676,6 +4708,10 @@ class TestProjectCmd:
             patch("nexus.commands.taxonomy_cmd._T2Database", return_value=db),
             patch("nexus.db.make_t3") as mock_t3,
         ):
+            # Raw-path exception (see test_split_cli): db.taxonomy here is
+            # real raw SQLite, so t3 must stay raw-backed or
+            # _require_supported_taxonomy_backend refuses.
+            mock_t3.return_value = MagicMock(spec=T3Database)
             mock_t3.return_value._client = chroma_client
             result = runner.invoke(taxonomy, [
                 "project", "psrc__coll", "--against", "ptgt__coll",
@@ -4699,7 +4735,7 @@ class TestProjectCmd:
         collections with topics minus the source. Explicit --against
         still overrides.
         """
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
 
         from click.testing import CliRunner
 
@@ -4738,6 +4774,10 @@ class TestProjectCmd:
             patch("nexus.commands.taxonomy_cmd._T2Database", return_value=db),
             patch("nexus.db.make_t3") as mock_t3,
         ):
+            # Raw-path exception (see test_split_cli): db.taxonomy here is
+            # real raw SQLite, so t3 must stay raw-backed or
+            # _require_supported_taxonomy_backend refuses.
+            mock_t3.return_value = MagicMock(spec=T3Database)
             mock_t3.return_value._client = chroma_client
             result = runner.invoke(taxonomy, ["project", src, "--threshold", "0.5"])
 

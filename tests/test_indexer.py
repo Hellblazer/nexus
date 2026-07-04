@@ -1302,7 +1302,7 @@ def test_on_stage_timers_fires_per_code_file_when_subscribed(tmp_path):
     # StageTimers instance with the expected shape
     snapshot = timers.snapshot()
     assert set(snapshot.keys()) == {
-        "chunking_s", "embed_s", "upload_s", "retry_s",
+        "chunking_s", "embed_s", "upload_s", "hooks_s", "retry_s",
     }
 
 

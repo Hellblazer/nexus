@@ -1,0 +1,101 @@
+# nexus-m8au7: seed + keep-warm the compiled PG-bundle cache on MAIN.
+#
+# WHY THIS WORKFLOW EXISTS — GitHub Actions cache isolation: a run triggered
+# by a tag can only RESTORE caches created on the same ref or on the DEFAULT
+# branch (main). Caches saved by one engine-service tag run are invisible to
+# the next tag, so engine-service-release.yml's cache step can only ever hit
+# entries seeded here. Eviction is 7-days-unused; engine tags are often
+# further apart, hence the weekly cron keep-warm.
+#
+# The cache key MUST stay byte-identical to the one in
+# engine-service-release.yml (build-publish-pg-bundle job):
+#   pg-bundle-<arch>-pg<PG_VERSION>-pgvector<PGVECTOR_VERSION>-img-<image|native>-<sha256 of scripts/build_pg_bundle.sh>
+# PG_VERSION / PGVECTOR_VERSION are duplicated across ci.yml, the release
+# workflow, and here (the pre-existing duplication pattern; the build script
+# holds the defaults). Bumping a version in the release workflow WITHOUT
+# bumping it here just means a cache miss at the next tag (graceful — it
+# compiles as before); the versions live in the key precisely so a stale
+# bundle of the WRONG version can never be restored silently.
+name: pg-bundle-cache-seed
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/build_pg_bundle.sh'
+      - '.github/workflows/pg-bundle-cache-seed.yml'
+  schedule:
+    # Weekly keep-warm (Mondays 07:23 UTC — off the hour to dodge cron rush).
+    - cron: '23 7 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    name: Seed PG bundle cache (${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { arch: linux-amd64, runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64" }
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64" }
+          - { arch: mac-arm64,   runner: macos-14,         image: "" }
+    env:
+      # Pinned identically to engine-service-release.yml + ci.yml (see header).
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.2"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - name: Restore/claim cache slot
+        id: pg-bundle-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: bundle
+          key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+
+      - name: Compile PG + pgvector (cache miss only)
+        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
+        env:
+          MANYLINUX_IMAGE: ${{ matrix.target.image }}
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/bundle"
+          mkdir -p "$bundle"
+          if [ -n "$MANYLINUX_IMAGE" ]; then
+            # Identical build environment to engine-service-release.yml:
+            # manylinux_2_28 for the glibc-2.28 floor.
+            docker run --rm \
+              -e PG_VERSION -e PGVECTOR_VERSION -e BUNDLE_PREFIX="$bundle" \
+              -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+              "$MANYLINUX_IMAGE" /bin/bash -c '
+                set -eux
+                bash "'"$GITHUB_WORKSPACE"'/scripts/build_pg_bundle.sh"
+              '
+          else
+            BUNDLE_PREFIX="$bundle" bash scripts/build_pg_bundle.sh
+          fi
+
+      - name: Sanity-check the prefix before it becomes the cached artifact
+        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -x "bundle/bin/initdb" ] || [ ! -x "bundle/bin/pg_ctl" ]; then
+            echo "::error::compiled prefix is missing the PG toolchain — refusing to seed a hollow cache"
+            exit 1
+          fi
+          # nexus-u30zm: contrib completeness (mirrors verify_and_mark). The
+          # actions/cache post-save runs with post-if: success() (verified
+          # upstream), so an exit 1 here genuinely prevents the seed.
+          sharedir="$(bundle/bin/pg_config --sharedir)"
+          for ctl in vector pg_trgm; do
+            if [ ! -f "$sharedir/extension/$ctl.control" ]; then
+              echo "::error::$ctl.control missing — refusing to seed an incomplete contrib set"
+              exit 1
+            fi
+          done
+          echo "prefix ok — cache will be saved on job success"

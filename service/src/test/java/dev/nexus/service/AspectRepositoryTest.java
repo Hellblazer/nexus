@@ -138,7 +138,9 @@ class AspectRepositoryTest {
                     "hl-rename-doc-1", "hl-rename-doc-2", "hl-rls-doc",
                     "q-doc-1", "done-doc-id-unique", "etl-q-doc",
                     // nexus-1usso importHighlightsBatch multi-row conversion tests
-                    "batch-hl-1", "batch-hl-2")) {
+                    "batch-hl-1", "batch-hl-2",
+                    // nexus-nyout doc_id COALESCE-on-NULL tests
+                    "coalesce-doc-1", "coalesce-doc-2")) {
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
                     "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
@@ -529,6 +531,73 @@ class AspectRepositoryTest {
         // Now we must be able to claim it again
         Optional<Map<String, Object>> reclaimed = repo.claimNext(TENANT_A);
         assertThat(reclaimed).as("re-enqueued row must be claimable again").isPresent();
+    }
+
+    @Test @Order(70)
+    void enqueue_blankDocIdReEnqueue_preservesExistingLinkage() {
+        // nexus-nyout: a doc_id-less re-enqueue (collection re-embed passes
+        // catalog_doc_id="" across multi-doc batches; nullIfBlank -> NULL)
+        // must NOT amnesia an existing correct tumbler — same document,
+        // same queue key, identity survives.
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "coalesce-coll");
+        body.put("source_path", "coalesce.md");
+        body.put("doc_id",      "coalesce-doc-1");
+        repo.enqueue(TENANT_A, body);
+
+        var blank = new java.util.LinkedHashMap<String, Object>();
+        blank.put("collection",  "coalesce-coll");
+        blank.put("source_path", "coalesce.md");
+        blank.put("doc_id",      "");  // nullIfBlank -> NULL
+        repo.enqueue(TENANT_A, blank);
+
+        Map<String, Object> row = repo.listPending(TENANT_A, 100).stream()
+            .filter(r -> "coalesce.md".equals(r.get("source_path")))
+            .findFirst().orElseThrow();
+        assertThat(row.get("doc_id"))
+            .as("blank re-enqueue must preserve the existing doc_id linkage")
+            .isEqualTo("coalesce-doc-1");
+    }
+
+    @Test @Order(71)
+    void enqueue_realDocIdReEnqueue_stillOverwrites() {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "coalesce-coll");
+        body.put("source_path", "coalesce-overwrite.md");
+        body.put("doc_id",      "coalesce-doc-1");
+        repo.enqueue(TENANT_A, body);
+
+        var newer = new java.util.LinkedHashMap<String, Object>();
+        newer.put("collection",  "coalesce-coll");
+        newer.put("source_path", "coalesce-overwrite.md");
+        newer.put("doc_id",      "coalesce-doc-2");
+        repo.enqueue(TENANT_A, newer);
+
+        Map<String, Object> row = repo.listPending(TENANT_A, 100).stream()
+            .filter(r -> "coalesce-overwrite.md".equals(r.get("source_path")))
+            .findFirst().orElseThrow();
+        assertThat(row.get("doc_id"))
+            .as("a real tumbler on re-enqueue still overwrites")
+            .isEqualTo("coalesce-doc-2");
+    }
+
+    @Test @Order(72)
+    void enqueue_freshBlankDocId_staysNull() {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  "coalesce-coll");
+        body.put("source_path", "coalesce-fresh.md");
+        body.put("doc_id",      "");
+        repo.enqueue(TENANT_A, body);
+
+        Map<String, Object> row = repo.listPending(TENANT_A, 100).stream()
+            .filter(r -> "coalesce-fresh.md".equals(r.get("source_path")))
+            .findFirst().orElseThrow();
+        // Stored as NULL (the composite FK would reject a literal ''), and
+        // the read path normalizes NULL -> "" per the QueueRow contract
+        // ("empty doc_id = fall back to source_path").
+        assertThat(row.get("doc_id"))
+            .as("fresh blank enqueue reads back as the empty-doc_id sentinel")
+            .isEqualTo("");
     }
 
     @Test @Order(32)

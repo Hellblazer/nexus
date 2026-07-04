@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import chromadb
 import pytest
 
+from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.t3 import T3Database, apply_hnsw_ef
 from nexus.db.chroma_quotas import QuotaValidator
 
@@ -238,7 +239,15 @@ class TestDoctorFixFlag:
             patch("nexus.db.t3.apply_hnsw_ef", return_value=3),
             patch("nexus.db.make_t3") as MockMakeT3,
         ):
-            MockMakeT3.return_value = MagicMock()
+            # make_t3() returns the service-backed HttpVectorClient
+            # unconditionally in production since RDR-155 P4a.2 --
+            # is_local_mode=True (patched above) no longer changes the
+            # handle type. doctor.py's own --fix code (doctor.py:1522-1526)
+            # documents apply_hnsw_ef as a no-op against this handle;
+            # apply_hnsw_ef itself is patched above too, so the mock's
+            # spec only needs to satisfy "something passed to a fully
+            # mocked function," but pin the real return type anyway.
+            MockMakeT3.return_value = MagicMock(spec=HttpVectorClient)
             result = runner.invoke(doctor_cmd, ["--fix"])
 
         assert result.exit_code == 0

@@ -7,6 +7,8 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.http_vector_client import HttpVectorClient
+from nexus.db.t3 import T3Database
 
 
 @pytest.fixture
@@ -24,7 +26,13 @@ def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def mock_db():
-    return MagicMock()
+    # env_creds sets both cloud creds, so is_local_mode()'s legacy
+    # heuristic resolves to cloud/service mode — the real _t3() would
+    # hand back an HttpVectorClient. spec= it so a method missing from
+    # HttpVectorClient (e.g. rename_collection, which HttpVectorClient
+    # does not implement) fails the mocked test too, instead of silently
+    # answering via a bare MagicMock.
+    return MagicMock(spec=HttpVectorClient)
 
 
 def _invoke(runner, mock_db, args, **kwargs):
@@ -353,8 +361,12 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     # Stub Catalog.docs_for_chashes to return the manifest mapping.
     # Catalog is lazy-imported inside reindex_cmd (`from nexus.catalog
     # import Catalog`); patch the source module's attribute so the
-    # lazy import resolves to our stub.
-    fake_cat = MagicMock()
+    # lazy import resolves to our stub. The autouse
+    # _pin_storage_backend_sqlite fixture pins the catalog to SQLite
+    # mode by default, so make_catalog_reader() really returns a local
+    # Catalog here (not HttpCatalogClient).
+    from nexus.catalog.catalog import Catalog
+    fake_cat = MagicMock(spec=Catalog)
     fake_cat.docs_for_chashes.return_value = {chash: ["ART-PHASE3"]}
 
     # RDR-146 P1.2: reindex reaches the catalog via make_catalog_reader().
@@ -575,8 +587,15 @@ def test_run_collection_postprocessing_does_not_pass_alias_through(monkeypatch):
 
     monkeypatch.setattr(index_mod, "_discover_taxonomy", _capture)
 
-    fake_t3 = MagicMock()
-    fake_t3._client = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2 -- cloud creds /
+    # is_local_mode() no longer affect the handle type. This test's
+    # _discover_taxonomy is fully mocked (_capture, above) and never
+    # touches t3 beyond passing it through, so no ._client stub is
+    # needed (the "inert" branch code-review flagged: total_topics
+    # stays 0, so the cross-collection projection branch that reads
+    # getattr(t3, "_client", t3) is never reached either).
+    fake_t3 = MagicMock(spec=HttpVectorClient)
     monkeypatch.setattr(index_mod, "make_t3", lambda: fake_t3, raising=False)
     # make_t3 lives in nexus.db; patch at the import site used inside
     # run_collection_postprocessing.
@@ -744,8 +763,13 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path) -> None:
         ],
     )
 
-    fake_db = MagicMock()
-    fake_db._client = client
+    # nexus-c9xr2 FIXED: re-embed now calls db.get_collection() (the
+    # method both production handles expose) instead of the pre-155
+    # db._client phantom. Spec against the handle make_t3() actually
+    # returns; route get_collection to the real Ephemeral collection so
+    # count()/get() paging behaves like production.
+    fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db.get_collection.side_effect = client.get_collection
 
     result = _invoke(
         runner, fake_db,
@@ -766,7 +790,12 @@ def test_reembed_no_dry_run_writes_via_voyage(
     import chromadb
     import uuid
 
-    coll_name = f"knowledge__rem_{uuid.uuid4().hex[:12]}"
+    # nexus-u37lw: name ENCODES the target model — service mode only
+    # permits same-model re-embed (cross-model fails loud pre-write),
+    # and same-model routes through the upsert_chunks verbatim
+    # passthrough, never upsert_chunks_with_embeddings (which the
+    # service handle discards vectors on).
+    coll_name = f"code__rem{uuid.uuid4().hex[:10]}__voyage-code-3__v1"
     client = chromadb.EphemeralClient()
     col = client.get_or_create_collection(coll_name)
     col.add(
@@ -777,15 +806,21 @@ def test_reembed_no_dry_run_writes_via_voyage(
         ],
     )
 
-    fake_db = MagicMock()
-    fake_db._client = client
+    # nexus-c9xr2 FIXED: see test_reembed_dry_run_reports_count.
+    fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db.get_collection.side_effect = client.get_collection
 
     upsert_calls: list[dict] = []
 
-    def _capture_upsert(**kw):
-        upsert_calls.append(kw)
+    def _capture_upsert(collection, ids, documents, metadatas=None, *,
+                        embeddings=None, skip_existing=None):
+        upsert_calls.append({
+            "collection_name": collection, "ids": ids,
+            "documents": documents, "metadatas": metadatas,
+            "embeddings": embeddings,
+        })
 
-    fake_db.upsert_chunks_with_embeddings.side_effect = _capture_upsert
+    fake_db.upsert_chunks.side_effect = _capture_upsert
 
     fake_embed_result = MagicMock()
     fake_embed_result.embeddings = [[0.5] * 1024, [0.7] * 1024]
@@ -818,7 +853,7 @@ def test_reembed_rejects_cce_model(runner, env_creds) -> None:
     """nexus-bw65: voyage-context-3 (CCE) is not supported; click.Choice
     rejects at parse time."""
     result = _invoke(
-        runner, MagicMock(),
+        runner, MagicMock(spec=HttpVectorClient),
         ["re-embed", "knowledge__any", "--to", "voyage-context-3"],
     )
     assert result.exit_code != 0
@@ -833,7 +868,8 @@ def test_reembed_skips_empty_documents(
     import chromadb
     import uuid
 
-    coll_name = f"knowledge__rem_{uuid.uuid4().hex[:12]}"
+    # nexus-u37lw: model-encoded name so the same-model service path runs.
+    coll_name = f"code__rem{uuid.uuid4().hex[:10]}__voyage-3__v1"
     client = chromadb.EphemeralClient()
     col = client.get_or_create_collection(coll_name)
     col.add(
@@ -845,8 +881,9 @@ def test_reembed_skips_empty_documents(
         ],
     )
 
-    fake_db = MagicMock()
-    fake_db._client = client
+    # nexus-c9xr2 FIXED: see test_reembed_dry_run_reports_count.
+    fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db.get_collection.side_effect = client.get_collection
 
     fake_embed_result = MagicMock()
     fake_embed_result.embeddings = [[0.5] * 1024]

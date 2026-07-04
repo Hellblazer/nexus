@@ -1237,8 +1237,17 @@ def aspect_extraction_enqueue_hook(
             )
         )
     except Exception as exc:  # noqa: BLE001 — enqueue is best-effort; failure logged via log.warning
+        # nexus-w8lg1: one-line warning at the CLI surface; the full
+        # traceback goes to debug (it previously spammed raw structlog
+        # tracebacks to the user's terminal on every enqueue failure).
         _log.warning(
             "aspect_extraction_enqueue_failed",
+            source_path=source_path,
+            collection=collection,
+            error=str(exc)[:500],
+        )
+        _log.debug(
+            "aspect_extraction_enqueue_failed_detail",
             source_path=source_path,
             collection=collection,
             exc_info=True,

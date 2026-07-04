@@ -494,9 +494,12 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             metadatas=metadatas,
         )
 
+    with _stage("hooks"):
         # Post-store hook chains (RDR-095). Both single-doc and batch
         # chains fire from every storage event; the per-doc loop covers
-        # single-shape consumers on CLI ingest.
+        # single-shape consumers on CLI ingest. Own stage bucket
+        # (nexus-cfc72): under concurrent indexing these serialize on
+        # LockedHookRegistry, and lock-wait must not read as upload time.
         ctx.hooks.fire_batch(
             ids, ctx.corpus, documents, embeddings, metadatas,
             catalog_doc_id=catalog_doc_id,

@@ -307,6 +307,39 @@ class CatalogRepositoryTest {
         assertThat(metaUpdated).isEqualTo(1);
     }
 
+    @Test @Order(12)
+    @SuppressWarnings("unchecked")
+    void document_updateMeta_mergesLikeLocalCatalog() {
+        // nexus-ke45f: local Catalog.update() MERGES meta (dict.update —
+        // add/overwrite keys, never remove); the wire did a bare
+        // SET metadata=<new>, so every service-mode writer.update(meta=...)
+        // silently dropped pre-existing keys (miss_count, content_hash, ...).
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.15",
+            "title", "Merge Target",
+            "content_type", "paper",
+            "metadata", Map.of("content_hash", "keepme", "miss_count", 1)
+        ));
+
+        int n = repo.updateDocument(
+            TENANT_A, "2.15", Map.of("meta", Map.of("bib_checked", true)));
+        assertThat(n).isEqualTo(1);
+
+        var doc = repo.getDocument(TENANT_A, "2.15");
+        Map<String, Object> meta = (Map<String, Object>) doc.get("metadata");
+        assertThat(meta.get("content_hash"))
+            .as("pre-existing key survives a merge update").isEqualTo("keepme");
+        assertThat(meta.get("miss_count")).isEqualTo(1);
+        assertThat(meta.get("bib_checked")).isEqualTo(true);
+
+        // Overwrite semantics: an incoming key replaces the old value.
+        repo.updateDocument(TENANT_A, "2.15", Map.of("meta", Map.of("miss_count", 0)));
+        var doc2 = repo.getDocument(TENANT_A, "2.15");
+        Map<String, Object> meta2 = (Map<String, Object>) doc2.get("metadata");
+        assertThat(meta2.get("miss_count")).isEqualTo(0);
+        assertThat(meta2.get("content_hash")).isEqualTo("keepme");
+    }
+
     @Test @Order(13)
     void document_update_rejectsNonWhitelistedColumns() {
         // Wave review (SQL audit CRITICAL): request JSON keys become SET targets —
@@ -2357,6 +2390,68 @@ class CatalogRepositoryTest {
         // SPAN_CHASH belongs to SPAN_TENANT; querying from another tenant must return null.
         var result = repo.resolveChash(TENANT_B, SPAN_CHASH, null);
         assertThat(result).isNull();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CHUNK RESOLUTION (nexus-gc2ze)
+    // ══════════════════════════════════════════════════════════════════════════
+    // Mirrors the local Catalog._DocumentOps.resolve_chunk contract
+    // (catalog_docs.py): chunks are implicit addresses derived from a
+    // document's chunk_count, not their own catalog rows. resolveChunk()
+    // is a pure lookup + range-check over an existing document row (no new
+    // SQL — it delegates to getDocument()).
+
+    private static final String CHUNK_DOC_TUMBLER = "9.9.101";
+
+    @Test @Order(215)
+    void resolveChunk_returnsDocumentAndChunkMetadata() {
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", CHUNK_DOC_TUMBLER,
+            "title", "Chunk Resolution Doc",
+            "content_type", "code",
+            "corpus", "code",
+            "physical_collection", "code__nexus__voyage-code-3__v1",
+            "chunk_count", 3
+        ));
+        var result = repo.resolveChunk(TENANT_A, CHUNK_DOC_TUMBLER, 1);
+        assertThat(result).isNotNull();
+        assertThat(result.get("document_tumbler")).isEqualTo(CHUNK_DOC_TUMBLER);
+        assertThat(result.get("chunk_index")).isEqualTo(1);
+        assertThat(result.get("physical_collection")).isEqualTo("code__nexus__voyage-code-3__v1");
+        assertThat(result.get("title")).isEqualTo("Chunk Resolution Doc");
+        assertThat(result.get("content_type")).isEqualTo("code");
+    }
+
+    @Test @Order(216)
+    void resolveChunk_outOfRangeIndex_returnsNull() {
+        // chunk_count=3 seeded in Order 215 -> valid indices are 0, 1, 2.
+        var result = repo.resolveChunk(TENANT_A, CHUNK_DOC_TUMBLER, 3);
+        assertThat(result).isNull();
+    }
+
+    @Test @Order(217)
+    void resolveChunk_missingDocument_returnsNull() {
+        var result = repo.resolveChunk(TENANT_A, "9.9.999", 0);
+        assertThat(result).isNull();
+    }
+
+    @Test @Order(218)
+    void resolveChunk_zeroChunkCount_skipsBoundsCheck() {
+        // chunk_count=0 (unset/unknown): the local Python contract skips the
+        // bounds check entirely in this case (catalog_docs.py: "chunk_count
+        // of 0 or None means count is not yet known") — a large chunk index
+        // must still resolve rather than being rejected as out-of-range.
+        final String tumbler = "9.9.102";
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", tumbler,
+            "title", "Unknown Chunk Count Doc",
+            "content_type", "code",
+            "corpus", "code",
+            "physical_collection", "code__nexus__voyage-code-3__v1"
+        ));
+        var result = repo.resolveChunk(TENANT_A, tumbler, 999);
+        assertThat(result).isNotNull();
+        assertThat(result.get("chunk_index")).isEqualTo(999);
     }
 
     // ══════════════════════════════════════════════════════════════════════════

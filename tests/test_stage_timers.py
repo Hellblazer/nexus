@@ -119,6 +119,7 @@ class TestAggregate:
             "chunking_s": 0.0,
             "embed_s": 0.0,
             "upload_s": 0.0,
+            "hooks_s": 0.0,
             "retry_s": 0.0,
             "total_s": 0.0,
         }

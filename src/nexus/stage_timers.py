@@ -32,7 +32,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-_STAGE_NAMES: tuple[str, ...] = ("chunking", "embed", "upload")
+_STAGE_NAMES: tuple[str, ...] = ("chunking", "embed", "upload", "hooks")
 
 
 @dataclass
@@ -52,6 +52,10 @@ class StageTimers:
     chunking_s: float = 0.0
     embed_s: float = 0.0
     upload_s: float = 0.0
+    # nexus-cfc72: hook chains get their own bucket so LockedHookRegistry
+    # lock-wait under concurrent indexing shows up as hooks time, not as
+    # a mysteriously slow "upload".
+    hooks_s: float = 0.0
     retry_s: float = 0.0
 
     # Constructed by __post_init__ so the lock does not leak into the
@@ -64,7 +68,7 @@ class StageTimers:
     def stage(self, name: str) -> Iterator[None]:
         """Time the wrapped block and add net-of-retry to *name*.
 
-        ``name`` must be one of ``"chunking"``, ``"embed"``, ``"upload"``.
+        ``name`` must be one of ``"chunking"``, ``"embed"``, ``"upload"``, ``"hooks"``.
         Unknown names raise ``ValueError`` at entry so a typo fails
         loudly at first call, not silently at report time.
         """
@@ -91,22 +95,25 @@ class StageTimers:
                     self.chunking_s += net
                 elif name == "embed":
                     self.embed_s += net
+                elif name == "hooks":
+                    self.hooks_s += net
                 else:  # "upload"
                     self.upload_s += net
                 self.retry_s += retry_delta
 
     def snapshot(self) -> dict[str, float]:
-        """Thread-safe snapshot of the four accumulators."""
+        """Thread-safe snapshot of the accumulators."""
         with self._lock:
             return {
                 "chunking_s": self.chunking_s,
                 "embed_s": self.embed_s,
                 "upload_s": self.upload_s,
+                "hooks_s": self.hooks_s,
                 "retry_s": self.retry_s,
             }
 
     def total_s(self) -> float:
-        """Sum of all four buckets — convenience for reports."""
+        """Sum of all buckets — convenience for reports."""
         s = self.snapshot()
         return sum(s.values())
 
@@ -114,13 +121,14 @@ class StageTimers:
 def aggregate(timers: list[StageTimers]) -> dict[str, float]:
     """Sum a list of per-file :class:`StageTimers` into totals.
 
-    Returns a dict with the same four keys as :meth:`StageTimers.snapshot`
+    Returns a dict with the same keys as :meth:`StageTimers.snapshot`
     plus ``total_s``. Empty input returns all zeros (no files recorded).
     """
     totals = {
         "chunking_s": 0.0,
         "embed_s": 0.0,
         "upload_s": 0.0,
+        "hooks_s": 0.0,
         "retry_s": 0.0,
     }
     for t in timers:
@@ -144,7 +152,7 @@ def format_report(totals: dict[str, float], *, n_files: int) -> str:
     if grand <= 0 or n_files <= 0:
         return "[debug-timing] no per-stage samples recorded"
     lines = [f"[debug-timing] per-stage totals across {n_files} files:"]
-    for stage in ("chunking_s", "embed_s", "upload_s", "retry_s"):
+    for stage in ("chunking_s", "embed_s", "upload_s", "hooks_s", "retry_s"):
         seconds = totals.get(stage, 0.0)
         pct = (seconds / grand * 100) if grand > 0 else 0.0
         lines.append(f"  {stage:12} {seconds:>7.1f}s  ({pct:>4.1f}%)")

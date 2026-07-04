@@ -10,18 +10,19 @@ from pathlib import Path
 
 import structlog
 
-from nexus.catalog.catalog import Catalog, CatalogEntry
+from nexus.catalog.catalog import CatalogEntry
+from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
 from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger()
 
 
-def _all_entries(cat: Catalog) -> list[CatalogEntry]:
+def _all_entries(cat: CatalogReader) -> list[CatalogEntry]:
     """Fetch all catalog entries via the public API."""
     return cat.all_documents()
 
 
-def generate_citation_links(cat: Catalog, *, writer: object = None) -> int:
+def generate_citation_links(cat: CatalogReader, *, writer: CatalogWriter | None = None) -> int:
     """Auto-create 'cites' links via bib ID cross-matching.
 
     Uses metadata already on catalog entries — no API calls.
@@ -98,7 +99,7 @@ _PROSE_PATH_RE = re.compile(
 )
 
 
-def generate_rdr_filepath_links(cat: Catalog, *, writer: object = None, new_tumblers: list[Tumbler] | None = None) -> int:
+def generate_rdr_filepath_links(cat: CatalogReader, *, writer: CatalogWriter | None = None, new_tumblers: list[Tumbler] | None = None) -> int:
     """Extract file paths from RDR content and link to matching code entries.
 
     Scans each RDR's file on disk for source file paths (e.g.,
@@ -164,7 +165,7 @@ def generate_rdr_filepath_links(cat: Catalog, *, writer: object = None, new_tumb
 
 
 def generate_prose_filepath_links(
-    cat: Catalog, *, writer: object = None, new_tumblers: list[Tumbler] | None = None,
+    cat: CatalogReader, *, writer: CatalogWriter | None = None, new_tumblers: list[Tumbler] | None = None,
 ) -> int:
     """nexus-sob9: extract file paths from prose / markdown content
     and link to matching code entries.
@@ -252,7 +253,7 @@ def generate_prose_filepath_links(
 
 
 def generate_pdf_corpus_links(
-    cat: Catalog, *, writer: object = None, new_tumblers: list[Tumbler] | None = None,
+    cat: CatalogReader, *, writer: CatalogWriter | None = None, new_tumblers: list[Tumbler] | None = None,
 ) -> int:
     """nexus-sob9: link PDFs that share a content_hash via ``same-as``.
 

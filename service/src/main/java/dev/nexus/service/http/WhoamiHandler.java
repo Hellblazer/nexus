@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.Field;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,9 +52,12 @@ public final class WhoamiHandler implements HttpHandler {
 
         // Execute within a GUC-stamped transaction — proves the withTenant path
         String body = tenantScope.withTenant(tenant, ctx -> {
-            // SELECT current_setting proves GUC was applied
-            String stamped = ctx.fetchOne("SELECT current_setting('nexus.tenant', true)")
-                                .get(0, String.class);
+            // SELECT current_setting proves GUC was applied — DSL.function template
+            // (nexus-mzuj9), the current_setting(text, bool) 2-arg PG builtin has no
+            // dedicated jOOQ DSL accessor.
+            Field<String> currentSetting = DSL.function(
+                "current_setting", String.class, DSL.val("nexus.tenant"), DSL.val(true));
+            String stamped = ctx.select(currentSetting).fetchOne(currentSetting);
             try {
                 return MAPPER.writeValueAsString(Map.of(
                     "tenant", tenant,

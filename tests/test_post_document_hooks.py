@@ -433,3 +433,45 @@ def test_record_batch_hook_failure_writes_chain_batch(
     assert _json.loads(row[1]) == ["d1", "d2"]
     assert row[2] == 1
     assert row[3] == "batch"
+
+
+# ── nexus-w8lg1: document chain must carry the CATALOG doc_id ────────────────
+
+
+def test_fire_store_chains_forwards_catalog_doc_id_to_document_chain() -> None:
+    """nexus-w8lg1 (6.3.0 live shakeout finding #1): fire_store_chains
+    passed the T3 chunk id (chunk_text_hash[:32]) as the document chain's
+    doc_id instead of the catalog tumbler. The aspect-enqueue hook then
+    shipped that chunk hash to the engine, violating the composite FK
+    aspect_extraction_queue(tenant_id, doc_id) -> catalog_documents
+    (tenant_id, tumbler) — SQLSTATE 23503, surfaced as a typed 409, and
+    the note silently never got aspects."""
+    registry = HookRegistry()
+    seen: list[dict] = []
+
+    def doc_id_aware(source_path, collection, content, *, doc_id=""):
+        seen.append({"source_path": source_path, "doc_id": doc_id})
+
+    registry.register_document(doc_id_aware)
+
+    chunk_id = "bf715bbd" + "0" * 24  # chunk_text_hash[:32] shape
+    registry.fire_store_chains(
+        [chunk_id], "knowledge__delos", ["note body"],
+        catalog_doc_id="1.7.42",
+    )
+
+    assert seen == [{"source_path": chunk_id, "doc_id": "1.7.42"}]
+
+
+def test_fire_store_chains_empty_catalog_doc_id_stays_empty() -> None:
+    """No catalog entry (catalog absent) -> doc_id must stay "" so the
+    enqueue persists NULL, which the nullable FK accepts."""
+    registry = HookRegistry()
+    seen: list[str] = []
+
+    def doc_id_aware(source_path, collection, content, *, doc_id=""):
+        seen.append(doc_id)
+
+    registry.register_document(doc_id_aware)
+    registry.fire_store_chains(["c" * 32], "knowledge__delos", ["body"])
+    assert seen == [""]

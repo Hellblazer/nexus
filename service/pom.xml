@@ -94,6 +94,7 @@
             <version>${jooq.version}</version>
         </dependency>
 
+
         <!-- GraalVM native-image hosted API (Feature, RuntimeReflection). Compile-only:
              used solely by JooqRecordReflectionFeature, which the native-image builder
              runs at image-build time. provided scope keeps it off the app-jar runtime
@@ -309,6 +310,24 @@
                                                 <inputSchema>t1</inputSchema>
                                             </schema>
                                         </schemata>
+                                        <!-- nexus-xtmtf: pgvector columns generate as
+                                             TableField<R, Vector> via VectorBinding —
+                                             retires the ?::vector casts + vectorLiteral()
+                                             strings. (jOOQ's own FloatVector types are
+                                             commercial-edition-only; the OSS
+                                             jooq-postgres-extensions jar has no vector
+                                             support, hence the in-repo binding.) The
+                                             binding class is referenced by NAME in
+                                             generated code and compiles in the same
+                                             javac pass — no codegen-classpath dep. -->
+                                        <forcedTypes>
+                                            <forcedType>
+                                                <userType>dev.nexus.service.jooq.binding.Vector</userType>
+                                                <binding>dev.nexus.service.jooq.binding.VectorBinding</binding>
+                                                <includeTypes>vector</includeTypes>
+                                                <priority>-2147483648</priority>
+                                            </forcedType>
+                                        </forcedTypes>
                                     </database>
                                     <generate>
                                         <pojos>true</pojos>

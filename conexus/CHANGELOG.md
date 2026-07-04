@@ -6,9 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.3.1] - 2026-07-04
+
+Plugin version aligned with conexus 6.3.1. No plugin-side changes.
+
 ## [6.3.0] - 2026-07-03
 
 Plugin version aligned with conexus 6.3.0. No plugin-side changes.
+
+
 
 ## [6.2.0] - 2026-07-02
 

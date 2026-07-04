@@ -564,3 +564,155 @@ def build_doc_id_resolver(
         return file_to_doc_id.get(path, "")
 
     return _resolver
+
+
+# ── Bounded file-level concurrency (nexus-cfc72) ─────────────────────────────
+
+
+def resolve_index_concurrency() -> int:
+    """Resolve the per-file indexing concurrency for ``nx index repo``.
+
+    ``NX_INDEX_CONCURRENCY`` (>=1) wins when set and parseable. Otherwise
+    the default is 2 when BOTH the vectors and catalog backends are the
+    HTTP service (thread-safe httpx clients; the engine's TenantScope
+    admission control bounds bursts to typed 503s) and 1 everywhere else
+    — the direct-SQLite catalog on the legacy ``=sqlite`` opt-out is not
+    thread-safe. The gate self-retires once nexus-7bomn removes that
+    opt-out.
+
+    The gate deliberately does NOT check the T2 "memory" backend
+    (chash/taxonomy/aspect-queue writes): those routes only run inside
+    the hook chains, which ``LockedHookRegistry`` serializes whenever
+    concurrency > 1 — the lock, not this gate, is what makes a diverging
+    memory backend safe (critique finding, nexus-cfc72). Narrowing the
+    hook lock requires extending this gate. The local bge embedder is
+    also concurrency-safe: onnxruntime ``InferenceSession.run`` supports
+    concurrent calls on a shared session.
+    """
+    import os  # noqa: PLC0415 — leaf module keeps import surface minimal
+
+    def _backend_default() -> int:
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — deferred to avoid circular import (db.http_vector_client)
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+
+        if (
+            is_vector_service_mode()
+            and storage_backend_for("catalog") == StorageBackend.SERVICE
+        ):
+            return 2
+        return 1
+
+    raw = os.environ.get("NX_INDEX_CONCURRENCY", "").strip()
+    if raw:
+        try:
+            requested = max(1, int(raw))
+        except ValueError:
+            _log.warning(
+                "nx_index_concurrency_invalid", value=raw,
+                hint="expected an integer >= 1; using the backend default",
+            )
+        else:
+            if requested > 1 and _backend_default() == 1:
+                # Review finding (nexus-cfc72): the override wins, but
+                # never silently — forcing concurrency onto a non-service
+                # backend reintroduces the direct-SQLite hazard the
+                # default gate exists to avoid.
+                _log.warning(
+                    "nx_index_concurrency_overrides_backend_gate",
+                    value=requested,
+                    hint="a non-service catalog/vectors backend is not "
+                         "audited for concurrent indexing",
+                )
+            return requested
+    return _backend_default()
+
+
+def run_file_loop(
+    files: list[tuple[float, Path]],
+    index_one: Callable[[Path, float, object | None], int],
+    *,
+    concurrency: int,
+    on_file: Callable[[Path, int, float], None] | None,
+    on_stage_timers: Callable[[Path, object], None] | None,
+) -> None:
+    """Drive one per-file indexing loop, sequentially or with a bounded pool.
+
+    ``index_one(file, score, timers) -> chunk_count`` is the loop body
+    (the ``_index_code_file`` / ``_index_prose_file`` / ``_index_pdf_file``
+    call). Contracts preserved from the legacy inline loops (nexus-cfc72):
+
+    - ``concurrency <= 1`` is a plain sequential loop — identical
+      ordering and error behavior to the pre-concurrency code.
+    - Submission order is the caller's (frecency-descending) order, so
+      high-value files start first even when completion interleaves.
+    - ``on_file`` / ``on_stage_timers`` are invoked under one lock —
+      the CLI progress renderer is not re-entrant. Per-file elapsed is
+      measured inside the worker, so durations stay truthful.
+    - A per-file ``StageTimers`` is built only when ``on_stage_timers``
+      is subscribed, mirroring the nexus-7niu short-circuit.
+    - Error semantics match the sequential loop: the first exception
+      cancels all not-yet-started files and re-raises. In-flight files
+      run to completion (callbacks included) before the raise — the
+      shakeout's count-based assertions are order-independent, so a few
+      extra completed files at failure time are indistinguishable from
+      the sequential "run died at file X" shape.
+    """
+    import threading  # noqa: PLC0415 — leaf module keeps import surface minimal
+    import time  # noqa: PLC0415 — leaf module keeps import surface minimal
+
+    cb_lock = threading.Lock()
+
+    def _make_timers() -> object | None:
+        if on_stage_timers is None:
+            return None
+        from nexus.stage_timers import StageTimers  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep)
+
+        return StageTimers()
+
+    def _process(score: float, file: Path) -> None:
+        t0 = time.monotonic()
+        timers = _make_timers()
+        chunks = index_one(file, score, timers)
+        with cb_lock:
+            if on_file:
+                on_file(file, chunks, time.monotonic() - t0)
+            if on_stage_timers is not None and timers is not None:
+                on_stage_timers(file, timers)
+
+    if concurrency <= 1:
+        for score, file in files:
+            _process(score, file)
+        return
+
+    from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait  # noqa: PLC0415 — leaf module keeps import surface minimal
+
+    with ThreadPoolExecutor(
+        max_workers=concurrency, thread_name_prefix="nx-index",
+    ) as pool:
+        futures = [pool.submit(_process, score, file) for score, file in files]
+        done, not_done = wait(futures, return_when=FIRST_EXCEPTION)
+        if not not_done and not any(f.exception() for f in done):
+            return
+        # A failure (or spurious wake). Cancel everything not yet started,
+        # let in-flight files finish, then harvest EVERY failure — a
+        # concurrent secondary failure must be logged, never silently
+        # dropped (critique finding, nexus-cfc72).
+        for fut in not_done:
+            fut.cancel()
+        wait(futures)
+        failures: list[tuple[Path, BaseException]] = []
+        for (score, file), fut in zip(files, futures):
+            if fut.cancelled():
+                continue
+            exc = fut.exception()
+            if exc is not None:
+                failures.append((file, exc))
+        if not failures:
+            return
+        # Deterministic "first": earliest in submission (frecency) order.
+        for file, exc in failures[1:]:
+            _log.warning(
+                "index_file_concurrent_failure_suppressed",
+                file=str(file), error=str(exc),
+            )
+        raise failures[0][1]

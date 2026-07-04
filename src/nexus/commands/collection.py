@@ -211,6 +211,25 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
             f"is intentional (rare — usually means the caller is resurrecting "
             f"an orphaned collection with the wrong prefix)."
         )
+    # nexus-tcvpn: a SAME-prefix rename whose embedding-model SEGMENT differs
+    # sailed through the prefix guard — but rename is an O(1) identity
+    # re-home with ZERO re-embedding, so the vectors would stay in the old
+    # model space while the name claims the new one (silent staleness/
+    # search corruption, no Voyage call ever fires). Cross-model moves are
+    # the RDR-162 migration pipeline's job (remap_collection_references +
+    # vector ETL), not rename's.
+    old_model = embedding_model_for_collection(old)
+    new_model = embedding_model_for_collection(new)
+    if old_model != new_model and not force_prefix_change:
+        raise click.ClickException(
+            f"embedding-model mismatch: {old!r} encodes {old_model!r} but "
+            f"{new!r} encodes {new_model!r}. rename never re-embeds — the "
+            f"vectors would silently stay {old_model!r} under a name claiming "
+            f"{new_model!r}. Cross-model moves go through the migration "
+            f"pipeline (nx migrate / guided-upgrade, RDR-162 vector ETL). "
+            f"Pass --force-prefix-change ONLY if you know the vectors are "
+            f"already {new_model!r}."
+        )
 
     counts = rename_collection_data_plane(old, new)
 
@@ -785,7 +804,7 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
         grand_updated = 0
         for i, col_name in enumerate(sorted(targets), 1):
             try:
-                col = db._client.get_collection(col_name)
+                col = db.get_collection(col_name)
             except Exception as exc:  # noqa: BLE001 — per-collection resolution failure surfaced via click.echo, loop continues
                 click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
                 continue
@@ -856,13 +875,18 @@ def _reembed_collection(
     from nexus.retry import _voyage_with_retry  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     try:
-        col = db._client.get_collection(col_name)
+        col = db.get_collection(col_name)
+        # count() inside the same boundary: the service stub propagates
+        # transient VectorServiceError raw (tail review, nexus-c9xr2) —
+        # surface it as the file's ClickException convention, not a
+        # traceback.
+        total = col.count()
+    except click.ClickException:
+        raise
     except Exception as exc:  # noqa: BLE001 — boundary catch re-raised as ClickException with context
         raise click.ClickException(
             f"collection {col_name!r}: {type(exc).__name__}: {exc}"
         )
-
-    total = col.count()
     if total == 0:
         return 0, 0
 
@@ -926,13 +950,27 @@ def _reembed_collection(
             for m in v_metas:
                 if isinstance(m, dict):
                     m["embedding_model"] = target_model
-            db.upsert_chunks_with_embeddings(
-                collection_name=col_name,
-                ids=v_ids,
-                documents=v_docs,
-                embeddings=embeddings,
-                metadatas=v_metas,
-            )
+            from nexus.db.http_vector_client import is_service_backed as _isb  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            if _isb(db):
+                # nexus-u37lw: on the service handle, upsert_chunks_with_
+                # embeddings DISCARDS caller vectors (server re-embeds by
+                # collection name). The command guard has already pinned
+                # target_model == the name-encoded model here, so the
+                # nexus-hxry2 verbatim passthrough stores our vectors
+                # without a second (billed) server-side embed.
+                db.upsert_chunks(
+                    col_name, v_ids, v_docs,
+                    metadatas=v_metas,
+                    embeddings=embeddings,
+                )
+            else:
+                db.upsert_chunks_with_embeddings(
+                    collection_name=col_name,
+                    ids=v_ids,
+                    documents=v_docs,
+                    embeddings=embeddings,
+                    metadatas=v_metas,
+                )
             # nexus-bw65 / nexus-9099: fire post-store chains so the
             # invariant 'every CLI T3 write also fires the chain'
             # (test_every_cli_t3_write_function_fires_store_chains)
@@ -1007,9 +1045,40 @@ def reembed_cmd(
         )
 
     db = _t3()
+
+    # nexus-u37lw (critique Critical): in service mode, upsert_chunks_with_
+    # embeddings forwards TEXT and the server re-embeds by the model the
+    # COLLECTION NAME encodes (EmbedderRouter routes by name segment) —
+    # client-computed vectors are discarded. A --to that differs from the
+    # encoded model would therefore silently no-op with the OLD model while
+    # stamping the NEW model into metadata (corrupting staleness checks)
+    # and printing false success. Fail loud instead; cross-model moves are
+    # the rename --cross-model flow.
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if not dry_run and is_service_backed(db):
+        encoded = embedding_model_for_collection(name)
+        if encoded != target_model:
+            raise click.ClickException(
+                f"service mode re-embeds server-side using the model the "
+                f"collection NAME encodes — or, for legacy 2-segment names, "
+                f"the prefix-inferred model ({encoded!r}); --to {target_model!r} "
+                f"cannot take effect on {name!r}. Cross-model moves go "
+                f"through the migration pipeline (nx migrate / "
+                f"guided-upgrade — the RDR-162 vector ETL re-embeds into a "
+                f"{target_model}-named collection). Plain 'nx collection "
+                f"rename' does NOT re-embed and would corrupt the "
+                f"name-encoded model contract."
+            )
+
     if dry_run:
-        col = db._client.get_collection(name)
-        n = col.count()
+        try:
+            col = db.get_collection(name)
+            n = col.count()
+        except Exception as exc:  # noqa: BLE001 — boundary catch re-raised as ClickException (tail review, nexus-c9xr2)
+            raise click.ClickException(
+                f"collection {name!r}: {type(exc).__name__}: {exc}"
+            )
         click.echo(
             f"dry-run: would re-embed {n} chunk(s) in {name!r} with "
             f"{target_model!r}. Pass --no-dry-run --yes to apply."

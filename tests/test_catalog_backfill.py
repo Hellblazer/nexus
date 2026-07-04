@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
+from nexus.db.http_vector_client import HttpVectorClient
 
 
 @pytest.fixture(autouse=True)
@@ -51,8 +52,16 @@ def _mock_registry(tmp_path: Path, repos: dict | None = None) -> MagicMock:
 
 
 def _mock_t3(collections: list[dict] | None = None) -> MagicMock:
-    """Create a mock T3Database."""
-    mock = MagicMock()
+    """Create a mock T3 handle.
+
+    make_t3()/_make_t3() return the service-backed HttpVectorClient
+    unconditionally in production since RDR-155 P4a.2. list_collections()
+    returning a dict shape (``{"name":..., "count":...}``, not raw Chroma
+    Collection objects) matches HttpVectorClient.list_collections(), not
+    T3Database's chroma-Collection ``._client.list_collections()`` path --
+    spec= it so a missing method fails the mocked test too.
+    """
+    mock = MagicMock(spec=HttpVectorClient)
     if collections is None:
         collections = [
             {"name": "code__myrepo", "count": 100},
@@ -189,7 +198,12 @@ class TestBackfillFromT3:
     ) -> MagicMock:
         """Build a mock T3 whose ``get_collection().get(...)`` paginates
         chunks tagged with absolute source_paths under ``repo_root``."""
-        mock_t3 = MagicMock()
+        # make_t3()/_make_t3() return the service-backed HttpVectorClient
+        # unconditionally since RDR-155 P4a.2. _backfill_per_file_from_t3
+        # calls t3.get_collection(collection) directly (a method both
+        # T3Database and HttpVectorClient implement) -- it never reaches
+        # ._client, so no raw-chroma stub is needed here.
+        mock_t3 = MagicMock(spec=HttpVectorClient)
         mock_col = MagicMock()
         mock_col.name = collection_name
 
@@ -216,7 +230,6 @@ class TestBackfillFromT3:
 
         mock_col.get.side_effect = _paginated_get
         mock_t3.get_collection.return_value = mock_col
-        mock_t3._client.get_collection.return_value = mock_col
         return mock_t3
 
     def test_per_file_recovery_registers_unique_source_paths(
@@ -327,8 +340,11 @@ class TestBackfillFromT3:
         from nexus.commands.catalog import _backfill_per_file_from_t3
 
         cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        # No owner registered for this hash.
-        t3 = MagicMock()
+        # No owner registered for this hash. t3 is never touched -- the
+        # owner-lookup ClickException raises before any T3 call -- but
+        # spec= it anyway to match the real unconditional make_t3()
+        # return type (RDR-155 P4a.2).
+        t3 = MagicMock(spec=HttpVectorClient)
 
         with pytest.raises(Exception) as exc_info:
             _backfill_per_file_from_t3(
@@ -392,9 +408,11 @@ class TestBackfillFromT3CLI:
 
         mock_col = MagicMock()
         mock_col.get.side_effect = _paginated_get
-        mock_t3 = MagicMock()
+        # make_t3()/_make_t3() return the service-backed HttpVectorClient
+        # unconditionally since RDR-155 P4a.2; _backfill_per_file_from_t3
+        # calls t3.get_collection(collection) directly (no ._client access).
+        mock_t3 = MagicMock(spec=HttpVectorClient)
         mock_t3.get_collection.return_value = mock_col
-        mock_t3._client.get_collection.return_value = mock_col
         mock_t3_fn.return_value = mock_t3
         mock_reg_fn.return_value = _mock_registry(tmp_path)
 

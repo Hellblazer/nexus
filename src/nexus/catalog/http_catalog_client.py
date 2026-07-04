@@ -119,6 +119,23 @@ def _link_from_dict(d: dict) -> CatalogLink:
 from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
 
 
+def _coerce_legacy_grandfathered(d: dict) -> dict:
+    """Coerce a collection row's ``legacy_grandfathered`` to ``bool`` (nexus-u26b4).
+
+    ``CatalogRepository.collRow()``'s ``legacy_grandfathered`` column is a boxed
+    Integer on the wire (serializes as a JSON number, 0/1); local
+    ``Catalog.list_collections()`` (via ``_row_to_collection_dict``) already casts
+    it to a real Python ``bool``. Mirrors that cast here so raw dict-returning
+    callers (``get_collection``/``list_collections``/``collections_by_owner``) get
+    the same type local gives, not just ``is_legacy_collection()`` which papered
+    over the divergence at its own call site with a local ``bool(...)`` cast.
+    """
+    d = dict(d)
+    if "legacy_grandfathered" in d:
+        d["legacy_grandfathered"] = bool(d["legacy_grandfathered"])
+    return d
+
+
 def _to_entry(d: dict) -> CatalogEntry:
     """Convert a server response dict to a CatalogEntry.
 
@@ -1010,8 +1027,33 @@ class HttpCatalogClient:
         return out
 
     def resolve_chunk(self, tumbler: Tumbler | str) -> dict | None:
-        result = self.resolve(tumbler)
-        return result.__dict__ if result else None
+        """Resolve a 4-segment chunk tumbler to its document + chunk metadata.
+
+        Mirrors the local ``Catalog.resolve_chunk`` contract exactly
+        (catalog_docs.py): chunks are implicit addresses, not their own
+        catalog rows. Returns ``None`` immediately (no wire round-trip) when
+        ``tumbler`` is not a chunk address (``tumbler.chunk is None``) — the
+        same short-circuit the local side takes. Otherwise calls
+        ``GET /resolve_chunk`` (nexus-gc2ze).
+        """
+        t = Tumbler.parse(tumbler) if isinstance(tumbler, str) else tumbler
+        if t.chunk is None:
+            return None
+        try:
+            result = self._get("/resolve_chunk", tumbler=str(t))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if not result:
+            return None
+        return {
+            "document_tumbler": result.get("document_tumbler", ""),
+            "chunk_index": result.get("chunk_index", 0),
+            "physical_collection": result.get("physical_collection", ""),
+            "title": result.get("title", ""),
+            "content_type": result.get("content_type", ""),
+        }
 
     def resolve_span_text(self, tumbler: Tumbler | str, span: str) -> str | None:
         return None  # not supported in initial service-mode implementation
@@ -1221,11 +1263,48 @@ class HttpCatalogClient:
         from_t: Tumbler | str,
         to_t: Tumbler | str,
         link_type: str,
-    ) -> bool:
-        return (
-            self.resolve(from_t) is not None and
-            self.resolve(to_t) is not None
+    ) -> list[str]:
+        """Return a list of validation errors (empty = link is valid).
+
+        Return-type parity (nexus-u26b4): mirrors local
+        ``_LinkOps.validate_link``'s errors-list contract exactly (was a
+        ``bool``), reusing existing wire routes — ``self.resolve()`` for
+        the existence checks and ``self.link_query()`` for the duplicate
+        check — rather than a new server endpoint.
+        """
+        errors: list[str] = []
+        if self.resolve(from_t) is None:
+            errors.append(f"from_tumbler {from_t} not found in documents")
+        if self.resolve(to_t) is None:
+            errors.append(f"to_tumbler {to_t} not found in documents")
+        existing = self.link_query(
+            from_t=str(from_t), to_t=str(to_t), link_type=link_type, limit=1,
         )
+        if existing:
+            errors.append(
+                f"duplicate: link ({from_t}, {to_t}, {link_type!r}) "
+                f"already exists"
+            )
+        return errors
+
+    def _traverse(self, payload: dict) -> dict:
+        """POST /v1/catalog/traverse and convert wire dicts to typed objects.
+
+        Return-type parity (nexus-u26b4, the h8rf6.3 incident class): local
+        ``Catalog.graph()``/``graph_many()`` return
+        ``{"nodes": list[CatalogEntry], "edges": list[CatalogLink]}`` (matching
+        the return-type-parity pattern used elsewhere in this module, e.g.
+        ``links_from``/``get_manifest``); this previously returned the RAW wire
+        dict unconverted, so consumers doing attribute access (``node.tumbler``,
+        ``edge.link_type`` — e.g. ``mcp/core.py``'s traverse tool,
+        ``commands/catalog_cmds/links.py``'s ``links`` command) silently
+        degraded or crashed in service mode.
+        """
+        result = self._post("/traverse", payload) or {"nodes": [], "edges": []}
+        return {
+            "nodes": [_to_entry(n) for n in result.get("nodes", [])],
+            "edges": [_link_from_dict(e) for e in result.get("edges", [])],
+        }
 
     def graph(
         self,
@@ -1251,7 +1330,7 @@ class HttpCatalogClient:
         # include_heuristic: forwarded to service for future support; currently informational
         if include_heuristic:
             payload["include_heuristic"] = True
-        return self._post("/traverse", payload) or {"nodes": [], "edges": []}
+        return self._traverse(payload)
 
     def graph_many(
         self,
@@ -1277,7 +1356,7 @@ class HttpCatalogClient:
         # include_heuristic: forwarded to service for future support; currently informational
         if include_heuristic:
             payload["include_heuristic"] = True
-        return self._post("/traverse", payload) or {"nodes": [], "edges": []}
+        return self._traverse(payload)
 
     def link_audit(self, *, t3: Any = None) -> dict:
         return {}  # not supported in initial service-mode implementation
@@ -1318,7 +1397,10 @@ class HttpCatalogClient:
 
     def list_collections(self) -> list[dict]:
         result = self._get("/collections/list")
-        return result.get("collections", []) if result else []
+        return [
+            _coerce_legacy_grandfathered(c)
+            for c in (result.get("collections", []) if result else [])
+        ]
 
     def get_collection(self, name: str) -> dict | None:
         try:
@@ -1327,7 +1409,9 @@ class HttpCatalogClient:
             if exc.response.status_code == 404:
                 return None
             raise
-        return result if result and result.get("name") else None
+        if not result or not result.get("name"):
+            return None
+        return _coerce_legacy_grandfathered(result)
 
     def is_legacy_collection(self, name: str) -> bool:
         coll = self.get_collection(name)
@@ -1667,28 +1751,42 @@ class HttpCatalogClient:
     # ══════════════════════════════════════════════════════════════════════════
 
     def collection_health_meta(self, collection: str) -> dict:
-        """Return ``{last_indexed, orphan_count}`` for *collection* from the service.
+        """Return ``{last_indexed, orphan_count, stale_source_ratio}`` for *collection*.
 
         nexus-dsu5z: public service-mode method replacing the guarded
         ``hasattr(cat, '_db')`` path in ``collection_health._default_catalog_stats_fn``.
         Routes to ``GET /v1/catalog/collections/health?collection=<name>``.
 
-        Returns ``{"last_indexed": None, "orphan_count": 0}`` when the service
-        responds with an empty/absent payload or 404 (collection unknown).
-        Non-404 errors (auth, bad-request, 5xx) propagate — they signal
+        Returns ``{"last_indexed": None, "orphan_count": 0, "stale_source_ratio": None}``
+        when the service responds with an empty/absent payload or 404 (collection
+        unknown). Non-404 errors (auth, bad-request, 5xx) propagate — they signal
         misconfiguration that must not be masked as a healthy-empty result.
+
+        Return-shape parity (nexus-u26b4): ``stale_source_ratio`` is carried by
+        both the wire response (``CatalogRepository.collectionHealthMeta``, the
+        catalog-011 PG view) and local ``Catalog.collection_health_meta()`` — this
+        method previously reconstructed only ``{last_indexed, orphan_count}`` and
+        silently dropped it, leaving ``collection_health.py``'s report always
+        rendering the ``—`` placeholder for service-mode collections.
         """
         try:
             result = self._get("/collections/health", collection=collection)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
-                return {"last_indexed": None, "orphan_count": 0}
+                return {
+                    "last_indexed": None, "orphan_count": 0,
+                    "stale_source_ratio": None,
+                }
             raise
         if not result:
-            return {"last_indexed": None, "orphan_count": 0}
+            return {
+                "last_indexed": None, "orphan_count": 0,
+                "stale_source_ratio": None,
+            }
         return {
             "last_indexed": result.get("last_indexed"),
             "orphan_count": int(result.get("orphan_count") or 0),
+            "stale_source_ratio": result.get("stale_source_ratio"),
         }
 
     def stats(self) -> dict:

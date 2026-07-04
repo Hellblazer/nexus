@@ -21,6 +21,7 @@ from nexus.commands.enrich import (
     _merge_bib_gapfill,
     enrich,
 )
+from nexus.db.http_vector_client import HttpVectorClient
 
 
 # --- _dt_crossref_bib: map the live CrossRef flat dict -> nexus bib dict ----
@@ -165,7 +166,11 @@ def test_source_dt_gapfills_when_primary_misses(
         "authors": ["X", "Y"],
     }
     _two_chunk_collection(mock_retry)
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles;
+    # _chroma_with_retry is patched above so the rest is bypassed.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = MagicMock()
     mock_t3.return_value = mock_db
 
@@ -205,7 +210,11 @@ def test_source_dt_unavailable_degrades_to_primary_only(
         {"ids": ["c1"], "metadatas": [dict(_CHUNK_META)]},
         {"ids": ["c1"], "documents": ["body"], "metadatas": [dict(_CHUNK_META)]},
     ]
-    mock_db = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2.
+    # get_or_create_collection() is a direct call on both handles;
+    # _chroma_with_retry is patched above so the rest is bypassed.
+    mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = MagicMock()
     mock_t3.return_value = mock_db
 
