@@ -754,9 +754,11 @@ def run_collection_postprocessing(
             click.echo(msg)
 
     cfg = _load_cfg()
+    import time as _time  # noqa: PLC0415 — phase-timer only (nexus-duoak heatmap attribution)
     try:
         t3 = make_t3()
         total_topics = 0
+        _tax_t0 = _time.monotonic()
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for col_name in collections:
                 try:
@@ -764,6 +766,7 @@ def run_collection_postprocessing(
                     total_topics += n
                 except Exception:  # noqa: BLE001 — best-effort per-collection taxonomy discovery; failure logged and chain continues
                     _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)
+            _say(f"  Taxonomy: discover done ({_time.monotonic() - _tax_t0:.1f}s)")
             if total_topics:
                 _say(f"  Taxonomy: {total_topics} topics across {len(collections)} collections.")
                 # Auto-label with Claude if available and enabled
@@ -772,13 +775,17 @@ def run_collection_postprocessing(
                     try:
                         from nexus.commands.taxonomy_cmd import _claude_available, relabel_topics  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
                         if _claude_available():
+                            _lbl_t0 = _time.monotonic()
                             labeled = 0
                             for col_name in collections:
                                 labeled += relabel_topics(
                                     db.taxonomy, collection=col_name, only_pending=True,
                                 )
                             if labeled:
-                                _say(f"  Labels:   {labeled} topics labeled by Claude haiku.")
+                                _say(
+                                    f"  Labels:   {labeled} topics labeled by "
+                                    f"Claude haiku ({_time.monotonic() - _lbl_t0:.1f}s)"
+                                )
                     except Exception:  # noqa: BLE001 — best-effort Claude auto-labelling; failure logged and chain continues
                         _log.debug("taxonomy_label_failed", exc_info=True)
 
@@ -793,11 +800,15 @@ def run_collection_postprocessing(
                 # project_against handles both backends; pass the chroma client
                 # for a raw T3Database or the service handle itself.
                 try:
+                    _proj_t0 = _time.monotonic()
                     proj_total = _project_cross_collections(
                         db.taxonomy, collections, getattr(t3, "_client", t3),
                     )
                     if proj_total:
-                        _say(f"  Project:  {proj_total} cross-collection assignments.")
+                        _say(
+                            f"  Project:  {proj_total} cross-collection "
+                            f"assignments ({_time.monotonic() - _proj_t0:.1f}s)"
+                        )
                 except Exception:  # noqa: BLE001 — best-effort cross-collection projection pass; failure logged and chain continues
                     _log.debug("taxonomy_projection_failed", exc_info=True)
 
