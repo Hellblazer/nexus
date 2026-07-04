@@ -173,8 +173,14 @@ public final class ChashRepository {
         if (chashes == null || chashes.isEmpty()) return;
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        // distinct(): a multi-VALUES INSERT .. ON CONFLICT DO UPDATE raises
+        // "cannot affect row a second time" (-> HTTP 500) when the same chash
+        // appears twice in one statement, and real files emit duplicate chunk
+        // text (nexus-85z0y). Dedup is semantics-free: a chash is a content
+        // hash, so every occurrence is identical.
         List<String> valid = chashes.stream()
                 .filter(c -> c != null && !c.isBlank())
+                .distinct()
                 .toList();
         if (valid.isEmpty()) return;
 

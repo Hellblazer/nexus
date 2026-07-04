@@ -174,6 +174,26 @@ class ChashRepositoryTest {
         assertThat(blank).isEmpty();
     }
 
+    // ── Test 3b: upsertMany tolerates in-batch duplicate chashes ─────────────
+
+    @Test
+    @Order(3)
+    void upsertMany_dedupsInBatchDuplicates() {
+        // nexus-85z0y: a multi-VALUES INSERT .. ON CONFLICT DO UPDATE raises
+        // "cannot affect row a second time" when one statement repeats a
+        // conflict key. Real files emit duplicate chunk text, so a batch
+        // like [dup, dup, dup2] must succeed, not 500.
+        repo.upsertMany(TENANT_A,
+                List.of("chash_dup_a", "chash_dup_a", "chash_dup_b",
+                        "chash_dup_a", "chash_dup_b"),
+                "code__dupbatch");
+
+        var a = repo.lookup(TENANT_A, "chash_dup_a");
+        var b = repo.lookup(TENANT_A, "chash_dup_b");
+        assertThat(a).hasSize(1).extracting(r -> r.get("collection")).containsExactly("code__dupbatch");
+        assertThat(b).hasSize(1).extracting(r -> r.get("collection")).containsExactly("code__dupbatch");
+    }
+
     // ── Test 4: lookup returns multiple collections ───────────────────────────
 
     @Test
