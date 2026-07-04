@@ -2566,7 +2566,8 @@ public final class CatalogRepository {
      * (as the cast did) — these are fidelity-preserving import/supersede
      * timestamps, not event stamps, so never substitute now().
      */
-    private static java.time.OffsetDateTime tsOrNull(String iso) {
+    // Package-private for direct unit testing (CatalogTsOrNullTest).
+    static java.time.OffsetDateTime tsOrNull(String iso) {
         if (iso == null || iso.isBlank()) return null;
         String normalized = iso.trim().replace(' ', 'T');
         try {
@@ -2574,8 +2575,16 @@ public final class CatalogRepository {
         } catch (java.time.format.DateTimeParseException e) {
             // Offsetless (legacy SQLite catalog rows) — timestamptz text input
             // without a zone resolves in the session TZ; the service runs UTC.
-            return java.time.LocalDateTime.parse(normalized)
-                       .atOffset(java.time.ZoneOffset.UTC);
+            try {
+                return java.time.LocalDateTime.parse(normalized)
+                           .atOffset(java.time.ZoneOffset.UTC);
+            } catch (java.time.format.DateTimeParseException e2) {
+                // Date-only ("2026-05-01") — the retired ?::timestamptz cast
+                // accepted bare dates as midnight; preserve that (review
+                // finding: this branch was missing and threw uncaught).
+                return java.time.LocalDate.parse(normalized)
+                           .atStartOfDay().atOffset(java.time.ZoneOffset.UTC);
+            }
         }
     }
 

@@ -29,11 +29,32 @@ import java.util.stream.Stream;
  */
 class RawSqlGateTest {
 
-    /** {@code <receiver>.execute("...")} or {@code .execute(sqlVar, ...)} —
-     * the string-SQL overloads. A bare {@code .execute()} (jOOQ DSL terminal)
-     * does not match. */
+    /** String-SQL execution shapes, matched across line breaks (review
+     * finding: the per-line scan was evadable by a newline after the
+     * paren). Covers {@code .execute("...")}, {@code .execute(sql...)},
+     * {@code .execute(new StringBuilder...)}, {@code ctx.query("...")}
+     * (jOOQ's raw-SQL query builder), and JDBC
+     * {@code executeQuery("...")/executeUpdate("...")}. A bare
+     * {@code .execute()} (jOOQ DSL terminal) does not match.
+     *
+     * KNOWN RESIDUAL (accepted, documented per critique): a raw SQL
+     * string bound to a variable NOT prefixed "sql" and passed to
+     * .execute(var) evades the name heuristic — jOOQ's legitimate
+     * .execute(Query) overload makes a match-any-identifier rule
+     * false-positive on typed DSL usage, so the heuristic stays
+     * name-based. The three pre-existing bootstrap JDBC sites
+     * (HealthHandler, VersionHandler, PoolerModeCheck) run before/
+     * outside the jOOQ context and are whitelisted below. */
     private static final Pattern RAW_EXECUTE = Pattern.compile(
-        "\\.execute\\(\\s*(\"|sql|new StringBuilder)");
+        "(\\.execute\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.query\\(\\s*\""
+        + "|\\.execute(Query|Update)\\(\\s*\")",
+        Pattern.DOTALL);
+
+    /** Bootstrap/health JDBC sites that predate jOOQ context availability. */
+    private static final java.util.Set<String> JDBC_BOOTSTRAP_WHITELIST =
+        java.util.Set.of(
+            "HealthHandler.java", "VersionHandler.java", "PoolerModeCheck.java");
 
     @Test
     void noRawExecuteSqlInMainSources() throws IOException {
@@ -44,17 +65,20 @@ class RawSqlGateTest {
         try (Stream<Path> files = Files.walk(root)) {
             files.filter(p -> p.toString().endsWith(".java")).forEach(p -> {
                 try {
-                    List<String> lines = Files.readAllLines(p);
-                    for (int i = 0; i < lines.size(); i++) {
-                        String line = lines.get(i);
-                        String trimmed = line.trim();
-                        if (trimmed.startsWith("//") || trimmed.startsWith("*")
-                                || trimmed.startsWith("/*")) {
-                            continue;  // comments may cite the forbidden form
-                        }
-                        if (RAW_EXECUTE.matcher(line).find()) {
-                            violations.add(p + ":" + (i + 1) + "  " + trimmed);
-                        }
+                    if (JDBC_BOOTSTRAP_WHITELIST.contains(p.getFileName().toString())) {
+                        return;
+                    }
+                    // Strip comments FIRST (block + line), then scan the whole
+                    // remaining source with a newline-tolerant pattern — a
+                    // line break after ".execute(" no longer evades the gate.
+                    String src = Files.readString(p)
+                        .replaceAll("(?s)/\\*.*?\\*/", "")
+                        .replaceAll("(?m)//.*$", "");
+                    var m = RAW_EXECUTE.matcher(src);
+                    while (m.find()) {
+                        int line = 1 + (int) src.substring(0, m.start()).chars()
+                            .filter(c -> c == '\n').count();
+                        violations.add(p + ":" + line + "  " + m.group().strip());
                     }
                 } catch (IOException e) {
                     throw new RuntimeException(e);
