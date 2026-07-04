@@ -479,3 +479,45 @@ def _record_document_hook_failure(
         doc_id=source_path, collection=collection, hook_name=hook_name,
         error=error, chain="document",
     )
+
+
+# ── Serializing proxy for concurrent indexing (nexus-cfc72) ──────────────────
+
+
+class LockedHookRegistry:
+    """Serialize the fire methods of a :class:`HookRegistry` under one lock.
+
+    The nexus-cfc72 bounded file-level indexing concurrency runs 2+ file
+    pipelines at once; the hook chains they fire (manifest writes, chash
+    ledger, taxonomy assign, aspect enqueue) were written for the
+    sequential loop and are not audited for interleaving. Hooks are
+    milliseconds against the multi-second embed/upsert work, so
+    serializing them costs ~nothing and removes the question. Everything
+    else (registration, attribute access) delegates to the wrapped
+    registry unchanged.
+    """
+
+    def __init__(self, registry: HookRegistry) -> None:
+        import threading  # noqa: PLC0415 — only needed by this concurrency proxy
+
+        self._registry = registry
+        self._lock = threading.Lock()
+
+    def fire_single(self, *args: Any, **kwargs: Any) -> None:
+        with self._lock:
+            self._registry.fire_single(*args, **kwargs)
+
+    def fire_batch(self, *args: Any, **kwargs: Any) -> None:
+        with self._lock:
+            self._registry.fire_batch(*args, **kwargs)
+
+    def fire_document(self, *args: Any, **kwargs: Any) -> None:
+        with self._lock:
+            self._registry.fire_document(*args, **kwargs)
+
+    def fire_store_chains(self, *args: Any, **kwargs: Any) -> None:
+        with self._lock:
+            self._registry.fire_store_chains(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._registry, name)

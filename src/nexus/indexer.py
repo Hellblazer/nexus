@@ -2637,21 +2637,31 @@ def _run_index(
             f"({time.monotonic() - _staleness_t0:.1f}s)"
         )
 
+    # nexus-cfc72: bounded file-level concurrency. Sequential (exact
+    # legacy loop) unless both the vectors and catalog backends are the
+    # HTTP service (or NX_INDEX_CONCURRENCY overrides). Staleness caches
+    # are read-only after build; on_file/on_stage_timers are serialized
+    # inside run_file_loop; hook chains are serialized via
+    # LockedHookRegistry so the manifest/chash/taxonomy/aspect writes
+    # never interleave.
+    from nexus.indexer_utils import resolve_index_concurrency, run_file_loop  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
+    _concurrency = resolve_index_concurrency()
+    if _concurrency > 1 and hooks is not None:
+        # hooks may be None at direct test call sites; wrapping None would
+        # defeat every downstream ``hooks is None`` fallback (review
+        # finding, nexus-cfc72) — leave None alone.
+        from nexus.hook_registry import LockedHookRegistry  # noqa: PLC0415 — deferred to avoid circular import
+        hooks = LockedHookRegistry(hooks)
+        _log.info("index_file_concurrency", workers=_concurrency)
+
     # Index code files → code__ (voyage-code-3, AST chunking)
     # NOTE: calls _index_code_file (the module-level wrapper) so that tests
     # patching nexus.indexer._index_code_file continue to intercept correctly.
     _log.debug("indexing code files", count=len(code_files))
-    for score, file in code_files:
+
+    def _index_one_code(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
-        t0 = time.monotonic()
-        # nexus-7niu: build a per-file StageTimers only when the caller
-        # subscribed via ``on_stage_timers``. ``None`` short-circuits
-        # every instrumented block inside the indexer to a no-op.
-        timers = None
-        if on_stage_timers is not None:
-            from nexus.stage_timers import StageTimers  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-            timers = StageTimers()
-        chunks = _index_code_file(
+        return _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
             chunk_lines=effective_chunk_lines,
@@ -2662,23 +2672,19 @@ def _run_index(
             staleness_cache=code_staleness,
             hooks=hooks,
         )
-        if on_file:
-            on_file(file, chunks, time.monotonic() - t0)
-        if on_stage_timers is not None and timers is not None:
-            on_stage_timers(file, timers)
+
+    run_file_loop(
+        code_files, _index_one_code, concurrency=_concurrency,
+        on_file=on_file, on_stage_timers=on_stage_timers,
+    )
 
     # Index prose files → docs__ (voyage-context-3 via CCE)
     # NOTE: calls _index_prose_file (the module-level wrapper) — same reason.
     _log.debug("indexing prose files", count=len(prose_files))
-    for score, file in prose_files:
+
+    def _index_one_prose(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
-        t0 = time.monotonic()
-        # nexus-7niu: per-file StageTimers when the caller subscribed.
-        timers = None
-        if on_stage_timers is not None:
-            from nexus.stage_timers import StageTimers  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-            timers = StageTimers()
-        chunks = _index_prose_file(
+        return _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
@@ -2689,22 +2695,18 @@ def _run_index(
             staleness_cache=docs_staleness,
             hooks=hooks,
         )
-        if on_file:
-            on_file(file, chunks, time.monotonic() - t0)
-        if on_stage_timers is not None and timers is not None:
-            on_stage_timers(file, timers)
+
+    run_file_loop(
+        prose_files, _index_one_prose, concurrency=_concurrency,
+        on_file=on_file, on_stage_timers=on_stage_timers,
+    )
 
     # Index PDF files → docs__ (PDF extraction + voyage-context-3)
     _log.debug("indexing PDF files", count=len(pdf_files))
-    for score, file in pdf_files:
+
+    def _index_one_pdf(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
-        t0 = time.monotonic()
-        # nexus-7niu: per-file StageTimers when the caller subscribed.
-        timers = None
-        if on_stage_timers is not None:
-            from nexus.stage_timers import StageTimers  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-            timers = StageTimers()
-        chunks = _index_pdf_file(
+        return _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
@@ -2716,10 +2718,11 @@ def _run_index(
             staleness_cache=docs_staleness,
             hooks=hooks,
         )
-        if on_file:
-            on_file(file, chunks, time.monotonic() - t0)
-        if on_stage_timers is not None and timers is not None:
-            on_stage_timers(file, timers)
+
+    run_file_loop(
+        pdf_files, _index_one_pdf, concurrency=_concurrency,
+        on_file=on_file, on_stage_timers=on_stage_timers,
+    )
 
     # Post-processing phase markers (nexus-vatx Gap 2): the per-file
     # progress bar ends at "[N/N]" but the pipeline keeps running for
