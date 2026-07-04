@@ -44,6 +44,7 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/topics/delete       delete topic (returns collection)
  *   POST  /v1/taxonomy/topics/merge        merge source→target
  *   POST  /v1/taxonomy/assignments/assign  upsert assignment
+ *   POST  /v1/taxonomy/assignments/assign_many batch upsert assignments
  *   GET   /v1/taxonomy/assignments/docs    doc_ids for topic_id=
  *   POST  /v1/taxonomy/assignments/for_docs assignments for doc_ids list
  *   GET   /v1/taxonomy/assignments/by_label doc_ids for label=
@@ -92,6 +93,9 @@ public final class TaxonomyHandler implements HttpHandler {
     private static final TypeReference<Map<String, Object>> MAP_TYPE   = new TypeReference<>() {};
     private static final TypeReference<List<Object>>        LIST_TYPE  = new TypeReference<>() {};
 
+    /** Upper bound on rows accepted by {@code /assignments/assign_many} (bead nexus-71988). */
+    private static final int MAX_ASSIGN_MANY = 1000;
+
     private final TaxonomyRepository repo;
     private final TaxonomyCentroidRepository centroidRepo;
 
@@ -131,6 +135,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/topics/merge"              -> handleMergeTopics(exchange, tenant, method);
                 // Assignments
                 case "/assignments/assign"        -> handleAssign(exchange, tenant, method);
+                case "/assignments/assign_many"   -> handleAssignMany(exchange, tenant, method);
                 case "/assignments/docs"          -> handleGetDocIds(exchange, tenant, method);
                 case "/assignments/for_docs"      -> handleGetAssignmentsForDocs(exchange, tenant, method);
                 case "/assignments/by_label"      -> handleGetDocsByLabel(exchange, tenant, method);
@@ -336,6 +341,45 @@ public final class TaxonomyHandler implements HttpHandler {
         String assignedAt      = optStringOrNull(body, "assigned_at");
         repo.assignTopic(tenant, docId, topicId, assignedBy, similarity, sourceCollection, assignedAt);
         HttpUtil.send(ex, 200, "{\"ok\":true}");
+    }
+
+    /**
+     * POST /v1/taxonomy/assignments/assign_many (bead nexus-71988).
+     *
+     * <p>Body {@code {"assignments": [{doc_id, topic_id, assigned_by,
+     * similarity?, source_collection?, assigned_at?}, ...]}}. The whole batch
+     * lands under ONE tenant transaction via
+     * {@link dev.nexus.service.db.TaxonomyRepository#assignMany}, mirroring the
+     * single-row {@link #handleAssign} semantics exactly. Cap
+     * {@value #MAX_ASSIGN_MANY} rows. Response 200 {@code {"persisted": N}}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleAssignMany(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        Object raw = body.get("assignments");
+        if (!(raw instanceof List<?> rawList)) {
+            throw new IllegalArgumentException("field 'assignments' must be a JSON array");
+        }
+        if (rawList.size() > MAX_ASSIGN_MANY) {
+            throw new IllegalArgumentException(
+                "too many assignments (max " + MAX_ASSIGN_MANY + ")");
+        }
+        List<Map<String, Object>> rows = new ArrayList<>(rawList.size());
+        for (Object o : rawList) {
+            if (!(o instanceof Map<?, ?> rm)) {
+                throw new IllegalArgumentException("each element of 'assignments' must be an object");
+            }
+            Map<String, Object> row = (Map<String, Object>) rm;
+            // Validate the three required fields up-front (400) so a bad row never
+            // starts a partial transaction — mirrors handleAssign's requireString/requireLong.
+            requireString(row, "doc_id");
+            requireLong(row, "topic_id");
+            requireString(row, "assigned_by");
+            rows.add(row);
+        }
+        int persisted = repo.assignMany(tenant, rows);
+        HttpUtil.send(ex, 200, json(Map.of("persisted", persisted)));
     }
 
     private void handleGetDocIds(HttpExchange ex, String tenant, String method) throws IOException {

@@ -1757,6 +1757,34 @@ class HttpCatalogClient:
             if new_chunk_count is not None: updates["chunk_count"] = new_chunk_count
             self._post("/update", {"tumbler": doc_id, **updates})
 
+    def write_manifest_many(
+        self, docs: "list[tuple[str, list[dict]]]"
+    ) -> list[str]:
+        """Atomic per-doc manifest REPLACE for many docs in one POST.
+
+        nexus-u2kwq: the flush-grain manifest hook writes complete files
+        (file-atomic batching guarantees position 0), and the per-doc
+        ``atomic_manifest_replace`` cost 2 POSTs per file (~205s of a
+        177-file wall). ``/manifest/write_many`` (engine v0.1.24+) does
+        DELETE+INSERT+chunk_count per doc in one server-side per-doc
+        transaction; docs page at 1000 (MAX_BATCH parity). Returns the
+        accumulated ``failed_doc_ids`` (per-doc isolation server-side).
+        Callers must catch HTTP 404 and fall back per-doc for older
+        engines.
+        """
+        failed: list[str] = []
+        for start in range(0, len(docs), _MANIFEST_GET_MANY_PAGE):
+            page = docs[start : start + _MANIFEST_GET_MANY_PAGE]
+            result = self._post(
+                "/manifest/write_many",
+                {"docs": [
+                    {"doc_id": d, "rows": self._manifest_rows(chunks)}
+                    for d, chunks in page
+                ]},
+            )
+            failed.extend((result or {}).get("failed_doc_ids", []))
+        return failed
+
     def resync_chunk_count_cache(self, doc_id: str) -> None:
         """Recompute ``documents.chunk_count`` from the true manifest row count.
 

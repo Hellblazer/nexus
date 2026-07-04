@@ -297,8 +297,8 @@ class TestBatchCompleteCallback:
         b = ChunkBatcher(
             flush=rec.flush,
             on_file_complete=rec.on_complete,
-            on_batch_complete=lambda coll, ids, docs, metas, files: batch_events.append(
-                (coll, len(ids), sorted(files))
+            on_batch_complete=lambda coll, ids, docs, metas, fcs: batch_events.append(
+                (coll, len(ids), sorted(p for p, _ in fcs))
             ),
             max_chunks=10,
         )
@@ -339,7 +339,7 @@ class TestBatchCompleteCallback:
         b = ChunkBatcher(
             flush=rec.flush,
             on_file_complete=rec.on_complete,
-            on_batch_complete=lambda coll, ids, docs, metas, files: batch_events.append(len(ids)),
+            on_batch_complete=lambda coll, ids, docs, metas, fcs: batch_events.append(len(ids)),
             max_chunks=10,
         )
         b.add("a.py", "code__x", *_mk(4, "a"))

@@ -43,6 +43,7 @@ import java.util.*;
  *   POST  /v1/catalog/traverse           BFS graph traversal
  *   POST  /v1/catalog/manifest/write     replace manifest
  *   POST  /v1/catalog/manifest/append    append chunks
+ *   POST  /v1/catalog/manifest/write_many batch replace manifests for multiple docs (+chunk_count)
  *   GET   /v1/catalog/manifest/get       get manifest for doc_id
  *   POST  /v1/catalog/manifest/get_many  batch-fetch manifests for multiple doc_ids (nexus-7lm3q)
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
@@ -131,6 +132,7 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Manifest ──────────────────────────────────────────────────
                 case "/manifest/write"        -> handleManifestWrite(exchange, tenant, method);
                 case "/manifest/append"       -> handleManifestAppend(exchange, tenant, method);
+                case "/manifest/write_many"   -> handleManifestWriteMany(exchange, tenant, method);
                 case "/manifest/get"          -> handleManifestGet(exchange, tenant, method);
                 case "/manifest/get_many"     -> handleManifestGetMany(exchange, tenant, method);
                 case "/manifest/purge"        -> handleManifestPurge(exchange, tenant, method);
@@ -507,6 +509,40 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = castRows(body.get("rows"));
         repo.appendManifestChunks(tenant, docId, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
+    }
+
+    /**
+     * POST /v1/catalog/manifest/write_many (bead nexus-u2kwq).
+     *
+     * <p>Body {@code {"docs": [{"doc_id": "...", "rows": [<same row shape as
+     * /manifest/write>]}, ...]}}. Each doc is REPLACED in its own transaction
+     * (delete all rows + insert + set documents.chunk_count = rows.size();
+     * per-doc atomicity, cross-doc isolation) via
+     * {@link CatalogRepository#writeManifestMany}. Cap {@value #MAX_BATCH_DOC_IDS}
+     * docs. Response 200 {@code {docs: N_ok, rows: M_total, failed_doc_ids: [...]}}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleManifestWriteMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("docs");
+        // Review #2: malformed shapes must 400, not no-op as a false 200
+        // (mirrors handleAssignMany; a wrong key or element type is a
+        // client bug and silence would mask it).
+        if (!(raw instanceof List<?> l)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'docs' must be a list\"}"); return;
+        }
+        if (l.stream().anyMatch(o -> !(o instanceof Map))) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"every 'docs' element must be an object\"}"); return;
+        }
+        List<Map<String, Object>> docs =
+            l.stream().map(o -> (Map<String, Object>) o).toList();
+        if (docs.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var result = repo.writeManifestMany(tenant, docs);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
     /** GET /v1/catalog/manifest/get?doc_id=X */

@@ -2633,4 +2633,102 @@ class CatalogRepositoryTest {
         assertThat(repo.importChunksBatch("etl-batch-chunk-tenant", "bch.1", List.of())).isZero();
         assertThat(repo.importChunksBatch("etl-batch-chunk-tenant", "bch.1", null)).isZero();
     }
+
+    // ── writeManifestMany (nexus-u2kwq) ─────────────────────────────────────────
+
+    @Test @Order(230)
+    void writeManifestMany_twoDocs_replaceAndChunkCountUpdated() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.1", "title", "WMM Doc1",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.2", "title", "WMM Doc2",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+
+        var result = repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "wmm.1", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmm1aa00000000000000000000000000", "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", "wmm1bb00000000000000000000000000", "chunk_index", 1))),
+            Map.<String, Object>of("doc_id", "wmm.2", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmm2aa00000000000000000000000000", "chunk_index", 0)))));
+
+        assertThat(result.get("docs")).isEqualTo(2);
+        assertThat(result.get("rows")).isEqualTo(3);
+        assertThat((List<?>) result.get("failed_doc_ids")).isEmpty();
+
+        // Equal to two independent writeManifest calls: positions + chashes intact.
+        var m1 = repo.getManifest(TENANT_A, "wmm.1");
+        assertThat(m1).hasSize(2);
+        assertThat(m1.get(0).get("chash")).isEqualTo("wmm1aa00000000000000000000000000");
+        assertThat(m1.get(1).get("chash")).isEqualTo("wmm1bb00000000000000000000000000");
+        assertThat(repo.getManifest(TENANT_A, "wmm.2")).hasSize(1);
+
+        // chunk_count folded into the same per-doc transaction.
+        assertThat(repo.getDocument(TENANT_A, "wmm.1").get("chunk_count")).isEqualTo(2);
+        assertThat(repo.getDocument(TENANT_A, "wmm.2").get("chunk_count")).isEqualTo(1);
+    }
+
+    @Test @Order(231)
+    void writeManifestMany_replaceShrinks_exactRowsAndChunkCount() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.3", "title", "WMM Doc3",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        // Seed 5 rows.
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "wmm.3", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmm3a000000000000000000000000000", "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", "wmm3b000000000000000000000000000", "chunk_index", 1),
+                Map.<String, Object>of("position", 2, "chash", "wmm3c000000000000000000000000000", "chunk_index", 2),
+                Map.<String, Object>of("position", 3, "chash", "wmm3d000000000000000000000000000", "chunk_index", 3),
+                Map.<String, Object>of("position", 4, "chash", "wmm3e000000000000000000000000000", "chunk_index", 4)))));
+        assertThat(repo.getManifest(TENANT_A, "wmm.3")).hasSize(5);
+        assertThat(repo.getDocument(TENANT_A, "wmm.3").get("chunk_count")).isEqualTo(5);
+
+        // Replace with only 2 rows — REPLACE shrinks; exactly 2 remain, chunk_count 2.
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "wmm.3", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmm3new0000000000000000000000000", "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", "wmm3new1000000000000000000000000", "chunk_index", 1)))));
+
+        var got = repo.getManifest(TENANT_A, "wmm.3");
+        assertThat(got).hasSize(2);
+        assertThat(got.stream().map(r -> (String) r.get("chash")).toList())
+            .containsExactlyInAnyOrder("wmm3new0000000000000000000000000", "wmm3new1000000000000000000000000");
+        assertThat(repo.getDocument(TENANT_A, "wmm.3").get("chunk_count")).isEqualTo(2);
+    }
+
+    @Test @Order(232)
+    void writeManifestMany_violatingRow_isolatedToFailedDocIds() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.good", "title", "WMM Good",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.bad", "title", "WMM Bad",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+
+        // wmm.bad carries a row with a missing chash (NOT NULL violation) -> its own
+        // transaction rolls back; wmm.good is unaffected (cross-doc isolation).
+        Map<String, Object> badRow = new LinkedHashMap<>();
+        badRow.put("position", 0);
+        badRow.put("chunk_index", 0); // chash intentionally absent -> null
+
+        var result = repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "wmm.good", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmmgood0000000000000000000000000", "chunk_index", 0))),
+            Map.<String, Object>of("doc_id", "wmm.bad", "rows", List.<Map<String, Object>>of(badRow))));
+
+        assertThat(result.get("docs")).isEqualTo(1);
+        assertThat(result.get("rows")).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        List<String> failed = (List<String>) result.get("failed_doc_ids");
+        assertThat(failed).containsExactly("wmm.bad");
+
+        assertThat(repo.getManifest(TENANT_A, "wmm.good")).hasSize(1);
+        assertThat(repo.getDocument(TENANT_A, "wmm.good").get("chunk_count")).isEqualTo(1);
+        assertThat(repo.getManifest(TENANT_A, "wmm.bad")).isEmpty();
+        assertThat(repo.getDocument(TENANT_A, "wmm.bad").get("chunk_count")).isEqualTo(0);
+    }
+
+    @Test @Order(233)
+    void writeManifestMany_emptyDocsList_noOp() {
+        var result = repo.writeManifestMany(TENANT_A, List.of());
+        assertThat(result.get("docs")).isEqualTo(0);
+        assertThat(result.get("rows")).isEqualTo(0);
+        assertThat((List<?>) result.get("failed_doc_ids")).isEmpty();
+    }
 }

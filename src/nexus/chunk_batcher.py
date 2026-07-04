@@ -93,7 +93,7 @@ class ChunkBatcher:
         flush: FlushFn,
         on_file_complete: Callable[[str, object], None] | None = None,
         on_file_failed: Callable[[str, str, object], None] | None = None,
-        on_batch_complete: "Callable[[str, list[str], list[str], list[dict], list[str]], None] | None" = None,
+        on_batch_complete: "Callable[[str, list[str], list[str], list[dict], list[tuple[str, object]]], None] | None" = None,
         max_chunks: "int | Callable[[str], int]" = DEFAULT_MAX_CHUNKS,
         max_bytes: int | None = None,
         flush_concurrency: int = 1,
@@ -107,7 +107,7 @@ class ChunkBatcher:
         #: batch (collection, ids, documents, metadatas) — the seam for
         #: flush-grain hooks (taxonomy/chash run per upload batch, not per
         #: file). Runs unlocked, before the per-file completions.
-        self._on_batch_complete = on_batch_complete or (lambda _c, _i, _d, _m, _f: None)
+        self._on_batch_complete = on_batch_complete or (lambda _c, _i, _d, _m, _fc: None)
         self._max_chunks = max_chunks
         self._max_bytes = max_bytes
         self._lock = threading.Lock()
@@ -295,10 +295,16 @@ class ChunkBatcher:
             )
         elapsed = time.monotonic() - t0
         if error is None:
+            with self._lock:
+                file_contexts = [
+                    (path, self._files[path].context)
+                    for path in pend.file_counts
+                    if path in self._files
+                ]
             try:
                 self._on_batch_complete(
                     collection, pend.ids, pend.documents, pend.metadatas,
-                    list(pend.file_counts),
+                    file_contexts,
                 )
             except Exception:  # noqa: BLE001 — flush-grain hooks are best-effort, never fail the batch
                 _log.warning(

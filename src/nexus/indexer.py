@@ -2740,7 +2740,7 @@ def _run_index(
 
         def _fire_flush_grain_hooks(
             collection: str, _ids: list, _docs: list, _metas: list,
-            _files: list,
+            _file_contexts: list,
         ) -> None:
             # nexus-duoak.7: taxonomy + chash are file-agnostic and
             # round-trip-dominated — one call per upload batch (~6/run)
@@ -2761,12 +2761,33 @@ def _run_index(
                 "flush_grain_hooks_firing",
                 collection=collection,
                 chunks=len(_ids),
-                files=_files,
+                files=[p for p, _ in _file_contexts],
             )
+            # Rebuild the aggregate from per-file contexts with doc_id +
+            # FILE-LOCAL chunk_index injected: post-RDR-108 chunk metadata
+            # carries neither, and the manifest hook's enumeration
+            # fallback would otherwise assign batch-global positions
+            # (manifest corruption). taxonomy/chash ignore both keys.
+            agg_ids: list = []
+            agg_docs: list = []
+            agg_metas: list = []
+            for _path, _c in _file_contexts:
+                if not isinstance(_c, dict):
+                    continue
+                agg_ids.extend(_c["ids"])
+                agg_docs.extend(_c["documents"])
+                for _j, _m in enumerate(_c["metadatas"]):
+                    agg_metas.append({
+                        **_m,
+                        "doc_id": _c["catalog_doc_id"],
+                        "chunk_index": _j,
+                    })
+            if not agg_ids:
+                return
             _t0 = time.monotonic()
             reg.fire_batch(
-                _ids, collection, _docs,
-                [[] for _ in _ids], _metas,
+                agg_ids, collection, agg_docs,
+                [[] for _ in agg_ids], agg_metas,
                 grain="flush",
             )
             with _hook_seconds_lock:

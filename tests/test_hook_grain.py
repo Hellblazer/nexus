@@ -59,7 +59,7 @@ class TestGrainDispatch:
 
 
 class TestDefaultConsumersDeclareGrain:
-    def test_taxonomy_and_chash_are_flush_grain(self) -> None:
+    def test_default_consumers_grain_declarations(self) -> None:
         from nexus.mcp_infra import (
             chash_dual_write_batch_hook,
             manifest_write_batch_hook,
@@ -67,7 +67,11 @@ class TestDefaultConsumersDeclareGrain:
         )
         assert getattr(taxonomy_assign_batch_hook, "batch_grain", "file") == "flush"
         assert getattr(chash_dual_write_batch_hook, "batch_grain", "file") == "flush"
-        assert getattr(manifest_write_batch_hook, "batch_grain", "file") == "file"
+        # nexus-u2kwq: manifest joined flush grain — the batched indexer's
+        # aggregate call injects per-chunk doc_id + file-local chunk_index
+        # so by_doc grouping/positions stay correct; grain="all" callers
+        # (MCP store_put, legacy inline) still fire it per document.
+        assert getattr(manifest_write_batch_hook, "batch_grain", "file") == "flush"
 
 
 class TestLockedRegistryGrainPassthrough:

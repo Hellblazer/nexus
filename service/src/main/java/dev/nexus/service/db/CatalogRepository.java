@@ -1063,17 +1063,84 @@ public final class CatalogRepository {
     /** Replace manifest for docId with the provided rows (atomic delete + insert). */
     public void writeManifest(String tenant, String docId, List<Map<String, Object>> rows) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
-            for (var row : rows) {
-                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
-                   .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
-                           i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
-                   .execute();
-            }
+            writeManifestRows(ctx, tenant, docId, rows);
             return null;
         });
+    }
+
+    /**
+     * Shared REPLACE body (delete all rows for docId, then insert the provided
+     * rows) used by both {@link #writeManifest} (one doc per transaction) and
+     * {@link #writeManifestMany} (N docs, one transaction each). Assumes
+     * {@code ctx} is already scoped to {@code tenant}. Does NOT touch
+     * documents.chunk_count — {@code writeManifest}'s public behavior is unchanged;
+     * the chunk_count fold-in is {@code writeManifestMany}'s addition.
+     */
+    private static void writeManifestRows(DSLContext ctx, String tenant, String docId,
+                                          List<Map<String, Object>> rows) {
+        ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+        for (var row : rows) {
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                    CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+               .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
+                       i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
+               .execute();
+        }
+    }
+
+    /**
+     * Batch REPLACE manifest for multiple docs (bead nexus-u2kwq). Each doc is
+     * replaced in its OWN {@link TenantScope#withTenant} transaction that folds
+     * together the {@link #writeManifest} REPLACE (delete all rows + insert) AND
+     * a {@code documents.chunk_count = rows.size()} UPDATE — collapsing the
+     * client's separate {@code /manifest/write} + chunk_count {@code /update}
+     * round-trips into one atomic per-doc write. A failure on one doc rolls back
+     * only that doc and its doc_id is collected in {@code failed_doc_ids}; sibling
+     * docs are unaffected (per-doc atomicity, cross-doc isolation). Empty list is
+     * a no-op.
+     *
+     * @param docs each entry {@code {"doc_id": "...", "rows": [<manifest row>...]}}.
+     * @return {@code {docs: <int ok>, rows: <int total written>, failed_doc_ids: [...]}}.
+     */
+    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs) {
+        int okDocs = 0;
+        int totalRows = 0;
+        List<String> failed = new ArrayList<>();
+        if (docs != null) {
+            for (Map<String, Object> d : docs) {
+                String docId = s(d, "doc_id");
+                Object rawRows = d.get("rows");
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> rows = rawRows instanceof List<?> l
+                    ? (List<Map<String, Object>>) l
+                    : List.of();
+                try {
+                    if (docId == null || docId.isBlank()) {
+                        throw new IllegalArgumentException("'doc_id' required");
+                    }
+                    tenantScope.withTenant(tenant, ctx -> {
+                        writeManifestRows(ctx, tenant, docId, rows);
+                        ctx.update(CATALOG_DOCUMENTS)
+                           .set(CATALOG_DOCUMENTS.CHUNK_COUNT, rows.size())
+                           .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                           .execute();
+                        return null;
+                    });
+                    okDocs++;
+                    totalRows += rows.size();
+                } catch (Exception e) {
+                    log.debug("event=write_manifest_many_doc_failed tenant={} doc_id={} error={}",
+                              tenant, docId, e.getMessage());
+                    failed.add(docId);
+                }
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("docs", okDocs);
+        result.put("rows", totalRows);
+        result.put("failed_doc_ids", failed);
+        return result;
     }
 
     /** Append manifest rows (upsert by position). */

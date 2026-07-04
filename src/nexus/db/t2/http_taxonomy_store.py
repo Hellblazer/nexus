@@ -734,10 +734,29 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
     def persist_assignments(self, assignments: list[dict[str, Any]]) -> int:
         """Persist pre-computed assignments (mirrors CatalogTaxonomy.persist_assignments).
 
-        Reuses :meth:`assign_topic` per row (no duplicate persist logic),
-        preserving its projection-UPSERT / centroid-INSERT-OR-IGNORE semantics
-        and doc_count resync. Returns the number persisted.
+        nexus-71988: one ``/assignments/assign_many`` POST per <=1000 rows —
+        the per-row ``assign_topic`` loop cost ~29s per 300-chunk flush batch
+        (up to ~600 sequential POSTs, 2026-07-04 attrib run). The engine
+        endpoint (v0.1.24+) preserves the per-row semantics verbatim
+        (projection GREATEST/CASE upsert, centroid DO NOTHING,
+        trigger-maintained doc_count). A 404 (older engine) falls back to
+        the legacy per-row loop. Returns the number persisted.
         """
+        if not assignments:
+            return 0
+        _PAGE = 1000  # engine cap (MAX_BATCH parity)
+        try:
+            for start in range(0, len(assignments), _PAGE):
+                batch = assignments[start : start + _PAGE]
+                self._post("/assignments/assign_many", {"assignments": batch})
+            return len(assignments)
+        except Exception as exc:  # noqa: BLE001 — 404-classify only; anything else re-raises below
+            status = getattr(
+                getattr(exc, "response", None), "status_code", None
+            ) or getattr(exc, "code", None)
+            if status != 404:
+                raise
+            _log.info("assign_many_unavailable_fallback_per_row")
         for a in assignments:
             self.assign_topic(
                 a["doc_id"],

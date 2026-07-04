@@ -396,65 +396,120 @@ public final class TaxonomyRepository {
                              String assignedBy, Double similarity,
                              String sourceCollection, String assignedAt) {
         tenantScope.withTenant(tenant, ctx -> {
-            if ("projection".equals(assignedBy)) {
-                // RDR-156 P0.2: ensure collection is registered before the assignment write
-                ensureCollectionRegistered(ctx, tenant, sourceCollection);
-                OffsetDateTime assignedAtTs = assignedAt != null
-                    ? parseTs(assignedAt)
-                    : OffsetDateTime.now(ZoneOffset.UTC);
-                // GREATEST(COALESCE(...), ...) + CASE WHEN EXCLUDED.similarity > ... patterns
-                // referencing both EXCLUDED.* and the existing table row are Postgres-specific
-                // constructs retained as DSL.field() fragments per spec.
-                ctx.insertInto(TOPIC_ASSIGNMENTS,
-                        TOPIC_ASSIGNMENTS.TENANT_ID,
-                        TOPIC_ASSIGNMENTS.DOC_ID,
-                        TOPIC_ASSIGNMENTS.TOPIC_ID,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                        TOPIC_ASSIGNMENTS.SIMILARITY,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-                   .values(tenant, docId, topicId, "projection", similarity, assignedAtTs, sourceCollection)
-                   .onConflict(
-                        TOPIC_ASSIGNMENTS.TENANT_ID,
-                        TOPIC_ASSIGNMENTS.DOC_ID,
-                        TOPIC_ASSIGNMENTS.TOPIC_ID)
-                   .doUpdate()
-                   .set(TOPIC_ASSIGNMENTS.SIMILARITY,
-                        field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
-                            + " EXCLUDED.similarity)", Double.class))
-                   .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        field("CASE WHEN EXCLUDED.similarity"
-                            + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
-                            + " THEN EXCLUDED.assigned_at"
-                            + " ELSE nexus.topic_assignments.assigned_at END", OffsetDateTime.class))
-                   .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                        field("CASE WHEN EXCLUDED.similarity"
-                            + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
-                            + " THEN EXCLUDED.source_collection"
-                            + " ELSE nexus.topic_assignments.source_collection END", String.class))
-                   .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
-                   .execute();
-            } else {
-                ctx.insertInto(TOPIC_ASSIGNMENTS,
-                        TOPIC_ASSIGNMENTS.TENANT_ID,
-                        TOPIC_ASSIGNMENTS.DOC_ID,
-                        TOPIC_ASSIGNMENTS.TOPIC_ID,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_BY)
-                   .values(tenant, docId, topicId, assignedBy)
-                   .onConflict(
-                       TOPIC_ASSIGNMENTS.TENANT_ID,
-                       TOPIC_ASSIGNMENTS.DOC_ID,
-                       TOPIC_ASSIGNMENTS.TOPIC_ID)
-                   .doNothing()
-                   .execute();
-            }
-            // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. A fresh
-            // assignment INSERT fires the AFTER INSERT statement-level trigger,
-            // which recomputes topics.doc_count from the live rows. (An ON CONFLICT
-            // DO NOTHING / DO UPDATE that changes no assignment count leaves
-            // doc_count correctly unchanged.) The trigger is the sole writer.
+            assignOne(ctx, tenant, docId, topicId, assignedBy, similarity, sourceCollection, assignedAt);
             return null;
         });
+    }
+
+    /**
+     * Batch upsert of topic assignments (bead nexus-71988). Loops the SAME two
+     * insert shapes as {@link #assignTopic} inside ONE
+     * {@link TenantScope#withTenant} transaction (GUC {@code nexus.tenant} set
+     * once). Projection rows keep best-similarity-wins; non-projection rows are
+     * dup-safe DO NOTHING. doc_count stays trigger-maintained (RDR-154) — the
+     * per-row INSERTs fire the statement-level triggers, no manual resync.
+     * Empty list is a no-op.
+     *
+     * @param rows each carries doc_id/topic_id/assigned_by (required) and
+     *             optional similarity/source_collection/assigned_at.
+     * @return number of rows submitted.
+     */
+    public int assignMany(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Review #5: register each distinct source_collection ONCE per
+            // batch instead of one idempotent INSERT per projection row
+            // (batches routinely share a single collection).
+            rows.stream()
+                .filter(r -> "projection".equals(r.get("assigned_by")))
+                .map(r -> optS(r, "source_collection"))
+                .filter(c -> c != null && !c.isBlank())
+                .distinct()
+                .forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
+            for (Map<String, Object> r : rows) {
+                assignOne(ctx, tenant, reqS(r, "doc_id"), reqL(r, "topic_id"),
+                          reqS(r, "assigned_by"), optD(r, "similarity"),
+                          optS(r, "source_collection"), optS(r, "assigned_at"),
+                          false);
+            }
+            return rows.size();
+        });
+    }
+
+    /**
+     * Shared single-assignment upsert body used by both {@link #assignTopic}
+     * (one row per transaction) and {@link #assignMany} (N rows per
+     * transaction). Assumes {@code ctx} is already scoped to {@code tenant}.
+     */
+    private static void assignOne(DSLContext ctx, String tenant, String docId, long topicId,
+                                  String assignedBy, Double similarity,
+                                  String sourceCollection, String assignedAt) {
+        assignOne(ctx, tenant, docId, topicId, assignedBy, similarity,
+                  sourceCollection, assignedAt, true);
+    }
+
+    private static void assignOne(DSLContext ctx, String tenant, String docId, long topicId,
+                                  String assignedBy, Double similarity,
+                                  String sourceCollection, String assignedAt,
+                                  boolean ensureCollection) {
+        if ("projection".equals(assignedBy)) {
+            // RDR-156 P0.2: ensure collection is registered before the assignment
+            // write (assignMany pre-registers distinct collections and passes false)
+            if (ensureCollection) ensureCollectionRegistered(ctx, tenant, sourceCollection);
+            OffsetDateTime assignedAtTs = assignedAt != null
+                ? parseTs(assignedAt)
+                : OffsetDateTime.now(ZoneOffset.UTC);
+            // GREATEST(COALESCE(...), ...) + CASE WHEN EXCLUDED.similarity > ... patterns
+            // referencing both EXCLUDED.* and the existing table row are Postgres-specific
+            // constructs retained as DSL.field() fragments per spec.
+            ctx.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SIMILARITY,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+               .values(tenant, docId, topicId, "projection", similarity, assignedAtTs, sourceCollection)
+               .onConflict(
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .doUpdate()
+               .set(TOPIC_ASSIGNMENTS.SIMILARITY,
+                    field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
+                        + " EXCLUDED.similarity)", Double.class))
+               .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                    field("CASE WHEN EXCLUDED.similarity"
+                        + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
+                        + " THEN EXCLUDED.assigned_at"
+                        + " ELSE nexus.topic_assignments.assigned_at END", OffsetDateTime.class))
+               .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    field("CASE WHEN EXCLUDED.similarity"
+                        + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
+                        + " THEN EXCLUDED.source_collection"
+                        + " ELSE nexus.topic_assignments.source_collection END", String.class))
+               .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
+               .execute();
+        } else {
+            ctx.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY)
+               .values(tenant, docId, topicId, assignedBy)
+               .onConflict(
+                   TOPIC_ASSIGNMENTS.TENANT_ID,
+                   TOPIC_ASSIGNMENTS.DOC_ID,
+                   TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .doNothing()
+               .execute();
+        }
+        // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. A fresh
+        // assignment INSERT fires the AFTER INSERT statement-level trigger,
+        // which recomputes topics.doc_count from the live rows. (An ON CONFLICT
+        // DO NOTHING / DO UPDATE that changes no assignment count leaves
+        // doc_count correctly unchanged.) The trigger is the sole writer.
     }
 
     /** Return doc_ids assigned to a topic. limit=0 means no limit. */
