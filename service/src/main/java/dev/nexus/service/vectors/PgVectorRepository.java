@@ -8,12 +8,19 @@ import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.jooq.Record;
 import org.jooq.Result;
 import org.jooq.impl.DSL;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -583,7 +590,6 @@ public final class PgVectorRepository {
                 + " (dim mismatch — no silent truncation)");
         }
 
-        String table = chunksTable(dim);
         String[] collSegs  = collection.split("__");
         boolean conformant = collSegs.length == 4;
 
@@ -591,11 +597,13 @@ public final class PgVectorRepository {
             // (3) full → reference-only guard: SELECT before INSERT.
             // Reads only chunk_text — safe against Phase-A schema (no retention column needed).
             // A previously-full chunk must never be silently NULLed (RDR-169 §Re-index PROHIBITS).
-            var existing = ctx.fetchOne(
-                "SELECT chunk_text FROM " + table
-                + " WHERE tenant_id = ? AND collection = ? AND chash = ?",
-                tenant, collection, chash);
-            if (existing != null && existing.get("chunk_text", String.class) != null) {
+            DimTables.ChunkTable existingCh = DimTables.CHUNKS.get(dim);
+            var existing = ctx.select(existingCh.chunkText()).from(existingCh.table())
+                              .where(existingCh.tenantId().eq(tenant)
+                                  .and(existingCh.collection().eq(collection))
+                                  .and(existingCh.chash().eq(chash)))
+                              .fetchOne();
+            if (existing != null && existing.value1() != null) {
                 throw new IllegalStateException(
                     "upsertReferenceOnlyChunk: chash '" + chash + "' in collection '"
                     + collection + "' already has full content (chunk_text IS NOT NULL). "
@@ -729,7 +737,7 @@ public final class PgVectorRepository {
             // collection + metadata predicates narrow the candidate set. SET LOCAL is
             // txn-scoped (same pool discipline as the TenantScope GUC stamp).
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            return ctx.fetch(sql.toString(), binds.toArray());
+            return rawVectorFetch(ctx, sql.toString(), binds.toArray());
         });
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -1003,8 +1011,8 @@ public final class PgVectorRepository {
             // do not. Pinned per-transaction so the gate is independent of cluster config.
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
 
-            List<String> gateChashes = ctx.fetch(
-                "SELECT chash FROM " + table + gateSql + " LIMIT ?", probeBinds.toArray())
+            List<String> gateChashes = rawVectorFetch(
+                ctx, "SELECT chash FROM " + table + gateSql + " LIMIT ?", probeBinds.toArray())
                 .map(r -> r.get("chash", String.class));
 
             if (gateChashes.size() <= selectiveGateMax) {
@@ -1016,7 +1024,7 @@ public final class PgVectorRepository {
                 // chash with NO text gate, so the <% heap-recheck happens once, not twice.
                 if (gateChashes.isEmpty()) {
                     // Empty gate: typed-empty result (chash IN () is invalid SQL).
-                    return ctx.fetch(
+                    return rawVectorFetch(ctx,
                         "SELECT NULL::text AS chash, NULL::text AS chunk_text,"
                         + " NULL::text AS collection, NULL::text AS metadata_json,"
                         + " NULL::float8 AS distance WHERE false");
@@ -1037,7 +1045,7 @@ public final class PgVectorRepository {
                 b.addAll(scopeBinds);
                 b.addAll(inChashes);
                 b.add(nResults);
-                return ctx.fetch(sql, b.toArray());
+                return rawVectorFetch(ctx, sql, b.toArray());
             }
             // HNSW-first for a dense gate: keep HNSW scanning past ef_search.
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
@@ -1048,7 +1056,7 @@ public final class PgVectorRepository {
             b.add(vecLit);
             b.addAll(gateBinds);
             b.add(nResults);
-            return ctx.fetch(sql, b.toArray());
+            return rawVectorFetch(ctx, sql, b.toArray());
         });
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -1082,25 +1090,23 @@ public final class PgVectorRepository {
             return Map.of("ids", List.of(), "documents", List.of(), "metadatas", List.of());
         }
 
-        List<Object> binds = new ArrayList<>();
-        binds.add(collection);
-        binds.addAll(ids);
-        binds.add(limit);
-        binds.add(offset);
-        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("SELECT chash, chunk_text, metadata::text AS metadata_json FROM "
-                      + chunksTable(dim)
-                      + " WHERE collection = ? AND chash IN (" + placeholders(ids.size()) + ")"
-                      + " ORDER BY chash ASC LIMIT ? OFFSET ?",
-                      binds.toArray()));
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        var result = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
+               .from(ch.table())
+               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
+               .orderBy(ch.chash().asc())
+               .limit(limit).offset(offset)
+               .fetch());
 
         List<String> outIds = new ArrayList<>(result.size());
         List<String> outDocs = new ArrayList<>(result.size());
         List<Map<String, Object>> outMetas = new ArrayList<>(result.size());
-        for (Record rec : result) {
-            outIds.add(rec.get("chash", String.class));
-            outDocs.add(rec.get("chunk_text", String.class));
-            outMetas.add(fromJson(rec.get("metadata_json", String.class)));
+        for (var rec : result) {
+            outIds.add(rec.value1());
+            outDocs.add(rec.value2());
+            JSONB meta = rec.value3();
+            outMetas.add(fromJson(meta != null ? meta.data() : null));
         }
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
         return enrichGetEnvelope(tenant,
@@ -1135,20 +1141,19 @@ public final class PgVectorRepository {
         if (ids == null || ids.isEmpty()) {
             return Map.of("ids", List.of(), "embeddings", List.of());
         }
-        List<Object> binds = new ArrayList<>();
-        binds.add(collection);
-        binds.addAll(ids);
-        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("SELECT chash, embedding::text AS embedding_text FROM "
-                      + chunksTable(dim)
-                      + " WHERE collection = ? AND chash IN ("
-                      + placeholders(ids.size()) + ")",
-                      binds.toArray()));
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        var result = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.chash(), ch.embedding())
+               .from(ch.table())
+               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
+               .fetch());
 
         Map<String, List<Float>> byChash = new HashMap<>();
-        for (Record rec : result) {
-            byChash.put(rec.get("chash", String.class),
-                        parseVectorLiteral(rec.get("embedding_text", String.class)));
+        for (var rec : result) {
+            Vector v = rec.value2();
+            List<Float> floats = new ArrayList<>();
+            if (v != null) for (float f : v.floats()) floats.add(f);
+            byChash.put(rec.value1(), floats);
         }
         List<String> outIds = new ArrayList<>();
         List<List<Float>> outEmbeddings = new ArrayList<>();
@@ -1160,28 +1165,6 @@ public final class PgVectorRepository {
             }
         }
         return Map.of("ids", outIds, "embeddings", outEmbeddings);
-    }
-
-    /** Parse a pgvector text literal {@code "[0.1,0.2,...]"} into floats. */
-    private static List<Float> parseVectorLiteral(String literal) {
-        if (literal == null || literal.length() < 2) {
-            // Schema says NOT NULL; a null/short literal means a malformed
-            // row. Return an empty row — the Python caller's ndarray
-            // construction rejects the ragged shape and fails the
-            // collection's fetch (degrade, never misattribute).
-            log.warn("event=embedding_literal_malformed literal={}", literal);
-            return List.of();
-        }
-        String body = literal.substring(1, literal.length() - 1);
-        if (body.isBlank()) {
-            return List.of();
-        }
-        String[] parts = body.split(",");
-        List<Float> out = new ArrayList<>(parts.length);
-        for (String part : parts) {
-            out.add(Float.parseFloat(part.trim()));
-        }
-        return out;
     }
 
     /**
@@ -1237,31 +1220,30 @@ public final class PgVectorRepository {
                                         int limit, int offset,
                                         boolean includeSourceUri) {
         int dim = dimForCollection(collection);
-        StringBuilder sql = new StringBuilder()
-            .append("SELECT chash, chunk_text, metadata::text AS metadata_json FROM ")
-            .append(chunksTable(dim))
-            .append(" WHERE collection = ?");
-        List<Object> binds = new ArrayList<>();
-        binds.add(collection);
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        org.jooq.Condition cond = ch.collection().eq(collection);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
-                appendWherePredicate(sql, binds, e.getKey(), e.getValue());
+                cond = cond.and(metadataCondition(e.getKey(), e.getValue()));
             }
         }
-        sql.append(" ORDER BY chash ASC LIMIT ? OFFSET ?");
-        binds.add(limit);
-        binds.add(offset);
-
-        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch(sql.toString(), binds.toArray()));
+        org.jooq.Condition finalCond = cond;
+        var result = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
+               .from(ch.table())
+               .where(finalCond)
+               .orderBy(ch.chash().asc())
+               .limit(limit).offset(offset)
+               .fetch());
 
         List<String> outIds = new ArrayList<>(result.size());
         List<String> outDocs = new ArrayList<>(result.size());
         List<Map<String, Object>> outMetas = new ArrayList<>(result.size());
-        for (Record rec : result) {
-            outIds.add(rec.get("chash", String.class));
-            outDocs.add(rec.get("chunk_text", String.class));
-            outMetas.add(fromJson(rec.get("metadata_json", String.class)));
+        for (var rec : result) {
+            outIds.add(rec.value1());
+            outDocs.add(rec.value2());
+            JSONB meta = rec.value3();
+            outMetas.add(fromJson(meta != null ? meta.data() : null));
         }
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
         return enrichGetEnvelope(tenant,
@@ -1288,15 +1270,15 @@ public final class PgVectorRepository {
      * @return Chroma-style envelope {@code [{"name": ...}, ...]}, name ascending
      */
     public List<Map<String, Object>> listCollections(String tenant) {
-        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("SELECT collection FROM ("
-                      + "  SELECT DISTINCT collection FROM nexus.chunks_384"
-                      + "  UNION SELECT DISTINCT collection FROM nexus.chunks_768"
-                      + "  UNION SELECT DISTINCT collection FROM nexus.chunks_1024"
-                      + ") cols ORDER BY collection ASC"));
-        List<Map<String, Object>> out = new ArrayList<>(result.size());
-        for (Record rec : result) {
-            out.add(Map.of("name", rec.get("collection", String.class)));
+        var names = tenantScope.withTenant(tenant, ctx ->
+            ctx.selectDistinct(CHUNKS_384.COLLECTION).from(CHUNKS_384)
+               .union(ctx.selectDistinct(CHUNKS_768.COLLECTION).from(CHUNKS_768))
+               .union(ctx.selectDistinct(CHUNKS_1024.COLLECTION).from(CHUNKS_1024))
+               .orderBy(1)
+               .fetch());
+        List<Map<String, Object>> out = new ArrayList<>(names.size());
+        for (var rec : names) {
+            out.add(Map.of("name", rec.value1()));
         }
         return out;
     }
@@ -1550,6 +1532,17 @@ public final class PgVectorRepository {
      * Execute a combined-query function call under the tenant RLS scope with the
      * filtered-ANN session setting, and map the (id, content, collection, distance)
      * rows to the flat search() envelope.
+     *
+     * <p>SANCTIONED RAW (nexus-mzuj9): {@code sql} is caller-built (one per combined-query
+     * family: metadata-scoped, graph-hop, topic-scoped) calling a per-dim stored function
+     * ({@code nexus.search_<kind>_scoped_<dim>(...)}). jOOQ codegen DOES emit typed
+     * table-valued-function wrappers for these (e.g. {@code SearchMetadataScoped_1024}) —
+     * unlike the {@link #hybridSearch}/{@link #searchWithTokens} case this is NOT a hard
+     * DSL-expressiveness wall, but converting it requires a dim-keyed dispatch map (mirroring
+     * {@link DimTables}) across 3 function families × 3 dims with parameter shapes
+     * (ARRAY[...]::text[] collection lists, ::jsonb where-maps) re-verified call-by-call
+     * against each caller. Flagged as a good follow-up mechanical conversion, deferred here
+     * for risk/effort — registered in {@code RawSqlGateTest}'s sanctioned method allowlist.
      */
     private List<Map<String, Object>> runCombinedQuery(
             String tenant, String sql, List<Object> binds) {
@@ -1573,6 +1566,9 @@ public final class PgVectorRepository {
      * Like {@link #runCombinedQuery} but also maps the matched chunk's {@code chash}
      * column (graph-hop, bead nexus-houg9). Kept separate because the metadata/topic
      * functions do not expose chash — {@code rec.get("chash", ...)} would throw there.
+     *
+     * <p>SANCTIONED RAW (nexus-mzuj9): same rationale as {@link #runCombinedQuery} — see
+     * that method's javadoc.
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
             String tenant, String sql, List<Object> binds) {
@@ -1613,17 +1609,19 @@ public final class PgVectorRepository {
      *         if null. Collections with zero live chunks do not appear.
      */
     public List<Map<String, Object>> collectionStats(String tenant) {
-        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("SELECT collection, dim, chunk_count, last_write"
-                      + " FROM nexus.collection_vector_stats"
-                      + " ORDER BY collection ASC, dim ASC"));
+        var result = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
+                       COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE)
+               .from(COLLECTION_VECTOR_STATS)
+               .orderBy(COLLECTION_VECTOR_STATS.COLLECTION.asc(), COLLECTION_VECTOR_STATS.DIM.asc())
+               .fetch());
         List<Map<String, Object>> out = new ArrayList<>(result.size());
-        for (Record rec : result) {
+        for (var rec : result) {
             Map<String, Object> row = new java.util.LinkedHashMap<>();
-            row.put("name",  rec.get("collection", String.class));
-            row.put("dim",   rec.get("dim", Integer.class));
-            row.put("count", rec.get("chunk_count", Long.class));
-            var lastWrite = rec.get("last_write", java.time.OffsetDateTime.class);
+            row.put("name",  rec.value1());
+            row.put("dim",   rec.value2());
+            row.put("count", rec.value3());
+            var lastWrite = rec.value4();
             if (lastWrite != null) {
                 row.put("last_write", lastWrite.toString());
             }
@@ -1640,16 +1638,21 @@ public final class PgVectorRepository {
     public Map<String, Object> list(String tenant, String collection,
                                     int limit, int offset) {
         int dim = dimForCollection(collection);
-        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
-            ctx.fetch("SELECT chash, metadata::text AS metadata_json FROM " + chunksTable(dim)
-                      + " WHERE collection = ? ORDER BY chash ASC LIMIT ? OFFSET ?",
-                      collection, limit, offset));
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        var result = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.chash(), ch.metadata())
+               .from(ch.table())
+               .where(ch.collection().eq(collection))
+               .orderBy(ch.chash().asc())
+               .limit(limit).offset(offset)
+               .fetch());
 
         List<String> outIds = new ArrayList<>(result.size());
         List<Map<String, Object>> outMetas = new ArrayList<>(result.size());
-        for (Record rec : result) {
-            outIds.add(rec.get("chash", String.class));
-            outMetas.add(fromJson(rec.get("metadata_json", String.class)));
+        for (var rec : result) {
+            outIds.add(rec.value1());
+            JSONB meta = rec.value2();
+            outMetas.add(fromJson(meta != null ? meta.data() : null));
         }
         return Map.of("ids", outIds, "metadatas", outMetas);
     }
@@ -1683,10 +1686,9 @@ public final class PgVectorRepository {
      */
     public int count(String tenant, String collection) {
         int dim = dimForCollection(collection);
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         long c = tenantScope.withTenant(tenant, ctx ->
-            ctx.fetchOne("SELECT count(*) FROM " + chunksTable(dim) + " WHERE collection = ?",
-                         collection)
-               .get(0, Long.class));
+            (long) ctx.fetchCount(ch.table(), ch.collection().eq(collection)));
         // PG count(*) is bigint; refuse to wrap rather than silently narrow.
         if (c > Integer.MAX_VALUE) {
             throw new IllegalStateException("count overflow for collection '" + collection
@@ -1748,17 +1750,22 @@ public final class PgVectorRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // 1. The document must be visible under RLS. A foreign tenant's tumbler is
             //    indistinguishable from an unknown one (no existence leak).
-            Record doc = ctx.fetchOne(
-                "SELECT 1 FROM nexus.catalog_documents WHERE tumbler = ?", tumbler);
+            Integer doc = ctx.select(DSL.one()).from(CATALOG_DOCUMENTS)
+                             .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                             .fetchOne(0, Integer.class);
             if (doc == null) {
                 throw new IllegalStateException(
                     "tumbler '" + tumbler + "' does not resolve to a visible catalog document");
             }
 
             // 2. Manifest rows in position order.
-            Result<Record> manifest = ctx.fetch(
-                "SELECT position, chash, collection FROM nexus.catalog_document_chunks"
-                + " WHERE doc_id = ? ORDER BY position ASC", tumbler);
+            var manifest = ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION,
+                                      CATALOG_DOCUMENT_CHUNKS.CHASH,
+                                      CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                              .from(CATALOG_DOCUMENT_CHUNKS)
+                              .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler))
+                              .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION.asc())
+                              .fetch();
             if (manifest.isEmpty()) {
                 return List.of();
             }
@@ -1766,55 +1773,52 @@ public final class PgVectorRepository {
             // 3. Resolve chunk text per collection group (each collection dispatches to
             //    its own chunks_<dim> table).
             Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
-            for (Record m : manifest) {
-                String col = m.get("collection", String.class);
+            for (var m : manifest) {
+                String col = m.value3();
                 if (col == null || col.isBlank()) {
                     throw new IllegalStateException(
                         "manifest row for doc '" + tumbler + "' position "
-                        + m.get("position", Integer.class)
+                        + m.value1()
                         + " has no collection - cannot dispatch to a chunks_<dim> table"
                         + " (pre-migration manifest rows are resolved by the Phase 5 ETL)");
                 }
                 chashesByCollection.computeIfAbsent(col, k -> new LinkedHashSet<>())
-                                   .add(m.get("chash", String.class));
+                                   .add(m.value2());
             }
 
             Map<String, Map<String, String>> textByColThenChash = new HashMap<>();
             for (Map.Entry<String, Set<String>> e : chashesByCollection.entrySet()) {
                 String col = e.getKey();
                 int dim = dimForCollection(col);
-                List<Object> binds = new ArrayList<>();
-                binds.add(col);
-                binds.addAll(e.getValue());
-                Result<Record> chunks = ctx.fetch(
-                    "SELECT chash, chunk_text FROM " + chunksTable(dim)
-                    + " WHERE collection = ? AND chash IN (" + placeholders(e.getValue().size()) + ")",
-                    binds.toArray());
+                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+                var chunks = ctx.select(ch.chash(), ch.chunkText()).from(ch.table())
+                                .where(ch.collection().eq(col).and(ch.chash().in(e.getValue())))
+                                .fetch();
                 Map<String, String> byChash =
                     textByColThenChash.computeIfAbsent(col, k -> new HashMap<>());
-                for (Record c : chunks) {
-                    byChash.put(c.get("chash", String.class),
-                                c.get("chunk_text", String.class));
+                for (var c : chunks) {
+                    byChash.put(c.value1(), c.value2());
                 }
             }
 
             // 4. Walk the manifest in position order; any unresolved (collection, chash)
             //    fails loud - never a silently partial document.
             List<Map<String, Object>> rows = new ArrayList<>(manifest.size());
-            for (Record m : manifest) {
-                String col   = m.get("collection", String.class);
-                String chash = m.get("chash", String.class);
+            for (var m : manifest) {
+                Integer position = m.value1();
+                String chash     = m.value2();
+                String col       = m.value3();
                 Map<String, String> byChash = textByColThenChash.get(col);
                 String text  = byChash != null ? byChash.get(chash) : null;
                 if (text == null) {
                     throw new IllegalStateException(
                         "manifest row for doc '" + tumbler + "' position "
-                        + m.get("position", Integer.class) + " references (" + col + ", "
+                        + position + " references (" + col + ", "
                         + chash + ") which has no chunk row - refusing to return a"
                         + " partial document (application-enforced referential check)");
                 }
                 Map<String, Object> row = new LinkedHashMap<>();
-                row.put("position",   m.get("position", Integer.class));
+                row.put("position",   position);
                 row.put("chash",      chash);
                 row.put("chunk_text", text);
                 row.put("collection", col);
@@ -1846,19 +1850,39 @@ public final class PgVectorRepository {
      */
     public String fetchChunkText(String tenant, String collection, String chash) {
         int dim = dimForCollection(collection);
-        return tenantScope.withTenant(tenant, ctx -> {
-            Record row = ctx.fetchOne(
-                "SELECT chunk_text FROM " + chunksTable(dim)
-                + " WHERE collection = ? AND chash = ?",
-                collection, chash);
-            return row != null ? row.get("chunk_text", String.class) : null;
-        });
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.chunkText()).from(ch.table())
+               .where(ch.collection().eq(collection).and(ch.chash().eq(chash)))
+               .fetchOne(ch.chunkText()));
     }
 
     // -- Internal helpers -------------------------------------------------------
 
     private static String chunksTable(int dim) {
         return "nexus.chunks_" + dim;
+    }
+
+    /**
+     * SANCTIONED RAW (nexus-mzuj9): the single execution chokepoint for every genuinely
+     * raw-SQL fetch left in this class after the fetch-side jOOQ conversion sweep. Callers
+     * ({@link #searchWithTokens} and {@link #hybridSearch}) build the SQL text because it
+     * combines things jOOQ's typed DSL cannot express together in one statement: the
+     * pgvector {@code <=>} distance operator ordering directly off a bind-parameter vector
+     * literal, the {@code pg_trgm} {@code <%} similarity operator, a per-call dynamic-arity
+     * {@code WHERE} (an arbitrary count of caller-supplied metadata predicates plus an
+     * IN-list sized to the collection/chash set), and — for {@code hybridSearch} — a
+     * selectivity-dependent PLAN CHOICE (materialize-then-rank vs. HNSW-first) made in Java
+     * between two structurally different follow-up queries. Rewriting this as nested DSL
+     * would either lose the operator-level control the selectivity dispatch depends on or
+     * require a bespoke dynamic-condition builder whose behavior would need to be
+     * re-verified bit-for-bit against the existing (well-tested) selectivity contract —
+     * not a safe mechanical transform. Registered in {@code RawSqlGateTest}'s sanctioned
+     * method allowlist; this is the ONLY place in the class where a caller-built raw SQL
+     * string reaches {@code ctx.fetch}.
+     */
+    private static Result<Record> rawVectorFetch(DSLContext ctx, String sql, Object... binds) {
+        return ctx.fetch(sql, binds);
     }
 
     /** Strip NUL (0x00) — unstorable in Postgres {@code text}/{@code jsonb} (nexus-rvfwj). */
@@ -2010,6 +2034,56 @@ public final class PgVectorRepository {
         }
     }
 
+    /**
+     * Typed jOOQ sibling of {@link #appendWherePredicate} (nexus-mzuj9): same Chroma
+     * operator-subset ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}, plain-scalar
+     * shorthand for {@code $eq}), expressed as a {@link org.jooq.Condition} via a
+     * {@code metadata ->> {0}} DSL.field template (bind placeholder, not string
+     * concatenation) instead of hand-built SQL text. Used by the plain-equality
+     * {@link #getWhere} path, which has no vector/trigram operator to entangle with.
+     */
+    static org.jooq.Condition metadataCondition(String key, Object value) {
+        if (key.startsWith("$")) {
+            throw new IllegalArgumentException(
+                "compound where operator '" + key + "' is not supported on the vector "
+                + "bridge; express each field as its own predicate (all fields are ANDed)");
+        }
+        org.jooq.Field<String> mv = DSL.field("metadata ->> {0}", String.class, key);
+        if (!(value instanceof Map<?, ?> ops)) {
+            return mv.eq(String.valueOf(value));
+        }
+        if (ops.size() != 1) {
+            throw new IllegalArgumentException(
+                "where operator map for field '" + key + "' must hold exactly one operator, got "
+                + ops.keySet());
+        }
+        Map.Entry<?, ?> op = ops.entrySet().iterator().next();
+        String operator = String.valueOf(op.getKey());
+        Object operand = op.getValue();
+        return switch (operator) {
+            case "$eq" -> mv.eq(String.valueOf(operand));
+            case "$ne" -> mv.isDistinctFrom(String.valueOf(operand));
+            case "$in", "$nin" -> {
+                if (!(operand instanceof List<?> items)) {
+                    throw new IllegalArgumentException(
+                        operator + " for field '" + key + "' expects a list operand, got "
+                        + (operand == null ? "null" : operand.getClass().getSimpleName()));
+                }
+                if (items.isEmpty()) {
+                    // $in [] matches nothing; $nin [] excludes nothing.
+                    yield "$in".equals(operator) ? DSL.falseCondition() : DSL.trueCondition();
+                }
+                List<String> strItems = items.stream().map(String::valueOf).toList();
+                yield "$in".equals(operator)
+                    ? mv.in(strItems)
+                    : mv.isNull().or(mv.notIn(strItems));
+            }
+            default -> throw new IllegalArgumentException(
+                "unsupported where operator '" + operator + "' for field '" + key
+                + "'; supported: $eq, $ne, $in, $nin");
+        };
+    }
+
     private static String toJson(Map<String, Object> metadata) {
         Map<String, Object> m = metadata != null ? metadata : Map.of();
         try {
@@ -2054,23 +2128,19 @@ public final class PgVectorRepository {
             // adds defense-in-depth on the catalog_documents side (fix #H2).
             // Note: last-writer-wins when a chash appears in multiple catalog_document_chunks
             // rows (shared chunk text across documents) — non-determinism accepted for now.
-            String sql = "SELECT cdc.chash, d.source_uri"
-                       + " FROM nexus.catalog_document_chunks cdc"
-                       + " JOIN nexus.catalog_documents d"
-                       + "   ON d.tumbler = cdc.doc_id AND d.tenant_id = ?"
-                       + " WHERE cdc.tenant_id = ?"
-                       + " AND cdc.chash IN (" + placeholders(batch.size()) + ")";
-            List<Object> binds = new ArrayList<>();
-            binds.add(tenant);   // d.tenant_id
-            binds.add(tenant);   // cdc.tenant_id
-            binds.addAll(batch);
+            var result = tenantScope.withTenant(tenant, ctx ->
+                ctx.select(CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENTS.SOURCE_URI)
+                   .from(CATALOG_DOCUMENT_CHUNKS)
+                   .join(CATALOG_DOCUMENTS)
+                   .on(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)
+                       .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)))
+                   .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(batch)))
+                   .fetch());
 
-            Result<Record> result = tenantScope.withTenant(tenant, ctx ->
-                ctx.fetch(sql, binds.toArray()));
-
-            for (Record rec : result) {
-                String chash     = rec.get("chash",      String.class);
-                String sourceUri = rec.get("source_uri", String.class);
+            for (var rec : result) {
+                String chash     = rec.value1();
+                String sourceUri = rec.value2();
                 if (chash != null) out.put(chash, sourceUri);
             }
         }

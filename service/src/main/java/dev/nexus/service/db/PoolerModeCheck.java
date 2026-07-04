@@ -1,13 +1,13 @@
 package dev.nexus.service.db;
 
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -122,12 +122,16 @@ public final class PoolerModeCheck {
         String timedUrl = adminUrl.contains("connectTimeout=") || adminUrl.contains("socketTimeout=")
                 ? adminUrl
                 : adminUrl + (adminUrl.contains("?") ? "&" : "?") + "connectTimeout=10&socketTimeout=10";
-        try (Connection conn = DriverManager.getConnection(timedUrl, user, pass);
-             Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SHOW CONFIG")) {
-            // PgBouncer SHOW CONFIG returns columns: key, value, [changeable].
-            while (rs.next()) {
-                rows.put(rs.getString("key"), rs.getString("value"));
+        // SANCTIONED RAW (nexus-mzuj9): `SHOW CONFIG` is a PgBouncer admin-console meta-command,
+        // not SQL against any table/schema — it has no jOOQ DSL form (no bind params, no known
+        // column set ahead of time; PgBouncer, not Postgres, answers it). Routed through
+        // DSL.using(connection) rather than a bare JDBC Statement so the result is a typed
+        // jOOQ Result<Record> (key/value/[changeable] columns) instead of manual ResultSet
+        // iteration. Registered in RawSqlGateTest's sanctioned method allowlist.
+        try (Connection conn = DriverManager.getConnection(timedUrl, user, pass)) {
+            var result = DSL.using(conn, SQLDialect.POSTGRES).fetch("SHOW CONFIG");
+            for (var rec : result) {
+                rows.put(rec.get("key", String.class), rec.get("value", String.class));
             }
         }
         return rows;

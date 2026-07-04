@@ -9,13 +9,19 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_INDEX;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_DOC_COUNTS;
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_HEALTH_META;
+import static dev.nexus.service.jooq.nexus.Tables.COVERAGE_BY_CONTENT_TYPE;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
+import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_1024;
@@ -674,8 +680,8 @@ public final class CatalogRepository {
      */
     public long manifestBackfill(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rec = ctx.fetchOne("select nexus.manifest_backfill()");
-            return rec != null ? rec.get(0, Long.class) : 0L;
+            Long count = dev.nexus.service.jooq.nexus.Routines.manifestBackfill(ctx.configuration());
+            return count != null ? count : 0L;
         });
     }
 
@@ -709,14 +715,13 @@ public final class CatalogRepository {
                 "limit must be > 0 (the sample is bounded; use count for the gate)");
         }
         return tenantScope.withTenant(tenant, ctx -> {
-            Long count = ctx.fetchOne(
-                "select count(*) from nexus.manifest_orphans(?)", dim
-            ).get(0, Long.class);
-            var sample = ctx.fetch(
-                "select * from nexus.manifest_orphans(?) limit ?", dim, limit
-            ).map(org.jooq.Record::intoMap);
+            long count = ctx.fetchCount(MANIFEST_ORPHANS.call(dim));
+            var sample = ctx.selectFrom(MANIFEST_ORPHANS.call(dim))
+                             .limit(limit)
+                             .fetch()
+                             .map(org.jooq.Record::intoMap);
             Map<String, Object> out = new LinkedHashMap<>();
-            out.put("count", count != null ? count : 0L);
+            out.put("count", count);
             out.put("orphans", sample);
             return out;
         });
@@ -730,11 +735,8 @@ public final class CatalogRepository {
      */
     public long manifestOrphanCount(String tenant, int dim) {
         requireSupportedDim(dim);
-        return tenantScope.withTenant(tenant, ctx -> {
-            var rec = ctx.fetchOne(
-                "select count(*) from nexus.manifest_orphans(?)", dim);
-            return rec != null ? rec.get(0, Long.class) : 0L;
-        });
+        return tenantScope.withTenant(tenant, ctx ->
+            (long) ctx.fetchCount(MANIFEST_ORPHANS.call(dim)));
     }
 
     private static void requireSupportedDim(int dim) {
@@ -1280,34 +1282,40 @@ public final class CatalogRepository {
      */
     public Map<String, Object> resolveChash(String tenant, String chash, String preferCollection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // Raw SQL: UNION ALL wrapped in a subquery so the outer ORDER BY can
-            // use expressions (PostgreSQL rejects expressions in UNION ORDER BY;
-            // wrapping in FROM avoids that restriction).
-            // prefer_collection is a bind parameter — never inlined into SQL.
+            // UNION ALL across the three dim tables, wrapped as a derived table so the
+            // outer ORDER BY can reference expressions (PostgreSQL rejects expressions
+            // in a bare UNION's ORDER BY; a derived-table FROM avoids that restriction).
+            // prefer_collection is a bind parameter via the typed .eq(pref) predicate below.
             String pref = preferCollection != null ? preferCollection : "";
-            String sql =
-                "SELECT collection, chunk_text, metadata, created_at FROM ("
-                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_768"
-                + "  WHERE chash = ?"
-                + " UNION ALL"
-                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_384"
-                + "  WHERE chash = ?"
-                + " UNION ALL"
-                + " SELECT collection, chunk_text, metadata::text AS metadata, created_at FROM nexus.chunks_1024"
-                + "  WHERE chash = ?"
-                + ") sub"
-                // Third key `collection ASC` matches the canonical _sort_key
-                // (preferred, newest created_at, deterministic name) so a chash in two
-                // collections with equal created_at resolves stably (njrcn.4 review).
-                + " ORDER BY (collection = ?) DESC, created_at DESC, collection ASC LIMIT 1";
 
-            var result = ctx.fetch(sql, chash, chash, chash, pref);
-            if (result.isEmpty()) return null;
+            var sub = ctx.select(CHUNKS_768.COLLECTION, CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA, CHUNKS_768.CREATED_AT)
+                          .from(CHUNKS_768).where(CHUNKS_768.CHASH.eq(chash))
+                       .unionAll(
+                          ctx.select(CHUNKS_384.COLLECTION, CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA, CHUNKS_384.CREATED_AT)
+                             .from(CHUNKS_384).where(CHUNKS_384.CHASH.eq(chash)))
+                       .unionAll(
+                          ctx.select(CHUNKS_1024.COLLECTION, CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA, CHUNKS_1024.CREATED_AT)
+                             .from(CHUNKS_1024).where(CHUNKS_1024.CHASH.eq(chash)))
+                       .asTable("sub");
 
-            var row     = result.get(0);
-            String col  = row.get("collection", String.class);
-            String text = row.get("chunk_text",  String.class);
-            String metaJson = row.get("metadata", String.class);
+            Field<String>         col       = sub.field("collection", String.class);
+            Field<String>         text      = sub.field("chunk_text", String.class);
+            Field<org.jooq.JSONB> meta      = sub.field("metadata", org.jooq.JSONB.class);
+            Field<java.time.OffsetDateTime> createdAt = sub.field("created_at", java.time.OffsetDateTime.class);
+
+            var row = ctx.select(col, text, meta, createdAt)
+                          .from(sub)
+                          // Third key `collection ASC` matches the canonical _sort_key
+                          // (preferred, newest created_at, deterministic name) so a chash in two
+                          // collections with equal created_at resolves stably (njrcn.4 review).
+                          .orderBy(col.eq(pref).desc(), createdAt.desc(), col.asc())
+                          .limit(1)
+                          .fetchOne();
+            if (row == null) return null;
+
+            String colVal      = row.value1();
+            String textVal     = row.value2();
+            org.jooq.JSONB metaVal = row.value3();
 
             // Lookup doc_id from catalog_document_chunks. ORDER BY doc_id for a
             // deterministic winner when a chash is referenced by multiple docs (dedup).
@@ -1320,10 +1328,10 @@ public final class CatalogRepository {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("chash",               chash);
             m.put("chunk_hash",          chash);
-            m.put("physical_collection", col);
+            m.put("physical_collection", colVal);
             m.put("doc_id",              docId);
-            m.put("chunk_text",          text);
-            m.put("metadata",            metaJson != null ? parseMetaJson(metaJson) : Map.of());
+            m.put("chunk_text",          textVal);
+            m.put("metadata",            metaVal != null ? parseMetaJson(metaVal.data()) : Map.of());
             return m;
         });
     }
@@ -1728,31 +1736,27 @@ public final class CatalogRepository {
             // catalog_stats security_invoker view (per-subquery RLS scopes each to
             // the GUC tenant), replacing five separate selectCount calls and the
             // Java-side hand-assembly that the Python path duplicated.
-            var s = ctx.fetchOne(
-                "SELECT doc_count, link_count, owner_count, collection_count, chunk_count "
-                + "FROM nexus.catalog_stats");
-            long docCount  = s.get("doc_count", Long.class);
-            long lnkCount  = s.get("link_count", Long.class);
-            long ownCount  = s.get("owner_count", Long.class);
-            long collCount = s.get("collection_count", Long.class);
-            long chkCount  = s.get("chunk_count", Long.class);
+            var s = ctx.selectFrom(CATALOG_STATS).fetchOne();
+            long docCount  = s.get(CATALOG_STATS.DOC_COUNT);
+            long lnkCount  = s.get(CATALOG_STATS.LINK_COUNT);
+            long ownCount  = s.get(CATALOG_STATS.OWNER_COUNT);
+            long collCount = s.get(CATALOG_STATS.COLLECTION_COUNT);
+            long chkCount  = s.get(CATALOG_STATS.CHUNK_COUNT);
             // RDR-154 P1.2: the two GROUP-BY breakdowns also read views (completing
             // the "5+2" collapse, Gap 3). links_by_type ← links_by_type_counts;
             // by_content_type reuses coverage_by_content_type.total (same per-type
             // document count — eliminates the duplicate aggregate the critic flagged).
-            var ltypes = ctx.fetch(
-                "SELECT link_type, link_count FROM nexus.links_by_type_counts");
+            var ltypes = ctx.selectFrom(LINKS_BY_TYPE_COUNTS).fetch();
             Map<String, Long> byType = new LinkedHashMap<>();
-            for (var r : ltypes) byType.put(r.get("link_type", String.class),
-                                            r.get("link_count", Long.class));
+            for (var r : ltypes) byType.put(r.get(LINKS_BY_TYPE_COUNTS.LINK_TYPE),
+                                            r.get(LINKS_BY_TYPE_COUNTS.LINK_COUNT));
             // by_content_type: key is "" for null/empty content_type (the view already
             // COALESCEs to ''), matching SQLite Catalog.stats().
-            var ctypes = ctx.fetch(
-                "SELECT content_type, total FROM nexus.coverage_by_content_type");
+            var ctypes = ctx.select(COVERAGE_BY_CONTENT_TYPE.CONTENT_TYPE, COVERAGE_BY_CONTENT_TYPE.TOTAL)
+                            .from(COVERAGE_BY_CONTENT_TYPE).fetch();
             Map<String, Long> byContentType = new LinkedHashMap<>();
             for (var r : ctypes) {
-                byContentType.put(r.get("content_type", String.class),
-                                  r.get("total", Long.class));
+                byContentType.put(r.value1(), r.value2());
             }
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("doc_count", docCount);
@@ -1783,16 +1787,18 @@ public final class CatalogRepository {
             // The view GROUP BYs collection, so it emits NO row for a collection
             // with zero documents — default to {last_indexed:null, orphan_count:0}
             // to preserve the prior contract.
-            var r = ctx.fetchOne(
-                "SELECT last_indexed, orphan_count, stale_source_ratio "
-                + "FROM nexus.collection_health_meta WHERE collection = ?", collection);
+            var r = ctx.select(COLLECTION_HEALTH_META.LAST_INDEXED,
+                               COLLECTION_HEALTH_META.ORPHAN_COUNT,
+                               COLLECTION_HEALTH_META.STALE_SOURCE_RATIO)
+                       .from(COLLECTION_HEALTH_META)
+                       .where(COLLECTION_HEALTH_META.COLLECTION.eq(collection))
+                       .fetchOne();
 
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("last_indexed", r == null ? null : r.get("last_indexed", String.class));
-            result.put("orphan_count", r == null ? 0L : r.get("orphan_count", Long.class));
+            result.put("last_indexed", r == null ? null : r.value1());
+            result.put("orphan_count", r == null ? 0L : r.value2());
             // nexus-agsq7: index-age staleness; null when no dated doc qualifies.
-            result.put("stale_source_ratio",
-                       r == null ? null : r.get("stale_source_ratio", Double.class));
+            result.put("stale_source_ratio", r == null ? null : r.value3());
             return result;
         });
     }
@@ -1926,12 +1932,12 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-154 P1.2 (nexus-h9qyp): read the collection_doc_counts
             // security_invoker view (replaces the hand-written GROUP BY).
-            var rows = ctx.fetch(
-                "SELECT physical_collection, doc_count FROM nexus.collection_doc_counts");
+            var rows = ctx.select(COLLECTION_DOC_COUNTS.PHYSICAL_COLLECTION, COLLECTION_DOC_COUNTS.DOC_COUNT)
+                          .from(COLLECTION_DOC_COUNTS)
+                          .fetch();
             Map<String, Long> result = new LinkedHashMap<>();
             for (var r : rows) {
-                result.put(r.get("physical_collection", String.class),
-                           r.get("doc_count", Long.class));
+                result.put(r.value1(), r.value2());
             }
             return result;
         });
@@ -1968,32 +1974,49 @@ public final class CatalogRepository {
             // security_invoker view; the owner-prefix case runs the same aggregation
             // with the prefix applied BEFORE the GROUP BY (a view cannot be
             // parameterized, but the N+1 is eliminated either way).
-            org.jooq.Result<?> rows;
+            List<Map<String, Object>> result = new ArrayList<>();
             if (ownerPrefix == null || ownerPrefix.isBlank()) {
-                rows = ctx.fetch(
-                    "SELECT content_type, total, linked FROM nexus.coverage_by_content_type");
+                var rows = ctx.select(COVERAGE_BY_CONTENT_TYPE.CONTENT_TYPE,
+                                      COVERAGE_BY_CONTENT_TYPE.TOTAL,
+                                      COVERAGE_BY_CONTENT_TYPE.LINKED)
+                              .from(COVERAGE_BY_CONTENT_TYPE)
+                              .fetch();
+                for (var r : rows) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("content_type", r.value1());
+                    row.put("total",        r.value2());
+                    row.put("linked",       r.value3());
+                    result.add(row);
+                }
             } else {
                 String likePat = ownerPrefix.replaceAll("\\.$", "") + ".%";
-                rows = ctx.fetch(
-                    "SELECT COALESCE(d.content_type, '') AS content_type, "
-                    + "count(*) AS total, "
-                    + "count(*) FILTER (WHERE EXISTS ("
-                    + "  SELECT 1 FROM nexus.catalog_links l "
-                    + "   WHERE l.from_tumbler = d.tumbler OR l.to_tumbler = d.tumbler"
-                    + ")) AS linked "
-                    + "FROM nexus.catalog_documents d "
-                    + "WHERE d.tumbler LIKE ? OR d.tumbler = ? "
-                    + "GROUP BY COALESCE(d.content_type, '')",
-                    likePat, ownerPrefix);
-            }
-
-            List<Map<String, Object>> result = new ArrayList<>();
-            for (var r : rows) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("content_type", r.get("content_type", String.class));
-                row.put("total",        r.get("total", Long.class));
-                row.put("linked",       r.get("linked", Long.class));
-                result.add(row);
+                // DSL.inline("") (a constant, not a bind param) — reusing the SAME Field
+                // object in both the SELECT list and GROUP BY only reads as the same
+                // expression to Postgres's GROUP BY validity check when the fallback is an
+                // inlined literal; a bound "?" parameter renders as a DIFFERENT placeholder
+                // ($N vs $M) at each occurrence, so Postgres sees two distinct expressions
+                // and rejects the query with "must appear in the GROUP BY clause" even
+                // though both bind to "" at runtime (caught by CatalogRepositoryTest
+                // coverageByContentType_ownerPrefixFilter).
+                Field<String> contentType = DSL.coalesce(CATALOG_DOCUMENTS.CONTENT_TYPE, DSL.inline(""));
+                Field<Long> linkedCount = DSL.count().filterWhere(
+                    DSL.exists(DSL.selectOne().from(CATALOG_LINKS)
+                        .where(CATALOG_LINKS.FROM_TUMBLER.eq(CATALOG_DOCUMENTS.TUMBLER)
+                            .or(CATALOG_LINKS.TO_TUMBLER.eq(CATALOG_DOCUMENTS.TUMBLER)))))
+                    .cast(Long.class);
+                var rows = ctx.select(contentType, DSL.count().cast(Long.class), linkedCount)
+                              .from(CATALOG_DOCUMENTS)
+                              .where(CATALOG_DOCUMENTS.TUMBLER.like(likePat)
+                                  .or(CATALOG_DOCUMENTS.TUMBLER.eq(ownerPrefix)))
+                              .groupBy(contentType)
+                              .fetch();
+                for (var r : rows) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("content_type", r.value1());
+                    row.put("total",        r.value2());
+                    row.put("linked",       r.value3());
+                    result.add(row);
+                }
             }
             return result;
         });

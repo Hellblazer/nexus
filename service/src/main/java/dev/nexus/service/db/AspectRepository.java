@@ -53,64 +53,60 @@ public final class AspectRepository {
     /** Minimum confidence threshold (mirrors Python _MIN_CONFIDENCE = 0.3). */
     private static final double MIN_CONFIDENCE = 0.3;
 
-    // EXCLUDED pseudo-table fields used in ON CONFLICT DO UPDATE SET.
-    // ⚠ DRIFT RISK (RDR-164 review S4): these field("...") fragments embed literal column
-    // names (EXCLUDED.<col>, and qualified table cols in the COALESCE/GREATEST/LEAST/CASE
-    // constants below) that jOOQ codegen CANNOT type-check — jOOQ has no typed API for the
-    // EXCLUDED pseudo-table. If any referenced column is renamed in a Liquibase changelog
-    // (document_aspects.{problem_formulation,proposed_method,experimental_datasets,
-    // experimental_baselines,experimental_results,extras,confidence,extracted_at,model_version,
-    // extractor_name,source_uri,salient_sentences,doc_id}; aspect_extraction_queue.{status,
-    // retry_count,enqueued_at,last_attempt_at,last_error}), these strings compile but fail at
-    // runtime. Update them HERE when renaming those columns.
-    private static final Field<String>          EX_PROBLEM_FORMULATION    = field("EXCLUDED.problem_formulation",    String.class);
-    private static final Field<String>          EX_PROPOSED_METHOD        = field("EXCLUDED.proposed_method",        String.class);
-    private static final Field<String>          EX_EXPERIMENTAL_DATASETS  = field("EXCLUDED.experimental_datasets",  String.class);
-    private static final Field<String>          EX_EXPERIMENTAL_BASELINES = field("EXCLUDED.experimental_baselines", String.class);
-    private static final Field<String>          EX_EXPERIMENTAL_RESULTS   = field("EXCLUDED.experimental_results",   String.class);
-    private static final Field<String>          EX_EXTRAS                 = field("EXCLUDED.extras",                 String.class);
-    private static final Field<Double>          EX_CONFIDENCE             = field("EXCLUDED.confidence",             Double.class);
-    private static final Field<OffsetDateTime>  EX_EXTRACTED_AT           = field("EXCLUDED.extracted_at",           OffsetDateTime.class);
-    private static final Field<String>          EX_MODEL_VERSION          = field("EXCLUDED.model_version",          String.class);
-    private static final Field<String>          EX_EXTRACTOR_NAME         = field("EXCLUDED.extractor_name",         String.class);
-    private static final Field<String>          EX_SOURCE_URI             = field("EXCLUDED.source_uri",             String.class);
-    private static final Field<String>          EX_SALIENT_SENTENCES      = field("EXCLUDED.salient_sentences",      String.class);
-    private static final Field<String>          EX_DOC_ID                 = field("EXCLUDED.doc_id",                 String.class);
+    // EXCLUDED pseudo-table fields used in ON CONFLICT DO UPDATE SET, typed via
+    // DSL.excluded(Field) (nexus-mzuj9: replaces the hand-built field("EXCLUDED.x", ...)
+    // raw-string fragments — jOOQ codegen now type-checks every column reference here
+    // against the generated DOCUMENT_ASPECTS / DOCUMENT_HIGHLIGHTS / ASPECT_EXTRACTION_QUEUE
+    // tables, so a Liquibase column rename fails at COMPILE time instead of at runtime).
+    private static final Field<String>          EX_PROBLEM_FORMULATION    = excluded(DOCUMENT_ASPECTS.PROBLEM_FORMULATION);
+    private static final Field<String>          EX_PROPOSED_METHOD        = excluded(DOCUMENT_ASPECTS.PROPOSED_METHOD);
+    private static final Field<String>          EX_EXPERIMENTAL_DATASETS  = excluded(DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS);
+    private static final Field<String>          EX_EXPERIMENTAL_BASELINES = excluded(DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES);
+    private static final Field<String>          EX_EXPERIMENTAL_RESULTS   = excluded(DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS);
+    private static final Field<String>          EX_EXTRAS                 = excluded(DOCUMENT_ASPECTS.EXTRAS);
+    private static final Field<Double>          EX_CONFIDENCE             = excluded(DOCUMENT_ASPECTS.CONFIDENCE);
+    private static final Field<OffsetDateTime>  EX_EXTRACTED_AT           = excluded(DOCUMENT_ASPECTS.EXTRACTED_AT);
+    private static final Field<String>          EX_MODEL_VERSION          = excluded(DOCUMENT_ASPECTS.MODEL_VERSION);
+    private static final Field<String>          EX_EXTRACTOR_NAME         = excluded(DOCUMENT_ASPECTS.EXTRACTOR_NAME);
+    private static final Field<String>          EX_SOURCE_URI             = excluded(DOCUMENT_ASPECTS.SOURCE_URI);
+    private static final Field<String>          EX_SALIENT_SENTENCES      = excluded(DOCUMENT_ASPECTS.SALIENT_SENTENCES);
+    private static final Field<String>          EX_DOC_ID                 = excluded(DOCUMENT_ASPECTS.DOC_ID);
 
     // COALESCE(EXCLUDED.x, table.x) fields for importAspect path
     private static final Field<String>          EX_SOURCE_URI_COALESCE =
-        field("COALESCE(EXCLUDED.source_uri, document_aspects.source_uri)", String.class);
+        coalesce(excluded(DOCUMENT_ASPECTS.SOURCE_URI), DOCUMENT_ASPECTS.SOURCE_URI);
     private static final Field<String>          EX_SALIENT_COALESCE =
-        field("COALESCE(EXCLUDED.salient_sentences, document_aspects.salient_sentences)", String.class);
+        coalesce(excluded(DOCUMENT_ASPECTS.SALIENT_SENTENCES), DOCUMENT_ASPECTS.SALIENT_SENTENCES);
     private static final Field<String>          EX_DOC_ID_COALESCE =
-        field("COALESCE(EXCLUDED.doc_id, document_aspects.doc_id)", String.class);
+        coalesce(excluded(DOCUMENT_ASPECTS.DOC_ID), DOCUMENT_ASPECTS.DOC_ID);
 
     // document_highlights EXCLUDED fields
-    private static final Field<String>          EX_HL_SOURCE_URI   = field("EXCLUDED.source_uri",    String.class);
-    private static final Field<String>          EX_HL_COLLECTION   = field("EXCLUDED.collection",    String.class);
-    private static final Field<String>          EX_HL_HIGHLIGHTS   = field("EXCLUDED.highlights_md", String.class);
-    private static final Field<String>          EX_HL_MENTIONS     = field("EXCLUDED.mentions_md",   String.class);
-    private static final Field<OffsetDateTime>  EX_HL_INGESTED_AT  = field("EXCLUDED.ingested_at",   OffsetDateTime.class);
+    private static final Field<String>          EX_HL_SOURCE_URI   = excluded(DOCUMENT_HIGHLIGHTS.SOURCE_URI);
+    private static final Field<String>          EX_HL_COLLECTION   = excluded(DOCUMENT_HIGHLIGHTS.COLLECTION);
+    private static final Field<String>          EX_HL_HIGHLIGHTS   = excluded(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD);
+    private static final Field<String>          EX_HL_MENTIONS     = excluded(DOCUMENT_HIGHLIGHTS.MENTIONS_MD);
+    private static final Field<OffsetDateTime>  EX_HL_INGESTED_AT  = excluded(DOCUMENT_HIGHLIGHTS.INGESTED_AT);
 
     // aspect_extraction_queue EXCLUDED fields
-    private static final Field<String>          EX_Q_DOC_ID          = field("EXCLUDED.doc_id",          String.class);
-    private static final Field<String>          EX_Q_CONTENT_HASH    = field("EXCLUDED.content_hash",    String.class);
-    private static final Field<String>          EX_Q_CONTENT         = field("EXCLUDED.content",         String.class);
-    private static final Field<OffsetDateTime>  EX_Q_ENQUEUED_AT     = field("EXCLUDED.enqueued_at",     OffsetDateTime.class);
-    private static final Field<String>          EX_Q_LAST_ERROR      = field("EXCLUDED.last_error",      String.class);
-    // Complex GREATEST/LEAST/CASE fields for importQueueRow
+    private static final Field<String>          EX_Q_DOC_ID          = excluded(ASPECT_EXTRACTION_QUEUE.DOC_ID);
+    private static final Field<String>          EX_Q_CONTENT_HASH    = excluded(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
+    private static final Field<String>          EX_Q_CONTENT         = excluded(ASPECT_EXTRACTION_QUEUE.CONTENT);
+    private static final Field<OffsetDateTime>  EX_Q_ENQUEUED_AT     = excluded(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT);
+    private static final Field<String>          EX_Q_LAST_ERROR      = excluded(ASPECT_EXTRACTION_QUEUE.LAST_ERROR);
+    // Complex GREATEST/LEAST/CASE fields for importQueueRow, typed via DSL.when/.otherwise
+    // and DSL.greatest/DSL.least against the EXCLUDED pseudo-table + the live column.
     private static final Field<String>          EX_Q_STATUS_CASE =
-        field("CASE WHEN nexus.aspect_extraction_queue.status = 'in_progress' "
-            + "THEN nexus.aspect_extraction_queue.status ELSE EXCLUDED.status END", String.class);
+        when(ASPECT_EXTRACTION_QUEUE.STATUS.eq("in_progress"), ASPECT_EXTRACTION_QUEUE.STATUS)
+            .otherwise(excluded(ASPECT_EXTRACTION_QUEUE.STATUS));
     private static final Field<Integer>         EX_Q_RETRY_GREATEST =
-        field("GREATEST(EXCLUDED.retry_count, nexus.aspect_extraction_queue.retry_count)", Integer.class);
+        greatest(excluded(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT), ASPECT_EXTRACTION_QUEUE.RETRY_COUNT);
     private static final Field<OffsetDateTime>  EX_Q_ENQUEUED_LEAST =
-        field("LEAST(EXCLUDED.enqueued_at, nexus.aspect_extraction_queue.enqueued_at)", OffsetDateTime.class);
+        least(excluded(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT), ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT);
     private static final Field<OffsetDateTime>  EX_Q_ATTEMPT_GREATEST =
-        field("GREATEST(EXCLUDED.last_attempt_at, nexus.aspect_extraction_queue.last_attempt_at)", OffsetDateTime.class);
+        greatest(excluded(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT), ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT);
     private static final Field<String>          EX_Q_LAST_ERROR_CASE =
-        field("CASE WHEN EXCLUDED.status = 'failed' THEN EXCLUDED.last_error "
-            + "ELSE nexus.aspect_extraction_queue.last_error END", String.class);
+        when(excluded(ASPECT_EXTRACTION_QUEUE.STATUS).eq("failed"), excluded(ASPECT_EXTRACTION_QUEUE.LAST_ERROR))
+            .otherwise(ASPECT_EXTRACTION_QUEUE.LAST_ERROR);
 
     private final TenantScope tenantScope;
 

@@ -125,6 +125,10 @@ public final class TaxonomyCentroidRepository {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
         String op = crossCollection ? "<>" : "=";
+        // SANCTIONED RAW (nexus-mzuj9): the pgvector `<=>` distance operator ordered directly
+        // off a bind-parameter vector literal has no jOOQ DSL form (same category as
+        // PgVectorRepository's search()/hybridSearch() — see that class's rawVectorFetch
+        // javadoc). Registered in RawSqlGateTest's sanctioned method allowlist.
         Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
             // Filtered-ANN recall: the collection predicate + RLS narrow the candidate set;
             // keep HNSW scanning past ef_search so a narrow collection returns its full set
@@ -153,12 +157,10 @@ public final class TaxonomyCentroidRepository {
         long total = tenantScope.withTenant(tenant, ctx -> {
             long sum = 0;
             for (int dim : DIMS) {
-                String sql = "SELECT count(*) FROM " + centroidTable(dim)
-                    + (collection != null ? " WHERE collection = ?" : "");
-                Record rec = collection != null
-                    ? ctx.fetchOne(sql, collection)
-                    : ctx.fetchOne(sql);
-                sum += rec.get(0, Long.class);
+                DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
+                sum += collection != null
+                    ? ctx.fetchCount(ct.table(), ct.collection().eq(collection))
+                    : ctx.fetchCount(ct.table());
             }
             return sum;
         });
@@ -188,8 +190,8 @@ public final class TaxonomyCentroidRepository {
     public int dimensionProbe(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
             for (int dim : DIMS) {
-                Record rec = ctx.fetchOne("SELECT 1 FROM " + centroidTable(dim) + " LIMIT 1");
-                if (rec != null) return dim;
+                DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
+                if (ctx.fetchExists(ct.table())) return dim;
             }
             return -1;
         });
@@ -201,7 +203,7 @@ public final class TaxonomyCentroidRepository {
      * shape the rebuild/project paths index into.
      */
     public List<CentroidRecord> getByCollection(String tenant, String collection) {
-        return fetchCentroids(tenant, "collection = ?", collection);
+        return fetchCentroids(tenant, ct -> ct.collection().eq(collection));
     }
 
     /**
@@ -219,27 +221,31 @@ public final class TaxonomyCentroidRepository {
      * embedding is hydrated like {@link #getByCollection}.
      */
     public List<CentroidRecord> getForeignCentroids(String tenant, String collection) {
-        return fetchCentroids(tenant, "collection <> ?", collection);
+        return fetchCentroids(tenant, ct -> ct.collection().ne(collection));
     }
 
-    /** Shared per-dim centroid fetch with a parameterized collection predicate. */
-    private List<CentroidRecord> fetchCentroids(String tenant, String collectionPredicate,
-                                                String collection) {
+    /** Shared per-dim centroid fetch with a typed collection predicate. */
+    private List<CentroidRecord> fetchCentroids(
+            String tenant,
+            java.util.function.Function<DimTables.CentroidTable, org.jooq.Condition> predicate) {
         return tenantScope.withTenant(tenant, ctx -> {
             List<CentroidRecord> out = new ArrayList<>();
             for (int dim : DIMS) {
-                Result<Record> rows = ctx.fetch(
-                    "SELECT collection, topic_id, embedding::text AS embedding_text, label, doc_count FROM "
-                    + centroidTable(dim) + " WHERE " + collectionPredicate
-                    + " ORDER BY collection ASC, topic_id ASC",
-                    collection);
-                for (Record rec : rows) {
+                DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
+                var rows = ctx.select(ct.collection(), ct.topicId(), ct.embedding(),
+                                      ct.label(), ct.docCount())
+                              .from(ct.table())
+                              .where(predicate.apply(ct))
+                              .orderBy(ct.collection().asc(), ct.topicId().asc())
+                              .fetch();
+                for (var rec : rows) {
+                    Vector v = rec.value3();
                     out.add(new CentroidRecord(
-                        rec.get("collection", String.class),
-                        rec.get("topic_id", Long.class),
-                        parseVectorLiteral(rec.get("embedding_text", String.class)),
-                        rec.get("label", String.class),
-                        rec.get("doc_count", Integer.class)));
+                        rec.value1(),
+                        rec.value2(),
+                        v != null ? v.floats() : new float[0],
+                        rec.value4(),
+                        rec.value5()));
                 }
             }
             return out;
@@ -301,27 +307,4 @@ public final class TaxonomyCentroidRepository {
         return sb.append(']').toString();
     }
 
-    /** Parse a pgvector text literal {@code "[0.1,0.2,...]"} into a float array. */
-    private static float[] parseVectorLiteral(String literal) {
-        if (literal == null || literal.length() < 2) {
-            // Schema says NOT NULL; a null/short literal means a malformed row.
-            throw new IllegalStateException("malformed centroid embedding literal: " + literal);
-        }
-        String body = literal.substring(1, literal.length() - 1);
-        if (body.isBlank()) return new float[0];
-        String[] parts = body.split(",");
-        float[] out = new float[parts.length];
-        for (int i = 0; i < parts.length; i++) {
-            out[i] = Float.parseFloat(parts[i].trim());
-        }
-        return out;
-    }
-
-    /** {@code IN}-list placeholder string: {@code ?,?,...} (n >= 1). */
-    private static String placeholders(int n) {
-        if (n <= 0) {
-            throw new IllegalArgumentException("placeholders requires n >= 1, got " + n);
-        }
-        return String.join(",", java.util.Collections.nCopies(n, "?"));
-    }
 }

@@ -3,6 +3,8 @@ package dev.nexus.service.http;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,10 +46,11 @@ public final class HealthHandler implements HttpHandler {
     }
 
     private void checkDb() throws Exception {
-        try (Connection conn = dataSource.getConnection();
-             var stmt = conn.createStatement();
-             var rs = stmt.executeQuery("SELECT 1")) {
-            if (!rs.next()) {
+        try (Connection conn = dataSource.getConnection()) {
+            Integer one = DSL.using(conn, SQLDialect.POSTGRES)
+                             .select(DSL.one())
+                             .fetchOne(0, Integer.class);
+            if (one == null) {
                 throw new RuntimeException("SELECT 1 returned no rows");
             }
         }

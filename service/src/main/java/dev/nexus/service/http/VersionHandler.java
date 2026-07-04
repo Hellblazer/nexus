@@ -5,6 +5,10 @@ package dev.nexus.service.http;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedderRouter;
+import org.jooq.Field;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,6 +58,19 @@ public final class VersionHandler implements HttpHandler {
     /** RDR-002: the release identity, stamped from the git tag at build time. */
     private static final String RELEASE_PROPERTIES =
             "/META-INF/nexus/release.properties";
+
+    // Liquibase's own bookkeeping table lives in `public`, outside the jOOQ codegen's
+    // `nexus`/`t1` inputSchema scope (explicitly excluded — pom.xml codegen <excludes>),
+    // so there is no generated Tables.DATABASECHANGELOG to reference. Typed ad-hoc
+    // DSL.table/DSL.field references (nexus-mzuj9) replace the raw
+    // "SELECT ... FROM public.databasechangelog" JDBC strings below — still zero
+    // embedded SQL text, just no codegen for this one cross-schema table.
+    private static final Table<?> DATABASECHANGELOG =
+            DSL.table(DSL.name("public", "databasechangelog"));
+    private static final Field<String> DBCL_ID =
+            DSL.field(DSL.name("id"), String.class);
+    private static final Field<Integer> DBCL_ORDER_EXECUTED =
+            DSL.field(DSL.name("orderexecuted"), Integer.class);
 
     private final DataSource dataSource;
     private final String appVersion;
@@ -157,21 +174,13 @@ public final class VersionHandler implements HttpHandler {
         String latestId = null;
         long count = 0;
         String schemaError = null;
-        try (Connection conn = dataSource.getConnection();
-             var stmt = conn.createStatement()) {
-            try (var rs = stmt.executeQuery(
-                    "SELECT id FROM public.databasechangelog "
-                    + "ORDER BY orderexecuted DESC LIMIT 1")) {
-                if (rs.next()) {
-                    latestId = rs.getString(1);
-                }
-            }
-            try (var rs = stmt.executeQuery(
-                    "SELECT count(*) FROM public.databasechangelog")) {
-                if (rs.next()) {
-                    count = rs.getLong(1);
-                }
-            }
+        try (Connection conn = dataSource.getConnection()) {
+            var dsl = DSL.using(conn, SQLDialect.POSTGRES);
+            latestId = dsl.select(DBCL_ID).from(DATABASECHANGELOG)
+                          .orderBy(DBCL_ORDER_EXECUTED.desc())
+                          .limit(1)
+                          .fetchOne(DBCL_ID);
+            count = dsl.fetchCount(DATABASECHANGELOG);
         } catch (Exception e) {
             log.warn("event=version_schema_read_failed error={}", e.getMessage());
             schemaError = e.getMessage();
