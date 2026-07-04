@@ -743,6 +743,90 @@ class TestHttpCatalogClientRoundTrip:
         assert by_doc["1.1.1"][0].chash == CHASH_A
         assert by_doc["1.1.1"][0].position == 0
 
+    def test_get_manifests_pages_over_1000_doc_ids(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # nexus-gui8a: the service 400s on >1000 doc_ids per POST, so
+        # get_manifests must page at _MANIFEST_GET_MANY_PAGE (1000) and merge.
+        # 2500 ids -> 3 POSTs (1000 + 1000 + 500), each body <= 1000 doc_ids,
+        # and the merged result must contain entries from every page.
+        doc_ids = [f"doc-{i}" for i in range(2500)]
+        posts: list[list[str]] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            assert path == "/manifest/get_many"
+            batch = body["doc_ids"]
+            posts.append(batch)
+            return {
+                "manifests": {
+                    did: [{"chash": CHASH_A, "position": 0}] for did in batch
+                }
+            }
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        merged = client.get_manifests(doc_ids)
+
+        assert len(posts) == 3
+        assert [len(p) for p in posts] == [1000, 1000, 500]
+        assert all(len(p) <= 1000 for p in posts)
+        assert len(merged) == 2500
+        assert "doc-0" in merged
+        assert "doc-1500" in merged
+        assert "doc-2499" in merged
+        assert merged["doc-2499"][0].chash == CHASH_A
+
+    def test_get_manifests_page_failure_fails_loud(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # nexus-gui8a follow-up: a page failure must propagate, not yield
+        # a silent partial. Every caller handles the exception in its own
+        # safe direction (staleness cache -> full re-index; doctor -> hard
+        # error instead of phantom corruption).
+        doc_ids = [f"doc-{i}" for i in range(2500)]
+        calls: list[int] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            calls.append(len(body["doc_ids"]))
+            if len(calls) == 2:  # second page (doc-1000..doc-1999) fails
+                raise RuntimeError("transient 502")
+            return {
+                "manifests": {
+                    did: [{"chash": CHASH_A, "position": 0}]
+                    for did in body["doc_ids"]
+                }
+            }
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="transient 502"):
+            client.get_manifests(doc_ids)
+        assert calls == [1000, 1000]  # stopped at the failing page
+
+    def test_resolve_many_pages_over_1000_doc_ids(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # nexus-gui8a: /resolve_many enforces the same MAX_BATCH_DOC_IDS
+        # = 1000 server cap as /manifest/get_many, so it pages identically.
+        doc_ids = [f"doc-{i}" for i in range(2500)]
+        posts: list[list[str]] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            assert path == "/resolve_many"
+            posts.append(body["doc_ids"])
+            return {
+                "entries": {
+                    did: {"tumbler": f"1.9.{i}", "title": did}
+                    for i, did in enumerate(body["doc_ids"])
+                }
+            }
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        entries = client.resolve_many(doc_ids)
+
+        assert [len(p) for p in posts] == [1000, 1000, 500]
+        assert len(entries) == 2500
+        assert str(entries["doc-0"].tumbler) == "1.9.0"
+        assert str(entries["doc-2499"].tumbler) == "1.9.499"
+
     def test_graph_post_traverse(self, client: HttpCatalogClient) -> None:
         # graph() must POST /traverse (not GET)
         result = client.graph("1.1.1")

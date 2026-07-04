@@ -118,6 +118,11 @@ def _link_from_dict(d: dict) -> CatalogLink:
 # copy of the env->lease->fail-loud logic now shared across all clients).
 from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
 
+# nexus-gui8a: the service rejects POST /v1/catalog/manifest/get_many bodies
+# carrying more than 1000 doc_ids with HTTP 400 (bisected: OK at 1000, 400 at
+# 1001). ``get_manifests`` pages at this size and merges the per-page results.
+_MANIFEST_GET_MANY_PAGE = 1000
+
 
 def _coerce_legacy_grandfathered(d: dict) -> dict:
     """Coerce a collection row's ``legacy_grandfathered`` to ``bool`` (nexus-u26b4).
@@ -880,16 +885,22 @@ class HttpCatalogClient:
 
         Returns a dict keyed by doc_id; each value is a CatalogEntry.
         Missing or unresolvable doc_ids are absent from the result.
+
+        nexus-gui8a: paged at ``_MANIFEST_GET_MANY_PAGE`` per POST — the
+        service enforces the same ``MAX_BATCH_DOC_IDS = 1000`` cap on
+        ``/resolve_many`` as on ``/manifest/get_many``.
         """
         if not doc_ids:
             return {}
-        result = self._post("/resolve_many", {"doc_ids": doc_ids})
-        if not result:
-            return {}
         entries: dict[str, CatalogEntry] = {}
-        for doc_id, raw in result.get("entries", {}).items():
-            if raw and raw.get("tumbler"):
-                entries[doc_id] = _to_entry(raw)
+        for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
+            batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
+            result = self._post("/resolve_many", {"doc_ids": batch})
+            if not result:
+                continue
+            for doc_id, raw in result.get("entries", {}).items():
+                if raw and raw.get("tumbler"):
+                    entries[doc_id] = _to_entry(raw)
         return entries
 
     def lookup_doc_id_by_collection_and_path(
@@ -1608,15 +1619,30 @@ class HttpCatalogClient:
         Returns a dict keyed by doc_id; each value is the ordered list
         of manifest rows (same shape as ``get_manifest()``). Missing
         doc_ids are absent from the result (not keyed to empty list).
+
+        nexus-gui8a: doc_ids are paged at ``_MANIFEST_GET_MANY_PAGE`` per
+        POST — the service 400s on bodies with more than 1000 doc_ids, so
+        an un-paged call from ``build_staleness_cache`` (4500+ ids on medium
+        repos) silently built an empty cache and degraded every
+        ``nx index repo`` to a full re-index.
+
+        A page failure propagates (whole call fails loud). Deliberate:
+        every caller already handles the exception in its own safe
+        direction — build_staleness_cache degrades to full re-index,
+        embed_migrate blocks its destructive re-index, and catalog
+        doctor must see a hard error rather than a silent partial that
+        reads as data corruption.
         """
         if not doc_ids:
             return {}
-        result = self._post("/manifest/get_many", {"doc_ids": doc_ids})
-        manifests = result.get("manifests", {}) if result else {}
-        return {
-            did: [_manifest_row_from_dict(r) for r in rows]
-            for did, rows in manifests.items()
-        }
+        merged: dict[str, list[ManifestRow]] = {}
+        for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
+            batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
+            result = self._post("/manifest/get_many", {"doc_ids": batch})
+            manifests = result.get("manifests", {}) if result else {}
+            for did, rows in manifests.items():
+                merged[did] = [_manifest_row_from_dict(r) for r in rows]
+        return merged
 
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
         """Return chashes for all chunks of doc_id.
