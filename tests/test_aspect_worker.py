@@ -1215,3 +1215,49 @@ class TestRetryLadderIntegration:
         # retry_count is therefore cap+1 — proving the full ladder ran, not a
         # single-shot fail (which would terminate at retry_count == 1).
         assert row[1] == _RETRY_MAX_ATTEMPTS + 1
+
+
+# ── nexus-w8lg1: the queue row carries the CATALOG doc_id ────────────────────
+
+
+class TestEnqueueHookDocIdWiring:
+    """nexus-w8lg1 (6.3.0 live shakeout finding #1): the enqueue hook must
+    persist the catalog tumbler it was handed as the row's ``doc_id`` —
+    verbatim, no substitution anywhere between fire_document and the
+    queue write. The live bug shipped the T3 chunk hash instead, which
+    the engine's composite FK rejected (typed 409) on every CLI store
+    put. SQLite has no FK, so this pins the WIRING (the class of bug
+    that actually occurred) on every CI run; the FK itself is exercised
+    by the --fullstack rehearsal."""
+
+    def test_enqueue_persists_catalog_doc_id_verbatim(self, _isolate_t2):
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        chunk_id = "bf715bbd" + "0" * 24  # the WRONG identity (T3 chunk hash)
+        aspect_extraction_enqueue_hook(
+            source_path=chunk_id,
+            collection="knowledge__delos",
+            content="note body",
+            doc_id="1.7.42",
+        )
+
+        with T2Database(_isolate_t2) as db:
+            row = db.aspect_queue.claim_next()
+        assert row is not None
+        assert row.doc_id == "1.7.42"
+        assert row.source_path == chunk_id
+
+    def test_enqueue_empty_doc_id_stays_empty(self, _isolate_t2):
+        """catalog absent -> doc_id stays "" (persists NULL service-side,
+        which the nullable FK accepts)."""
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        aspect_extraction_enqueue_hook(
+            source_path="c" * 32,
+            collection="knowledge__delos",
+            content="body",
+        )
+        with T2Database(_isolate_t2) as db:
+            row = db.aspect_queue.claim_next()
+        assert row is not None
+        assert row.doc_id == ""

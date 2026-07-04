@@ -286,6 +286,14 @@ class HookRegistry:
         (``nx store put``, ``nx memory promote``, ``nx store import``).
         Bulk ``nx index *`` paths still call the three fire methods
         directly to preserve the existing per-batch shape.
+
+        INVARIANT (nexus-w8lg1): ``catalog_doc_id`` is scoped to the
+        WHOLE call — the document chain broadcasts it to every item.
+        One call therefore covers ONE catalog document's chunks (or
+        passes ``""``). Callers with a multi-document batch must group
+        by document first (see ``exporter._fire_store_chains_grouped_by_doc``);
+        passing a nonempty ``catalog_doc_id`` across mixed documents
+        would mis-attribute every document's aspect-queue row.
         """
         n = len(doc_ids)
         if len(contents) != n:
@@ -309,8 +317,17 @@ class HookRegistry:
             catalog_doc_id=catalog_doc_id,
         )
 
-        for did, sp, content in zip(doc_ids, source_paths, contents):
-            self.fire_document(sp, collection, content, doc_id=did)
+        # nexus-w8lg1 (6.3.0 live shakeout finding #1): the document chain
+        # carries the CATALOG doc_id (tumbler), never the T3 chunk id.
+        # Passing ``did`` here shipped chunk_text_hash[:32] to the aspect
+        # enqueue, violating the engine's composite FK
+        # aspect_extraction_queue(tenant_id, doc_id) ->
+        # catalog_documents(tenant_id, tumbler) — typed 409, aspects
+        # silently lost on every CLI store put. "" persists as NULL,
+        # which the nullable FK accepts. ``doc_ids`` is intentionally
+        # unused here — chunk ids belong to the single/batch chains only.
+        for sp, content in zip(source_paths, contents):
+            self.fire_document(sp, collection, content, doc_id=catalog_doc_id)
 
 
 # ── Default-hooks factory ────────────────────────────────────────────────────
