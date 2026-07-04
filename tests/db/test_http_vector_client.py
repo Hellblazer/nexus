@@ -1261,3 +1261,68 @@ class TestManagedFailureReframe:
         monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(exc_obj))
         with pytest.raises(type(exc_obj)):
             hv._get("/v1/vectors/collections")
+
+
+class TestGatewayTransientRetry:
+    """502/503/504 retry with backoff in _request (nexus-wcs39).
+
+    Found by the duoak.4 scaling sweep: one transient 504 on
+    /v1/vectors/upsert-chunks killed an entire nx index run at 2 workers
+    (concurrent CCE batches slow server-side embed past the gateway
+    timeout). Upserts are idempotent -> bounded retry is safe.
+    """
+
+    def _http_error(self, code: int, body: bytes = b'{"error":"gw"}'):
+        import io
+        import urllib.error
+        return urllib.error.HTTPError(
+            url="http://svc/v1/x", code=code, msg="err", hdrs={},
+            fp=io.BytesIO(body),
+        )
+
+    @pytest.mark.parametrize("code", [502, 503, 504])
+    def test_transient_5xx_retries_then_succeeds(self, monkeypatch, code):
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._http_error(code)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        result = hv._request("POST", "/v1/vectors/upsert-chunks",
+                             tenant="default", timeout=600, body={})
+        assert result == {"ok": True}
+        assert len(calls) == 3
+        assert sleeps == list(hv._GATEWAY_RETRY_SLEEPS[:2])
+
+    def test_exhausted_retries_raise_original(self, monkeypatch):
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        monkeypatch.setattr(hv, "_request_once",
+                            lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(504)))[1])
+        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", "/v1/vectors/upsert-chunks",
+                        tenant="default", timeout=600, body={})
+        assert len(calls) == 1 + len(hv._GATEWAY_RETRY_SLEEPS)
+
+    # 401 is intentionally absent: it is an auto-restart signature and gets
+    # ONE re-resolve retry via the pre-existing nexus-pebfx.1 path.
+    @pytest.mark.parametrize("code", [400, 409, 500])
+    def test_non_gateway_codes_do_not_retry(self, monkeypatch, code):
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        monkeypatch.setattr(hv, "_request_once",
+                            lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(code)))[1])
+        monkeypatch.setattr(hv.time, "sleep", lambda s: pytest.fail("must not sleep"))
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", "/v1/vectors/search",
+                        tenant="default", timeout=120, body={})
+        assert len(calls) == 1

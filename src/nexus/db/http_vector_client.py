@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -188,6 +189,15 @@ def _request_once(
         return json.loads(resp.read())
 
 
+#: Backoff schedule for gateway-transient HTTP codes (502/503/504). Found by
+#: the nexus-duoak.4 scaling sweep: concurrent CCE upsert batches slow
+#: server-side embedding past the gateway timeout, and a single unretried 504
+#: killed an entire ``nx index repo`` run. Upserts are idempotent
+#: (content-addressed), so bounded retry is safe for every /v1 call family.
+_GATEWAY_RETRY_SLEEPS: tuple[float, ...] = (2.0, 5.0, 10.0)
+_GATEWAY_RETRY_CODES = frozenset({502, 503, 504})
+
+
 def _request(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
 ) -> Any:
@@ -198,11 +208,34 @@ def _request(
     cached endpoint therefore means "re-read the lease and try once more"
     (nexus-pebfx.1), not "give up". A second failure surfaces normally —
     no retry loops.
+
+    Gateway-transient HTTP codes (``_GATEWAY_RETRY_CODES``) additionally get
+    a bounded backoff retry (``_GATEWAY_RETRY_SLEEPS``); all other HTTP
+    errors propagate immediately — 4xx/500 are not transient.
     """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
+    def _once_with_gateway_retry() -> Any:
+        for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
+            try:
+                return _request_once(
+                    method, path, tenant=tenant, timeout=timeout, body=body
+                )
+            except urllib.error.HTTPError as exc:
+                if exc.code not in _GATEWAY_RETRY_CODES or delay is None:
+                    raise
+                _log.warning(
+                    "vector_gateway_retry",
+                    path=path,
+                    code=exc.code,
+                    attempt=i + 1,
+                    sleep_s=delay,
+                )
+                time.sleep(delay)
+        raise AssertionError("unreachable")  # loop always returns or raises
+
     try:
-        return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
+        return _once_with_gateway_retry()
     # Narrow catch (dual-review H1): only the transport/auth error families
     # participate in retry classification. RuntimeError from an unresolvable
     # endpoint propagates untouched — fail-loud must never become a retry.
@@ -218,7 +251,7 @@ def _request(
             reason=type(exc).__name__,
         )
         _invalidate_endpoint()
-        return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
+        return _once_with_gateway_retry()
 
 
 def _managed_remedy() -> str | None:
