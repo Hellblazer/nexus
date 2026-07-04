@@ -2732,7 +2732,8 @@ def _run_index(
             _log.error("indexed_file_upload_failed", file=_path, error=error)
 
         def _fire_flush_grain_hooks(
-            collection: str, _ids: list, _docs: list, _metas: list
+            collection: str, _ids: list, _docs: list, _metas: list,
+            _files: list,
         ) -> None:
             # nexus-duoak.7: taxonomy + chash are file-agnostic and
             # round-trip-dominated — one call per upload batch (~6/run)
@@ -2743,6 +2744,18 @@ def _run_index(
                 from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid circular import
                 reg = HookRegistry()
                 install_default_hooks(reg)
+            # Attribution (critic S1): a flush-grain consumer failure
+            # affects every file in this batch — log the roster so an
+            # operator can map an aggregate chash/taxonomy warning back
+            # to files (the widened blast radius vs per-file firing is
+            # an accepted, documented tradeoff; chash falls back to the
+            # resolve_span scan, taxonomy heals on the next assign run).
+            _log.debug(
+                "flush_grain_hooks_firing",
+                collection=collection,
+                chunks=len(_ids),
+                files=_files,
+            )
             reg.fire_batch(
                 _ids, collection, _docs,
                 [[] for _ in _ids], _metas,

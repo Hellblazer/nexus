@@ -297,15 +297,18 @@ class TestBatchCompleteCallback:
         b = ChunkBatcher(
             flush=rec.flush,
             on_file_complete=rec.on_complete,
-            on_batch_complete=lambda coll, ids, docs, metas: batch_events.append(
-                (coll, len(ids), len(set(ids)))
+            on_batch_complete=lambda coll, ids, docs, metas, files: batch_events.append(
+                (coll, len(ids), sorted(files))
             ),
             max_chunks=10,
         )
         b.add("a.py", "code__x", *_mk(6, "a"))
         b.add("b.py", "code__x", *_mk(6, "b"))  # pre-flush [a]
         b.drain()
-        assert batch_events == [("code__x", 6, 6), ("code__x", 6, 6)]
+        assert batch_events == [
+            ("code__x", 6, ["a.py"]),
+            ("code__x", 6, ["b.py"]),
+        ]
 
     def test_not_fired_for_failed_flush(self) -> None:
         class AlwaysFail(Recorder):
@@ -336,7 +339,7 @@ class TestBatchCompleteCallback:
         b = ChunkBatcher(
             flush=rec.flush,
             on_file_complete=rec.on_complete,
-            on_batch_complete=lambda coll, ids, docs, metas: batch_events.append(len(ids)),
+            on_batch_complete=lambda coll, ids, docs, metas, files: batch_events.append(len(ids)),
             max_chunks=10,
         )
         b.add("a.py", "code__x", *_mk(4, "a"))
