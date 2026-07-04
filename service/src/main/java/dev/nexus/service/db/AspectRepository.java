@@ -906,7 +906,14 @@ public final class AspectRepository {
                     ASPECT_EXTRACTION_QUEUE.COLLECTION,
                     ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
                 .doUpdate()
-                .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,          EX_Q_DOC_ID)
+                // nexus-nyout: a doc_id-less re-enqueue (blank -> NULL via
+                // nullIfBlank; e.g. collection re-embed) must not erase an
+                // existing correct tumbler — COALESCE keeps the old linkage;
+                // a real incoming tumbler still overwrites. The queue IMPORT
+                // path stays verbatim EXCLUDED.doc_id: fidelity import
+                // reproduces exported rows exactly, including blanks.
+                .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,
+                     coalesce(EX_Q_DOC_ID, ASPECT_EXTRACTION_QUEUE.DOC_ID))
                 .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
                 .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
                 .set(ASPECT_EXTRACTION_QUEUE.STATUS,          "pending")
