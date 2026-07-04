@@ -1394,6 +1394,7 @@ def _index_code_file(
     doc_id_resolver: Callable[[Path], str] | None = None,
     staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
+    batcher: object | None = None,
 ) -> int:
     """Index a single code file.  Delegates to nexus.code_indexer.index_code_file.
 
@@ -1434,6 +1435,7 @@ def _index_code_file(
         doc_id_resolver=doc_id_resolver,
         staleness_cache=staleness_cache,
         hooks=hooks,
+        batcher=batcher,
     )
     return index_code_file(ctx, file)
 
@@ -1457,6 +1459,7 @@ def _index_prose_file(
     doc_id_resolver: Callable[[Path], str] | None = None,
     staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
+    batcher: object | None = None,
 ) -> int:
     """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
@@ -1493,6 +1496,7 @@ def _index_prose_file(
         doc_id_resolver=doc_id_resolver,
         staleness_cache=staleness_cache,
         hooks=hooks,
+        batcher=batcher,
     )
     return index_prose_file(ctx, file)
 
@@ -1517,6 +1521,7 @@ def _index_pdf_file(
     doc_id_resolver: Callable[[Path], str] | None = None,
     staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
+    batcher: object | None = None,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -1632,6 +1637,28 @@ def _index_pdf_file(
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
+
+    # duoak 2C (nexus-1ugqs): stage in the cross-file batcher; hooks
+    # defer to the orchestrator's completion callback on batch-land.
+    # add() returning False (file exceeds one batch) falls through to
+    # the legacy per-file upsert — file-atomicity preserved either way.
+    if batcher is not None and batcher.add(  # type: ignore[attr-defined]
+        str(file),
+        collection_name,
+        ids,
+        documents,
+        metadatas,
+        context={
+            "ids": ids,
+            "documents": documents,
+            "embeddings": embeddings,
+            "metadatas": metadatas,
+            "catalog_doc_id": catalog_doc_id,
+            "collection": collection_name,
+            "hooks": hooks,
+        },
+    ):
+        return len(ids)
 
     with _stage("upload"):
         db.upsert_chunks_with_embeddings(
@@ -2654,6 +2681,68 @@ def _run_index(
         hooks = LockedHookRegistry(hooks)
         _log.info("index_file_concurrency", workers=_concurrency)
 
+    # duoak 2C (nexus-1ugqs): cross-file chunk batching. Per-file upserts
+    # amortize ~nothing (median file 3-15 chunks -> ~1200 embed calls for
+    # a 1200-file repo). Stage chunks in a shared accumulator, flush at
+    # the service cap, fire each file's post-store hook chains once its
+    # chunks land in a successful flush. Service mode only — the flush
+    # posts raw text for server-side embedding (Seam B).
+    # Gate on the ACTUAL client type, not is_vector_service_mode(): tests
+    # (and any legacy topology) inject a local T3 db that embeds
+    # client-side and cannot accept the empty-embeddings Seam B batches.
+    from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — deferred to avoid circular import
+    _batcher = None
+    if isinstance(db, HttpVectorClient):
+        from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
+
+        def _batch_flush(collection: str, _ids: list, _docs: list, _metas: list) -> None:
+            db.upsert_chunks_with_embeddings(
+                collection_name=collection,
+                ids=_ids,
+                documents=_docs,
+                embeddings=[[] for _ in _ids],  # Seam B: server embeds
+                metadatas=_metas,
+            )
+
+        def _fire_deferred_hooks(_path: str, context: object) -> None:
+            if not isinstance(context, dict):
+                return
+            reg = context["hooks"]
+            if reg is None:
+                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid circular import
+                reg = HookRegistry()
+                install_default_hooks(reg)
+            reg.fire_batch(
+                context["ids"], context["collection"], context["documents"],
+                context["embeddings"], context["metadatas"],
+                catalog_doc_id=context["catalog_doc_id"],
+            )
+            for _did, _doc in zip(context["ids"], context["documents"]):
+                reg.fire_single(_did, context["collection"], _doc)
+            reg.fire_document(
+                _path, context["collection"], "",
+                doc_id=context["catalog_doc_id"],
+            )
+
+        def _batched_file_failed(_path: str, error: str, _context: object) -> None:
+            _log.error("indexed_file_upload_failed", file=_path, error=error)
+
+        def _cap_for(collection: str) -> int:
+            # CCE collections (docs/knowledge/rdr) embed far slower
+            # server-side: a 172-chunk CCE batch 504'd the gateway on the
+            # 2026-07-04 2C smoke. Code (voyage-code-3) sustains the full
+            # service cap. Bisection-on-failure self-tunes below these.
+            prefix = collection.split("__", 1)[0]
+            return 64 if prefix in ("docs", "knowledge", "rdr") else 300
+
+        _batcher = ChunkBatcher(
+            flush=_batch_flush,
+            on_file_complete=_fire_deferred_hooks,
+            on_file_failed=_batched_file_failed,
+            max_chunks=_cap_for,
+        )
+        _log.info("index_chunk_batching_enabled")
+
     # Index code files → code__ (voyage-code-3, AST chunking)
     # NOTE: calls _index_code_file (the module-level wrapper) so that tests
     # patching nexus.indexer._index_code_file continue to intercept correctly.
@@ -2671,6 +2760,7 @@ def _run_index(
             doc_id_resolver=_doc_id_resolver,
             staleness_cache=code_staleness,
             hooks=hooks,
+            batcher=_batcher,
         )
 
     run_file_loop(
@@ -2694,6 +2784,7 @@ def _run_index(
             doc_id_resolver=_doc_id_resolver,
             staleness_cache=docs_staleness,
             hooks=hooks,
+            batcher=_batcher,
         )
 
     run_file_loop(
@@ -2717,12 +2808,44 @@ def _run_index(
             doc_id_resolver=_doc_id_resolver,
             staleness_cache=docs_staleness,
             hooks=hooks,
+            batcher=_batcher,
         )
 
     run_file_loop(
         pdf_files, _index_one_pdf, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
+
+    # duoak 2C: flush remaining staged chunks and surface per-file upload
+    # failures (containment: a failed batch fails its contributing files,
+    # never the run — nexus-wcs39).
+    if _batcher is not None:
+        _batcher.drain()
+        _bstats = _batcher.stats
+        _log.info(
+            "index_chunk_batch_stats",
+            flushes=int(_bstats["flushes"]),
+            flush_seconds=round(_bstats["flush_seconds"], 1),
+        )
+        if on_phase is not None and _bstats["flushes"]:
+            on_phase(
+                f"Chunk batching: {int(_bstats['flushes'])} upload batches, "
+                f"{_bstats['flush_seconds']:.1f}s total upload time"
+            )
+        _batch_failures = _batcher.failed_files
+        if _batch_failures:
+            _log.error(
+                "index_batch_upload_failures",
+                count=len(_batch_failures),
+                files=sorted(_batch_failures)[:20],
+            )
+            if on_phase is not None:
+                on_phase(
+                    f"WARNING: {len(_batch_failures)} file(s) FAILED chunk "
+                    f"upload (see logs); their vectors are absent or partial: "
+                    + ", ".join(sorted(_batch_failures)[:5])
+                    + ("…" if len(_batch_failures) > 5 else "")
+                )
 
     # Post-processing phase markers (nexus-vatx Gap 2): the per-file
     # progress bar ends at "[N/N]" but the pipeline keeps running for

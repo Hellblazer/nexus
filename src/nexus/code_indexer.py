@@ -484,6 +484,30 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
                 )
                 embeddings.extend(result.embeddings)
 
+    # duoak 2C (nexus-1ugqs): stage chunks in the cross-file batcher;
+    # upload happens in cap-sized batches and the post-store hook chains
+    # fire from the orchestrator's completion callback once this file's
+    # chunks land. Context carries the hook arguments. add() returning
+    # False (file exceeds one batch) falls through to the legacy
+    # per-file upsert below — file-atomicity is preserved either way.
+    if ctx.batcher is not None and ctx.batcher.add(  # type: ignore[attr-defined]
+        str(file_path),
+        ctx.corpus,
+        ids,
+        documents,
+        metadatas,
+        context={
+            "ids": ids,
+            "documents": documents,
+            "embeddings": embeddings,
+            "metadatas": metadatas,
+            "catalog_doc_id": catalog_doc_id,
+            "collection": ctx.corpus,
+            "hooks": ctx.hooks,
+        },
+    ):
+        return total_chunks
+
     with _stage("upload"):
         _log.debug("upserting", file=str(file_path), chunks=total_chunks)
         ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
