@@ -767,6 +767,28 @@ def _catalog_hook(
         import sys  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         _progress = sys.stderr.write
         _progress(f"  Catalog: registering {len(indexed_files)} files…\r")
+
+        # nexus-dst5h: ONE owner-scoped fetch + local join instead of a
+        # per-file ``by_file_path`` round-trip. In service mode each
+        # per-file lookup was a WAN HTTPS call (and the server returns the
+        # full owner list per call — GH #1350 class), so a warm run paid
+        # ~len(indexed_files) serial round-trips before indexing anything.
+        # The snapshot is taken once: a file registered by a CONCURRENT
+        # writer after this point is misclassified as new, takes the
+        # register-branch, and register()'s own idempotency check returns
+        # the existing tumbler (fields refresh on the next pass) — same
+        # class the fairness/yield machinery below already acknowledges.
+        # A fetch failure must NOT no-op the whole hook (the nexus-o6aa.10.4
+        # ghost class): fall back to the per-file lookups, loudly.
+        path_to_entry: dict[str, object] | None
+        try:
+            path_to_entry = {e.file_path: e for e in cat.by_owner(owner)}
+        except Exception as exc:  # noqa: BLE001 — degraded path must keep the hook alive
+            path_to_entry = None
+            _log.warning(
+                "catalog_hook_owner_list_failed_falling_back_per_file",
+                repo=repo_name, error=str(exc),
+            )
         new_tumblers = []
         # nexus-o6aa.10.4 follow-up: track per-file failures so the
         # catalog hook stops failing silently. Pre-fix, a single
@@ -833,7 +855,11 @@ def _catalog_hook(
                 file_hash = ""
 
             try:
-                existing = cat.by_file_path(owner, rel_path)
+                existing = (
+                    path_to_entry.get(rel_path)
+                    if path_to_entry is not None
+                    else cat.by_file_path(owner, rel_path)
+                )
                 if existing is None:
                     tumbler = writer.register(
                         owner=owner,
@@ -848,13 +874,32 @@ def _catalog_hook(
                     new_tumblers.append(tumbler)
                     file_to_doc_id[abs_path] = str(tumbler)
                 else:
-                    writer.update(
-                        existing.tumbler,
-                        head_hash=head_hash,
-                        physical_collection=collection_name,
-                        meta={"content_hash": file_hash} if file_hash else None,
-                        source_mtime=source_mtime,
+                    # nexus-dst5h: skip the write when nothing changed —
+                    # a warm re-run otherwise pays one serial update
+                    # round-trip per file. An empty file_hash (read
+                    # failure) is inconclusive, not a change. The mtime
+                    # compare relies on st_mtime round-tripping bit-exact
+                    # through storage (SQLite REAL / PG DOUBLE PRECISION /
+                    # JSON); a storage change that truncates precision
+                    # flips this to always-changed (harmless) — never
+                    # compare with tolerance, drift means changed.
+                    changed = (
+                        existing.head_hash != head_hash
+                        or existing.physical_collection != collection_name
+                        or existing.source_mtime != source_mtime
+                        or (
+                            file_hash
+                            and existing.meta.get("content_hash", "") != file_hash
+                        )
                     )
+                    if changed:
+                        writer.update(
+                            existing.tumbler,
+                            head_hash=head_hash,
+                            physical_collection=collection_name,
+                            meta={"content_hash": file_hash} if file_hash else None,
+                            source_mtime=source_mtime,
+                        )
                     file_to_doc_id[abs_path] = str(existing.tumbler)
             except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # Per-file failure must NOT abort the rest of the loop.
@@ -1165,15 +1210,19 @@ def _build_frecency_doc_id_map(
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:
             return file_to_doc_id
+        # nexus-dst5h: ONE owner-scoped fetch + local join instead of a
+        # per-file ``by_file_path`` pass (a second full serial-WAN sweep
+        # in service mode, paid on every warm run). A by_owner failure
+        # raises into the outer except -> empty map, which the documented
+        # contract tolerates (caller falls back to the legacy
+        # source_path filter).
+        path_to_entry = {e.file_path: e for e in cat.by_owner(owner)}
         for abs_path in files:
             try:
                 rel_path = str(abs_path.relative_to(repo))
             except ValueError:
                 rel_path = abs_path.name
-            try:
-                entry = cat.by_file_path(owner, rel_path)
-            except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
-                continue
+            entry = path_to_entry.get(rel_path)
             if entry is not None:
                 file_to_doc_id[abs_path] = str(entry.tumbler)
     except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller

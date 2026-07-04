@@ -145,6 +145,354 @@ class TestCatalogHookDocuments:
         assert len(entries) == 2
 
 
+class _SpyProxy:
+    """Counting proxy around a real reader/writer (integration over mocks).
+
+    Delegates everything; records call counts for the methods the
+    nexus-dst5h batching contract pins.
+    """
+
+    def __init__(self, target):
+        self._target = target
+        self.calls: dict[str, int] = {}
+
+    def __getattr__(self, name):
+        attr = getattr(self._target, name)
+        if callable(attr):
+            def counted(*a, **kw):
+                self.calls[name] = self.calls.get(name, 0) + 1
+                return attr(*a, **kw)
+            return counted
+        return attr
+
+
+def _spy_factories(monkeypatch) -> tuple[list["_SpyProxy"], list["_SpyProxy"]]:
+    """Patch the catalog factories to hand out spy-wrapped real objects."""
+    import nexus.catalog.factory as factory
+
+    readers: list[_SpyProxy] = []
+    writers: list[_SpyProxy] = []
+    real_reader, real_writer = factory.make_catalog_reader, factory.make_catalog_writer
+
+    def spy_reader(**kw):
+        spy = _SpyProxy(real_reader(**kw))
+        readers.append(spy)
+        return spy
+
+    def spy_writer(**kw):
+        spy = _SpyProxy(real_writer(**kw))
+        writers.append(spy)
+        return spy
+
+    monkeypatch.setattr(factory, "make_catalog_reader", spy_reader)
+    monkeypatch.setattr(factory, "make_catalog_writer", spy_writer)
+    return readers, writers
+
+
+class TestCatalogHookBatchedLookups:
+    """nexus-dst5h: the pre-index sweep must not do per-file catalog
+    round-trips — one owner-scoped list + local join, and no writes for
+    unchanged files on a warm re-run."""
+
+    def _index(self, tmp_path, files, head_hash="aaa"):
+        from nexus.indexer import _catalog_hook
+
+        return _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash=head_hash,
+            indexed_files=[(f, "code", "code__nexus") for f in files],
+        )
+
+    def test_no_per_file_lookups_single_owner_list(self, tmp_path, monkeypatch):
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        files = []
+        for i in range(3):
+            f = tmp_path / f"f{i}.py"
+            f.write_text(f"code {i}")
+            files.append(f)
+
+        readers, _ = _spy_factories(monkeypatch)
+        self._index(tmp_path, files)
+
+        reader = readers[0]
+        assert reader.calls.get("by_file_path", 0) == 0
+        # Exactly 2: one hook-level join fetch + housekeeping's fresh fetch.
+        assert reader.calls.get("by_owner", 0) == 2
+
+    def test_warm_rerun_issues_zero_updates(self, tmp_path, monkeypatch):
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        f = tmp_path / "a.py"
+        f.write_text("stable")
+
+        self._index(tmp_path, [f], head_hash="same")
+        _, writers = _spy_factories(monkeypatch)
+        self._index(tmp_path, [f], head_hash="same")
+
+        writer = writers[0]
+        assert writer.calls.get("update", 0) == 0
+        assert writer.calls.get("register", 0) == 0
+
+    def test_changed_head_hash_still_updates(self, tmp_path, monkeypatch):
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        f = tmp_path / "a.py"
+        f.write_text("v1")
+
+        self._index(tmp_path, [f], head_hash="aaa")
+        _, writers = _spy_factories(monkeypatch)
+        self._index(tmp_path, [f], head_hash="bbb")
+
+        assert writers[0].calls.get("update", 0) == 1
+        owner = cat.owner_for_repo("571b8edd")
+        assert cat.by_file_path(owner, "a.py").head_hash == "bbb"
+
+    def test_changed_content_still_updates(self, tmp_path, monkeypatch):
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        f = tmp_path / "a.py"
+        f.write_text("v1")
+
+        self._index(tmp_path, [f], head_hash="same")
+        f.write_text("v2 changed")
+        _, writers = _spy_factories(monkeypatch)
+        self._index(tmp_path, [f], head_hash="same")
+
+        assert writers[0].calls.get("update", 0) == 1
+
+    def test_new_file_still_registers_alongside_warm_files(self, tmp_path, monkeypatch):
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        old = tmp_path / "old.py"
+        old.write_text("old")
+
+        self._index(tmp_path, [old], head_hash="same")
+        new = tmp_path / "new.py"
+        new.write_text("new")
+        _, writers = _spy_factories(monkeypatch)
+        result = self._index(tmp_path, [old, new], head_hash="same")
+
+        assert writers[0].calls.get("register", 0) == 1
+        assert writers[0].calls.get("update", 0) == 0
+        assert set(result) == {old, new}
+        owner = cat.owner_for_repo("571b8edd")
+        assert cat.by_file_path(owner, "new.py") is not None
+
+
+class TestCatalogHookOwnerListFailure:
+    """nexus-dst5h review Critical: a failing owner-list fetch must not
+    silently no-op the whole hook — it falls back to per-file lookups."""
+
+    def test_by_owner_failure_falls_back_per_file(self, tmp_path, monkeypatch):
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        f = tmp_path / "a.py"
+        f.write_text("code")
+
+        class _FailingOwnerList(_SpyProxy):
+            def by_owner(self, *a, **kw):
+                raise ConnectionError("service unreachable")
+
+        # Failing variant: housekeeping's by_owner also fails; the hook
+        # must still register the file via the per-file fallback.
+        import nexus.catalog.factory as factory
+        monkeypatch.setattr(
+            factory, "make_catalog_reader",
+            lambda **kw: _FailingOwnerList(cat),
+        )
+
+        result = _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="aaa",
+            indexed_files=[(f, "code", "code__nexus")],
+        )
+
+        assert set(result) == {f}
+        owner = cat.owner_for_repo("571b8edd")
+        assert cat.by_file_path(owner, "a.py") is not None
+
+    def test_frecency_by_owner_failure_returns_empty_map(self, tmp_path, monkeypatch):
+        from nexus.indexer import _build_frecency_doc_id_map
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        class _FailingOwnerList(_SpyProxy):
+            def by_owner(self, *a, **kw):
+                raise ConnectionError("service unreachable")
+
+        import nexus.catalog.factory as factory
+        monkeypatch.setattr(
+            factory, "make_catalog_reader",
+            lambda **kw: _FailingOwnerList(cat),
+        )
+        # Must not raise; documented contract returns an empty map.
+        assert _build_frecency_doc_id_map(tmp_path, [tmp_path / "a.py"]) == {}
+
+
+class TestFrecencyDocIdMapBatched:
+    """nexus-dst5h: _build_frecency_doc_id_map's second per-file
+    by_file_path pass must also become one by_owner + local join."""
+
+    def test_single_by_owner_no_per_file_lookups(self, tmp_path, monkeypatch):
+        from nexus.indexer import _build_frecency_doc_id_map, _catalog_hook
+        from nexus.repo_identity import _repo_identity
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        files = []
+        for i in range(3):
+            f = tmp_path / f"f{i}.py"
+            f.write_text(f"code {i}")
+            files.append(f)
+        _, repo_hash = _repo_identity(tmp_path)
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash=repo_hash,
+            head_hash="aaa",
+            indexed_files=[(f, "code", "code__nexus") for f in files],
+        )
+
+        readers, _ = _spy_factories(monkeypatch)
+        unknown = tmp_path / "unknown.py"
+        mapping = _build_frecency_doc_id_map(tmp_path, [*files, unknown])
+
+        reader = readers[0]
+        assert reader.calls.get("by_file_path", 0) == 0
+        assert reader.calls.get("by_owner", 0) == 1
+        assert set(mapping) == set(files)  # unknown file absent from map
+
+
+class TestCatalogHookBatchedServiceMode:
+    """nexus-dst5h critic Critical: pin the batching + changed-predicate
+    contract against the REAL HttpCatalogClient, with entries passing
+    through ``_to_entry``'s JSON None→\"\"/0/{} coercion — the boundary the
+    warm-run tax actually lives on. The HTTP transport is mocked
+    (httpx.MockTransport); the client, URL routing, and JSON round-trip
+    are real."""
+
+    class _StubWriter:
+        """Write-side stub with the surface _catalog_hook touches."""
+
+        priority = "interactive"
+
+        def __init__(self):
+            self.register_calls: list[dict] = []
+            self.update_calls: list[dict] = []
+
+        def register(self, **kw):
+            from nexus.catalog.tumbler import Tumbler
+            self.register_calls.append(kw)
+            return Tumbler.parse("1.1.99")
+
+        def update(self, tumbler, **fields):
+            self.update_calls.append({"tumbler": str(tumbler), **fields})
+
+        def is_interactive_write_pending(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+    def _http_client_and_log(self, monkeypatch, docs: list[dict]):
+        """Real HttpCatalogClient over a MockTransport serving *docs*."""
+        import httpx
+
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        requests: list[tuple[str, dict]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append((request.url.path, params))
+            if request.url.path == "/v1/catalog/owners/by_repo":
+                return httpx.Response(200, json={"tumbler_prefix": "1.1"})
+            if request.url.path == "/v1/catalog/list":
+                return httpx.Response(200, json={"documents": docs})
+            return httpx.Response(200, json={})
+
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
+        client = HttpCatalogClient(base_url="http://mock.test")
+        client._client = httpx.Client(
+            base_url="http://mock.test",
+            transport=httpx.MockTransport(handler),
+        )
+        return client, requests
+
+    def _run_hook(self, tmp_path, monkeypatch, docs, head_hash):
+        from nexus.indexer import _catalog_hook
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
+        client, requests = self._http_client_and_log(monkeypatch, docs)
+        writer = self._StubWriter()
+
+        import nexus.catalog.factory as factory
+        monkeypatch.setattr(factory, "make_catalog_reader", lambda **kw: client)
+        monkeypatch.setattr(factory, "make_catalog_writer", lambda **kw: writer)
+
+        f = tmp_path / "a.py"
+        result = _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash=head_hash,
+            indexed_files=[(f, "code", "code__nexus")],
+        )
+        return result, writer, requests
+
+    def _doc_for(self, f, *, head_hash) -> dict:
+        import hashlib
+
+        return {
+            "tumbler": "1.1.1",
+            "title": f.name,
+            "content_type": "code",
+            "file_path": f.name,
+            "physical_collection": "code__nexus",
+            "head_hash": head_hash,
+            "source_mtime": f.stat().st_mtime,
+            "meta": {"content_hash": hashlib.sha256(f.read_bytes()).hexdigest()},
+            # Java payloads carry explicit nulls; _to_entry must coerce.
+            "author": None,
+            "year": None,
+            "corpus": None,
+            "source_uri": None,
+        }
+
+    def test_warm_rerun_no_updates_no_per_file_lookups(self, tmp_path, monkeypatch):
+        f = tmp_path / "a.py"
+        f.write_text("stable")
+        doc = self._doc_for(f, head_hash="same")
+
+        result, writer, requests = self._run_hook(
+            tmp_path, monkeypatch, [doc], head_hash="same",
+        )
+
+        assert writer.update_calls == []
+        assert writer.register_calls == []
+        assert set(result) == {f}
+        # No per-file lookups: zero /list calls carrying file_path.
+        assert [p for path, p in requests
+                if path == "/v1/catalog/list" and "file_path" in p] == []
+        # Exactly 2 owner-list fetches: hook join + housekeeping.
+        assert len([p for path, p in requests
+                    if path == "/v1/catalog/list" and "owner" in p]) == 2
+
+    def test_changed_head_hash_updates_through_json_boundary(
+        self, tmp_path, monkeypatch,
+    ):
+        f = tmp_path / "a.py"
+        f.write_text("stable")
+        doc = self._doc_for(f, head_hash="old")
+
+        _, writer, _ = self._run_hook(
+            tmp_path, monkeypatch, [doc], head_hash="new",
+        )
+
+        assert len(writer.update_calls) == 1
+        assert writer.update_calls[0]["head_hash"] == "new"
+
+
 class TestCatalogHookErrorSafe:
     def test_hook_does_not_propagate_errors(self, tmp_path, monkeypatch):
         from nexus.indexer import _catalog_hook
