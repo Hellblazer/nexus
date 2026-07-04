@@ -717,6 +717,39 @@ def _project_cross_collections(
     return total
 
 
+def _spawn_deferred_labeling() -> bool:
+    """Spawn a DETACHED ``nx taxonomy label`` process (nexus-qqc1v).
+
+    Haiku topic labeling is review-time cosmetics — 81.2s measured on
+    the indexing wall (2026-07-04 attrib run) with nothing downstream
+    consuming the labels during the run. Detached (own session, stdio
+    to a log file) so the CLI exits immediately; labels land minutes
+    later. Same-interpreter module entry, not the ``nx`` shim — PATH-
+    less autostart environments taught us that lesson (nexus-n8sbw).
+
+    Returns True when the process launched; False (logged) otherwise —
+    labeling then simply stays pending for ``nx taxonomy label``.
+    """
+    import subprocess  # noqa: PLC0415 — spawn-only branch
+    import sys  # noqa: PLC0415 — spawn-only branch
+
+    try:
+        log_dir = Path.home() / ".config" / "nexus" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log = open(log_dir / "deferred_labeling.log", "ab")  # noqa: SIM115 — handed to the child for its lifetime
+        subprocess.Popen(
+            [sys.executable, "-m", "nexus.cli", "taxonomy", "label"],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — labeling is best-effort; pending topics remain labelable manually
+        _log.warning("deferred_labeling_spawn_failed", exc_info=True)
+        return False
+
+
 def run_collection_postprocessing(
     collections: list[str],
     *,
@@ -773,19 +806,12 @@ def run_collection_postprocessing(
                 auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
                 if auto_label:
                     try:
-                        from nexus.commands.taxonomy_cmd import _claude_available, relabel_topics  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
-                        if _claude_available():
-                            _lbl_t0 = _time.monotonic()
-                            labeled = 0
-                            for col_name in collections:
-                                labeled += relabel_topics(
-                                    db.taxonomy, collection=col_name, only_pending=True,
-                                )
-                            if labeled:
-                                _say(
-                                    f"  Labels:   {labeled} topics labeled by "
-                                    f"Claude haiku ({_time.monotonic() - _lbl_t0:.1f}s)"
-                                )
+                        from nexus.commands.taxonomy_cmd import _claude_available  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+                        # nexus-qqc1v: labeling is DEFERRED to a detached
+                        # process — 81.2s of haiku calls measured off the
+                        # indexing wall; labels are review-time cosmetics.
+                        if _claude_available() and _spawn_deferred_labeling():
+                            _say("  Labels:   labeling in background (deferred)")
                     except Exception:  # noqa: BLE001 — best-effort Claude auto-labelling; failure logged and chain continues
                         _log.debug("taxonomy_label_failed", exc_info=True)
 
