@@ -63,6 +63,98 @@ def probe(url: str | None) -> None:
         )
 
 
+def _normalize_engine_version(tag: str) -> str:
+    """Reduce an engine tag to its bare ``X.Y.Z`` release version.
+
+    Accepts ``engine-service-vX.Y.Z``, ``vX.Y.Z``, or ``X.Y.Z`` — the forms an
+    operator or the engine-release skill might pass — and returns ``X.Y.Z`` for
+    comparison against the live ``/version`` ``release_version`` field.
+    """
+    return tag.removeprefix("engine-service-").removeprefix("v")
+
+
+@service.command("record-deploy")
+@click.argument("tag")
+@click.option("--commit", "commit", default="", help="Deployed commit SHA (provenance).")
+@click.option(
+    "--gate",
+    "gate",
+    default="",
+    help="Cloud-gate result to record (e.g. PASSED).",
+)
+@click.option(
+    "--url",
+    "url",
+    default=None,
+    help="Managed service base URL. Defaults to NX_SERVICE_URL or "
+    "https://api.conexus-nexus.com.",
+)
+def record_deploy(tag: str, commit: str, gate: str, url: str | None) -> None:
+    """Record TAG as the cloud-deployed engine — GUARDED by a live ``/version`` read.
+
+    Guards the ``deployed-engine-version`` T2 tracker against recording a version
+    that disagrees with reality (nexus-dz6b1 / RDR-179). GETs the managed
+    service's unauthenticated ``/version`` handshake, ASSERTS its
+    ``release_version`` equals TAG's version, and only then writes the tracker.
+    The recorded version is machine-sourced from the live read — never
+    hand-typed — so the record cannot disagree with what the cloud is actually
+    running, and a deploy that has not landed yet fails loud instead of writing a
+    wrong fact.
+
+    SCOPE — what this does NOT do: it does not guarantee the record is *made*.
+    The original rot (v0.1.17 stale across three deploys) was an omission — the
+    write step was skipped — and this command still has to be RUN (engine-release
+    skill Step 8). Closing the omission vector (cloud-gate writes the tracker as a
+    side effect of passing) is tracked separately (nexus-dz6b1 follow-up). The
+    ``--commit`` / ``--gate`` values are operator-supplied provenance and are
+    recorded verbatim — only ``release_version`` is verified against the live
+    deploy.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415 — function-local: keep import cost off the CLI hot path
+
+    from nexus.db.managed_endpoint import (  # noqa: PLC0415 — circular-dep avoidance; managed_endpoint imports config
+        ManagedServiceError,
+        probe_managed_service,
+        resolve_managed_endpoint,
+    )
+
+    expected = _normalize_engine_version(tag)
+    base = url or resolve_managed_endpoint(require_token=False)[0]
+    try:
+        caps = probe_managed_service(base_url=base)
+    except ManagedServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    live = caps.release_version
+    if live != expected:
+        raise click.ClickException(
+            f"Refusing to record {tag}: the service at {caps.base_url} is running "
+            f"release_version {live!r}, not {expected!r}. Deploy the tag first, "
+            "then re-run record-deploy (the tracker only records verified deploys)."
+        )
+
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    parts = [f"engine-service-v{live} @ {commit or '<commit unrecorded>'}"]
+    parts.append(f"recorded {timestamp}")
+    parts.append(f"gate {gate or '<gate result unrecorded>'}")
+    parts.append(f"verified live at {caps.base_url}/version")
+    content = "; ".join(parts)
+
+    from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — circular-dep avoidance; _helpers imports command surfaces
+
+    with t2_handle() as handle:
+        handle.memory.put(
+            project="nexus",
+            title="deployed-engine-version",
+            content=content,
+            tags="engine,deploy,tracker,rdr-179",
+            ttl=0,  # permanent operational record
+        )
+
+    _log.info("service.record_deploy", tag=tag, live=live, base_url=caps.base_url)
+    click.echo(f"✓ recorded deployed engine: {content}")
+
+
 @service.group("token")
 def token_group() -> None:
     """Manage service bearer tokens (issue / rotate / revoke / list)."""

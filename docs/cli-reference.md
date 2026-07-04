@@ -2013,6 +2013,14 @@ nx service probe [--url URL]
 
 Probe a managed nexus service for reachability and version compatibility. `--url` defaults to `NX_SERVICE_URL` (or the `service_url` credential). Reports the endpoint, `release_version`, `app_version`, and embedding mode; exits non-zero when the service is unreachable.
 
+### nx service record-deploy
+
+```
+nx service record-deploy TAG [--commit SHA] [--gate RESULT] [--url URL]
+```
+
+Record `TAG` (`engine-service-vX.Y.Z`, `vX.Y.Z`, or `X.Y.Z`) as the cloud-deployed engine in the `deployed-engine-version` T2 tracker — **guarded by a live `/version` read**. GETs the service handshake, asserts `release_version` equals `TAG`'s version, and only then writes the tracker; the recorded version is machine-sourced from the live read, never hand-typed. Fails loud (and writes nothing) if the deploy has not landed or the version disagrees, so a *wrong* version can never be recorded (nexus-dz6b1 / RDR-179). This replaces the old hand-typed `nx memory put` in the engine-release skill's record step. Note the scope boundary: it guards the recorded value, not that the step is run — forcing the write (cloud-gate writes the tracker on pass) is a tracked follow-up; `--commit`/`--gate` are recorded verbatim, not verified.
+
 ### nx service token issue
 
 ```
