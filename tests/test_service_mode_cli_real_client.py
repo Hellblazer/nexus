@@ -183,9 +183,14 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
             return {"deleted": len(body["ids"])}
         raise AssertionError(f"unexpected path {path}")
 
-    fake_cat = MagicMock()
+    # Spec'd against the REAL service-mode catalog client so attributes it
+    # doesn't have (like the local catalog's _dir) raise instead of
+    # auto-materializing. Live-shakeout finding #4: the original bare mock
+    # set fake_cat._dir = tmp_path, masking that gc's EventLog(cat._dir)
+    # crashed with AttributeError on every real service-mode --no-dry-run.
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    fake_cat = MagicMock(spec=HttpCatalogClient)
     fake_cat.chashes_for_collection.return_value = set()
-    fake_cat._dir = tmp_path  # EventLog(cat._dir) needs a real directory
 
     monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
     with (

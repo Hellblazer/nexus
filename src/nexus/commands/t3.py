@@ -510,19 +510,34 @@ def gc_cmd(
     # Operators SHOULD NOT run gc concurrently with active indexing.
     # The window is single-operator-driven and acceptably small in
     # practice.
-    event_log = EventLog(cat._dir)
+    # nexus-h8rf6 live-shakeout finding #4: EventLog is the LOCAL git-backed
+    # catalog's audit trail (needs cat._dir). In service mode the catalog is
+    # an HttpCatalogClient with no local directory — emitting local events
+    # for a server-authoritative delete is neither possible nor meaningful,
+    # so skip emission (logged) rather than crash. The strict order
+    # (event-then-delete) below still holds whenever a local event log exists.
+    cat_dir = getattr(cat, "_dir", None)
+    event_log = EventLog(cat_dir) if cat_dir is not None else None
+    if event_log is None:
+        _log.info(
+            "gc_event_log_skipped",
+            reason="service-backed catalog has no local event log",
+            collection=collection,
+            candidates=len(candidates),
+        )
     pending_chunk_ids: list[str] = []
     for chunk_id, chash in candidates:
-        event = make_event(
-            ChunkOrphanedPayload(
-                chunk_id=chunk_id,
-                reason=(
-                    f"chash {chash} not referenced by any manifest entry "
-                    f"in {collection}"
-                ),
+        if event_log is not None:
+            event = make_event(
+                ChunkOrphanedPayload(
+                    chunk_id=chunk_id,
+                    reason=(
+                        f"chash {chash} not referenced by any manifest entry "
+                        f"in {collection}"
+                    ),
+                )
             )
-        )
-        event_log.append(event)
+            event_log.append(event)
         pending_chunk_ids.append(chunk_id)
 
     deleted_total = 0
