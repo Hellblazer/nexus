@@ -471,9 +471,48 @@ class _DocumentOps:
 
         Unlike ``by_owner`` which returns only direct children, this returns
         the full subtree.  The prefix itself is excluded.
+
+        Return-shape parity (nexus-u26b4): normalizes each row to the same
+        Java-normalized document-row shape ``HttpCatalogClient.descendants()``
+        returns from ``/list`` — ``metadata`` parsed to a dict (not a raw JSON
+        TEXT string) and the full ``bib_*`` field set present — matching the
+        normalization every other read path applies (``resolve``, ``find``,
+        ...). Was previously a direct ``cat._db.descendants(prefix)``
+        passthrough of the raw un-normalized SQLite row.
         """
         cat = self._cat
-        return cat._db.descendants(prefix)
+        rows = cat._db.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, alias_of, source_uri, "
+            "bib_year, bib_authors, bib_venue, bib_citation_count "
+            "FROM documents WHERE tumbler LIKE ?",
+            (prefix + ".%",),
+        ).fetchall()
+        return [
+            {
+                "tumbler": r[0],
+                "title": r[1] or "",
+                "author": r[2] or "",
+                "year": r[3] or 0,
+                "content_type": r[4] or "",
+                "file_path": r[5] or "",
+                "corpus": r[6] or "",
+                "physical_collection": r[7] or "",
+                "chunk_count": r[8] or 0,
+                "head_hash": r[9] or "",
+                "indexed_at": r[10] or "",
+                "metadata": json.loads(r[11]) if r[11] else {},
+                "source_mtime": r[12] or 0.0,
+                "alias_of": r[13] or "",
+                "source_uri": r[14] or "",
+                "bib_year": r[15] or 0,
+                "bib_authors": r[16] or "",
+                "bib_venue": r[17] or "",
+                "bib_citation_count": r[18] or 0,
+            }
+            for r in rows
+        ]
 
     def resolve_chunk(self, tumbler: Tumbler) -> dict | None:
         """Resolve a 4-segment chunk tumbler to its document + chunk metadata.

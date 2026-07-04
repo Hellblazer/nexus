@@ -55,6 +55,15 @@ def _entry_dict(**kwargs: Any) -> dict:
     (``by_file_path``, ``by_source_uri``, ``find_by_file_path``,
     ``resolve_path``) find a match against the fake server too, without a
     stateful fake.
+
+    nexus-u26b4: ``metadata``/``source_mtime``/``bib_*`` added so the
+    ``/list``-backed ``descendants()`` parity entry (which does NOT go
+    through ``_to_entry()`` — it forwards the raw wire dict) sees the same
+    Java-normalized document-row shape (metadata as a parsed nested dict,
+    the full ``bib_*`` field set) as local ``Catalog.descendants()``'s now
+    -normalized rows. Harmless to every other ``_entry_dict()`` consumer:
+    they all go through ``_to_entry()``, which collapses to a
+    ``CatalogEntry`` dataclass regardless of which wire keys were present.
     """
     base = {
         "tumbler": _fake_tumbler(),
@@ -63,6 +72,12 @@ def _entry_dict(**kwargs: Any) -> dict:
         "chunk_count": 0,
         "file_path": "src/alpha.py",
         "source_uri": "file:///tmp/nexus-test/alpha.py",
+        "metadata": {"key": "value"},
+        "source_mtime": 0.0,
+        "bib_year": 0,
+        "bib_authors": "",
+        "bib_venue": "",
+        "bib_citation_count": 0,
     }
     base.update(kwargs)
     return base
@@ -146,7 +161,20 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 n = FakeCatalogHandler.list_content_type_count
                 self._send_json({"documents": [_entry_dict() for _ in range(n)], "count": n})
             else:
-                self._send_json({"documents": [_entry_dict(), _entry_dict(title="Second")], "count": 2})
+                # nexus-u26b4: second doc has EMPTY metadata (vs the first's
+                # populated dict) — descendants() parity needs this
+                # heterogeneity to mirror local Catalog.descendants()'s
+                # seeded mix (doc_a has a real ``meta=``, every other seeded
+                # descendant does not); _to_entry()-based consumers
+                # (by_content_type, all_documents, ...) are unaffected since
+                # they collapse to a CatalogEntry dataclass regardless.
+                self._send_json({
+                    "documents": [
+                        _entry_dict(),
+                        _entry_dict(title="Second", metadata={}),
+                    ],
+                    "count": 2,
+                })
         elif op == "/search":
             self._send_json({"documents": [_entry_dict()], "count": 1})
         elif op == "/resolve":
@@ -160,14 +188,22 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 requested = {t for t in params["link_types"].split(",") if t}
             elif params.get("link_type"):
                 requested = {params["link_type"]}
-            row = {"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}
+            out_row = {"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}
+            # nexus-u26b4: the in-direction row was previously hardcoded empty
+            # (see the links_to EXCLUSIONS/REGISTRY history in
+            # test_shape_parity_tripwire.py) — a real inbound-link row so
+            # direction=in|both are wire-faithful like direction=out already was.
+            in_row = {"from_tumbler": "1.1.3", "to_tumbler": "1.1.2", "link_type": "cites"}
             match = requested is None or "cites" in requested
             if direction == "out":
-                self._send_json({"links_from": [row] if match else [], "links_to": []})
+                self._send_json({"links_from": [out_row] if match else [], "links_to": []})
             elif direction == "in":
-                self._send_json({"links_from": [], "links_to": []})
+                self._send_json({"links_from": [], "links_to": [in_row] if match else []})
             else:
-                self._send_json({"links_from": [], "links_to": []})
+                self._send_json({
+                    "links_from": [out_row] if match else [],
+                    "links_to": [in_row] if match else [],
+                })
         elif op == "/link_query":
             params = self._query_params()
             if params.get("from_tumbler") == FakeCatalogHandler.link_absent_from:
@@ -658,7 +694,10 @@ class TestHttpCatalogClientRoundTrip:
     def test_links_to_uses_direction_in(self, client: HttpCatalogClient) -> None:
         # GET /links?tumbler=X&direction=in
         links = client.links_to("1.1.2")
-        assert links == []
+        assert len(links) == 1
+        # Return-type parity: typed CatalogLink (attribute access), like local Catalog.
+        assert links[0].link_type == "cites"
+        assert str(links[0].from_tumbler) == "1.1.3"
 
     def test_link_query(self, client: HttpCatalogClient) -> None:
         links = client.link_query(link_type="cites")

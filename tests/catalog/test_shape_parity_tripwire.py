@@ -185,6 +185,12 @@ REGISTRY: list[Parity] = [
         args=(lambda s: s.collection, lambda s: s.file_a),
     ),
     Parity("all_documents"),
+    Parity(
+        "descendants", args=(lambda s: str(s.owner),),
+        # nexus-u26b4: was KNOWN DRIFT (local raw-row passthrough vs HTTP's
+        # Java-normalized /list rows) — local catalog_docs.py now normalizes
+        # metadata to a parsed dict + full bib_* set, matching the HTTP side.
+    ),
     Parity("by_corpus", args=(lambda s: s.corpus_a,)),
     Parity("by_doc_id", args=(lambda s: str(s.doc_a),)),
     Parity("by_source_uri", args=(lambda s: s.source_uri_a,)),
@@ -239,9 +245,27 @@ REGISTRY: list[Parity] = [
     Parity("chunk_counts_for_docs", args=(lambda s: [str(s.doc_a)],)),
     Parity("links_from_batch", args=(lambda s: [str(s.doc_a)],)),
     Parity("stats"),
+    Parity(
+        "collection_health_meta", args=(lambda s: s.collection,),
+        # nexus-u26b4: was KNOWN DRIFT (HttpCatalogClient silently dropped
+        # 'stale_source_ratio') — now carried through on both sides.
+    ),
 
     # ── links cluster ────────────────────────────────────────────────────
     Parity("links_from", args=(lambda s: s.doc_a,)),
+    Parity(
+        "links_to", args=(lambda s: s.doc_b,),
+        # nexus-u26b4: was excluded (test-infra gap, not a wire-shape bug) —
+        # FakeCatalogHandler's /links direction=in|both branch was hardcoded
+        # to links_to=[]; now populates a real inbound row like direction=out
+        # already did.
+    ),
+    Parity(
+        "validate_link", args=(lambda s: s.doc_a, lambda s: s.doc_b, "cites"),
+        # nexus-u26b4: was KNOWN DRIFT (HttpCatalogClient returned bool, local
+        # returns list[str]) — doc_a->doc_b "cites" is already seeded, so both
+        # sides report the "duplicate" validation error (non-empty list[str]).
+    ),
     Parity("link_query", kwargs={"link_type": "cites"}),
     Parity(
         "link", args=("9.7.1", "9.7.2", "test-link", "parity-test"),
@@ -265,9 +289,39 @@ REGISTRY: list[Parity] = [
         # dry_run=True: read-only count via link_query, doesn't touch the
         # doc_a -> doc_b "cites" link other entries depend on.
     ),
+    Parity(
+        "graph", args=(lambda s: s.doc_a,),
+        # nexus-u26b4: was KNOWN DRIFT (h8rf6.3 incident class) — local
+        # returns {"nodes": list[CatalogEntry], "edges": list[CatalogLink]};
+        # HttpCatalogClient.graph() returned the RAW wire dict unconverted.
+        # Both sides always return the 2-key {"nodes","edges"} dict, so the
+        # vacuity guard (len(dict) == 2) passes structurally; the shape
+        # assertion is what pins the node/edge dataclass conversion.
+    ),
+    Parity(
+        "graph_many", args=(lambda s: [s.doc_a, s.doc_b],),
+        # nexus-u26b4: same fix as graph() (see that entry) applied to the
+        # multi-seed traversal.
+    ),
 
     # ── collections cluster ──────────────────────────────────────────────
     Parity("is_legacy_collection", args=(lambda s: s.legacy_collection,)),
+    Parity(
+        "get_collection", args=(lambda s: s.collection,),
+        # nexus-u26b4: was KNOWN DRIFT ('legacy_grandfathered' int-vs-bool) —
+        # HttpCatalogClient now coerces to bool like local's
+        # _row_to_collection_dict does.
+    ),
+    Parity(
+        "list_collections",
+        # nexus-u26b4: same 'legacy_grandfathered' int-vs-bool fix as
+        # get_collection() (see that entry).
+    ),
+    Parity(
+        "collections_by_owner", args=(lambda s: str(s.owner),),
+        # nexus-u26b4: inherits the get_collection()/list_collections() fix —
+        # filters the now-coerced list_collections() result client-side.
+    ),
     Parity(
         "collection_for", args=("code", lambda s: s.owner, "voyage-code-3"),
     ),
@@ -367,26 +421,22 @@ EXCLUSIONS: dict[str, str] = {
     # harness does not stand up: both resolve local chunk text via a real
     # ClientAPI.get_collection(...).get(where=...) call (catalog_spans.py);
     # HttpCatalogClient's t3 param is accepted-but-unused (resolution is
-    # server-side). Meaningfully exercising the LOCAL side would require
-    # wiring a second storage tier (an EphemeralClient with a real indexed
-    # chunk) into what is otherwise a SQLite+HTTP-only fixture — out of
-    # scope here, tracked as a follow-up rather than excluded silently.
-    "resolve_chash": "requires a live T3 ClientAPI (catalog_spans.resolve_chash_globally queries a real chroma collection); out of scope for this catalog-metadata-only harness (T3-backed parity tracked on bead nexus-oq0tk), not a wire-shape gap",
-    "resolve_span": "requires a live T3 ClientAPI (catalog_spans.resolve_span_in_t3 queries a real chroma collection); out of scope for this catalog-metadata-only harness (T3-backed parity tracked on bead nexus-oq0tk), not a wire-shape gap",
+    # server-side). Still excluded from THIS metadata-only REGISTRY (it has
+    # no T3 handle to exercise), but real shape parity is covered by a
+    # dedicated T3-backed leg — see test_shape_parity_t3_leg.py (nexus-oq0tk),
+    # which wires a real chromadb.EphemeralClient alongside a real ChashIndex
+    # and asserts shape(local) == shape(http) with the same shape() helper.
+    "resolve_chash": "parity covered by test_shape_parity_t3_leg.py (nexus-oq0tk) — requires a live T3 ClientAPI (catalog_spans.resolve_chash_globally queries a real chroma collection), out of scope for this catalog-metadata-only REGISTRY, but shape-parity is real and green in the T3-backed leg, not a wire-shape gap",
+    "resolve_span": "parity covered by test_shape_parity_t3_leg.py (nexus-oq0tk) — requires a live T3 ClientAPI (catalog_spans.resolve_span_in_t3 queries a real chroma collection), out of scope for this catalog-metadata-only REGISTRY, but shape-parity is real and green in the T3-backed leg, not a wire-shape gap",
     # ── fragile / redundant coupling
     "collection_for_repo": "requires real git-repo identity resolution (_repo_identity/_resolve_main_repo) chained through owner_for_repo(repo_hash); collection_for (registered) already exercises the same /collections/for_tuple wire route and CollectionName rendering without coupling the harness to filesystem/git-subprocess behavior",
-    # ── KNOWN DRIFT (real shape bugs, not fixed here per task scope — see
-    # final report / bead follow-up)
-    "validate_link": "KNOWN DRIFT: local Catalog.validate_link() returns list[str] (validation error messages, empty list == valid) but HttpCatalogClient.validate_link() returns bool (both endpoints resolve) — a genuine return-TYPE divergence, not merely a value difference. Recorded here per task instruction; bead follow-up, not fixed in this pass.",
-    "resolve_chunk": "KNOWN DRIFT: local Catalog.resolve_chunk() requires a 4-segment CHUNK-address tumbler (tumbler.chunk is not None) and returns a purpose-built {document_tumbler, chunk_index, physical_collection, ...} dict, returning None for any plain 3-segment document tumbler; HttpCatalogClient.resolve_chunk() does not implement chunk-address resolution at all — it treats ANY tumbler as a document and returns `self.resolve(tumbler).__dict__` (the full CatalogEntry field set). The two methods do not attempt the same operation; comparable non-empty results on both sides are not achievable via any single input. Recorded as a finding; bead follow-up, not fixed here.",
-    "descendants": "KNOWN DRIFT: local Catalog.descendants() returns RAW un-normalized SQLite row dicts via a direct `cat._db.descendants(prefix)` passthrough — 'metadata' is a JSON-encoded TEXT STRING, and there is no bib_*/alias_of/source_uri field set (bypasses the CatalogEntry/_to_entry normalization every other read path uses). HttpCatalogClient.descendants() returns the Java-normalized document-row shape from a raw /list call, where 'metadata' is a parsed nested JSON OBJECT and the full bib_* field set is present. Two structurally different dict shapes for the same conceptual result (not a test-fixture gap). Recorded as a finding; bead follow-up, not fixed here.",
-    "collection_health_meta": "KNOWN DRIFT: both the wire response (CatalogRepository.collectionHealthMeta) and local Catalog.collection_health_meta() carry a 'stale_source_ratio' field, but HttpCatalogClient.collection_health_meta() reconstructs only {'last_indexed', 'orphan_count'} from the response and silently drops 'stale_source_ratio' — a real missing-field return-shape gap, the same incident class as h8rf6.3. Recorded as a finding; bead follow-up, not fixed here.",
-    "get_collection": "KNOWN DRIFT: CatalogRepository.collRow()'s 'legacy_grandfathered' column is a boxed Integer (serializes as a JSON number, 0/1) on the wire, so HttpCatalogClient.get_collection() (a raw dict passthrough, no coercion) returns it as a Python int; local Catalog.get_collection() returns a real Python bool for the same field (SQLite column read + truthiness). A genuine cross-store type divergence on a shared dict key. is_legacy_collection() (registered) papers over this at its own call site by casting with bool(...), so the divergence is contained there but not at the raw get_collection()/list_collections() surface. Recorded as a finding; bead follow-up, not fixed here.",
-    "list_collections": "KNOWN DRIFT: same 'legacy_grandfathered' int-vs-bool divergence as get_collection() (see that entry) — HttpCatalogClient.list_collections() is a raw dict-list passthrough with no coercion. Recorded as a finding; bead follow-up, not fixed here.",
-    "collections_by_owner": "KNOWN DRIFT: HttpCatalogClient.collections_by_owner() filters the raw list_collections() result client-side, inheriting the same 'legacy_grandfathered' int-vs-bool divergence documented on get_collection()/list_collections(). Recorded as a finding; bead follow-up, not fixed here.",
-    "graph": "KNOWN DRIFT: local Catalog.graph() returns {'nodes': list[CatalogEntry], 'edges': list[CatalogLink]} (typed dataclasses, matching the return-type-parity pattern used by link_query/links_from/get_manifest elsewhere in HttpCatalogClient); HttpCatalogClient.graph() returns the RAW wire dict UNCONVERTED — 'nodes'/'edges' are plain dicts, never turned into CatalogEntry/CatalogLink. The same incident class as h8rf6.3 (docs_for_chashes), just not yet fixed for this method. Recorded as a finding; bead follow-up, not fixed here.",
-    "graph_many": "KNOWN DRIFT: same untyped-passthrough divergence as graph() (see that entry) — HttpCatalogClient.graph_many() also returns raw wire dicts for 'nodes'/'edges' instead of CatalogEntry/CatalogLink objects. Recorded as a finding; bead follow-up, not fixed here.",
-    "links_to": "FakeCatalogHandler's /links direction=in|both branch is hardcoded to links_to=[] (test_http_catalog_client.py's pre-existing test_links_to_uses_direction_in asserts exactly that empty result; changing the fake to be wire-faithful here would break that pre-existing, already-green test). The wire response for links_to is therefore permanently an empty list in this fixture, while local Catalog.links_to() genuinely returns non-empty CatalogLink results for seeded data — shape() distinguishes an empty container from a populated one (different tuple contents), so no assertion form is meaningful here. Not a wire-shape bug; a pre-existing fixture constraint this task must not disturb.",
+    # ── documented capability gap (bead follow-up, not a wire-shape bug):
+    # nexus-u26b4 fixed the other 5 KNOWN DRIFT findings this bead's parent
+    # (nexus-8y1tm) recorded (validate_link, descendants, collection_health_meta,
+    # get_collection/list_collections/collections_by_owner, graph/graph_many —
+    # all moved to REGISTRY below) plus the links_to test-infra gap. This one
+    # remains excluded: there is no wire route to build a real fix against.
+    "resolve_chunk": "CAPABILITY GAP (bead nexus-gc2ze): local Catalog.resolve_chunk() requires a 4-segment CHUNK-address tumbler (tumbler.chunk is not None) and returns a purpose-built {document_tumbler, chunk_index, physical_collection, ...} dict, returning None for any plain 3-segment document tumbler. The Java service has NO /resolve_chunk route (CatalogHandler.java's switch has no matching case) — HttpCatalogClient.resolve_chunk() does not implement chunk-address resolution at all; it treats ANY tumbler as a document and returns `self.resolve(tumbler).__dict__` (the full CatalogEntry field set) as a placeholder. The two methods do not attempt the same operation, and there is no wire endpoint to build a real client-side implementation against — comparable non-empty results on both sides are not achievable via any single input without first shipping the service route. nexus-gc2ze tracks adding a /resolve_chunk service route + CatalogHandler.java case + a real client implementation; move this entry to REGISTRY when that lands.",
 }
 
 

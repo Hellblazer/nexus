@@ -445,12 +445,14 @@ def catalog_links(
         # in service mode (swallowed into {"error": ...}).
         link_types = [link_type] if link_type else None
         result = cat.graph(t, depth=depth, direction=direction, link_types=link_types)
-        # nexus-qtj24: nodes/edges are CatalogEntry/CatalogLink objects on the
-        # SQLite path but plain dicts from the service /traverse path — guard
-        # .to_dict() (mirrors catalog_link_query).
+        # nexus-u26b4: nodes/edges are CatalogEntry/CatalogLink objects on both
+        # the SQLite path and the service /traverse path (HttpCatalogClient.graph
+        # now converts wire dicts to typed objects — the isinstance(n, dict)
+        # guard nexus-qtj24 added here is no longer reachable and has been
+        # dropped; mirrors catalog_link_query's unconditional .to_dict()).
         return {
-            "nodes": [n if isinstance(n, dict) else n.to_dict() for n in result["nodes"]],
-            "edges": [e if isinstance(e, dict) else e.to_dict() for e in result["edges"]],
+            "nodes": [n.to_dict() for n in result["nodes"]],
+            "edges": [e.to_dict() for e in result["edges"]],
         }
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}

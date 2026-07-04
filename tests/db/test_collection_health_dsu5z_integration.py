@@ -299,15 +299,25 @@ class TestCollectionHealthMetaLiveService:
         )
 
     def test_result_has_required_keys(self, cat, seeded_catalog) -> None:
-        """Result dict always contains last_indexed and orphan_count."""
+        """Result dict always contains last_indexed, orphan_count, and
+        stale_source_ratio.
+
+        nexus-u26b4: nexus-agsq7's FIRST (source_mtime-based, structurally
+        vacuous) stale_source_ratio wiring was reverted, which is why this
+        test used to assert the key's ABSENCE. A second, index-age-based
+        implementation (``_STALE_SOURCE_AGE_DAYS`` in catalog.py, backed by
+        the catalog-011 PG view service-side) reintroduced the same key on
+        both local ``Catalog.collection_health_meta()`` and the wire
+        response; HttpCatalogClient.collection_health_meta() was silently
+        dropping it when reconstructing its return dict (the h8rf6.3
+        incident class) until this fix — the shape-parity tripwire
+        (tests/catalog/test_shape_parity_tripwire.py) now pins the field
+        present on both sides.
+        """
         result = cat.collection_health_meta(_COLL)
         assert "last_indexed" in result
         assert "orphan_count" in result
-        # nexus-agsq7 CLOSED: the DB-only stale_source_ratio wiring was
-        # structurally vacuous (source_mtime <= indexed_at always) and was
-        # reverted — collection_health_meta no longer emits the key; the
-        # report layer renders the '—' placeholder via its None default.
-        assert "stale_source_ratio" not in result
+        assert "stale_source_ratio" in result
 
     def test_unknown_collection_returns_safe_defaults(self, cat, seeded_catalog) -> None:
         """B) Unknown collection -> last_indexed=None, orphan_count=0."""
