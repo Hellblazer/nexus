@@ -785,7 +785,7 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
         grand_updated = 0
         for i, col_name in enumerate(sorted(targets), 1):
             try:
-                col = db._client.get_collection(col_name)
+                col = db.get_collection(col_name)
             except Exception as exc:  # noqa: BLE001 — per-collection resolution failure surfaced via click.echo, loop continues
                 click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
                 continue
@@ -856,7 +856,7 @@ def _reembed_collection(
     from nexus.retry import _voyage_with_retry  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     try:
-        col = db._client.get_collection(col_name)
+        col = db.get_collection(col_name)
     except Exception as exc:  # noqa: BLE001 — boundary catch re-raised as ClickException with context
         raise click.ClickException(
             f"collection {col_name!r}: {type(exc).__name__}: {exc}"
@@ -1008,7 +1008,7 @@ def reembed_cmd(
 
     db = _t3()
     if dry_run:
-        col = db._client.get_collection(name)
+        col = db.get_collection(name)
         n = col.count()
         click.echo(
             f"dry-run: would re-embed {n} chunk(s) in {name!r} with "

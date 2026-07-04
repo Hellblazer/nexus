@@ -763,18 +763,13 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path) -> None:
         ],
     )
 
-    # spec=T3Database + injected _client: pins the phantom pre-155 shape;
-    # convert with nexus-c9xr2. Despite env_creds setting cloud-shaped
-    # creds (which in production now means make_t3() hands back
-    # HttpVectorClient, not T3Database), reembed_cmd's dry-run path
-    # reaches `db._client.get_collection(...)` unconditionally
-    # (collection.py ~line 1011) -- a raw chromadb op HttpVectorClient
-    # deliberately does not expose. That is a live bug (nx collection
-    # re-embed crashes with AttributeError in every real invocation
-    # today); this fixture reproduces the shape the code currently
-    # requires rather than the shape make_t3() currently produces.
-    fake_db = MagicMock(spec=T3Database)
-    fake_db._client = client
+    # nexus-c9xr2 FIXED: re-embed now calls db.get_collection() (the
+    # method both production handles expose) instead of the pre-155
+    # db._client phantom. Spec against the handle make_t3() actually
+    # returns; route get_collection to the real Ephemeral collection so
+    # count()/get() paging behaves like production.
+    fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db.get_collection.side_effect = client.get_collection
 
     result = _invoke(
         runner, fake_db,
@@ -806,11 +801,9 @@ def test_reembed_no_dry_run_writes_via_voyage(
         ],
     )
 
-    # spec=T3Database + injected _client: pins the phantom pre-155 shape;
-    # convert with nexus-c9xr2 (see test_reembed_dry_run_reports_count
-    # above for the full rationale).
-    fake_db = MagicMock(spec=T3Database)
-    fake_db._client = client
+    # nexus-c9xr2 FIXED: see test_reembed_dry_run_reports_count.
+    fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db.get_collection.side_effect = client.get_collection
 
     upsert_calls: list[dict] = []
 
@@ -850,7 +843,7 @@ def test_reembed_rejects_cce_model(runner, env_creds) -> None:
     """nexus-bw65: voyage-context-3 (CCE) is not supported; click.Choice
     rejects at parse time."""
     result = _invoke(
-        runner, MagicMock(spec=T3Database),
+        runner, MagicMock(spec=HttpVectorClient),
         ["re-embed", "knowledge__any", "--to", "voyage-context-3"],
     )
     assert result.exit_code != 0
@@ -877,11 +870,9 @@ def test_reembed_skips_empty_documents(
         ],
     )
 
-    # spec=T3Database + injected _client: pins the phantom pre-155 shape;
-    # convert with nexus-c9xr2 (see test_reembed_dry_run_reports_count
-    # above for the full rationale).
-    fake_db = MagicMock(spec=T3Database)
-    fake_db._client = client
+    # nexus-c9xr2 FIXED: see test_reembed_dry_run_reports_count.
+    fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db.get_collection.side_effect = client.get_collection
 
     fake_embed_result = MagicMock()
     fake_embed_result.embeddings = [[0.5] * 1024]

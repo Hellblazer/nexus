@@ -418,6 +418,19 @@ class _ServiceCollectionStub:
             )
             return {"ids": [], "documents": [], "metadatas": []}
 
+    def count(self) -> int:
+        """Chunk count for this collection — Chroma ``Collection.count()``
+        parity (nexus-c9xr2: the collection re-embed / backfill paths call
+        ``col.count()`` on the handle ``get_collection`` returns; without
+        this the stub was the only handle shape missing it)."""
+        from urllib.parse import quote  # noqa: PLC0415 — stdlib deferred to call site (urllib.parse)
+
+        result = _get(
+            "/v1/vectors/count?collection=" + quote(self._name),
+            tenant=self._tenant,
+        )
+        return int(result.get("count", 0))
+
     def delete(self, ids: list[str]) -> None:
         """Delete chunks by ID from the service."""
         if not ids:

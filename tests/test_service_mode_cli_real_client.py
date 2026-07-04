@@ -278,3 +278,37 @@ def test_model_drift_probe_service_mode_real_client(real_client, monkeypatch):
     # 'error' is the pre-fix service-mode symptom; 'model_drift' would mean
     # collection_metadata resolved the wrong model for a conformant name.
     assert results[0].outcome == "matched", (results[0].outcome, results[0].error)
+
+
+# ── nx collection re-embed (get_collection + stub.count, nexus-c9xr2) ────────
+
+
+def test_collection_reembed_dry_run_service_mode_real_client(
+    runner, real_client, monkeypatch,
+):
+    """nexus-c9xr2: re-embed reached db._client.get_collection — an attr NO
+    production handle has post-RDR-155 — so every real invocation crashed
+    with a raw AttributeError. The command now uses db.get_collection();
+    this drives the dry-run end-to-end through the REAL HttpVectorClient
+    (the _ServiceCollectionStub's new count() included) so the seam can
+    never be mock-masked again."""
+    coll = _KNOWLEDGE
+
+    def fake_get(path, tenant="default"):
+        if path.startswith("/v1/vectors/count"):
+            return {"count": 7}
+        if path.startswith("/v1/vectors/stats"):
+            # list_collections' primary path: /stats returns a BARE LIST of
+            # per-collection stat rows (collection_stats docstring).
+            return [{"name": coll, "dim": 1024, "count": 7}]
+        raise AssertionError(f"unexpected GET {path}")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+    with patch("nexus.commands.collection._t3", return_value=real_client):
+        result = runner.invoke(
+            main, ["collection", "re-embed", coll, "--to", "voyage-code-3"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "dry-run" in result.output
+    assert "7" in result.output
