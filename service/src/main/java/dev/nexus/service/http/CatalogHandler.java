@@ -187,6 +187,7 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Span / chash resolution (nexus-njrcn.4) ──────────────────
                 case "/resolve_span"          -> handleResolveSpan(exchange, tenant, method);
                 case "/resolve_chash"         -> handleResolveChash(exchange, tenant, method);
+                case "/resolve_chunk"         -> handleResolveChunk(exchange, tenant, method);
 
                 // ── Server-side tumbler assignment ────────────────────────────
                 case "/doc/register"          -> handleDocRegister(exchange, tenant, method);
@@ -635,6 +636,48 @@ public final class CatalogHandler implements HttpHandler {
         var result = repo.resolveChash(tenant, chash, preferCollection);
         if (result == null) {
             HttpUtil.send(exchange, 404, "{\"error\":\"chunk not found\"}"); return;
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
+    }
+
+    /**
+     * GET /v1/catalog/resolve_chunk?tumbler=<4-segment chunk address> (nexus-gc2ze)
+     *
+     * <p>Mirrors the local {@code Catalog.resolve_chunk} contract
+     * (catalog_docs.py): chunks are implicit addresses — the catalog stores
+     * document-level rows only, and chunk sub-addresses are resolved on
+     * demand from the document's {@code chunk_count}. Splits the tumbler
+     * into its document prefix (first 3 segments) and chunk index (4th
+     * segment), then delegates the lookup + range-check to
+     * {@link CatalogRepository#resolveChunk}.
+     *
+     * <p>400 if {@code tumbler} has fewer than 4 segments (not a chunk
+     * address) or the 4th segment is not an integer; 404 if the document is
+     * missing or the chunk index is out of range.
+     *
+     * <p>Response: {@code {"document_tumbler", "chunk_index",
+     * "physical_collection", "title", "content_type"}}.
+     */
+    private void handleResolveChunk(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String tumbler = queryParam(exchange, "tumbler");
+        if (tumbler == null || tumbler.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"tumbler query param required\"}"); return;
+        }
+        String[] segments = tumbler.split("\\.");
+        if (segments.length < 4) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"tumbler is not a chunk address (need >= 4 segments)\"}"); return;
+        }
+        int chunkIndex;
+        try {
+            chunkIndex = Integer.parseInt(segments[3]);
+        } catch (NumberFormatException e) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"invalid chunk segment\"}"); return;
+        }
+        String docTumbler = segments[0] + "." + segments[1] + "." + segments[2];
+        var result = repo.resolveChunk(tenant, docTumbler, chunkIndex);
+        if (result == null) {
+            HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return;
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }

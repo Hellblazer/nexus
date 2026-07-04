@@ -2360,6 +2360,68 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // CHUNK RESOLUTION (nexus-gc2ze)
+    // ══════════════════════════════════════════════════════════════════════════
+    // Mirrors the local Catalog._DocumentOps.resolve_chunk contract
+    // (catalog_docs.py): chunks are implicit addresses derived from a
+    // document's chunk_count, not their own catalog rows. resolveChunk()
+    // is a pure lookup + range-check over an existing document row (no new
+    // SQL — it delegates to getDocument()).
+
+    private static final String CHUNK_DOC_TUMBLER = "9.9.101";
+
+    @Test @Order(215)
+    void resolveChunk_returnsDocumentAndChunkMetadata() {
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", CHUNK_DOC_TUMBLER,
+            "title", "Chunk Resolution Doc",
+            "content_type", "code",
+            "corpus", "code",
+            "physical_collection", "code__nexus__voyage-code-3__v1",
+            "chunk_count", 3
+        ));
+        var result = repo.resolveChunk(TENANT_A, CHUNK_DOC_TUMBLER, 1);
+        assertThat(result).isNotNull();
+        assertThat(result.get("document_tumbler")).isEqualTo(CHUNK_DOC_TUMBLER);
+        assertThat(result.get("chunk_index")).isEqualTo(1);
+        assertThat(result.get("physical_collection")).isEqualTo("code__nexus__voyage-code-3__v1");
+        assertThat(result.get("title")).isEqualTo("Chunk Resolution Doc");
+        assertThat(result.get("content_type")).isEqualTo("code");
+    }
+
+    @Test @Order(216)
+    void resolveChunk_outOfRangeIndex_returnsNull() {
+        // chunk_count=3 seeded in Order 215 -> valid indices are 0, 1, 2.
+        var result = repo.resolveChunk(TENANT_A, CHUNK_DOC_TUMBLER, 3);
+        assertThat(result).isNull();
+    }
+
+    @Test @Order(217)
+    void resolveChunk_missingDocument_returnsNull() {
+        var result = repo.resolveChunk(TENANT_A, "9.9.999", 0);
+        assertThat(result).isNull();
+    }
+
+    @Test @Order(218)
+    void resolveChunk_zeroChunkCount_skipsBoundsCheck() {
+        // chunk_count=0 (unset/unknown): the local Python contract skips the
+        // bounds check entirely in this case (catalog_docs.py: "chunk_count
+        // of 0 or None means count is not yet known") — a large chunk index
+        // must still resolve rather than being rejected as out-of-range.
+        final String tumbler = "9.9.102";
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", tumbler,
+            "title", "Unknown Chunk Count Doc",
+            "content_type", "code",
+            "corpus", "code",
+            "physical_collection", "code__nexus__voyage-code-3__v1"
+        ));
+        var result = repo.resolveChunk(TENANT_A, tumbler, 999);
+        assertThat(result).isNotNull();
+        assertThat(result.get("chunk_index")).isEqualTo(999);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // importXBatch: ONE multi-row INSERT per method (nexus-1usso)
     // ══════════════════════════════════════════════════════════════════════════
     // Plan-audit correction: these endpoints already existed but their repository

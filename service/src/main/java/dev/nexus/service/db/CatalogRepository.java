@@ -456,6 +456,42 @@ public final class CatalogRepository {
     }
 
     /**
+     * Resolve a 4-segment chunk address to its document + chunk metadata
+     * (nexus-gc2ze). Mirrors the local {@code Catalog._DocumentOps.resolve_chunk}
+     * contract (catalog_docs.py): chunks are implicit addresses — the catalog
+     * tracks document-level rows only, and chunk sub-addresses are resolved on
+     * demand from the document's {@code chunk_count}. This is a pure lookup +
+     * range-check over an existing document row: it delegates entirely to
+     * {@link #getDocument}, so there is no new SQL to audit here.
+     *
+     * <p>{@code chunkCount} of 0 (or absent) means the count is not yet known
+     * — the bounds check is skipped in that case, mirroring the local
+     * Python's {@code if entry.chunk_count and chunk_idx >= entry.chunk_count}.
+     *
+     * @param tenant      tenant identifier
+     * @param docTumbler  the document tumbler (chunk segment already stripped
+     *                    by the caller — {@link dev.nexus.service.http.CatalogHandler})
+     * @param chunkIndex  the chunk's position within the document
+     * @return {@code {document_tumbler, chunk_index, physical_collection,
+     *         title, content_type}} or {@code null} if the document is
+     *         missing or {@code chunkIndex} is out of range
+     */
+    public Map<String, Object> resolveChunk(String tenant, String docTumbler, int chunkIndex) {
+        var doc = getDocument(tenant, docTumbler);
+        if (doc == null) return null;
+        Object rawCount = doc.get("chunk_count");
+        long chunkCount = rawCount instanceof Number ? ((Number) rawCount).longValue() : 0L;
+        if (chunkCount > 0 && chunkIndex >= chunkCount) return null;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("document_tumbler",    docTumbler);
+        m.put("chunk_index",         chunkIndex);
+        m.put("physical_collection", doc.getOrDefault("physical_collection", ""));
+        m.put("title",               doc.getOrDefault("title", ""));
+        m.put("content_type",        doc.getOrDefault("content_type", ""));
+        return m;
+    }
+
+    /**
      * Update mutable document fields. Only non-null fields in the map are updated.
      * Refuses to update tombstoned documents (returns 0).
      * Silently strips {@code deleted_at} from the input map — callers must use

@@ -365,6 +365,37 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "chunk_text":          "resolved chunk body",
                     "metadata":            {"source": "test"},
                 })
+        elif op == "/resolve_chunk":
+            # nexus-gc2ze: mirrors CatalogHandler.handleResolveChunk exactly —
+            # split on ".", >= 4 segments required, 4th segment must parse as
+            # an int, doc prefix = first 3 segments. Stateless fake: any
+            # well-formed chunk address "resolves" (real 404/400 semantics
+            # depend on a live Postgres document row, exercised by the Java
+            # integration tests instead); "9.9.999.0" stands in for a missing
+            # document so client-side 404-handling has something to hit.
+            params = self._query_params()
+            tumbler = params.get("tumbler", "")
+            segments = tumbler.split(".")
+            if len(segments) < 4:
+                self._send_json({"error": "tumbler is not a chunk address (need >= 4 segments)"}, 400)
+            else:
+                try:
+                    chunk_index = int(segments[3])
+                except ValueError:
+                    self._send_json({"error": "invalid chunk segment"}, 400)
+                else:
+                    doc_tumbler = ".".join(segments[:3])
+                    if doc_tumbler == "9.9.999":
+                        self.send_response(404)
+                        self.end_headers()
+                    else:
+                        self._send_json({
+                            "document_tumbler": doc_tumbler,
+                            "chunk_index": chunk_index,
+                            "physical_collection": "code__test__voyage-code-3__v1",
+                            "title": "Test Doc",
+                            "content_type": "code",
+                        })
         else:
             self._send_json({"error": f"unknown GET op: {op}"}, 404)
 
@@ -1274,6 +1305,70 @@ class TestResolveChash:
         try:
             client = HttpCatalogClient(base_url=base_url, _token="tok")
             result = client.resolve_chash("chash:not-a-valid-hex")
+            assert result is None
+        finally:
+            server.shutdown()
+
+
+class TestResolveChunk:
+    """nexus-gc2ze: HttpCatalogClient.resolve_chunk() real service-mode
+    chunk-address resolution (replaces the ``resolve(tumbler).__dict__``
+    placeholder that treated any tumbler as a document)."""
+
+    def test_resolve_chunk_returns_full_dict(self) -> None:
+        """Happy path: a real 4-segment chunk tumbler resolves to the
+        document + chunk metadata dict."""
+        from nexus.catalog.catalog import Tumbler
+
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            t = Tumbler(segments=(1, 1, 1, 2))
+            result = client.resolve_chunk(t)
+            assert result is not None
+            assert result["document_tumbler"] == "1.1.1"
+            assert result["chunk_index"] == 2
+            assert result["physical_collection"] == "code__test__voyage-code-3__v1"
+            assert result["title"] == "Test Doc"
+            assert result["content_type"] == "code"
+        finally:
+            server.shutdown()
+
+    def test_resolve_chunk_accepts_string_tumbler(self) -> None:
+        """String tumblers are parsed before the chunk-address check."""
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chunk("1.1.1.0")
+            assert result is not None
+            assert result["chunk_index"] == 0
+        finally:
+            server.shutdown()
+
+    def test_resolve_chunk_non_chunk_tumbler_returns_none_without_wire_call(self) -> None:
+        """A plain 3-segment document tumbler short-circuits to None locally
+        with no wire round-trip — mirroring the local
+        ``Catalog.resolve_chunk``'s ``if tumbler.chunk is None: return None``."""
+        from nexus.catalog.catalog import Tumbler
+
+        server, base_url = start_fake_server()
+        try:
+            FakeCatalogHandler.reset_log()
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chunk(Tumbler(segments=(1, 1, 1)))
+            assert result is None
+            assert "/resolve_chunk" not in FakeCatalogHandler.get_ops
+        finally:
+            server.shutdown()
+
+    def test_resolve_chunk_missing_document_returns_none(self) -> None:
+        """A 404 from the server (document not found) maps to None."""
+        from nexus.catalog.catalog import Tumbler
+
+        server, base_url = start_fake_server()
+        try:
+            client = HttpCatalogClient(base_url=base_url, _token="tok")
+            result = client.resolve_chunk(Tumbler(segments=(9, 9, 999, 0)))
             assert result is None
         finally:
             server.shutdown()

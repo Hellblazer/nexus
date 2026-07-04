@@ -38,7 +38,7 @@ import inspect
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
+from nexus.catalog.catalog import Catalog, Tumbler
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from tests.catalog.test_http_catalog_client import (
     CHUNK_SHA_A,
@@ -200,6 +200,15 @@ REGISTRY: list[Parity] = [
     Parity("resolve_many", args=(lambda s: [str(s.doc_a)],)),
     Parity("resolve_alias", args=(lambda s: s.doc_a,)),
     Parity("resolve_path", args=(lambda s: s.doc_a,)),
+    Parity(
+        "resolve_chunk",
+        args=(lambda s: Tumbler(segments=(*s.doc_a.segments, 0)),),
+        # nexus-gc2ze: real /resolve_chunk wire route now exists. doc_a's
+        # chunk_count is 0 (unset — write_manifest doesn't touch
+        # documents.chunk_count; only resync_chunk_count_cache does), so the
+        # local bounds check short-circuits (0 is falsy) and any chunk index
+        # resolves — chunk index 0 is the simplest valid chunk address.
+    ),
     Parity("doc_count"),
     Parity(
         "register",
@@ -434,9 +443,8 @@ EXCLUSIONS: dict[str, str] = {
     # nexus-u26b4 fixed the other 5 KNOWN DRIFT findings this bead's parent
     # (nexus-8y1tm) recorded (validate_link, descendants, collection_health_meta,
     # get_collection/list_collections/collections_by_owner, graph/graph_many —
-    # all moved to REGISTRY below) plus the links_to test-infra gap. This one
-    # remains excluded: there is no wire route to build a real fix against.
-    "resolve_chunk": "CAPABILITY GAP (bead nexus-gc2ze): local Catalog.resolve_chunk() requires a 4-segment CHUNK-address tumbler (tumbler.chunk is not None) and returns a purpose-built {document_tumbler, chunk_index, physical_collection, ...} dict, returning None for any plain 3-segment document tumbler. The Java service has NO /resolve_chunk route (CatalogHandler.java's switch has no matching case) — HttpCatalogClient.resolve_chunk() does not implement chunk-address resolution at all; it treats ANY tumbler as a document and returns `self.resolve(tumbler).__dict__` (the full CatalogEntry field set) as a placeholder. The two methods do not attempt the same operation, and there is no wire endpoint to build a real client-side implementation against — comparable non-empty results on both sides are not achievable via any single input without first shipping the service route. nexus-gc2ze tracks adding a /resolve_chunk service route + CatalogHandler.java case + a real client implementation; move this entry to REGISTRY when that lands.",
+    # all moved to REGISTRY below) plus the links_to test-infra gap.
+    # nexus-gc2ze closed the last one (resolve_chunk) — see REGISTRY above.
 }
 
 

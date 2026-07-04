@@ -1027,8 +1027,33 @@ class HttpCatalogClient:
         return out
 
     def resolve_chunk(self, tumbler: Tumbler | str) -> dict | None:
-        result = self.resolve(tumbler)
-        return result.__dict__ if result else None
+        """Resolve a 4-segment chunk tumbler to its document + chunk metadata.
+
+        Mirrors the local ``Catalog.resolve_chunk`` contract exactly
+        (catalog_docs.py): chunks are implicit addresses, not their own
+        catalog rows. Returns ``None`` immediately (no wire round-trip) when
+        ``tumbler`` is not a chunk address (``tumbler.chunk is None``) — the
+        same short-circuit the local side takes. Otherwise calls
+        ``GET /resolve_chunk`` (nexus-gc2ze).
+        """
+        t = Tumbler.parse(tumbler) if isinstance(tumbler, str) else tumbler
+        if t.chunk is None:
+            return None
+        try:
+            result = self._get("/resolve_chunk", tumbler=str(t))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if not result:
+            return None
+        return {
+            "document_tumbler": result.get("document_tumbler", ""),
+            "chunk_index": result.get("chunk_index", 0),
+            "physical_collection": result.get("physical_collection", ""),
+            "title": result.get("title", ""),
+            "content_type": result.get("content_type", ""),
+        }
 
     def resolve_span_text(self, tumbler: Tumbler | str, span: str) -> str | None:
         return None  # not supported in initial service-mode implementation
