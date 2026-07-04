@@ -2712,10 +2712,14 @@ def _run_index(
                 from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid circular import
                 reg = HookRegistry()
                 install_default_hooks(reg)
+            # File grain: manifest (needs catalog_doc_id) + any other
+            # default-grain consumer. Flush-grain hooks (taxonomy, chash)
+            # fire once per upload batch via _fire_flush_grain_hooks.
             reg.fire_batch(
                 context["ids"], context["collection"], context["documents"],
                 context["embeddings"], context["metadatas"],
                 catalog_doc_id=context["catalog_doc_id"],
+                grain="file",
             )
             for _did, _doc in zip(context["ids"], context["documents"]):
                 reg.fire_single(_did, context["collection"], _doc)
@@ -2726,6 +2730,24 @@ def _run_index(
 
         def _batched_file_failed(_path: str, error: str, _context: object) -> None:
             _log.error("indexed_file_upload_failed", file=_path, error=error)
+
+        def _fire_flush_grain_hooks(
+            collection: str, _ids: list, _docs: list, _metas: list
+        ) -> None:
+            # nexus-duoak.7: taxonomy + chash are file-agnostic and
+            # round-trip-dominated — one call per upload batch (~6/run)
+            # instead of one per file (~177/run). Uses the run's shared
+            # registry; embeddings placeholder (server embedded).
+            reg = hooks
+            if reg is None:
+                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid circular import
+                reg = HookRegistry()
+                install_default_hooks(reg)
+            reg.fire_batch(
+                _ids, collection, _docs,
+                [[] for _ in _ids], _metas,
+                grain="flush",
+            )
 
         def _cap_for(collection: str) -> int:
             # CCE collections (docs/knowledge/rdr) embed far slower
@@ -2739,6 +2761,7 @@ def _run_index(
             flush=_batch_flush,
             on_file_complete=_fire_deferred_hooks,
             on_file_failed=_batched_file_failed,
+            on_batch_complete=_fire_flush_grain_hooks,
             max_chunks=_cap_for,
         )
         _log.info("index_chunk_batching_enabled")

@@ -939,6 +939,14 @@ def chash_dual_write_batch_hook(
         structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)
 
 
+# nexus-duoak.7: file-agnostic consumers run once per upload flush in the
+# batched indexer (fire_batch(grain="flush")) instead of once per file —
+# their cost is round-trip-dominated, not row-dominated. Default-grain
+# callers (grain="all") still fire them exactly as before.
+taxonomy_assign_batch_hook.batch_grain = "flush"
+chash_dual_write_batch_hook.batch_grain = "flush"
+
+
 def manifest_write_batch_hook(
     doc_ids: list[str],
     collection: str,

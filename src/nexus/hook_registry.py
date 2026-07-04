@@ -154,6 +154,7 @@ class HookRegistry:
         metadatas: list[dict] | None = None,
         *,
         catalog_doc_id: str = "",
+        grain: str = "all",
     ) -> None:
         """Invoke every batch hook with the recorded call shape.
 
@@ -170,10 +171,22 @@ class HookRegistry:
         for this batch's document. Required by ``manifest_write_batch_hook``
         post-Phase-3; the manifest hook can no longer derive it from
         chunk metadata.
+
+        *grain* (nexus-duoak.7) — the duoak-2C batched indexer fires the
+        chain twice at different aggregation levels: once per FILE (with
+        that file's catalog_doc_id) and once per upload FLUSH (all files'
+        chunks, no single doc identity). A hook declares its level via a
+        ``batch_grain`` attribute (``"file"`` default, ``"flush"`` for
+        file-agnostic consumers like taxonomy/chash whose per-call cost
+        is round-trip-dominated). ``grain="all"`` (default) fires every
+        hook regardless — every pre-existing caller (MCP store_put,
+        legacy per-file indexing) is behaviorally unchanged.
         """
         if not doc_ids:
             return
         for hook in self._batch:
+            if grain != "all" and getattr(hook, "batch_grain", "file") != grain:
+                continue
             try:
                 if id(hook) in self._batch_with_catalog_doc_id:
                     hook(

@@ -93,6 +93,7 @@ class ChunkBatcher:
         flush: FlushFn,
         on_file_complete: Callable[[str, object], None] | None = None,
         on_file_failed: Callable[[str, str, object], None] | None = None,
+        on_batch_complete: "Callable[[str, list[str], list[str], list[dict]], None] | None" = None,
         max_chunks: "int | Callable[[str], int]" = DEFAULT_MAX_CHUNKS,
         max_bytes: int | None = None,
     ) -> None:
@@ -101,6 +102,11 @@ class ChunkBatcher:
         self._flush = flush
         self._on_complete = on_file_complete or (lambda _p, _c=None: None)
         self._on_failed = on_file_failed or (lambda _p, _e, _c=None: None)
+        #: nexus-duoak.7: fired once per SUCCESSFUL flush with the whole
+        #: batch (collection, ids, documents, metadatas) — the seam for
+        #: flush-grain hooks (taxonomy/chash run per upload batch, not per
+        #: file). Runs unlocked, before the per-file completions.
+        self._on_batch_complete = on_batch_complete or (lambda _c, _i, _d, _m: None)
         self._max_chunks = max_chunks
         self._max_bytes = max_bytes
         self._lock = threading.Lock()
@@ -257,6 +263,18 @@ class ChunkBatcher:
                 error=error,
             )
         elapsed = time.monotonic() - t0
+        if error is None:
+            try:
+                self._on_batch_complete(
+                    collection, pend.ids, pend.documents, pend.metadatas
+                )
+            except Exception:  # noqa: BLE001 — flush-grain hooks are best-effort, never fail the batch
+                _log.warning(
+                    "chunk_batch_complete_callback_failed",
+                    collection=collection,
+                    chunks=len(pend.ids),
+                    exc_info=True,
+                )
         settled: list[_Settled] = []
         with self._lock:
             self._flush_count += 1

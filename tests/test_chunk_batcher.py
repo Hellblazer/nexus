@@ -288,3 +288,58 @@ class TestPerCollectionCap:
         )
         assert b.add("d.md", "docs__x", *_mk(5, "d")) is False
         assert b.add("c.py", "code__x", *_mk(5, "c")) is True
+
+
+class TestBatchCompleteCallback:
+    def test_fires_once_per_successful_flush_with_aggregate(self) -> None:
+        rec = Recorder()
+        batch_events: list[tuple[str, int, int]] = []
+        b = ChunkBatcher(
+            flush=rec.flush,
+            on_file_complete=rec.on_complete,
+            on_batch_complete=lambda coll, ids, docs, metas: batch_events.append(
+                (coll, len(ids), len(set(ids)))
+            ),
+            max_chunks=10,
+        )
+        b.add("a.py", "code__x", *_mk(6, "a"))
+        b.add("b.py", "code__x", *_mk(6, "b"))  # pre-flush [a]
+        b.drain()
+        assert batch_events == [("code__x", 6, 6), ("code__x", 6, 6)]
+
+    def test_not_fired_for_failed_flush(self) -> None:
+        class AlwaysFail(Recorder):
+            def flush(self, collection, ids, docs, metas):
+                self.calls.append((collection, list(ids)))
+                raise RuntimeError("boom")
+        rec = AlwaysFail()
+        batch_events: list = []
+        b = ChunkBatcher(
+            flush=rec.flush,
+            on_file_failed=rec.on_failed,
+            on_batch_complete=lambda *a: batch_events.append(a),
+            max_chunks=10,
+        )
+        b.add("f.py", "code__x", *_mk(3, "f"))
+        b.drain()
+        assert batch_events == []
+
+    def test_bisected_halves_fire_batch_complete_each(self) -> None:
+        class FailFirst(Recorder):
+            def flush(self, collection, ids, docs, metas):
+                idx = len(self.calls)
+                self.calls.append((collection, list(ids)))
+                if idx == 0:
+                    raise RuntimeError("too big")
+        rec = FailFirst()
+        batch_events: list = []
+        b = ChunkBatcher(
+            flush=rec.flush,
+            on_file_complete=rec.on_complete,
+            on_batch_complete=lambda coll, ids, docs, metas: batch_events.append(len(ids)),
+            max_chunks=10,
+        )
+        b.add("a.py", "code__x", *_mk(4, "a"))
+        b.add("b.py", "code__x", *_mk(4, "b"))
+        b.drain()  # 8-chunk batch fails once, bisects to 4+4
+        assert batch_events == [4, 4]

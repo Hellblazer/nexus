@@ -197,12 +197,33 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
     The test asserts a Call node count rather than text presence so
     docstring or comment mentions do not satisfy the invariant. A future
     contributor who removes either fire on a CLI site fails CI here.
+
+    nexus-duoak.7 exemption: indexer.py's flush-grain aggregate call
+    (``fire_batch(..., grain="flush")`` in ``_fire_flush_grain_hooks``)
+    deliberately has NO fire_single counterpart — it re-fires only the
+    flush-grain consumers (taxonomy/chash) once per upload batch; the
+    per-document single chain already fired at file grain. Only calls
+    passing the literal ``grain="flush"`` are excluded from the
+    symmetric count; file-grain and default calls still count.
     """
     offenders: dict[str, list[str]] = {}
     for rel in CLI_SITE_FILES:
         path = PROJECT_ROOT / rel
         tree = ast.parse(path.read_text(), filename=str(path))
-        batch_calls = _count_method_calls(tree, "fire_batch")
+        batch_calls = 0
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "fire_batch"
+                and not any(
+                    k.arg == "grain"
+                    and isinstance(k.value, ast.Constant)
+                    and k.value.value == "flush"
+                    for k in node.keywords
+                )
+            ):
+                batch_calls += 1
         single_calls = _count_method_calls(tree, "fire_single")
         problems: list[str] = []
         if batch_calls == 0:
