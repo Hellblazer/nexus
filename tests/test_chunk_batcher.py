@@ -346,3 +346,54 @@ class TestBatchCompleteCallback:
         b.add("b.py", "code__x", *_mk(4, "b"))
         b.drain()  # 8-chunk batch fails once, bisects to 4+4
         assert batch_events == [4, 4]
+
+
+class TestConcurrentFlushes:
+    def test_drain_overlaps_flushes_up_to_limit(self) -> None:
+        # duoak follow-up: flushes dispatch to a small pool so drain()
+        # (and staging workers) don't serialize the network calls.
+        import threading as _t
+        import time as _time
+        active = []
+        peak = [0]
+        lock = _t.Lock()
+
+        def slow_flush(collection, ids, docs, metas):
+            with lock:
+                active.append(1)
+                peak[0] = max(peak[0], len(active))
+            _time.sleep(0.05)
+            with lock:
+                active.pop()
+
+        b = ChunkBatcher(flush=slow_flush, max_chunks=5, flush_concurrency=3)
+        for i in range(6):  # 6 full batches across 6 files
+            b.add(f"f{i}.py", "code__x", *_mk(5, f"f{i}-"))
+        b.drain()
+        assert peak[0] >= 2  # overlapped
+        assert peak[0] <= 3  # bounded
+
+    def test_drain_waits_for_all_callbacks(self) -> None:
+        import time as _time
+        completed: list[str] = []
+
+        def slow_flush(collection, ids, docs, metas):
+            _time.sleep(0.02)
+
+        b = ChunkBatcher(
+            flush=slow_flush,
+            on_file_complete=lambda p, c=None: completed.append(p),
+            max_chunks=5,
+            flush_concurrency=3,
+        )
+        for i in range(5):
+            b.add(f"f{i}.py", "code__x", *_mk(5, f"f{i}-"))
+        b.drain()
+        assert sorted(completed) == [f"f{i}.py" for i in range(5)]
+
+    def test_default_concurrency_is_sequential_compat(self) -> None:
+        # flush_concurrency=1 (or omitted) keeps the v1 synchronous shape.
+        rec = Recorder()
+        b = _batcher(rec, max_chunks=5)
+        b.add("a.py", "code__x", *_mk(5, "a"))
+        assert len(rec.calls) == 1  # flushed synchronously at cap

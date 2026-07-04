@@ -19,6 +19,7 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
 import errno
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -2704,9 +2705,13 @@ def _run_index(
                 metadatas=_metas,
             )
 
+        _hook_seconds = {"file": 0.0, "flush": 0.0}
+        _hook_seconds_lock = threading.Lock()
+
         def _fire_deferred_hooks(_path: str, context: object) -> None:
             if not isinstance(context, dict):
                 return
+            _t0 = time.monotonic()
             reg = context["hooks"]
             if reg is None:
                 from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid circular import
@@ -2727,6 +2732,8 @@ def _run_index(
                 _path, context["collection"], "",
                 doc_id=context["catalog_doc_id"],
             )
+            with _hook_seconds_lock:
+                _hook_seconds["file"] += time.monotonic() - _t0
 
         def _batched_file_failed(_path: str, error: str, _context: object) -> None:
             _log.error("indexed_file_upload_failed", file=_path, error=error)
@@ -2756,11 +2763,14 @@ def _run_index(
                 chunks=len(_ids),
                 files=_files,
             )
+            _t0 = time.monotonic()
             reg.fire_batch(
                 _ids, collection, _docs,
                 [[] for _ in _ids], _metas,
                 grain="flush",
             )
+            with _hook_seconds_lock:
+                _hook_seconds["flush"] += time.monotonic() - _t0
 
         def _cap_for(collection: str) -> int:
             # CCE collections (docs/knowledge/rdr) embed far slower
@@ -2776,6 +2786,10 @@ def _run_index(
             on_file_failed=_batched_file_failed,
             on_batch_complete=_fire_flush_grain_hooks,
             max_chunks=_cap_for,
+            # 3 concurrent flushes: inside the 10-concurrent-writes
+            # per-collection service quota with headroom; the 3midv
+            # sweep showed sequential flushes cost 76-112s of wall.
+            flush_concurrency=3,
         )
         _log.info("index_chunk_batching_enabled")
 
@@ -2866,7 +2880,9 @@ def _run_index(
         if on_phase is not None and _bstats["flushes"]:
             on_phase(
                 f"Chunk batching: {int(_bstats['flushes'])} upload batches, "
-                f"{_bstats['flush_seconds']:.1f}s total upload time"
+                f"{_bstats['flush_seconds']:.1f}s upload; hooks "
+                f"{_hook_seconds['file']:.1f}s file-grain + "
+                f"{_hook_seconds['flush']:.1f}s flush-grain"
             )
         _batch_failures = _batcher.failed_files
         if _batch_failures:

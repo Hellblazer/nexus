@@ -96,6 +96,7 @@ class ChunkBatcher:
         on_batch_complete: "Callable[[str, list[str], list[str], list[dict], list[str]], None] | None" = None,
         max_chunks: "int | Callable[[str], int]" = DEFAULT_MAX_CHUNKS,
         max_bytes: int | None = None,
+        flush_concurrency: int = 1,
     ) -> None:
         if isinstance(max_chunks, int) and max_chunks < 1:
             raise ValueError("max_chunks must be >= 1")
@@ -115,6 +116,19 @@ class ChunkBatcher:
         self._failed_files: dict[str, str] = {}
         self._flush_count = 0
         self._flush_seconds = 0.0
+        #: duoak follow-up: >1 dispatches flushes to a bounded pool so
+        #: neither staging workers nor drain() serialize the network
+        #: calls. 1 (default) = synchronous v1 behavior. Ceiling should
+        #: respect the service's per-collection concurrent-write quota.
+        self._flush_pool = None
+        self._futures: list = []
+        if flush_concurrency > 1:
+            from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only with concurrency enabled
+
+            self._flush_pool = ThreadPoolExecutor(
+                max_workers=flush_concurrency,
+                thread_name_prefix="nx-flush",
+            )
 
     def _cap(self, collection: str) -> int:
         """Per-collection chunk cap — CCE (docs/knowledge/rdr) collections
@@ -210,7 +224,7 @@ class ChunkBatcher:
                     del self._pending[collection]
         self._invoke_callbacks(settled)
         for coll, batch in to_flush:
-            self._flush_batch(coll, batch)
+            self._dispatch_flush(coll, batch)
         return True
 
     def drain(self) -> None:
@@ -221,9 +235,26 @@ class ChunkBatcher:
             ]
             self._pending = {}
         for coll, batch in to_flush:
-            self._flush_batch(coll, batch)
+            self._dispatch_flush(coll, batch)
+        if self._flush_pool is not None:
+            # Wait for every in-flight flush (including ones dispatched by
+            # earlier add() overflows) so callers see all callbacks fired.
+            with self._lock:
+                futures, self._futures = self._futures, []
+            for f in futures:
+                f.result()
+            self._flush_pool.shutdown(wait=True)
+            self._flush_pool = None  # post-drain adds fall back to sync
 
     # ── internals ────────────────────────────────────────────────────────
+
+    def _dispatch_flush(self, collection: str, pend: _Pending) -> None:
+        if self._flush_pool is None:
+            self._flush_batch(collection, pend)
+            return
+        fut = self._flush_pool.submit(self._flush_batch, collection, pend)
+        with self._lock:
+            self._futures.append(fut)
 
     def _flush_batch(self, collection: str, pend: _Pending) -> None:
         """Network flush with the lock RELEASED; settle + callbacks after.
