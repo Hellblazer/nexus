@@ -307,6 +307,39 @@ class CatalogRepositoryTest {
         assertThat(metaUpdated).isEqualTo(1);
     }
 
+    @Test @Order(12)
+    @SuppressWarnings("unchecked")
+    void document_updateMeta_mergesLikeLocalCatalog() {
+        // nexus-ke45f: local Catalog.update() MERGES meta (dict.update —
+        // add/overwrite keys, never remove); the wire did a bare
+        // SET metadata=<new>, so every service-mode writer.update(meta=...)
+        // silently dropped pre-existing keys (miss_count, content_hash, ...).
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.15",
+            "title", "Merge Target",
+            "content_type", "paper",
+            "metadata", Map.of("content_hash", "keepme", "miss_count", 1)
+        ));
+
+        int n = repo.updateDocument(
+            TENANT_A, "2.15", Map.of("meta", Map.of("bib_checked", true)));
+        assertThat(n).isEqualTo(1);
+
+        var doc = repo.getDocument(TENANT_A, "2.15");
+        Map<String, Object> meta = (Map<String, Object>) doc.get("metadata");
+        assertThat(meta.get("content_hash"))
+            .as("pre-existing key survives a merge update").isEqualTo("keepme");
+        assertThat(meta.get("miss_count")).isEqualTo(1);
+        assertThat(meta.get("bib_checked")).isEqualTo(true);
+
+        // Overwrite semantics: an incoming key replaces the old value.
+        repo.updateDocument(TENANT_A, "2.15", Map.of("meta", Map.of("miss_count", 0)));
+        var doc2 = repo.getDocument(TENANT_A, "2.15");
+        Map<String, Object> meta2 = (Map<String, Object>) doc2.get("metadata");
+        assertThat(meta2.get("miss_count")).isEqualTo(0);
+        assertThat(meta2.get("content_hash")).isEqualTo("keepme");
+    }
+
     @Test @Order(13)
     void document_update_rejectsNonWhitelistedColumns() {
         // Wave review (SQL audit CRITICAL): request JSON keys become SET targets —

@@ -537,10 +537,19 @@ public final class CatalogRepository {
                 // string) under "meta"/"metadata". A bare set() of a Map fails with
                 // "LinkedHashMap is not supported in dialect POSTGRES"; JSON-encode and
                 // bind as jsonb, mirroring upsertDocument (RDR-168 nexus-njrcn.7).
+                // nexus-ke45f: MERGE, not replace — local Catalog.update() does
+                // dict.update (add/overwrite keys, never remove), and every
+                // writer.update(meta=...) caller (enrich write-back, catalog
+                // hook, dt stamp, remediation) is written against that
+                // contract; the bare SET silently dropped pre-existing keys
+                // in service mode. jsonb_concat == the || operator.
                 if ("meta".equals(e.getKey()) || "metadata".equals(e.getKey())) {
+                    Field<String> merged = DSL.function("jsonb_concat", String.class,
+                        DSL.coalesce(F_DOC_META, jsonbVal("{}")),
+                        jsonbVal(jsonOrNull(e.getValue())));
                     more = (more == null)
-                        ? step.set(F_DOC_META, jsonbVal(jsonOrNull(e.getValue())))
-                        : more.set(F_DOC_META, jsonbVal(jsonOrNull(e.getValue())));
+                        ? step.set(F_DOC_META, merged)
+                        : more.set(F_DOC_META, merged);
                     continue;
                 }
                 @SuppressWarnings("unchecked")

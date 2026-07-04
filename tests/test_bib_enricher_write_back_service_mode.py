@@ -19,7 +19,7 @@ transport pattern (the ``umvh2``-class recurrence guard).
 LIVE BUG FOUND while building this coverage (see
 ``TestMetaMergeSemanticsDrift`` below): ``HttpCatalogClient.update()`` passes
 the ``meta=`` kwarg straight through to ``POST /update`` with NO client-side
-merge, and ``CatalogRepository.updateDocument`` (Java) does a bare
+merge, and ``CatalogRepository.updateDocument`` (Java) originally did a bare
 ``SET metadata = <new jsonb>`` — a full REPLACE, not a JSON merge. Local
 ``Catalog.update()`` (``catalog_writes.py`` lines ~447-451) explicitly reads
 the current entry and merges the caller's ``meta`` dict into the existing
@@ -27,12 +27,12 @@ one before writing. Every ``writer.update(tumbler, meta={...})`` call site
 in this codebase (``_enrich_apply`` here, plus ``indexer.py``,
 ``commands/dt.py``, ``commands/catalog_cmds/remediation.py``) is written
 against the LOCAL merge contract; in service mode every one of them silently
-drops any pre-existing metadata key absent from the new dict. This is a
+dropped any pre-existing metadata key absent from the new dict. This is a
 wire-shape/semantics divergence signature-conformance tests cannot see
 (``test_catalog_conformance.py``'s own docstring calls this class out
-explicitly as a known blind spot). Pinned below as ``xfail(strict=True)``
-per this repo's established RDR-168 divergence-tracking convention rather
-than silently working around it.
+explicitly as a known blind spot). FIXED server-side (nexus-ke45f):
+updateDocument now merges via jsonb_concat; TestMetaMergeSemanticsDrift is
+the standing pin.
 """
 from __future__ import annotations
 
@@ -57,9 +57,8 @@ class _State:
     """Server-side fixture state (a documents table), reset per test.
 
     ``/update`` mirrors ``CatalogRepository.updateDocument``'s REAL
-    semantics exactly (including the meta-REPLACE behavior described in the
-    module docstring) so the drift test below is evidence, not a fixture
-    artifact.
+    semantics exactly (including the nexus-ke45f metadata MERGE) so the
+    merge pin below is evidence, not a fixture artifact.
     """
 
     documents: dict[str, dict[str, Any]] = {}
@@ -195,8 +194,10 @@ class FakeBibCatalogHandler(BaseHTTPRequestHandler):
             for key, value in fields.items():
                 if key in ("meta", "metadata"):
                     # REAL semantics (CatalogRepository.java ~540-544):
-                    # SET metadata = <new jsonb> — a REPLACE, not a merge.
-                    doc["metadata"] = value
+                    # nexus-ke45f FIXED: updateDocument now merges —
+                    # jsonb_concat(COALESCE(metadata,'{}'), <new>), the ||
+                    # operator: add/overwrite keys, never remove. Mirror it.
+                    doc["metadata"] = {**doc.get("metadata", {}), **value}
                 else:
                     doc[key] = value
             self._send_json({"updated": 1})
@@ -351,7 +352,8 @@ class TestEnrichApplyServiceModeTitleFallback:
 
 
 class TestMetaMergeSemanticsDrift:
-    """KNOWN DRIFT (nexus-6lfdi live finding) — see module docstring.
+    """FIXED (nexus-ke45f): the standing merge-semantics pin — see module
+    docstring. Historical record of the drift below.
 
     ``HttpCatalogClient.update()`` (http_catalog_client.py) forwards the
     ``meta=`` kwarg to ``POST /update`` verbatim; ``CatalogRepository
@@ -367,24 +369,13 @@ class TestMetaMergeSemanticsDrift:
     orthogonal to signature conformance (both signatures match; this is a
     WIRE-SEMANTICS divergence).
 
-    Filed as bead nexus-ke45f (fix belongs in HttpCatalogClient.update():
-    read-merge-write for the meta/metadata kwarg, mirroring local
-    semantics). This test pins the reproduction; flip to a plain
-    (non-xfail) assertion when the fix lands and remove the xfail mark.
+    FIXED server-side (nexus-ke45f): CatalogRepository.updateDocument now
+    does jsonb_concat(COALESCE(metadata,'{}'), <new>) — merge, not replace
+    — matching local. (Server-side beats the originally-suggested client
+    read-merge-write: no read-modify-write race, and every wire client
+    gets the contract.) This test is the standing pin.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN DRIFT (nexus-6lfdi / bead nexus-ke45f): HttpCatalogClient.update() "
-            "does not merge the meta kwarg before POSTing (no read-before-write), and "
-            "the service's updateDocument does a bare metadata REPLACE, not a JSON "
-            "merge. Any writer.update(tumbler, meta={...}) in service mode — including "
-            "every bib-enrichment write-back — clobbers pre-existing metadata keys. "
-            "Local Catalog.update() merges; the client does not. XPASS here means the "
-            "client gained read-merge-write semantics — remove this xfail."
-        ),
-    )
     def test_bib_write_back_preserves_preexisting_metadata_in_service_mode(
         self, reader, writer,
     ) -> None:
