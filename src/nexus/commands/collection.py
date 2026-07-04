@@ -857,12 +857,17 @@ def _reembed_collection(
 
     try:
         col = db.get_collection(col_name)
+        # count() inside the same boundary: the service stub propagates
+        # transient VectorServiceError raw (tail review, nexus-c9xr2) —
+        # surface it as the file's ClickException convention, not a
+        # traceback.
+        total = col.count()
+    except click.ClickException:
+        raise
     except Exception as exc:  # noqa: BLE001 — boundary catch re-raised as ClickException with context
         raise click.ClickException(
             f"collection {col_name!r}: {type(exc).__name__}: {exc}"
         )
-
-    total = col.count()
     if total == 0:
         return 0, 0
 
@@ -1008,8 +1013,13 @@ def reembed_cmd(
 
     db = _t3()
     if dry_run:
-        col = db.get_collection(name)
-        n = col.count()
+        try:
+            col = db.get_collection(name)
+            n = col.count()
+        except Exception as exc:  # noqa: BLE001 — boundary catch re-raised as ClickException (tail review, nexus-c9xr2)
+            raise click.ClickException(
+                f"collection {name!r}: {type(exc).__name__}: {exc}"
+            )
         click.echo(
             f"dry-run: would re-embed {n} chunk(s) in {name!r} with "
             f"{target_model!r}. Pass --no-dry-run --yes to apply."
