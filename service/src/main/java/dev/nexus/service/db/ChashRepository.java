@@ -3,8 +3,7 @@ package dev.nexus.service.db;
 import org.jooq.DSLContext;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
-import org.jooq.Field;
-import org.jooq.Record3;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_INDEX;
 import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,16 +47,6 @@ public final class ChashRepository {
     public static final DateTimeFormatter UTC_SECOND =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
                              .withZone(ZoneOffset.UTC);
-
-    // ── Raw DSL field references (no jOOQ codegen for simple tables) ──────────
-    // Using DSL.field with type params to avoid raw-type warnings.
-
-    private static final Field<String>         F_TENANT     = DSL.field(DSL.name("chash_index", "tenant_id"),           String.class);
-    private static final Field<String>         F_CHASH      = DSL.field(DSL.name("chash_index", "chash"),               String.class);
-    private static final Field<String>         F_COLLECTION = DSL.field(DSL.name("chash_index", "physical_collection"), String.class);
-    private static final Field<OffsetDateTime> F_CREATED_AT = DSL.field(DSL.name("chash_index", "created_at"),          OffsetDateTime.class);
-
-    private static final org.jooq.Table<?> CHASH_INDEX = DSL.table(DSL.name("nexus", "chash_index"));
 
     private final TenantScope tenantScope;
 
@@ -162,11 +151,11 @@ public final class ChashRepository {
         registerCollectionShortTxn(tenant, collection);
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(CHASH_INDEX,
-                            F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT)
+                            CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT)
                .values(tenant, chash, collection, now)
-               .onConflict(F_TENANT, F_CHASH, F_COLLECTION)
+               .onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
                .doUpdate()
-               .set(F_CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
+               .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
                .execute();
             return null;
         });
@@ -194,14 +183,14 @@ public final class ChashRepository {
         registerCollectionShortTxn(tenant, collection);
         tenantScope.withTenant(tenant, ctx -> {
             var insert = ctx.insertInto(CHASH_INDEX,
-                                        F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT);
+                                        CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT);
             var step = insert.values(tenant, valid.get(0), collection, now);
             for (int i = 1; i < valid.size(); i++) {
                 step = step.values(tenant, valid.get(i), collection, now);
             }
-            step.onConflict(F_TENANT, F_CHASH, F_COLLECTION)
+            step.onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
                 .doUpdate()
-                .set(F_CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
+                .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
                 .execute();
             return null;
         });
@@ -217,15 +206,15 @@ public final class ChashRepository {
      */
     public List<Map<String, String>> lookup(String tenant, String chash) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(F_COLLECTION, F_CREATED_AT)
+            var rows = ctx.select(CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT)
                           .from(CHASH_INDEX)
-                          .where(F_CHASH.eq(chash))
+                          .where(CHASH_INDEX.CHASH.eq(chash))
                           .fetch();
             List<Map<String, String>> result = new ArrayList<>(rows.size());
             for (var r : rows) {
-                OffsetDateTime ts = r.get(F_CREATED_AT);
+                OffsetDateTime ts = r.get(CHASH_INDEX.CREATED_AT);
                 String tsStr = ts != null ? UTC_SECOND.format(ts.atZoneSameInstant(ZoneOffset.UTC)) : "";
-                result.add(Map.of("collection", r.get(F_COLLECTION), "created_at", tsStr));
+                result.add(Map.of("collection", r.get(CHASH_INDEX.PHYSICAL_COLLECTION), "created_at", tsStr));
             }
             return result;
         });
@@ -243,7 +232,7 @@ public final class ChashRepository {
     public int deleteCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx ->
                 ctx.deleteFrom(CHASH_INDEX)
-                   .where(F_COLLECTION.eq(collection))
+                   .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection))
                    .execute());
     }
 
@@ -257,12 +246,12 @@ public final class ChashRepository {
      */
     public Set<String> distinctCollections(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.selectDistinct(F_COLLECTION)
+            var rows = ctx.selectDistinct(CHASH_INDEX.PHYSICAL_COLLECTION)
                           .from(CHASH_INDEX)
                           .fetch();
             Set<String> result = new HashSet<>(rows.size());
             for (var r : rows) {
-                result.add(r.get(F_COLLECTION));
+                result.add(r.get(CHASH_INDEX.PHYSICAL_COLLECTION));
             }
             return result;
         });
@@ -285,17 +274,17 @@ public final class ChashRepository {
             ensureCollectionRegistered(ctx, tenant, newCollection);
             // Drop rows in new that would collide with the rename
             ctx.deleteFrom(CHASH_INDEX)
-               .where(F_COLLECTION.eq(newCollection)
-                   .and(F_CHASH.in(
-                       DSL.select(F_CHASH)
+               .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(newCollection)
+                   .and(CHASH_INDEX.CHASH.in(
+                       DSL.select(CHASH_INDEX.CHASH)
                           .from(CHASH_INDEX)
-                          .where(F_COLLECTION.eq(oldCollection))
+                          .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(oldCollection))
                    )))
                .execute();
             // Rename
             return ctx.update(CHASH_INDEX)
-                      .set(F_COLLECTION, newCollection)
-                      .where(F_COLLECTION.eq(oldCollection))
+                      .set(CHASH_INDEX.PHYSICAL_COLLECTION, newCollection)
+                      .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(oldCollection))
                       .execute();
         });
         // Post-commit (nexus-h8rf6.2): see upsert()'s comment / CollectionRegistry doc.
@@ -314,7 +303,7 @@ public final class ChashRepository {
     public int deleteStale(String tenant, String chash, String collection) {
         return tenantScope.withTenant(tenant, ctx ->
                 ctx.deleteFrom(CHASH_INDEX)
-                   .where(F_CHASH.eq(chash).and(F_COLLECTION.eq(collection)))
+                   .where(CHASH_INDEX.CHASH.eq(chash).and(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection)))
                    .execute());
     }
 
@@ -343,7 +332,7 @@ public final class ChashRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var row = ctx.select(DSL.count())
                          .from(CHASH_INDEX)
-                         .where(F_COLLECTION.eq(collection))
+                         .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection))
                          .fetchOne();
             return row != null ? row.value1() : 0;
         });
@@ -371,9 +360,9 @@ public final class ChashRepository {
             throw new IllegalArgumentException("collection must not be empty");
         }
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.selectDistinct(DSL.field(DSL.name("chash_index", "chash"), String.class))
+            var rows = ctx.selectDistinct(CHASH_INDEX.CHASH)
                           .from(CHASH_INDEX)
-                          .where(F_COLLECTION.eq(collection))
+                          .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection))
                           .fetch();
             Set<String> result = new HashSet<>(rows.size());
             for (var r : rows) {
@@ -418,11 +407,11 @@ public final class ChashRepository {
         registerCollectionShortTxn(tenant, collection);
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(CHASH_INDEX,
-                            F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT)
+                            CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT)
                .values(tenant, chash, collection, ts)
-               .onConflict(F_TENANT, F_CHASH, F_COLLECTION)
+               .onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
                .doUpdate()
-               .set(F_CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
+               .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
                .execute();
             return null;
         });
@@ -476,7 +465,7 @@ public final class ChashRepository {
         for (String c : collections) registerCollectionShortTxn(tenant, c);
         int landed = tenantScope.withTenant(tenant, ctx -> {
             var insert = ctx.insertInto(CHASH_INDEX,
-                    F_TENANT, F_CHASH, F_COLLECTION, F_CREATED_AT);
+                    CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT);
             for (ImportRow r : deduped) {
                 OffsetDateTime ts;
                 try {
@@ -488,9 +477,9 @@ public final class ChashRepository {
                 }
                 insert = insert.values(tenant, r.chash(), r.collection(), ts);
             }
-            insert.onConflict(F_TENANT, F_CHASH, F_COLLECTION)
+            insert.onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
                   .doUpdate()
-                  .set(F_CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
+                  .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
                   .execute();
             return deduped.size();
         });
