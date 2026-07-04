@@ -790,7 +790,12 @@ def test_reembed_no_dry_run_writes_via_voyage(
     import chromadb
     import uuid
 
-    coll_name = f"knowledge__rem_{uuid.uuid4().hex[:12]}"
+    # nexus-u37lw: name ENCODES the target model — service mode only
+    # permits same-model re-embed (cross-model fails loud pre-write),
+    # and same-model routes through the upsert_chunks verbatim
+    # passthrough, never upsert_chunks_with_embeddings (which the
+    # service handle discards vectors on).
+    coll_name = f"code__rem{uuid.uuid4().hex[:10]}__voyage-code-3__v1"
     client = chromadb.EphemeralClient()
     col = client.get_or_create_collection(coll_name)
     col.add(
@@ -807,10 +812,15 @@ def test_reembed_no_dry_run_writes_via_voyage(
 
     upsert_calls: list[dict] = []
 
-    def _capture_upsert(**kw):
-        upsert_calls.append(kw)
+    def _capture_upsert(collection, ids, documents, metadatas=None, *,
+                        embeddings=None, skip_existing=None):
+        upsert_calls.append({
+            "collection_name": collection, "ids": ids,
+            "documents": documents, "metadatas": metadatas,
+            "embeddings": embeddings,
+        })
 
-    fake_db.upsert_chunks_with_embeddings.side_effect = _capture_upsert
+    fake_db.upsert_chunks.side_effect = _capture_upsert
 
     fake_embed_result = MagicMock()
     fake_embed_result.embeddings = [[0.5] * 1024, [0.7] * 1024]
@@ -858,7 +868,8 @@ def test_reembed_skips_empty_documents(
     import chromadb
     import uuid
 
-    coll_name = f"knowledge__rem_{uuid.uuid4().hex[:12]}"
+    # nexus-u37lw: model-encoded name so the same-model service path runs.
+    coll_name = f"code__rem{uuid.uuid4().hex[:10]}__voyage-3__v1"
     client = chromadb.EphemeralClient()
     col = client.get_or_create_collection(coll_name)
     col.add(
