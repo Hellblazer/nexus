@@ -211,6 +211,25 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
             f"is intentional (rare — usually means the caller is resurrecting "
             f"an orphaned collection with the wrong prefix)."
         )
+    # nexus-tcvpn: a SAME-prefix rename whose embedding-model SEGMENT differs
+    # sailed through the prefix guard — but rename is an O(1) identity
+    # re-home with ZERO re-embedding, so the vectors would stay in the old
+    # model space while the name claims the new one (silent staleness/
+    # search corruption, no Voyage call ever fires). Cross-model moves are
+    # the RDR-162 migration pipeline's job (remap_collection_references +
+    # vector ETL), not rename's.
+    old_model = embedding_model_for_collection(old)
+    new_model = embedding_model_for_collection(new)
+    if old_model != new_model and not force_prefix_change:
+        raise click.ClickException(
+            f"embedding-model mismatch: {old!r} encodes {old_model!r} but "
+            f"{new!r} encodes {new_model!r}. rename never re-embeds — the "
+            f"vectors would silently stay {old_model!r} under a name claiming "
+            f"{new_model!r}. Cross-model moves go through the migration "
+            f"pipeline (nx migrate / guided-upgrade, RDR-162 vector ETL). "
+            f"Pass --force-prefix-change ONLY if you know the vectors are "
+            f"already {new_model!r}."
+        )
 
     counts = rename_collection_data_plane(old, new)
 
@@ -1042,10 +1061,14 @@ def reembed_cmd(
         if encoded != target_model:
             raise click.ClickException(
                 f"service mode re-embeds server-side using the model the "
-                f"collection NAME encodes ({encoded!r}); --to {target_model!r} "
-                f"cannot take effect on {name!r}. Use 'nx collection rename' "
-                f"(cross-model) to move to a {target_model}-named collection, "
-                f"which re-embeds under the new name."
+                f"collection NAME encodes — or, for legacy 2-segment names, "
+                f"the prefix-inferred model ({encoded!r}); --to {target_model!r} "
+                f"cannot take effect on {name!r}. Cross-model moves go "
+                f"through the migration pipeline (nx migrate / "
+                f"guided-upgrade — the RDR-162 vector ETL re-embeds into a "
+                f"{target_model}-named collection). Plain 'nx collection "
+                f"rename' does NOT re-embed and would corrupt the "
+                f"name-encoded model contract."
             )
 
     if dry_run:

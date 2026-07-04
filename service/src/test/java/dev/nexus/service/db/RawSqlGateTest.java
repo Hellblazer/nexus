@@ -69,14 +69,6 @@ class RawSqlGateTest {
         + "|\\.resultQuery\\(\\s*\")",
         Pattern.DOTALL);
 
-    /** Method-declaration scanner: modifier-led, 4-space-indented top-level
-     * method signatures. Deliberately simple (not a full Java parser) —
-     * matches this codebase's consistent formatting; the reluctant prefix
-     * quantifier stops at the first identifier immediately followed by
-     * {@code (}, which is always the method name in valid Java (no
-     * modifier/type keyword is itself followed directly by a paren here). */
-    private static final Pattern METHOD_DECL = Pattern.compile(
-        "(?m)^ {4}(?:public|private|protected)(?:\\s+\\w+)*\\s+[\\w<>\\[\\],.\\s]+?\\b(\\w+)\\s*\\(");
 
     /**
      * Method-scoped escape hatch (nexus-mzuj9): {@code file.java -> {sanctioned method
@@ -106,6 +98,112 @@ class RawSqlGateTest {
             "fetchShowConfig")
     );
 
+    /** Length-preserving blank-out of comment bodies and string/char literal
+     * CONTENTS (delimiters kept): offsets and line numbers stay identical to
+     * the original source, brace counting cannot be confused by braces inside
+     * strings or comments, and the raw-SQL pattern still fires on the kept
+     * opening quote. */
+    static String blank(String src) {
+        char[] out = src.toCharArray();
+        int i = 0;
+        while (i < out.length) {
+            char c = out[i];
+            if (c == '/' && i + 1 < out.length && out[i + 1] == '*') {
+                int end = src.indexOf("*/", i + 2);
+                end = (end < 0) ? out.length : end + 2;
+                for (int j = i; j < end; j++) if (out[j] != '\n') out[j] = ' ';
+                i = end;
+            } else if (c == '/' && i + 1 < out.length && out[i + 1] == '/') {
+                while (i < out.length && out[i] != '\n') out[i++] = ' ';
+            } else if (c == '"' || c == '\'') {
+                char q = c;
+                i++;
+                while (i < out.length && out[i] != q) {
+                    if (out[i] != '\n') out[i] = ' ';
+                    if (src.charAt(i) == '\\' && i + 1 < out.length) {
+                        i++;
+                        if (out[i] != '\n') out[i] = ' ';
+                    }
+                    i++;
+                }
+                i++;  // closing quote kept
+            } else {
+                i++;
+            }
+        }
+        return new String(out);
+    }
+
+    /** [start, end) body regions of each sanctioned method in *blanked*
+     * source: find ``name(`` where the preceding char is not ``.``/ident
+     * (a receiver call or longer name), paren-match the signature, require
+     * a following ``{``, brace-match the body. Brace-depth truth instead of
+     * declaration regexes — nexus-8kbzu: one regex heuristic mis-attributed
+     * nested-class and package-private shapes, the widened one matched call
+     * sites; neither class of error is possible here. */
+    static List<int[]> sanctionedRegions(String blanked, java.util.Set<String> names) {
+        List<int[]> regions = new ArrayList<>();
+        for (String name : names) {
+            Matcher m = Pattern.compile("\\b" + Pattern.quote(name) + "\\s*\\(").matcher(blanked);
+            while (m.find()) {
+                int before = m.start() - 1;
+                if (before >= 0 && (blanked.charAt(before) == '.'
+                        || Character.isJavaIdentifierPart(blanked.charAt(before)))) {
+                    continue;
+                }
+                int i = blanked.indexOf('(', m.start());
+                int depth = 0;
+                while (i < blanked.length()) {
+                    char c = blanked.charAt(i);
+                    if (c == '(') depth++;
+                    else if (c == ')' && --depth == 0) break;
+                    i++;
+                }
+                if (i >= blanked.length()) continue;
+                int j = i + 1;
+                while (j < blanked.length() && (Character.isWhitespace(blanked.charAt(j))
+                        || Character.isJavaIdentifierPart(blanked.charAt(j))
+                        || blanked.charAt(j) == ',')) {
+                    j++;
+                }
+                if (j >= blanked.length() || blanked.charAt(j) != '{') continue;
+                int braces = 0;
+                int k = j;
+                while (k < blanked.length()) {
+                    char c = blanked.charAt(k);
+                    if (c == '{') braces++;
+                    else if (c == '}' && --braces == 0) break;
+                    k++;
+                }
+                regions.add(new int[] {j, Math.min(k + 1, blanked.length())});
+            }
+        }
+        return regions;
+    }
+
+    /** Per-file scan: blank comments/strings -> newline-tolerant raw-SQL
+     * pattern -> brace-region sanction filter. Extracted so the nexus-8kbzu
+     * adversarial meta-tests exercise the excusal logic against synthetic
+     * sources, not just the pattern against the current tree. */
+    static List<String> scan(String fileName, String rawSource) {
+        String blanked = blank(rawSource);
+        List<int[]> regions = sanctionedRegions(
+            blanked, SANCTIONED_METHODS.getOrDefault(fileName, java.util.Set.of()));
+
+        List<String> violations = new ArrayList<>();
+        var m = RAW_EXECUTE.matcher(blanked);
+        while (m.find()) {
+            int at = m.start();
+            boolean excused = regions.stream()
+                .anyMatch(r -> r[0] <= at && at < r[1]);
+            if (excused) continue;
+            int line = 1 + (int) blanked.substring(0, at).chars()
+                .filter(c -> c == '\n').count();
+            violations.add(fileName + ":" + line + "  " + m.group().strip());
+        }
+        return violations;
+    }
+
     @Test
     void noRawExecuteSqlInMainSources() throws IOException {
         Path root = Path.of("src", "main", "java");
@@ -115,46 +213,8 @@ class RawSqlGateTest {
         try (Stream<Path> files = Files.walk(root)) {
             files.filter(p -> p.toString().endsWith(".java")).forEach(p -> {
                 try {
-                    String fileName = p.getFileName().toString();
-                    java.util.Set<String> sanctioned =
-                        SANCTIONED_METHODS.getOrDefault(fileName, java.util.Set.of());
-
-                    // Strip comments FIRST (block + line), then scan the whole
-                    // remaining source with a newline-tolerant pattern — a
-                    // line break after ".execute(" no longer evades the gate.
-                    String src = Files.readString(p)
-                        .replaceAll("(?s)/\\*.*?\\*/", "")
-                        .replaceAll("(?m)//.*$", "");
-
-                    // Pre-index every top-level method declaration's start offset + name,
-                    // in source order, so each violation can be attributed to its nearest
-                    // enclosing method (Java methods never nest, so "last declaration
-                    // before the violation offset" is always the correct enclosing method).
-                    List<int[]> declOffsets = new ArrayList<>();
-                    List<String> declNames = new ArrayList<>();
-                    Matcher dm = METHOD_DECL.matcher(src);
-                    while (dm.find()) {
-                        declOffsets.add(new int[] {dm.start()});
-                        declNames.add(dm.group(1));
-                    }
-
-                    var m = RAW_EXECUTE.matcher(src);
-                    while (m.find()) {
-                        String enclosing = null;
-                        for (int i = declOffsets.size() - 1; i >= 0; i--) {
-                            if (declOffsets.get(i)[0] <= m.start()) {
-                                enclosing = declNames.get(i);
-                                break;
-                            }
-                        }
-                        if (enclosing != null && sanctioned.contains(enclosing)) {
-                            continue;
-                        }
-                        int line = 1 + (int) src.substring(0, m.start()).chars()
-                            .filter(c -> c == '\n').count();
-                        violations.add(p + ":" + line + "  " + m.group().strip()
-                            + (enclosing != null ? "  [in " + enclosing + "]" : ""));
-                    }
+                    violations.addAll(scan(
+                        p.getFileName().toString(), Files.readString(p)));
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
@@ -168,5 +228,60 @@ class RawSqlGateTest {
                 + "hoist into a named method and add it to RawSqlGateTest's "
                 + "SANCTIONED_METHODS with a // SANCTIONED RAW comment")
             .isEmpty();
+    }
+
+    // ── nexus-8kbzu: the gate's own attribution logic under adversarial shapes ──
+
+    /** A violation inside a NESTED class positioned after a sanctioned
+     * method must still be flagged — it attributes to the nested method
+     * (never sanctioned), not to the preceding sanctioned declaration. */
+    @Test
+    void attribution_nestedClassAfterSanctionedMethod_isStillFlagged() {
+        String synthetic = String.join("\n",
+            "public final class PgVectorRepository {",
+            "    private void rawVectorFetch() {",
+            "        ctx.fetch(\"SELECT sanctioned\");",
+            "    }",
+            "    static class Sneaky {",
+            "        void hide() {",
+            "            ctx.execute(\"DROP TABLE evil\");",
+            "        }",
+            "    }",
+            "}");
+        // Violation text is blanked (string contents erased by design);
+        // assert on the location: line 7 is the nested-class execute call.
+        List<String> hits = scan("PgVectorRepository.java", synthetic);
+        assertThat(hits)
+            .as("nested-class violation must not inherit the sanction")
+            .anySatisfy(h -> assertThat(h).startsWith("PgVectorRepository.java:7"));
+    }
+
+    /** Package-private (no-modifier) methods are declaration boundaries too. */
+    @Test
+    void attribution_packagePrivateMethod_resetsSanction() {
+        String synthetic = String.join("\n",
+            "public final class TaxonomyCentroidRepository {",
+            "    private void annQuery() {",
+            "        ctx.fetch(\"SELECT sanctioned\");",
+            "    }",
+            "    void plainMethod() {",
+            "        ctx.execute(\"DELETE FROM x\");",
+            "    }",
+            "}");
+        List<String> hits = scan("TaxonomyCentroidRepository.java", synthetic);
+        assertThat(hits)
+            .anySatisfy(h -> assertThat(h).startsWith("TaxonomyCentroidRepository.java:6"));
+    }
+
+    /** Sanctioned methods themselves stay excused. */
+    @Test
+    void attribution_sanctionedMethodViolation_isExcused() {
+        String synthetic = String.join("\n",
+            "public final class PoolerModeCheck {",
+            "    private void fetchShowConfig() {",
+            "        ctx.fetch(\"SHOW CONFIG\");",
+            "    }",
+            "}");
+        assertThat(scan("PoolerModeCheck.java", synthetic)).isEmpty();
     }
 }
