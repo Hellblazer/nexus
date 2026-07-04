@@ -931,13 +931,27 @@ def _reembed_collection(
             for m in v_metas:
                 if isinstance(m, dict):
                     m["embedding_model"] = target_model
-            db.upsert_chunks_with_embeddings(
-                collection_name=col_name,
-                ids=v_ids,
-                documents=v_docs,
-                embeddings=embeddings,
-                metadatas=v_metas,
-            )
+            from nexus.db.http_vector_client import is_service_backed as _isb  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            if _isb(db):
+                # nexus-u37lw: on the service handle, upsert_chunks_with_
+                # embeddings DISCARDS caller vectors (server re-embeds by
+                # collection name). The command guard has already pinned
+                # target_model == the name-encoded model here, so the
+                # nexus-hxry2 verbatim passthrough stores our vectors
+                # without a second (billed) server-side embed.
+                db.upsert_chunks(
+                    col_name, v_ids, v_docs,
+                    metadatas=v_metas,
+                    embeddings=embeddings,
+                )
+            else:
+                db.upsert_chunks_with_embeddings(
+                    collection_name=col_name,
+                    ids=v_ids,
+                    documents=v_docs,
+                    embeddings=embeddings,
+                    metadatas=v_metas,
+                )
             # nexus-bw65 / nexus-9099: fire post-store chains so the
             # invariant 'every CLI T3 write also fires the chain'
             # (test_every_cli_t3_write_function_fires_store_chains)
@@ -1012,6 +1026,28 @@ def reembed_cmd(
         )
 
     db = _t3()
+
+    # nexus-u37lw (critique Critical): in service mode, upsert_chunks_with_
+    # embeddings forwards TEXT and the server re-embeds by the model the
+    # COLLECTION NAME encodes (EmbedderRouter routes by name segment) —
+    # client-computed vectors are discarded. A --to that differs from the
+    # encoded model would therefore silently no-op with the OLD model while
+    # stamping the NEW model into metadata (corrupting staleness checks)
+    # and printing false success. Fail loud instead; cross-model moves are
+    # the rename --cross-model flow.
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if not dry_run and is_service_backed(db):
+        encoded = embedding_model_for_collection(name)
+        if encoded != target_model:
+            raise click.ClickException(
+                f"service mode re-embeds server-side using the model the "
+                f"collection NAME encodes ({encoded!r}); --to {target_model!r} "
+                f"cannot take effect on {name!r}. Use 'nx collection rename' "
+                f"(cross-model) to move to a {target_model}-named collection, "
+                f"which re-embeds under the new name."
+            )
+
     if dry_run:
         try:
             col = db.get_collection(name)
