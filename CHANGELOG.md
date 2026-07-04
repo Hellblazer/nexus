@@ -98,6 +98,21 @@ Java audit. Pins engine-service-v0.1.21 (deployed + cloud-gated 2026-07-03).
 
 ### Added
 - Chash-existence short-circuit before server-side embedding: full/forced
+  re-index runs skip the Voyage embed for chunks whose content-addressed
+  chash already exists (metadata still refreshed) — the dominant cost of
+  full-run service-mode indexing.
+- `HttpVectorClient` signature-parity pin extended to all newly ported
+  methods; real-client CLI tests (faked transport, no mocks) for the
+  service-mode command surface.
+
+### Changed
+- Pinned engine: engine-service-v0.1.21 — carries the catalog-registration
+  convoy fixes (registration in its own micro-transaction +
+  `CollectionRegistry` cache with eviction on delete/rename), per-DataSource
+  admission control (typed 503 on admission timeout), a unified typed
+  DB-error ladder across all HTTP handlers (SQLSTATE-23 -> 409, pool
+  exhaustion -> 503), an `updateDocument` column whitelist, and jOOQ DSL
+  conversions for the plain catalog DML.
 
 ## [6.2.0] - 2026-07-02
 
