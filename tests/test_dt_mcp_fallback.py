@@ -27,6 +27,7 @@ import pytest
 
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.dt_link_generator import generate_dt_links
+from nexus.db.http_vector_client import HttpVectorClient
 from nexus.dt_writeback import writeback_record
 
 
@@ -166,6 +167,14 @@ class TestLayerCFallback:
                 {"ids": ["c1"], "metadatas": [dict(meta)]},
                 {"ids": ["c1"], "documents": ["body"], "metadatas": [dict(meta)]},
             ]
+            # make_t3() returns the service-backed HttpVectorClient
+            # unconditionally in production since RDR-155 P4a.2 -- cloud
+            # creds / is_local_mode() no longer affect the handle type.
+            # get_or_create_collection() is a direct call on both
+            # handles and the retry/chroma internals are fully mocked
+            # above, so the code path doesn't care which is which; pin
+            # the real return type anyway.
+            mock_t3.return_value = MagicMock(spec=HttpVectorClient)
             mock_t3.return_value.get_or_create_collection.return_value = MagicMock()
             res = CliRunner().invoke(
                 enrich, ["bib", "knowledge__t", "--delay", "0", "--source", "dt"],

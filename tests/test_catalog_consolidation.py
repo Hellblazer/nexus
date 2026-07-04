@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
+from nexus.db.http_vector_client import HttpVectorClient
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -183,7 +184,12 @@ class TestConsolidateCommand:
         cat.register(owner, "Paper A", content_type="paper", corpus="test",
                      physical_collection="docs__La")
 
-        mock_t3_fn.return_value = MagicMock()
+        # consolidate_cmd's --dry-run branch calls merge_corpus(cat, None,
+        # ..., dry_run=True) directly -- _make_t3() is never invoked in
+        # this path, so mock_t3_fn.return_value is inert here. spec= it
+        # anyway to match the real unconditional make_t3() return type
+        # (HttpVectorClient, RDR-155 P4a.2) rather than an unspec'd stub.
+        mock_t3_fn.return_value = MagicMock(spec=HttpVectorClient)
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "consolidate", "test", "--dry-run"])

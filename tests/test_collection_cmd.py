@@ -7,6 +7,8 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.http_vector_client import HttpVectorClient
+from nexus.db.t3 import T3Database
 
 
 @pytest.fixture
@@ -24,7 +26,13 @@ def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def mock_db():
-    return MagicMock()
+    # env_creds sets both cloud creds, so is_local_mode()'s legacy
+    # heuristic resolves to cloud/service mode — the real _t3() would
+    # hand back an HttpVectorClient. spec= it so a method missing from
+    # HttpVectorClient (e.g. rename_collection, which HttpVectorClient
+    # does not implement) fails the mocked test too, instead of silently
+    # answering via a bare MagicMock.
+    return MagicMock(spec=HttpVectorClient)
 
 
 def _invoke(runner, mock_db, args, **kwargs):
@@ -353,8 +361,12 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     # Stub Catalog.docs_for_chashes to return the manifest mapping.
     # Catalog is lazy-imported inside reindex_cmd (`from nexus.catalog
     # import Catalog`); patch the source module's attribute so the
-    # lazy import resolves to our stub.
-    fake_cat = MagicMock()
+    # lazy import resolves to our stub. The autouse
+    # _pin_storage_backend_sqlite fixture pins the catalog to SQLite
+    # mode by default, so make_catalog_reader() really returns a local
+    # Catalog here (not HttpCatalogClient).
+    from nexus.catalog.catalog import Catalog
+    fake_cat = MagicMock(spec=Catalog)
     fake_cat.docs_for_chashes.return_value = {chash: ["ART-PHASE3"]}
 
     # RDR-146 P1.2: reindex reaches the catalog via make_catalog_reader().
@@ -575,8 +587,15 @@ def test_run_collection_postprocessing_does_not_pass_alias_through(monkeypatch):
 
     monkeypatch.setattr(index_mod, "_discover_taxonomy", _capture)
 
-    fake_t3 = MagicMock()
-    fake_t3._client = MagicMock()
+    # make_t3() returns the service-backed HttpVectorClient
+    # unconditionally in production since RDR-155 P4a.2 -- cloud creds /
+    # is_local_mode() no longer affect the handle type. This test's
+    # _discover_taxonomy is fully mocked (_capture, above) and never
+    # touches t3 beyond passing it through, so no ._client stub is
+    # needed (the "inert" branch code-review flagged: total_topics
+    # stays 0, so the cross-collection projection branch that reads
+    # getattr(t3, "_client", t3) is never reached either).
+    fake_t3 = MagicMock(spec=HttpVectorClient)
     monkeypatch.setattr(index_mod, "make_t3", lambda: fake_t3, raising=False)
     # make_t3 lives in nexus.db; patch at the import site used inside
     # run_collection_postprocessing.
@@ -744,7 +763,17 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path) -> None:
         ],
     )
 
-    fake_db = MagicMock()
+    # spec=T3Database + injected _client: pins the phantom pre-155 shape;
+    # convert with nexus-c9xr2. Despite env_creds setting cloud-shaped
+    # creds (which in production now means make_t3() hands back
+    # HttpVectorClient, not T3Database), reembed_cmd's dry-run path
+    # reaches `db._client.get_collection(...)` unconditionally
+    # (collection.py ~line 1011) -- a raw chromadb op HttpVectorClient
+    # deliberately does not expose. That is a live bug (nx collection
+    # re-embed crashes with AttributeError in every real invocation
+    # today); this fixture reproduces the shape the code currently
+    # requires rather than the shape make_t3() currently produces.
+    fake_db = MagicMock(spec=T3Database)
     fake_db._client = client
 
     result = _invoke(
@@ -777,7 +806,10 @@ def test_reembed_no_dry_run_writes_via_voyage(
         ],
     )
 
-    fake_db = MagicMock()
+    # spec=T3Database + injected _client: pins the phantom pre-155 shape;
+    # convert with nexus-c9xr2 (see test_reembed_dry_run_reports_count
+    # above for the full rationale).
+    fake_db = MagicMock(spec=T3Database)
     fake_db._client = client
 
     upsert_calls: list[dict] = []
@@ -818,7 +850,7 @@ def test_reembed_rejects_cce_model(runner, env_creds) -> None:
     """nexus-bw65: voyage-context-3 (CCE) is not supported; click.Choice
     rejects at parse time."""
     result = _invoke(
-        runner, MagicMock(),
+        runner, MagicMock(spec=T3Database),
         ["re-embed", "knowledge__any", "--to", "voyage-context-3"],
     )
     assert result.exit_code != 0
@@ -845,7 +877,10 @@ def test_reembed_skips_empty_documents(
         ],
     )
 
-    fake_db = MagicMock()
+    # spec=T3Database + injected _client: pins the phantom pre-155 shape;
+    # convert with nexus-c9xr2 (see test_reembed_dry_run_reports_count
+    # above for the full rationale).
+    fake_db = MagicMock(spec=T3Database)
     fake_db._client = client
 
     fake_embed_result = MagicMock()

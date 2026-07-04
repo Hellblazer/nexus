@@ -12,6 +12,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.commands.search_cmd import _parse_where
+from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.t3 import T3Database
 from nexus.scoring import apply_hybrid_scoring
 from nexus.search_engine import search_cross_corpus
@@ -34,7 +35,13 @@ def _make_result(
 
 
 def _mock_t3(collections: list[str] | None = None) -> MagicMock:
-    mock = MagicMock()
+    # Most call sites here run under cloud_env / is_local_mode=False (see
+    # the nexus-xbw0f reranker tests below), so the real _t3() would hand
+    # back an HttpVectorClient. spec= it so a method HttpVectorClient
+    # doesn't implement fails the mocked test too. Explicit attribute
+    # assignment (e.g. ``mock_t3._voyage_client = None``) still works
+    # under spec= (only get-access is restricted, not set-access).
+    mock = MagicMock(spec=HttpVectorClient)
     col_names = collections or ["knowledge__test"]
     mock.list_collections.return_value = [{"name": n} for n in col_names]
     return mock

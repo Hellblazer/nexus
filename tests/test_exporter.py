@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
+from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.t3 import T3Database
 from nexus.errors import EmbeddingModelMismatch, FormatVersionError, NexusError
 from nexus.exporter import (
@@ -548,7 +549,8 @@ class TestExportImportCLI:
     def test_export_mutual_exclusion(self, runner, env_creds, args):
         from unittest.mock import MagicMock, patch
         from nexus.cli import main
-        with patch("nexus.commands.store._t3", return_value=MagicMock()):
+        # env_creds sets cloud creds -> real _t3() would be HttpVectorClient.
+        with patch("nexus.commands.store._t3", return_value=MagicMock(spec=HttpVectorClient)):
             result = runner.invoke(main, args)
         assert result.exit_code != 0
 
@@ -561,7 +563,7 @@ class TestExportImportCLI:
         from nexus.cli import main
         dummy = tmp_path / "dummy.nxexp"
         dummy.write_bytes(b"not a real file")
-        with patch("nexus.commands.store._t3", return_value=MagicMock()):
+        with patch("nexus.commands.store._t3", return_value=MagicMock(spec=HttpVectorClient)):
             result = runner.invoke(main, ["store", "import", str(dummy), "--remap", remap_val])
         assert result.exit_code != 0
         output = result.output.lower()

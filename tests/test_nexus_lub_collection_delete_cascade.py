@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from nexus.db.http_vector_client import HttpVectorClient
+
 
 @pytest.fixture
 def seeded_taxonomy(tmp_path: Path):
@@ -252,7 +254,11 @@ class TestCollectionDeleteCommandCascades:
         db.taxonomy.conn.commit()
         db.close()
 
-        fake_t3 = MagicMock()
+        # make_t3()/_t3() return the service-backed HttpVectorClient
+        # unconditionally in production since RDR-155 P4a.2 -- cloud
+        # creds / is_local_mode() no longer affect the handle type.
+        # delete_collection is a direct call on both handles.
+        fake_t3 = MagicMock(spec=HttpVectorClient)
         fake_t3.delete_collection = MagicMock(
             side_effect=NotFoundError("Collection [docs__gone] does not exist")
         )
@@ -308,7 +314,11 @@ class TestCollectionDeleteCommandCascades:
         db.taxonomy.conn.commit()
         db.close()
 
-        fake_t3 = MagicMock()
+        # make_t3()/_t3() return the service-backed HttpVectorClient
+        # unconditionally in production since RDR-155 P4a.2 -- cloud
+        # creds / is_local_mode() no longer affect the handle type.
+        # delete_collection is a direct call on both handles.
+        fake_t3 = MagicMock(spec=HttpVectorClient)
         fake_t3.delete_collection = MagicMock()
 
         runner = CliRunner()
@@ -372,7 +382,11 @@ class TestChashIndexDeleteCascade:
                 chash="cc33", collection="code__stays",
             )
 
-        fake_t3 = MagicMock()
+        # make_t3()/_t3() return the service-backed HttpVectorClient
+        # unconditionally in production since RDR-155 P4a.2 -- cloud
+        # creds / is_local_mode() no longer affect the handle type.
+        # delete_collection is a direct call on both handles.
+        fake_t3 = MagicMock(spec=HttpVectorClient)
         fake_t3.delete_collection = MagicMock()
 
         runner = CliRunner()
@@ -417,7 +431,11 @@ class TestChashIndexDeleteCascade:
                 chash="aa11", collection="docs__orphan",
             )
 
-        fake_t3 = MagicMock()
+        # make_t3()/_t3() return the service-backed HttpVectorClient
+        # unconditionally in production since RDR-155 P4a.2 -- cloud
+        # creds / is_local_mode() no longer affect the handle type.
+        # delete_collection is a direct call on both handles.
+        fake_t3 = MagicMock(spec=HttpVectorClient)
         fake_t3.delete_collection = MagicMock(
             side_effect=NotFoundError(
                 "Collection [docs__orphan] does not exist",
@@ -459,7 +477,11 @@ class TestChashIndexDeleteCascade:
                     chash=f"h{i:02d}", collection="code__reported",
                 )
 
-        fake_t3 = MagicMock()
+        # make_t3()/_t3() return the service-backed HttpVectorClient
+        # unconditionally in production since RDR-155 P4a.2 -- cloud
+        # creds / is_local_mode() no longer affect the handle type.
+        # delete_collection is a direct call on both handles.
+        fake_t3 = MagicMock(spec=HttpVectorClient)
         fake_t3.delete_collection = MagicMock()
 
         runner = CliRunner()
@@ -510,7 +532,11 @@ class TestPipelineDeleteCascade:
         pdb.write_chunk("hB", 0, "b", "cid-b")
         pdb.create_pipeline("hC", "/c.pdf", "docs__keep")
 
-        fake_t3 = MagicMock()
+        # make_t3()/_t3() return the service-backed HttpVectorClient
+        # unconditionally in production since RDR-155 P4a.2 -- cloud
+        # creds / is_local_mode() no longer affect the handle type.
+        # delete_collection is a direct call on both handles.
+        fake_t3 = MagicMock(spec=HttpVectorClient)
         fake_t3.delete_collection = MagicMock()
 
         runner = CliRunner()
@@ -559,7 +585,11 @@ class TestPipelineDeleteCascade:
         pdb = PipelineDB(pipe_path)
         pdb.create_pipeline("orphan_h", "/o.pdf", "docs__gone")
 
-        fake_t3 = MagicMock()
+        # make_t3()/_t3() return the service-backed HttpVectorClient
+        # unconditionally in production since RDR-155 P4a.2 -- cloud
+        # creds / is_local_mode() no longer affect the handle type.
+        # delete_collection is a direct call on both handles.
+        fake_t3 = MagicMock(spec=HttpVectorClient)
         fake_t3.delete_collection = MagicMock(
             side_effect=NotFoundError("Collection [docs__gone] does not exist"),
         )

@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from nexus.config import TuningConfig, _tuning_from_dict, get_tuning_config, load_config
+from nexus.db.http_vector_client import HttpVectorClient
 
 _EXPECTED_DEFAULTS = {
     "vector_weight": 0.7, "frecency_weight": 0.3, "file_size_threshold": 30,
@@ -210,7 +211,12 @@ def test_search_cmd_passes_ripgrep_timeout(tmp_path, monkeypatch) -> None:
         captured.append(timeout)
         return []
 
-    mock_t3 = MagicMock()
+    # cloud-shaped creds are set above -> the real _t3() would hand back
+    # an HttpVectorClient (make_t3() is unconditional post-RDR-155
+    # P4a.2 regardless, but this test also matches is_local_mode()'s
+    # legacy heuristic). Mirrors the sibling test_search_cmd.py::_mock_t3
+    # helper's spec= fix.
+    mock_t3 = MagicMock(spec=HttpVectorClient)
     mock_t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
     with (
         patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
