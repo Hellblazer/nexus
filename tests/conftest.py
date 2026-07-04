@@ -649,6 +649,18 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # mode-dependent path executes ("string-literal-as-name" class).
     "tests/migration/test_driver.py::test_two_leg_composes_collections_and_dims",
     #
+    # nexus-gc2ze + nexus-c9xr2/u37lw wave (2026-07-04): all
+    # "string-literal-as-name" — a REAL HttpCatalogClient/HttpVectorClient
+    # over a FAKED transport; the voyage token appears only inside
+    # conformant collection-name strings used as opaque identifiers (the
+    # u37lw guard tests additionally assert the NAME-derived model parse,
+    # same rationale as collection_metadata above). No embedder runs; no
+    # mode-dependent path executes.
+    "tests/catalog/test_http_catalog_client.py::TestResolveChunk::test_resolve_chunk_returns_full_dict",
+    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_dry_run_service_mode_real_client",
+    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_cross_model_rejected_service_mode",
+    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_uses_verbatim_passthrough",
+    #
     # nexus-gilf2: the cross-model remap-target test asserts the driver derives
     # voyage target NAMES (voyage-code-3 / voyage-context-3) in cloud mode. Mode
     # is pinned explicitly by patching ``voyage_key_available`` (via the
