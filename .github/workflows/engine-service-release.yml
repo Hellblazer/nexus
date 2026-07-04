@@ -423,13 +423,36 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
-      - name: Build PG + pgvector bundle and package .txz
+      # nexus-m8au7: PG_VERSION + PGVECTOR_VERSION are pinned constants that
+      # rarely change across tags, yet every tag recompiled both from source
+      # (~10-20 min/arch). Cache the COMPILED PREFIX keyed on everything that
+      # determines its content: versions, arch, builder image, and the build
+      # script itself (the script does the macOS relocatability fixup — a
+      # script change MUST invalidate the cache, or a stale bundle would ship
+      # the exact 2026-07-01 dyld-abort class again). On a hit the compile is
+      # skipped; packaging, the relocation gate, signing, and upload still run
+      # per release, so the one-cosign-identity contract and per-release
+      # acquisition URLs are unchanged, and the relocation gate stays the
+      # safety net against a stale/poisoned cache entry.
+      # restore-ONLY (review finding): tag-scoped cache saves can never be
+      # restored (tags only read default-branch caches), so a save here is
+      # pure quota waste against the repo's 10GB budget and can evict the
+      # legit main-scoped entries. Only pg-bundle-cache-seed.yml saves.
+      - name: Restore compiled PG bundle cache
+        id: pg-bundle-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: bundle
+          key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+
+      - name: Build PG + pgvector bundle (cache miss only)
+        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
         env:
           MANYLINUX_IMAGE: ${{ matrix.target.image }}
         run: |
           set -euo pipefail
           bundle="$GITHUB_WORKSPACE/bundle"
-          mkdir -p "$bundle" dist
+          mkdir -p "$bundle"
           if [ -n "$MANYLINUX_IMAGE" ]; then
             # linux: build inside manylinux_2_28 so the binaries' glibc floor is
             # 2.28 (broad compatibility), exactly as ci.yml's CA-3 gate builds them.
@@ -445,6 +468,32 @@ jobs:
             # applies MACOSX_DEPLOYMENT_TARGET). GH macOS runners have no Docker.
             BUNDLE_PREFIX="$bundle" bash scripts/build_pg_bundle.sh
           fi
+
+      - name: Package .txz
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/bundle"
+          mkdir -p dist
+          # Cache-hit sanity: a restored prefix must actually contain the PG
+          # toolchain; an empty/partial restore fails loud here rather than
+          # shipping a hollow .txz (the relocation gate below would also catch
+          # it, but this points at the cache instead of at relocation).
+          if [ ! -x "$bundle/bin/initdb" ]; then
+            echo "::error::bundle/bin/initdb missing — cache restored a hollow prefix or the build did not run"
+            exit 1
+          fi
+          # nexus-u30zm (critique Critical): a cache hit skips the build
+          # script's verify_and_mark(), which is the only place contrib
+          # completeness was asserted — a partial restore that kept initdb
+          # and vector but lost pg_trgm would otherwise sign + ship broken
+          # (RDR-155 needs pg_trgm). Mirror verify_and_mark here.
+          sharedir="$("$bundle/bin/pg_config" --sharedir)"
+          for ctl in vector pg_trgm; do
+            if [ ! -f "$sharedir/extension/$ctl.control" ]; then
+              echo "::error::$ctl.control missing from bundle — contrib set incomplete (cache corruption or build regression)"
+              exit 1
+            fi
+          done
           # -C parent + basename preserves the relative bin/ lib/ share/ layout
           # relocation depends on (identical to ci.yml packaging).
           tar -cJf "dist/$ASSET.txz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
@@ -494,6 +543,10 @@ jobs:
           # bare "vector" this assertion originally (incorrectly) expected.
           "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -c \
             "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null
+          # nexus-u30zm: pg_trgm must LOAD, not merely exist on disk — the
+          # cache-hit path has no other executable proof of the contrib set.
+          "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -c \
+            "CREATE EXTENSION IF NOT EXISTS pg_trgm" >/dev/null
           out="$("$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -tAc \
             "SELECT extname FROM pg_extension WHERE extname='vector'")"
           if [ "$out" != "vector" ]; then
