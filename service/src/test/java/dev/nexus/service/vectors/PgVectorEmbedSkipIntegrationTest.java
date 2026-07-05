@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -443,6 +444,162 @@ class PgVectorEmbedSkipIntegrationTest {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
         assertThat(metas.get(0).get("v")).isEqualTo("3");
+    }
+
+    // ---------------------------------------------------------------------------
+    // RDR-181 review Gap 1: resolveNeedEmbedIdx's OWN inline fail-safe (not
+    // selectExistingChashesOrEmpty, which the production upsert path never calls)
+    // must actually engage on a real existence-check failure and still write the
+    // batch, embedding everything, never silently dropping the chunk.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void resolveNeedEmbedIdx_existenceSelectConnectionFails_failSafeEmbedsEverythingAndWrites() throws Exception {
+        String col = "code__embedskip-failsafe__voyage-code-3__v1";
+        String chash = "flsf1000000000000000000000000000";
+
+        // Fails only the FIRST getConnection() call on this DataSource instance —
+        // resolveNeedEmbedIdx's own tenantScope.withTenant call is the first DB
+        // access upsertChunksInternal makes (dimForCollection + dedup/sort above it
+        // are pure in-memory work), so this targets resolveNeedEmbedIdx's inline
+        // catch (RuntimeException) branch specifically, while leaving the LATER
+        // catalog_collections registration + chunk INSERT transactions (2nd/3rd
+        // getConnection() calls, against the same real Postgres) unaffected.
+        FailFirstConnectionDataSource flakyDs = new FailFirstConnectionDataSource(svcDs);
+        TenantScope flakyScope = new TenantScope(flakyDs);
+        CountingEmbedder failsafeEmbedder = new CountingEmbedder(1024);
+        PgVectorRepository failsafeRepo = new PgVectorRepository(flakyScope, failsafeEmbedder, failsafeEmbedder);
+
+        failsafeRepo.upsertChunks(TENANT_A, col, List.of(chash), List.of("failsafe text"),
+                List.of(Map.of("v", "1")));
+
+        assertThat(failsafeEmbedder.callCount())
+                .as("resolveNeedEmbedIdx's inline catch must fail-safe to embed-everything "
+                    + "(insertIdx=null) when its own existence-check connection fails, exactly "
+                    + "like selectExistingChashesOrEmpty's contract but on the REAL production path")
+                .isEqualTo(1);
+        assertThat(superuserCount(col))
+                .as("the chunk must still land in the DB — a failed existence check must never "
+                    + "be read as \"everything already has a vector\", which would silently drop it")
+                .isEqualTo(1L);
+
+        Map<String, Object> got = failsafeRepo.get(TENANT_A, col, List.of(chash), 10, 0);
+        @SuppressWarnings("unchecked")
+        List<String> ids = (List<String>) got.get("ids");
+        assertThat(ids).containsExactly(chash);
+    }
+
+    /**
+     * Delegating {@link DataSource} whose {@code getConnection()} throws on exactly
+     * the Nth call (default: the 1st) and delegates to a real {@link DataSource} for
+     * every other call — used to force a targeted failure inside a single
+     * {@code tenantScope.withTenant} transaction without breaking every other DB
+     * access a test method makes.
+     */
+    private static final class FailFirstConnectionDataSource implements DataSource {
+        private final DataSource delegate;
+        private final AtomicInteger calls = new AtomicInteger();
+
+        FailFirstConnectionDataSource(DataSource delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            if (calls.incrementAndGet() == 1) {
+                throw new SQLException("injected (test): existence-select connection failure");
+            }
+            return delegate.getConnection();
+        }
+
+        @Override
+        public Connection getConnection(String username, String password) throws SQLException {
+            return getConnection();
+        }
+
+        @Override
+        public java.io.PrintWriter getLogWriter() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void setLogWriter(java.io.PrintWriter out) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void setLoginTimeout(int seconds) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public int getLoginTimeout() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public <T> T unwrap(Class<T> iface) throws SQLException {
+            throw new SQLException("stub: unwrap not supported");
+        }
+
+        @Override
+        public boolean isWrapperFor(Class<?> iface) {
+            return false;
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // RDR-181 review Gap 2: every embed-skip test above uses a code__*__voyage-
+    // code-3__v1 collection (the batched-embedder path). RDR-181's own Gap 2 calls
+    // out the CCE (voyage-context-3, per-chunk sequential embedder — docs__/rdr__/
+    // knowledge__ prefixes) as the place this optimization matters MOST (sequential
+    // per-chunk embed cost), so prove the existence-partition + have-vector
+    // metadata-only path engages there too, not just under code__. PgVectorRepository
+    // itself is prefix-agnostic (dimForCollection dispatches on the MODEL segment
+    // only — voyage-code-3 and voyage-context-3 both resolve to dim 1024, per
+    // PgVectorRepositoryContractTest's COL_CTX_1024 fixture convention), so this
+    // reuses the class's existing repo/embedder wiring with a CCE-shaped name.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void upsertChunks_cceCollection_sameChashTwice_secondCallSkipsEmbed_metadataRefreshed() throws Exception {
+        String col = "knowledge__embedskip-cce__voyage-context-3__v1";
+        String chash = "cce10000000000000000000000000000";
+
+        int callsBefore = embedder.callCount();
+        repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("cce stable text"),
+                List.of(Map.of("frecency_score", "0.1")));
+        int callsAfterFirst = embedder.callCount();
+        assertThat(callsAfterFirst - callsBefore)
+                .as("first upsert of a brand-new chash under a CCE (voyage-context-3) collection must embed")
+                .isEqualTo(1);
+        String firstVector = superuserEmbedding(col, chash);
+
+        repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("cce stable text"),
+                List.of(Map.of("frecency_score", "0.9")));
+
+        assertThat(embedder.callCount())
+                .as("re-upserting the SAME chash under a CCE collection must ALSO skip the embedder — "
+                    + "the embed-skip optimization is not code__-specific")
+                .isEqualTo(callsAfterFirst);
+
+        String secondVector = superuserEmbedding(col, chash);
+        assertThat(secondVector)
+                .as("the stored embedding must be UNCHANGED under the CCE collection too")
+                .isEqualTo(firstVector);
+
+        Map<String, Object> got = repo.get(TENANT_A, col, List.of(chash), 10, 0);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
+        assertThat(metas).hasSize(1);
+        assertThat(metas.get(0).get("frecency_score"))
+                .as("metadata must be refreshed by the have-vector branch under a CCE collection too")
+                .isEqualTo("0.9");
     }
 
     // ---------------------------------------------------------------------------

@@ -218,6 +218,15 @@ public final class VectorHandler implements HttpHandler {
      * on the vector-passthrough branch below ({@code embeddings} supplied) — that
      * path already skips the existence check unconditionally.
      *
+     * <p>Server-side (Postgres/service-mode) only: this endpoint and
+     * {@link dev.nexus.service.vectors.PgVectorRepository} are the sole owners of
+     * the embed-skip optimization {@code force_re_embed} bypasses. The Python
+     * client's local/Chroma-mode path ({@code T3Database.upsert_chunks} /
+     * {@code upsert_chunks_with_embeddings}) accepts {@code force_re_embed} for
+     * signature parity with {@code HttpVectorClient} (callers duck-type against
+     * {@code IndexContext.db} regardless of mode) but treats it as a documented
+     * no-op — local mode has no server-side existence-partition to bypass.
+     *
      * <p>Response 200: {"upserted": N}
      */
     private void handleUpsertChunks(HttpExchange ex, String method) throws IOException {

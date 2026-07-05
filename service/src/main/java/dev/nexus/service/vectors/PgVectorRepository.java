@@ -2014,6 +2014,21 @@ public final class PgVectorRepository {
      * the have-vector path); treating an error as "absent" only costs one redundant
      * embed — exactly today's unconditional-embed behavior, never worse.
      *
+     * <p><b>Not on the production hot path.</b> {@link #resolveNeedEmbedIdx} (the
+     * method {@link #upsertChunksInternal} actually calls) does NOT call this
+     * method — it needs the existing chunk's stored TEXT alongside presence (for
+     * the content-divergence guard) and both the existence check and the
+     * have-vector UPDATE must share one transaction, so it inlines its own
+     * SELECT + its own {@code catch (RuntimeException)} fail-safe (returning
+     * {@code null}, meaning "embed everything") rather than composing this
+     * method's own separate transaction. This method exists as a public,
+     * independently-tested existence-only primitive (see
+     * {@code PgVectorEmbedSkipTest#selectExistingChashesOrEmpty_selectErrors_failSafeReturnsEmptySet}
+     * for its own fail-safe coverage, and
+     * {@code PgVectorEmbedSkipIntegrationTest#resolveNeedEmbedIdx_existenceSelectConnectionFails_failSafeEmbedsEverythingAndWrites}
+     * for {@code resolveNeedEmbedIdx}'s independent fail-safe branch) for callers
+     * that only need presence, not the full embed-skip transaction contract.
+     *
      * @return the subset of {@code chashes} known to exist, or an empty set (not a
      *         propagated exception) if the existence check itself failed
      */
@@ -2087,6 +2102,23 @@ public final class PgVectorRepository {
      * chunk_text} — RDR-181's skip is an optimization for the common case where
      * chash is genuinely content-derived, not a license to assume it always is;
      * this method never assumes chash-implies-content on the caller's behalf.
+     *
+     * <p><b>KNOWN, UNRESOLVED-WITH-CERTAINTY RISK (RDR-181 review, bead
+     * nexus-f0r8p.2/.4):</b> this method adds one extra connection checkout per
+     * {@code upsertChunksInternal} call (this transaction) on top of the
+     * catalog-registration transaction and the final INSERT transaction, all
+     * drawn from the SAME shared HikariCP pool. During bead .2's implementation,
+     * a full {@code mvn test} run showed 6 transient pool-exhaustion 503s in
+     * {@code ChashVectorConcurrencyTest} (a zero-5xx-tolerance stress test,
+     * POOL_SIZE=6, 12 threads) attributed to this extra checkout; 3 isolated
+     * reruns and a subsequent full-suite rerun were clean, and an independent
+     * code-review isolation rerun (66s) also did not reproduce it. Neither the
+     * one dirty run nor the clean reruns are strong evidence either way for a
+     * stress test built specifically to surface this failure class — treat this
+     * as an open risk, not a resolved one, when tuning pool size or investigating
+     * 503s under load. See T2 memory {@code nexus-f0r8p-pool-exhaustion-known-risk}
+     * (project "nexus") for the full writeup and the recommendation to rerun
+     * {@code ChashVectorConcurrencyTest} under load before cutting the engine tag.
      *
      * @return the finalized need-embed indices (original absentees, any have-vector
      *         chash whose stored text differs from the incoming text, plus any
