@@ -1371,6 +1371,36 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
 # 1. Existing tests that import and call _index_code_file/_index_prose_file
 #    directly continue to work unchanged.
 # 2. Tests that patch nexus.indexer._index_code_file or _index_prose_file
+#: Transient upsert HTTP statuses (gateway timeout / pool exhaustion) where a
+#: per-file DIRECT upsert (prose/PDF — code files are contained by the
+#: ChunkBatcher's file-atomic failure handling) should DEFER the file to the next
+#: run's staleness retry instead of propagating. Propagating instead (a) fails
+#: the whole run on one transient blip and (b) under concurrency wedges the run
+#: for up to the upsert timeout while run_file_loop waits on the sibling in-flight
+#: worker (nexus-7yfe6). Idempotent ON CONFLICT upsert → the deferred file
+#: re-uploads cleanly next run.
+_TRANSIENT_UPSERT_CODES = frozenset({502, 503, 504})
+
+
+def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
+    """Run per-file index ``fn``; on a TRANSIENT upsert 5xx (gateway/pool), log
+    and return 0 (file deferred to staleness) instead of propagating. Permanent
+    errors (4xx, transport, non-transient 5xx) still raise (nexus-7yfe6).
+    """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+
+    try:
+        return fn()
+    except VectorServiceError as exc:
+        if exc.code in _TRANSIENT_UPSERT_CODES:
+            _log.warning(
+                "index_file_transient_upsert_deferred",
+                file=str(file), code=exc.code, error=str(exc),
+            )
+            return 0
+        raise
+
+
 #    still intercept the calls from _run_index.
 #
 # Implementation delegates to the clean IndexContext-based API in the
@@ -2850,7 +2880,11 @@ def _run_index(
 
     def _index_one_prose(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
-        return _index_prose_file(
+        # nexus-7yfe6: contain a transient upsert 5xx (gateway/pool) — defer the
+        # file to staleness instead of failing (and, under concurrency, hanging)
+        # the whole run. Code files get this via the ChunkBatcher; prose/PDF take
+        # the direct upsert path, so they need it here.
+        return _contain_transient_upsert(lambda: _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
@@ -2861,7 +2895,7 @@ def _run_index(
             staleness_cache=docs_staleness,
             hooks=hooks,
             batcher=_batcher,
-        )
+        ), file)
 
     _files_written += run_file_loop(
         prose_files, _index_one_prose, concurrency=_concurrency,
@@ -2873,7 +2907,8 @@ def _run_index(
 
     def _index_one_pdf(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
-        return _index_pdf_file(
+        # nexus-7yfe6: same transient-upsert containment as prose (direct path).
+        return _contain_transient_upsert(lambda: _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
@@ -2885,7 +2920,7 @@ def _run_index(
             staleness_cache=docs_staleness,
             hooks=hooks,
             batcher=_batcher,
-        )
+        ), file)
 
     _files_written += run_file_loop(
         pdf_files, _index_one_pdf, concurrency=_concurrency,

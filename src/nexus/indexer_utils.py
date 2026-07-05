@@ -23,6 +23,16 @@ from nexus.retry import _chroma_with_retry
 
 _log = structlog.get_logger(__name__)
 
+#: Surface-a-slow-drain threshold (seconds) when draining in-flight workers after
+#: a concurrent index failure (nexus-7yfe6). This is an OBSERVABILITY bound, not a
+#: kill: Python threads can't be force-killed, so an in-flight upsert runs until
+#: its own socket timeout (600s for /v1/vectors/upsert-chunks). If the drain
+#: exceeds this threshold we WARN with the in-flight count so the run reads as
+#: "draining N slow workers" instead of a silent hang. The common transient-5xx
+#: case never reaches here — it's contained per-file upstream (see
+#: indexer._contain_transient_upsert).
+_FAILURE_DRAIN_TIMEOUT_S = 120.0
+
 # Patterns always ignored (mirrors indexer.DEFAULT_IGNORE).
 _DEFAULT_IGNORE: list[str] = [
     "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", ".git",
@@ -711,7 +721,25 @@ def run_file_loop(
         # dropped (critique finding, nexus-cfc72).
         for fut in not_done:
             fut.cancel()
-        wait(futures)
+        # nexus-7yfe6: SURFACE a slow drain (observability only — NOT a hard
+        # bound). Python threads can't be force-killed, and the harvest loop below
+        # calls fut.exception() which blocks until each in-flight future finishes,
+        # so the real wall-time bound on a genuine (non-transient) failure racing a
+        # wedged sibling remains that sibling's upsert socket timeout (600s at
+        # http_vector_client.py). This bounded wait exists only to emit an early
+        # WARNING with the in-flight count, so a slow drain reads as "draining N
+        # workers" rather than a silent hang. The reported incident does NOT reach
+        # here: a transient 5xx is contained per-file upstream
+        # (indexer._contain_transient_upsert), so it never propagates into this
+        # failure path. Truly bounding a fatal-error drain would require abandoning
+        # in-flight threads (shutdown(wait=False)) — deferred, see nexus-7yfe6 notes.
+        _still_running = wait(futures, timeout=_FAILURE_DRAIN_TIMEOUT_S).not_done
+        if _still_running:
+            _log.warning(
+                "index_failure_drain_slow",
+                in_flight=len(_still_running),
+                waited_s=_FAILURE_DRAIN_TIMEOUT_S,
+            )
         failures: list[tuple[Path, BaseException]] = []
         for (score, file), fut in zip(files, futures):
             if fut.cancelled():

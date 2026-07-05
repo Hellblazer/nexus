@@ -347,3 +347,47 @@ class TestLockedHookRegistry:
             pass
         locked.register_document(probe)
         assert probe in registry._document
+
+
+# ── bounded failure drain (nexus-7yfe6) ───────────────────────────────────────
+
+
+class TestFailureDrainWarning:
+    """run_file_loop emits an early WARNING when the post-failure drain is slow —
+    observability so a genuine failure racing a wedged sibling reads as
+    'draining N workers', not a silent hang. The drain is NOT a hard bound (the
+    harvest still blocks on in-flight futures); this pins the WARNING path."""
+
+    def _files(self, n: int):
+        return [(float(n - i), Path(f"/repo/f{i}.py")) for i in range(n)]
+
+    def test_slow_drain_emits_warning_and_still_raises(self, monkeypatch):
+        import nexus.indexer_utils as iu
+
+        # Tiny drain threshold so the sibling is "still running" when we sample.
+        monkeypatch.setattr(iu, "_FAILURE_DRAIN_TIMEOUT_S", 0.02)
+        warnings: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            iu._log, "warning",
+            lambda event, **kw: warnings.append((event, kw)),
+        )
+
+        started = threading.Event()
+
+        def index_one(file, score, timers):
+            if file.name == "f0.py":
+                started.wait(1.0)      # ensure the sibling is in-flight first
+                raise RuntimeError("boom")   # non-transient → real failure path
+            started.set()
+            time.sleep(0.3)            # still running past the 0.02s drain sample
+            return 1
+
+        with pytest.raises(RuntimeError, match="boom"):
+            iu.run_file_loop(
+                self._files(2), index_one, concurrency=2,
+                on_file=None, on_stage_timers=None,
+            )
+
+        assert any(ev == "index_failure_drain_slow" for ev, _ in warnings), (
+            f"expected index_failure_drain_slow warning; got {[e for e,_ in warnings]}"
+        )
