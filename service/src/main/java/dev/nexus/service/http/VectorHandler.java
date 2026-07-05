@@ -594,8 +594,12 @@ public final class VectorHandler implements HttpHandler {
                     "metadatas length " + metadatas.size() + " != ids length " + ids.size());
         }
 
-        repo.updateMetadata(tenant, collection, ids, metadatas);
-        HttpUtil.send(ex, 200, json(Map.of("updated", ids.size())));
+        // RDR-181 (bead nexus-f0r8p.2): updateMetadata now returns the actual
+        // affected-row count rather than void — report it verbatim instead of
+        // assuming every id existed (a stale/deleted id previously reported as
+        // "updated" with no row actually touched).
+        int updated = repo.updateMetadata(tenant, collection, ids, metadatas);
+        HttpUtil.send(ex, 200, json(Map.of("updated", updated)));
     }
 
     /**
