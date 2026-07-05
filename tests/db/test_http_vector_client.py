@@ -1334,10 +1334,10 @@ class TestGatewayTransientRetry:
 def test_per_collection_chunk_cap_values():
     from nexus.db.http_vector_client import per_collection_chunk_cap
 
-    assert per_collection_chunk_cap("docs__o__voyage-context-3__v1") == 64
-    assert per_collection_chunk_cap("knowledge__x__voyage-context-3__v1") == 64
-    assert per_collection_chunk_cap("rdr__x__voyage-context-3__v1") == 64
-    assert per_collection_chunk_cap("code__x__voyage-code-3__v1") == 300
+    assert per_collection_chunk_cap("docs__o__onnx-x__v1") == 64
+    assert per_collection_chunk_cap("knowledge__x__onnx-x__v1") == 64
+    assert per_collection_chunk_cap("rdr__x__onnx-x__v1") == 64
+    assert per_collection_chunk_cap("code__x__onnx-x__v1") == 300
     assert per_collection_chunk_cap("weird-no-prefix") == 300
 
 
@@ -1361,7 +1361,7 @@ class TestUpsertChunksPaging:
         docs = [f"d{i}" for i in range(150)]
         metas = [{"n": i} for i in range(150)]
         HttpVectorClient().upsert_chunks(
-            "docs__o__voyage-context-3__v1", ids, docs, metadatas=metas,
+            "docs__o__onnx-x__v1", ids, docs, metadatas=metas,
         )
         # 150 CCE chunks, cap 64 → 64 + 64 + 22
         assert [len(c["ids"]) for c in calls] == [64, 64, 22]
@@ -1380,7 +1380,7 @@ class TestUpsertChunksPaging:
         docs = [f"d{i}" for i in range(n)]
         embs = [[float(i)] for i in range(n)]
         HttpVectorClient().upsert_chunks(
-            "docs__o__voyage-context-3__v1", ids, docs, embeddings=embs,
+            "docs__o__onnx-x__v1", ids, docs, embeddings=embs,
         )
         assert [len(c["ids"]) for c in calls] == [64, 64, 2]
         # embeddings track the ids page-for-page
@@ -1395,7 +1395,7 @@ class TestUpsertChunksPaging:
         # 200 code chunks, cap 300 → one POST (batcher-shaped batches unchanged)
         ids = [f"{i:032x}" for i in range(200)]
         HttpVectorClient().upsert_chunks(
-            "code__o__voyage-code-3__v1", ids, [f"d{i}" for i in range(200)],
+            "code__o__onnx-x__v1", ids, [f"d{i}" for i in range(200)],
         )
         assert len(calls) == 1
         assert len(calls[0]["ids"]) == 200
