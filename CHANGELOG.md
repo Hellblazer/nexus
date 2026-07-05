@@ -27,6 +27,114 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`NX_UPSERT_SKIP_EXISTING`** — kept for one deprecation cycle as a shim. `=1` (the old "skip probe" behavior) is now a no-op; `=0` now means "force full re-embed" (see Changed, above). New code should use the client's `force_re_embed` parameter directly rather than this env var.
 
+## [6.3.1] - 2026-07-04
+
+The shakeout-follow-ups release (epic nexus-c0twp). Everything the 6.3.0 live
+shakeout deferred, plus everything the new safety nets caught while building
+them. Pins engine-service-v0.1.22 (cloud-gated 2026-07-04).
+
+### Fixed
+- `nx t3 gc` no longer crashes in service mode — local event-log emission is
+  skipped when the catalog is service-backed (live-shakeout finding #4).
+- `nx store put` no longer loses aspect extraction on fresh notes: the document
+  hook chain carries the catalog doc_id, not the T3 chunk id, so the engine's
+  FK accepts the enqueue (nexus-w8lg1); the enqueue-failure warning is one line
+  (traceback at debug).
+- `nx collection re-embed` and the chash backfill no longer crash on
+  `db._client` (absent from every production handle post-RDR-155); service-mode
+  re-embed is same-model-only via the verbatim vector passthrough, and a
+  cross-model `--to` fails loud with correct guidance instead of silently
+  re-embedding with the wrong model (nexus-c9xr2, nexus-u37lw, nexus-tcvpn).
+- `nx collection rename` rejects same-prefix renames whose embedding-model
+  segment differs — rename never re-embeds, so the vectors would silently stay
+  in the old model space (nexus-tcvpn).
+- HttpCatalogClient shape drifts vs the local catalog fixed across 9 methods:
+  `graph`/`graph_many` return typed entries/links (the service-mode links CLI
+  was silently broken), `collection_health_meta` no longer drops
+  `stale_source_ratio`, `validate_link` returns error lists,
+  `legacy_grandfathered` is a bool, `descendants` rows are normalized, and
+  chunk-address `resolve_chunk` works against the new engine route
+  (nexus-u26b4, nexus-gc2ze).
+
+### Added
+- Bounded per-file indexing concurrency: 2 workers by default when both the
+  vectors and catalog backends are the HTTP service; `NX_INDEX_CONCURRENCY`
+  overrides; hook chains and progress callbacks are serialized;
+  `--debug-timing` gains a `hooks_s` bucket (nexus-cfc72).
+- Mechanized runtime return-shape tripwire across the shared
+  Catalog/HttpCatalogClient surface (72 registered parity entries + audited
+  exclusions + a completeness gate), with a T3-backed leg for span/chash
+  resolution (nexus-8y1tm, nexus-oq0tk).
+
+### Changed
+- Warm `nx index repo` no longer pays ~1,400–2,800 serial catalog round-trips
+  per run: one owner-scoped list + local join in both the registration hook
+  and the frecency map, and unchanged files skip their per-file catalog
+  update entirely (nexus-dst5h).
+- Pinned engine advances to engine-service-v0.1.22: aspect-queue linkage
+  preserved across doc_id-less re-enqueues, `/resolve_chunk`, metadata
+  updates MERGE like the local catalog (previously a silent-replace data-loss
+  class in service mode), and full raw-SQL elimination in the engine
+  (nexus-nyout, nexus-gc2ze, nexus-ke45f, nexus-xtmtf, nexus-mzuj9).
+- Engine release workflow caches the compiled PG bundle across tags
+  (nexus-m8au7).
+
+
+## [6.3.0] - 2026-07-03
+
+The service-mode seam-closure release (epic nexus-h8rf6). The first systematic
+post-consolidation shakeout of the 6.2.0 client against the cloud engine found
+a family of Chroma-era client seams never ported to service mode; this release
+closes all of them, plus the engine hardening that came out of a whole-tree
+Java audit. Pins engine-service-v0.1.21 (deployed + cloud-gated 2026-07-03).
+
+### Fixed
+- Service mode: `nx store expire` no longer crashes — `HttpVectorClient.expire`
+  implemented ($ne-based TTL pre-filter; `is_expired` stays authoritative).
+- Service mode: `nx doctor --fix-paths` no longer crashes —
+  `update_source_path` ported (accumulate-before-update pagination).
+- Service mode: `nx t3 gc` / `prune-stale` no longer silently no-op —
+  `delete_by_chunk_ids`, `list_unique_source_paths`,
+  `list_chunks_with_metadata` ported.
+- Service mode: the doctor model-drift probe no longer reports `error` for
+  every collection — `collection_metadata` ported with full T3 parity.
+- Service mode: distance-threshold filtering was silently disabled on every
+  search (retired `t3._voyage_client` gate); the reranker fix's sibling.
+  Thresholds now apply iff not local mode and a Voyage key is configured.
+- Service mode: `nx store delete --title`, `nx store list`, `nx collection
+  info` crashes — `find_ids_by_title`, `batch_delete`, `list_store`,
+  `collection_info` ported.
+- Cross-corpus reranker silently skipped in service mode
+  (`get_voyage_client()` fallback, now memoized).
+- Incremental indexing restored in service mode: `docs_for_chashes` returns
+  the documented dict shape and sends 32-char chash prefixes on the wire
+  (staleness cache was building empty, degrading every run to a full
+  re-embed).
+- Taxonomy assign hook crashed on every document in service mode (numpy
+  array truthiness).
+- `NX_T1_ISOLATED=1` now wins over service-backend T1 routing; bare-CLI
+  `nx scratch` 401s explain the minted-token design with sanctioned paths.
+- `delete_by_chunk_ids` no longer reports 0 after a partially-successful
+  multi-batch delete.
+
+### Added
+- Chash-existence short-circuit before server-side embedding: full/forced
+  re-index runs skip the Voyage embed for chunks whose content-addressed
+  chash already exists (metadata still refreshed) — the dominant cost of
+  full-run service-mode indexing.
+- `HttpVectorClient` signature-parity pin extended to all newly ported
+  methods; real-client CLI tests (faked transport, no mocks) for the
+  service-mode command surface.
+
+### Changed
+- Pinned engine: engine-service-v0.1.21 — carries the catalog-registration
+  convoy fixes (registration in its own micro-transaction +
+  `CollectionRegistry` cache with eviction on delete/rename), per-DataSource
+  admission control (typed 503 on admission timeout), a unified typed
+  DB-error ladder across all HTTP handlers (SQLSTATE-23 -> 409, pool
+  exhaustion -> 503), an `updateDocument` column whitelist, and jOOQ DSL
+  conversions for the plain catalog DML.
+
 ## [6.2.0] - 2026-07-02
 
 The unattended-migration release (RDR-178). An incident-shaped migration gap
