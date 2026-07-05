@@ -1774,6 +1774,99 @@ public final class PgVectorRepository {
     }
 
     /**
+     * RDR-181 (bead nexus-f0r8p.1): PK-indexed existence lookup — which of the given
+     * chashes already have a stored row (and therefore a stored vector) in
+     * {@code (tenant, collection)}. This is the existence-partition primitive behind
+     * the embed-skip design (a later bead wires the partition into
+     * {@link #upsertChunksInternal}; this method only answers "which chashes are
+     * already present").
+     *
+     * <p>Keys on {@code (collection, chash)} exactly like {@link #delete} and
+     * {@link #count} — the same {@code PRIMARY KEY (tenant_id, collection, chash)}
+     * the ON CONFLICT target uses (RDR-181 Research Findings), so a batch
+     * {@code chash = ANY(?)} over a few hundred keys is a millisecond PK-index
+     * lookup. No explicit {@code tenant_id} predicate — RLS scopes the visible rows,
+     * the same trust boundary {@link #delete} / {@link #count} already rely on.
+     *
+     * <p>SQL errors propagate as a {@link RuntimeException} (via
+     * {@link TenantScope#withTenant}) — the fail-safe (a SELECT error must never be
+     * read as "everything exists", which would silently skip embedding a genuinely
+     * new chunk) lives one layer up in {@link #selectExistingChashesOrEmpty}, not
+     * here.
+     *
+     * @param tenant     tenant principal for RLS scoping
+     * @param collection four-segment conformant collection name (drives dim dispatch)
+     * @param chashes    candidate chunk natural IDs to probe for existence
+     * @return the subset of {@code chashes} that already have a stored row; empty
+     *         (never null) when {@code chashes} is null or empty — no DB round-trip
+     *         is made in that case
+     */
+    public Set<String> selectExistingChashes(String tenant, String collection,
+                                              List<String> chashes) {
+        if (chashes == null || chashes.isEmpty()) {
+            return Set.of();
+        }
+        int dim = dimForCollection(collection);
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        return tenantScope.withTenant(tenant, ctx ->
+            new HashSet<>(ctx.select(ch.chash())
+                             .from(ch.table())
+                             .where(ch.collection().eq(collection).and(ch.chash().in(chashes)))
+                             .fetch(ch.chash())));
+    }
+
+    /**
+     * Fail-safe wrapper over {@link #selectExistingChashes} (RDR-181): a SELECT
+     * error is treated as "nothing exists" — never as "everything exists". The
+     * distinction is load-bearing: mistaking an indeterminate result for "present"
+     * would silently skip embedding a genuinely new chunk (permanent data loss on
+     * the have-vector path); treating an error as "absent" only costs one redundant
+     * embed — exactly today's unconditional-embed behavior, never worse.
+     *
+     * @return the subset of {@code chashes} known to exist, or an empty set (not a
+     *         propagated exception) if the existence check itself failed
+     */
+    public Set<String> selectExistingChashesOrEmpty(String tenant, String collection,
+                                                      List<String> chashes) {
+        try {
+            return selectExistingChashes(tenant, collection, chashes);
+        } catch (RuntimeException e) {
+            log.warn("event=existence_select_failed collection={} count={} fail_safe=embed_all err={}",
+                collection, chashes == null ? 0 : chashes.size(), e.toString());
+            return Set.of();
+        }
+    }
+
+    /**
+     * Result of {@link #partitionByExistence} — indices (not chashes) into the
+     * caller's original batch, so a caller can slice its aligned ids/documents/
+     * metadatas lists in lockstep (RDR-181).
+     */
+    public record ExistencePartition(List<Integer> needEmbedIdx, List<Integer> haveVectorIdx) {}
+
+    /**
+     * Pure partition of a chash batch into need-embed vs have-vector indices
+     * (RDR-181), given the set of chashes {@link #selectExistingChashesOrEmpty}
+     * found present. No DB dependency — deliberately kept separate from the
+     * (Testcontainers-only) existence SELECT so the partition logic itself has a
+     * fast, hermetic unit test.
+     *
+     * @param chashes the batch's chashes, in order
+     * @param present chashes known to already have a stored row (from
+     *                {@link #selectExistingChashesOrEmpty})
+     * @return the partition: indices into {@code chashes} needing embed vs already
+     *         having a stored vector
+     */
+    public static ExistencePartition partitionByExistence(List<String> chashes, Set<String> present) {
+        List<Integer> need = new ArrayList<>();
+        List<Integer> have = new ArrayList<>();
+        for (int i = 0; i < chashes.size(); i++) {
+            if (present.contains(chashes.get(i))) have.add(i); else need.add(i);
+        }
+        return new ExistencePartition(need, have);
+    }
+
+    /**
      * RDR-108 manifest join: resolve a catalog document's chunks in-database via
      * {@code catalog_documents.tumbler -> catalog_document_chunks(collection, chash) ->
      * chunks_<dim>}, ordered by manifest {@code position}.
