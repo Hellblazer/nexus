@@ -921,6 +921,8 @@ class T3Database:
         ids: list[str],
         documents: list[str],
         metadatas: list[dict],
+        *,
+        force_re_embed: bool = False,
     ) -> None:
         """Upsert a batch of pre-chunked documents into *collection*.
 
@@ -933,6 +935,15 @@ class T3Database:
         canonical write path) already enforce conformant naming; this bulk
         writer is also called by import / migration verbs that legitimately
         operate on pre-existing legacy collections.
+
+        ``force_re_embed`` (RDR-181 §Approach step 3): accepted for signature
+        parity with :class:`~nexus.db.http_vector_client.HttpVectorClient`
+        (the two are duck-typed drop-ins at call sites — see
+        ``nexus.index_context.IndexContext.db``). It is a no-op HERE: the
+        RDR-181 server-side existence-partition embed-skip lives entirely in
+        ``PgVectorRepository`` (Postgres/service-mode engine); local Chroma
+        mode has no such skip to bypass — ``col.upsert()`` always re-embeds
+        via the collection's own embedding function regardless of this flag.
         """
         for doc_id, doc, meta in zip(ids, documents, metadatas):
             self._validate_record(id=doc_id, document=doc, embedding=None, metadata=meta)
@@ -946,6 +957,8 @@ class T3Database:
         documents: list[str],
         embeddings: list[list[float]],
         metadatas: list[dict],
+        *,
+        force_re_embed: bool = False,
     ) -> None:
         """Upsert chunks with pre-computed embeddings (bypasses ChromaDB's EF).
 
@@ -960,7 +973,9 @@ class T3Database:
         Note: Per-record quota validation is intentionally skipped — callers are
         responsible for compliance (source data, e.g. from migration, is presumed valid).
 
-        See ``upsert_chunks`` for why ``strict=False`` here.
+        See ``upsert_chunks`` for why ``strict=False`` here, and for why
+        ``force_re_embed`` is accepted-but-no-op in local/Chroma mode
+        (RDR-181 — the embed-skip it bypasses is service-mode-only).
         """
         col = self.get_or_create_collection(collection_name, strict=False)
         self._write_batch(col, collection_name, ids, documents, metadatas, embeddings=embeddings)

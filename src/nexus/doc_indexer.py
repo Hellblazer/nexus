@@ -552,6 +552,8 @@ def _upsert_skip_reembed(
     documents: list[str],
     embeddings: list,
     metadatas: list[dict],
+    *,
+    force: bool = False,
 ) -> int:
     """Upsert chunks, short-circuiting server-side re-embedding of known chashes.
 
@@ -572,6 +574,16 @@ def _upsert_skip_reembed(
     (or a db shape without ``existing_ids``) degrades to the full upsert,
     i.e. exactly the pre-optimization behavior.
 
+    ``force`` (RDR-181 §Approach step 3): when True, this function's OWN
+    client-side existence probe (the ``nexus-h8rf6.4`` optimization above,
+    independent of and predating the RDR-181 server-side embed-skip) is
+    bypassed entirely — every chunk is sent through
+    ``upsert_chunks_with_embeddings`` with ``force_re_embed=True`` so the
+    server also skips its existence-partition and re-embeds unconditionally.
+    Without this, a ``--force`` reindex would still take the client-side
+    metadata-only-update branch for unchanged chashes below, silently
+    defeating the caller's intent to force a full re-embed.
+
     Returns the number of chunks actually sent down the embed path.
     """
     from nexus.db import http_vector_client as _hvc  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
@@ -580,6 +592,12 @@ def _upsert_skip_reembed(
         return 0
     if not _hvc.is_vector_service_mode():
         db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+        return len(ids)
+    if force:
+        db.upsert_chunks_with_embeddings(
+            collection_name, ids, documents, embeddings, metadatas,
+            force_re_embed=True,
+        )
         return len(ids)
     present: set[str] = set()
     try:
@@ -792,7 +810,7 @@ def _index_document(
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
-    _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas)
+    _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas, force=force)
 
     # Post-store hook chains (RDR-095). Both single-doc and batch chains
     # fire from every storage event; the per-doc loop covers single-shape
@@ -873,6 +891,7 @@ def _index_pdf_incremental(
     embed_fn: EmbedFn | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     hooks: "HookRegistry | None" = None,
+    force: bool = False,
 ) -> int:
     """Embed and upsert chunks in batches with checkpoint support.
 
@@ -882,6 +901,11 @@ def _index_pdf_incremental(
 
     The full document has already been extracted and chunked — this function
     only handles the embed → upsert → checkpoint loop.
+
+    ``force`` (RDR-181 §Approach step 3) is forwarded to
+    :func:`_upsert_skip_reembed` per batch so a ``--force`` reindex reaches
+    the server's ``forceReEmbed`` escape here too, not just the small-document
+    all-at-once path.
 
     Returns the total number of chunks indexed.
     """
@@ -965,7 +989,7 @@ def _index_pdf_incremental(
                 m["embedding_model"] = actual_model
 
         # Upsert (nexus-h8rf6.4: known chashes skip the server-side embed)
-        _upsert_skip_reembed(t3, collection_name, batch_ids, batch_docs, embeddings, batch_metas)
+        _upsert_skip_reembed(t3, collection_name, batch_ids, batch_docs, embeddings, batch_metas, force=force)
 
         # RDR-108 Phase 3: inject the global chunk_index per row before
         # firing the batch chain. ``batch_metas`` came from
@@ -1462,6 +1486,7 @@ def index_pdf(
         count = _index_pdf_incremental(
             pdf_path, corpus, prepared, content_hash, col_name, db,
             embed_fn=embed_fn, on_progress=on_progress, hooks=hooks,
+            force=force,
         )
         metadatas = [p[2] for p in prepared]
         _register_in_catalog(metadatas, len(metadatas))
@@ -1512,7 +1537,7 @@ def index_pdf(
         for m in metadatas_list:
             m["embedding_model"] = actual_model
     # nexus-h8rf6.4: known chashes skip the server-side embed.
-    _upsert_skip_reembed(db, col_name, ids, documents, embeddings, metadatas_list)
+    _upsert_skip_reembed(db, col_name, ids, documents, embeddings, metadatas_list, force=force)
 
     # Post-store hook chains (RDR-095). Both single-doc and batch chains
     # fire from every storage event; the per-doc loop covers single-shape

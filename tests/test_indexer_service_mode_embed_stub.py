@@ -17,6 +17,7 @@ the http client ignores.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -28,7 +29,8 @@ class _RecordingDb:
         self.upserts: list[dict] = []
 
     def upsert_chunks_with_embeddings(
-        self, collection_name, ids, documents, embeddings, metadatas
+        self, collection_name, ids, documents, embeddings, metadatas,
+        *, force_re_embed: bool = False,
     ) -> None:
         self.upserts.append({
             "collection_name": collection_name,
@@ -36,6 +38,7 @@ class _RecordingDb:
             "documents": documents,
             "embeddings": embeddings,
             "metadatas": metadatas,
+            "force_re_embed": force_re_embed,
         })
 
 
@@ -52,9 +55,20 @@ def _forbidden_embed_with_fallback(*a, **k):
     )
 
 
-def _make_ctx(tmp_path: Path, db: _RecordingDb, corpus: str, model: str) -> IndexContext:
+def _make_col() -> MagicMock:
+    # force=False exercises the real staleness check (check_staleness ->
+    # col.get roundtrip when no staleness_cache is supplied) — empty
+    # metadatas means "not stale", so the file still indexes.
+    col = MagicMock()
+    col.get.return_value = {"metadatas": [], "ids": []}
+    return col
+
+
+def _make_ctx(
+    tmp_path: Path, db: _RecordingDb, corpus: str, model: str, *, force: bool = True,
+) -> IndexContext:
     return IndexContext(
-        col=object(),
+        col=_make_col(),
         db=db,
         voyage_key="key-present-but-must-not-be-used",
         voyage_client=_ForbiddenVoyageClient(),
@@ -63,7 +77,7 @@ def _make_ctx(tmp_path: Path, db: _RecordingDb, corpus: str, model: str) -> Inde
         embedding_model=model,
         git_meta={},
         now_iso="2026-06-11T00:00:00+00:00",
-        force=True,  # bypass staleness — no col roundtrip
+        force=force,  # bypass staleness — no col roundtrip
     )
 
 
@@ -99,6 +113,28 @@ def test_prose_indexer_service_mode_skips_client_embed(tmp_path, monkeypatch):
     assert all(
         m.get("embedding_model") == "minilm-l6-v2-384" for m in up["metadatas"]
     )
+    # RDR-181 §Approach step 3: ctx.force=True must reach force_re_embed on
+    # the upsert call — the plumbing gap this test file's --force ctx was
+    # already exercising for the embed-stub, now also proven for the
+    # forceReEmbed escape.
+    assert up["force_re_embed"] is True
+
+
+def test_prose_indexer_force_false_does_not_set_force_re_embed(tmp_path, monkeypatch):
+    from nexus.prose_indexer import index_prose_file
+
+    f = tmp_path / "note2.md"
+    f.write_text("# Title\n\nSome more prose content long enough to chunk.\n")
+    db = _RecordingDb()
+    ctx = _make_ctx(
+        tmp_path, db, "rdr__t__minilm-l6-v2-384__v1", "minilm-l6-v2-384", force=False,
+    )
+
+    count = index_prose_file(ctx, f)
+
+    assert count >= 1
+    assert len(db.upserts) == 1
+    assert db.upserts[0]["force_re_embed"] is False
 
 
 def test_code_indexer_service_mode_skips_client_embed(tmp_path, monkeypatch):
@@ -118,3 +154,24 @@ def test_code_indexer_service_mode_skips_client_embed(tmp_path, monkeypatch):
     up = db.upserts[0]
     assert len(up["embeddings"]) == len(up["ids"])
     assert all(e == [] for e in up["embeddings"])
+    # RDR-181 §Approach step 3: --force must reach force_re_embed=True.
+    assert up["force_re_embed"] is True
+
+
+def test_code_indexer_force_false_does_not_set_force_re_embed(tmp_path, monkeypatch):
+    from nexus.code_indexer import index_code_file
+
+    f = tmp_path / "mod2.py"
+    f.write_text(
+        "def gamma():\n    return 3\n\n\ndef delta():\n    return 4\n"
+    )
+    db = _RecordingDb()
+    ctx = _make_ctx(
+        tmp_path, db, "code__t__minilm-l6-v2-384__v1", "minilm-l6-v2-384", force=False,
+    )
+
+    count = index_code_file(ctx, f)
+
+    assert count >= 1
+    assert len(db.upserts) == 1
+    assert db.upserts[0]["force_re_embed"] is False

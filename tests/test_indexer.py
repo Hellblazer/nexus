@@ -48,7 +48,7 @@ def _tracking_db():
         if name not in cols:
             c = MagicMock(); c.get.return_value = {"metadatas": [], "ids": []}; cols[name] = c
         return cols[name]
-    def cap(collection_name, ids, documents, embeddings, metadatas):
+    def cap(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False):
         ups.setdefault(collection_name, []).extend(metadatas)
     db = MagicMock()
     db.get_or_create_collection.side_effect = goc

@@ -727,6 +727,8 @@ class HttpVectorClient:
         documents: list[str],
         embeddings: list[list[float]],
         metadatas: list[dict] | None = None,
+        *,
+        force_re_embed: bool = False,
     ) -> None:
         """Server-side embed path: forward chunk text, ignore caller's embeddings.
 
@@ -739,9 +741,17 @@ class HttpVectorClient:
         ``T3Database.upsert_chunks_with_embeddings`` so callers using the kwarg
         form (code_indexer.py:470, prose_indexer.py:233, exporter.py:431,448)
         don't get a TypeError (nexus-7zuzz).
+
+        ``force_re_embed`` (RDR-181 §Approach step 3): forwarded verbatim to
+        :meth:`upsert_chunks` so the indexer's ``--force`` path reaches the
+        server's ``forceReEmbed`` escape (bypass the existence-partition,
+        re-embed every chunk in the batch) — closes the plumbing gap where
+        beads .3/.5 wired the engine and client kwarg but no production
+        caller ever set it.
         """
         self.upsert_chunks(
-            collection_name, ids, documents, metadatas=metadatas
+            collection_name, ids, documents, metadatas=metadatas,
+            force_re_embed=force_re_embed,
         )
 
     def put(

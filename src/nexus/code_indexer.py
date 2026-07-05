@@ -516,6 +516,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             documents=documents,
             embeddings=embeddings,
             metadatas=metadatas,
+            force_re_embed=ctx.force,
         )
 
     with _stage("hooks"):

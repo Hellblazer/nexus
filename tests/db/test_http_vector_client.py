@@ -1278,6 +1278,24 @@ class TestForceReEmbed:
         client.upsert_chunks("col", ["a"], ["ta"])
         assert "force_re_embed" not in calls[0][1]
 
+    def test_upsert_chunks_with_embeddings_forwards_force_re_embed_true(self, monkeypatch):
+        """The plumbing gap this closes: every production indexer call site
+        goes through upsert_chunks_with_embeddings (Seam B — the caller's
+        embeddings are discarded), NOT upsert_chunks directly. Bead .3/.5
+        wired force_re_embed onto upsert_chunks's wire body but
+        upsert_chunks_with_embeddings never forwarded it, so no production
+        --force reindex could ever reach the server's forceReEmbed escape."""
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks_with_embeddings(
+            "col", ["a"], ["ta"], [[0.1]], force_re_embed=True,
+        )
+        assert calls[0][1]["force_re_embed"] is True
+
+    def test_upsert_chunks_with_embeddings_default_omits_field(self, monkeypatch):
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks_with_embeddings("col", ["a"], ["ta"], [[0.1]])
+        assert "force_re_embed" not in calls[0][1]
+
 
 class TestServiceModeDefault:
     """nexus-tawx0: post-RDR-155 P4a.2, make_t3() returns HttpVectorClient

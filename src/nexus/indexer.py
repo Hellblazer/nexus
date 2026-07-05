@@ -1766,6 +1766,7 @@ def _index_pdf_file(
             documents=documents,
             embeddings=embeddings,
             metadatas=metadatas,
+            force_re_embed=force,
         )
 
         # Post-store hook chains (RDR-095). Both single-doc and batch
@@ -2833,12 +2834,18 @@ def _run_index(
         from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
 
         def _batch_flush(collection: str, _ids: list, _docs: list, _metas: list) -> None:
+            # RDR-181 §Approach step 3: force_re_embed closes over the
+            # enclosing _run_index's ``force`` (constant for the whole
+            # run, like ``db`` above) so ``--force`` reaches the server's
+            # forceReEmbed escape for the batched flush path too, not
+            # just the per-file fallback below.
             db.upsert_chunks_with_embeddings(
                 collection_name=collection,
                 ids=_ids,
                 documents=_docs,
                 embeddings=[[] for _ in _ids],  # Seam B: server embeds
                 metadatas=_metas,
+                force_re_embed=force,
             )
 
         _hook_seconds = {"file": 0.0, "flush": 0.0}

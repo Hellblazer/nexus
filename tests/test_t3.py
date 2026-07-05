@@ -745,6 +745,22 @@ def test_upsert_chunks_calls_col_upsert(mock_db):
     )
 
 
+def test_upsert_chunks_force_re_embed_is_local_noop(mock_db):
+    """RDR-181 §Approach step 3: same signature-parity no-op as
+    upsert_chunks_with_embeddings — see that test's docstring."""
+    db, mock_col, _ = mock_db
+    db.upsert_chunks(
+        collection="code__myrepo", ids=["id-1"],
+        documents=["chunk one"],
+        metadatas=[{"title": "f.py:1-10"}],
+        force_re_embed=True,
+    )
+    mock_col.upsert.assert_called_once_with(
+        ids=["id-1"], documents=["chunk one"],
+        metadatas=[{"title": "f.py:1-10", "content_type": "code"}],
+    )
+
+
 def test_upsert_chunks_passes_all_metadata_fields(mock_db):
     """Canonical schema fields (nexus-40t) survive the normalize pass;
     ``indexed_at`` is now in ALLOWED_TOP_LEVEL (replaces dropped
@@ -1037,6 +1053,28 @@ def test_upsert_chunks_with_embeddings_stores(mock_db):
         {"page_number": 1, "content_type": "prose"},
         {"page_number": 2, "content_type": "prose"},
     ]
+    mock_col.upsert.assert_called_once_with(
+        ids=ids, documents=docs, embeddings=embeddings, metadatas=expected_metas,
+    )
+
+
+def test_upsert_chunks_with_embeddings_force_re_embed_is_local_noop(mock_db):
+    """RDR-181 §Approach step 3: force_re_embed is accepted for signature
+    parity with HttpVectorClient (indexer call sites are duck-typed across
+    both — see nexus.index_context.IndexContext.db) but is a no-op in local
+    Chroma mode: the server-side existence-partition it bypasses lives only
+    in PgVectorRepository (service mode). The write must be byte-identical
+    to the no-kwarg call — no TypeError, no behavior change."""
+    db, mock_col, _ = mock_db
+    embeddings = [[0.1, 0.2, 0.3]]
+    ids = ["chunk-1"]
+    docs = ["first chunk text"]
+    metas = [{"page_number": 1}]
+    db.upsert_chunks_with_embeddings(
+        collection_name="docs__corpus", ids=ids, documents=docs,
+        embeddings=embeddings, metadatas=metas, force_re_embed=True,
+    )
+    expected_metas = [{"page_number": 1, "content_type": "prose"}]
     mock_col.upsert.assert_called_once_with(
         ids=ids, documents=docs, embeddings=embeddings, metadatas=expected_metas,
     )

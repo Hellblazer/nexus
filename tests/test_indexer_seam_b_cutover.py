@@ -122,6 +122,119 @@ def test_run_index_service_mode_skips_voyageai_client(tmp_path, monkeypatch):
         )
 
 
+def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
+    """RDR-181 §Approach step 3: the ChunkBatcher flush closure defined
+    inside _run_index (the batched cross-file write path for code/prose/pdf
+    chunks, duoak 2C) must forward --force to force_re_embed on the
+    HttpVectorClient upsert. Without this, a forced reindex whose chunks
+    land via the shared batcher (rather than the per-file oversize-fallback
+    path) would silently keep the server-side embed-skip — the same gap
+    the per-file fallback fix closes, but for the dominant batched path.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "hello.py").write_text("x = 1\n")
+    reg = _reg()
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+    monkeypatch.setenv("CHROMA_API_KEY", "fake")
+
+    db = MagicMock(spec=HttpVectorClient)
+    captured: dict = {}
+
+    class _CapturingBatcher:
+        def __init__(self, *, flush, **_kw):
+            captured["flush"] = flush
+
+        def add(self, *_a, **_kw):
+            return False  # never staged — the per-file indexers are stubbed anyway
+
+        def drain(self) -> None:
+            pass
+
+        @property
+        def failed_files(self) -> dict:
+            return {}
+
+        @property
+        def stats(self) -> dict:
+            return {"flushes": 0.0, "flush_seconds": 0.0}
+
+    with _service_mode_patches(db), \
+         patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
+        _run_index(repo, reg, force=True)
+
+    assert "flush" in captured, (
+        "ChunkBatcher must be constructed when db is an HttpVectorClient"
+    )
+    captured["flush"]("code__repo__voyage-code-3__v1", ["id1"], ["doc1"], [{"m": 1}])
+    db.upsert_chunks_with_embeddings.assert_called_once_with(
+        collection_name="code__repo__voyage-code-3__v1",
+        ids=["id1"], documents=["doc1"],
+        embeddings=[[]],
+        metadatas=[{"m": 1}],
+        force_re_embed=True,
+    )
+
+
+def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkeypatch):
+    """Mirror of the above with force=False (the common re-index case):
+    the flush closure must still pass force_re_embed=False explicitly
+    (not force_re_embed missing) — the callee treats both the same, but
+    the closure's own contract is to forward whatever --force resolved to."""
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "hello.py").write_text("x = 1\n")
+    reg = _reg()
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+    monkeypatch.setenv("CHROMA_API_KEY", "fake")
+
+    db = MagicMock(spec=HttpVectorClient)
+    captured: dict = {}
+
+    class _CapturingBatcher:
+        def __init__(self, *, flush, **_kw):
+            captured["flush"] = flush
+
+        def add(self, *_a, **_kw):
+            return False
+
+        def drain(self) -> None:
+            pass
+
+        @property
+        def failed_files(self) -> dict:
+            return {}
+
+        @property
+        def stats(self) -> dict:
+            return {"flushes": 0.0, "flush_seconds": 0.0}
+
+    with _service_mode_patches(db), \
+         patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
+        _run_index(repo, reg, force=False)
+
+    captured["flush"]("code__repo__voyage-code-3__v1", ["id1"], ["doc1"], [{"m": 1}])
+    db.upsert_chunks_with_embeddings.assert_called_once_with(
+        collection_name="code__repo__voyage-code-3__v1",
+        ids=["id1"], documents=["doc1"],
+        embeddings=[[]],
+        metadatas=[{"m": 1}],
+        force_re_embed=False,
+    )
+
+
 def test_run_index_service_mode_uses_get_t3_not_make_t3(tmp_path, monkeypatch):
     """In service mode, _run_index must use mcp_infra.get_t3() to obtain the
     T3 handle rather than make_t3() — so HttpVectorClient is the write target."""
