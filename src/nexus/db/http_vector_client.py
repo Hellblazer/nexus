@@ -197,6 +197,45 @@ def _request_once(
 _GATEWAY_RETRY_SLEEPS: tuple[float, ...] = (2.0, 5.0, 10.0)
 _GATEWAY_RETRY_CODES = frozenset({502, 503, 504})
 
+#: Per-collection chunk cap for a SINGLE /v1/vectors/upsert-chunks POST
+#: (nexus-nf3n7). CCE collections (docs/knowledge/rdr — voyage-context-3) embed
+#: far slower server-side, so a large batch can exceed the control-plane
+#: requestTimeout (30s time-to-response-start) and 504; code (voyage-code-3)
+#: sustains the full service write cap. :meth:`HttpVectorClient.upsert_chunks`
+#: pages any oversize id set into <=cap sub-POSTs, so this is the ONE choke point
+#: every caller inherits — the ChunkBatcher's flush AND the oversize per-file
+#: fallbacks in prose_indexer / code_indexer / doc_indexer, plus exporter,
+#: pipeline, reindex and consolidation. Values match the ChunkBatcher's own
+#: per-collection flush cap (live 504 at 172 CCE chunks, 2026-07-04).
+_CCE_UPSERT_CHUNK_CAP = 64
+_CODE_UPSERT_CHUNK_CAP = 300
+_CCE_COLLECTION_PREFIXES = frozenset({"docs", "knowledge", "rdr"})
+
+
+def per_collection_chunk_cap(collection: str) -> int:
+    """Max chunks per single ``/v1/vectors/upsert-chunks`` POST for *collection*.
+
+    This is ONE constraint — the largest batch whose server-side embed + write +
+    HNSW completes within the control-plane 30s requestTimeout (nexus-nf3n7). It
+    is DELIBERATELY shared (not two independent knobs) by:
+      * the ChunkBatcher flush cap (``indexer._cap_for`` delegates here): the
+        batcher accumulates then flushes <=cap chunks, i.e. each flush is one POST
+        of <=cap; and
+      * this client's oversize paging: :meth:`HttpVectorClient.upsert_chunks`
+        pages a too-large id set into <=cap sub-POSTs.
+    Both emit POSTs bounded by the SAME timeout, so tuning this value changes both
+    BY DESIGN — and any change must be validated against the CP timeout, never
+    raised for cross-file batching throughput alone.
+
+    Value: 64 for CCE (docs/knowledge/rdr — voyage-context-3, slow server-side
+    embed; live 504 at 172 CCE chunks 2026-07-04) is the CONSERVATIVE proven-safe
+    cap. conexus's root-cause relay suggested ~128 for the direct path pending a
+    re-gate p99 — a throughput optimization tracked in nexus-o1mbu / nexus-9mzkd,
+    not taken here without that measurement. Code (voyage-code-3) sustains 300.
+    """
+    prefix = collection.split("__", 1)[0]
+    return _CCE_UPSERT_CHUNK_CAP if prefix in _CCE_COLLECTION_PREFIXES else _CODE_UPSERT_CHUNK_CAP
+
 
 def _request(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
@@ -609,24 +648,35 @@ class HttpVectorClient:
                 metadatas = [metas[i] for i in keep]
                 if embeddings is not None:
                     embeddings = [embeddings[i] for i in keep]
-        body: dict[str, Any] = {
-            "collection": collection,
-            "ids": ids,
-            "documents": documents,
-            "metadatas": metadatas or [{}] * len(ids),
-        }
-        # Same-model vector PASSTHROUGH (nexus-hxry2): when the caller supplies
-        # precomputed vectors (source model == target wired model), send them so
-        # the service stores them verbatim and skips the billed re-embed. Absent →
-        # the default Seam B server-side embed. This is the ONE path where
-        # ``embeddings`` is honoured; every other caller leaves it None.
-        if embeddings is not None:
-            body["embeddings"] = embeddings
-        _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
+        # nexus-nf3n7: page an oversize id set into <=cap sub-POSTs so no single
+        # request exceeds the control-plane requestTimeout (a large CCE upsert
+        # 504s otherwise). This is the ONE choke point — the ChunkBatcher already
+        # sends <=cap so its flushes are a single page (unchanged); the oversize
+        # per-file fallbacks (prose/code/doc) and every other caller inherit the
+        # cap here. NOT atomic across pages: a sub-POST failure raises with earlier
+        # pages already committed, but the write is idempotent-retry-safe — ON
+        # CONFLICT dedup + full-file staleness retry heal a partial mid-paging
+        # failure next run. Same-model vector PASSTHROUGH (nexus-hxry2): supplied
+        # vectors are sliced in lockstep with the ids.
+        cap = per_collection_chunk_cap(collection)
+        metas = metadatas or [{}] * len(ids)
+        n = len(ids)
+        for start in range(0, n, cap):
+            end = min(start + cap, n)
+            body: dict[str, Any] = {
+                "collection": collection,
+                "ids": ids[start:end],
+                "documents": documents[start:end],
+                "metadatas": metas[start:end],
+            }
+            if embeddings is not None:
+                body["embeddings"] = embeddings[start:end]
+            _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
         _log.debug(
             "http_vector_upsert_chunks",
             collection=collection,
-            count=len(ids),
+            count=n,
+            pages=(n + cap - 1) // cap if n else 0,
         )
 
     def upsert_chunks_with_embeddings(

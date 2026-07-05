@@ -2825,13 +2825,12 @@ def _run_index(
             with _hook_seconds_lock:
                 _hook_seconds["flush"] += time.monotonic() - _t0
 
-        def _cap_for(collection: str) -> int:
-            # CCE collections (docs/knowledge/rdr) embed far slower
-            # server-side: a 172-chunk CCE batch 504'd the gateway on the
-            # 2026-07-04 2C smoke. Code (voyage-code-3) sustains the full
-            # service cap. Bisection-on-failure self-tunes below these.
-            prefix = collection.split("__", 1)[0]
-            return 64 if prefix in ("docs", "knowledge", "rdr") else 300
+        # Shared with HttpVectorClient's internal upsert paging (nexus-nf3n7) so
+        # the batcher flush cap and the client's oversize-fallback page size are
+        # ONE source of truth. CCE collections (docs/knowledge/rdr) embed far
+        # slower server-side: a 172-chunk CCE batch 504'd the gateway on the
+        # 2026-07-04 2C smoke. Bisection-on-failure self-tunes below these.
+        from nexus.db.http_vector_client import per_collection_chunk_cap as _cap_for  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
 
         _batcher = ChunkBatcher(
             flush=_batch_flush,

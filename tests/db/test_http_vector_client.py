@@ -1326,3 +1326,76 @@ class TestGatewayTransientRetry:
             hv._request("POST", "/v1/vectors/search",
                         tenant="default", timeout=120, body={})
         assert len(calls) == 1
+
+
+# ── nexus-nf3n7: per-collection upsert paging (CCE 504 avoidance) ──────────────
+
+
+def test_per_collection_chunk_cap_values():
+    from nexus.db.http_vector_client import per_collection_chunk_cap
+
+    assert per_collection_chunk_cap("docs__o__voyage-context-3__v1") == 64
+    assert per_collection_chunk_cap("knowledge__x__voyage-context-3__v1") == 64
+    assert per_collection_chunk_cap("rdr__x__voyage-context-3__v1") == 64
+    assert per_collection_chunk_cap("code__x__voyage-code-3__v1") == 300
+    assert per_collection_chunk_cap("weird-no-prefix") == 300
+
+
+class TestUpsertChunksPaging:
+    """A single oversize upsert is paged into <=cap sub-POSTs so no request
+    exceeds the control-plane requestTimeout (nexus-nf3n7)."""
+
+    def _capture(self, monkeypatch):
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: calls.append(body),
+        )
+        return calls
+
+    def test_oversize_cce_pages_into_cap_sized_posts(self, monkeypatch):
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        ids = [f"{i:032x}" for i in range(150)]
+        docs = [f"d{i}" for i in range(150)]
+        metas = [{"n": i} for i in range(150)]
+        HttpVectorClient().upsert_chunks(
+            "docs__o__voyage-context-3__v1", ids, docs, metadatas=metas,
+        )
+        # 150 CCE chunks, cap 64 → 64 + 64 + 22
+        assert [len(c["ids"]) for c in calls] == [64, 64, 22]
+        # full coverage, in order, no drops/dupes
+        assert [i for c in calls for i in c["ids"]] == ids
+        # metadatas sliced in lockstep with ids
+        assert calls[0]["metadatas"][0] == {"n": 0}
+        assert calls[2]["metadatas"][-1] == {"n": 149}
+
+    def test_passthrough_embeddings_sliced_in_lockstep(self, monkeypatch):
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        n = 130
+        ids = [f"{i:032x}" for i in range(n)]
+        docs = [f"d{i}" for i in range(n)]
+        embs = [[float(i)] for i in range(n)]
+        HttpVectorClient().upsert_chunks(
+            "docs__o__voyage-context-3__v1", ids, docs, embeddings=embs,
+        )
+        assert [len(c["ids"]) for c in calls] == [64, 64, 2]
+        # embeddings track the ids page-for-page
+        assert calls[0]["embeddings"][0] == [0.0]
+        assert calls[1]["embeddings"][0] == [64.0]
+        assert calls[2]["embeddings"] == [[128.0], [129.0]]
+
+    def test_under_cap_is_single_post(self, monkeypatch):
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        # 200 code chunks, cap 300 → one POST (batcher-shaped batches unchanged)
+        ids = [f"{i:032x}" for i in range(200)]
+        HttpVectorClient().upsert_chunks(
+            "code__o__voyage-code-3__v1", ids, [f"d{i}" for i in range(200)],
+        )
+        assert len(calls) == 1
+        assert len(calls[0]["ids"]) == 200
