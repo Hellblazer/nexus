@@ -146,6 +146,27 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Test-visibility hook (RDR-181, bead nexus-f0r8p.3): counts invocations of
+     * {@link #resolveNeedEmbedIdx} — i.e. how many times the existence-SELECT +
+     * have-vector-UPDATE existence-partition transaction actually ran. Lets
+     * integration tests assert that {@code forceReEmbed=true} bypasses the
+     * existence check ENTIRELY (count stays 0) rather than merely inferring it
+     * from the embedder's call count. Same read/reset-accessor shape as
+     * {@link #sourceUriJoinCalls} — production code never reads it.
+     */
+    private final AtomicInteger existenceSelectCalls = new AtomicInteger();
+
+    /** Test-only instrumentation read — see {@link #existenceSelectCalls}. */
+    public int existenceSelectCallCount() {
+        return existenceSelectCalls.get();
+    }
+
+    /** Test-only instrumentation reset — see {@link #existenceSelectCalls}. */
+    public void resetExistenceSelectCallsForTests() {
+        existenceSelectCalls.set(0);
+    }
+
+    /**
      * Pairs a value with the embedding token count consumed to produce it (bead nexus-ehc4q).
      *
      * <p>Returned by the {@code *WithTokens} sibling methods so the caller (VectorHandler)
@@ -265,8 +286,24 @@ public final class PgVectorRepository {
                                                     List<String> ids,
                                                     List<String> documents,
                                                     List<Map<String, Object>> metadatas) {
+        return upsertChunksWithTokens(tenant, collection, ids, documents, metadatas, false);
+    }
+
+    /**
+     * {@code forceReEmbed}-aware sibling (RDR-181, bead nexus-f0r8p.3): when
+     * {@code true}, bypasses the existence-partition entirely (every chash embeds,
+     * as if the collection had never been indexed) — the rare model-drift-within-
+     * a-collection recompute, and the escape for the (0%-hit) first-index path
+     * that would otherwise pay for a existence SELECT with no offsetting benefit.
+     * Wired from {@code VectorHandler}'s {@code force_re_embed} request field.
+     */
+    public Tokened<Integer> upsertChunksWithTokens(String tenant, String collection,
+                                                    List<String> ids,
+                                                    List<String> documents,
+                                                    List<Map<String, Object>> metadatas,
+                                                    boolean forceReEmbed) {
         long[] tokensOut = {0L};
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut, null);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut, null, forceReEmbed);
         return new Tokened<>(ids.size(), tokensOut[0]);
     }
 
@@ -275,7 +312,16 @@ public final class PgVectorRepository {
                              List<String> ids,
                              List<String> documents,
                              List<Map<String, Object>> metadatas) {
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, false);
+    }
+
+    /** {@code forceReEmbed}-aware sibling of {@link #upsertChunks} — see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean)}. */
+    public void upsertChunks(String tenant, String collection,
+                             List<String> ids,
+                             List<String> documents,
+                             List<Map<String, Object>> metadatas,
+                             boolean forceReEmbed) {
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, forceReEmbed);
     }
 
     /**
@@ -302,7 +348,11 @@ public final class PgVectorRepository {
                 "upsertChunksWithVectors requires one embedding per id: ids="
                 + ids.size() + " embeddings=" + (embeddings == null ? "null" : embeddings.size()));
         }
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, embeddings);
+        // forceReEmbed is irrelevant to the passthrough path: dedupProvided != null
+        // gates the existence-partition check off unconditionally below, before
+        // forceReEmbed is ever consulted. Pass false — never wire this true here,
+        // it would be dead plumbing with no behavioral effect.
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, embeddings, false);
     }
 
     private void upsertChunksInternal(String tenant, String collection,
@@ -310,7 +360,8 @@ public final class PgVectorRepository {
                                       List<String> documents,
                                       List<Map<String, Object>> metadatas,
                                       long[] tokensOut,
-                                      List<float[]> providedEmbeddings) {
+                                      List<float[]> providedEmbeddings,
+                                      boolean forceReEmbed) {
         if (ids.isEmpty()) return;
         int dim = dimForCollection(collection);
 
@@ -398,15 +449,12 @@ public final class PgVectorRepository {
         // re-inserting it would be redundant: its vector is untouched, which is the
         // whole point of the optimization.
         List<Integer> insertIdx = null;
-        if (dedupProvided == null && !dedupIds.isEmpty()) {
-            // TODO(nexus-f0r8p.3): wire the forceReEmbed request param — bypasses the
-            // existence check entirely for the rare model-drift-within-collection
-            // recompute, and keeps the first-index path (0% existence hit rate) free
-            // of the SELECT. Hardcoded false until that bead lands.
-            boolean forceReEmbed = false;
-            if (!forceReEmbed) {
-                insertIdx = resolveNeedEmbedIdx(tenant, collection, dim, dedupIds, dedupDocs, dedupMetas);
-            }
+        if (dedupProvided == null && !dedupIds.isEmpty() && !forceReEmbed) {
+            // RDR-181 (bead nexus-f0r8p.3): forceReEmbed bypasses the existence
+            // check entirely — the rare model-drift-within-collection recompute,
+            // and the escape for the (0%-hit) first-index path so it never pays
+            // for the existence SELECT with no offsetting benefit.
+            insertIdx = resolveNeedEmbedIdx(tenant, collection, dim, dedupIds, dedupDocs, dedupMetas);
         }
         if (insertIdx == null) {
             // Passthrough, forceReEmbed, an empty batch, or the existence-check
@@ -2021,6 +2069,7 @@ public final class PgVectorRepository {
                                                List<String> dedupIds,
                                                List<String> dedupDocs,
                                                List<Map<String, Object>> dedupMetas) {
+        existenceSelectCalls.incrementAndGet();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         try {
             return tenantScope.withTenant(tenant, ctx -> {

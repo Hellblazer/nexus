@@ -342,6 +342,110 @@ class PgVectorEmbedSkipIntegrationTest {
     }
 
     // ---------------------------------------------------------------------------
+    // RDR-181 bead nexus-f0r8p.3: forceReEmbed bypasses the existence partition
+    // entirely (model-drift recompute / --force / first-index escape).
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void forceReEmbed_true_skipsExistenceSelectEntirely_noExistenceCheckIssued() throws Exception {
+        String col = "code__embedskip-force-noselect__voyage-code-3__v1";
+        String chash = "frc10000000000000000000000000000";
+
+        // Seed the chash normally (forceReEmbed=false): this DOES run the existence
+        // partition (a fresh chash still probes the — empty — table).
+        repo.resetExistenceSelectCallsForTests();
+        repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("hello world"),
+                List.of(Map.of("v", "1")));
+        assertThat(repo.existenceSelectCallCount())
+                .as("a forceReEmbed=false upsert must run the existence partition")
+                .isEqualTo(1);
+
+        // Re-upsert the SAME chash (which now already has a stored vector) with
+        // forceReEmbed=true. If the existence check ran at all, this bead's whole
+        // acceptance criterion is violated — resolveNeedEmbedIdx must not be
+        // invoked, at all, under forceReEmbed.
+        repo.resetExistenceSelectCallsForTests();
+        repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("hello world v2"),
+                List.of(Map.of("v", "2")), true);
+
+        assertThat(repo.existenceSelectCallCount())
+                .as("forceReEmbed=true must issue ZERO existence-SELECT / metadata-only-UPDATE calls")
+                .isEqualTo(0);
+    }
+
+    @Test
+    void forceReEmbed_true_reEmbedsEveryChunkEvenWhenChashAlreadyHasAStoredVector() throws Exception {
+        String col = "code__embedskip-force-reembed__voyage-code-3__v1";
+        String chash = "frc20000000000000000000000000000";
+
+        repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("stable text"),
+                List.of(Map.of("v", "1")));
+        String firstVector = superuserEmbedding(col, chash);
+        int callsAfterFirst = embedder.callCount();
+
+        // Same chash, IDENTICAL text — under forceReEmbed=false this would take the
+        // have-vector metadata-only path and skip the embedder entirely (see
+        // upsertChunks_sameChashTwice_secondCallSkipsEmbed_metadataRefreshed_vectorUnchanged
+        // above). forceReEmbed=true must override that and re-embed anyway.
+        repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("stable text"),
+                List.of(Map.of("v", "2")), true);
+
+        assertThat(embedder.callCount())
+                .as("forceReEmbed=true must invoke the embedder even for an unchanged, already-vectored chash")
+                .isEqualTo(callsAfterFirst + 1);
+
+        String secondVector = superuserEmbedding(col, chash);
+        assertThat(secondVector)
+                .as("the CountingEmbedder tags each call's vector with a distinct serial — a genuine "
+                    + "re-embed must produce a DIFFERENT stored vector, not reuse the old one")
+                .isNotEqualTo(firstVector);
+
+        Map<String, Object> got = repo.get(TENANT_A, col, List.of(chash), 10, 0);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
+        assertThat(metas).hasSize(1);
+        assertThat(metas.get(0).get("v")).isEqualTo("2");
+    }
+
+    @Test
+    void upsertChunksWithVectors_passthroughUnaffectedByForceReEmbedWiring() throws Exception {
+        // Migration passthrough never sees forceReEmbed (no such parameter on
+        // upsertChunksWithVectors) — this pins that the .3 wiring did not disturb
+        // the passthrough's existing "always skip the embedder, always skip the
+        // existence check" behavior, even when the chash already has a row.
+        String col = "code__embedskip-force-passthrough__voyage-code-3__v1";
+        String chash = "frc30000000000000000000000000000";
+
+        repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("original text"),
+                List.of(Map.of("v", "1")));
+        String originalVector = superuserEmbedding(col, chash);
+        int callsBefore = embedder.callCount();
+        repo.resetExistenceSelectCallsForTests();
+
+        float[] suppliedVector = new float[1024];
+        suppliedVector[0] = 42f;
+        repo.upsertChunksWithVectors(TENANT_A, col, List.of(chash), List.of("passthrough text"),
+                List.of(suppliedVector), List.of(Map.of("v", "3")));
+
+        assertThat(embedder.callCount())
+                .as("passthrough must never invoke the embedder, forceReEmbed wiring or not")
+                .isEqualTo(callsBefore);
+        assertThat(repo.existenceSelectCallCount())
+                .as("passthrough must never run the existence partition either")
+                .isEqualTo(0);
+
+        String storedVector = superuserEmbedding(col, chash);
+        assertThat(storedVector)
+                .as("the passthrough-supplied vector must be stored verbatim, replacing the original")
+                .isNotEqualTo(originalVector);
+
+        Map<String, Object> got = repo.get(TENANT_A, col, List.of(chash), 10, 0);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
+        assertThat(metas.get(0).get("v")).isEqualTo("3");
+    }
+
+    // ---------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------
 

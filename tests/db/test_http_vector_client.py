@@ -1148,6 +1148,63 @@ class TestUpsertSkipExisting:
         assert calls[0][1]["ids"] == ["a", "b"]
 
 
+class TestForceReEmbed:
+    """RDR-181 bead nexus-f0r8p.3: plumbing-only — thread force_re_embed onto
+    the wire and map the deprecated NX_UPSERT_SKIP_EXISTING=0 escape to it.
+    The client does NOT interpret the flag itself; the server's existence
+    partition is what force_re_embed bypasses (PgVectorRepository)."""
+
+    def _client_with_fake_post(self, monkeypatch):
+        client = HttpVectorClient()
+        calls = []
+
+        def fake_post(path, body, *, tenant="default", timeout=120):
+            calls.append((path, body))
+            return {"upserted": len(body.get("ids", []))}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        return client, calls
+
+    def test_force_re_embed_true_sends_field(self, monkeypatch):
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"], force_re_embed=True)
+        assert calls[0][1]["force_re_embed"] is True
+
+    def test_default_omits_field(self, monkeypatch):
+        """Default (no kwarg, no env) must NOT send force_re_embed at all —
+        the common case stays byte-identical to pre-.3 request bodies."""
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"])
+        assert "force_re_embed" not in calls[0][1]
+
+    def test_explicit_false_omits_field(self, monkeypatch):
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"], force_re_embed=False)
+        assert "force_re_embed" not in calls[0][1]
+
+    def test_env_skip_existing_0_maps_to_force_re_embed(self, monkeypatch):
+        """The deprecated escape: NX_UPSERT_SKIP_EXISTING=0 (explicitly set to
+        the string '0', not merely unset) maps to force_re_embed=True when the
+        caller does not pass the kwarg explicitly."""
+        monkeypatch.setenv("NX_UPSERT_SKIP_EXISTING", "0")
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"])
+        assert calls[0][1]["force_re_embed"] is True
+
+    def test_explicit_kwarg_overrides_env(self, monkeypatch):
+        """An explicit force_re_embed=False kwarg wins over the env escape."""
+        monkeypatch.setenv("NX_UPSERT_SKIP_EXISTING", "0")
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"], force_re_embed=False)
+        assert "force_re_embed" not in calls[0][1]
+
+    def test_env_unset_does_not_activate_force_re_embed(self, monkeypatch):
+        monkeypatch.delenv("NX_UPSERT_SKIP_EXISTING", raising=False)
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"])
+        assert "force_re_embed" not in calls[0][1]
+
+
 class TestServiceModeDefault:
     """nexus-tawx0: post-RDR-155 P4a.2, make_t3() returns HttpVectorClient
     unconditionally — service mode IS the default reality. The env var

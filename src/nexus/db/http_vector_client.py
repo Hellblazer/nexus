@@ -595,6 +595,7 @@ class HttpVectorClient:
         *,
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
+        force_re_embed: bool | None = None,
     ) -> None:
         """Embed + write via the Java service.
 
@@ -627,11 +628,27 @@ class HttpVectorClient:
         elsewhere in the file). ``existing_ids`` resolves to the EMPTY set
         on probe failure, so a degraded probe upserts everything — chunks
         are never silently dropped.
+
+        ``force_re_embed`` (RDR-181, bead nexus-f0r8p.3; or the deprecated
+        env escape ``NX_UPSERT_SKIP_EXISTING=0``): tells the SERVER to bypass
+        its own existence-partition entirely (``PgVectorRepository``'s
+        RDR-181 embed-skip optimization) and re-embed every chunk in the
+        batch, even ones whose chash already has a stored vector — the rare
+        model-drift-within-a-collection recompute, and the escape for the
+        (0%-hit) first-index path so it never pays for the server-side
+        existence SELECT with no offsetting benefit. Distinct from
+        ``skip_existing`` above: that is a CLIENT-side pre-filter probe;
+        this is a flag threaded through to the server's own (separate,
+        unconditional) existence check. Sending it is a no-op when
+        ``embeddings`` is supplied (the migration passthrough already skips
+        the server's existence check unconditionally).
         """
         if not ids:
             return
         if skip_existing is None:
             skip_existing = os.environ.get("NX_UPSERT_SKIP_EXISTING", "") == "1"
+        if force_re_embed is None:
+            force_re_embed = os.environ.get("NX_UPSERT_SKIP_EXISTING", "") == "0"
         if skip_existing:
             present = self.existing_ids(collection, ids)
             if present:
@@ -671,6 +688,8 @@ class HttpVectorClient:
             }
             if embeddings is not None:
                 body["embeddings"] = embeddings[start:end]
+            if force_re_embed:
+                body["force_re_embed"] = True
             _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
         _log.debug(
             "http_vector_upsert_chunks",
