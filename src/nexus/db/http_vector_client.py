@@ -45,6 +45,39 @@ _log = structlog.get_logger(__name__)
 #: Env var for the vector backend flag.
 _VECTORS_BACKEND_ENV = "NX_STORAGE_BACKEND_VECTORS"
 
+#: RDR-181 bead nexus-f0r8p.5: log the ``skip_existing`` deprecation notice
+#: once per process rather than once per call. Tests reset this directly
+#: (module attribute, not a public API).
+_skip_existing_deprecation_logged: bool = False
+
+
+def _warn_skip_existing_deprecated() -> None:
+    """Log-once notice: ``skip_existing`` no longer filters the batch.
+
+    RDR-181 made the server's existence-partition
+    (``PgVectorRepository.upsertChunksInternal``) authoritative, so the
+    client-side probe this flag used to drive is redundant — and worse,
+    it silently skipped the ON CONFLICT metadata refresh that the
+    server-side check performs. The kwarg / env var are kept readable
+    for one deprecation cycle (bead nexus-f0r8p.5) but have no effect
+    on what is sent; this is the only remaining observable effect.
+    """
+    global _skip_existing_deprecation_logged
+    if _skip_existing_deprecation_logged:
+        return
+    _skip_existing_deprecation_logged = True
+    _log.warning(
+        "http_vector_skip_existing_deprecated",
+        message=(
+            "skip_existing / NX_UPSERT_SKIP_EXISTING=1 is deprecated "
+            "(RDR-181): the client-side existence probe it drove is "
+            "redundant now that server-side embed-skip is authoritative. "
+            "This flag no longer filters the outgoing batch; use "
+            "force_re_embed / NX_UPSERT_SKIP_EXISTING=0 to change what "
+            "the server does with existing chashes."
+        ),
+    )
+
 
 # ── Endpoint resolution (nexus-pebfx.1) ──────────────────────────────────────
 #
@@ -616,18 +649,21 @@ class HttpVectorClient:
         (Note: :meth:`upsert_chunks_with_embeddings` deliberately still DISCARDS
         its vectors — indexers re-embed server-side as the single authority.)
 
-        ``skip_existing`` (or env ``NX_UPSERT_SKIP_EXISTING=1``): pre-filter
-        ids through :meth:`existing_ids` and embed/upsert only the chunks
-        the collection does not already hold. Chunk ids are content hashes,
-        so re-indexing unchanged files re-sends byte-identical chunks whose
-        server-side embedding cost is pure waste — the pre-filter makes a
-        forced re-convergence run pay only for genuinely missing chunks
-        (nexus-7zuzz orphan remediation). OPT-IN, not default: skipping an
-        existing id also skips the ON CONFLICT DO UPDATE metadata refresh
-        (line numbers can drift for identical chunk text after edits
-        elsewhere in the file). ``existing_ids`` resolves to the EMPTY set
-        on probe failure, so a degraded probe upserts everything — chunks
-        are never silently dropped.
+        ``skip_existing`` (or env ``NX_UPSERT_SKIP_EXISTING=1``): DEPRECATED
+        (RDR-181, bead nexus-f0r8p.5) — kept readable for one deprecation
+        cycle only, no longer changes what is sent. It used to pre-filter
+        ids through :meth:`existing_ids` (a client-side round-trip) and
+        drop chunks the collection already held (nexus-7zuzz orphan
+        remediation), but that pre-filter also silently skipped the ON
+        CONFLICT DO UPDATE metadata refresh — the "metadata caveat" RDR-181
+        closed. Server-side embed-skip
+        (``PgVectorRepository.upsertChunksInternal``'s existence-partition,
+        beads .1/.2) now does the equivalent filtering losslessly and
+        universally, with no extra round-trip and no opt-in required.
+        Setting this kwarg (or the env var) is now a no-op on the outgoing
+        batch — the whole batch is always sent — and only triggers a
+        one-time deprecation log line (see
+        :func:`_warn_skip_existing_deprecated`).
 
         ``force_re_embed`` (RDR-181, bead nexus-f0r8p.3; or the deprecated
         env escape ``NX_UPSERT_SKIP_EXISTING=0``): tells the SERVER to bypass
@@ -636,12 +672,12 @@ class HttpVectorClient:
         batch, even ones whose chash already has a stored vector — the rare
         model-drift-within-a-collection recompute, and the escape for the
         (0%-hit) first-index path so it never pays for the server-side
-        existence SELECT with no offsetting benefit. Distinct from
-        ``skip_existing`` above: that is a CLIENT-side pre-filter probe;
-        this is a flag threaded through to the server's own (separate,
-        unconditional) existence check. Sending it is a no-op when
-        ``embeddings`` is supplied (the migration passthrough already skips
-        the server's existence check unconditionally).
+        existence SELECT with no offsetting benefit. This is now the ONLY
+        kwarg/env lever on this method that changes what is sent or how the
+        server treats existing chashes — ``skip_existing`` above no longer
+        does. Sending it is a no-op when ``embeddings`` is supplied (the
+        migration passthrough already skips the server's existence check
+        unconditionally).
         """
         if not ids:
             return
@@ -650,21 +686,7 @@ class HttpVectorClient:
         if force_re_embed is None:
             force_re_embed = os.environ.get("NX_UPSERT_SKIP_EXISTING", "") == "0"
         if skip_existing:
-            present = self.existing_ids(collection, ids)
-            if present:
-                keep = [i for i, _id in enumerate(ids) if _id not in present]
-                if not keep:
-                    _log.debug(
-                        "http_vector_upsert_all_present",
-                        collection=collection, count=len(ids),
-                    )
-                    return
-                metas = metadatas or [{}] * len(ids)
-                ids = [ids[i] for i in keep]
-                documents = [documents[i] for i in keep]
-                metadatas = [metas[i] for i in keep]
-                if embeddings is not None:
-                    embeddings = [embeddings[i] for i in keep]
+            _warn_skip_existing_deprecated()
         # nexus-nf3n7: page an oversize id set into <=cap sub-POSTs so no single
         # request exceeds the control-plane requestTimeout (a large CCE upsert
         # 504s otherwise). This is the ONE choke point — the ChunkBatcher already
