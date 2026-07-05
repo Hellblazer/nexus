@@ -450,6 +450,152 @@ public final class CatalogRepository {
         });
     }
 
+    /**
+     * Batch variant of {@link #registerDocument} (nexus-9dvqy, duoak.11 sink #2).
+     *
+     * <p>Registers N documents under one owner in a SINGLE transaction, returning
+     * their tumblers in INPUT ORDER. The per-doc {@code registerDocument} path pays
+     * one {@code SELECT next_seq FOR UPDATE} owner-row lock per call — 2,133 serial
+     * WAN round-trips on a --force index (333s / 16% of the duoak.11 gate wall), all
+     * queued on the SAME owner lock (so client concurrency cannot help). This claims
+     * the whole contiguous sequence block under ONE lock acquisition and inserts all
+     * new rows in one multi-row INSERT.
+     *
+     * <p>Idempotency matches the single-doc path exactly: a doc whose {@code source_uri}
+     * (then {@code file_path}) already maps to a LIVE (non-tombstoned) document returns
+     * that existing tumbler and does NOT consume a sequence number — so a re-registration
+     * leaves no seq gap. Only genuinely-new docs draw from the claimed block.
+     *
+     * <p>Caller (the HTTP handler) caps the batch under the PostgreSQL 32767 bind-param
+     * ceiling; with ~24 columns per row the safe cap is 1000 rows (24000 params).
+     */
+    public java.util.List<String> registerDocumentMany(
+            String tenant, String ownerPrefix, java.util.List<java.util.Map<String, Object>> docs) {
+        if (TenantConstants.isWildcard(tenant)) {
+            throw new IllegalArgumentException(
+                "tenant '*' is a reserved sentinel and cannot own catalog entries");
+        }
+        if (docs == null || docs.isEmpty()) {
+            return java.util.List.of();
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Ensure owner row exists (idempotent upsert, minimal fields) — once.
+            ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
+                           CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
+               .values(tenant, ownerPrefix,
+                       s(docs.get(0), "owner_name", ownerPrefix),
+                       s(docs.get(0), "owner_type", "repo"),
+                       null, null, "", null, 0L)
+               .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
+               .doNothing()
+               .execute();
+
+            // Batch idempotency: fetch existing LIVE docs for every source_uri and
+            // file_path in the batch in ONE query per direction, then join locally.
+            java.util.List<String> srcUris = new java.util.ArrayList<>();
+            java.util.List<String> filePaths = new java.util.ArrayList<>();
+            for (var d : docs) {
+                String su = s(d, "source_uri", "");
+                if (!su.isEmpty()) srcUris.add(su);
+                String fp = s(d, "file_path", "");
+                if (!fp.isEmpty()) filePaths.add(fp);
+            }
+            java.util.Map<String, String> tumblerBySrcUri = new java.util.HashMap<>();
+            if (!srcUris.isEmpty()) {
+                ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.TUMBLER)
+                   .from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.SOURCE_URI.in(srcUris))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                   .fetch()
+                   .forEach(r -> tumblerBySrcUri.putIfAbsent(r.value1(), r.value2()));
+            }
+            java.util.Map<String, String> tumblerByFilePath = new java.util.HashMap<>();
+            if (!filePaths.isEmpty()) {
+                ctx.select(CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.TUMBLER)
+                   .from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.FILE_PATH.in(filePaths))
+                          .and(CATALOG_DOCUMENTS.TUMBLER.startsWith(ownerPrefix + "."))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                   .fetch()
+                   .forEach(r -> tumblerByFilePath.putIfAbsent(r.value1(), r.value2()));
+            }
+
+            // Resolve each doc to an existing tumbler or mark it NEW (input order).
+            String[] out = new String[docs.size()];
+            java.util.List<Integer> newIdx = new java.util.ArrayList<>();
+            for (int i = 0; i < docs.size(); i++) {
+                var d = docs.get(i);
+                String su = s(d, "source_uri", "");
+                String fp = s(d, "file_path", "");
+                String existing = null;
+                if (!su.isEmpty()) existing = tumblerBySrcUri.get(su);
+                if (existing == null && !fp.isEmpty()) existing = tumblerByFilePath.get(fp);
+                if (existing != null) {
+                    out[i] = existing;
+                } else {
+                    newIdx.add(i);
+                }
+            }
+
+            if (!newIdx.isEmpty()) {
+                // Claim a contiguous seq block under ONE FOR UPDATE lock.
+                long seq = ctx.select(CATALOG_OWNERS.NEXT_SEQ).from(CATALOG_OWNERS)
+                              .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
+                              .forUpdate()
+                              .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
+                long cursor = seq;
+
+                var insert = ctx.insertInto(CATALOG_DOCUMENTS,
+                        CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
+                        CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
+                        CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
+                        CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
+                        CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT);
+                for (int idx : newIdx) {
+                    var fields = docs.get(idx);
+                    cursor += 1;
+                    String tumbler = ownerPrefix + "." + cursor;
+                    out[idx] = tumbler;
+                    String metaJson = jsonOrNull(fields.get("meta"));
+                    insert = insert.values(tenant, tumbler,
+                            s(fields, "title", ""),
+                            nne(s(fields, "author", null)),
+                            ni(i(fields, "year"), 0),
+                            nne(s(fields, "content_type", "")),
+                            nne(s(fields, "file_path", "")),
+                            nne(s(fields, "corpus", "")),
+                            nne(s(fields, "physical_collection", "")),
+                            ni(i(fields, "chunk_count"), 0),
+                            nne(s(fields, "head_hash", "")),
+                            nne(s(fields, "indexed_at", "")),
+                            jsonbVal(metaJson),
+                            nd(dbl(fields, "source_mtime")),
+                            nne(s(fields, "alias_of", "")),
+                            nne(s(fields, "source_uri", "")),
+                            ni(i(fields, "bib_year"), 0),
+                            nne(s(fields, "bib_authors", "")),
+                            nne(s(fields, "bib_venue", "")),
+                            ni(i(fields, "bib_citation_count"), 0),
+                            nne(s(fields, "bib_semantic_scholar_id", "")),
+                            nne(s(fields, "bib_openalex_id", "")),
+                            nne(s(fields, "bib_doi", "")),
+                            nne(s(fields, "bib_enriched_at", "")));
+                }
+                insert.execute();
+
+                // Advance next_seq by exactly the number of new docs claimed.
+                ctx.update(CATALOG_OWNERS)
+                   .set(CATALOG_OWNERS.NEXT_SEQ, cursor)
+                   .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
+                   .execute();
+            }
+
+            return java.util.Arrays.asList(out);
+        });
+    }
+
     /** Fetch a document by tumbler. Returns null if not found. */
     public Map<String, Object> getDocument(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -1063,17 +1209,84 @@ public final class CatalogRepository {
     /** Replace manifest for docId with the provided rows (atomic delete + insert). */
     public void writeManifest(String tenant, String docId, List<Map<String, Object>> rows) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
-            for (var row : rows) {
-                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
-                   .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
-                           i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
-                   .execute();
-            }
+            writeManifestRows(ctx, tenant, docId, rows);
             return null;
         });
+    }
+
+    /**
+     * Shared REPLACE body (delete all rows for docId, then insert the provided
+     * rows) used by both {@link #writeManifest} (one doc per transaction) and
+     * {@link #writeManifestMany} (N docs, one transaction each). Assumes
+     * {@code ctx} is already scoped to {@code tenant}. Does NOT touch
+     * documents.chunk_count — {@code writeManifest}'s public behavior is unchanged;
+     * the chunk_count fold-in is {@code writeManifestMany}'s addition.
+     */
+    private static void writeManifestRows(DSLContext ctx, String tenant, String docId,
+                                          List<Map<String, Object>> rows) {
+        ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+        for (var row : rows) {
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                    CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+               .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
+                       i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
+               .execute();
+        }
+    }
+
+    /**
+     * Batch REPLACE manifest for multiple docs (bead nexus-u2kwq). Each doc is
+     * replaced in its OWN {@link TenantScope#withTenant} transaction that folds
+     * together the {@link #writeManifest} REPLACE (delete all rows + insert) AND
+     * a {@code documents.chunk_count = rows.size()} UPDATE — collapsing the
+     * client's separate {@code /manifest/write} + chunk_count {@code /update}
+     * round-trips into one atomic per-doc write. A failure on one doc rolls back
+     * only that doc and its doc_id is collected in {@code failed_doc_ids}; sibling
+     * docs are unaffected (per-doc atomicity, cross-doc isolation). Empty list is
+     * a no-op.
+     *
+     * @param docs each entry {@code {"doc_id": "...", "rows": [<manifest row>...]}}.
+     * @return {@code {docs: <int ok>, rows: <int total written>, failed_doc_ids: [...]}}.
+     */
+    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs) {
+        int okDocs = 0;
+        int totalRows = 0;
+        List<String> failed = new ArrayList<>();
+        if (docs != null) {
+            for (Map<String, Object> d : docs) {
+                String docId = s(d, "doc_id");
+                Object rawRows = d.get("rows");
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> rows = rawRows instanceof List<?> l
+                    ? (List<Map<String, Object>>) l
+                    : List.of();
+                try {
+                    if (docId == null || docId.isBlank()) {
+                        throw new IllegalArgumentException("'doc_id' required");
+                    }
+                    tenantScope.withTenant(tenant, ctx -> {
+                        writeManifestRows(ctx, tenant, docId, rows);
+                        ctx.update(CATALOG_DOCUMENTS)
+                           .set(CATALOG_DOCUMENTS.CHUNK_COUNT, rows.size())
+                           .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                           .execute();
+                        return null;
+                    });
+                    okDocs++;
+                    totalRows += rows.size();
+                } catch (Exception e) {
+                    log.debug("event=write_manifest_many_doc_failed tenant={} doc_id={} error={}",
+                              tenant, docId, e.getMessage());
+                    failed.add(docId);
+                }
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("docs", okDocs);
+        result.put("rows", totalRows);
+        result.put("failed_doc_ids", failed);
+        return result;
     }
 
     /** Append manifest rows (upsert by position). */

@@ -242,6 +242,28 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         for m in metadatas:
             m["embedding_model"] = actual_model
 
+    # duoak 2C (nexus-1ugqs): stage in the cross-file batcher; hooks
+    # defer to the orchestrator's completion callback on batch-land.
+    # add() returning False (file exceeds one batch) falls through to
+    # the legacy per-file upsert — file-atomicity preserved either way.
+    if ctx.batcher is not None and ctx.batcher.add(  # type: ignore[attr-defined]
+        str(file_path),
+        ctx.corpus,
+        ids,
+        documents,
+        metadatas,
+        context={
+            "ids": ids,
+            "documents": documents,
+            "embeddings": embeddings,
+            "metadatas": metadatas,
+            "catalog_doc_id": catalog_doc_id,
+            "collection": ctx.corpus,
+            "hooks": ctx.hooks,
+        },
+    ):
+        return len(ids)
+
     with _stage("upload"):
         ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
             collection_name=ctx.corpus,
@@ -249,6 +271,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             documents=documents,
             embeddings=embeddings,
             metadatas=metadatas,
+            force_re_embed=ctx.force,
         )
 
     with _stage("hooks"):

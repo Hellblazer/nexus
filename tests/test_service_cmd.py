@@ -161,3 +161,109 @@ def test_probe_failure_fails_loud(monkeypatch) -> None:
     result = _run(["probe", "--url", "https://x"])
     assert result.exit_code != 0
     assert "NX_SERVICE_URL" in result.output
+
+
+# ── nx service record-deploy (nexus-dz6b1, RDR-179 tracker mechanization) ──────
+
+
+class _FakeMemory:
+    """Captures memory.put() calls routed through a fake t2_handle."""
+
+    puts: list[dict[str, Any]] = []
+
+    def put(self, **kwargs: Any) -> int:
+        _FakeMemory.puts.append(kwargs)
+        return 1
+
+
+class _FakeHandle:
+    memory = _FakeMemory()
+
+    def __enter__(self) -> "_FakeHandle":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+
+@pytest.fixture
+def _fake_t2(monkeypatch):
+    from nexus.commands import _helpers
+
+    _FakeMemory.puts = []
+    monkeypatch.setattr(_helpers, "t2_handle", lambda: _FakeHandle())
+    return _FakeMemory
+
+
+def _patch_caps(monkeypatch, release_version: str) -> None:
+    from nexus.db import managed_endpoint as me
+
+    caps = me.ManagedCapabilities(
+        base_url="https://api.conexus-nexus.com",
+        app_version="1.0-SNAPSHOT",
+        release_version=release_version,
+        embedding_mode="voyage",
+        embedding_models=["voyage-context-3"],
+        schema_latest_id=None,
+        schema_changeset_count=None,
+    )
+    monkeypatch.setattr(me, "probe_managed_service", lambda **kw: caps)
+
+
+def test_record_deploy_writes_tracker_when_live_version_matches(monkeypatch, _fake_t2) -> None:
+    _patch_caps(monkeypatch, "0.1.24")
+
+    result = _run(
+        [
+            "record-deploy",
+            "engine-service-v0.1.24",
+            "--commit",
+            "b80b14d4",
+            "--gate",
+            "PASSED",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert len(_fake_t2.puts) == 1
+    put = _fake_t2.puts[0]
+    assert put["project"] == "nexus"
+    assert put["title"] == "deployed-engine-version"
+    # The version field is machine-sourced from the live /version read, never
+    # hand-typed — this is the anti-rot invariant.
+    assert "0.1.24" in put["content"]
+    assert "b80b14d4" in put["content"]
+    assert "PASSED" in put["content"]
+    assert put["ttl"] == 0  # permanent operational record
+
+
+def test_record_deploy_accepts_bare_version_forms(monkeypatch, _fake_t2) -> None:
+    _patch_caps(monkeypatch, "0.1.24")
+    for tag in ("0.1.24", "v0.1.24", "engine-service-v0.1.24"):
+        _FakeMemory.puts = []
+        result = _run(["record-deploy", tag])
+        assert result.exit_code == 0, f"{tag}: {result.output}"
+        assert len(_fake_t2.puts) == 1
+
+
+def test_record_deploy_refuses_when_live_version_mismatches(monkeypatch, _fake_t2) -> None:
+    # Cloud still on 0.1.23; recording 0.1.24 must fail loud and write nothing.
+    _patch_caps(monkeypatch, "0.1.23")
+
+    result = _run(["record-deploy", "engine-service-v0.1.24"])
+    assert result.exit_code != 0
+    assert "0.1.23" in result.output  # names what is actually live
+    assert "0.1.24" in result.output  # names what was asked
+    assert _fake_t2.puts == []  # NO write on mismatch
+
+
+def test_record_deploy_fails_loud_when_service_unreachable(monkeypatch, _fake_t2) -> None:
+    from nexus.db import managed_endpoint as me
+
+    def _boom(**kw):
+        raise me.ManagedServiceUnreachable("unreachable — set NX_SERVICE_URL")
+
+    monkeypatch.setattr(me, "probe_managed_service", _boom)
+
+    result = _run(["record-deploy", "engine-service-v0.1.24"])
+    assert result.exit_code != 0
+    assert _fake_t2.puts == []  # NO write when we cannot verify live truth

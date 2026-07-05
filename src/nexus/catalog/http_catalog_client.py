@@ -118,6 +118,15 @@ def _link_from_dict(d: dict) -> CatalogLink:
 # copy of the env->lease->fail-loud logic now shared across all clients).
 from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
 
+# nexus-gui8a: the service rejects POST /v1/catalog/manifest/get_many bodies
+# carrying more than 1000 doc_ids with HTTP 400 (bisected: OK at 1000, 400 at
+# 1001). ``get_manifests`` pages at this size and merges the per-page results.
+_MANIFEST_GET_MANY_PAGE = 1000
+#: Page size for register_many POSTs — matches the server's MAX_BATCH_DOC_IDS
+#: cap (nexus-9dvqy). ~24 columns/row keeps a full page under PostgreSQL's
+#: 32767 bind-parameter ceiling.
+_REGISTER_MANY_PAGE = 1000
+
 
 def _coerce_legacy_grandfathered(d: dict) -> dict:
     """Coerce a collection row's ``legacy_grandfathered`` to ``bool`` (nexus-u26b4).
@@ -749,6 +758,56 @@ class HttpCatalogClient:
         result = self._post("/doc/register", payload)
         return Tumbler.parse(result["tumbler"])
 
+    def register_many(
+        self, owner: Tumbler | str, docs: list[dict]
+    ) -> list[Tumbler]:
+        """Batch-register documents; returns tumblers aligned 1:1 with *docs*.
+
+        nexus-9dvqy (duoak.11 sink #2): replaces the per-file ``register()``
+        loop in the indexer's catalog hook. The single-doc path pays one
+        ``SELECT next_seq FOR UPDATE`` WAN round-trip per file — 2,133 serial
+        calls (333s) on a --force index, all queued on the same owner lock.
+        ``POST /doc/register_many`` claims the whole contiguous tumbler block
+        under one lock and inserts every new row in one multi-row INSERT.
+
+        Each doc dict carries the same keyword fields as :meth:`register`
+        (``title``, ``content_type``, ``file_path``, ``physical_collection``,
+        ``head_hash``, ``meta``, ``source_mtime``, ``source_uri`` …). Docs are
+        paged at :data:`_REGISTER_MANY_PAGE` to stay under the server's
+        MAX_BATCH_DOC_IDS cap. A page that fails as a whole falls back to
+        per-doc :meth:`register`, preserving the per-file failure isolation the
+        caller relies on (a single bad doc must not sink the rest of the run).
+        """
+        if not docs:
+            return []
+        out: list[Tumbler] = []
+        for start in range(0, len(docs), _REGISTER_MANY_PAGE):
+            page = docs[start : start + _REGISTER_MANY_PAGE]
+            try:
+                result = self._post(
+                    "/doc/register_many",
+                    {"owner_prefix": str(owner), "docs": page},
+                )
+                tumblers = (result or {}).get("tumblers", [])
+                if len(tumblers) != len(page):
+                    raise ValueError(
+                        f"register_many returned {len(tumblers)} tumblers "
+                        f"for {len(page)} docs"
+                    )
+                out.extend(Tumbler.parse(t) for t in tumblers)
+            except Exception:  # noqa: BLE001 — page failed; fall back to resilient per-doc register
+                _log.warning(
+                    "register_many_page_failed_falling_back_per_doc",
+                    owner=str(owner),
+                    page_size=len(page),
+                    exc_info=True,
+                )
+                for d in page:
+                    title = d.get("title", "")
+                    rest = {k: v for k, v in d.items() if k != "title"}
+                    out.append(self.register(owner, title, **rest))
+        return out
+
     def resolve(
         self, tumbler: Tumbler | str, *, follow_alias: bool = True
     ) -> CatalogEntry | None:
@@ -880,16 +939,22 @@ class HttpCatalogClient:
 
         Returns a dict keyed by doc_id; each value is a CatalogEntry.
         Missing or unresolvable doc_ids are absent from the result.
+
+        nexus-gui8a: paged at ``_MANIFEST_GET_MANY_PAGE`` per POST — the
+        service enforces the same ``MAX_BATCH_DOC_IDS = 1000`` cap on
+        ``/resolve_many`` as on ``/manifest/get_many``.
         """
         if not doc_ids:
             return {}
-        result = self._post("/resolve_many", {"doc_ids": doc_ids})
-        if not result:
-            return {}
         entries: dict[str, CatalogEntry] = {}
-        for doc_id, raw in result.get("entries", {}).items():
-            if raw and raw.get("tumbler"):
-                entries[doc_id] = _to_entry(raw)
+        for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
+            batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
+            result = self._post("/resolve_many", {"doc_ids": batch})
+            if not result:
+                continue
+            for doc_id, raw in result.get("entries", {}).items():
+                if raw and raw.get("tumbler"):
+                    entries[doc_id] = _to_entry(raw)
         return entries
 
     def lookup_doc_id_by_collection_and_path(
@@ -1608,15 +1673,30 @@ class HttpCatalogClient:
         Returns a dict keyed by doc_id; each value is the ordered list
         of manifest rows (same shape as ``get_manifest()``). Missing
         doc_ids are absent from the result (not keyed to empty list).
+
+        nexus-gui8a: doc_ids are paged at ``_MANIFEST_GET_MANY_PAGE`` per
+        POST — the service 400s on bodies with more than 1000 doc_ids, so
+        an un-paged call from ``build_staleness_cache`` (4500+ ids on medium
+        repos) silently built an empty cache and degraded every
+        ``nx index repo`` to a full re-index.
+
+        A page failure propagates (whole call fails loud). Deliberate:
+        every caller already handles the exception in its own safe
+        direction — build_staleness_cache degrades to full re-index,
+        embed_migrate blocks its destructive re-index, and catalog
+        doctor must see a hard error rather than a silent partial that
+        reads as data corruption.
         """
         if not doc_ids:
             return {}
-        result = self._post("/manifest/get_many", {"doc_ids": doc_ids})
-        manifests = result.get("manifests", {}) if result else {}
-        return {
-            did: [_manifest_row_from_dict(r) for r in rows]
-            for did, rows in manifests.items()
-        }
+        merged: dict[str, list[ManifestRow]] = {}
+        for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
+            batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
+            result = self._post("/manifest/get_many", {"doc_ids": batch})
+            manifests = result.get("manifests", {}) if result else {}
+            for did, rows in manifests.items():
+                merged[did] = [_manifest_row_from_dict(r) for r in rows]
+        return merged
 
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
         """Return chashes for all chunks of doc_id.
@@ -1730,6 +1810,34 @@ class HttpCatalogClient:
             if new_collection:              updates["physical_collection"] = new_collection
             if new_chunk_count is not None: updates["chunk_count"] = new_chunk_count
             self._post("/update", {"tumbler": doc_id, **updates})
+
+    def write_manifest_many(
+        self, docs: "list[tuple[str, list[dict]]]"
+    ) -> list[str]:
+        """Atomic per-doc manifest REPLACE for many docs in one POST.
+
+        nexus-u2kwq: the flush-grain manifest hook writes complete files
+        (file-atomic batching guarantees position 0), and the per-doc
+        ``atomic_manifest_replace`` cost 2 POSTs per file (~205s of a
+        177-file wall). ``/manifest/write_many`` (engine v0.1.24+) does
+        DELETE+INSERT+chunk_count per doc in one server-side per-doc
+        transaction; docs page at 1000 (MAX_BATCH parity). Returns the
+        accumulated ``failed_doc_ids`` (per-doc isolation server-side).
+        Callers must catch HTTP 404 and fall back per-doc for older
+        engines.
+        """
+        failed: list[str] = []
+        for start in range(0, len(docs), _MANIFEST_GET_MANY_PAGE):
+            page = docs[start : start + _MANIFEST_GET_MANY_PAGE]
+            result = self._post(
+                "/manifest/write_many",
+                {"docs": [
+                    {"doc_id": d, "rows": self._manifest_rows(chunks)}
+                    for d, chunks in page
+                ]},
+            )
+            failed.extend((result or {}).get("failed_doc_ids", []))
+        return failed
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:
         """Recompute ``documents.chunk_count`` from the true manifest row count.

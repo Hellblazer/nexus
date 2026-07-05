@@ -124,3 +124,51 @@ def test_empty_ids_noop(monkeypatch):
     db = _service_db(monkeypatch, existing=set())
     assert _upsert_skip_reembed(db, _COLL, [], [], [], []) == 0
     db.upsert_chunks_with_embeddings.assert_not_called()
+
+
+# ── RDR-181 §Approach step 3: force bypasses this function's OWN client-side
+# probe entirely (a distinct, earlier client-side skip predating RDR-181's
+# server-side existence-partition) and forwards force_re_embed=True so the
+# server also re-embeds unconditionally. Without this, --force reindex would
+# still take the metadata-only-update branch below for known chashes,
+# silently defeating the caller's intent. ──────────────────────────────────
+
+
+def test_force_true_bypasses_probe_and_sets_force_re_embed(monkeypatch):
+    db = _service_db(monkeypatch, existing={_IDS[0], _IDS[2]})
+    sent = _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS, force=True)
+    assert sent == 3  # every chunk goes down the embed path, not just the new one
+    db.existing_ids.assert_not_called()  # the client-side probe is skipped entirely
+    db.upsert_chunks_with_embeddings.assert_called_once_with(
+        _COLL, _IDS, _DOCS, _EMB, _METAS, force_re_embed=True,
+    )
+    db.update_chunks.assert_not_called()  # no metadata-only branch under force
+
+
+def test_force_false_default_no_force_re_embed_kwarg(monkeypatch):
+    # force defaults False: the existing split behavior is unchanged and
+    # the full-upsert branch (none existing) is called WITHOUT the
+    # force_re_embed kwarg at all (matches the pre-RDR-181 call shape).
+    db = _service_db(monkeypatch, existing=set())
+    sent = _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS)
+    assert sent == 3
+    db.upsert_chunks_with_embeddings.assert_called_once_with(
+        _COLL, _IDS, _DOCS, _EMB, _METAS,
+    )
+
+
+def test_force_true_non_service_mode_untouched(monkeypatch):
+    # Local mode has no server-side existence-partition to bypass — force
+    # must not change the local-mode call shape (no force_re_embed kwarg;
+    # T3Database accepts-and-ignores it, but this call site never sends it
+    # in local mode since there is nothing to force).
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client.is_vector_service_mode", lambda: False,
+    )
+    db = MagicMock(spec=HttpVectorClient)
+    sent = _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS, force=True)
+    assert sent == 3
+    db.existing_ids.assert_not_called()
+    db.upsert_chunks_with_embeddings.assert_called_once_with(
+        _COLL, _IDS, _DOCS, _EMB, _METAS,
+    )

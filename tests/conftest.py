@@ -604,6 +604,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # Mode-self-tests — these assert local-mode behavior; cloud_mode
     # would invert what they test.
     "test_local_mode.py",
+    # nexus-duoak.3 bench teardown-scope: voyage tokens appear only in
+    # synthetic collection-name fixtures (REAL / after lists) exercising pure
+    # set-difference logic in bench_tumblers/plan_teardown; no Voyage call is
+    # ever made and no embedder mode is asserted.
+    "test_teardown_scope.py",
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
@@ -690,6 +695,13 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # HTTP request body; the test asserts the request is POSTed to the
     # /update-metadata endpoint, not any cloud-mode embedder behavior.
     "tests/db/test_http_vector_client.py::TestUpdateChunks::test_posts_to_update_metadata_endpoint",
+    #
+    # nexus-f0r8p.3 (RDR-181): force_re_embed forwarding tests in the batch-flush
+    # closure. The voyage tokens are collection-NAME fixtures (code__repo__voyage-code-3__v1
+    # etc.); the tests assert the force_re_embed kwarg is forwarded/omitted
+    # correctly on the flush call, not any cloud-mode embedder behavior.
+    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_forwards_force_re_embed",
+    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_force_false_omits_force_re_embed",
 })
 
 

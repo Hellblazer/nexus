@@ -140,13 +140,21 @@ class HttpChashIndex(RawHandleGuardMixin):
         Batches into chunks of ``_BATCH_SIZE`` (200) to respect service limits.
         Blank/whitespace entries are skipped. Empty collection raises ValueError.
         An empty chashes list is a no-op.
+
+        Duplicate chashes are collapsed order-preserving (first-wins) BEFORE
+        batching. The service rejects a batch containing the same chash twice
+        with HTTP 500 (nexus-85z0y), and real files emit duplicate chunk text
+        (license headers, boilerplate), so dedup must happen up front — before
+        the ``_BATCH_SIZE`` split — to keep a repeat from spanning or recurring
+        across batches.
         """
         if not collection:
             raise ValueError("collection must not be empty")
         if not chashes:
             return
 
-        valid = [c for c in chashes if isinstance(c, str) and c.strip()]
+        seen = [c for c in chashes if isinstance(c, str) and c.strip()]
+        valid = list(dict.fromkeys(seen))
         if not valid:
             return
 

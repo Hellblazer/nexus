@@ -203,9 +203,29 @@ public final class VectorHandler implements HttpHandler {
      *   "collection": "knowledge__owner__model__v1",
      *   "ids":        ["sha256hex...", ...],
      *   "documents":  ["chunk text", ...],
-     *   "metadatas":  [{...}, ...]   // optional; length must match ids if provided
+     *   "metadatas":  [{...}, ...]    // optional; length must match ids if provided
+     *   "force_re_embed": false       // optional, default false — see below
      * }
      * </pre>
+     *
+     * <p>{@code force_re_embed} (RDR-181, bead nexus-f0r8p.3): bypasses the
+     * server-side existence-partition entirely so every chunk in the batch is
+     * re-embedded, even if its chash already has a stored vector. Wired from the
+     * client {@code --force} path and the deprecated
+     * {@code NX_UPSERT_SKIP_EXISTING=0} escape — the rare model-drift-within-a-
+     * collection recompute, and the escape for the (0%-hit) first-index path so
+     * it never pays for the existence SELECT with no offsetting benefit. Ignored
+     * on the vector-passthrough branch below ({@code embeddings} supplied) — that
+     * path already skips the existence check unconditionally.
+     *
+     * <p>Server-side (Postgres/service-mode) only: this endpoint and
+     * {@link dev.nexus.service.vectors.PgVectorRepository} are the sole owners of
+     * the embed-skip optimization {@code force_re_embed} bypasses. The Python
+     * client's local/Chroma-mode path ({@code T3Database.upsert_chunks} /
+     * {@code upsert_chunks_with_embeddings}) accepts {@code force_re_embed} for
+     * signature parity with {@code HttpVectorClient} (callers duck-type against
+     * {@code IndexContext.db} regardless of mode) but treats it as a documented
+     * no-op — local mode has no server-side existence-partition to bypass.
      *
      * <p>Response 200: {"upserted": N}
      */
@@ -219,6 +239,7 @@ public final class VectorHandler implements HttpHandler {
         List<String> documents      = requireStringList(body, "documents");
         List<Map<String, Object>> metadatas = optMetadataList(body, "metadatas", ids.size());
         List<float[]> embeddings = optEmbeddingsList(body, "embeddings");
+        boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
 
         if (ids.size() != documents.size()) {
             throw new IllegalArgumentException(
@@ -229,6 +250,8 @@ public final class VectorHandler implements HttpHandler {
             // Same-model vector PASSTHROUGH (nexus-hxry2): store the supplied vectors
             // verbatim, no embedder call (token usage 0). Dimension is validated
             // against the dispatched table inside the repository (fail loud).
+            // force_re_embed is irrelevant here (see javadoc above) — never threaded
+            // into upsertChunksWithVectors, which has no such parameter.
             if (embeddings.size() != ids.size()) {
                 throw new IllegalArgumentException(
                         "embeddings length " + embeddings.size() + " != ids length " + ids.size());
@@ -239,7 +262,8 @@ public final class VectorHandler implements HttpHandler {
             return;
         }
 
-        var upsertResult = repo.upsertChunksWithTokens(tenant, collection, ids, documents, metadatas);
+        var upsertResult = repo.upsertChunksWithTokens(
+                tenant, collection, ids, documents, metadatas, forceReEmbed);
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, upsertResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
@@ -594,8 +618,12 @@ public final class VectorHandler implements HttpHandler {
                     "metadatas length " + metadatas.size() + " != ids length " + ids.size());
         }
 
-        repo.updateMetadata(tenant, collection, ids, metadatas);
-        HttpUtil.send(ex, 200, json(Map.of("updated", ids.size())));
+        // RDR-181 (bead nexus-f0r8p.2): updateMetadata now returns the actual
+        // affected-row count rather than void — report it verbatim instead of
+        // assuming every id existed (a stale/deleted id previously reported as
+        // "updated" with no row actually touched).
+        int updated = repo.updateMetadata(tenant, collection, ids, metadatas);
+        HttpUtil.send(ex, 200, json(Map.of("updated", updated)));
     }
 
     /**

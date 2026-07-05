@@ -23,6 +23,16 @@ from nexus.retry import _chroma_with_retry
 
 _log = structlog.get_logger(__name__)
 
+#: Surface-a-slow-drain threshold (seconds) when draining in-flight workers after
+#: a concurrent index failure (nexus-7yfe6). This is an OBSERVABILITY bound, not a
+#: kill: Python threads can't be force-killed, so an in-flight upsert runs until
+#: its own socket timeout (600s for /v1/vectors/upsert-chunks). If the drain
+#: exceeds this threshold we WARN with the in-flight count so the run reads as
+#: "draining N slow workers" instead of a silent hang. The common transient-5xx
+#: case never reaches here — it's contained per-file upstream (see
+#: indexer._contain_transient_upsert).
+_FAILURE_DRAIN_TIMEOUT_S = 120.0
+
 # Patterns always ignored (mirrors indexer.DEFAULT_IGNORE).
 _DEFAULT_IGNORE: list[str] = [
     "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", ".git",
@@ -634,8 +644,12 @@ def run_file_loop(
     concurrency: int,
     on_file: Callable[[Path, int, float], None] | None,
     on_stage_timers: Callable[[Path, object], None] | None,
-) -> None:
+) -> int:
     """Drive one per-file indexing loop, sequentially or with a bounded pool.
+
+    Returns the number of files that wrote at least one chunk this run
+    (``index_one`` returned > 0); staleness-skipped and failed files return 0
+    and are not counted (nexus-qgc4b).
 
     ``index_one(file, score, timers) -> chunk_count`` is the loop body
     (the ``_index_code_file`` / ``_index_prose_file`` / ``_index_pdf_file``
@@ -669,11 +683,19 @@ def run_file_loop(
 
         return StageTimers()
 
+    # nexus-qgc4b: count files that actually wrote chunks (index_one > 0).
+    # A staleness-skipped or failed file returns 0. The caller gates the
+    # expensive post-index passes (taxonomy discover/kmeans/labeling) on this
+    # count being non-zero, so an all-skip re-index costs only the scan.
+    written = [0]
+
     def _process(score: float, file: Path) -> None:
         t0 = time.monotonic()
         timers = _make_timers()
         chunks = index_one(file, score, timers)
         with cb_lock:
+            if chunks > 0:
+                written[0] += 1
             if on_file:
                 on_file(file, chunks, time.monotonic() - t0)
             if on_stage_timers is not None and timers is not None:
@@ -682,7 +704,7 @@ def run_file_loop(
     if concurrency <= 1:
         for score, file in files:
             _process(score, file)
-        return
+        return written[0]
 
     from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait  # noqa: PLC0415 — leaf module keeps import surface minimal
 
@@ -692,14 +714,32 @@ def run_file_loop(
         futures = [pool.submit(_process, score, file) for score, file in files]
         done, not_done = wait(futures, return_when=FIRST_EXCEPTION)
         if not not_done and not any(f.exception() for f in done):
-            return
+            return written[0]
         # A failure (or spurious wake). Cancel everything not yet started,
         # let in-flight files finish, then harvest EVERY failure — a
         # concurrent secondary failure must be logged, never silently
         # dropped (critique finding, nexus-cfc72).
         for fut in not_done:
             fut.cancel()
-        wait(futures)
+        # nexus-7yfe6: SURFACE a slow drain (observability only — NOT a hard
+        # bound). Python threads can't be force-killed, and the harvest loop below
+        # calls fut.exception() which blocks until each in-flight future finishes,
+        # so the real wall-time bound on a genuine (non-transient) failure racing a
+        # wedged sibling remains that sibling's upsert socket timeout (600s at
+        # http_vector_client.py). This bounded wait exists only to emit an early
+        # WARNING with the in-flight count, so a slow drain reads as "draining N
+        # workers" rather than a silent hang. The reported incident does NOT reach
+        # here: a transient 5xx is contained per-file upstream
+        # (indexer._contain_transient_upsert), so it never propagates into this
+        # failure path. Truly bounding a fatal-error drain would require abandoning
+        # in-flight threads (shutdown(wait=False)) — deferred, see nexus-7yfe6 notes.
+        _still_running = wait(futures, timeout=_FAILURE_DRAIN_TIMEOUT_S).not_done
+        if _still_running:
+            _log.warning(
+                "index_failure_drain_slow",
+                in_flight=len(_still_running),
+                waited_s=_FAILURE_DRAIN_TIMEOUT_S,
+            )
         failures: list[tuple[Path, BaseException]] = []
         for (score, file), fut in zip(files, futures):
             if fut.cancelled():
@@ -708,7 +748,7 @@ def run_file_loop(
             if exc is not None:
                 failures.append((file, exc))
         if not failures:
-            return
+            return written[0]
         # Deterministic "first": earliest in submission (frecency) order.
         for file, exc in failures[1:]:
             _log.warning(

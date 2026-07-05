@@ -9,6 +9,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -396,65 +397,133 @@ public final class TaxonomyRepository {
                              String assignedBy, Double similarity,
                              String sourceCollection, String assignedAt) {
         tenantScope.withTenant(tenant, ctx -> {
-            if ("projection".equals(assignedBy)) {
-                // RDR-156 P0.2: ensure collection is registered before the assignment write
-                ensureCollectionRegistered(ctx, tenant, sourceCollection);
-                OffsetDateTime assignedAtTs = assignedAt != null
-                    ? parseTs(assignedAt)
-                    : OffsetDateTime.now(ZoneOffset.UTC);
-                // GREATEST(COALESCE(...), ...) + CASE WHEN EXCLUDED.similarity > ... patterns
-                // referencing both EXCLUDED.* and the existing table row are Postgres-specific
-                // constructs retained as DSL.field() fragments per spec.
-                ctx.insertInto(TOPIC_ASSIGNMENTS,
-                        TOPIC_ASSIGNMENTS.TENANT_ID,
-                        TOPIC_ASSIGNMENTS.DOC_ID,
-                        TOPIC_ASSIGNMENTS.TOPIC_ID,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                        TOPIC_ASSIGNMENTS.SIMILARITY,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-                   .values(tenant, docId, topicId, "projection", similarity, assignedAtTs, sourceCollection)
-                   .onConflict(
-                        TOPIC_ASSIGNMENTS.TENANT_ID,
-                        TOPIC_ASSIGNMENTS.DOC_ID,
-                        TOPIC_ASSIGNMENTS.TOPIC_ID)
-                   .doUpdate()
-                   .set(TOPIC_ASSIGNMENTS.SIMILARITY,
-                        field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
-                            + " EXCLUDED.similarity)", Double.class))
-                   .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        field("CASE WHEN EXCLUDED.similarity"
-                            + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
-                            + " THEN EXCLUDED.assigned_at"
-                            + " ELSE nexus.topic_assignments.assigned_at END", OffsetDateTime.class))
-                   .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                        field("CASE WHEN EXCLUDED.similarity"
-                            + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
-                            + " THEN EXCLUDED.source_collection"
-                            + " ELSE nexus.topic_assignments.source_collection END", String.class))
-                   .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
-                   .execute();
-            } else {
-                ctx.insertInto(TOPIC_ASSIGNMENTS,
-                        TOPIC_ASSIGNMENTS.TENANT_ID,
-                        TOPIC_ASSIGNMENTS.DOC_ID,
-                        TOPIC_ASSIGNMENTS.TOPIC_ID,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_BY)
-                   .values(tenant, docId, topicId, assignedBy)
-                   .onConflict(
-                       TOPIC_ASSIGNMENTS.TENANT_ID,
-                       TOPIC_ASSIGNMENTS.DOC_ID,
-                       TOPIC_ASSIGNMENTS.TOPIC_ID)
-                   .doNothing()
-                   .execute();
-            }
-            // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. A fresh
-            // assignment INSERT fires the AFTER INSERT statement-level trigger,
-            // which recomputes topics.doc_count from the live rows. (An ON CONFLICT
-            // DO NOTHING / DO UPDATE that changes no assignment count leaves
-            // doc_count correctly unchanged.) The trigger is the sole writer.
+            assignOne(ctx, tenant, docId, topicId, assignedBy, similarity, sourceCollection, assignedAt);
             return null;
         });
+    }
+
+    /**
+     * Batch upsert of topic assignments (bead nexus-71988). Loops the SAME two
+     * insert shapes as {@link #assignTopic} inside ONE
+     * {@link TenantScope#withTenant} transaction (GUC {@code nexus.tenant} set
+     * once). Projection rows keep best-similarity-wins; non-projection rows are
+     * dup-safe DO NOTHING. doc_count stays trigger-maintained (RDR-154) — the
+     * per-row INSERTs fire the statement-level triggers, no manual resync.
+     * Empty list is a no-op.
+     *
+     * @param rows each carries doc_id/topic_id/assigned_by (required) and
+     *             optional similarity/source_collection/assigned_at.
+     * @return number of rows submitted.
+     */
+    public int assignMany(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return 0;
+        // nexus-ps9wb: assignMany accumulates one row lock per assignOne across the
+        // whole transaction, in arrival order. Two concurrent assignMany calls (the
+        // flush-grain assign_many hook under multi-worker indexing) that touch
+        // overlapping (doc_id, topic_id) keys in different orders deadlock (SQLSTATE
+        // 40P01) — the same class as PgVectorRepository.upsertChunks. Sort rows by the
+        // (tenant constant) conflict key so every concurrent batch locks in one global
+        // order. Copy first — the caller's list may be immutable.
+        List<Map<String, Object>> ordered = new ArrayList<>(rows);
+        ordered.sort(Comparator
+                .comparing((Map<String, Object> r) -> reqS(r, "doc_id"))
+                .thenComparing(r -> reqL(r, "topic_id")));
+        // Belt: retry a residual cross-path deadlock; idempotent upserts, victim
+        // already rolled back → safe.
+        return DeadlockRetry.run("taxonomy.assignMany", () -> tenantScope.withTenant(tenant, ctx -> {
+            // Review #5: register each distinct source_collection ONCE per
+            // batch instead of one idempotent INSERT per projection row
+            // (batches routinely share a single collection).
+            ordered.stream()
+                .filter(r -> "projection".equals(r.get("assigned_by")))
+                .map(r -> optS(r, "source_collection"))
+                .filter(c -> c != null && !c.isBlank())
+                .distinct()
+                .forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
+            for (Map<String, Object> r : ordered) {
+                assignOne(ctx, tenant, reqS(r, "doc_id"), reqL(r, "topic_id"),
+                          reqS(r, "assigned_by"), optD(r, "similarity"),
+                          optS(r, "source_collection"), optS(r, "assigned_at"),
+                          false);
+            }
+            return ordered.size();
+        }));
+    }
+
+    /**
+     * Shared single-assignment upsert body used by both {@link #assignTopic}
+     * (one row per transaction) and {@link #assignMany} (N rows per
+     * transaction). Assumes {@code ctx} is already scoped to {@code tenant}.
+     */
+    private static void assignOne(DSLContext ctx, String tenant, String docId, long topicId,
+                                  String assignedBy, Double similarity,
+                                  String sourceCollection, String assignedAt) {
+        assignOne(ctx, tenant, docId, topicId, assignedBy, similarity,
+                  sourceCollection, assignedAt, true);
+    }
+
+    private static void assignOne(DSLContext ctx, String tenant, String docId, long topicId,
+                                  String assignedBy, Double similarity,
+                                  String sourceCollection, String assignedAt,
+                                  boolean ensureCollection) {
+        if ("projection".equals(assignedBy)) {
+            // RDR-156 P0.2: ensure collection is registered before the assignment
+            // write (assignMany pre-registers distinct collections and passes false)
+            if (ensureCollection) ensureCollectionRegistered(ctx, tenant, sourceCollection);
+            OffsetDateTime assignedAtTs = assignedAt != null
+                ? parseTs(assignedAt)
+                : OffsetDateTime.now(ZoneOffset.UTC);
+            // GREATEST(COALESCE(...), ...) + CASE WHEN EXCLUDED.similarity > ... patterns
+            // referencing both EXCLUDED.* and the existing table row are Postgres-specific
+            // constructs retained as DSL.field() fragments per spec.
+            ctx.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SIMILARITY,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+               .values(tenant, docId, topicId, "projection", similarity, assignedAtTs, sourceCollection)
+               .onConflict(
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .doUpdate()
+               .set(TOPIC_ASSIGNMENTS.SIMILARITY,
+                    field("GREATEST(COALESCE(nexus.topic_assignments.similarity, -1.0),"
+                        + " EXCLUDED.similarity)", Double.class))
+               .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                    field("CASE WHEN EXCLUDED.similarity"
+                        + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
+                        + " THEN EXCLUDED.assigned_at"
+                        + " ELSE nexus.topic_assignments.assigned_at END", OffsetDateTime.class))
+               .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    field("CASE WHEN EXCLUDED.similarity"
+                        + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
+                        + " THEN EXCLUDED.source_collection"
+                        + " ELSE nexus.topic_assignments.source_collection END", String.class))
+               .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
+               .execute();
+        } else {
+            ctx.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY)
+               .values(tenant, docId, topicId, assignedBy)
+               .onConflict(
+                   TOPIC_ASSIGNMENTS.TENANT_ID,
+                   TOPIC_ASSIGNMENTS.DOC_ID,
+                   TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .doNothing()
+               .execute();
+        }
+        // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. A fresh
+        // assignment INSERT fires the AFTER INSERT statement-level trigger,
+        // which recomputes topics.doc_count from the live rows. (An ON CONFLICT
+        // DO NOTHING / DO UPDATE that changes no assignment count leaves
+        // doc_count correctly unchanged.) The trigger is the sole writer.
     }
 
     /** Return doc_ids assigned to a topic. limit=0 means no limit. */
@@ -909,7 +978,11 @@ public final class TaxonomyRepository {
      */
     public int importBatch(String tenant, String kind, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
+        // nexus-ps9wb belt: the import*Batch methods sort their deduped rows by the
+        // ON CONFLICT key (global lock order), and this retry covers a residual
+        // cross-path deadlock. Idempotent ON CONFLICT batch, victim already rolled
+        // back → safe.
+        return DeadlockRetry.run("taxonomy.importBatch." + kind, () -> tenantScope.withTenant(tenant, ctx -> {
             int n = switch (kind) {
                 case "topic"      -> importTopicsBatch(ctx, tenant, rows);
                 case "assignment" -> importAssignmentsBatch(ctx, tenant, rows);
@@ -919,7 +992,7 @@ public final class TaxonomyRepository {
             };
             log.debug("event=taxonomy_import_batch tenant={} kind={} rows={}", tenant, kind, rows.size());
             return n;
-        });
+        }));
     }
 
     /**
@@ -942,10 +1015,13 @@ public final class TaxonomyRepository {
         }
         for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
 
-        // Dedupe on id (the conflict key), last occurrence wins.
+        // Dedupe on id (the conflict key), last occurrence wins. Sort by id (the
+        // ON CONFLICT key) so concurrent batches lock TOPICS rows in one global order
+        // — deadlock avoidance, nexus-ps9wb.
         var unique = new LinkedHashMap<Long, Map<String, Object>>(rows.size());
         for (var r : rows) unique.put(reqL(r, "id"), r);
-        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+        List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
+        deduped.sort(Comparator.comparing(r -> reqL(r, "id")));
 
         final int cols = 10;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
@@ -978,10 +1054,15 @@ public final class TaxonomyRepository {
         }
         for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
 
-        // Conflict key: (tenant_id, doc_id, topic_id). tenant is constant for this call.
+        // Conflict key: (tenant_id, doc_id, topic_id). tenant is constant for this
+        // call. Sort by (doc_id, topic_id) so concurrent batches lock TOPIC_ASSIGNMENTS
+        // rows in one global order — deadlock avoidance, nexus-ps9wb.
         var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
         for (var r : rows) unique.put(reqS(r, "doc_id") + "::" + reqL(r, "topic_id"), r);
-        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+        List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
+        deduped.sort(Comparator
+                .comparing((Map<String, Object> r) -> reqS(r, "doc_id"))
+                .thenComparing(r -> reqL(r, "topic_id")));
 
         final int cols = 7;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
@@ -1020,10 +1101,15 @@ public final class TaxonomyRepository {
     }
 
     private static int importLinksBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
-        // Conflict key: (tenant_id, from_topic_id, to_topic_id).
+        // Conflict key: (tenant_id, from_topic_id, to_topic_id). Sort by
+        // (from_topic_id, to_topic_id) so concurrent batches lock TOPIC_LINKS rows in
+        // one global order — deadlock avoidance, nexus-ps9wb.
         var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
         for (var r : rows) unique.put(reqL(r, "from_topic_id") + "::" + reqL(r, "to_topic_id"), r);
-        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+        List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
+        deduped.sort(Comparator
+                .comparing((Map<String, Object> r) -> reqL(r, "from_topic_id"))
+                .thenComparing(r -> reqL(r, "to_topic_id")));
 
         final int cols = 5;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
@@ -1051,10 +1137,13 @@ public final class TaxonomyRepository {
         for (var r : rows) collections.add(reqS(r, "collection"));
         for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
 
-        // Conflict key: (tenant_id, collection).
+        // Conflict key: (tenant_id, collection). Sort by collection so concurrent
+        // batches lock TAXONOMY_META rows in one global order — deadlock avoidance,
+        // nexus-ps9wb.
         var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
         for (var r : rows) unique.put(reqS(r, "collection"), r);
-        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+        List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
+        deduped.sort(Comparator.comparing(r -> reqS(r, "collection")));
 
         final int cols = 4;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);

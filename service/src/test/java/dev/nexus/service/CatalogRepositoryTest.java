@@ -2633,4 +2633,228 @@ class CatalogRepositoryTest {
         assertThat(repo.importChunksBatch("etl-batch-chunk-tenant", "bch.1", List.of())).isZero();
         assertThat(repo.importChunksBatch("etl-batch-chunk-tenant", "bch.1", null)).isZero();
     }
+
+    // ── writeManifestMany (nexus-u2kwq) ─────────────────────────────────────────
+
+    @Test @Order(230)
+    void writeManifestMany_twoDocs_replaceAndChunkCountUpdated() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.1", "title", "WMM Doc1",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.2", "title", "WMM Doc2",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+
+        var result = repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "wmm.1", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmm1aa00000000000000000000000000", "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", "wmm1bb00000000000000000000000000", "chunk_index", 1))),
+            Map.<String, Object>of("doc_id", "wmm.2", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmm2aa00000000000000000000000000", "chunk_index", 0)))));
+
+        assertThat(result.get("docs")).isEqualTo(2);
+        assertThat(result.get("rows")).isEqualTo(3);
+        assertThat((List<?>) result.get("failed_doc_ids")).isEmpty();
+
+        // Equal to two independent writeManifest calls: positions + chashes intact.
+        var m1 = repo.getManifest(TENANT_A, "wmm.1");
+        assertThat(m1).hasSize(2);
+        assertThat(m1.get(0).get("chash")).isEqualTo("wmm1aa00000000000000000000000000");
+        assertThat(m1.get(1).get("chash")).isEqualTo("wmm1bb00000000000000000000000000");
+        assertThat(repo.getManifest(TENANT_A, "wmm.2")).hasSize(1);
+
+        // chunk_count folded into the same per-doc transaction.
+        assertThat(repo.getDocument(TENANT_A, "wmm.1").get("chunk_count")).isEqualTo(2);
+        assertThat(repo.getDocument(TENANT_A, "wmm.2").get("chunk_count")).isEqualTo(1);
+    }
+
+    @Test @Order(231)
+    void writeManifestMany_replaceShrinks_exactRowsAndChunkCount() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.3", "title", "WMM Doc3",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        // Seed 5 rows.
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "wmm.3", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmm3a000000000000000000000000000", "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", "wmm3b000000000000000000000000000", "chunk_index", 1),
+                Map.<String, Object>of("position", 2, "chash", "wmm3c000000000000000000000000000", "chunk_index", 2),
+                Map.<String, Object>of("position", 3, "chash", "wmm3d000000000000000000000000000", "chunk_index", 3),
+                Map.<String, Object>of("position", 4, "chash", "wmm3e000000000000000000000000000", "chunk_index", 4)))));
+        assertThat(repo.getManifest(TENANT_A, "wmm.3")).hasSize(5);
+        assertThat(repo.getDocument(TENANT_A, "wmm.3").get("chunk_count")).isEqualTo(5);
+
+        // Replace with only 2 rows — REPLACE shrinks; exactly 2 remain, chunk_count 2.
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "wmm.3", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmm3new0000000000000000000000000", "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", "wmm3new1000000000000000000000000", "chunk_index", 1)))));
+
+        var got = repo.getManifest(TENANT_A, "wmm.3");
+        assertThat(got).hasSize(2);
+        assertThat(got.stream().map(r -> (String) r.get("chash")).toList())
+            .containsExactlyInAnyOrder("wmm3new0000000000000000000000000", "wmm3new1000000000000000000000000");
+        assertThat(repo.getDocument(TENANT_A, "wmm.3").get("chunk_count")).isEqualTo(2);
+    }
+
+    @Test @Order(232)
+    void writeManifestMany_violatingRow_isolatedToFailedDocIds() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.good", "title", "WMM Good",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.bad", "title", "WMM Bad",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+
+        // wmm.bad carries a row with a missing chash (NOT NULL violation) -> its own
+        // transaction rolls back; wmm.good is unaffected (cross-doc isolation).
+        Map<String, Object> badRow = new LinkedHashMap<>();
+        badRow.put("position", 0);
+        badRow.put("chunk_index", 0); // chash intentionally absent -> null
+
+        var result = repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "wmm.good", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", "wmmgood0000000000000000000000000", "chunk_index", 0))),
+            Map.<String, Object>of("doc_id", "wmm.bad", "rows", List.<Map<String, Object>>of(badRow))));
+
+        assertThat(result.get("docs")).isEqualTo(1);
+        assertThat(result.get("rows")).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        List<String> failed = (List<String>) result.get("failed_doc_ids");
+        assertThat(failed).containsExactly("wmm.bad");
+
+        assertThat(repo.getManifest(TENANT_A, "wmm.good")).hasSize(1);
+        assertThat(repo.getDocument(TENANT_A, "wmm.good").get("chunk_count")).isEqualTo(1);
+        assertThat(repo.getManifest(TENANT_A, "wmm.bad")).isEmpty();
+        assertThat(repo.getDocument(TENANT_A, "wmm.bad").get("chunk_count")).isEqualTo(0);
+    }
+
+    @Test @Order(233)
+    void writeManifestMany_emptyDocsList_noOp() {
+        var result = repo.writeManifestMany(TENANT_A, List.of());
+        assertThat(result.get("docs")).isEqualTo(0);
+        assertThat(result.get("rows")).isEqualTo(0);
+        assertThat((List<?>) result.get("failed_doc_ids")).isEmpty();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // registerDocumentMany (nexus-9dvqy, duoak.11 sink #2)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private static Map<String, Object> regDoc(String title, String filePath) {
+        return Map.of("title", title, "content_type", "code", "corpus", "code",
+                      "file_path", filePath, "physical_collection", "code__x__v1");
+    }
+
+    @Test @Order(300)
+    void registerDocumentMany_contiguousSeqBlock() {
+        final String prefix = "rm-block";
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("a", "a.py"), regDoc("b", "b.py"), regDoc("c", "c.py")));
+        // Contiguous, input-order, starting at seq 1 for a fresh owner.
+        assertThat(tumblers).containsExactly(prefix + ".1", prefix + ".2", prefix + ".3");
+        // next_seq advanced by exactly 3: a following single register gets .4.
+        String next = repo.registerDocument(TENANT_A, prefix, regDoc("d", "d.py"));
+        assertThat(next).isEqualTo(prefix + ".4");
+    }
+
+    @Test @Order(301)
+    void registerDocumentMany_mixedNewAndExisting_preservesOrderAndSkipsSeqForExisting() {
+        final String prefix = "rm-mixed";
+        // Pre-register one doc via the single-doc path.
+        String existing = repo.registerDocument(TENANT_A, prefix, regDoc("keep", "keep.py"));
+        assertThat(existing).isEqualTo(prefix + ".1");
+        // Batch: [existing (same file_path), new, new] — existing returns its tumbler,
+        // only the two new docs consume the block; order preserved.
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("keep-again", "keep.py"), regDoc("new1", "n1.py"), regDoc("new2", "n2.py")));
+        assertThat(tumblers).containsExactly(prefix + ".1", prefix + ".2", prefix + ".3");
+        // No seq gap: next single register is .4, not .5.
+        assertThat(repo.registerDocument(TENANT_A, prefix, regDoc("tail", "tail.py")))
+            .isEqualTo(prefix + ".4");
+    }
+
+    @Test @Order(302)
+    void registerDocumentMany_idempotentRebatch_returnsSameTumblers_noSeqGap() {
+        final String prefix = "rm-idem";
+        var first = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("x", "x.py"), regDoc("y", "y.py")));
+        assertThat(first).containsExactly(prefix + ".1", prefix + ".2");
+        // Re-batch the same file_paths — every doc is already LIVE, so no seq is drawn.
+        var second = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("x-again", "x.py"), regDoc("y-again", "y.py")));
+        assertThat(second).containsExactly(prefix + ".1", prefix + ".2");
+        assertThat(repo.registerDocument(TENANT_A, prefix, regDoc("z", "z.py")))
+            .isEqualTo(prefix + ".3");
+    }
+
+    @Test @Order(303)
+    void registerDocumentMany_ownerAbsentBootstrap_createsOwner() {
+        final String prefix = "rm-bootstrap";
+        // Owner does not exist yet — the batch upserts it, then assigns from seq 1.
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(regDoc("only", "only.py")));
+        assertThat(tumblers).containsExactly(prefix + ".1");
+        assertThat(repo.getDocument(TENANT_A, prefix + ".1").get("title")).isEqualTo("only");
+    }
+
+    @Test @Order(304)
+    void registerDocumentMany_emptyList_returnsEmpty() {
+        assertThat(repo.registerDocumentMany(TENANT_A, "rm-empty", List.of())).isEmpty();
+    }
+
+    @Test @Order(306)
+    void registerDocumentMany_idempotencyKeysOnSourceUriFirst() {
+        // source_uri is checked BEFORE file_path (matching registerDocument);
+        // a re-batch with the same source_uri returns the same tumbler and
+        // consumes no sequence number, even if the file_path differs.
+        final String prefix = "rm-srcuri";
+        final String uri = "file:///tmp/rm-srcuri/doc.md";
+        String first = repo.registerDocument(TENANT_A, prefix, Map.of(
+            "title", "srcuri doc", "content_type", "rdr", "corpus", "rdr",
+            "file_path", "orig.md", "source_uri", uri));
+        assertThat(first).isEqualTo(prefix + ".1");
+        // Batch with the SAME source_uri but a DIFFERENT file_path -> idempotent
+        // on source_uri (first precedence), returns the existing tumbler.
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            Map.of("title", "srcuri doc renamed", "content_type", "rdr",
+                   "corpus", "rdr", "file_path", "renamed.md", "source_uri", uri),
+            Map.of("title", "brand new", "content_type", "rdr", "corpus", "rdr",
+                   "file_path", "new.md", "source_uri", "file:///tmp/rm-srcuri/new.md")));
+        assertThat(tumblers).containsExactly(prefix + ".1", prefix + ".2");
+        // No seq gap: the existing source_uri consumed nothing; only "brand new" did.
+        assertThat(repo.registerDocument(TENANT_A, prefix, Map.of(
+            "title", "tail", "content_type", "rdr", "corpus", "rdr",
+            "file_path", "tail.md", "source_uri", "file:///tmp/rm-srcuri/tail.md")))
+            .isEqualTo(prefix + ".3");
+    }
+
+    @Test @Order(305)
+    void registerDocumentMany_concurrentSameOwner_disjointGaplessBlocks() throws Exception {
+        final String prefix = "rm-concurrent";
+        final int perBatch = 5;
+        // Bootstrap the owner first so both threads race only the next_seq FOR UPDATE claim.
+        repo.registerDocumentMany(TENANT_A, prefix, List.of(regDoc("seed", "seed.py")));
+
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.Callable<List<String>> task = () -> {
+                long tid = Thread.currentThread().getId();
+                var docs = new java.util.ArrayList<Map<String, Object>>();
+                for (int i = 0; i < perBatch; i++) {
+                    docs.add(regDoc("t" + tid + "-" + i, "t" + tid + "-" + i + ".py"));
+                }
+                return repo.registerDocumentMany(TENANT_A, prefix, docs);
+            };
+            var f1 = pool.submit(task);
+            var f2 = pool.submit(task);
+            var all = new java.util.ArrayList<String>();
+            all.addAll(f1.get());
+            all.addAll(f2.get());
+            // 10 tumblers, all distinct (disjoint blocks) — the FOR UPDATE lock
+            // serializes the two seq-block claims so neither overlaps.
+            assertThat(all).hasSize(2 * perBatch);
+            assertThat(new java.util.HashSet<>(all)).hasSize(2 * perBatch);
+            // Gapless overall: seeds .2, both batches fill .2..(seed+10) with no hole.
+            String next = repo.registerDocument(TENANT_A, prefix, regDoc("after", "after.py"));
+            // seed consumed .1; 10 concurrent docs consumed .2..0.11; next is .12.
+            assertThat(next).isEqualTo(prefix + ".12");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
 }

@@ -43,6 +43,7 @@ import java.util.*;
  *   POST  /v1/catalog/traverse           BFS graph traversal
  *   POST  /v1/catalog/manifest/write     replace manifest
  *   POST  /v1/catalog/manifest/append    append chunks
+ *   POST  /v1/catalog/manifest/write_many batch replace manifests for multiple docs (+chunk_count)
  *   GET   /v1/catalog/manifest/get       get manifest for doc_id
  *   POST  /v1/catalog/manifest/get_many  batch-fetch manifests for multiple doc_ids (nexus-7lm3q)
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
@@ -131,6 +132,7 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Manifest ──────────────────────────────────────────────────
                 case "/manifest/write"        -> handleManifestWrite(exchange, tenant, method);
                 case "/manifest/append"       -> handleManifestAppend(exchange, tenant, method);
+                case "/manifest/write_many"   -> handleManifestWriteMany(exchange, tenant, method);
                 case "/manifest/get"          -> handleManifestGet(exchange, tenant, method);
                 case "/manifest/get_many"     -> handleManifestGetMany(exchange, tenant, method);
                 case "/manifest/purge"        -> handleManifestPurge(exchange, tenant, method);
@@ -191,6 +193,7 @@ public final class CatalogHandler implements HttpHandler {
 
                 // ── Server-side tumbler assignment ────────────────────────────
                 case "/doc/register"          -> handleDocRegister(exchange, tenant, method);
+                case "/doc/register_many"     -> handleRegisterMany(exchange, tenant, method);
 
                 // ── Migration count verification (RDR-159 P-1a) ───────────────
                 case "/verify/relation-counts" -> handleRelationCounts(exchange, tenant, method);
@@ -507,6 +510,40 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = castRows(body.get("rows"));
         repo.appendManifestChunks(tenant, docId, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
+    }
+
+    /**
+     * POST /v1/catalog/manifest/write_many (bead nexus-u2kwq).
+     *
+     * <p>Body {@code {"docs": [{"doc_id": "...", "rows": [<same row shape as
+     * /manifest/write>]}, ...]}}. Each doc is REPLACED in its own transaction
+     * (delete all rows + insert + set documents.chunk_count = rows.size();
+     * per-doc atomicity, cross-doc isolation) via
+     * {@link CatalogRepository#writeManifestMany}. Cap {@value #MAX_BATCH_DOC_IDS}
+     * docs. Response 200 {@code {docs: N_ok, rows: M_total, failed_doc_ids: [...]}}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleManifestWriteMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("docs");
+        // Review #2: malformed shapes must 400, not no-op as a false 200
+        // (mirrors handleAssignMany; a wrong key or element type is a
+        // client bug and silence would mask it).
+        if (!(raw instanceof List<?> l)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'docs' must be a list\"}"); return;
+        }
+        if (l.stream().anyMatch(o -> !(o instanceof Map))) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"every 'docs' element must be an object\"}"); return;
+        }
+        List<Map<String, Object>> docs =
+            l.stream().map(o -> (Map<String, Object>) o).toList();
+        if (docs.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var result = repo.writeManifestMany(tenant, docs);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
     /** GET /v1/catalog/manifest/get?doc_id=X */
@@ -1017,6 +1054,39 @@ public final class CatalogHandler implements HttpHandler {
         }
         String tumbler = repo.registerDocument(tenant, ownerPrefix, body);
         HttpUtil.send(exchange, 200, "{\"tumbler\":" + MAPPER.writeValueAsString(tumbler) + "}");
+    }
+
+    /**
+     * POST /v1/catalog/doc/register_many — batch-register N documents under one owner
+     * in a single transaction, returning their tumblers in INPUT ORDER (nexus-9dvqy,
+     * duoak.11 sink #2).
+     *
+     * <p>Body: {"owner_prefix": "1.1", "docs": [{"title": ..., "file_path": ...}, ...]}
+     * Response: {"tumblers": ["1.1.3", "1.1.4", ...]}  (aligned 1:1 with docs)
+     *
+     * <p>Existing (idempotent) docs return their current tumbler and consume no
+     * sequence number; only new docs draw from the contiguous block claimed under
+     * one owner-row FOR UPDATE lock. Capped at {@value #MAX_BATCH_DOC_IDS} rows to
+     * stay under PostgreSQL's 32767-parameter Bind limit (~24 cols/row).
+     */
+    @SuppressWarnings("unchecked")
+    private void handleRegisterMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String ownerPrefix = (String) body.get("owner_prefix");
+        if (ownerPrefix == null || ownerPrefix.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'owner_prefix' required\"}"); return;
+        }
+        Object raw = body.get("docs");
+        List<Map<String, Object>> docs = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof Map<?, ?>).map(o -> (Map<String, Object>) o).toList()
+            : List.of();
+        if (docs.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var tumblers = repo.registerDocumentMany(tenant, ownerPrefix, docs);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("tumblers", tumblers)));
     }
 
     // ══════════════════════════════════════════════════════════════════════════

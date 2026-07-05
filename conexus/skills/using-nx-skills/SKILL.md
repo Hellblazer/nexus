@@ -16,7 +16,7 @@ Before any multi-agent pipeline:
 3. If "No matching plans.", route normally
 
 After a successful pipeline:
-- `mcp__plugin_conexus_nexus__plan_save(query="<task>", plan_json={"steps":[...],"tools_used":[...],"outcome_notes":"..."}, tags="<agents>")`
+- Retrieval pipelines auto-grow the plan library via `nx_answer` — no manual save needed. Only `plan_save` a genuinely reusable **retrieval** plan, and it **requires a `verb`** (research / analyze / query / review / …): `mcp__plugin_conexus_nexus__plan_save(query="<question>", plan_json={...}, verb="<verb>", tags="<ops>")`. **Implementation / pipeline / phased-execution plans do NOT go here** — they live in beads + T2 memory. A verb-less save is refused (it pollutes the verb-dimensional plan-match library).
 
 ## Routing
 

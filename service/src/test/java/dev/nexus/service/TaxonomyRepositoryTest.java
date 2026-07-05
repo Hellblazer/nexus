@@ -135,7 +135,9 @@ class TaxonomyRepositoryTest {
                     // RDR-152 nexus-1di3r Phase 3 fixtures
                     "os-doc-manual", "os-doc-hdbscan",
                     "rb-doc-1", "rb-doc-2", "rb-doc-manual",
-                    "disc-doc-1", "disc-doc-2")) {
+                    "disc-doc-1", "disc-doc-2",
+                    // nexus-71988 assignMany fixtures
+                    "am-doc-1", "am-doc-2", "am-doc-dup", "am-doc-proj")) {
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
                     "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
@@ -972,6 +974,67 @@ class TaxonomyRepositoryTest {
     void importBatch_unknownKind_throws() {
         assertThatThrownBy(() -> repo.importBatch(TENANT_A, "bogus-kind", List.of(m("id", 1L))))
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // ── assignMany (nexus-71988) ────────────────────────────────────────────────
+
+    @Test @Order(60)
+    void assignMany_mixedCentroidAndProjection_matchesSequentialAssignTopic() {
+        long tBatch = repo.insertTopic(TENANT_A, "am-batch-topic", null, COL_A, 0, null, null);
+        long tSeq   = repo.insertTopic(TENANT_A, "am-seq-topic", null, COL_A, 0, null, null);
+
+        int persisted = repo.assignMany(TENANT_A, List.of(
+            m("doc_id", "am-doc-1", "topic_id", tBatch, "assigned_by", "centroid"),
+            m("doc_id", "am-doc-2", "topic_id", tBatch, "assigned_by", "projection",
+              "similarity", 0.7, "source_collection", COL_A)));
+        assertThat(persisted).isEqualTo(2);
+
+        // Equivalent sequence of single-row assignTopic calls to a sibling topic.
+        repo.assignTopic(TENANT_A, "am-doc-1", tSeq, "centroid", null, null, null);
+        repo.assignTopic(TENANT_A, "am-doc-2", tSeq, "projection", 0.7, COL_A, null);
+
+        assertThat(repo.getTopicDocIds(TENANT_A, tBatch, 0))
+            .containsExactlyInAnyOrder("am-doc-1", "am-doc-2");
+        assertThat(repo.getTopicDocIds(TENANT_A, tSeq, 0))
+            .containsExactlyInAnyOrder("am-doc-1", "am-doc-2");
+
+        Optional<Double> sim = repo.chunkGroundedIn(TENANT_A, "am-doc-2", COL_A);
+        assertThat(sim).isPresent();
+        assertThat(sim.get()).isEqualTo(0.7, offset(0.001));
+    }
+
+    @Test @Order(61)
+    void assignMany_duplicateNonProjectionRowsInBatch_dupSafe() {
+        long t = repo.insertTopic(TENANT_A, "am-dup-topic", null, COL_A, 0, null, null);
+        // Two identical (doc_id, topic_id) non-projection rows in ONE call: the
+        // second hits ON CONFLICT DO NOTHING (separate INSERT statements) — no error.
+        int persisted = repo.assignMany(TENANT_A, List.of(
+            m("doc_id", "am-doc-dup", "topic_id", t, "assigned_by", "centroid"),
+            m("doc_id", "am-doc-dup", "topic_id", t, "assigned_by", "centroid")));
+        assertThat(persisted).isEqualTo(2);
+        assertThat(repo.getTopicDocIds(TENANT_A, t, 0)).containsExactly("am-doc-dup");
+    }
+
+    @Test @Order(62)
+    void assignMany_projectionBestSimilarityWins_withinBatch() {
+        long t = repo.insertTopic(TENANT_A, "am-proj-topic", null, COL_A, 0, null, null);
+        repo.assignMany(TENANT_A, List.of(
+            m("doc_id", "am-doc-proj", "topic_id", t, "assigned_by", "projection",
+              "similarity", 0.4, "source_collection", COL_A),
+            m("doc_id", "am-doc-proj", "topic_id", t, "assigned_by", "projection",
+              "similarity", 0.9, "source_collection", COL_A),
+            m("doc_id", "am-doc-proj", "topic_id", t, "assigned_by", "projection",
+              "similarity", 0.6, "source_collection", COL_A)));
+
+        Optional<Double> sim = repo.chunkGroundedIn(TENANT_A, "am-doc-proj", COL_A);
+        assertThat(sim).isPresent();
+        assertThat(sim.get()).isEqualTo(0.9, offset(0.001));
+    }
+
+    @Test @Order(63)
+    void assignMany_emptyList_noOp() {
+        assertThat(repo.assignMany(TENANT_A, List.of())).isZero();
+        assertThat(repo.assignMany(TENANT_A, null)).isZero();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

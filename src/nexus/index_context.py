@@ -98,6 +98,15 @@ class IndexContext:
     # :func:`nexus.hook_registry.install_default_hooks`.
     hooks: "HookRegistry | None" = field(default=None)
 
+    # Cross-file chunk batcher (nexus-1ugqs, duoak 2C). When set, the
+    # per-file indexers STAGE chunks via ``batcher.add(...)`` instead of
+    # upserting directly, and defer their post-store hook chains to the
+    # batcher's completion callback (the orchestrator fires them once the
+    # file's chunks land in a successful flush). ``None`` is the legacy
+    # one-upsert-per-file path. Service mode only — the batcher's flush
+    # fn posts raw text for server-side embedding.
+    batcher: "object | None" = field(default=None)
+
     def __post_init__(self) -> None:
         if self.hooks is None:
             from nexus.hook_registry import HookRegistry  # noqa: PLC0415 — circular-dep avoidance: hook_registry imports this module

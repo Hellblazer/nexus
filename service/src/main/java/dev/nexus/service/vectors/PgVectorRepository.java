@@ -5,6 +5,7 @@ package dev.nexus.service.vectors;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
@@ -25,12 +26,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
@@ -139,6 +143,58 @@ public final class PgVectorRepository {
     /** Test-only instrumentation reset — see {@link #sourceUriJoinCalls}. */
     public void resetSourceUriJoinCallsForTests() {
         sourceUriJoinCalls.set(0);
+    }
+
+    /**
+     * Test-visibility hook (RDR-181, bead nexus-f0r8p.3): counts invocations of
+     * {@link #resolveNeedEmbedIdx} — i.e. how many times the existence-SELECT +
+     * have-vector-UPDATE existence-partition transaction actually ran. Lets
+     * integration tests assert that {@code forceReEmbed=true} bypasses the
+     * existence check ENTIRELY (count stays 0) rather than merely inferring it
+     * from the embedder's call count. Same read/reset-accessor shape as
+     * {@link #sourceUriJoinCalls} — production code never reads it.
+     */
+    private final AtomicInteger existenceSelectCalls = new AtomicInteger();
+
+    /** Test-only instrumentation read — see {@link #existenceSelectCalls}. */
+    public int existenceSelectCallCount() {
+        return existenceSelectCalls.get();
+    }
+
+    /** Test-only instrumentation reset — see {@link #existenceSelectCalls}. */
+    public void resetExistenceSelectCallsForTests() {
+        existenceSelectCalls.set(0);
+    }
+
+    /**
+     * Test-only interleaving seam (RDR-181, bead nexus-f0r8p.4): an optional callback
+     * invoked by {@link #resolveNeedEmbedIdx} immediately after the existence SELECT
+     * resolves (the have-vector/need-embed partition is computed) and BEFORE the
+     * have-vector UPDATE loop begins. This is the exact window the RDR's Risks and
+     * Mitigations section describes — chash H is confirmed present by the SELECT, then
+     * a concurrent orphan-GC {@link #delete} of H can commit, then the have-vector
+     * UPDATE runs and must observe 0 affected rows (self-healing reroute to need-embed,
+     * never silent loss). Production code has no way to pause a transaction
+     * deterministically at this point, and the regression test proving the self-heal
+     * is safe cannot rely on {@code Thread.sleep} timing (flaky) — so this hook exists
+     * purely to let {@code PgVectorEmbedSkipGcRaceTest} block the writer thread here
+     * while a second thread's concurrent delete commits, then release it.
+     *
+     * <p>Default {@code null} (no-op): every call site does a single null-check before
+     * invoking it, costing nothing when unset. Never read or written by production
+     * code. A package-private setter would not reach the test class — it lives in
+     * {@code dev.nexus.service}, this repository in {@code dev.nexus.service.vectors} —
+     * so the setter is {@code public}, following the same public-accessor shape already
+     * established by {@link #sourceUriJoinCalls} / {@link #existenceSelectCalls}.
+     */
+    private volatile Runnable afterExistencePartitionHookForTests;
+
+    /**
+     * Test-only: install (or clear with {@code null}) the post-existence-partition
+     * pause hook — see {@link #afterExistencePartitionHookForTests}.
+     */
+    public void setAfterExistencePartitionHookForTests(Runnable hook) {
+        this.afterExistencePartitionHookForTests = hook;
     }
 
     /**
@@ -261,8 +317,24 @@ public final class PgVectorRepository {
                                                     List<String> ids,
                                                     List<String> documents,
                                                     List<Map<String, Object>> metadatas) {
+        return upsertChunksWithTokens(tenant, collection, ids, documents, metadatas, false);
+    }
+
+    /**
+     * {@code forceReEmbed}-aware sibling (RDR-181, bead nexus-f0r8p.3): when
+     * {@code true}, bypasses the existence-partition entirely (every chash embeds,
+     * as if the collection had never been indexed) — the rare model-drift-within-
+     * a-collection recompute, and the escape for the (0%-hit) first-index path
+     * that would otherwise pay for a existence SELECT with no offsetting benefit.
+     * Wired from {@code VectorHandler}'s {@code force_re_embed} request field.
+     */
+    public Tokened<Integer> upsertChunksWithTokens(String tenant, String collection,
+                                                    List<String> ids,
+                                                    List<String> documents,
+                                                    List<Map<String, Object>> metadatas,
+                                                    boolean forceReEmbed) {
         long[] tokensOut = {0L};
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut, null);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut, null, forceReEmbed);
         return new Tokened<>(ids.size(), tokensOut[0]);
     }
 
@@ -271,7 +343,16 @@ public final class PgVectorRepository {
                              List<String> ids,
                              List<String> documents,
                              List<Map<String, Object>> metadatas) {
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, false);
+    }
+
+    /** {@code forceReEmbed}-aware sibling of {@link #upsertChunks} — see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean)}. */
+    public void upsertChunks(String tenant, String collection,
+                             List<String> ids,
+                             List<String> documents,
+                             List<Map<String, Object>> metadatas,
+                             boolean forceReEmbed) {
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, forceReEmbed);
     }
 
     /**
@@ -298,7 +379,11 @@ public final class PgVectorRepository {
                 "upsertChunksWithVectors requires one embedding per id: ids="
                 + ids.size() + " embeddings=" + (embeddings == null ? "null" : embeddings.size()));
         }
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, embeddings);
+        // forceReEmbed is irrelevant to the passthrough path: dedupProvided != null
+        // gates the existence-partition check off unconditionally below, before
+        // forceReEmbed is ever consulted. Pass false — never wire this true here,
+        // it would be dead plumbing with no behavioral effect.
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, embeddings, false);
     }
 
     private void upsertChunksInternal(String tenant, String collection,
@@ -306,7 +391,8 @@ public final class PgVectorRepository {
                                       List<String> documents,
                                       List<Map<String, Object>> metadatas,
                                       long[] tokensOut,
-                                      List<float[]> providedEmbeddings) {
+                                      List<float[]> providedEmbeddings,
+                                      boolean forceReEmbed) {
         if (ids.isEmpty()) return;
         int dim = dimForCollection(collection);
 
@@ -349,22 +435,102 @@ public final class PgVectorRepository {
                     collection, ids.size(), dedupIds.size(), collapsed);
         }
 
+        // nexus-ps9wb: PgVector DEADLOCK (SQLState 40P01) fix. Two concurrent upsert
+        // batches into the SAME collection that touch overlapping chashes in different
+        // arrival orders lock the shared rows in opposite orders on the multi-row
+        // INSERT ... ON CONFLICT below -> lock cycle -> Postgres kills a victim -> the
+        // caller sees HTTP 500. Sorting the dedup'd rows by chash (the ON CONFLICT key)
+        // gives EVERY batch one global lock-acquisition order, so no cycle can form.
+        // Done BEFORE embedding so the computed embeddings inherit the sorted order (no
+        // separate reorder of the possibly-immutable embeddings list). Mutated IN PLACE
+        // (clear + re-add) so the list references stay effectively-final for the lambda
+        // captures in the write transaction below.
+        if (dedupIds.size() > 1) {
+            Integer[] perm = new Integer[dedupIds.size()];
+            for (int i = 0; i < perm.length; i++) perm[i] = i;
+            Arrays.sort(perm, Comparator.comparing(dedupIds::get));
+            List<String> oIds = new ArrayList<>(dedupIds);
+            List<String> oDocs = new ArrayList<>(dedupDocs);
+            List<Map<String, Object>> oMetas = new ArrayList<>(dedupMetas);
+            List<float[]> oProvided = dedupProvided != null ? new ArrayList<>(dedupProvided) : null;
+            dedupIds.clear();
+            dedupDocs.clear();
+            dedupMetas.clear();
+            if (dedupProvided != null) dedupProvided.clear();
+            for (int idx : perm) {
+                dedupIds.add(oIds.get(idx));
+                dedupDocs.add(oDocs.get(idx));
+                dedupMetas.add(oMetas.get(idx));
+                if (dedupProvided != null) dedupProvided.add(oProvided.get(idx));
+            }
+        }
+
+        // RDR-181 (bead nexus-f0r8p.2): existence-partition — skip re-embedding
+        // chunks whose vector is already stored for (tenant, collection, chash).
+        // Only applies to the server-embed path: the passthrough path (dedupProvided
+        // != null, upsertChunksWithVectors) already skips the embedder unconditionally
+        // and writes caller-supplied vectors verbatim, so running the existence check
+        // there would be pure overhead with no win.
+        //
+        // insertIdx: indices into dedupIds/dedupDocs/dedupMetas that will be embedded
+        // (or, for passthrough, already carry a supplied vector) and written via the
+        // INSERT ... ON CONFLICT below. A chash whose have-vector branch succeeds
+        // (metadata-only UPDATE affected 1 row, inside resolveNeedEmbedIdx's single
+        // short transaction) is FULLY handled there and excluded from insertIdx —
+        // re-inserting it would be redundant: its vector is untouched, which is the
+        // whole point of the optimization.
+        List<Integer> insertIdx = null;
+        if (dedupProvided == null && !dedupIds.isEmpty() && !forceReEmbed) {
+            // RDR-181 (bead nexus-f0r8p.3): forceReEmbed bypasses the existence
+            // check entirely — the rare model-drift-within-collection recompute,
+            // and the escape for the (0%-hit) first-index path so it never pays
+            // for the existence SELECT with no offsetting benefit.
+            insertIdx = resolveNeedEmbedIdx(tenant, collection, dim, dedupIds, dedupDocs, dedupMetas);
+        }
+        if (insertIdx == null) {
+            // Passthrough, forceReEmbed, an empty batch, or the existence-check
+            // transaction itself failing (fail-safe: a SELECT/UPDATE error must never
+            // be read as "everything already has a vector", which would silently skip
+            // embedding a genuinely new chunk) — every row is embedded/written,
+            // exactly as today.
+            insertIdx = new ArrayList<>(dedupIds.size());
+            for (int i = 0; i < dedupIds.size(); i++) insertIdx.add(i);
+        }
+        List<String> docsToEmbed = new ArrayList<>(insertIdx.size());
+        for (int idx : insertIdx) docsToEmbed.add(dedupDocs.get(idx));
+
+        int embedSkipped = dedupIds.size() - insertIdx.size();
+        if (embedSkipped > 0) {
+            log.info("event=upsert_embed_skipped collection={} skipped={} embedded={}",
+                    collection, embedSkipped, insertIdx.size());
+        }
+
         // Embeddings: either caller-supplied (same-model PASSTHROUGH, nexus-hxry2)
-        // or computed server-side (the default Seam B path). When the caller
-        // supplies vectors we skip the embedder entirely — no Voyage call, token
-        // count stays 0 — because the source model equals the target's wired model
-        // (validated client-side) and re-embedding would re-bill for identical
-        // vectors. Collection-aware routing when wired with the router (production /
-        // Seam B path), identical to the Chroma VectorRepository flow. Uses
-        // *WithUsage to capture the token count (bead nexus-ehc4q), surfaced to
-        // VectorHandler via the Tokened<T> return value (not a ThreadLocal).
+        // or computed server-side (the default Seam B path), for exactly the
+        // insertIdx subset. When the caller supplies vectors we skip the embedder
+        // entirely — no Voyage call, token count stays 0 — because the source model
+        // equals the target's wired model (validated client-side) and re-embedding
+        // would re-bill for identical vectors. Collection-aware routing when wired
+        // with the router (production / Seam B path), identical to the Chroma
+        // VectorRepository flow. Uses *WithUsage to capture the token count (bead
+        // nexus-ehc4q), surfaced to VectorHandler via the Tokened<T> return value
+        // (not a ThreadLocal). embed() runs OUTSIDE any transaction (RDR-181
+        // Technical Design) — resolveNeedEmbedIdx's existence-check transaction
+        // above has already committed by the time we get here, and the DeadlockRetry-
+        // wrapped INSERT below has not yet started; never wrap this call in either.
         List<float[]> embeddings;
         if (dedupProvided != null) {
             embeddings = dedupProvided;  // passthrough — no embed, tokensOut stays 0
+        } else if (docsToEmbed.isEmpty()) {
+            // RDR-181: every chash in this batch was settled by the have-vector
+            // metadata-only UPDATE above — skip the embedder round-trip entirely
+            // rather than invoking it with an empty batch (the whole point of this
+            // bead: a batch of pure metadata refreshes bills Voyage for nothing).
+            embeddings = List.of();
         } else {
             EmbedResult embedResult = (docRouter != null)
-                    ? docRouter.embedForCollectionWithUsage(collection, dedupDocs)
-                    : docEmbedder.embedWithUsage(dedupDocs);
+                    ? docRouter.embedForCollectionWithUsage(collection, docsToEmbed)
+                    : docEmbedder.embedWithUsage(docsToEmbed);
             if (tokensOut != null) tokensOut[0] = embedResult.tokens();
             embeddings = embedResult.embeddings();
         }
@@ -432,31 +598,64 @@ public final class PgVectorRepository {
             CollectionRegistry.markKnown(tenant, collection);
         }
 
-        tenantScope.withTenant(tenant, ctx -> {
-            // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
-            // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
-            // round trips. The old per-row loop held this transaction's connection
-            // (and, transitively, the catalog_collections row lock any concurrent
-            // registration attempt for this collection was blocked on) open for N
-            // round trips — cheap on a near-zero-RTT localhost DB, but on a real
-            // network hop to Postgres every extra round trip is directly extra
-            // lock-hold time for every OTHER concurrent writer to this collection.
-            // Mirrors ChashRepository.upsertMany / doImportBatch, which already
-            // batch this way. Same ON CONFLICT semantics, same bound values, just
-            // one statement.
-            if (!dedupIds.isEmpty()) {
+        // nexus-ps9wb belt-and-suspenders: the chash sort above removes the
+        // same-collection lock cycle, but a residual deadlock is still possible
+        // against a concurrent writer on a DIFFERENT lock order (e.g. a concurrent
+        // delete, or the catalog_collections registration path). The deadlock victim's
+        // transaction is ALREADY rolled back by Postgres, so re-running the batch is
+        // safe (idempotent ON CONFLICT upsert). Bounded retries with jitter; on
+        // exhaustion the original exception propagates unchanged.
+        // nexus-ps9wb belt: the chash sort above removes the same-collection lock
+        // cycle, but a residual deadlock is still possible against a concurrent writer
+        // on a DIFFERENT lock order (e.g. a concurrent delete). The victim's txn is
+        // already rolled back, so re-running the idempotent ON CONFLICT batch is safe.
+        // Embeddings were computed ABOVE, outside this retry, so a retry never re-bills
+        // Voyage. Shared helper — same belt guards every multi-row upsert path.
+        // Effectively-final copy for the lambda captures below: insertIdx is assigned
+        // via one of two branches above (the existence-partition result or the
+        // identity fallback), so javac sees more than one assignment statement and
+        // refuses to treat it as effectively final even though exactly one runs.
+        final List<Integer> finalInsertIdx = insertIdx;
+        // RDR-181 (bead nexus-f0r8p.2): when the existence-partition resolved every
+        // chash via the have-vector metadata-only UPDATE (a pure re-index-with-no-
+        // content-change batch), finalInsertIdx is empty and there is NOTHING left to
+        // insert — skip this transaction's connection acquisition entirely rather
+        // than borrowing a pool connection just to run a no-op INSERT ... ON CONFLICT
+        // over zero rows. Under concurrent load with a bounded HikariCP pool (see
+        // ChashVectorConcurrencyTest), an unconditional extra checkout per call is
+        // real, avoidable contention.
+        if (!finalInsertIdx.isEmpty()) {
+            DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
+                // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
+                // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
+                // round trips. The old per-row loop held this transaction's connection
+                // (and, transitively, the catalog_collections row lock any concurrent
+                // registration attempt for this collection was blocked on) open for N
+                // round trips — cheap on a near-zero-RTT localhost DB, but on a real
+                // network hop to Postgres every extra round trip is directly extra
+                // lock-hold time for every OTHER concurrent writer to this collection.
+                // Mirrors ChashRepository.upsertMany / doImportBatch, which already
+                // batch this way. Same ON CONFLICT semantics, same bound values, just
+                // one statement.
                 // nexus-xtmtf: chained .values() keeps this ONE multi-row
                 // statement (the h8rf6.2 lock-hold rationale); float[] (VectorBinding) +
                 // JSONB typed binds retire the ?::vector / ?::jsonb casts.
+                // RDR-181 (bead nexus-f0r8p.2): only insertIdx rows land here — chashes
+                // whose have-vector branch already succeeded via a metadata-only UPDATE
+                // are excluded (see insertIdx construction above); embeddings is aligned
+                // to insertIdx (position k), NOT to dedupIds (position idx) — the two
+                // lists diverge whenever the existence-partition skipped any embeds, so
+                // embeddings.get(idx) would silently pair the wrong vector with a chash.
                 DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
                 var insert = ctx.insertInto(ch.table())
                     .columns(ch.tenantId(), ch.collection(), ch.chash(),
                              ch.chunkText(), ch.embedding(), ch.metadata());
-                for (int i = 0; i < dedupIds.size(); i++) {
-                    insert = insert.values(tenant, collection, dedupIds.get(i),
-                            dedupDocs.get(i),
-                            Vector.of(embeddings.get(i)),
-                            JSONB.jsonb(toJson(dedupMetas.get(i))));
+                for (int k = 0; k < finalInsertIdx.size(); k++) {
+                    int idx = finalInsertIdx.get(k);
+                    insert = insert.values(tenant, collection, dedupIds.get(idx),
+                            dedupDocs.get(idx),
+                            Vector.of(embeddings.get(k)),
+                            JSONB.jsonb(toJson(dedupMetas.get(idx))));
                 }
                 insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
                       .doUpdate()
@@ -464,11 +663,11 @@ public final class PgVectorRepository {
                       .set(ch.embedding(), DSL.excluded(ch.embedding()))
                       .set(ch.metadata(),  DSL.excluded(ch.metadata()))
                       .execute();
-            }
-            return null;
-        });
-        log.debug("event=upsert_chunks_done collection={} table={} count={}",
-                collection, table, dedupIds.size());
+                return null;
+            }));
+        }
+        log.debug("event=upsert_chunks_done collection={} table={} count={} embedded={} metadata_only={}",
+                collection, table, dedupIds.size(), insertIdx.size(), embedSkipped);
     }
 
     // -------------------------------------------------------------------------
@@ -1701,30 +1900,300 @@ public final class PgVectorRepository {
      * Metadata-only update on existing chunks - no re-embedding, {@code chunk_text} and
      * {@code embedding} unchanged (frecency reindex path, RDR-152 nexus-enehl).
      *
+     * <p>RDR-181 (bead nexus-f0r8p.2): returns the total affected-row count summed
+     * across {@code ids} rather than {@code void}. A count lower than {@code ids.size()}
+     * means one or more rows no longer exist (e.g. a concurrent delete) — callers that
+     * care WHICH ids missed (the have-vector reroute in {@link #upsertChunksInternal})
+     * call this once per id so the single-id count is directly the race signal; batch
+     * callers (the HTTP {@code update-metadata} endpoint) can use the summed count as
+     * a coarser "how many actually existed" signal.
+     *
      * @param metadatas replacement metadata maps aligned with {@code ids}
+     * @return total rows affected across all {@code ids} (0 to {@code ids.size()})
      */
-    public void updateMetadata(String tenant, String collection,
+    public int updateMetadata(String tenant, String collection,
                                List<String> ids,
                                List<Map<String, Object>> metadatas) {
         int dim = dimForCollection(collection);
-        if (ids == null || ids.isEmpty()) return;
+        if (ids == null || ids.isEmpty()) return 0;
         if (ids.size() != metadatas.size()) {
             throw new IllegalArgumentException(
                 "ids (" + ids.size() + ") and metadatas (" + metadatas.size()
                 + ") must be aligned");
         }
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        tenantScope.withTenant(tenant, ctx -> {
+        return tenantScope.withTenant(tenant, ctx -> {
+            int affected = 0;
             for (int i = 0; i < ids.size(); i++) {
-                ctx.update(ch.table())
-                   // Same NUL defense as upsertChunks: jsonb rejects NUL just
-                   // like text does (nexus-rvfwj, dual-review M2).
-                   .set(ch.metadata(), JSONB.jsonb(toJson(sanitizeNulDeep(metadatas.get(i)))))
-                   .where(ch.collection().eq(collection).and(ch.chash().eq(ids.get(i))))
-                   .execute();
+                affected += updateMetadataOneRow(ctx, ch, collection, ids.get(i), metadatas.get(i));
             }
-            return null;
+            return affected;
         });
+    }
+
+    /**
+     * Ctx-level metadata-only UPDATE for exactly one chash — the shared SQL shape
+     * behind both {@link #updateMetadata} (its own short transaction, the HTTP
+     * frecency-reindex path) and {@link #resolveNeedEmbedIdx}'s have-vector branch
+     * (same transaction as that method's existence SELECT, RDR-181 bead nexus-f0r8p.2).
+     * Factored out so both call sites share identical sanitization + JSON shape — the
+     * metadata a have-vector UPDATE writes MUST be indistinguishable from what a fresh
+     * INSERT would have written (metadata-parity acceptance criterion).
+     *
+     * @return rows affected (0 or 1) — 0 means no row currently matches
+     *         {@code (collection, chash)} under RLS
+     */
+    private static int updateMetadataOneRow(DSLContext ctx, DimTables.ChunkTable ch,
+                                             String collection, String chash,
+                                             Map<String, Object> metadata) {
+        // Same NUL defense as upsertChunks: jsonb rejects NUL just like text does
+        // (nexus-rvfwj, dual-review M2).
+        return ctx.update(ch.table())
+                  .set(ch.metadata(), JSONB.jsonb(toJson(sanitizeNulDeep(metadata))))
+                  .where(ch.collection().eq(collection).and(ch.chash().eq(chash)))
+                  .execute();
+    }
+
+    /**
+     * RDR-181 (bead nexus-f0r8p.1): PK-indexed existence lookup — which of the given
+     * chashes already have a stored row (and therefore a stored vector) in
+     * {@code (tenant, collection)}. This is the existence-partition primitive behind
+     * the embed-skip design (a later bead wires the partition into
+     * {@link #upsertChunksInternal}; this method only answers "which chashes are
+     * already present").
+     *
+     * <p>Keys on {@code (collection, chash)} exactly like {@link #delete} and
+     * {@link #count} — the same {@code PRIMARY KEY (tenant_id, collection, chash)}
+     * the ON CONFLICT target uses (RDR-181 Research Findings), so a batch
+     * {@code chash = ANY(?)} over a few hundred keys is a millisecond PK-index
+     * lookup. No explicit {@code tenant_id} predicate — RLS scopes the visible rows,
+     * the same trust boundary {@link #delete} / {@link #count} already rely on.
+     *
+     * <p>SQL errors propagate as a {@link RuntimeException} (via
+     * {@link TenantScope#withTenant}) — the fail-safe (a SELECT error must never be
+     * read as "everything exists", which would silently skip embedding a genuinely
+     * new chunk) lives one layer up in {@link #selectExistingChashesOrEmpty}, not
+     * here.
+     *
+     * @param tenant     tenant principal for RLS scoping
+     * @param collection four-segment conformant collection name (drives dim dispatch)
+     * @param chashes    candidate chunk natural IDs to probe for existence
+     * @return the subset of {@code chashes} that already have a stored row; empty
+     *         (never null) when {@code chashes} is null or empty — no DB round-trip
+     *         is made in that case
+     */
+    public Set<String> selectExistingChashes(String tenant, String collection,
+                                              List<String> chashes) {
+        if (chashes == null || chashes.isEmpty()) {
+            return Set.of();
+        }
+        int dim = dimForCollection(collection);
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        return tenantScope.withTenant(tenant, ctx -> selectExistingChashesCtx(ctx, ch, collection, chashes));
+    }
+
+    /**
+     * Ctx-level existence SELECT — the shared SQL shape behind both
+     * {@link #selectExistingChashes} (its own short transaction) and
+     * {@link #resolveNeedEmbedIdx} (same transaction as that method's have-vector
+     * UPDATE loop, RDR-181 bead nexus-f0r8p.2).
+     */
+    private static Set<String> selectExistingChashesCtx(DSLContext ctx, DimTables.ChunkTable ch,
+                                                         String collection, List<String> chashes) {
+        return new HashSet<>(ctx.select(ch.chash())
+                                 .from(ch.table())
+                                 .where(ch.collection().eq(collection).and(ch.chash().in(chashes)))
+                                 .fetch(ch.chash()));
+    }
+
+    /**
+     * Fail-safe wrapper over {@link #selectExistingChashes} (RDR-181): a SELECT
+     * error is treated as "nothing exists" — never as "everything exists". The
+     * distinction is load-bearing: mistaking an indeterminate result for "present"
+     * would silently skip embedding a genuinely new chunk (permanent data loss on
+     * the have-vector path); treating an error as "absent" only costs one redundant
+     * embed — exactly today's unconditional-embed behavior, never worse.
+     *
+     * <p><b>Not on the production hot path.</b> {@link #resolveNeedEmbedIdx} (the
+     * method {@link #upsertChunksInternal} actually calls) does NOT call this
+     * method — it needs the existing chunk's stored TEXT alongside presence (for
+     * the content-divergence guard) and both the existence check and the
+     * have-vector UPDATE must share one transaction, so it inlines its own
+     * SELECT + its own {@code catch (RuntimeException)} fail-safe (returning
+     * {@code null}, meaning "embed everything") rather than composing this
+     * method's own separate transaction. This method exists as a public,
+     * independently-tested existence-only primitive (see
+     * {@code PgVectorEmbedSkipTest#selectExistingChashesOrEmpty_selectErrors_failSafeReturnsEmptySet}
+     * for its own fail-safe coverage, and
+     * {@code PgVectorEmbedSkipIntegrationTest#resolveNeedEmbedIdx_existenceSelectConnectionFails_failSafeEmbedsEverythingAndWrites}
+     * for {@code resolveNeedEmbedIdx}'s independent fail-safe branch) for callers
+     * that only need presence, not the full embed-skip transaction contract.
+     *
+     * @return the subset of {@code chashes} known to exist, or an empty set (not a
+     *         propagated exception) if the existence check itself failed
+     */
+    public Set<String> selectExistingChashesOrEmpty(String tenant, String collection,
+                                                      List<String> chashes) {
+        try {
+            return selectExistingChashes(tenant, collection, chashes);
+        } catch (RuntimeException e) {
+            log.warn("event=existence_select_failed collection={} count={} fail_safe=embed_all err={}",
+                collection, chashes == null ? 0 : chashes.size(), e.toString());
+            return Set.of();
+        }
+    }
+
+    /**
+     * Result of {@link #partitionByExistence} — indices (not chashes) into the
+     * caller's original batch, so a caller can slice its aligned ids/documents/
+     * metadatas lists in lockstep (RDR-181).
+     */
+    public record ExistencePartition(List<Integer> needEmbedIdx, List<Integer> haveVectorIdx) {}
+
+    /**
+     * Pure partition of a chash batch into need-embed vs have-vector indices
+     * (RDR-181), given the set of chashes {@link #selectExistingChashesOrEmpty}
+     * found present. No DB dependency — deliberately kept separate from the
+     * (Testcontainers-only) existence SELECT so the partition logic itself has a
+     * fast, hermetic unit test.
+     *
+     * @param chashes the batch's chashes, in order
+     * @param present chashes known to already have a stored row (from
+     *                {@link #selectExistingChashesOrEmpty})
+     * @return the partition: indices into {@code chashes} needing embed vs already
+     *         having a stored vector
+     */
+    public static ExistencePartition partitionByExistence(List<String> chashes, Set<String> present) {
+        List<Integer> need = new ArrayList<>();
+        List<Integer> have = new ArrayList<>();
+        for (int i = 0; i < chashes.size(); i++) {
+            if (present.contains(chashes.get(i))) have.add(i); else need.add(i);
+        }
+        return new ExistencePartition(need, have);
+    }
+
+    /**
+     * RDR-181 (bead nexus-f0r8p.2): resolve the finalized need-embed indices for
+     * {@link #upsertChunksInternal}'s embed-skip path — the existence SELECT AND the
+     * have-vector metadata-only UPDATE-with-reroute loop run inside ONE short
+     * transaction ({@link TenantScope#withTenant} opens exactly one connection/
+     * transaction for this whole call) that commits before this method returns —
+     * i.e. strictly before the caller embeds anything (Technical Design, RDR-181
+     * lines ~227-261). Deliberately inlines the SELECT and per-chash UPDATE against a
+     * single shared {@link DSLContext} rather than composing the public
+     * {@link #selectExistingChashes} / {@link #updateMetadata} methods, each of which
+     * opens its OWN transaction — the RDR's "steps 1+3 are one short transaction"
+     * requirement is literal, not merely "eventually correct under READ COMMITTED".
+     *
+     * <p>Race-safety: a chash present at the existence SELECT can still be
+     * hard-deleted (concurrent orphan-GC pass) before its have-vector UPDATE runs
+     * inside this SAME transaction. That UPDATE's affected-row count catches it — 0
+     * rows means the chash is gone, so it is added to the returned need-embed list
+     * rather than silently dropped. The have-vector branch is self-healing against
+     * this race, never lossy.
+     *
+     * <p>Content-divergence guard (locked contract:
+     * {@code PgVectorRepositoryContractTest#upsert_reUpsertSameChash_updatesInPlace}):
+     * a chash's presence is NOT by itself sufficient to skip embedding — the caller's
+     * incoming text is compared against the currently stored {@code chunk_text}, and
+     * only a BYTE-IDENTICAL match takes the metadata-only path. A re-upsert of the
+     * same id with different text (Chroma upsert semantics: any id can be
+     * re-upserted with new content) must still re-embed and rewrite {@code
+     * chunk_text} — RDR-181's skip is an optimization for the common case where
+     * chash is genuinely content-derived, not a license to assume it always is;
+     * this method never assumes chash-implies-content on the caller's behalf.
+     *
+     * <p><b>KNOWN, UNRESOLVED-WITH-CERTAINTY RISK (RDR-181 review, bead
+     * nexus-f0r8p.2/.4):</b> this method adds one extra connection checkout per
+     * {@code upsertChunksInternal} call (this transaction) on top of the
+     * catalog-registration transaction and the final INSERT transaction, all
+     * drawn from the SAME shared HikariCP pool. During bead .2's implementation,
+     * a full {@code mvn test} run showed 6 transient pool-exhaustion 503s in
+     * {@code ChashVectorConcurrencyTest} (a zero-5xx-tolerance stress test,
+     * POOL_SIZE=6, 12 threads) attributed to this extra checkout; 3 isolated
+     * reruns and a subsequent full-suite rerun were clean, and an independent
+     * code-review isolation rerun (66s) also did not reproduce it. Neither the
+     * one dirty run nor the clean reruns are strong evidence either way for a
+     * stress test built specifically to surface this failure class — treat this
+     * as an open risk, not a resolved one, when tuning pool size or investigating
+     * 503s under load. See T2 memory {@code nexus-f0r8p-pool-exhaustion-known-risk}
+     * (project "nexus") for the full writeup and the recommendation to rerun
+     * {@code ChashVectorConcurrencyTest} under load before cutting the engine tag.
+     *
+     * @return the finalized need-embed indices (original absentees, any have-vector
+     *         chash whose stored text differs from the incoming text, plus any
+     *         have-vector chash whose metadata-only UPDATE affected 0 rows), or
+     *         {@code null} if the existence-check transaction itself failed —
+     *         fail-safe: the caller must treat {@code null} exactly like "skip the
+     *         optimization, embed everything" (today's behavior), never as "nothing
+     *         needs embedding"
+     */
+    private List<Integer> resolveNeedEmbedIdx(String tenant, String collection, int dim,
+                                               List<String> dedupIds,
+                                               List<String> dedupDocs,
+                                               List<Map<String, Object>> dedupMetas) {
+        existenceSelectCalls.incrementAndGet();
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        try {
+            return tenantScope.withTenant(tenant, ctx -> {
+                Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, collection, dedupIds);
+                ExistencePartition partition = partitionByExistence(dedupIds, existingText.keySet());
+                // Test-only interleaving seam (bead nexus-f0r8p.4) — see
+                // afterExistencePartitionHookForTests javadoc. Fires AFTER the existence
+                // SELECT resolves and BEFORE the have-vector UPDATE loop below, inside
+                // this SAME still-open transaction, so a test can pause here while a
+                // concurrent GC delete commits on another connection. No-op (null) in
+                // production.
+                Runnable hook = afterExistencePartitionHookForTests;
+                if (hook != null) {
+                    hook.run();
+                }
+                // Mutable working copy: ExistencePartition is an immutable record, and
+                // the reroute step ("if 0 rows, move that chash into need-embed") is a
+                // mutation partition.needEmbedIdx() cannot express directly.
+                List<Integer> needEmbedIdx = new ArrayList<>(partition.needEmbedIdx());
+                for (int idx : partition.haveVectorIdx()) {
+                    String storedText = existingText.get(dedupIds.get(idx));
+                    if (!Objects.equals(storedText, dedupDocs.get(idx))) {
+                        // Content-divergence guard (see javadoc): the id already
+                        // exists but with DIFFERENT text — this is a genuine content
+                        // update, not a redundant re-index. Route to need-embed
+                        // exactly like an absent chash; no metadata-only UPDATE is
+                        // issued here (the insert path below rewrites chunk_text,
+                        // embedding, AND metadata together).
+                        needEmbedIdx.add(idx);
+                        continue;
+                    }
+                    int affected = updateMetadataOneRow(ctx, ch, collection,
+                            dedupIds.get(idx), dedupMetas.get(idx));
+                    if (affected == 0) {
+                        needEmbedIdx.add(idx);
+                    }
+                }
+                return needEmbedIdx;
+            });
+        } catch (RuntimeException e) {
+            log.warn("event=existence_partition_failed collection={} count={} fail_safe=embed_all err={}",
+                    collection, dedupIds.size(), e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * Ctx-level existence + stored-text lookup — like {@link #selectExistingChashesCtx}
+     * but also returns each present chash's currently stored {@code chunk_text}, so
+     * {@link #resolveNeedEmbedIdx} can detect the content-divergence case (same id,
+     * different text) without a second round trip.
+     */
+    private static Map<String, String> selectExistingChashTextCtx(DSLContext ctx, DimTables.ChunkTable ch,
+                                                                    String collection, List<String> chashes) {
+        Map<String, String> out = new HashMap<>();
+        ctx.select(ch.chash(), ch.chunkText())
+           .from(ch.table())
+           .where(ch.collection().eq(collection).and(ch.chash().in(chashes)))
+           .fetch()
+           .forEach(r -> out.put(r.value1(), r.value2()));
+        return out;
     }
 
     /**

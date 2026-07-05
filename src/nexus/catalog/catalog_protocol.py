@@ -192,6 +192,9 @@ class CatalogWriter(Protocol):
     def register(self, owner, title, *, content_type=..., file_path=..., corpus=..., physical_collection=..., chunk_count=..., head_hash=..., author=..., year=..., meta=..., source_mtime=..., source_uri=...) -> object:  # canonical
         ...
 
+    def register_many(self, owner, docs) -> object:  # canonical — returns list[Tumbler] aligned 1:1 with docs (nexus-9dvqy)
+        ...
+
     def update(self, tumbler, **fields) -> object:  # canonical
         ...
 

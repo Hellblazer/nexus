@@ -304,6 +304,73 @@ class TestUpsertMany:
         with pytest.raises(ValueError, match="collection must not be empty"):
             store.upsert_many(chashes=["c1"], collection="")
 
+    def test_upsert_many_dedups_order_preserving(self, fake_server):
+        """Duplicate chashes are collapsed first-wins before POST (nexus-85z0y).
+
+        The engine 500s on a batch containing the same chash twice. Each POST
+        body must carry unique chashes, and the union across POSTs must equal
+        the distinct input set with exact per-chash counts.
+        """
+        post_bodies: list[list[str]] = []
+        s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
+        original_post = s._client.post
+
+        def spy_post(path, **kwargs):
+            if path == "/v1/chash/upsert_many":
+                post_bodies.append(kwargs["json"]["chashes"])
+            return original_post(path, **kwargs)
+
+        s._client.post = spy_post
+        s.upsert_many(chashes=["a", "a", "b", "a", "c", "b"], collection="col_dup")
+        s.close()
+
+        # Single batch (6 < _BATCH_SIZE) with duplicates collapsed to {a,b,c}.
+        assert len(post_bodies) == 1
+        sent = post_bodies[0]
+        assert sent == ["a", "b", "c"], f"expected first-wins unique order, got {sent}"
+        # No chash appears more than once in any POST body.
+        for body in post_bodies:
+            assert len(body) == len(set(body)), f"duplicate chash in POST body: {body}"
+        # Union across POSTs == distinct input, with exact counts.
+        from collections import Counter
+
+        union = Counter(ch for body in post_bodies for ch in body)
+        assert union == Counter({"a": 1, "b": 1, "c": 1})
+        with _STORE_LOCK:
+            assert {k for k in _STORE} == {("a", "col_dup"), ("b", "col_dup"), ("c", "col_dup")}
+
+    def test_upsert_many_dedup_across_batch_boundary(self, fake_server):
+        """A duplicate that would straddle the 200-item batch boundary is removed
+        before the split, so no batch repeats a chash (nexus-85z0y)."""
+        post_bodies: list[list[str]] = []
+        s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
+        original_post = s._client.post
+
+        def spy_post(path, **kwargs):
+            if path == "/v1/chash/upsert_many":
+                post_bodies.append(kwargs["json"]["chashes"])
+            return original_post(path, **kwargs)
+
+        s._client.post = spy_post
+
+        # 250 unique chashes. Without dedup, re-appending "sha0000" and "sha0200"
+        # would land copies in different batches (byte-identical straddle) OR
+        # repeat within a batch. With dedup they collapse to the first occurrence.
+        base = [f"sha{i:04d}" for i in range(250)]
+        chashes = base + ["sha0000", "sha0200"]
+        s.upsert_many(chashes=chashes, collection="col_straddle")
+        s.close()
+
+        # 250 unique -> batch 0 (200) + batch 1 (50) = 2 POSTs.
+        assert len(post_bodies) == 2
+        assert len(post_bodies[0]) == 200
+        assert len(post_bodies[1]) == 50
+        # No chash repeats within OR across batches.
+        all_sent = [ch for body in post_bodies for ch in body]
+        assert len(all_sent) == len(set(all_sent)) == 250
+        for body in post_bodies:
+            assert len(body) == len(set(body))
+
     def test_upsert_many_batches_at_200(self, fake_server, monkeypatch):
         """Verify that > _BATCH_SIZE chashes are split into multiple requests."""
         import nexus.db.t2.http_chash_index as mod

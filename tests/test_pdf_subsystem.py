@@ -254,7 +254,7 @@ class TestIndexPdfFileGitMetadata:
 
         captured: list[list[dict]] = []
 
-        def capture(collection_name, ids, documents, embeddings, metadatas):
+        def capture(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False):
             captured.append(metadatas)
 
         mock_db.upsert_chunks_with_embeddings.side_effect = capture

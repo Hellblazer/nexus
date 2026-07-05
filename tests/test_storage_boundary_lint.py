@@ -524,7 +524,12 @@ def test_dual_population_baseline_locked():
     # direct `T2Database(mem_path)` for a read-only failed-row inspection
     # (mirrors `aspects gc`); reads are WAL-concurrent-safe so no single-writer
     # concern. Carries an `# epsilon-allow:` reason.
-    assert result.t2database_constructions == 34, (
+    #
+    # nexus-qgc4b: 34 -> 35. `_taxonomy_incomplete` opens a read-only
+    # `T2Database(default_db_path())` to probe per-collection topic existence
+    # for the no-change index gate; read-only, WAL-safe. Carries an
+    # `# epsilon-allow:` reason.
+    assert result.t2database_constructions == 35, (
         f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
     )
 

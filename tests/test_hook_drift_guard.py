@@ -197,12 +197,33 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
     The test asserts a Call node count rather than text presence so
     docstring or comment mentions do not satisfy the invariant. A future
     contributor who removes either fire on a CLI site fails CI here.
+
+    nexus-duoak.7 exemption: indexer.py's flush-grain aggregate call
+    (``fire_batch(..., grain="flush")`` in ``_fire_flush_grain_hooks``)
+    deliberately has NO fire_single counterpart — it re-fires only the
+    flush-grain consumers (taxonomy/chash) once per upload batch; the
+    per-document single chain already fired at file grain. Only calls
+    passing the literal ``grain="flush"`` are excluded from the
+    symmetric count; file-grain and default calls still count.
     """
     offenders: dict[str, list[str]] = {}
     for rel in CLI_SITE_FILES:
         path = PROJECT_ROOT / rel
         tree = ast.parse(path.read_text(), filename=str(path))
-        batch_calls = _count_method_calls(tree, "fire_batch")
+        batch_calls = 0
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "fire_batch"
+                and not any(
+                    k.arg == "grain"
+                    and isinstance(k.value, ast.Constant)
+                    and k.value.value == "flush"
+                    for k in node.keywords
+                )
+            ):
+                batch_calls += 1
         single_calls = _count_method_calls(tree, "fire_single")
         problems: list[str] = []
         if batch_calls == 0:
@@ -229,12 +250,16 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
 
 
 # Expected fire counts per module for the document-grain chain.
-# Total: 8 fire-statement instances across 7 modules (seven logical
-# document boundaries — doc_indexer.py:index_pdf has two branch tails,
-# accounting for the off-by-one between site count and module count).
+# Total: 9 fire-statement instances across 6 modules —
+# doc_indexer.py:index_pdf has two branch tails, and indexer.py has the
+# legacy PDF path plus the duoak-2C deferred-hook closure (a file
+# traverses exactly one of the two).
 # Mirrors CLI_SITE_FILES above plus mcp/core.py:store_put.
 DOCUMENT_HOOK_FIRE_SITES: dict[str, int] = {
-    "src/nexus/indexer.py": 1,             # _index_pdf_file (nx index repo PDF path)
+    "src/nexus/indexer.py": 2,             # _index_pdf_file (legacy path) +
+                                           # _fire_deferred_hooks (duoak 2C
+                                           # batched path; a file traverses
+                                           # exactly ONE of the two)
     "src/nexus/doc_indexer.py": 3,         # _index_document + index_pdf x2
     "src/nexus/code_indexer.py": 1,        # index_code_file
     "src/nexus/prose_indexer.py": 1,       # index_prose_file

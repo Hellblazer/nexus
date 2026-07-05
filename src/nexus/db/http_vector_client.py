@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +44,39 @@ _log = structlog.get_logger(__name__)
 
 #: Env var for the vector backend flag.
 _VECTORS_BACKEND_ENV = "NX_STORAGE_BACKEND_VECTORS"
+
+#: RDR-181 bead nexus-f0r8p.5: log the ``skip_existing`` deprecation notice
+#: once per process rather than once per call. Tests reset this directly
+#: (module attribute, not a public API).
+_skip_existing_deprecation_logged: bool = False
+
+
+def _warn_skip_existing_deprecated() -> None:
+    """Log-once notice: ``skip_existing`` no longer filters the batch.
+
+    RDR-181 made the server's existence-partition
+    (``PgVectorRepository.upsertChunksInternal``) authoritative, so the
+    client-side probe this flag used to drive is redundant — and worse,
+    it silently skipped the ON CONFLICT metadata refresh that the
+    server-side check performs. The kwarg / env var are kept readable
+    for one deprecation cycle (bead nexus-f0r8p.5) but have no effect
+    on what is sent; this is the only remaining observable effect.
+    """
+    global _skip_existing_deprecation_logged
+    if _skip_existing_deprecation_logged:
+        return
+    _skip_existing_deprecation_logged = True
+    _log.warning(
+        "http_vector_skip_existing_deprecated",
+        message=(
+            "skip_existing / NX_UPSERT_SKIP_EXISTING=1 is deprecated "
+            "(RDR-181): the client-side existence probe it drove is "
+            "redundant now that server-side embed-skip is authoritative. "
+            "This flag no longer filters the outgoing batch; use "
+            "force_re_embed / NX_UPSERT_SKIP_EXISTING=0 to change what "
+            "the server does with existing chashes."
+        ),
+    )
 
 
 # ── Endpoint resolution (nexus-pebfx.1) ──────────────────────────────────────
@@ -188,6 +222,54 @@ def _request_once(
         return json.loads(resp.read())
 
 
+#: Backoff schedule for gateway-transient HTTP codes (502/503/504). Found by
+#: the nexus-duoak.4 scaling sweep: concurrent CCE upsert batches slow
+#: server-side embedding past the gateway timeout, and a single unretried 504
+#: killed an entire ``nx index repo`` run. Upserts are idempotent
+#: (content-addressed), so bounded retry is safe for every /v1 call family.
+_GATEWAY_RETRY_SLEEPS: tuple[float, ...] = (2.0, 5.0, 10.0)
+_GATEWAY_RETRY_CODES = frozenset({502, 503, 504})
+
+#: Per-collection chunk cap for a SINGLE /v1/vectors/upsert-chunks POST
+#: (nexus-nf3n7). CCE collections (docs/knowledge/rdr — voyage-context-3) embed
+#: far slower server-side, so a large batch can exceed the control-plane
+#: requestTimeout (30s time-to-response-start) and 504; code (voyage-code-3)
+#: sustains the full service write cap. :meth:`HttpVectorClient.upsert_chunks`
+#: pages any oversize id set into <=cap sub-POSTs, so this is the ONE choke point
+#: every caller inherits — the ChunkBatcher's flush AND the oversize per-file
+#: fallbacks in prose_indexer / code_indexer / doc_indexer, plus exporter,
+#: pipeline, reindex and consolidation. Values match the ChunkBatcher's own
+#: per-collection flush cap (live 504 at 172 CCE chunks, 2026-07-04).
+_CCE_UPSERT_CHUNK_CAP = 64
+_CODE_UPSERT_CHUNK_CAP = 300
+_CCE_COLLECTION_PREFIXES = frozenset({"docs", "knowledge", "rdr"})
+
+
+def per_collection_chunk_cap(collection: str) -> int:
+    """Max chunks per single ``/v1/vectors/upsert-chunks`` POST for *collection*.
+
+    This is ONE constraint — the largest batch whose server-side embed + write +
+    HNSW completes within the control-plane 30s requestTimeout (nexus-nf3n7). It
+    is DELIBERATELY shared (not two independent knobs) by:
+      * the ChunkBatcher flush cap (``indexer._cap_for`` delegates here): the
+        batcher accumulates then flushes <=cap chunks, i.e. each flush is one POST
+        of <=cap; and
+      * this client's oversize paging: :meth:`HttpVectorClient.upsert_chunks`
+        pages a too-large id set into <=cap sub-POSTs.
+    Both emit POSTs bounded by the SAME timeout, so tuning this value changes both
+    BY DESIGN — and any change must be validated against the CP timeout, never
+    raised for cross-file batching throughput alone.
+
+    Value: 64 for CCE (docs/knowledge/rdr — voyage-context-3, slow server-side
+    embed; live 504 at 172 CCE chunks 2026-07-04) is the CONSERVATIVE proven-safe
+    cap. conexus's root-cause relay suggested ~128 for the direct path pending a
+    re-gate p99 — a throughput optimization tracked in nexus-o1mbu / nexus-9mzkd,
+    not taken here without that measurement. Code (voyage-code-3) sustains 300.
+    """
+    prefix = collection.split("__", 1)[0]
+    return _CCE_UPSERT_CHUNK_CAP if prefix in _CCE_COLLECTION_PREFIXES else _CODE_UPSERT_CHUNK_CAP
+
+
 def _request(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
 ) -> Any:
@@ -198,11 +280,34 @@ def _request(
     cached endpoint therefore means "re-read the lease and try once more"
     (nexus-pebfx.1), not "give up". A second failure surfaces normally —
     no retry loops.
+
+    Gateway-transient HTTP codes (``_GATEWAY_RETRY_CODES``) additionally get
+    a bounded backoff retry (``_GATEWAY_RETRY_SLEEPS``); all other HTTP
+    errors propagate immediately — 4xx/500 are not transient.
     """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
+    def _once_with_gateway_retry() -> Any:
+        for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
+            try:
+                return _request_once(
+                    method, path, tenant=tenant, timeout=timeout, body=body
+                )
+            except urllib.error.HTTPError as exc:
+                if exc.code not in _GATEWAY_RETRY_CODES or delay is None:
+                    raise
+                _log.warning(
+                    "vector_gateway_retry",
+                    path=path,
+                    code=exc.code,
+                    attempt=i + 1,
+                    sleep_s=delay,
+                )
+                time.sleep(delay)
+        raise AssertionError("unreachable")  # loop always returns or raises
+
     try:
-        return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
+        return _once_with_gateway_retry()
     # Narrow catch (dual-review H1): only the transport/auth error families
     # participate in retry classification. RuntimeError from an unresolvable
     # endpoint propagates untouched — fail-loud must never become a retry.
@@ -218,7 +323,7 @@ def _request(
             reason=type(exc).__name__,
         )
         _invalidate_endpoint()
-        return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
+        return _once_with_gateway_retry()
 
 
 def _managed_remedy() -> str | None:
@@ -521,6 +626,7 @@ class HttpVectorClient:
         documents: list[str],
         metadatas: list[dict] | None = None,
         *,
+        force_re_embed: bool | None = None,
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
     ) -> None:
@@ -543,57 +649,75 @@ class HttpVectorClient:
         (Note: :meth:`upsert_chunks_with_embeddings` deliberately still DISCARDS
         its vectors — indexers re-embed server-side as the single authority.)
 
-        ``skip_existing`` (or env ``NX_UPSERT_SKIP_EXISTING=1``): pre-filter
-        ids through :meth:`existing_ids` and embed/upsert only the chunks
-        the collection does not already hold. Chunk ids are content hashes,
-        so re-indexing unchanged files re-sends byte-identical chunks whose
-        server-side embedding cost is pure waste — the pre-filter makes a
-        forced re-convergence run pay only for genuinely missing chunks
-        (nexus-7zuzz orphan remediation). OPT-IN, not default: skipping an
-        existing id also skips the ON CONFLICT DO UPDATE metadata refresh
-        (line numbers can drift for identical chunk text after edits
-        elsewhere in the file). ``existing_ids`` resolves to the EMPTY set
-        on probe failure, so a degraded probe upserts everything — chunks
-        are never silently dropped.
+        ``skip_existing`` (or env ``NX_UPSERT_SKIP_EXISTING=1``): DEPRECATED
+        (RDR-181, bead nexus-f0r8p.5) — kept readable for one deprecation
+        cycle only, no longer changes what is sent. It used to pre-filter
+        ids through :meth:`existing_ids` (a client-side round-trip) and
+        drop chunks the collection already held (nexus-7zuzz orphan
+        remediation), but that pre-filter also silently skipped the ON
+        CONFLICT DO UPDATE metadata refresh — the "metadata caveat" RDR-181
+        closed. Server-side embed-skip
+        (``PgVectorRepository.upsertChunksInternal``'s existence-partition,
+        beads .1/.2) now does the equivalent filtering losslessly and
+        universally, with no extra round-trip and no opt-in required.
+        Setting this kwarg (or the env var) is now a no-op on the outgoing
+        batch — the whole batch is always sent — and only triggers a
+        one-time deprecation log line (see
+        :func:`_warn_skip_existing_deprecated`).
+
+        ``force_re_embed`` (RDR-181, bead nexus-f0r8p.3; or the deprecated
+        env escape ``NX_UPSERT_SKIP_EXISTING=0``): tells the SERVER to bypass
+        its own existence-partition entirely (``PgVectorRepository``'s
+        RDR-181 embed-skip optimization) and re-embed every chunk in the
+        batch, even ones whose chash already has a stored vector — the rare
+        model-drift-within-a-collection recompute, and the escape for the
+        (0%-hit) first-index path so it never pays for the server-side
+        existence SELECT with no offsetting benefit. This is now the ONLY
+        kwarg/env lever on this method that changes what is sent or how the
+        server treats existing chashes — ``skip_existing`` above no longer
+        does. Sending it is a no-op when ``embeddings`` is supplied (the
+        migration passthrough already skips the server's existence check
+        unconditionally).
         """
         if not ids:
             return
         if skip_existing is None:
             skip_existing = os.environ.get("NX_UPSERT_SKIP_EXISTING", "") == "1"
+        if force_re_embed is None:
+            force_re_embed = os.environ.get("NX_UPSERT_SKIP_EXISTING", "") == "0"
         if skip_existing:
-            present = self.existing_ids(collection, ids)
-            if present:
-                keep = [i for i, _id in enumerate(ids) if _id not in present]
-                if not keep:
-                    _log.debug(
-                        "http_vector_upsert_all_present",
-                        collection=collection, count=len(ids),
-                    )
-                    return
-                metas = metadatas or [{}] * len(ids)
-                ids = [ids[i] for i in keep]
-                documents = [documents[i] for i in keep]
-                metadatas = [metas[i] for i in keep]
-                if embeddings is not None:
-                    embeddings = [embeddings[i] for i in keep]
-        body: dict[str, Any] = {
-            "collection": collection,
-            "ids": ids,
-            "documents": documents,
-            "metadatas": metadatas or [{}] * len(ids),
-        }
-        # Same-model vector PASSTHROUGH (nexus-hxry2): when the caller supplies
-        # precomputed vectors (source model == target wired model), send them so
-        # the service stores them verbatim and skips the billed re-embed. Absent →
-        # the default Seam B server-side embed. This is the ONE path where
-        # ``embeddings`` is honoured; every other caller leaves it None.
-        if embeddings is not None:
-            body["embeddings"] = embeddings
-        _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
+            _warn_skip_existing_deprecated()
+        # nexus-nf3n7: page an oversize id set into <=cap sub-POSTs so no single
+        # request exceeds the control-plane requestTimeout (a large CCE upsert
+        # 504s otherwise). This is the ONE choke point — the ChunkBatcher already
+        # sends <=cap so its flushes are a single page (unchanged); the oversize
+        # per-file fallbacks (prose/code/doc) and every other caller inherit the
+        # cap here. NOT atomic across pages: a sub-POST failure raises with earlier
+        # pages already committed, but the write is idempotent-retry-safe — ON
+        # CONFLICT dedup + full-file staleness retry heal a partial mid-paging
+        # failure next run. Same-model vector PASSTHROUGH (nexus-hxry2): supplied
+        # vectors are sliced in lockstep with the ids.
+        cap = per_collection_chunk_cap(collection)
+        metas = metadatas or [{}] * len(ids)
+        n = len(ids)
+        for start in range(0, n, cap):
+            end = min(start + cap, n)
+            body: dict[str, Any] = {
+                "collection": collection,
+                "ids": ids[start:end],
+                "documents": documents[start:end],
+                "metadatas": metas[start:end],
+            }
+            if embeddings is not None:
+                body["embeddings"] = embeddings[start:end]
+            if force_re_embed:
+                body["force_re_embed"] = True
+            _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
         _log.debug(
             "http_vector_upsert_chunks",
             collection=collection,
-            count=len(ids),
+            count=n,
+            pages=(n + cap - 1) // cap if n else 0,
         )
 
     def upsert_chunks_with_embeddings(
@@ -603,6 +727,8 @@ class HttpVectorClient:
         documents: list[str],
         embeddings: list[list[float]],
         metadatas: list[dict] | None = None,
+        *,
+        force_re_embed: bool = False,
     ) -> None:
         """Server-side embed path: forward chunk text, ignore caller's embeddings.
 
@@ -615,9 +741,17 @@ class HttpVectorClient:
         ``T3Database.upsert_chunks_with_embeddings`` so callers using the kwarg
         form (code_indexer.py:470, prose_indexer.py:233, exporter.py:431,448)
         don't get a TypeError (nexus-7zuzz).
+
+        ``force_re_embed`` (RDR-181 §Approach step 3): forwarded verbatim to
+        :meth:`upsert_chunks` so the indexer's ``--force`` path reaches the
+        server's ``forceReEmbed`` escape (bypass the existence-partition,
+        re-embed every chunk in the batch) — closes the plumbing gap where
+        beads .3/.5 wired the engine and client kwarg but no production
+        caller ever set it.
         """
         self.upsert_chunks(
-            collection_name, ids, documents, metadatas=metadatas
+            collection_name, ids, documents, metadatas=metadatas,
+            force_re_embed=force_re_embed,
         )
 
     def put(

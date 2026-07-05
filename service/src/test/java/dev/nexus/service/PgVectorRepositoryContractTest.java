@@ -915,6 +915,26 @@ class PgVectorRepositoryContractTest {
     }
 
     // ---------------------------------------------------------------------------
+    // Contract 6b: selectExistingChashes (RDR-181 embed-skip existence lookup,
+    // bead nexus-f0r8p.1) — a PK-indexed (collection, chash) existence probe.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void selectExistingChashes_returnsExactlyThePresentSubset() throws Exception {
+        String col = "code__existsk__voyage-code-3__v1";
+        String existingChash = "exsk1024c10000000000000000000000";
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(existingChash), List.of("existence probe text"), List.of(Map.of()));
+
+        Set<String> present = repo1024.selectExistingChashes(TENANT_A, col,
+            List.of(existingChash, "exsk1024ne0000000000000000000000"));
+
+        assertThat(present)
+            .as("only the chash with a stored row is reported present")
+            .containsExactly(existingChash);
+    }
+
+    // ---------------------------------------------------------------------------
     // Contract 7: update-metadata (metadata only — no re-embed, text unchanged)
     // ---------------------------------------------------------------------------
 

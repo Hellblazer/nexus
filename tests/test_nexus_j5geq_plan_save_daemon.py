@@ -126,6 +126,7 @@ def test_plan_save_routes_via_t2_index_write(tmp_path: Path) -> None:
         result = core.plan_save(
             query="test-plan-query",
             plan_json='{"steps":[]}',
+            verb="query",
             outcome="success",
             tags="test",
             project="nexus",

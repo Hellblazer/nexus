@@ -48,7 +48,7 @@ def _tracking_db():
         if name not in cols:
             c = MagicMock(); c.get.return_value = {"metadatas": [], "ids": []}; cols[name] = c
         return cols[name]
-    def cap(collection_name, ids, documents, embeddings, metadatas):
+    def cap(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False):
         ups.setdefault(collection_name, []).extend(metadatas)
     db = MagicMock()
     db.get_or_create_collection.side_effect = goc
@@ -798,11 +798,16 @@ def test_prune_misclassified_uses_catalog_manifest_for_phase3_chunks(tmp_path):
     )
 
     # Catalog manifest reports both chashes belong to the code file's doc.
+    # nexus-yz8bt: the prune now fetches manifests in ONE batched
+    # ``get_manifests(doc_ids)`` call (backed by /manifest/get_many),
+    # not a per-doc ``get_manifest`` loop.
     catalog = MagicMock()
-    catalog.get_manifest.return_value = [
-        SimpleNamespace(chash=chash_a, position=0),
-        SimpleNamespace(chash=chash_b, position=1),
-    ]
+    catalog.get_manifests.return_value = {
+        "1.1.5": [
+            SimpleNamespace(chash=chash_a, position=0),
+            SimpleNamespace(chash=chash_b, position=1),
+        ]
+    }
 
     _prune_misclassified(
         repo=tmp_path,
@@ -816,8 +821,10 @@ def test_prune_misclassified_uses_catalog_manifest_for_phase3_chunks(tmp_path):
         catalog=catalog,
     )
 
-    # Manifest was queried for the doc_id.
-    catalog.get_manifest.assert_any_call("1.1.5")
+    # Manifests were queried via the BATCH API for the doc_id, and the
+    # per-doc serial path was NOT taken on the happy path.
+    catalog.get_manifests.assert_any_call(["1.1.5"])
+    catalog.get_manifest.assert_not_called()
     # docs col was queried with the chash[:32] IDs.
     get_calls = docs_col.get.call_args_list
     assert any(
@@ -827,6 +834,194 @@ def test_prune_misclassified_uses_catalog_manifest_for_phase3_chunks(tmp_path):
     # Both chunks deleted from the wrong collection.
     deleted = _deleted_ids(docs_col)
     assert set(deleted) == {chash_a[:32], chash_b[:32]}
+
+
+def test_prune_misclassified_batch_fetch_and_absent_doc(tmp_path):
+    """nexus-yz8bt (duoak.11 sink #3): the manifest resolution is ONE
+    batched ``get_manifests(doc_ids)`` call, not N serial ``get_manifest``
+    round-trips. A doc absent from the batch result (empty/unknown
+    manifest) is treated as "no chunks to prune" — no crash, no delete.
+    """
+    from types import SimpleNamespace
+
+    from nexus.indexer import _prune_misclassified
+
+    have = tmp_path / "has_chunks.py"
+    have.write_text("x = 1\n")
+    absent = tmp_path / "no_manifest.py"
+    absent.write_text("y = 2\n")
+
+    chash = "a" * 64
+    docs_col = MagicMock()
+    docs_col.get.return_value = {"ids": [chash[:32]]}
+    db = MagicMock()
+    db.get_collection.side_effect = lambda name: (
+        docs_col if name == "docs__repo" else MagicMock()
+    )
+
+    # Batch API returns rows only for the doc that has a manifest; the
+    # other doc_id is ABSENT from the dict (per the get_manifests contract).
+    catalog = MagicMock()
+    catalog.get_manifests.return_value = {
+        "1.1.5": [SimpleNamespace(chash=chash, position=0)],
+    }
+
+    _prune_misclassified(
+        repo=tmp_path,
+        code_collection="code__repo",
+        docs_collection="docs__repo",
+        code_files=[have, absent],
+        prose_files=[],
+        pdf_files=[],
+        db=db,
+        file_to_doc_id={have: "1.1.5", absent: "1.1.6"},
+        catalog=catalog,
+    )
+
+    # Exactly one batched fetch, no per-doc serial calls.
+    assert catalog.get_manifests.call_count == 1
+    catalog.get_manifest.assert_not_called()
+    # BOTH doc_ids must be in the batch request — including the absent one.
+    # Guards against a regression that pre-filters doc_ids before the
+    # batch (which would defeat the unconditional-prune invariant). Order
+    # is not guaranteed: doc_ids is built from set iteration.
+    assert set(catalog.get_manifests.call_args_list[0].args[0]) == {"1.1.5", "1.1.6"}
+    # The doc with chunks is pruned; the absent doc contributes nothing.
+    assert set(_deleted_ids(docs_col)) == {chash[:32]}
+
+
+def test_prune_misclassified_all_absent_zero_deletes(tmp_path):
+    """nexus-yz8bt: a fresh corpus where the batch returns manifests for
+    NO doc (all absent) prunes nothing — zero col.get hits with ids, zero
+    deletes — without a per-doc round-trip. The common OOTB-index shape.
+    """
+    from nexus.indexer import _prune_misclassified
+
+    a = tmp_path / "a.py"
+    a.write_text("x = 1\n")
+    b = tmp_path / "b.py"
+    b.write_text("y = 2\n")
+
+    docs_col = MagicMock()
+    db = MagicMock()
+    db.get_collection.side_effect = lambda name: (
+        docs_col if name == "docs__repo" else MagicMock()
+    )
+
+    catalog = MagicMock()
+    catalog.get_manifests.return_value = {}  # nothing misclassified
+
+    _prune_misclassified(
+        repo=tmp_path,
+        code_collection="code__repo",
+        docs_collection="docs__repo",
+        code_files=[a, b],
+        prose_files=[],
+        pdf_files=[],
+        db=db,
+        file_to_doc_id={a: "1.1.5", b: "1.1.6"},
+        catalog=catalog,
+    )
+
+    assert catalog.get_manifests.call_count == 1
+    catalog.get_manifest.assert_not_called()
+    # No chash resolved => the manifest col.get(ids=) sweep never fires,
+    # and nothing is deleted.
+    assert _deleted_ids(docs_col) == []
+
+
+def test_prune_misclassified_fallback_records_skipped_on_doubled_failure(tmp_path):
+    """nexus-yz8bt: the doubled-failure path (nexus-8g79.4 class). The
+    batch fails loud AND, inside the per-doc fallback, one doc's
+    get_manifest also raises. The failing doc is skipped (WARNING logged,
+    no crash); the healthy doc is still pruned.
+    """
+    from types import SimpleNamespace
+
+    from nexus.indexer import _prune_misclassified
+
+    good = tmp_path / "good.py"
+    good.write_text("x = 1\n")
+    bad = tmp_path / "bad.py"
+    bad.write_text("y = 2\n")
+
+    chash = "c" * 64
+    docs_col = MagicMock()
+    docs_col.get.return_value = {"ids": [chash[:32]]}
+    db = MagicMock()
+    db.get_collection.side_effect = lambda name: (
+        docs_col if name == "docs__repo" else MagicMock()
+    )
+
+    catalog = MagicMock()
+    catalog.get_manifests.side_effect = RuntimeError("page 400")  # batch fails loud
+
+    def _per_doc(did):
+        if did == "1.1.6":  # the bad doc's lookup also fails
+            raise RuntimeError("transient")
+        return [SimpleNamespace(chash=chash, position=0)]
+
+    catalog.get_manifest.side_effect = _per_doc
+
+    # Must not raise despite the doubled failure.
+    _prune_misclassified(
+        repo=tmp_path,
+        code_collection="code__repo",
+        docs_collection="docs__repo",
+        code_files=[good, bad],
+        prose_files=[],
+        pdf_files=[],
+        db=db,
+        file_to_doc_id={good: "1.1.5", bad: "1.1.6"},
+        catalog=catalog,
+    )
+
+    # Fell back to per-doc for both docs; the healthy one is still pruned,
+    # the failing one is skipped without aborting the sweep.
+    assert catalog.get_manifest.call_count == 2
+    assert set(_deleted_ids(docs_col)) == {chash[:32]}
+
+
+def test_prune_misclassified_falls_back_when_batch_raises(tmp_path):
+    """nexus-yz8bt: if the batched ``get_manifests`` fails loud (a page
+    error propagates per its contract), the prune falls back to the
+    per-doc ``get_manifest`` loop unchanged — resilience preserved, the
+    stale chunk is still pruned.
+    """
+    from types import SimpleNamespace
+
+    from nexus.indexer import _prune_misclassified
+
+    code_path = tmp_path / "main.py"
+    code_path.write_text("x = 1\n")
+    chash = "b" * 64
+
+    docs_col = MagicMock()
+    docs_col.get.return_value = {"ids": [chash[:32]]}
+    db = MagicMock()
+    db.get_collection.side_effect = lambda name: (
+        docs_col if name == "docs__repo" else MagicMock()
+    )
+
+    catalog = MagicMock()
+    catalog.get_manifests.side_effect = RuntimeError("page 400")
+    catalog.get_manifest.return_value = [SimpleNamespace(chash=chash, position=0)]
+
+    _prune_misclassified(
+        repo=tmp_path,
+        code_collection="code__repo",
+        docs_collection="docs__repo",
+        code_files=[code_path],
+        prose_files=[],
+        pdf_files=[],
+        db=db,
+        file_to_doc_id={code_path: "1.1.5"},
+        catalog=catalog,
+    )
+
+    # Fell back to the per-doc path and still pruned the stale chunk.
+    catalog.get_manifest.assert_any_call("1.1.5")
+    assert set(_deleted_ids(docs_col)) == {chash[:32]}
 
 
 def test_prune_deleted_files_per_collection_orphan_isolation(tmp_path):
@@ -1092,7 +1287,9 @@ def test_run_index_passes_force_to_helpers(tmp_path, fname, content, target):
     f = repo / fname
     f.write_bytes(content) if isinstance(content, bytes) else f.write_text(content)
     db, _, _ = _tracking_db()
-    with _patches(db, extra={target: {}, "nexus.doc_indexer.batch_index_markdowns": {"return_value": {}}}) as mocks:
+    # target helper returns an int chunk-count per its contract (run_file_loop
+    # tallies files_written off it — nexus-qgc4b); {} would yield a MagicMock.
+    with _patches(db, extra={target: {"return_value": 1}, "nexus.doc_indexer.batch_index_markdowns": {"return_value": {}}}) as mocks:
         _run_index(repo, _reg(), force=True)
     h = mocks[target.split(".")[-1]]; h.assert_called(); assert h.call_args.kwargs.get("force") is True
 

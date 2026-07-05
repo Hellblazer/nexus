@@ -120,11 +120,28 @@ The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → c
 - `tests/e2e/migration-rehearsal/run.sh` `COLD_TAG` default → the new published tag (or override via `NEXUS_SERVICE_TAG`).
 - When the **next PyPI release** pins this engine: `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`) and — ONLY if the release hard-requires the new engine's features — `REQUIRED_RELEASE_VERSION` (`src/nexus/migration/guided_upgrade.py`; the floor is a minimum, not "latest"). These are the `release` skill's job, not this one.
 
-### 8. Record state (T2)
+### 8. Record state (T2) — guarded by a live /version read (DO NOT SKIP)
 
 ```
-nx memory put -p nexus -t deployed-engine-version "engine-service-vX.Y.Z @ <commit>; cloud-gated <date>; gate result <...>"
+nx service record-deploy engine-service-vX.Y.Z --commit <sha> --gate PASSED
 ```
+
+This GETs the deployed service's `/version`, ASSERTS `release_version == X.Y.Z`,
+and only then writes the `deployed-engine-version` tracker. The recorded version
+is machine-sourced from the live read — never hand-typed — so it cannot disagree
+with what the cloud is actually running, and running it before the deploy lands
+fails loud instead of recording a wrong fact (nexus-dz6b1 / RDR-179).
+
+**Scope honesty:** this guards the *value* (no wrong version can be recorded); it
+does NOT force the step to run. The original v0.1.17-stale-across-three-deploys
+incident was an OMISSION, not a fat-finger — so this step is still skippable and
+you must not skip it. Closing the omission vector for good (cloud-gate writes the
+tracker on pass) is a tracked follow-up. `--commit`/`--gate` are verbatim
+provenance, not verified against the deploy.
+
+To read what the cloud is running WITHOUT trusting the tracker, use the live
+handshake directly: `nx service probe` (prints `release_version`). The tracker is
+a cache; `/version` is truth.
 
 So the next session (and the engine-freshness gate in the `release` skill) can see what the cloud is actually running without re-deriving it.
 

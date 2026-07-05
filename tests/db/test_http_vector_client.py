@@ -193,23 +193,30 @@ class TestUpsertChunks:
         )
         assert calls[0]["embeddings"] == vecs
 
-    def test_skip_existing_prunes_embeddings_in_lockstep(self, monkeypatch):
-        """When skip_existing drops already-present ids, the supplied embeddings
-        must be pruned to match — never misaligned to the kept ids."""
+    def test_skip_existing_no_longer_prunes_embeddings(self, monkeypatch):
+        """RDR-181 bead nexus-f0r8p.5: skip_existing is a deprecated no-op —
+        the full batch (including supplied embeddings) is always sent, and
+        the client-side existing_ids probe is never invoked anymore."""
         client = HttpVectorClient()
         calls = []
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
-            lambda path, body, **kw: calls.append(body) or {"upserted": 1},
+            lambda path, body, **kw: calls.append(body) or {"upserted": 2},
         )
-        # id1 already present → only id2 survives; its embedding must be vecs[1].
-        monkeypatch.setattr(client, "existing_ids", lambda col, ids: {"id1"})
+        probe_calls = []
+
+        def _tracked_existing_ids(col, ids):
+            probe_calls.append((col, ids))
+            return {"id1"}
+
+        monkeypatch.setattr(client, "existing_ids", _tracked_existing_ids)
         vecs = [[0.1], [0.2]]
         client.upsert_chunks(
             "col", ["id1", "id2"], ["t1", "t2"], embeddings=vecs, skip_existing=True
         )
-        assert calls[0]["ids"] == ["id2"]
-        assert calls[0]["embeddings"] == [[0.2]]
+        assert probe_calls == []
+        assert calls[0]["ids"] == ["id1", "id2"]
+        assert calls[0]["embeddings"] == vecs
 
 
 class TestSearch:
@@ -1077,15 +1084,21 @@ class TestEmbeddingFetchServiceModeRegression:
 
 
 class TestUpsertSkipExisting:
-    """nexus-7zuzz remediation follow-on: opt-in chash pre-filter so a
-    forced re-index pays embedding cost only for genuinely missing chunks.
-    Opt-in because skipping existing ids also skips the ON CONFLICT
-    DO UPDATE metadata refresh (line numbers can drift for identical
-    chunk text); default behavior is unchanged."""
+    """RDR-181 bead nexus-f0r8p.5: skip_existing is now a deprecation shim.
 
-    def _client_with_fake_post(self, monkeypatch, existing: list[str]):
+    Server-side embed-skip (``PgVectorRepository.upsertChunksInternal``'s
+    existence-partition, beads .1/.2) is authoritative. The client-side
+    probe this flag used to drive (nexus-7zuzz) is gone: skip_existing
+    (or ``NX_UPSERT_SKIP_EXISTING=1``) no longer removes anything from the
+    outgoing batch — the whole batch is always sent, and the server does
+    the equivalent filtering losslessly, including the metadata refresh
+    the old client-side probe dropped. See TestSkipExistingDeprecationNotice
+    for the one remaining observable effect (a one-time log line)."""
+
+    def _client_with_fake_post(self, monkeypatch, existing: list[str] | None = None):
         client = HttpVectorClient()
         calls = []
+        existing = existing or []
 
         def fake_post(path, body, *, tenant="default", timeout=120):
             calls.append((path, body))
@@ -1097,24 +1110,29 @@ class TestUpsertSkipExisting:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         return client, calls
 
-    def test_skip_existing_filters_present_ids(self, monkeypatch):
+    def test_skip_existing_no_longer_filters_present_ids(self, monkeypatch):
+        """The full batch is sent even though 'a' and 'c' are already
+        present — the client-side probe round-trip is gone entirely."""
         client, calls = self._client_with_fake_post(monkeypatch, existing=["a", "c"])
         client.upsert_chunks(
             "col", ["a", "b", "c"], ["ta", "tb", "tc"],
             metadatas=[{"k": 1}, {"k": 2}, {"k": 3}],
             skip_existing=True,
         )
+        assert [p for p, _ in calls if p == "/v1/vectors/store-get"] == []
         upserts = [(p, b) for p, b in calls if p == "/v1/vectors/upsert-chunks"]
         assert len(upserts) == 1
         body = upserts[0][1]
-        assert body["ids"] == ["b"]
-        assert body["documents"] == ["tb"]
-        assert body["metadatas"] == [{"k": 2}]
+        assert body["ids"] == ["a", "b", "c"]
+        assert body["documents"] == ["ta", "tb", "tc"]
+        assert body["metadatas"] == [{"k": 1}, {"k": 2}, {"k": 3}]
 
-    def test_skip_existing_all_present_skips_upsert_entirely(self, monkeypatch):
+    def test_skip_existing_all_present_still_sends_full_batch(self, monkeypatch):
         client, calls = self._client_with_fake_post(monkeypatch, existing=["a", "b"])
         client.upsert_chunks("col", ["a", "b"], ["ta", "tb"], skip_existing=True)
-        assert [p for p, _ in calls if p == "/v1/vectors/upsert-chunks"] == []
+        upserts = [b for p, b in calls if p == "/v1/vectors/upsert-chunks"]
+        assert len(upserts) == 1
+        assert upserts[0]["ids"] == ["a", "b"]
 
     def test_default_behavior_unchanged_no_existence_probe(self, monkeypatch):
         client, calls = self._client_with_fake_post(monkeypatch, existing=["a"])
@@ -1122,30 +1140,161 @@ class TestUpsertSkipExisting:
         assert [p for p, _ in calls] == ["/v1/vectors/upsert-chunks"]
         assert calls[0][1]["ids"] == ["a", "b"]
 
-    def test_env_flag_activates_skip(self, monkeypatch):
+    def test_env_flag_no_longer_filters_batch(self, monkeypatch):
         monkeypatch.setenv("NX_UPSERT_SKIP_EXISTING", "1")
         client, calls = self._client_with_fake_post(monkeypatch, existing=["a"])
         client.upsert_chunks("col", ["a", "b"], ["ta", "tb"])
+        assert [p for p, _ in calls if p == "/v1/vectors/store-get"] == []
         upserts = [b for p, b in calls if p == "/v1/vectors/upsert-chunks"]
-        assert upserts[0]["ids"] == ["b"]
+        assert upserts[0]["ids"] == ["a", "b"]
 
-    def test_probe_failure_degrades_to_full_upsert(self, monkeypatch):
-        """existing_ids resolves to empty set on service error (its
-        documented contract) — skip_existing must then upsert EVERYTHING,
-        never silently drop chunks."""
+
+class TestSkipExistingDeprecationNotice:
+    """RDR-181 bead nexus-f0r8p.5: skip_existing (kwarg or the
+    NX_UPSERT_SKIP_EXISTING=1 env alias) fires a one-time structlog
+    deprecation notice pointing at RDR-181 the first time it is observed
+    set on this process, and never again — not once per call."""
+
+    def _reset_dedup_flag(self, monkeypatch):
+        import nexus.db.http_vector_client as hvc
+
+        monkeypatch.setattr(hvc, "_skip_existing_deprecation_logged", False)
+
+    def _client_with_fake_post(self, monkeypatch):
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: {"upserted": len(body.get("ids", []))},
+        )
+        return client
+
+    @staticmethod
+    def _deprecation_events(logs):
+        return [e for e in logs if e["event"] == "http_vector_skip_existing_deprecated"]
+
+    def test_kwarg_true_logs_deprecation_once(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        self._reset_dedup_flag(monkeypatch)
+        client = self._client_with_fake_post(monkeypatch)
+        with capture_logs() as logs:
+            client.upsert_chunks("col", ["a"], ["ta"], skip_existing=True)
+        assert len(self._deprecation_events(logs)) == 1
+
+    def test_env_flag_logs_deprecation(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        self._reset_dedup_flag(monkeypatch)
+        monkeypatch.setenv("NX_UPSERT_SKIP_EXISTING", "1")
+        client = self._client_with_fake_post(monkeypatch)
+        with capture_logs() as logs:
+            client.upsert_chunks("col", ["a"], ["ta"])
+        assert len(self._deprecation_events(logs)) == 1
+
+    def test_logs_only_once_across_multiple_calls(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        self._reset_dedup_flag(monkeypatch)
+        client = self._client_with_fake_post(monkeypatch)
+        with capture_logs() as logs:
+            client.upsert_chunks("col", ["a"], ["ta"], skip_existing=True)
+            client.upsert_chunks("col", ["b"], ["tb"], skip_existing=True)
+        assert len(self._deprecation_events(logs)) == 1
+
+    def test_default_no_deprecation_log(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        self._reset_dedup_flag(monkeypatch)
+        client = self._client_with_fake_post(monkeypatch)
+        with capture_logs() as logs:
+            client.upsert_chunks("col", ["a"], ["ta"])
+        assert self._deprecation_events(logs) == []
+
+    def test_force_re_embed_alone_does_not_log_deprecation(self, monkeypatch):
+        """force_re_embed is the live (non-deprecated) escape hatch; using it
+        alone must not trip the skip_existing deprecation notice."""
+        from structlog.testing import capture_logs
+
+        self._reset_dedup_flag(monkeypatch)
+        client = self._client_with_fake_post(monkeypatch)
+        with capture_logs() as logs:
+            client.upsert_chunks("col", ["a"], ["ta"], force_re_embed=True)
+        assert self._deprecation_events(logs) == []
+
+
+class TestForceReEmbed:
+    """RDR-181 bead nexus-f0r8p.3: plumbing-only — thread force_re_embed onto
+    the wire and map the deprecated NX_UPSERT_SKIP_EXISTING=0 escape to it.
+    The client does NOT interpret the flag itself; the server's existence
+    partition is what force_re_embed bypasses (PgVectorRepository)."""
+
+    def _client_with_fake_post(self, monkeypatch):
         client = HttpVectorClient()
         calls = []
 
         def fake_post(path, body, *, tenant="default", timeout=120):
-            if path == "/v1/vectors/store-get":
-                from nexus.db.http_vector_client import VectorServiceError
-                raise VectorServiceError("probe down")
             calls.append((path, body))
             return {"upserted": len(body.get("ids", []))}
 
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client.upsert_chunks("col", ["a", "b"], ["ta", "tb"], skip_existing=True)
-        assert calls[0][1]["ids"] == ["a", "b"]
+        return client, calls
+
+    def test_force_re_embed_true_sends_field(self, monkeypatch):
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"], force_re_embed=True)
+        assert calls[0][1]["force_re_embed"] is True
+
+    def test_default_omits_field(self, monkeypatch):
+        """Default (no kwarg, no env) must NOT send force_re_embed at all —
+        the common case stays byte-identical to pre-.3 request bodies."""
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"])
+        assert "force_re_embed" not in calls[0][1]
+
+    def test_explicit_false_omits_field(self, monkeypatch):
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"], force_re_embed=False)
+        assert "force_re_embed" not in calls[0][1]
+
+    def test_env_skip_existing_0_maps_to_force_re_embed(self, monkeypatch):
+        """The deprecated escape: NX_UPSERT_SKIP_EXISTING=0 (explicitly set to
+        the string '0', not merely unset) maps to force_re_embed=True when the
+        caller does not pass the kwarg explicitly."""
+        monkeypatch.setenv("NX_UPSERT_SKIP_EXISTING", "0")
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"])
+        assert calls[0][1]["force_re_embed"] is True
+
+    def test_explicit_kwarg_overrides_env(self, monkeypatch):
+        """An explicit force_re_embed=False kwarg wins over the env escape."""
+        monkeypatch.setenv("NX_UPSERT_SKIP_EXISTING", "0")
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"], force_re_embed=False)
+        assert "force_re_embed" not in calls[0][1]
+
+    def test_env_unset_does_not_activate_force_re_embed(self, monkeypatch):
+        monkeypatch.delenv("NX_UPSERT_SKIP_EXISTING", raising=False)
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks("col", ["a"], ["ta"])
+        assert "force_re_embed" not in calls[0][1]
+
+    def test_upsert_chunks_with_embeddings_forwards_force_re_embed_true(self, monkeypatch):
+        """The plumbing gap this closes: every production indexer call site
+        goes through upsert_chunks_with_embeddings (Seam B — the caller's
+        embeddings are discarded), NOT upsert_chunks directly. Bead .3/.5
+        wired force_re_embed onto upsert_chunks's wire body but
+        upsert_chunks_with_embeddings never forwarded it, so no production
+        --force reindex could ever reach the server's forceReEmbed escape."""
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks_with_embeddings(
+            "col", ["a"], ["ta"], [[0.1]], force_re_embed=True,
+        )
+        assert calls[0][1]["force_re_embed"] is True
+
+    def test_upsert_chunks_with_embeddings_default_omits_field(self, monkeypatch):
+        client, calls = self._client_with_fake_post(monkeypatch)
+        client.upsert_chunks_with_embeddings("col", ["a"], ["ta"], [[0.1]])
+        assert "force_re_embed" not in calls[0][1]
 
 
 class TestServiceModeDefault:
@@ -1261,3 +1410,141 @@ class TestManagedFailureReframe:
         monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(exc_obj))
         with pytest.raises(type(exc_obj)):
             hv._get("/v1/vectors/collections")
+
+
+class TestGatewayTransientRetry:
+    """502/503/504 retry with backoff in _request (nexus-wcs39).
+
+    Found by the duoak.4 scaling sweep: one transient 504 on
+    /v1/vectors/upsert-chunks killed an entire nx index run at 2 workers
+    (concurrent CCE batches slow server-side embed past the gateway
+    timeout). Upserts are idempotent -> bounded retry is safe.
+    """
+
+    def _http_error(self, code: int, body: bytes = b'{"error":"gw"}'):
+        import io
+        import urllib.error
+        return urllib.error.HTTPError(
+            url="http://svc/v1/x", code=code, msg="err", hdrs={},
+            fp=io.BytesIO(body),
+        )
+
+    @pytest.mark.parametrize("code", [502, 503, 504])
+    def test_transient_5xx_retries_then_succeeds(self, monkeypatch, code):
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._http_error(code)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        result = hv._request("POST", "/v1/vectors/upsert-chunks",
+                             tenant="default", timeout=600, body={})
+        assert result == {"ok": True}
+        assert len(calls) == 3
+        assert sleeps == list(hv._GATEWAY_RETRY_SLEEPS[:2])
+
+    def test_exhausted_retries_raise_original(self, monkeypatch):
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        monkeypatch.setattr(hv, "_request_once",
+                            lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(504)))[1])
+        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", "/v1/vectors/upsert-chunks",
+                        tenant="default", timeout=600, body={})
+        assert len(calls) == 1 + len(hv._GATEWAY_RETRY_SLEEPS)
+
+    # 401 is intentionally absent: it is an auto-restart signature and gets
+    # ONE re-resolve retry via the pre-existing nexus-pebfx.1 path.
+    @pytest.mark.parametrize("code", [400, 409, 500])
+    def test_non_gateway_codes_do_not_retry(self, monkeypatch, code):
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        monkeypatch.setattr(hv, "_request_once",
+                            lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(code)))[1])
+        monkeypatch.setattr(hv.time, "sleep", lambda s: pytest.fail("must not sleep"))
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", "/v1/vectors/search",
+                        tenant="default", timeout=120, body={})
+        assert len(calls) == 1
+
+
+# ── nexus-nf3n7: per-collection upsert paging (CCE 504 avoidance) ──────────────
+
+
+def test_per_collection_chunk_cap_values():
+    from nexus.db.http_vector_client import per_collection_chunk_cap
+
+    assert per_collection_chunk_cap("docs__o__onnx-x__v1") == 64
+    assert per_collection_chunk_cap("knowledge__x__onnx-x__v1") == 64
+    assert per_collection_chunk_cap("rdr__x__onnx-x__v1") == 64
+    assert per_collection_chunk_cap("code__x__onnx-x__v1") == 300
+    assert per_collection_chunk_cap("weird-no-prefix") == 300
+
+
+class TestUpsertChunksPaging:
+    """A single oversize upsert is paged into <=cap sub-POSTs so no request
+    exceeds the control-plane requestTimeout (nexus-nf3n7)."""
+
+    def _capture(self, monkeypatch):
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: calls.append(body),
+        )
+        return calls
+
+    def test_oversize_cce_pages_into_cap_sized_posts(self, monkeypatch):
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        ids = [f"{i:032x}" for i in range(150)]
+        docs = [f"d{i}" for i in range(150)]
+        metas = [{"n": i} for i in range(150)]
+        HttpVectorClient().upsert_chunks(
+            "docs__o__onnx-x__v1", ids, docs, metadatas=metas,
+        )
+        # 150 CCE chunks, cap 64 → 64 + 64 + 22
+        assert [len(c["ids"]) for c in calls] == [64, 64, 22]
+        # full coverage, in order, no drops/dupes
+        assert [i for c in calls for i in c["ids"]] == ids
+        # metadatas sliced in lockstep with ids
+        assert calls[0]["metadatas"][0] == {"n": 0}
+        assert calls[2]["metadatas"][-1] == {"n": 149}
+
+    def test_passthrough_embeddings_sliced_in_lockstep(self, monkeypatch):
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        n = 130
+        ids = [f"{i:032x}" for i in range(n)]
+        docs = [f"d{i}" for i in range(n)]
+        embs = [[float(i)] for i in range(n)]
+        HttpVectorClient().upsert_chunks(
+            "docs__o__onnx-x__v1", ids, docs, embeddings=embs,
+        )
+        assert [len(c["ids"]) for c in calls] == [64, 64, 2]
+        # embeddings track the ids page-for-page
+        assert calls[0]["embeddings"][0] == [0.0]
+        assert calls[1]["embeddings"][0] == [64.0]
+        assert calls[2]["embeddings"] == [[128.0], [129.0]]
+
+    def test_under_cap_is_single_post(self, monkeypatch):
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        # 200 code chunks, cap 300 → one POST (batcher-shaped batches unchanged)
+        ids = [f"{i:032x}" for i in range(200)]
+        HttpVectorClient().upsert_chunks(
+            "code__o__onnx-x__v1", ids, [f"d{i}" for i in range(200)],
+        )
+        assert len(calls) == 1
+        assert len(calls[0]["ids"]) == 200

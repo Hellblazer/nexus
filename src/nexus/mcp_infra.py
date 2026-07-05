@@ -939,6 +939,19 @@ def chash_dual_write_batch_hook(
         structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)
 
 
+# nexus-duoak.7: file-agnostic consumers run once per upload flush in the
+# batched indexer (fire_batch(grain="flush")) instead of once per file —
+# their cost is round-trip-dominated, not row-dominated. Default-grain
+# callers (grain="all") still fire them exactly as before.
+taxonomy_assign_batch_hook.batch_grain = "flush"
+chash_dual_write_batch_hook.batch_grain = "flush"
+# manifest joined the flush grain in nexus-u2kwq: the batched indexer's
+# aggregate call carries per-chunk doc_id + file-local chunk_index
+# (injected by _fire_flush_grain_hooks), so by_doc grouping and position
+# enumeration work unchanged; grain="all" callers (MCP store_put, legacy
+# inline paths) still fire it per document exactly as before.
+
+
 def manifest_write_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -1043,20 +1056,83 @@ def manifest_write_batch_hook(
             _close()
 
 
+def _manifest_chunk_rows(indexed_metas) -> list[dict]:
+    return [
+        {
+            "chash": m.get("chunk_text_hash", ""),
+            "position": int(m.get("chunk_index", i)),
+            "chunk_index": m.get("chunk_index"),
+            "line_start": m.get("line_start") or None,
+            "line_end": m.get("line_end") or None,
+            "char_start": m.get("chunk_start_char") or None,
+            "char_end": m.get("chunk_end_char") or None,
+        }
+        for i, m in indexed_metas
+    ]
+
+
 def _manifest_write_loop(cat, by_doc) -> None:
+    # nexus-u2kwq: multi-doc batches (the flush-grain aggregate path) go
+    # through ONE write_many POST when the writer supports it; a 404
+    # (engine < v0.1.24) or missing capability falls back to the per-doc
+    # loop below. Flush-grain batches always carry complete files
+    # (position 0 present), matching write_many's replace semantics.
+    if callable(getattr(cat, "write_manifest_many", None)):
+        # No len(by_doc) gate (critique Critical, nexus-u2kwq): write_many
+        # handles N=1 fine, and single-doc batches MUST take it — the
+        # endpoint folds the documents.chunk_count update in, which the
+        # per-doc HTTP replace path does not (stale chunk_count = docs
+        # misread as empty by chunk_count>0 consumers).
+        full_docs: list[tuple[str, list[dict]]] = []
+        continuation: dict = {}
+        for doc_id, indexed_metas in by_doc.items():
+            chunks = _manifest_chunk_rows(indexed_metas)
+            if not any(c["chash"] for c in chunks):
+                continue
+            # POSITION-0 GATE (review Important #1): write_many is
+            # REPLACE — a doc whose batch lacks position 0 is a
+            # continuation slice, and replacing would DELETE its
+            # earlier rows (silent manifest corruption). Today's only
+            # flush-grain producer (ChunkBatcher) is file-atomic so
+            # position 0 is always present; this guard defends the
+            # invariant against any future producer.
+            if not any(c["position"] == 0 for c in chunks):
+                continuation[doc_id] = indexed_metas
+                continue
+            full_docs.append((doc_id, chunks))
+        if continuation:
+            import structlog  # noqa: PLC0415 — deferred (lazy logger)
+            structlog.get_logger().warning(
+                "manifest_write_many_partial_doc_skipped",
+                count=len(continuation),
+                note="continuation slices routed to per-doc append path",
+            )
+        wrote_many = False
+        if full_docs:
+            try:
+                failed = cat.write_manifest_many(full_docs)
+                wrote_many = True
+                if failed:
+                    import structlog  # noqa: PLC0415 — deferred (lazy logger)
+                    structlog.get_logger().warning(
+                        "manifest_write_many_partial", failed_doc_ids=failed,
+                    )
+            except Exception as exc:  # noqa: BLE001 — 404-classify; older engine falls back per-doc
+                status = getattr(
+                    getattr(exc, "response", None), "status_code", None
+                ) or getattr(exc, "code", None)
+                if status != 404:
+                    raise
+        if wrote_many:
+            # per-doc loop handles ONLY the continuation remainder (may
+            # be empty). Critique Significant: an all-continuation batch
+            # must fall through to the loop, never early-return.
+            by_doc = continuation
+        # else: 404 or nothing eligible — per-doc loop covers everything.
+        if not by_doc:
+            return
     for doc_id, indexed_metas in by_doc.items():
-        chunks = [
-            {
-                "chash": m.get("chunk_text_hash", ""),
-                "position": int(m.get("chunk_index", i)),
-                "chunk_index": m.get("chunk_index"),
-                "line_start": m.get("line_start") or None,
-                "line_end": m.get("line_end") or None,
-                "char_start": m.get("chunk_start_char") or None,
-                "char_end": m.get("chunk_end_char") or None,
-            }
-            for i, m in indexed_metas
-        ]
+        chunks = _manifest_chunk_rows(indexed_metas)
         if all(not c["chash"] for c in chunks):
             continue
         try:
@@ -1073,6 +1149,13 @@ def _manifest_write_loop(cat, by_doc) -> None:
             # streaming PDF / doc_indexer paths.
             if any(c["position"] == 0 for c in chunks):
                 cat.atomic_manifest_replace(doc_id, chunks)
+                # chunk_count parity (critique Critical): the HTTP
+                # client's replace does NOT touch documents.chunk_count
+                # (only write_many folds it in); the local Catalog does
+                # it in-txn, where this resync is an idempotent no-op.
+                _resync = getattr(cat, "resync_chunk_count_cache", None)
+                if callable(_resync):
+                    _resync(doc_id)
             else:
                 cat.append_manifest_chunks(doc_id, chunks)
                 # nexus-zq79: documents.chunk_count is a denormalised cache of
@@ -1289,3 +1372,7 @@ def inject_t3(t3):
     """Inject a T3Database for testing."""
     global _t3_instance
     _t3_instance = t3
+
+
+# nexus-u2kwq: see grain comment above taxonomy/chash declarations.
+manifest_write_batch_hook.batch_grain = "flush"

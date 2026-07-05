@@ -216,6 +216,14 @@ REGISTRY: list[Parity] = [
         kwargs={"content_type": "code", "file_path": "src/registered_8y1tm.py"},
     ),
     Parity(
+        # nexus-9dvqy: batch register returns list[Tumbler] aligned 1:1 with docs.
+        "register_many",
+        args=(lambda s: s.owner, lambda s: [
+            {"title": "Batch Doc 9dvqy", "content_type": "code",
+             "file_path": "src/batch_9dvqy.py"},
+        ]),
+    ),
+    Parity(
         "update", args=(lambda s: s.doc_update,), kwargs={"title": "Updated Title 8y1tm"},
         empty_ok=True, empty_reason="void write: update() returns None on both sides",
     ),

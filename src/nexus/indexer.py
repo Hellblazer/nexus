@@ -19,6 +19,7 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
 import errno
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -256,6 +257,11 @@ def _repo_lock_path(repo: Path) -> Path:
 
 
 _LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
+#: Page size for the batched catalog register_many pass (nexus-9dvqy). Matches
+#: the server's MAX_BATCH_DOC_IDS cap. Also the granularity of the RDR-146
+#: fairness yield in _catalog_hook. Module-level so tests can shrink it to force
+#: multi-page behaviour without a 1000+ file corpus.
+_CATALOG_REGISTER_PAGE = 1000
 
 
 def _clear_stale_lock(lock_path: Path) -> None:
@@ -799,31 +805,39 @@ def _catalog_hook(
         # ghost-chunk class on 2026-05-02.
         skipped_files: list[tuple[Path, str]] = []
         fairness_yielded = 0  # RDR-146 P2: files deferred to the next pass.
+        import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        # Pass 1: resolve each file to existing-or-new. Changed existing docs are
+        # updated inline; NEW docs are accumulated for ONE batched register_many
+        # (nexus-9dvqy, duoak.11 sink #2) — the per-file writer.register() loop
+        # was the 333s serial-WAN registration sink. The per-file try/except keeps
+        # the ghost-class isolation intact: one bad file must never strip doc_ids
+        # from the rest of the repo.
+        #
+        # RDR-146 P2 fairness: the yield stays PER-FILE here (it guards the inline
+        # writer.update() calls, which on a warm re-run fire for the whole existing
+        # population — a HEAD bump flips every doc's stored head_hash to changed —
+        # so this is a large serial write burst, not a rare one). ``skip`` defers
+        # the remaining files to the next idempotent pass. Pass 2 adds a second,
+        # per-page yield for the new-doc batch.
+        new_batch: list[tuple[Path, dict]] = []
         for abs_path, content_type, collection_name in indexed_files:
-            # RDR-146 P2 (nexus-5p2ci.12): yield to a pending interactive
-            # catalog write so a foreground ``nx dt index`` is not starved by
-            # this background burst. Only batch producers yield; the probe is
-            # an in-memory daemon read (cheap) and returns False with no
-            # daemon. ``skip`` terminal defers the rest of the batch to the
-            # next idempotent pass (break, not abort: already-registered files
-            # and housekeeping below still run on the full indexed set).
-            if _batch_producer:
-                if await_fair_window(
-                    writer.is_interactive_write_pending, on_locked,
-                ) == "skip":
-                    # Deferred = total minus successes (new + updated, tracked
-                    # in file_to_doc_id) minus per-file failures. ``new_tumblers``
-                    # counts new-only, so an updated-then-deferred batch would
-                    # overcount; ``file_to_doc_id`` is the right success set.
-                    fairness_yielded = (
-                        len(indexed_files) - len(file_to_doc_id) - len(skipped_files)
-                    )
-                    _log.info(
-                        "catalog_write_yielded_skipped",
-                        repo=repo_name, deferred=fairness_yielded,
-                        reason="interactive_write_pending",
-                    )
-                    break
+            if _batch_producer and await_fair_window(
+                writer.is_interactive_write_pending, on_locked,
+            ) == "skip":
+                # Deferred = files not yet resolved this pass. new_batch entries
+                # already collected are still registered in pass 2; the broken-off
+                # tail (neither accumulated nor updated) is picked up next pass.
+                fairness_yielded = (
+                    len(indexed_files) - len(file_to_doc_id)
+                    - len(skipped_files) - len(new_batch)
+                )
+                _log.info(
+                    "catalog_write_yielded_skipped",
+                    repo=repo_name, deferred=fairness_yielded,
+                    reason="interactive_write_pending",
+                )
+                break
             try:
                 rel_path = str(abs_path.relative_to(repo))
             except ValueError:
@@ -848,7 +862,6 @@ def _catalog_hook(
                 source_mtime = 0.0
 
             # Per-file content hash for rename detection (RDR-060 E7)
-            import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             try:
                 file_hash = _hl.sha256(abs_path.read_bytes()).hexdigest()
             except OSError:
@@ -861,18 +874,17 @@ def _catalog_hook(
                     else cat.by_file_path(owner, rel_path)
                 )
                 if existing is None:
-                    tumbler = writer.register(
-                        owner=owner,
-                        title=abs_path.name,
-                        content_type=content_type,
-                        file_path=rel_path,
-                        physical_collection=collection_name,
-                        head_hash=head_hash,
-                        meta={"content_hash": file_hash} if file_hash else None,
-                        source_mtime=source_mtime,
-                    )
-                    new_tumblers.append(tumbler)
-                    file_to_doc_id[abs_path] = str(tumbler)
+                    # Defer the write: accumulate for the batched register_many
+                    # in pass 2. new_tumblers / file_to_doc_id are populated there.
+                    new_batch.append((abs_path, {
+                        "title": abs_path.name,
+                        "content_type": content_type,
+                        "file_path": rel_path,
+                        "physical_collection": collection_name,
+                        "head_hash": head_hash,
+                        "meta": {"content_hash": file_hash} if file_hash else None,
+                        "source_mtime": source_mtime,
+                    }))
                 else:
                     # nexus-dst5h: skip the write when nothing changed —
                     # a warm re-run otherwise pays one serial update
@@ -914,6 +926,61 @@ def _catalog_hook(
                     error=str(exc),
                     exc_info=True,
                 )
+
+        # Pass 2: batch-register the NEW docs. The RDR-146 fairness yield moves
+        # from per-file to a per-PAGE check — a page is ONE register_many round-
+        # trip (one multi-row INSERT server-side), not 1000 serial writes, so the
+        # foreground-starvation window is bounded to a single batch. ``skip``
+        # defers the remaining pages to the next idempotent pass. register_many
+        # is 1:1-or-raise; the client already degrades a failed batch to per-doc
+        # register() internally, and if even that raises we fall back here to a
+        # per-file register with the same ghost-class isolation as pass 1.
+        for _start in range(0, len(new_batch), _CATALOG_REGISTER_PAGE):
+            if _batch_producer and await_fair_window(
+                writer.is_interactive_write_pending, on_locked,
+            ) == "skip":
+                fairness_yielded = len(new_batch) - _start
+                _log.info(
+                    "catalog_write_yielded_skipped",
+                    repo=repo_name, deferred=fairness_yielded,
+                    reason="interactive_write_pending",
+                )
+                break
+            page = new_batch[_start : _start + _CATALOG_REGISTER_PAGE]
+            page_docs = [doc for _, doc in page]
+            try:
+                tumblers = writer.register_many(owner, page_docs)
+                # register_many is 1:1-or-raise; guard the invariant explicitly so
+                # a short return can never SILENTLY truncate via zip() (the ghost-
+                # doc class). A mismatch routes to the per-file fallback below.
+                if len(tumblers) != len(page):
+                    raise ValueError(
+                        f"register_many returned {len(tumblers)} tumblers for "
+                        f"{len(page)} docs"
+                    )
+                for (path, _doc), tum in zip(page, tumblers):
+                    new_tumblers.append(tum)
+                    file_to_doc_id[path] = str(tum)
+            except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
+                _log.warning(
+                    "catalog_register_many_failed_falling_back_per_file",
+                    repo=repo_name, page_size=len(page), exc_info=True,
+                )
+                for path, doc in page:
+                    try:
+                        tum = writer.register(
+                            owner, doc["title"],
+                            **{k: v for k, v in doc.items() if k != "title"},
+                        )
+                        new_tumblers.append(tum)
+                        file_to_doc_id[path] = str(tum)
+                    except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
+                        skipped_files.append((path, str(exc)))
+                        _log.warning(
+                            "catalog_hook_register_failed",
+                            abs_path=str(path), error=str(exc), exc_info=True,
+                        )
+
         if skipped_files:
             _progress(
                 f"  Catalog: {len(new_tumblers)} new, "
@@ -1122,7 +1189,9 @@ def index_repository(
     ``{}`` immediately without indexing.  Frecency-only runs bypass the lock.
 
     Returns a stats dict (empty for frecency_only runs) with keys:
-    ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
+    ``rdr_indexed``, ``rdr_current``, ``rdr_failed``, and ``files_changed``
+    (count of files — code/prose/pdf plus rdr_indexed — that wrote at least
+    one chunk this run; drives the caller's post-index taxonomy gate, nexus-qgc4b).
     """
     lock_fd = None
     lock_path: Path | None = None
@@ -1368,6 +1437,36 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
 # 1. Existing tests that import and call _index_code_file/_index_prose_file
 #    directly continue to work unchanged.
 # 2. Tests that patch nexus.indexer._index_code_file or _index_prose_file
+#: Transient upsert HTTP statuses (gateway timeout / pool exhaustion) where a
+#: per-file DIRECT upsert (prose/PDF — code files are contained by the
+#: ChunkBatcher's file-atomic failure handling) should DEFER the file to the next
+#: run's staleness retry instead of propagating. Propagating instead (a) fails
+#: the whole run on one transient blip and (b) under concurrency wedges the run
+#: for up to the upsert timeout while run_file_loop waits on the sibling in-flight
+#: worker (nexus-7yfe6). Idempotent ON CONFLICT upsert → the deferred file
+#: re-uploads cleanly next run.
+_TRANSIENT_UPSERT_CODES = frozenset({502, 503, 504})
+
+
+def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
+    """Run per-file index ``fn``; on a TRANSIENT upsert 5xx (gateway/pool), log
+    and return 0 (file deferred to staleness) instead of propagating. Permanent
+    errors (4xx, transport, non-transient 5xx) still raise (nexus-7yfe6).
+    """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+
+    try:
+        return fn()
+    except VectorServiceError as exc:
+        if exc.code in _TRANSIENT_UPSERT_CODES:
+            _log.warning(
+                "index_file_transient_upsert_deferred",
+                file=str(file), code=exc.code, error=str(exc),
+            )
+            return 0
+        raise
+
+
 #    still intercept the calls from _run_index.
 #
 # Implementation delegates to the clean IndexContext-based API in the
@@ -1394,6 +1493,7 @@ def _index_code_file(
     doc_id_resolver: Callable[[Path], str] | None = None,
     staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
+    batcher: object | None = None,
 ) -> int:
     """Index a single code file.  Delegates to nexus.code_indexer.index_code_file.
 
@@ -1434,6 +1534,7 @@ def _index_code_file(
         doc_id_resolver=doc_id_resolver,
         staleness_cache=staleness_cache,
         hooks=hooks,
+        batcher=batcher,
     )
     return index_code_file(ctx, file)
 
@@ -1457,6 +1558,7 @@ def _index_prose_file(
     doc_id_resolver: Callable[[Path], str] | None = None,
     staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
+    batcher: object | None = None,
 ) -> int:
     """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
@@ -1493,6 +1595,7 @@ def _index_prose_file(
         doc_id_resolver=doc_id_resolver,
         staleness_cache=staleness_cache,
         hooks=hooks,
+        batcher=batcher,
     )
     return index_prose_file(ctx, file)
 
@@ -1517,6 +1620,7 @@ def _index_pdf_file(
     doc_id_resolver: Callable[[Path], str] | None = None,
     staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
+    batcher: object | None = None,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -1633,6 +1737,28 @@ def _index_pdf_file(
         for m in metadatas:
             m["embedding_model"] = actual_model
 
+    # duoak 2C (nexus-1ugqs): stage in the cross-file batcher; hooks
+    # defer to the orchestrator's completion callback on batch-land.
+    # add() returning False (file exceeds one batch) falls through to
+    # the legacy per-file upsert — file-atomicity preserved either way.
+    if batcher is not None and batcher.add(  # type: ignore[attr-defined]
+        str(file),
+        collection_name,
+        ids,
+        documents,
+        metadatas,
+        context={
+            "ids": ids,
+            "documents": documents,
+            "embeddings": embeddings,
+            "metadatas": metadatas,
+            "catalog_doc_id": catalog_doc_id,
+            "collection": collection_name,
+            "hooks": hooks,
+        },
+    ):
+        return len(ids)
+
     with _stage("upload"):
         db.upsert_chunks_with_embeddings(
             collection_name=collection_name,
@@ -1640,6 +1766,7 @@ def _index_pdf_file(
             documents=documents,
             embeddings=embeddings,
             metadatas=metadatas,
+            force_re_embed=force,
         )
 
         # Post-store hook chains (RDR-095). Both single-doc and batch
@@ -1839,22 +1966,60 @@ def _prune_misclassified_in_collection(
         # chunks. Log at WARNING with the doc_id so operators see the
         # affected scope; count for the post-run summary.
         skipped_doc_ids: dict[str, str] = {}
-        for did in doc_ids:
-            try:
-                manifest = catalog.get_manifest(did)
-            except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-                skipped_doc_ids[did] = f"{type(exc).__name__}: {exc}"
-                _log.warning(
-                    "prune_misclassified_manifest_lookup_failed",
-                    doc_id=did,
-                    collection=getattr(col, "name", "?"),
-                    kind=kind,
-                    exc_info=True,
-                )
-                continue
-            for row in manifest:
-                if row.chash:
-                    natural_id_set.add(row.chash[:32])
+        # nexus-yz8bt (duoak.11 sink #3): resolve every doc's manifest in
+        # ONE batched call instead of a per-doc serial loop. At index
+        # scale (a --force run registers ~N docs) the old loop paid N
+        # sequential catalog round-trips — 226.6s on the 2,133-file gate,
+        # ~11% of wall — to prove a mostly-empty prune. ``get_manifests``
+        # (nexus-7lm3q, backed by /manifest/get_many) is internally paged
+        # and returns one dict; a doc ABSENT from the result has no
+        # manifest rows, i.e. nothing to prune (manifest is the canonical
+        # chunk list, so absent == no chunks anywhere == safe skip). The
+        # batch fails loud on any page error (its documented contract), so
+        # a failure falls back to the per-doc loop below — byte-identical
+        # to the pre-batch behaviour, preserving the skipped-doc accounting.
+        # The try guards ONLY the RPC (its contract is "a page failure
+        # PROPAGATES"). Row processing stays OUTSIDE it — exactly as the
+        # original per-doc loop kept ``for row in manifest`` outside its
+        # ``get_manifest`` try — so a malformed ``ManifestRow`` surfaces as
+        # a local bug instead of being masked as an infra failure and
+        # silently downgraded to the O(N) fallback.
+        manifests = None
+        try:
+            manifests = catalog.get_manifests(doc_ids)
+        except Exception:  # noqa: BLE001 — batch failed loud; fall back to the resilient per-doc path
+            _log.warning(
+                "prune_misclassified_batch_manifest_failed_falling_back_per_doc",
+                collection=getattr(col, "name", "?"),
+                kind=kind,
+                doc_count=len(doc_ids),
+                exc_info=True,
+            )
+        if manifests is not None:
+            for did in doc_ids:
+                rows = manifests.get(did)
+                if rows is None:
+                    continue
+                for row in rows:
+                    if row.chash:
+                        natural_id_set.add(row.chash[:32])
+        else:
+            for did in doc_ids:
+                try:
+                    manifest = catalog.get_manifest(did)
+                except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
+                    skipped_doc_ids[did] = f"{type(exc).__name__}: {exc}"
+                    _log.warning(
+                        "prune_misclassified_manifest_lookup_failed",
+                        doc_id=did,
+                        collection=getattr(col, "name", "?"),
+                        kind=kind,
+                        exc_info=True,
+                    )
+                    continue
+                for row in manifest:
+                    if row.chash:
+                        natural_id_set.add(row.chash[:32])
         all_natural_ids: list[str] = list(natural_id_set)
         # Batched ``col.get`` to fetch the present subset, then batched
         # delete. _CHROMA_PAGE_SIZE caps the ids list per call.
@@ -2654,6 +2819,143 @@ def _run_index(
         hooks = LockedHookRegistry(hooks)
         _log.info("index_file_concurrency", workers=_concurrency)
 
+    # duoak 2C (nexus-1ugqs): cross-file chunk batching. Per-file upserts
+    # amortize ~nothing (median file 3-15 chunks -> ~1200 embed calls for
+    # a 1200-file repo). Stage chunks in a shared accumulator, flush at
+    # the service cap, fire each file's post-store hook chains once its
+    # chunks land in a successful flush. Service mode only — the flush
+    # posts raw text for server-side embedding (Seam B).
+    # Gate on the ACTUAL client type, not is_vector_service_mode(): tests
+    # (and any legacy topology) inject a local T3 db that embeds
+    # client-side and cannot accept the empty-embeddings Seam B batches.
+    from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — deferred to avoid circular import
+    _batcher = None
+    if isinstance(db, HttpVectorClient):
+        from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
+
+        def _batch_flush(collection: str, _ids: list, _docs: list, _metas: list) -> None:
+            # RDR-181 §Approach step 3: force_re_embed closes over the
+            # enclosing _run_index's ``force`` (constant for the whole
+            # run, like ``db`` above) so ``--force`` reaches the server's
+            # forceReEmbed escape for the batched flush path too, not
+            # just the per-file fallback below.
+            db.upsert_chunks_with_embeddings(
+                collection_name=collection,
+                ids=_ids,
+                documents=_docs,
+                embeddings=[[] for _ in _ids],  # Seam B: server embeds
+                metadatas=_metas,
+                force_re_embed=force,
+            )
+
+        _hook_seconds = {"file": 0.0, "flush": 0.0}
+        _hook_seconds_lock = threading.Lock()
+
+        def _fire_deferred_hooks(_path: str, context: object) -> None:
+            if not isinstance(context, dict):
+                return
+            _t0 = time.monotonic()
+            reg = context["hooks"]
+            if reg is None:
+                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid circular import
+                reg = HookRegistry()
+                install_default_hooks(reg)
+            # File grain: manifest (needs catalog_doc_id) + any other
+            # default-grain consumer. Flush-grain hooks (taxonomy, chash)
+            # fire once per upload batch via _fire_flush_grain_hooks.
+            reg.fire_batch(
+                context["ids"], context["collection"], context["documents"],
+                context["embeddings"], context["metadatas"],
+                catalog_doc_id=context["catalog_doc_id"],
+                grain="file",
+            )
+            for _did, _doc in zip(context["ids"], context["documents"]):
+                reg.fire_single(_did, context["collection"], _doc)
+            reg.fire_document(
+                _path, context["collection"], "",
+                doc_id=context["catalog_doc_id"],
+            )
+            with _hook_seconds_lock:
+                _hook_seconds["file"] += time.monotonic() - _t0
+
+        def _batched_file_failed(_path: str, error: str, _context: object) -> None:
+            _log.error("indexed_file_upload_failed", file=_path, error=error)
+
+        def _fire_flush_grain_hooks(
+            collection: str, _ids: list, _docs: list, _metas: list,
+            _file_contexts: list,
+        ) -> None:
+            # nexus-duoak.7: taxonomy + chash are file-agnostic and
+            # round-trip-dominated — one call per upload batch (~6/run)
+            # instead of one per file (~177/run). Uses the run's shared
+            # registry; embeddings placeholder (server embedded).
+            reg = hooks
+            if reg is None:
+                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid circular import
+                reg = HookRegistry()
+                install_default_hooks(reg)
+            # Attribution (critic S1): a flush-grain consumer failure
+            # affects every file in this batch — log the roster so an
+            # operator can map an aggregate chash/taxonomy warning back
+            # to files (the widened blast radius vs per-file firing is
+            # an accepted, documented tradeoff; chash falls back to the
+            # resolve_span scan, taxonomy heals on the next assign run).
+            _log.debug(
+                "flush_grain_hooks_firing",
+                collection=collection,
+                chunks=len(_ids),
+                files=[p for p, _ in _file_contexts],
+            )
+            # Rebuild the aggregate from per-file contexts with doc_id +
+            # FILE-LOCAL chunk_index injected: post-RDR-108 chunk metadata
+            # carries neither, and the manifest hook's enumeration
+            # fallback would otherwise assign batch-global positions
+            # (manifest corruption). taxonomy/chash ignore both keys.
+            agg_ids: list = []
+            agg_docs: list = []
+            agg_metas: list = []
+            for _path, _c in _file_contexts:
+                if not isinstance(_c, dict):
+                    continue
+                agg_ids.extend(_c["ids"])
+                agg_docs.extend(_c["documents"])
+                for _j, _m in enumerate(_c["metadatas"]):
+                    agg_metas.append({
+                        **_m,
+                        "doc_id": _c["catalog_doc_id"],
+                        "chunk_index": _j,
+                    })
+            if not agg_ids:
+                return
+            _t0 = time.monotonic()
+            reg.fire_batch(
+                agg_ids, collection, agg_docs,
+                [[] for _ in agg_ids], agg_metas,
+                grain="flush",
+            )
+            with _hook_seconds_lock:
+                _hook_seconds["flush"] += time.monotonic() - _t0
+
+        # Shared with HttpVectorClient's internal upsert paging (nexus-nf3n7) so
+        # the batcher flush cap and the client's oversize-fallback page size are
+        # ONE source of truth. CCE collections (docs/knowledge/rdr) embed far
+        # slower server-side: a 172-chunk CCE batch 504'd the gateway on the
+        # 2026-07-04 2C smoke. Bisection-on-failure self-tunes below these.
+        from nexus.db.http_vector_client import per_collection_chunk_cap as _cap_for  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+
+        _batcher = ChunkBatcher(
+            flush=_batch_flush,
+            on_file_complete=_fire_deferred_hooks,
+            on_file_failed=_batched_file_failed,
+            on_batch_complete=_fire_flush_grain_hooks,
+            max_chunks=_cap_for,
+            # 3 concurrent flushes: inside the 10-concurrent-writes
+            # per-collection service quota with headroom; the 3midv
+            # sweep showed sequential flushes cost 76-112s of wall.
+            flush_concurrency=3,
+        )
+        _log.info("index_chunk_batching_enabled")
+
     # Index code files → code__ (voyage-code-3, AST chunking)
     # NOTE: calls _index_code_file (the module-level wrapper) so that tests
     # patching nexus.indexer._index_code_file continue to intercept correctly.
@@ -2671,9 +2973,13 @@ def _run_index(
             doc_id_resolver=_doc_id_resolver,
             staleness_cache=code_staleness,
             hooks=hooks,
+            batcher=_batcher,
         )
 
-    run_file_loop(
+    # nexus-qgc4b: tally files that actually wrote chunks across all three
+    # loops; used below to skip the expensive post-index passes on all-skip runs.
+    _files_written = 0
+    _files_written += run_file_loop(
         code_files, _index_one_code, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
@@ -2684,7 +2990,11 @@ def _run_index(
 
     def _index_one_prose(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
-        return _index_prose_file(
+        # nexus-7yfe6: contain a transient upsert 5xx (gateway/pool) — defer the
+        # file to staleness instead of failing (and, under concurrency, hanging)
+        # the whole run. Code files get this via the ChunkBatcher; prose/PDF take
+        # the direct upsert path, so they need it here.
+        return _contain_transient_upsert(lambda: _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
@@ -2694,9 +3004,10 @@ def _run_index(
             doc_id_resolver=_doc_id_resolver,
             staleness_cache=docs_staleness,
             hooks=hooks,
-        )
+            batcher=_batcher,
+        ), file)
 
-    run_file_loop(
+    _files_written += run_file_loop(
         prose_files, _index_one_prose, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
@@ -2706,7 +3017,8 @@ def _run_index(
 
     def _index_one_pdf(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
-        return _index_pdf_file(
+        # nexus-7yfe6: same transient-upsert containment as prose (direct path).
+        return _contain_transient_upsert(lambda: _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
@@ -2717,12 +3029,46 @@ def _run_index(
             doc_id_resolver=_doc_id_resolver,
             staleness_cache=docs_staleness,
             hooks=hooks,
-        )
+            batcher=_batcher,
+        ), file)
 
-    run_file_loop(
+    _files_written += run_file_loop(
         pdf_files, _index_one_pdf, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
+
+    # duoak 2C: flush remaining staged chunks and surface per-file upload
+    # failures (containment: a failed batch fails its contributing files,
+    # never the run — nexus-wcs39).
+    if _batcher is not None:
+        _batcher.drain()
+        _bstats = _batcher.stats
+        _log.info(
+            "index_chunk_batch_stats",
+            flushes=int(_bstats["flushes"]),
+            flush_seconds=round(_bstats["flush_seconds"], 1),
+        )
+        if on_phase is not None and _bstats["flushes"]:
+            on_phase(
+                f"Chunk batching: {int(_bstats['flushes'])} upload batches, "
+                f"{_bstats['flush_seconds']:.1f}s upload; hooks "
+                f"{_hook_seconds['file']:.1f}s file-grain + "
+                f"{_hook_seconds['flush']:.1f}s flush-grain"
+            )
+        _batch_failures = _batcher.failed_files
+        if _batch_failures:
+            _log.error(
+                "index_batch_upload_failures",
+                count=len(_batch_failures),
+                files=sorted(_batch_failures)[:20],
+            )
+            if on_phase is not None:
+                on_phase(
+                    f"WARNING: {len(_batch_failures)} file(s) FAILED chunk "
+                    f"upload (see logs); their vectors are absent or partial: "
+                    + ", ".join(sorted(_batch_failures)[:5])
+                    + ("…" if len(_batch_failures) > 5 else "")
+                )
 
     # Post-processing phase markers (nexus-vatx Gap 2): the per-file
     # progress bar ends at "[N/N]" but the pipeline keeps running for
@@ -2764,7 +3110,17 @@ def _run_index(
             f"{rdr_failed} failed ({time.monotonic() - _t:.1f}s)"
         )
 
-        # Prune misclassified chunks (reclassification cleanup)
+        # Prune misclassified chunks (reclassification cleanup). Kept
+        # UNCONDITIONAL: prune safety when a file's classification changes
+        # without a content re-write is not airtight, and the only durable
+        # signal (a catalog physical_collection delta) is consumed by the
+        # register pass BEFORE this runs — a crash between the two would
+        # orphan stale chunks if we gated on it (nexus-yz8bt, nx_plan_audit
+        # CRITICAL). nexus-qgc4b originally called the prune passes "cheap";
+        # the duoak.11 gate disproved that (226.6s / ~11% of wall at 2,133
+        # files) — the cost was the per-doc serial manifest fetch, now
+        # batched inside _prune_misclassified_in_collection (nexus-yz8bt),
+        # so the pass stays unconditional AND fast.
         _phase("Pruning misclassified chunks…")
         _t = time.monotonic()
         _prune_misclassified(
@@ -2823,7 +3179,15 @@ def _run_index(
         suffix = f" (interrupted: {type(post_error).__name__})" if post_error else ""
         _phase(f"Post-processing complete ({time.monotonic() - post_t0:.1f}s){suffix}")
 
-    return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
+    # nexus-qgc4b: files_changed drives the caller's post-index gate. RDR
+    # (re)indexing is a content change too, so an RDR-only run still triggers
+    # taxonomy discovery.
+    return {
+        "rdr_indexed": rdr_indexed,
+        "rdr_current": rdr_current,
+        "rdr_failed": rdr_failed,
+        "files_changed": _files_written + rdr_indexed,
+    }
 
 
 def _is_under(child: Path, parent: Path) -> bool:

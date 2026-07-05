@@ -115,6 +115,23 @@ Per the marketplace-pinned-source playbook (also used by `Hellblazer/palinex`), 
 git checkout develop && git pull
 git checkout -b release/vX.Y.Z
 
+# PRE-MERGE MAIN FIRST (added 2026-07-04, learned on v6.3.1): a release branch
+# based on develop ALWAYS conflicts with main's release-only files (all seven
+# version manifests, both changelogs, the engine pin, uv.lock) because release
+# bumps land on main and never merge back to develop. GitHub cannot build the
+# PR merge ref while CONFLICTING, so PR checks silently never run ("no checks
+# reported") — the conflict must be resolved BEFORE the bumps, or you resolve
+# it under pressure post-PR. Resolve by construction:
+git fetch origin main
+git merge origin/main   # resolve: changelogs = union (fold main's released
+                        # sections in, verbatim — verify with a diff of the
+                        # section against origin/main, not by eye; a truncated
+                        # fold is silent history loss); everything else will be
+                        # re-bumped in Step 3 anyway. Then run `uv sync`.
+# Also expect develop's manifests/engine-pin to be OLDER than the last release
+# (they were never bumped on develop) — Step 3 bumps from whatever is present,
+# so bump by pattern, not by exact-previous-version string match.
+
 # Stage ALL SEVEN bump targets from Step 3, plus uv.lock and both changelogs.
 # mcpb/pyproject.toml + mcpb/manifest.json are the easy-to-miss pair here and
 # their omission fails CI's mcpb-manifest-version parity check.

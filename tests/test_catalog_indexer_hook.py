@@ -273,11 +273,129 @@ class TestCatalogHookBatchedLookups:
         _, writers = _spy_factories(monkeypatch)
         result = self._index(tmp_path, [old, new], head_hash="same")
 
-        assert writers[0].calls.get("register", 0) == 1
+        # nexus-9dvqy: the NEW file is registered via the batched register_many
+        # (one page), NOT the per-file register(); the warm file takes no write.
+        assert writers[0].calls.get("register_many", 0) == 1
+        assert writers[0].calls.get("register", 0) == 0
         assert writers[0].calls.get("update", 0) == 0
         assert set(result) == {old, new}
         owner = cat.owner_for_repo("571b8edd")
         assert cat.by_file_path(owner, "new.py") is not None
+
+
+    def test_multiple_new_files_registered_in_one_batch(self, tmp_path, monkeypatch):
+        # nexus-9dvqy: N new files on a fresh index => ONE register_many call,
+        # every file mapped to a doc_id.
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        files = []
+        for i in range(4):
+            f = tmp_path / f"n{i}.py"
+            f.write_text(f"code {i}")
+            files.append(f)
+
+        _, writers = _spy_factories(monkeypatch)
+        result = self._index(tmp_path, files)
+
+        assert writers[0].calls.get("register_many", 0) == 1
+        assert writers[0].calls.get("register", 0) == 0
+        assert set(result) == set(files)
+
+    def test_fairness_yield_pass1_defers_update_burst(self, tmp_path, monkeypatch):
+        # nexus-9dvqy (stacked-review CRITICAL): the RDR-146 per-file yield must
+        # still guard the pass-1 inline writer.update() burst. On a warm re-run a
+        # HEAD bump flips every existing doc to changed => a large serial update
+        # burst; a pending interactive write on the 2nd file must defer the rest.
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        monkeypatch.setenv("NX_WRITE_PRIORITY", "batch")
+        files = []
+        for i in range(3):
+            f = tmp_path / f"u{i}.py"
+            f.write_text(f"code {i}")
+            files.append(f)
+        # First index registers all three (head v1).
+        self._index(tmp_path, files, head_hash="v1")
+
+        # Re-index with a new HEAD => every doc is "changed" => update() path.
+        seen = {"n": 0}
+
+        def fake_await(pending_fn, on_locked):
+            seen["n"] += 1
+            return "skip" if seen["n"] == 2 else "wait"
+
+        monkeypatch.setattr(
+            "nexus.catalog.write_priority.await_fair_window", fake_await
+        )
+        result = self._index(tmp_path, files, head_hash="v2")
+
+        # Only the first file was resolved before the yield deferred the rest.
+        assert len(result) == 1
+        assert files[1] not in result and files[2] not in result
+
+    def test_fairness_yield_pass2_defers_between_pages(self, tmp_path, monkeypatch):
+        # nexus-9dvqy (audit HIGH): pass 2 adds a SECOND per-page yield for the
+        # new-doc batch. Let pass 1 complete (all "wait"), then skip on the 2nd
+        # page so page-1 registers and the rest defer. Page shrunk to 2.
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        monkeypatch.setenv("NX_WRITE_PRIORITY", "batch")
+        monkeypatch.setattr("nexus.indexer._CATALOG_REGISTER_PAGE", 2)
+
+        files = []
+        for i in range(3):
+            f = tmp_path / f"y{i}.py"
+            f.write_text(f"code {i}")
+            files.append(f)
+
+        # Calls: pass1 resolves 3 files (n=1,2,3 -> wait), pass2 page@0 (n=4 ->
+        # wait, registers files 0,1), page@2 (n=5 -> skip, defers file 2).
+        seen = {"n": 0}
+
+        def fake_await(pending_fn, on_locked):
+            seen["n"] += 1
+            return "skip" if seen["n"] == 5 else "wait"
+
+        monkeypatch.setattr(
+            "nexus.catalog.write_priority.await_fair_window", fake_await
+        )
+        result = self._index(tmp_path, files)
+
+        assert set(result) == {files[0], files[1]}
+        assert files[2] not in result
+
+    def test_register_many_failure_falls_back_per_file(self, tmp_path, monkeypatch):
+        # nexus-9dvqy: if register_many raises unrecoverably, the hook falls
+        # back to per-file register() with ghost-class isolation — every file
+        # is still registered.
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        class _BatchFailsProxy(_SpyProxy):
+            def register_many(self, *a, **kw):
+                self.calls["register_many"] = self.calls.get("register_many", 0) + 1
+                raise RuntimeError("batch endpoint down")
+
+        import nexus.catalog.factory as factory
+        real_writer = factory.make_catalog_writer
+        writers: list = []
+
+        def spy_writer(**kw):
+            spy = _BatchFailsProxy(real_writer(**kw))
+            writers.append(spy)
+            return spy
+
+        monkeypatch.setattr(factory, "make_catalog_writer", spy_writer)
+        # reader stays real
+        files = [tmp_path / "a.py", tmp_path / "b.py"]
+        for f in files:
+            f.write_text(f.name)
+
+        result = self._index(tmp_path, files)
+
+        assert writers[0].calls.get("register_many", 0) == 1
+        assert writers[0].calls.get("register", 0) == 2  # per-file fallback
+        assert set(result) == set(files)
 
 
 class TestCatalogHookOwnerListFailure:
@@ -382,10 +500,19 @@ class TestCatalogHookBatchedServiceMode:
             self.register_calls: list[dict] = []
             self.update_calls: list[dict] = []
 
-        def register(self, **kw):
+        def register(self, *args, **kw):
             from nexus.catalog.tumbler import Tumbler
+            # Positional owner/title (per-file fallback path) or all-kw.
             self.register_calls.append(kw)
             return Tumbler.parse("1.1.99")
+
+        def register_many(self, owner, docs):
+            from nexus.catalog.tumbler import Tumbler
+            out = []
+            for d in docs:
+                self.register_calls.append(d)
+                out.append(Tumbler.parse("1.1.99"))
+            return out
 
         def update(self, tumbler, **fields):
             self.update_calls.append({"tumbler": str(tumbler), **fields})
