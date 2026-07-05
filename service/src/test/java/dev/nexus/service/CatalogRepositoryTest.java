@@ -2731,4 +2731,130 @@ class CatalogRepositoryTest {
         assertThat(result.get("rows")).isEqualTo(0);
         assertThat((List<?>) result.get("failed_doc_ids")).isEmpty();
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // registerDocumentMany (nexus-9dvqy, duoak.11 sink #2)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private static Map<String, Object> regDoc(String title, String filePath) {
+        return Map.of("title", title, "content_type", "code", "corpus", "code",
+                      "file_path", filePath, "physical_collection", "code__x__v1");
+    }
+
+    @Test @Order(300)
+    void registerDocumentMany_contiguousSeqBlock() {
+        final String prefix = "rm-block";
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("a", "a.py"), regDoc("b", "b.py"), regDoc("c", "c.py")));
+        // Contiguous, input-order, starting at seq 1 for a fresh owner.
+        assertThat(tumblers).containsExactly(prefix + ".1", prefix + ".2", prefix + ".3");
+        // next_seq advanced by exactly 3: a following single register gets .4.
+        String next = repo.registerDocument(TENANT_A, prefix, regDoc("d", "d.py"));
+        assertThat(next).isEqualTo(prefix + ".4");
+    }
+
+    @Test @Order(301)
+    void registerDocumentMany_mixedNewAndExisting_preservesOrderAndSkipsSeqForExisting() {
+        final String prefix = "rm-mixed";
+        // Pre-register one doc via the single-doc path.
+        String existing = repo.registerDocument(TENANT_A, prefix, regDoc("keep", "keep.py"));
+        assertThat(existing).isEqualTo(prefix + ".1");
+        // Batch: [existing (same file_path), new, new] — existing returns its tumbler,
+        // only the two new docs consume the block; order preserved.
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("keep-again", "keep.py"), regDoc("new1", "n1.py"), regDoc("new2", "n2.py")));
+        assertThat(tumblers).containsExactly(prefix + ".1", prefix + ".2", prefix + ".3");
+        // No seq gap: next single register is .4, not .5.
+        assertThat(repo.registerDocument(TENANT_A, prefix, regDoc("tail", "tail.py")))
+            .isEqualTo(prefix + ".4");
+    }
+
+    @Test @Order(302)
+    void registerDocumentMany_idempotentRebatch_returnsSameTumblers_noSeqGap() {
+        final String prefix = "rm-idem";
+        var first = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("x", "x.py"), regDoc("y", "y.py")));
+        assertThat(first).containsExactly(prefix + ".1", prefix + ".2");
+        // Re-batch the same file_paths — every doc is already LIVE, so no seq is drawn.
+        var second = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("x-again", "x.py"), regDoc("y-again", "y.py")));
+        assertThat(second).containsExactly(prefix + ".1", prefix + ".2");
+        assertThat(repo.registerDocument(TENANT_A, prefix, regDoc("z", "z.py")))
+            .isEqualTo(prefix + ".3");
+    }
+
+    @Test @Order(303)
+    void registerDocumentMany_ownerAbsentBootstrap_createsOwner() {
+        final String prefix = "rm-bootstrap";
+        // Owner does not exist yet — the batch upserts it, then assigns from seq 1.
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(regDoc("only", "only.py")));
+        assertThat(tumblers).containsExactly(prefix + ".1");
+        assertThat(repo.getDocument(TENANT_A, prefix + ".1").get("title")).isEqualTo("only");
+    }
+
+    @Test @Order(304)
+    void registerDocumentMany_emptyList_returnsEmpty() {
+        assertThat(repo.registerDocumentMany(TENANT_A, "rm-empty", List.of())).isEmpty();
+    }
+
+    @Test @Order(306)
+    void registerDocumentMany_idempotencyKeysOnSourceUriFirst() {
+        // source_uri is checked BEFORE file_path (matching registerDocument);
+        // a re-batch with the same source_uri returns the same tumbler and
+        // consumes no sequence number, even if the file_path differs.
+        final String prefix = "rm-srcuri";
+        final String uri = "file:///tmp/rm-srcuri/doc.md";
+        String first = repo.registerDocument(TENANT_A, prefix, Map.of(
+            "title", "srcuri doc", "content_type", "rdr", "corpus", "rdr",
+            "file_path", "orig.md", "source_uri", uri));
+        assertThat(first).isEqualTo(prefix + ".1");
+        // Batch with the SAME source_uri but a DIFFERENT file_path -> idempotent
+        // on source_uri (first precedence), returns the existing tumbler.
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            Map.of("title", "srcuri doc renamed", "content_type", "rdr",
+                   "corpus", "rdr", "file_path", "renamed.md", "source_uri", uri),
+            Map.of("title", "brand new", "content_type", "rdr", "corpus", "rdr",
+                   "file_path", "new.md", "source_uri", "file:///tmp/rm-srcuri/new.md")));
+        assertThat(tumblers).containsExactly(prefix + ".1", prefix + ".2");
+        // No seq gap: the existing source_uri consumed nothing; only "brand new" did.
+        assertThat(repo.registerDocument(TENANT_A, prefix, Map.of(
+            "title", "tail", "content_type", "rdr", "corpus", "rdr",
+            "file_path", "tail.md", "source_uri", "file:///tmp/rm-srcuri/tail.md")))
+            .isEqualTo(prefix + ".3");
+    }
+
+    @Test @Order(305)
+    void registerDocumentMany_concurrentSameOwner_disjointGaplessBlocks() throws Exception {
+        final String prefix = "rm-concurrent";
+        final int perBatch = 5;
+        // Bootstrap the owner first so both threads race only the next_seq FOR UPDATE claim.
+        repo.registerDocumentMany(TENANT_A, prefix, List.of(regDoc("seed", "seed.py")));
+
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.Callable<List<String>> task = () -> {
+                long tid = Thread.currentThread().getId();
+                var docs = new java.util.ArrayList<Map<String, Object>>();
+                for (int i = 0; i < perBatch; i++) {
+                    docs.add(regDoc("t" + tid + "-" + i, "t" + tid + "-" + i + ".py"));
+                }
+                return repo.registerDocumentMany(TENANT_A, prefix, docs);
+            };
+            var f1 = pool.submit(task);
+            var f2 = pool.submit(task);
+            var all = new java.util.ArrayList<String>();
+            all.addAll(f1.get());
+            all.addAll(f2.get());
+            // 10 tumblers, all distinct (disjoint blocks) — the FOR UPDATE lock
+            // serializes the two seq-block claims so neither overlaps.
+            assertThat(all).hasSize(2 * perBatch);
+            assertThat(new java.util.HashSet<>(all)).hasSize(2 * perBatch);
+            // Gapless overall: seeds .2, both batches fill .2..(seed+10) with no hole.
+            String next = repo.registerDocument(TENANT_A, prefix, regDoc("after", "after.py"));
+            // seed consumed .1; 10 concurrent docs consumed .2..0.11; next is .12.
+            assertThat(next).isEqualTo(prefix + ".12");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
 }

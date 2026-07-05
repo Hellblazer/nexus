@@ -56,17 +56,18 @@ def db_path(tmp_path: Path) -> Path:
 
 
 class TestWhitelistContract:
-    def test_exactly_twentytwo_ops(self) -> None:
-        # 16 hot-path (P1.0) + 6 admin/maintenance (P1.2).
-        assert len(CATALOG_WRITE_OPS) == 22
+    def test_exactly_twentythree_ops(self) -> None:
+        # 16 hot-path (P1.0) + 6 admin/maintenance (P1.2) + register_many (nexus-9dvqy).
+        assert len(CATALOG_WRITE_OPS) == 23
         # No duplicates.
-        assert len(set(CATALOG_WRITE_OPS)) == 22
+        assert len(set(CATALOG_WRITE_OPS)) == 23
 
-    def test_op_set_is_the_locked_22(self) -> None:
+    def test_op_set_is_the_locked_23(self) -> None:
         assert set(CATALOG_WRITE_OPS) == {
             "register_owner",
             "ensure_owner_for_repo",
             "register",
+            "register_many",
             "update",
             "link",
             "link_if_absent",
@@ -136,6 +137,27 @@ class TestClientEncoding:
         assert decode_return("unlink", 2) == 2
         assert decode_return("delete_document", True) is True
 
+    def test_decode_parses_list_return_for_register_many(self) -> None:
+        # nexus-9dvqy: register_many returns list[Tumbler]; the daemon sends
+        # list[str] and the client parses each element back to Tumbler.
+        out = decode_return("register_many", ["1.2.3", "1.2.4"])
+        assert [type(o) for o in out] == [Tumbler, Tumbler]
+        assert [str(o) for o in out] == ["1.2.3", "1.2.4"]
+
+    def test_daemon_serialises_list_of_tumblers_to_str_for_register_many(self) -> None:
+        # Round-trip the daemon side: a Catalog method returning list[Tumbler]
+        # is serialised to list[str] on the wire, then decode_return above
+        # parses it back — so a daemon-routed register_many returns Tumblers.
+        def fake_register_many(owner: Tumbler, docs: list) -> list:
+            return [Tumbler.parse("1.2.3"), Tumbler.parse("1.2.4")]
+
+        shim = make_write_shim(fake_register_many, "register_many")
+        wire = shim(Tumbler.parse("1.2"), [{"title": "a"}, {"title": "b"}])
+        assert wire == ["1.2.3", "1.2.4"]  # list[str] on the wire
+        assert decode_return("register_many", wire) == [
+            Tumbler.parse("1.2.3"), Tumbler.parse("1.2.4"),
+        ]
+
 
 class TestDaemonShim:
     def test_str_arg_coerced_to_tumbler(self) -> None:
@@ -181,7 +203,7 @@ class TestDaemonShim:
     def test_build_dispatch_has_namespaced_whitelist(self) -> None:
         cat = _make_local_catalog()
         table = build_catalog_write_dispatch(cat)
-        assert len(table) == 22
+        assert len(table) == 23
         assert all(k.startswith(CATALOG_WRITE_PREFIX) for k in table)
         assert set(table) == {f"{CATALOG_WRITE_PREFIX}{op}" for op in CATALOG_WRITE_OPS}
 

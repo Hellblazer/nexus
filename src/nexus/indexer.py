@@ -257,6 +257,11 @@ def _repo_lock_path(repo: Path) -> Path:
 
 
 _LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
+#: Page size for the batched catalog register_many pass (nexus-9dvqy). Matches
+#: the server's MAX_BATCH_DOC_IDS cap. Also the granularity of the RDR-146
+#: fairness yield in _catalog_hook. Module-level so tests can shrink it to force
+#: multi-page behaviour without a 1000+ file corpus.
+_CATALOG_REGISTER_PAGE = 1000
 
 
 def _clear_stale_lock(lock_path: Path) -> None:
@@ -800,31 +805,39 @@ def _catalog_hook(
         # ghost-chunk class on 2026-05-02.
         skipped_files: list[tuple[Path, str]] = []
         fairness_yielded = 0  # RDR-146 P2: files deferred to the next pass.
+        import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        # Pass 1: resolve each file to existing-or-new. Changed existing docs are
+        # updated inline; NEW docs are accumulated for ONE batched register_many
+        # (nexus-9dvqy, duoak.11 sink #2) — the per-file writer.register() loop
+        # was the 333s serial-WAN registration sink. The per-file try/except keeps
+        # the ghost-class isolation intact: one bad file must never strip doc_ids
+        # from the rest of the repo.
+        #
+        # RDR-146 P2 fairness: the yield stays PER-FILE here (it guards the inline
+        # writer.update() calls, which on a warm re-run fire for the whole existing
+        # population — a HEAD bump flips every doc's stored head_hash to changed —
+        # so this is a large serial write burst, not a rare one). ``skip`` defers
+        # the remaining files to the next idempotent pass. Pass 2 adds a second,
+        # per-page yield for the new-doc batch.
+        new_batch: list[tuple[Path, dict]] = []
         for abs_path, content_type, collection_name in indexed_files:
-            # RDR-146 P2 (nexus-5p2ci.12): yield to a pending interactive
-            # catalog write so a foreground ``nx dt index`` is not starved by
-            # this background burst. Only batch producers yield; the probe is
-            # an in-memory daemon read (cheap) and returns False with no
-            # daemon. ``skip`` terminal defers the rest of the batch to the
-            # next idempotent pass (break, not abort: already-registered files
-            # and housekeeping below still run on the full indexed set).
-            if _batch_producer:
-                if await_fair_window(
-                    writer.is_interactive_write_pending, on_locked,
-                ) == "skip":
-                    # Deferred = total minus successes (new + updated, tracked
-                    # in file_to_doc_id) minus per-file failures. ``new_tumblers``
-                    # counts new-only, so an updated-then-deferred batch would
-                    # overcount; ``file_to_doc_id`` is the right success set.
-                    fairness_yielded = (
-                        len(indexed_files) - len(file_to_doc_id) - len(skipped_files)
-                    )
-                    _log.info(
-                        "catalog_write_yielded_skipped",
-                        repo=repo_name, deferred=fairness_yielded,
-                        reason="interactive_write_pending",
-                    )
-                    break
+            if _batch_producer and await_fair_window(
+                writer.is_interactive_write_pending, on_locked,
+            ) == "skip":
+                # Deferred = files not yet resolved this pass. new_batch entries
+                # already collected are still registered in pass 2; the broken-off
+                # tail (neither accumulated nor updated) is picked up next pass.
+                fairness_yielded = (
+                    len(indexed_files) - len(file_to_doc_id)
+                    - len(skipped_files) - len(new_batch)
+                )
+                _log.info(
+                    "catalog_write_yielded_skipped",
+                    repo=repo_name, deferred=fairness_yielded,
+                    reason="interactive_write_pending",
+                )
+                break
             try:
                 rel_path = str(abs_path.relative_to(repo))
             except ValueError:
@@ -849,7 +862,6 @@ def _catalog_hook(
                 source_mtime = 0.0
 
             # Per-file content hash for rename detection (RDR-060 E7)
-            import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             try:
                 file_hash = _hl.sha256(abs_path.read_bytes()).hexdigest()
             except OSError:
@@ -862,18 +874,17 @@ def _catalog_hook(
                     else cat.by_file_path(owner, rel_path)
                 )
                 if existing is None:
-                    tumbler = writer.register(
-                        owner=owner,
-                        title=abs_path.name,
-                        content_type=content_type,
-                        file_path=rel_path,
-                        physical_collection=collection_name,
-                        head_hash=head_hash,
-                        meta={"content_hash": file_hash} if file_hash else None,
-                        source_mtime=source_mtime,
-                    )
-                    new_tumblers.append(tumbler)
-                    file_to_doc_id[abs_path] = str(tumbler)
+                    # Defer the write: accumulate for the batched register_many
+                    # in pass 2. new_tumblers / file_to_doc_id are populated there.
+                    new_batch.append((abs_path, {
+                        "title": abs_path.name,
+                        "content_type": content_type,
+                        "file_path": rel_path,
+                        "physical_collection": collection_name,
+                        "head_hash": head_hash,
+                        "meta": {"content_hash": file_hash} if file_hash else None,
+                        "source_mtime": source_mtime,
+                    }))
                 else:
                     # nexus-dst5h: skip the write when nothing changed —
                     # a warm re-run otherwise pays one serial update
@@ -915,6 +926,61 @@ def _catalog_hook(
                     error=str(exc),
                     exc_info=True,
                 )
+
+        # Pass 2: batch-register the NEW docs. The RDR-146 fairness yield moves
+        # from per-file to a per-PAGE check — a page is ONE register_many round-
+        # trip (one multi-row INSERT server-side), not 1000 serial writes, so the
+        # foreground-starvation window is bounded to a single batch. ``skip``
+        # defers the remaining pages to the next idempotent pass. register_many
+        # is 1:1-or-raise; the client already degrades a failed batch to per-doc
+        # register() internally, and if even that raises we fall back here to a
+        # per-file register with the same ghost-class isolation as pass 1.
+        for _start in range(0, len(new_batch), _CATALOG_REGISTER_PAGE):
+            if _batch_producer and await_fair_window(
+                writer.is_interactive_write_pending, on_locked,
+            ) == "skip":
+                fairness_yielded = len(new_batch) - _start
+                _log.info(
+                    "catalog_write_yielded_skipped",
+                    repo=repo_name, deferred=fairness_yielded,
+                    reason="interactive_write_pending",
+                )
+                break
+            page = new_batch[_start : _start + _CATALOG_REGISTER_PAGE]
+            page_docs = [doc for _, doc in page]
+            try:
+                tumblers = writer.register_many(owner, page_docs)
+                # register_many is 1:1-or-raise; guard the invariant explicitly so
+                # a short return can never SILENTLY truncate via zip() (the ghost-
+                # doc class). A mismatch routes to the per-file fallback below.
+                if len(tumblers) != len(page):
+                    raise ValueError(
+                        f"register_many returned {len(tumblers)} tumblers for "
+                        f"{len(page)} docs"
+                    )
+                for (path, _doc), tum in zip(page, tumblers):
+                    new_tumblers.append(tum)
+                    file_to_doc_id[path] = str(tum)
+            except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
+                _log.warning(
+                    "catalog_register_many_failed_falling_back_per_file",
+                    repo=repo_name, page_size=len(page), exc_info=True,
+                )
+                for path, doc in page:
+                    try:
+                        tum = writer.register(
+                            owner, doc["title"],
+                            **{k: v for k, v in doc.items() if k != "title"},
+                        )
+                        new_tumblers.append(tum)
+                        file_to_doc_id[path] = str(tum)
+                    except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
+                        skipped_files.append((path, str(exc)))
+                        _log.warning(
+                            "catalog_hook_register_failed",
+                            abs_path=str(path), error=str(exc), exc_info=True,
+                        )
+
         if skipped_files:
             _progress(
                 f"  Catalog: {len(new_tumblers)} new, "

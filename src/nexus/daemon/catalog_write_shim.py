@@ -52,6 +52,7 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     "register_owner",
     "ensure_owner_for_repo",
     "register",
+    "register_many",
     "update",
     "link",
     "link_if_absent",
@@ -85,6 +86,7 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
 #: which round-trips natively via the ``_TAG_PATH`` encoder).
 TUMBLER_PARAMS_BY_OP: dict[str, frozenset[str]] = {
     "register": frozenset({"owner"}),
+    "register_many": frozenset({"owner"}),
     "update": frozenset({"tumbler"}),
     "delete_document": frozenset({"tumbler"}),
     "set_owner_head_hash": frozenset({"owner"}),
@@ -107,6 +109,12 @@ TUMBLER_PARAM_NAMES: frozenset[str] = frozenset().union(
 TUMBLER_RETURN_OPS: frozenset[str] = frozenset(
     {"register_owner", "ensure_owner_for_repo", "register"}
 )
+
+#: Ops whose return value is a ``list[Tumbler]`` (nexus-9dvqy). The scalar
+#: TUMBLER_RETURN_OPS coercion above cannot round-trip a list, so these are
+#: handled separately at both boundaries: daemon-side each Tumbler in the
+#: list is serialised to ``str``, client-side each ``str`` is parsed back.
+TUMBLER_LIST_RETURN_OPS: frozenset[str] = frozenset({"register_many"})
 
 #: RPC op prefix for the write whitelist. Distinct from the ``catalog.*``
 #: namespace that serves the low-level CatalogStore reads, so the two
@@ -138,6 +146,8 @@ def decode_return(op: str, result: Any) -> Any:
     """Client-side: parse a Tumbler-returning op's ``str`` back to Tumbler."""
     if op in TUMBLER_RETURN_OPS and isinstance(result, str):
         return Tumbler.parse(result)
+    if op in TUMBLER_LIST_RETURN_OPS and isinstance(result, list):
+        return [Tumbler.parse(r) if isinstance(r, str) else r for r in result]
     return result
 
 
@@ -165,6 +175,8 @@ def make_write_shim(method: Callable[..., Any], op: str) -> Callable[..., Any]:
         result = method(*bound.args, **bound.kwargs)
         if op in TUMBLER_RETURN_OPS and isinstance(result, Tumbler):
             return str(result)
+        if op in TUMBLER_LIST_RETURN_OPS and isinstance(result, list):
+            return [str(r) if isinstance(r, Tumbler) else r for r in result]
         return result
 
     _shim.__name__ = op

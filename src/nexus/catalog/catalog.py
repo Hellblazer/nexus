@@ -1407,6 +1407,22 @@ class Catalog:
         finally:
             self._release_lock(dir_fd)
 
+    def register_many(self, owner: Tumbler, docs: list[dict]) -> list[Tumbler]:
+        """Local parity for the batch register endpoint (nexus-9dvqy).
+
+        Local mode is filesystem-fast with no WAN round-trip, so this is a
+        faithful loop over :meth:`register` rather than a batched write — the
+        service-mode ``/doc/register_many`` endpoint exists to collapse network
+        round-trips that don't exist here. Returns tumblers aligned 1:1 with
+        *docs*; each doc dict carries the same keyword fields as ``register``.
+        """
+        out: list[Tumbler] = []
+        for d in docs:
+            title = d.get("title", "")
+            rest = {k: v for k, v in d.items() if k != "title"}
+            out.append(self.register(owner, title, **rest))
+        return out
+
     def resolve(self, tumbler: Tumbler, *, follow_alias: bool = True) -> CatalogEntry | None:
         """Delegates to ``_DocumentOps.resolve`` (nexus-mbm)."""
         return self._docs.resolve(tumbler, follow_alias=follow_alias)

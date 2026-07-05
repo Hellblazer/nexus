@@ -122,6 +122,10 @@ from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpo
 # carrying more than 1000 doc_ids with HTTP 400 (bisected: OK at 1000, 400 at
 # 1001). ``get_manifests`` pages at this size and merges the per-page results.
 _MANIFEST_GET_MANY_PAGE = 1000
+#: Page size for register_many POSTs — matches the server's MAX_BATCH_DOC_IDS
+#: cap (nexus-9dvqy). ~24 columns/row keeps a full page under PostgreSQL's
+#: 32767 bind-parameter ceiling.
+_REGISTER_MANY_PAGE = 1000
 
 
 def _coerce_legacy_grandfathered(d: dict) -> dict:
@@ -753,6 +757,56 @@ class HttpCatalogClient:
         payload.update(kwargs)
         result = self._post("/doc/register", payload)
         return Tumbler.parse(result["tumbler"])
+
+    def register_many(
+        self, owner: Tumbler | str, docs: list[dict]
+    ) -> list[Tumbler]:
+        """Batch-register documents; returns tumblers aligned 1:1 with *docs*.
+
+        nexus-9dvqy (duoak.11 sink #2): replaces the per-file ``register()``
+        loop in the indexer's catalog hook. The single-doc path pays one
+        ``SELECT next_seq FOR UPDATE`` WAN round-trip per file — 2,133 serial
+        calls (333s) on a --force index, all queued on the same owner lock.
+        ``POST /doc/register_many`` claims the whole contiguous tumbler block
+        under one lock and inserts every new row in one multi-row INSERT.
+
+        Each doc dict carries the same keyword fields as :meth:`register`
+        (``title``, ``content_type``, ``file_path``, ``physical_collection``,
+        ``head_hash``, ``meta``, ``source_mtime``, ``source_uri`` …). Docs are
+        paged at :data:`_REGISTER_MANY_PAGE` to stay under the server's
+        MAX_BATCH_DOC_IDS cap. A page that fails as a whole falls back to
+        per-doc :meth:`register`, preserving the per-file failure isolation the
+        caller relies on (a single bad doc must not sink the rest of the run).
+        """
+        if not docs:
+            return []
+        out: list[Tumbler] = []
+        for start in range(0, len(docs), _REGISTER_MANY_PAGE):
+            page = docs[start : start + _REGISTER_MANY_PAGE]
+            try:
+                result = self._post(
+                    "/doc/register_many",
+                    {"owner_prefix": str(owner), "docs": page},
+                )
+                tumblers = (result or {}).get("tumblers", [])
+                if len(tumblers) != len(page):
+                    raise ValueError(
+                        f"register_many returned {len(tumblers)} tumblers "
+                        f"for {len(page)} docs"
+                    )
+                out.extend(Tumbler.parse(t) for t in tumblers)
+            except Exception:  # noqa: BLE001 — page failed; fall back to resilient per-doc register
+                _log.warning(
+                    "register_many_page_failed_falling_back_per_doc",
+                    owner=str(owner),
+                    page_size=len(page),
+                    exc_info=True,
+                )
+                for d in page:
+                    title = d.get("title", "")
+                    rest = {k: v for k, v in d.items() if k != "title"}
+                    out.append(self.register(owner, title, **rest))
+        return out
 
     def resolve(
         self, tumbler: Tumbler | str, *, follow_alias: bool = True

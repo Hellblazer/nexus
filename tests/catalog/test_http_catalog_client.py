@@ -578,6 +578,58 @@ class TestHttpCatalogClientRoundTrip:
         assert isinstance(t, Tumbler)
         assert str(t) == "1.1.1"
 
+    def test_register_many_pages_and_preserves_order(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # nexus-9dvqy: 2500 docs page at 1000 (1000+1000+500); tumblers come
+        # back aligned 1:1 with docs in input order across the concatenation.
+        from nexus.catalog.catalog import Tumbler
+        docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(2500)]
+        page_sizes: list[int] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            assert path == "/doc/register_many"
+            assert body["owner_prefix"] == "1.1"
+            page = body["docs"]
+            base = sum(page_sizes)  # tumblers continue where prior pages left off
+            page_sizes.append(len(page))
+            return {"tumblers": [f"1.1.{base + j + 1}" for j in range(len(page))]}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        out = client.register_many("1.1", docs)
+
+        assert page_sizes == [1000, 1000, 500]
+        assert all(p <= 1000 for p in page_sizes)
+        assert len(out) == 2500
+        assert all(isinstance(t, Tumbler) for t in out)
+        assert [str(t) for t in out[:3]] == ["1.1.1", "1.1.2", "1.1.3"]
+        assert str(out[-1]) == "1.1.2500"
+
+    def test_register_many_page_failure_falls_back_per_doc(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # nexus-9dvqy: a whole-page failure must not sink the run — it falls
+        # back to per-doc register() (POST /doc/register), preserving per-file
+        # isolation and still returning aligned tumblers.
+        from nexus.catalog.catalog import Tumbler
+        docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(3)]
+        single_calls: list[str] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            if path == "/doc/register_many":
+                raise RuntimeError("500 batch failed")
+            assert path == "/doc/register"
+            single_calls.append(body["file_path"])
+            return {"tumbler": f"1.1.{len(single_calls)}"}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        out = client.register_many("1.1", docs)
+
+        # Fell back to one register() per doc, in order, aligned tumblers.
+        assert single_calls == ["0.py", "1.py", "2.py"]
+        assert [str(t) for t in out] == ["1.1.1", "1.1.2", "1.1.3"]
+        assert all(isinstance(t, Tumbler) for t in out)
+
     def test_register_no_bib_fields(self, client: HttpCatalogClient) -> None:
         """register() must NOT accept bib_year/bib_authors — CatalogEntry has none."""
         import inspect

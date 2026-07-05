@@ -598,3 +598,36 @@ class TestBackfillRdrsRepoOwner:
             (col_name,),
         ).fetchone()
         assert row is not None
+
+
+class TestLocalRegisterManyParity:
+    """nexus-9dvqy: local Catalog.register_many is a faithful loop over
+    register() — same tumblers, same idempotency, aligned 1:1 with docs."""
+
+    def test_register_many_matches_sequential_register(self, catalog_env, tmp_path):
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        owner = cat.register_owner(
+            "rm-local", "repo", repo_hash="beef0001",
+            repo_root=str(tmp_path / "rm-local"),
+        )
+        docs = [
+            {"title": "a", "content_type": "code", "file_path": "a.py"},
+            {"title": "b", "content_type": "code", "file_path": "b.py"},
+            {"title": "c", "content_type": "code", "file_path": "c.py"},
+        ]
+        tumblers = cat.register_many(owner, docs)
+        # Aligned 1:1, contiguous under the owner prefix, input order.
+        assert [str(t) for t in tumblers] == [
+            f"{owner}.1", f"{owner}.2", f"{owner}.3",
+        ]
+        # Idempotent: re-registering the same file_paths returns the same tumblers.
+        again = cat.register_many(owner, docs)
+        assert [str(t) for t in again] == [str(t) for t in tumblers]
+
+    def test_register_many_empty_returns_empty(self, catalog_env, tmp_path):
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        owner = cat.register_owner(
+            "rm-empty", "repo", repo_hash="beef0002",
+            repo_root=str(tmp_path / "rm-empty"),
+        )
+        assert cat.register_many(owner, []) == []

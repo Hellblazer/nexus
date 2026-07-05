@@ -507,8 +507,8 @@ class _CatalogWriterProxy:
 
         if method_name not in CATALOG_WRITE_OPS:
             raise AttributeError(
-                f"{method_name!r} is not a catalog write op; the 16-op "
-                f"whitelist is {CATALOG_WRITE_OPS!r}"
+                f"{method_name!r} is not a catalog write op; the "
+                f"{len(CATALOG_WRITE_OPS)}-op whitelist is {CATALOG_WRITE_OPS!r}"
             )
         client = self._client
 
