@@ -604,6 +604,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # Mode-self-tests — these assert local-mode behavior; cloud_mode
     # would invert what they test.
     "test_local_mode.py",
+    # nexus-duoak.3 bench teardown-scope: voyage tokens appear only in
+    # synthetic collection-name fixtures (REAL / after lists) exercising pure
+    # set-difference logic in bench_tumblers/plan_teardown; no Voyage call is
+    # ever made and no embedder mode is asserted.
+    "test_teardown_scope.py",
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
