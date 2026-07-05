@@ -626,9 +626,9 @@ class HttpVectorClient:
         documents: list[str],
         metadatas: list[dict] | None = None,
         *,
+        force_re_embed: bool | None = None,
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
-        force_re_embed: bool | None = None,
     ) -> None:
         """Embed + write via the Java service.
 
